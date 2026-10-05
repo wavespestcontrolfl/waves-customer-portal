@@ -124,12 +124,14 @@ describe('source contracts', () => {
     expect(scheduler).toMatch(/cron\.schedule\('4-59\/10 \* \* \* \*', async \(\) => \{\s*try \{\s*await runExclusive\('assessment-estimate-closeout', async \(\) => \{\s*const sweep = await require\('\.\/assessment-estimate-closeout'\)\.closeAssessmentsWithSentEstimates\(\);/);
     expect(scheduler.match(/closeAssessmentsWithSentEstimates\(/g)).toHaveLength(1);
   });
-  test('ET midnight passing mid-request is not a refusal of the visit: the posture is read from the live clock, and a rollover seen under the lock is neither audited nor rested', () => {
+  test('the close always asks for the backfill posture — one constant request per visit, time on site unknown', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/assessment-estimate-closeout.js'), 'utf8');
-    expect(source).toMatch(/const pastDay = resuming \? postureOfKey\(resumeKey\) === 'backfill' : dateOnlyString\(visit\.scheduled_date\) < etDateString\(\);/);
-    expect(source).toMatch(/if \(\(dateOnlyString\(lockedVisit\.scheduled_date\) < lockedToday\) !== pastDay\) return CLOCK_ROLLED_OVER;/);
-    expect(source).toMatch(/if \(reason === CLOCK_ROLLED_OVER\) return \{ closed: false, reason \};\s*logger\.warn\(/);
+    expect(source).toMatch(/const idempotencyKeyFor = \(visitId\) => `\$\{KEY_PREFIX\}\$\{visitId\}:backfill`;/);
+    expect(source).toMatch(/requestReview: false,[\s\S]{0,400}?backfill: true,\s*\n\s*\},/);
+    const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    expect(completion).toMatch(/allowSameDay: !!completionInput\.issuedInvoiceCloseout \|\| completionInput\.systemQuietCloseout === true \}\);/);
   });
+
   test('the gate is strict and read at call time', () => {
     const gates = fs.readFileSync(path.join(__dirname, '../config/feature-gates.js'), 'utf8');
     expect(gates).toMatch(/function estimateSentClosesAssessmentLive\(\) \{\s*return process\.env\.GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT === 'true';\s*\}/);
@@ -176,7 +178,6 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
   // sent after it. Only its posture differs then (yesterday's visit closes in
   // the backfill posture), which no assertion below depends on.
   const startDay = () => etDateString(minutesAgo(50));
-  const postureOf = (day) => (day < etDateString() ? 'backfill' : 'live');
   async function visit(customerId, { status = 'on_site', day = startDay(), serviceType = 'Waves Assessment', serviceId = assessmentCatalogId, ...rest } = {}) {
     const id = randomUUID();
     await mockPg('scheduled_services').insert({
@@ -213,7 +214,11 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const visitId = await visit(customerId);
     const estimateId = await estimate(customerId);
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
-    expect((await row(visitId)).status).toBe('completed');
+    const closedRow = await row(visitId);
+    expect(closedRow.status).toBe('completed');
+    // Nobody timed it: no on-site labor is booked from the arrival to the sweep (Codex r3 P1).
+    expect(closedRow.service_time_minutes).toBeNull();
+    expect(closedRow.actual_duration_minutes).toBeNull();
     await expectQuiet(customerId, visitId);
     expect(await audits(visitId, AUDIT_CLOSED)).toEqual([expect.objectContaining({ actor_type: 'system', metadata: expect.objectContaining({ estimateId }) })]);
     // The next tick finds nothing to do.
@@ -381,7 +386,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(await request('refuse')).toMatchObject({ status: 200, body: { success: true } });
   });
 
-  test('refused on the visit day, retried after midnight: the backfill attempt is its own request, never a changed payload under the old key', async () => {
+  test('refused on the visit day, retried after midnight under the same key with the same request — never a changed payload', async () => {
     const customerId = await customer();
     const visitId = await visit(customerId);
     const visitRow = await row(visitId);
@@ -394,7 +399,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     };
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
     const firstKeys = await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key');
-    expect(firstKeys).toEqual([`assessment-estimate:${visitId}:${postureOf(startDay())}`]);
+    expect(firstKeys).toEqual([`assessment-estimate:${visitId}:backfill`]);
     // Next day: the timer stopped and the visit day has passed → backfill
     // posture. The completion reads the real clock, so the day passing is
     // modeled by moving the fixture one day back (visit, stamps and send),
@@ -407,7 +412,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(closed.status).toBe('completed');
     expect(closed.service_time_minutes).toBeNull();
     expect(new Set(await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key')))
-      .toEqual(new Set([`assessment-estimate:${visitId}:backfill`, firstKeys[0]]));
+      .toEqual(new Set([`assessment-estimate:${visitId}:backfill`]));
   });
 
   test('a completion this closeout committed and left parked is resumed from its own posture — with no fresh estimate needed, no locked guard, and behind the open visits', async () => {

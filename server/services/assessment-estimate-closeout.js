@@ -36,25 +36,23 @@ const DEAD_STATUSES = ['cancelled', 'no_show', 'skipped', 'rescheduled'];
 
 const AUDIT_CLOSED = 'visit.assessment_closed_on_estimate_sent';
 const AUDIT_REFUSED = 'visit.assessment_close_on_estimate_sent_refused';
-// The completion hashes its request, refuses a key reused with a different
-// request, and matches a committed attempt's resume on that hash. So what
-// this module sends is CONSTANT for a visit, apart from the posture (live on
-// the visit day, backfill after), and the posture is in the key: no visit
-// identity is sent (`expectedVisit`) — a date correction or a customer merge
-// between two attempts, or between a commit and its resume, would otherwise
-// change the hash and strand the retry (pre-push audit P1 ×3). Identity is
-// re-decided where it belongs: on the locked row, by lockedVisitGuard.
+// The close ALWAYS runs in the backfill posture, on the visit day too
+// (completeScheduledService admits the same day for a system quiet
+// closeout): nobody timed this visit, so its time on site stays unknown
+// rather than being booked from arrived_at to whenever the sweep ran (Codex
+// r3 P1 #5903). One posture means one request per visit: the completion
+// hashes its request and matches a committed attempt's resume on it, so the
+// request is constant and carries no visit identity (a date correction or a
+// customer merge between attempts would change the hash and strand the
+// retry). Identity is decided on the locked row by lockedVisitGuard.
 // What the completion's record is built from; compared between the row it
 // loaded and the row it locked.
 const IDENTITY_FIELDS = ['customer_id', 'scheduled_date', 'service_type', 'service_id'];
 const identityValue = (visit, field) => (field === 'scheduled_date'
   ? (visit && visit.scheduled_date ? dateOnlyString(visit.scheduled_date) : null)
   : String((visit && visit[field]) ?? ''));
-
-const CLOCK_ROLLED_OVER = 'clock_rolled_over';
 const KEY_PREFIX = 'assessment-estimate:';
-const idempotencyKeyFor = (visitId, posture) => `${KEY_PREFIX}${visitId}:${posture}`;
-const postureOfKey = (key) => (String(key || '').split(':')[2] === 'backfill' ? 'backfill' : 'live');
+const idempotencyKeyFor = (visitId) => `${KEY_PREFIX}${visitId}:backfill`;
 
 // How far back an estimate's send still closes an assessment, how old an
 // assessment may be, and how long a refused visit rests before it is asked
@@ -251,17 +249,12 @@ async function liveRefusal(conn, visit) {
   return null;
 }
 
-// The canonical completion, asked for nothing customer-facing. A past-day
-// visit closes in the backfill posture (its time on site stays unknown: the
-// span from a days-old arrival to now is not labor).
+// The canonical completion, asked for nothing customer-facing, in the
+// backfill posture (time on site unknown; see idempotencyKeyFor).
 async function closeAssessment(visit, { today, now, resumeKey = null }) {
   const { completeScheduledService } = require('./complete-scheduled-service');
   const resuming = Boolean(resumeKey);
-  // The posture is read from the clock NOW, not from the sweep's `today`: a
-  // sweep that started before ET midnight and reaches this visit after it
-  // must ask for the backfill posture the completion will expect.
-  const pastDay = resuming ? postureOfKey(resumeKey) === 'backfill' : dateOnlyString(visit.scheduled_date) < etDateString();
-  const key = resumeKey || idempotencyKeyFor(visit.id, pastDay ? 'backfill' : 'live');
+  const key = resumeKey || idempotencyKeyFor(visit.id);
   const result = await completeScheduledService({
     serviceId: visit.id,
     idempotencyKey: key,
@@ -275,7 +268,7 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
       // explicitly.
       offerInspectionCredit: false,
       idempotencyKey: key,
-      ...(pastDay ? { backfill: true } : {}),
+      backfill: true,
     },
     actor: { techRole: 'admin', technicianId: null, technician: null },
     // Nobody's work and nobody's bill: no invoice is minted (so nothing can
@@ -283,8 +276,7 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
     // job_complete notification is written for the assigned technician.
     systemQuietCloseout: true,
     // The WHOLE decision once more, on the visit row the completion has
-    // LOCKED, from that row alone: still an assessment, still on the side of
-    // midnight this request's posture assumes, an estimate sent to the
+    // LOCKED, from that row alone: still an assessment, an estimate sent to the
     // customer the row names NOW, the rule, and no running timer or open
     // group. A reschedule, a reclassification, a customer merge, an arrival
     // or a timer start after this module's reads is therefore decided on
@@ -301,11 +293,6 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
       if (IDENTITY_FIELDS.some((field) => identityValue(lockedVisit, field) !== identityValue(loadedVisit, field))) return 'visit_changed';
       if (!(await isAssessmentBooking(lockedVisit, trx))) return 'not_assessment';
       const lockedToday = etDateString();
-      // The visit did not move (checked above), so a posture mismatch here
-      // is the clock alone: ET midnight passed between this request being
-      // built and this lock. Not a refusal of the visit — the next tick
-      // asks again in the backfill posture (see closeOne: no audit, no rest).
-      if ((dateOnlyString(lockedVisit.scheduled_date) < lockedToday) !== pastDay) return CLOCK_ROLLED_OVER;
       const estimate = await estimateForAssessment(trx, lockedVisit, { now });
       if (!estimate) return 'estimate_not_sent';
       return assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: lockedToday })
@@ -355,9 +342,6 @@ async function closeOne(conn, row, { today, now }) {
       return { closed: true, reason: null };
     }
     const reason = outcome.code || `status_${outcome.status}`;
-    // Midnight passed mid-request: nothing about the visit was refused, so
-    // nothing is audited and the visit does not rest — the next tick closes it.
-    if (reason === CLOCK_ROLLED_OVER) return { closed: false, reason };
     logger.warn(`[assessment-estimate-closeout] visit ${visitId} NOT completed (${outcome.status} ${reason})`);
     await audit(AUDIT_REFUSED, { visitId, estimateId, code: reason, status: outcome.status });
     return { closed: false, reason };

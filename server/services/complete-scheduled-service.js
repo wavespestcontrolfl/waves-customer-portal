@@ -3100,7 +3100,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // can't flip loud↔quiet before a record exists) — hashed everywhere,
     // the mismatch 409'd completion_resume_payload_mismatch and stranded
     // the committed completion before the re-derivation could run.
-    const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date, role: completionInput.actor.techRole, allowSameDay: !!completionInput.issuedInvoiceCloseout });
+    const backfillPlan = backfillCompletionPlan({ backfill, scheduledDate: svc.scheduled_date, role: completionInput.actor.techRole, allowSameDay: !!completionInput.issuedInvoiceCloseout || completionInput.systemQuietCloseout === true });
     if (backfillPlan.error) {
       return ({ status: backfillPlan.status || 400, body: backfillPlan.error });
     }

@@ -2310,7 +2310,7 @@ describe('completion route wiring (source contracts)', () => {
   const verdictSource = fs.readFileSync(path.join(__dirname, '../services/completion-charge-verdict.js'), 'utf8');
 
   test('route feeds the requester role into the plan and honors the 403 status', () => {
-    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: completionInput\.actor\.techRole, allowSameDay: !!completionInput\.issuedInvoiceCloseout \}\)/);
+    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: completionInput\.actor\.techRole, allowSameDay: !!completionInput\.issuedInvoiceCloseout \|\| completionInput\.systemQuietCloseout === true \}\)/);
     expect(source).toMatch(/\{ status: backfillPlan\.status \|\| 400, body: backfillPlan\.error \}/);
   });
 
