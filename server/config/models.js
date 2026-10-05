@@ -233,7 +233,11 @@ const DEFAULTS = Object.freeze({
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || DEFAULTS.FLAGSHIP;
 const WORKHORSE = process.env.MODEL_WORKHORSE || DEFAULTS.WORKHORSE;
-const ROUTINE   = process.env.MODEL_ROUTINE   || DEFAULTS.ROUTINE;
+// Fable / Mythos are refused here, in the registry: two ROUTINE call sites use
+// the SDK directly and have no second provider for a refusal, so a hand-set
+// MODEL_ROUTINE naming one of them falls back to the default.
+const ROUTINE_EXCLUDED_RE = /^claude-(fable|mythos)/;
+const ROUTINE   = (!ROUTINE_EXCLUDED_RE.test(process.env.MODEL_ROUTINE || '') && process.env.MODEL_ROUTINE) || DEFAULTS.ROUTINE;
 // Low effort only while ROUTINE is an always-thinking model (the Sonnet 5.5
 // default). A rollback to MODEL_ROUTINE=claude-opus-4-8 sends no per-lane
 // effort, so those lanes get back the model AND the reasoning they had.
@@ -733,6 +737,7 @@ module.exports = {
   WORKHORSE,
   ROUTINE,
   ROUTINE_EFFORT,
+  ROUTINE_EXCLUDED_RE,
   FAST,
   VOICE,
   VISION,

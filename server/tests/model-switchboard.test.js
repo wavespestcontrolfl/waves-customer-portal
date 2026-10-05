@@ -548,6 +548,25 @@ describe('model-switchboard', () => {
     for (const id of ['wiki_qa_staff', 'expense_categorize', 'hero_alt', 'invoice_pdf', 'lead_synopsis']) {
       expect(lanes.find((l) => l.id === id).primary.selector).toBe('ROUTINE');
     }
+    // The ROUTINE picker never offers Fable / Mythos, and the registry refuses a hand-set one.
+    const routineAccepts = selectors.find((s) => s.key === 'ROUTINE').accepts;
+    expect(routineAccepts.catalogOnly).toBe(true);
+    expect(routineAccepts.allowedIds).toEqual(expect.arrayContaining([MODELS.DEFAULTS.ROUTINE, MODELS.DEFAULTS.FLAGSHIP]));
+    expect(routineAccepts.allowedIds.some((id) => /^claude-(fable|mythos)/.test(id))).toBe(false);
+    const prevRoutine = process.env.MODEL_ROUTINE;
+    try {
+      process.env.MODEL_ROUTINE = 'claude-fable-5-1';
+      jest.isolateModules(() => { expect(require('../config/models').ROUTINE).toBe(MODELS.DEFAULTS.ROUTINE); });
+      process.env.MODEL_ROUTINE = 'claude-opus-4-8';
+      jest.isolateModules(() => {
+        const rolledBack = require('../config/models');
+        expect(rolledBack.ROUTINE).toBe('claude-opus-4-8');
+        expect(rolledBack.ROUTINE_EFFORT).toBeUndefined();
+        expect(rolledBack.TEXT_POLICIES.routineAnswer.primary).toEqual({ provider: 'anthropic', model: 'claude-opus-4-8' });
+      });
+    } finally {
+      if (prevRoutine === undefined) delete process.env.MODEL_ROUTINE; else process.env.MODEL_ROUTINE = prevRoutine;
+    }
     // Customer-facing wiki answers stay on the flagship policy.
     expect(lanes.find((l) => l.id === 'wiki_qa').primary.selector).toBe('FLAGSHIP');
     expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');

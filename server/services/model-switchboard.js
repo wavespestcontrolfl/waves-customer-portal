@@ -49,6 +49,16 @@ function catalogEntry(id) {
 // model through services/llm/deep.js (the only path that handles Fable's
 // thinking blocks + refusals — catalog entries with requires:'deep'). `lock`
 // removes the picker entirely.
+// What the ROUTINE picker may offer: Anthropic catalog models that read
+// images, minus Fable / Mythos. Two ROUTINE call sites use the SDK directly
+// and have no second provider for a refusal; models.js applies the same
+// exclusion to a hand-set MODEL_ROUTINE.
+// (`|| {}` / the regex default: a narrow config/models stub has neither.)
+const ROUTINE_EXCLUDED_RE = MODELS.ROUTINE_EXCLUDED_RE || /^claude-(fable|mythos)/;
+const ROUTINE_ALLOWED_IDS = Object.freeze(Object.entries(MODEL_CATALOG || {})
+  .filter(([id, m]) => m.provider === 'anthropic' && m.caps.includes('vision') && !ROUTINE_EXCLUDED_RE.test(id))
+  .map(([id]) => id));
+
 const SELECTORS = [
   // General reasoning callers may include images; keep a vision-capable tier.
   { key: 'FLAGSHIP', env: 'MODEL_FLAGSHIP', description: 'Best general reasoning', accepts: { providers: ['anthropic'], cap: 'vision' } },
@@ -59,10 +69,10 @@ const SELECTORS = [
   // max_tokens (llm/call.js#dispatch for the two routine* policies;
   // anthropicMaxTokens + anthropicText at the two direct sites), so the
   // Sonnet 5.5 default and the models like it are pickable. cap: 'vision' —
-  // hero alt text and vendor invoice PDFs send images / documents. Fable /
-  // Mythos stay a deliberate non-choice: the direct sites treat a refusal
-  // as a failed read (null synopsis, rejected invoice), with no second provider.
-  { key: 'ROUTINE', env: 'MODEL_ROUTINE', description: 'Routine internal lanes moved off the flagship (owner 2026-10-04)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
+  // hero alt text and vendor invoice PDFs send images / documents.
+  // catalogOnly + allowedIds: the picker offers catalog models only and never
+  // Fable / Mythos (ROUTINE_ALLOWED_IDS above); models.js refuses those ids too.
+  { key: 'ROUTINE', env: 'MODEL_ROUTINE', description: 'Routine internal lanes moved off the flagship (owner 2026-10-04)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true, catalogOnly: true, allowedIds: ROUTINE_ALLOWED_IDS } },
   { key: 'FAST', env: 'MODEL_FAST', description: 'Claude leg of the fast lanes', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VOICE', env: 'MODEL_VOICE', description: 'Spoken voice relay + Ask Waves fallback', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VISION', env: 'MODEL_VISION', description: 'Claude photo scoring', accepts: { providers: ['anthropic'], cap: 'vision' } },
