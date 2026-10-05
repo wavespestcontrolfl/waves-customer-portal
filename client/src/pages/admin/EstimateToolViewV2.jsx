@@ -1900,6 +1900,8 @@ export default function EstimateToolViewV2({
   const resetSearchPick = () => {
     pickedContactRef.current = { customerPhone: "", customerEmail: "" };
     setLinkedLead(null);
+    // Each estimate starts with the contact boxes closed again.
+    setContactOpen(false);
   };
   // `picked` is read BEFORE the new pick overwrites the ref: setForm runs its
   // updater later, when the ref already holds the new person's values.
