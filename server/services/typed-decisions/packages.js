@@ -20,7 +20,10 @@
  * question answers a 0..1 probability that the statement is true.
  */
 const crypto = require('crypto');
-const { auditAppointmentContract } = require('../prompts/appointment-confirmed-rules');
+// call_judge.v3's appointment contract, FROZEN as asked (Codex #5994 r3): a
+// snapshot of auditAppointmentContract() taken when v3 was published. When the
+// production rules change, add call_judge.v4 with a new snapshot; never edit this file.
+const CALL_JUDGE_V3_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('path').join(__dirname, 'call-judge-v3-appointment-contract.txt'), 'utf8');
 
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -64,8 +67,8 @@ const CALL_JUDGE = {
 };
 
 // v3 (Codex #5994): appointment_agreed asks the production extractor's own
-// appointment_confirmed rules (prompts/appointment-confirmed-rules.js), the same
-// text the Deep auditor grades by, so every call_judge answer, the auditor and
+// appointment_confirmed rules (prompts/appointment-confirmed-rules.js, frozen
+// as a snapshot below), the same text the Deep auditor grades by, so every call_judge answer, the auditor and
 // production share one label. v2 asked a looser question ("a day and a time or
 // window"); it stays registered so rows answered under it still resolve.
 const CALL_JUDGE_V3 = {
@@ -74,7 +77,7 @@ const CALL_JUDGE_V3 = {
   version: 3,
   questions: {
     ...CALL_JUDGE.questions,
-    appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${auditAppointmentContract('the date the call took place')}`),
+    appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V3_APPOINTMENT_CONTRACT}`),
   },
 };
 

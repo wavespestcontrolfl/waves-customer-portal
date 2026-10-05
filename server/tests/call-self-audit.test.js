@@ -647,6 +647,8 @@ describe('AUDIT_PROMPT appointment definition', () => {
     expect(AUDIT_PROMPT).toContain(auditAppointmentContract('the date the call took place'));
   });
   test('the typed judge asks the same contract (call_judge.v3)', () => {
+    // v3 is a frozen snapshot. If this fails, the production rules changed:
+    // publish call_judge.v4 with a new snapshot and point the self-audit at it.
     expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions)
       .toContain(auditAppointmentContract('the date the call took place'));
   });
