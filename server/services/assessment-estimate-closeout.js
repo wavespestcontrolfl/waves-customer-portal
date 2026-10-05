@@ -1,0 +1,252 @@
+// Estimate sent after a Waves Assessment ⇒ the assessment is closed (owner
+// ruling 2026-10-04). The assessment is the walkthrough; the estimate is what
+// comes out of it. Once the estimate has gone to the customer the walkthrough
+// happened, and nobody should have to tap Complete on it. Dark by default:
+// GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT.
+//
+// A SWEEP OVER DURABLE STATE, not a hook on each send path. An estimate is
+// marked sent from many places (the admin send routes, scheduled sends, the
+// report's click-to-estimate, the website quote). Hooking each one means one
+// best-effort call per rail and a retry story for every way that call can be
+// lost; the invoice-issued closeout took five review rounds to learn that
+// (#5886). So this reads what is durably true — an open assessment visit and
+// an estimate with a sent_at stamp for the same customer — every ten minutes,
+// and closes what the rule admits. A send path added later needs no wiring.
+//
+// The close itself is the canonical completion. A Waves Assessment's profile
+// is internal-only: no service report, no completion text, no review ask, no
+// invoice. Nothing is reimplemented here; this module decides WHICH visit.
+const db = require('../models/db');
+const logger = require('./logger');
+const { etDateString, dateOnlyString } = require('../utils/datetime-et');
+const { scopeToAssessmentBookings, isAssessmentBooking } = require('./assessment-booking');
+
+const gateLive = () => require('../config/feature-gates').estimateSentClosesAssessmentLive();
+
+// The technician has set out for, or reached, the assessment.
+const STARTED_STATUSES = ['en_route', 'on_site'];
+// Nobody is known to have gone. A NULL status is a live visit (the
+// repository's legacy live-visit convention).
+const UNSTARTED_STATUSES = ['pending', 'confirmed'];
+
+const AUDIT_CLOSED = 'visit.assessment_closed_on_estimate_sent';
+const AUDIT_REFUSED = 'visit.assessment_close_on_estimate_sent_refused';
+const idempotencyKeyFor = (visitId) => `assessment-estimate:${visitId}`;
+
+// How far back an estimate's send still closes an assessment, how old an
+// assessment may be, and how long a refused visit rests before it is asked
+// again (the sweep runs every ten minutes; a refusal about what the visit IS
+// would otherwise be re-run and re-audited 144 times a day).
+const ESTIMATE_WINDOW_DAYS = 14;
+const ASSESSMENT_WINDOW_DAYS = 30;
+const REFUSAL_REST_HOURS = 6;
+
+const isStarted = (status) => status != null && STARTED_STATUSES.includes(String(status));
+const isUnstarted = (status) => status == null || UNSTARTED_STATUSES.includes(String(status));
+
+function validTime(value) {
+  const time = value ? new Date(value).getTime() : NaN;
+  return Number.isFinite(time) ? time : null;
+}
+
+// THE rule. Null when the estimate's send closes the assessment, else the
+// reason it stays open. "After the assessment" is read from durable stamps,
+// never from the clock at call time, so a sweep ten minutes or ten days
+// later reaches the same verdict:
+//  - STARTED (en_route / on_site): the estimate was sent after the technician
+//    set out (arrived_at, else en_route_at). GPS often misses the arrival, so
+//    en_route counts: an estimate sent after the technician left for the
+//    property came out of that visit.
+//  - UNSTARTED: nobody is known to have gone, so the estimate must have been
+//    sent on a LATER ET day than the visit. An estimate sent on or before the
+//    visit day is a quote ahead of the walkthrough and closes nothing.
+//  - A future visit, and every terminal status, never close.
+function assessmentEstimateCloseRefusal(visit, estimateSentAt, { today = etDateString() } = {}) {
+  const started = isStarted(visit.status);
+  if (!started && !isUnstarted(visit.status)) return `visit_${visit.status}`;
+  const day = visit.scheduled_date ? dateOnlyString(visit.scheduled_date) : null;
+  if (!day || day > today) return 'visit_in_future';
+  const sentTime = validTime(estimateSentAt);
+  if (sentTime == null) return 'estimate_not_sent';
+  const sentDay = etDateString(new Date(sentTime));
+  if (!started) return sentDay > day ? null : 'estimate_not_after_visit_day';
+  if (sentDay < day) return 'estimate_before_visit';
+  const startedTime = validTime(visit.arrived_at) ?? validTime(visit.en_route_at);
+  // No start stamp on a started visit: the day comparison above stands in.
+  return startedTime == null || sentTime > startedTime ? null : 'estimate_before_visit';
+}
+
+// The newest estimate this customer was SENT inside the window. The newest
+// send is the strongest proof, so one row decides.
+async function newestSentEstimate(conn, customerId, { now }) {
+  if (!customerId) return null;
+  return conn('estimates')
+    .where({ customer_id: customerId })
+    .whereNotNull('sent_at')
+    .whereNot('status', 'draft')
+    .where('sent_at', '>=', new Date(now.getTime() - ESTIMATE_WINDOW_DAYS * 86400000))
+    .orderBy('sent_at', 'desc')
+    .first('id', 'sent_at', 'status');
+}
+
+// This closeout's own completion attempt, committed but not finished (the
+// canonical completion commits status='completed' before its post-commit
+// work and parks a crashed run under its idempotency key).
+const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempts a WHERE a.service_id = s.id AND a.idempotency_key = 'assessment-estimate:' || s.id::text AND a.status NOT IN ('succeeded', 'failed'))";
+
+function candidateVisits(conn, { today, now }) {
+  const oldest = etDateString(new Date(now.getTime() - ASSESSMENT_WINDOW_DAYS * 86400000));
+  const query = conn('scheduled_services as s')
+    .leftJoin('services as svc', 'svc.id', 's.service_id')
+    .where('s.scheduled_date', '<=', today)
+    .where('s.scheduled_date', '>=', oldest)
+    .where((q) => q
+      .where((open) => open.whereIn('s.status', [...STARTED_STATUSES, ...UNSTARTED_STATUSES]).orWhereNull('s.status'))
+      .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
+    // An assessment with a sent estimate for its customer, decided in SQL so
+    // the sweep reads a handful of rows, not every open visit.
+    .whereExists(function sentEstimate() {
+      this.select(conn.raw('1')).from('estimates as e')
+        .whereRaw('e.customer_id = s.customer_id')
+        .whereNotNull('e.sent_at')
+        .whereNot('e.status', 'draft')
+        .where('e.sent_at', '>=', new Date(now.getTime() - ESTIMATE_WINDOW_DAYS * 86400000));
+    })
+    .orderBy(['s.scheduled_date', 's.id'])
+    .select('s.*', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
+  return scopeToAssessmentBookings(query, 's', 'svc');
+}
+
+async function audit(action, { visitId, estimateId, code = null, status = null, error = null }) {
+  try {
+    await require('./audit-log').recordAuditEvent({
+      actor_type: 'system',
+      action,
+      resource_type: 'scheduled_services',
+      resource_id: visitId,
+      metadata: { estimateId, code, status, ...(error ? { error } : {}) },
+    });
+  } catch (err) {
+    logger.warn(`[assessment-estimate-closeout] audit write failed for visit ${visitId}: ${err.message}`);
+  }
+}
+
+// A visit refused recently rests (REFUSAL_REST_HOURS). The rest only spaces
+// out retries; nothing depends on the row for correctness — with no row the
+// visit is simply asked again on the next tick.
+async function restingAfterRefusal(conn, visitId, { now }) {
+  const recent = await conn('audit_log')
+    .where({ resource_type: 'scheduled_services', resource_id: visitId, action: AUDIT_REFUSED })
+    .where('created_at', '>=', new Date(now.getTime() - REFUSAL_REST_HOURS * 3600000))
+    .first('id');
+  return Boolean(recent);
+}
+
+// Reads beyond the visit row that keep it open: its technician's job timer is
+// still running (they are working it right now), or it is one stop of a
+// grouped visit (the whole visit closes together).
+async function liveRefusal(conn, visit) {
+  const { visitJobTimerRunning } = require('./invoice-issued-closeout');
+  if (await visitJobTimerRunning(conn, visit.id)) return 'visit_timer_running';
+  if (visit.visit_id) {
+    const { openMembers } = require('./visit-groups');
+    if ((await openMembers(conn, visit.visit_id)).length >= 2) return 'grouped_visit';
+  }
+  return null;
+}
+
+// The canonical completion, asked for nothing customer-facing. A past-day
+// visit closes in the backfill posture (its time on site stays unknown: the
+// span from a days-old arrival to now is not labor). `expectedVisit` makes
+// the completion refuse, under its own row lock, a visit that was moved,
+// reassigned to another customer or reclassified after this module read it.
+async function closeAssessment(visit, { today }) {
+  const { completeScheduledService } = require('./complete-scheduled-service');
+  const key = idempotencyKeyFor(visit.id);
+  const pastDay = dateOnlyString(visit.scheduled_date) < today;
+  const result = await completeScheduledService({
+    serviceId: visit.id,
+    idempotencyKey: key,
+    body: {
+      visitOutcome: 'completed',
+      sendCompletionSms: false,
+      requestReview: false,
+      idempotencyKey: key,
+      ...(pastDay ? { backfill: true } : {}),
+      expectedVisit: {
+        customerId: visit.customer_id,
+        serviceType: visit.service_type,
+        scheduledDate: dateOnlyString(visit.scheduled_date),
+      },
+    },
+    actor: { techRole: 'admin', technicianId: null, technician: null },
+  });
+  const body = (result && result.body) || {};
+  const status = (result && result.status) || null;
+  return { closed: status === 200 && body.success === true, status, code: body.code || null };
+}
+
+// One candidate visit: decide, close, audit. Never throws.
+async function closeOne(conn, row, { today, now }) {
+  const visitId = row.id;
+  let estimate = null;
+  try {
+    // Fresh reads: the candidate query is a snapshot.
+    const visit = await conn('scheduled_services').where({ id: visitId }).first();
+    if (!visit || !(await isAssessmentBooking(visit, conn))) return { closed: false, reason: 'not_assessment' };
+    estimate = await newestSentEstimate(conn, visit.customer_id, { now });
+    if (!estimate) return { closed: false, reason: 'estimate_not_sent' };
+    if (!row.own_attempt_parked || visit.status !== 'completed') {
+      // Not this rule's to decide, or not yet: no audit row, nothing to rest.
+      const byRule = assessmentEstimateCloseRefusal(visit, estimate.sent_at, { today });
+      if (byRule) return { closed: false, reason: byRule };
+      if (await restingAfterRefusal(conn, visitId, { now })) return { closed: false, reason: 'resting' };
+      const live = await liveRefusal(conn, visit);
+      if (live) {
+        await audit(AUDIT_REFUSED, { visitId, estimateId: estimate.id, code: live });
+        return { closed: false, reason: live };
+      }
+    }
+    const outcome = await closeAssessment(visit, { today });
+    if (outcome.closed) {
+      logger.info(`[assessment-estimate-closeout] visit ${visitId} completed: estimate ${estimate.id} was sent after it`);
+      await audit(AUDIT_CLOSED, { visitId, estimateId: estimate.id, status: outcome.status });
+      return { closed: true, reason: null };
+    }
+    const reason = outcome.code || `status_${outcome.status}`;
+    logger.warn(`[assessment-estimate-closeout] visit ${visitId} NOT completed (${outcome.status} ${reason})`);
+    await audit(AUDIT_REFUSED, { visitId, estimateId: estimate.id, code: reason, status: outcome.status });
+    return { closed: false, reason };
+  } catch (err) {
+    logger.error(`[assessment-estimate-closeout] visit ${visitId} failed: ${err.message}`);
+    await audit(AUDIT_REFUSED, { visitId, estimateId: estimate ? estimate.id : null, code: 'error', error: String(err.message || err).slice(0, 500) });
+    return { closed: false, reason: 'error' };
+  }
+}
+
+// The sweep (scheduler: assessment-estimate-closeout, every ten minutes).
+async function closeAssessmentsWithSentEstimates({ conn = db, now = new Date(), today = etDateString(now), limit = 25 } = {}) {
+  const none = { candidates: 0, closed: 0 };
+  if (!gateLive()) return none;
+  let rows = [];
+  try {
+    rows = await candidateVisits(conn, { today, now }).limit(limit);
+  } catch (err) {
+    logger.error(`[assessment-estimate-closeout] candidate lookup failed: ${err.message}`);
+    return none;
+  }
+  let closed = 0;
+  for (const row of rows) {
+    const out = await closeOne(conn, row, { today, now });
+    if (out.closed) closed += 1;
+  }
+  if (closed) logger.info(`[assessment-estimate-closeout] ${rows.length} candidate(s), ${closed} closed`);
+  return { candidates: rows.length, closed };
+}
+
+module.exports = {
+  assessmentEstimateCloseRefusal,
+  closeAssessmentsWithSentEstimates,
+  AUDIT_CLOSED,
+  AUDIT_REFUSED,
+};
