@@ -295,3 +295,12 @@ test('a vendor row for one exact address on a shared billing platform names that
   await processVendorInvoice({ id: 'e27', gmail_id: 'g', from_address: 'supplier-b@billing-platform.example', subject: 'Invoice' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Supplier B', category_id: null }));
 });
+
+test('the notice-copy check skips a description too long for its column', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Receipt' };
+  mockState.copy = { id: 'exp-clipped-copy' };
+  await processVendorInvoice({ id: 'e33', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'B'.repeat(250), subject: 'Receipt' },
+    { extracted: { payment_status: 'paid', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 25 }));
+});

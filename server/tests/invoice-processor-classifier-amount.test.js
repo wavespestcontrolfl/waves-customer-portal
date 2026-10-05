@@ -14,12 +14,14 @@ test.each([
   ['  $ 7.5 ', 7.5],
   ['200', 200],
   [12.34, 12.34],
+  [12.345, 12.35],
+  [9999999999.99, 9999999999.99],
 ])('reads %p as %p', (input, expected) => {
   expect(classifierAmount(input)).toBe(expected);
 });
 
 test.each([
-  ['$10.06 and $5.00'], ['about $10'], ['$10,000,000,000.00'], [1e10], [Infinity], ['9'.repeat(400)], ['10.06 EUR'], ['$1,23.00'], ['unknown'], [''], [null], [{ amount: 5 }], [NaN], ['$10.123'],
+  ['$10.06 and $5.00'], ['about $10'], ['$10,000,000,000.00'], [1e10], [Infinity], [9999999999.999], ['$9,999,999,999.999'], ['9'.repeat(400)], ['10.06 EUR'], ['$1,23.00'], ['unknown'], [''], [null], [{ amount: 5 }], [NaN], ['$10.123'],
 ])('rejects %p', (input) => {
   expect(classifierAmount(input)).toBeNull();
 });

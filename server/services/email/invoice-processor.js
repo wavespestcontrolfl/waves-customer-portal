@@ -238,19 +238,47 @@ async function findSameNoticeExpense(conn, emailId, amount, description) {
     .first('x.id');
 }
 
+// expenses.amount is decimal(12,2): round to cents first (Postgres would),
+// then the largest storable value is 9,999,999,999.99.
+function inColumnRange(n) {
+  if (!Number.isFinite(n)) return null;
+  const cents = Math.round(n * 100) / 100;
+  return cents < 1e10 ? cents : null;
+}
+
+// The expense date: the parsed invoice's date, else the classifier's, else
+// today (ET). dateFromInvoice is false for the today fallback, so it never
+// drives a duplicate match.
+// - The classifier's date is untyped. Only a string counts (new Date(20260231)
+//   is a 1970 instant), and an ISO-shaped impossible date (2026-02-31) would
+//   roll over to March 3 in new Date(), so it counts as no date.
+// - A date taxPeriodFor cannot place (e.g. year 0012) falls back to today,
+//   date and tax period together, instead of throwing before the email
+//   outcome is recorded (Codex r20 on #4884).
+function receiptDate(parsedInvoice, classifierDate) {
+  const usableClassifierDate = typeof classifierDate !== 'string' ? null
+    : /^\s*\d{4}-\d{2}-\d{2}/.test(classifierDate)
+      ? validCalendarDate(classifierDate.trim(), { allowTimeSuffix: true })
+      : classifierDate;
+  const raw = parsedInvoice?.invoice_date || usableClassifierDate;
+  const parsed = raw ? new Date(raw) : null;
+  const candidate = parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString().split('T')[0] : null;
+  return candidate && taxPeriodFor(candidate)
+    ? { invoiceDate: candidate, dateFromInvoice: true }
+    : { invoiceDate: etDateString(), dateFromInvoice: false };
+}
+
 // The classifier returns the amount as printed ("$10.06", "1,234.50 USD").
 // parseFloat read "$10.06" as NaN, so every such receipt was skipped as
 // "no_amount" (2026-10-05: 96 receipts, about $1,476, mostly Twilio, OpenAI,
 // Google). Accept one money figure with an optional $ and USD and thousands
 // commas; anything else is no amount.
 function classifierAmount(value) {
-  if (typeof value === 'number') return Number.isFinite(value) && value < 1e10 ? value : null;
+  if (typeof value === 'number') return inColumnRange(value);
   if (typeof value !== 'string') return null;
   const m = value.trim().match(/^(?:USD\s*)?\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?\s*(?:USD)?$/i);
   if (!m) return null;
-  const n = Number(m[1].replace(/,/g, '') + (m[2] || ''));
-  // expenses.amount is decimal(12,2): the same ceiling isUsableInvoiceTotal applies.
-  return Number.isFinite(n) && n < 1e10 ? n : null;
+  return inColumnRange(Number(m[1].replace(/,/g, '') + (m[2] || '')));
 }
 
 // Booking phase: the AI category suggestion (outside any transaction), then
@@ -304,7 +332,9 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
       // depend on which copy is processed first; the per-sender lock covers
       // two copies processed at once.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`expense-notice:${String(email.from_address || '').toLowerCase()}`]);
-      const copy = await findSameNoticeExpense(trx, email.id, amount, expenseDescription(vendorName, invoiceNumber));
+      // A clipped description is no identity (the same guard duplicateKey uses).
+      const fits = fullExpenseDescription(vendorName, invoiceNumber).length <= 300 && String(vendorName).length <= 200;
+      const copy = fits ? await findSameNoticeExpense(trx, email.id, amount, expenseDescription(vendorName, invoiceNumber)) : null;
       if (copy) {
         await trx('emails').where({ id: email.id }).update({
           expense_id: copy.id,
@@ -468,24 +498,7 @@ async function processVendorInvoice(email, classification) {
   // total also falls back to the classifier.
   const amountFromClassifier = parsedInvoice?.total == null;
   const invoiceNumber = parsedInvoice?.invoice_number || classification.extracted?.invoice_number;
-  // The classifier's date is untyped: an ISO-shaped impossible date
-  // (2026-02-31) would roll over to March 3 in new Date(), so it counts as no
-  // date. Other written forms are parsed as before.
-  const classifierDate = classification.extracted?.invoice_date;
-  // Only a string: new Date(20260231) is a 1970 instant.
-  const usableClassifierDate = typeof classifierDate !== 'string' ? null
-    : /^\s*\d{4}-\d{2}-\d{2}/.test(classifierDate)
-      ? validCalendarDate(classifierDate.trim(), { allowTimeSuffix: true })
-      : classifierDate;
-  const rawInvoiceDate = parsedInvoice?.invoice_date || usableClassifierDate;
-  const parsedDate = rawInvoiceDate ? new Date(rawInvoiceDate) : null;
-  const invoiceDateValid = parsedDate && !Number.isNaN(parsedDate.getTime());
-  // The classifier's own date is not calendar-checked upstream: a date
-  // taxPeriodFor cannot place (e.g. year 0012) falls back to today — date and
-  // tax period together — instead of throwing before the email outcome is
-  // recorded (Codex r20 on #4884).
-  const candidateDate = invoiceDateValid ? parsedDate.toISOString().split('T')[0] : null;
-  const invoiceDate = candidateDate && taxPeriodFor(candidateDate) ? candidateDate : etDateString();
+  const { invoiceDate, dateFromInvoice } = receiptDate(parsedInvoice, classification.extracted?.invoice_date);
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
   const paymentStatus = classification.extracted?.payment_status;
@@ -497,7 +510,7 @@ async function processVendorInvoice(email, classification) {
   } else if (amount > 0) {
     await bookExpense(email, {
       vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate,
-      dateFromInvoice: invoiceDate === candidateDate, taxYear, quarter,
+      dateFromInvoice, taxYear, quarter,
     });
   } else {
     await db('emails').where({ id: email.id }).update({
