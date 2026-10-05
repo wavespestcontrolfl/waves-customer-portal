@@ -6356,6 +6356,77 @@ describe('createTermForAnnualPrepay born-already-paid reconcile', () => {
   });
 });
 
+describe('createTermForAnnualPrepay records the stamp-time price baseline of a NEW term (GATE_PREPAY_MINT_PRICE_HOLD)', () => {
+  const TERM = {
+    id: 'term-1', customer_id: 'customer-1', status: 'payment_pending', prepay_amount: 400,
+    term_start: '2026-06-15', term_end: '2027-06-15',
+    coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4, coverage_cadence: 'quarterly',
+    prepay_invoice_id: null,
+  };
+  const visitRows = ['2026-06-20', '2026-09-20', '2026-12-20', '2027-03-20'].map((scheduled_date, i) => ({
+    id: `s${i + 1}`, customer_id: 'customer-1', scheduled_date, service_type: 'Quarterly Pest Control', status: 'pending', estimated_price: 110,
+  }));
+  const ORIGINAL_GATE = process.env.GATE_PREPAY_MINT_PRICE_HOLD;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    _private.resetCachesForTests();
+    db.transaction = jest.fn(async (cb) => cb(db));
+    process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'shadow';
+  });
+  afterEach(() => {
+    if (ORIGINAL_GATE === undefined) delete process.env.GATE_PREPAY_MINT_PRICE_HOLD;
+    else process.env.GATE_PREPAY_MINT_PRICE_HOLD = ORIGINAL_GATE;
+  });
+
+  function mintQueues({ baselineRead }) {
+    const record = query();
+    setDbQueues({
+      annual_prepay_terms: [
+        query({ columnInfo: COMPLETE_TERMITE_NOTICE_COLS }),
+        query({ first: undefined }), // existing-term lookup (customer + window)
+        query({ returning: [TERM] }), // insert
+        query({ first: TERM }), // refreshTermSnapshot term read
+        query({ returning: [TERM] }), // refreshTermSnapshot snapshot update
+      ],
+      scheduled_services: [
+        ...(baselineRead ? [query({ rows: visitRows })] : []), // recordMintVisitPrices coverage read
+        query({ columnInfo: { scheduled_date: {}, service_type: {} } }),
+        query({ rows: visitRows }),
+        query({ rows: visitRows }),
+      ],
+      activity_log: [record],
+    });
+    return record;
+  }
+  const mint = (extra = {}) => AnnualPrepayRenewals.createTermForAnnualPrepay({
+    customerId: 'customer-1', termStart: '2026-06-15', coverageServiceType: 'Quarterly Pest Control',
+    coverageVisitCount: 4, coverageCadence: 'quarterly', prepayAmount: 400, ...extra,
+  });
+
+  test('an inserted term writes one record with its covered visits\' prices', async () => {
+    const record = mintQueues({ baselineRead: true });
+
+    await mint();
+
+    expect(record.insert).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(record.insert.mock.calls[0][0].metadata)).toEqual({
+      term_id: 'term-1', prices: { s1: 11000, s2: 11000, s3: 11000, s4: 11000 },
+    });
+  });
+
+  test('a caller that defers the record gets termCreated and nothing is written here', async () => {
+    const record = mintQueues({ baselineRead: false });
+    const deferVisitPriceRecord = {};
+
+    await mint({ deferVisitPriceRecord });
+
+    expect(deferVisitPriceRecord.termCreated).toBe(true);
+    expect(record.insert).not.toHaveBeenCalled();
+  });
+});
+
 describe('createTermForAnnualPrepay window edit — out-of-window detach is NOT best-effort', () => {
   beforeEach(() => {
     jest.clearAllMocks();

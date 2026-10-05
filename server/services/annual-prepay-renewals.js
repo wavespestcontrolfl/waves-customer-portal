@@ -7657,10 +7657,12 @@ async function createTermForAnnualPrepay({
   // (termCountsAsPaidAfterCreate). Every other caller leaves it unset
   // (byte-identical to before this option existed).
   anchorInstallation,
-  // Stamp-time price check baseline (recordMintVisitPrices) for a NEW term.
-  // false only for a caller that still writes visit prices after this
-  // returns and records the baseline itself (the estimate accept).
-  recordVisitPrices = true,
+  // Stamp-time price check baseline (recordMintVisitPrices), written here for
+  // a NEW term. A caller that still writes visit prices after this returns
+  // (the estimate accept) passes an object instead: nothing is recorded here,
+  // `termCreated` is set on it only when this call inserted the term, and the
+  // caller records the baseline itself then. A reused term is never recorded.
+  deferVisitPriceRecord = null,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -7879,7 +7881,8 @@ async function createTermForAnnualPrepay({
   await syncInvoiceTerm(prepayInvoiceId, term.id, conn);
   // Before the refresh: a visit the refresh seeds is priced by the term
   // itself and needs no baseline.
-  if (recordVisitPrices) await recordMintVisitPrices(term, conn);
+  if (deferVisitPriceRecord) deferVisitPriceRecord.termCreated = true;
+  else await recordMintVisitPrices(term, conn);
   const refreshed = await refreshTermSnapshot(term.id, conn);
   // A brand-new insert never carries a renewal_decision, so this stays
   // ACTIVE-only in practice (same rule as the "existing" branch above).
