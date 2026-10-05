@@ -525,6 +525,11 @@ module.exports = {
   // ONE denominator rule (GH codex P1): never-winnable rows leave rates.
   effectiveDisposition,
   excludedFromRates,
+  // Canonical sent anchor (first durable delivery evidence) and resolution
+  // date — shared with the dashboard's service-line card so no second copy of
+  // the fallback chains can drift from Pipeline Analytics.
+  sentAnchorMs,
+  resolutionDateMs,
   // Canonical triple-shape resolver for the persisted lookup profile
   // (engineRequest.profile → enriched → marker-bearing engineInputs) —
   // shared with estimate-pricing-audit's send-time provenance block so the
