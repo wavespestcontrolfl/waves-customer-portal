@@ -249,10 +249,21 @@ describe('one deadline for the whole step (the technician is waiting at Complete
     expect(state.updates).toBe(0);
   });
 
+  test('another assessment landing during the build: no paragraph, nothing generated (Codex r7)', async () => {
+    gatesOn();
+    loadLinkedTreeShrubAssessment.mockResolvedValueOnce({ id: 77 }).mockResolvedValueOnce({ id: 78 });
+    const { knex } = fakeKnex();
+    const generate = jest.fn(async () => GOOD);
+    const out = await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate } });
+    expect(out).toBeNull();
+    expect(generate).not.toHaveBeenCalled();
+    expect(gatherTreeShrubTechParagraphInputs).not.toHaveBeenCalled();
+  });
+
   test('a slow lookup shortens the engine\'s budget by what it spent', async () => {
     gatesOn();
     jest.useFakeTimers();
-    loadLinkedTreeShrubAssessment.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ id: 77 }), 6000)));
+    loadLinkedTreeShrubAssessment.mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve({ id: 77 }), 6000)));
     const { knex } = fakeKnex();
     const generate = jest.fn(async () => GOOD);
     const out = settled(freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate } }));

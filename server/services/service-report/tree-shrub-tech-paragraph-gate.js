@@ -85,6 +85,15 @@ async function freezeTreeShrubTechParagraph({
           // deterministic template and never dispatches the narrative lane, so this
           // step makes exactly one model call.
           const data = await buildReportV1Data(record, reportToken, knex, { skipNarrativeGeneration: true }).catch(() => null);
+          // The build looks the assessment up again. If another one landed in
+          // between, the gathered findings may be from it, not from the one the
+          // freeze is keyed to: no paragraph (Codex r7). After this re-check a later
+          // assessment only means the build used the selected one.
+          const after = await loadLinkedTreeShrubAssessment(service, knex);
+          if (!after || String(after.id) !== assessmentId) {
+            logger.info(`[ts-tech-paragraph] none for service_record ${service.id}: assessment_changed`);
+            return null;
+          }
           return require('./tree-shrub-tech-paragraph-inputs').gatherTreeShrubTechParagraphInputs({ record, data, knex });
         },
         knex,

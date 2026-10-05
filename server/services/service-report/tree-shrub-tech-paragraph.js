@@ -134,6 +134,15 @@ const HEDGE_RE = /\b(?:possible|possibly|may|might|could|maybe|perhaps|probably|
 // Another visit, past or planned (Codex r6): "last visit we saw scale", "return
 // next week to treat scale". Fail closed: a sentence with any such cue supports no item.
 const TEMPORAL_RE = /\b(?:last|previous(?:ly)?|prior|earlier|before|ago|again|next|return\w*|come\s+back|follow[\s-]?up|check\s+back|recheck\w*|re-?treat\w*|will|going\s+to|plan\w*|schedul\w*|upcoming|yesterday|tomorrow|soon|later)\b/i;
+// A sighting needs a POSITIVE word in the condition's sentence (an allow list,
+// Codex r7; "Found scale on the hedges and sooty mold on the ixora" covers both): "Applied Merit for scale on the hedges" names a treatment
+// target, not a sighting, and supports nothing. A note in bare shorthand
+// ("Scale on hedges.") supports no "saw" line either: fail closed.
+const SIGHTING_RE = /\b(?:saw|seen|seeing|found|finding|noticed|noticing|spotted|observed|detected|discovered|showing|shows|present|active|infested|infestation|covered|crawling)\b/i;
+// A treatment or its purpose in the condition's clause ("applied Merit for scale",
+// "treated scale", "to control") is not a sighting, even with a sighting word
+// elsewhere in the sentence. Fail closed.
+const PURPOSE_RE = /\b(?:for|against|targeting|prevent\w*|control\w*|preventive|preventative|protect\w*|appl(?:y|ied|ying)|treat\w*|spray\w*|drench\w*|injected|injection)\b/i;
 // Owner rulings: never Ganoderma or a conk (10-03, #5836) or the other two
 // diagnosis-only palm diseases; photos are from the ground, so never a word about a
 // palm's crown, spear leaf or newest fronds (10-01, PALM_CROWN_PROMPT_RULE).
@@ -148,7 +157,8 @@ const clausesOf = (sentence) => sentence.split(/,|\band\b|\bbut\b|\bwhile\b|\bwi
  * The model judges each item (seenToday must be true: owner ruling 2026-10-03,
  * the model judges the language, the code verifies). Then an item stays only when
  * its condition term is in a note sentence that is not negated, not hedged, names
- * no other visit (past or planned) and carries no palm-banned term. Its plant stays only when a
+ * no other visit (past or planned), carries no palm-banned term and has a sighting
+ * word, and the condition's own clause names no treatment or purpose. Its plant stays only when a
  * plant term sits in the same clause as the condition; otherwise the plant is
  * dropped and the condition stays. Unknown ids, repeats and everything past the
  * third item drop.
@@ -164,9 +174,11 @@ function verifyObservations(observations, note) {
     const plantId = raw.plant && typeof raw.plant === 'string' && Object.hasOwn(PLANTS, raw.plant) ? raw.plant : null;
     const usable = sentences.filter((s) => CONDITIONS[condition].re.test(s)
       && !NEGATION_RE.test(s) && !HEDGE_RE.test(s) && !TEMPORAL_RE.test(s) && !PALM_NAME_RE.test(s) && !PALM_CROWN_RE.test(s));
-    if (!usable.length) continue;
+    const sighted = usable.filter((s) => SIGHTING_RE.test(s)).flatMap(clausesOf)
+      .filter((c) => CONDITIONS[condition].re.test(c) && !PURPOSE_RE.test(c));
+    if (!sighted.length) continue;
     seen.add(condition);
-    const plantOk = !!plantId && usable.some((s) => clausesOf(s).some((c) => CONDITIONS[condition].re.test(c) && PLANTS[plantId].re.test(c)));
+    const plantOk = !!plantId && sighted.some((c) => PLANTS[plantId].re.test(c));
     out.push({ condition, plant: plantOk ? plantId : null });
   }
   return out;

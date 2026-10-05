@@ -136,14 +136,14 @@ describe('verifyObservations: the note must support each item', () => {
   test('a condition and plant in the same clause are kept', () => {
     expect(verify('Found scale on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
     expect(verify('Found scale on the hedge.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
-    expect(verify('Whitefly on the underside of leaves of several shrubs.', obs('whitefly', 'shrubs'))).toEqual([{ condition: 'whitefly', plant: 'shrubs' }]);
+    expect(verify('Saw whitefly on the underside of leaves of several shrubs.', obs('whitefly', 'shrubs'))).toEqual([{ condition: 'whitefly', plant: 'shrubs' }]);
   });
 
   test('scale and hedges in different note sentences: the item stays, the plant is dropped (a weaker, true claim)', () => {
     expect(verify('Found scale along the fence. Trimmed the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: null }]);
     // Same sentence but different clauses.
-    expect(verify('Scale on the palms, whitefly on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: null }]);
-    expect(verify('Scale on the palms, whitefly on the hedges.', obs('whitefly', 'hedges'))).toEqual([{ condition: 'whitefly', plant: 'hedges' }]);
+    expect(verify('Saw scale on the palms, whitefly on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: null }]);
+    expect(verify('Saw scale on the palms, whitefly on the hedges.', obs('whitefly', 'hedges'))).toEqual([{ condition: 'whitefly', plant: 'hedges' }]);
   });
 
   test('a condition the note does not carry is dropped, and so is one it negates, hedges or ties to a palm-banned term', () => {
@@ -226,6 +226,26 @@ describe('deterministic lines', () => {
   test('nothing applies: no sentence, no paragraph', () => {
     expect(textFor({ technicianNote: '', products: [], landscapeCondition: null }, [])).toBe('');
     expect(textFor({ technicianNote: 'Visited.', products: [], landscapeCondition: 'Fair' }, [])).toBe('');
+  });
+});
+
+describe('a sighting, never a treatment target (Codex r7)', () => {
+  const verify = (note, ...items) => tech.verifyObservations(items, note);
+  test('a treatment or its purpose supports no "saw" line', () => {
+    for (const note of [
+      'Applied Merit for scale on the hedges.',
+      'Treated scale on the hedges.',
+      'Sprayed the hedges to control scale.',
+      'Drenched the hedges against scale, saw nothing else.',
+      'Treated the hedges for scale we found.',
+    ]) expect(verify(note, obs('scale', 'hedges'))).toEqual([]);
+  });
+  test('bare shorthand with no sighting word supports nothing (fail closed)', () => {
+    expect(verify('Scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
+    expect(verify('Aphids.', obs('aphids'))).toEqual([]);
+  });
+  test('a sighting beside a separate treatment clause still counts', () => {
+    expect(verify('Found scale on the hedges and treated them with Merit.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
   });
 });
 
@@ -325,9 +345,9 @@ describe('the model call (extraction only)', () => {
     expect(out.paragraph).toBe('Today we applied Merit 2F and Palm Gro 8-2-12. Your landscape looked excellent today.');
   });
 
-  test('a short note is still read: "Aphids." is a full observation (Codex r4)', async () => {
+  test('a short note is still read: "Saw aphids." is a full observation (Codex r4)', async () => {
     const callModel = jest.fn(async () => ({ ok: true, json: { observations: [obs('aphids')] } }));
-    const out = await tech.generateTechParagraph(inputs({ technicianNote: 'Aphids.' }), { callModel });
+    const out = await tech.generateTechParagraph(inputs({ technicianNote: 'Saw aphids.' }), { callModel });
     expect(callModel).toHaveBeenCalledTimes(1);
     expect(out.paragraph).toMatch(/^Our technician saw aphids\./);
   });
