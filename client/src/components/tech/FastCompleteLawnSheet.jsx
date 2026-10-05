@@ -309,6 +309,24 @@ function useLawnFastContext({ base, request, service }) {
 
 // ── products ────────────────────────────────────────────────────────────────
 
+// The plan's quantity as the row starts: the plan's own measure and amount
+// when the plan gave one in a unit the row's measures know (a small liquid dose
+// in spoons), else the product's own measure with an empty box.
+function plannedSeed(planned, own) {
+  const amount = Number(planned?.amount);
+  const dimension = measureUnit(planned?.amountUnit, own.dimension)
+    ? own.dimension
+    : Object.keys(UNIT_CHOICES).find((name) => measureUnit(planned?.amountUnit, name));
+  if (!dimension || !(amount > 0)) return { dimension: own.dimension, amount: '', unit: own.unit };
+  return { dimension, ...seededAmount(amount, measureUnit(planned.amountUnit, dimension)) };
+}
+
+// The plan's own rate (ratePer1000 in rateUnit), only in a unit /complete
+// accepts; null when the plan carries none.
+const plannedRate = (planned) => (planned && Number(planned.ratePer1000) > 0 && isSendableRateUnit(planned.rateUnit)
+  ? { rate: Number(planned.ratePer1000), unit: String(planned.rateUnit).trim() }
+  : null);
+
 // A row for a catalog product. `planned` carries the plan's amount, unit and
 // method; `protocol` (an entry of the month's window, see ProtocolAddOns) its
 // method and rate; an added product has none and starts on its own default method.
@@ -316,49 +334,40 @@ function productRow(product, { planned = null, added = false, protocol = null })
   const rawMethod = planned?.applicationMethod || protocol?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn');
   // Held the way the server reads it, so the requirements table finds it.
   const method = normalizeApplicationMethod(rawMethod) || rawMethod;
-  const own = productUnits(product, { method });
-  const amount = Number(planned?.amount);
-  const plannedDimension = measureUnit(planned?.amountUnit, own.dimension)
-    ? own.dimension
-    : Object.keys(UNIT_CHOICES).find((name) => measureUnit(planned?.amountUnit, name));
-  let dimension = own.dimension;
-  let seeded = { amount: '', unit: own.unit };
-  if (plannedDimension && amount > 0) {
-    dimension = plannedDimension;
-    seeded = seededAmount(amount, measureUnit(planned.amountUnit, plannedDimension));
-  }
+  const seeded = plannedSeed(planned, productUnits(product, { method }));
   return {
     product,
     productId: product.id,
     name: product.name,
     added,
     planned: !!planned,
-    // The window entry this row came from, if any: its rate figures the amount.
+    // The window entry this row came from, if any: the protocol is the
+    // authority on its rate (a nutrient target is not a rate; the catalog's
+    // generic rate never stands in for it).
     protocol: protocol ? { ratePer1000: Number(protocol.ratePer1000) || null, rateUnit: protocol.rateUnit || null } : null,
     method,
-    dimension,
+    dimension: seeded.dimension,
     totalAmount: seeded.amount,
     amountUnit: seeded.unit,
     fromPlan: seeded.amount !== '',
-    // The plan's own rate (ratePer1000 in rateUnit), only in a unit /complete
-    // accepts. Nobody types a rate on this sheet: an untouched planned row sends
-    // this exactly as the plan gave it, and the first change to the row's amount
-    // or amount unit (rateChanged) drops it.
-    planRate: planned && Number(planned.ratePer1000) > 0 && isSendableRateUnit(planned.rateUnit)
-      ? { rate: Number(planned.ratePer1000), unit: String(planned.rateUnit).trim() }
-      : null,
+    // Nobody types a rate on this sheet: an untouched planned row sends the
+    // plan's exactly as the plan gave it, and the first change to the row's
+    // amount or amount unit (rateChanged) drops it.
+    planRate: plannedRate(planned),
     rateChanged: false,
     // The square feet the context's planned item carries, if any.
     plannedSqft: planned && Number(planned.treatedSqft) > 0 && (!planned.areaUnit || planned.areaUnit === 'sqft') ? Number(planned.treatedSqft) : null,
   };
 }
 
-// The rate a row records: the plan's, for a planned row nobody has changed, and
-// nothing else (no typed rate, no catalog default, no recomputing: a nutrient
-// rate such as lb N cannot be got back from the product amount). So there is no
-// unit to get wrong. Added products, changed rows, plans with no rate and
-// units /complete does not accept all record none.
-const plannedRateOf = (row) => (row.planned && !row.rateChanged ? row.planRate : null);
+// The rate a row records: the plan's, for a planned row nobody has changed;
+// the rate a figured amount was figured FROM (derivedRate, the protocol's or
+// the catalog's per 1,000 sq ft in its base unit), so the application's rate
+// is on the record for the annual-limit checks; and nothing else (no typed
+// rate, no recomputing: a nutrient rate such as lb N cannot be got back from
+// the product amount). Typed amounts, changed planned rows, plans with no rate
+// and units /complete does not accept all record none.
+const rateOf = (row) => (row.planned && !row.rateChanged ? row.planRate : row.derivedRate || null);
 
 // AmountRow shows a rate box only when it is given a rate unit; this sheet never does.
 const NO_RATE = { rate: '', rateUnit: '', max: null };
@@ -428,31 +437,67 @@ const areaOf = (row, wholeLawn) => {
 // acre, per spot), a rate in mL or a rate in another measure than the row's
 // figures nothing, and the box stays empty. Returns { amount, unit, note } or
 // null; `note` is the working, read under the box.
-function derivedAmount(row, lawnSqft) {
-  if (row.amountPicked || row.fromPlan) return null;
-  const area = requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (row.planned ? row.plannedSqft : null);
-  if (!(area > 0)) return null;
-  // The protocol's own rate for a row from the month's window, else the catalog's.
-  const resolved = row.protocol?.ratePer1000 > 0 && row.protocol.rateUnit
+// One measure's units against its base (fl oz; grams; each), for a figured
+// amount read in the unit the tech picked.
+const UNIT_SCALE = {
+  liquid: { tsp: 1 / 6, fl_oz: 1, gal: 128 },
+  weight: { g: 1, oz: 28.3495, lb: 453.592 },
+  count: { each: 1 },
+};
+function convertAmount(amount, from, to, dimension) {
+  const scale = UNIT_SCALE[dimension];
+  if (!scale || !(from in scale) || !(to in scale)) return null;
+  return amount * (scale[from] / scale[to]);
+}
+
+// The rate a row is figured at, { rate, base } (base = the rate's own unit
+// before any "/"), or null when there is none the sheet can figure from: a
+// row from the month's window takes the protocol's own rate and nothing else
+// (a nutrient target such as lb N is not a rate per 1,000, and the catalog's
+// generic rate never stands in for the protocol's); any other row takes the
+// catalog's. A per-basis rate (per gallon, per acre, per spot) or one in mL
+// figures nothing.
+function figuringRate(row) {
+  const source = row.protocol
     ? { rate: row.protocol.ratePer1000, rateUnit: row.protocol.rateUnit }
     : resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
-  const rate = Number(resolved.rate);
-  const rateUnit = String(resolved.rateUnit || '').trim();
+  const rate = Number(source?.rate);
+  const rateUnit = String(source?.rateUnit || '').trim();
   if (!(rate > 0) || !rateUnit || isPerBasisUnit(rateUnit) || isMlUnit(rateUnit)) return null;
-  const base = rateUnit.split('/')[0].trim().toLowerCase();
+  return { rate, base: rateUnit.split('/')[0].trim().toLowerCase() };
+}
+
+// The area a row is figured on: the one it submits for a sqft method; a
+// planned spot row's own plan area; else none.
+const figuringArea = (row, lawnSqft) => (requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (row.planned ? row.plannedSqft : null));
+
+function derivedAmount(row, lawnSqft) {
+  if (row.amountPicked || row.fromPlan) return null;
+  const area = figuringArea(row, lawnSqft);
+  const figured = figuringRate(row);
+  if (!(area > 0) || !figured) return null;
+  const { rate, base } = figured;
   const unit = measureUnit(base, row.dimension);
   if (!unit) return null;
-  // Rounded ONCE, after the spoon conversion, to the precision the record
-  // keeps for the unit (three decimals for fl oz, as submittedAmount sends it;
-  // two for spoons and dry weights): a two-decimal pre-round in fl oz would
-  // zero a tiny dose (0.004 fl oz) and the record would disagree with the box.
-  const seeded = seededAmount(rate * (area / 1000), unit);
-  const places = seeded.unit === 'fl_oz' ? 1000 : 100;
-  const amount = Math.round(seeded.amount * places) / places;
+  // In the unit the tech picked for the row (unitPicked), else the rate's own
+  // (spoons for a small liquid dose). Rounded ONCE, after that conversion, to
+  // the precision the record keeps for the unit (three decimals for fl oz and
+  // gal, as submittedAmount sends them; two for spoons and dry weights): a
+  // two-decimal pre-round in fl oz would zero a tiny dose (0.004 fl oz) and
+  // the record would disagree with the box.
+  const inBase = rate * (area / 1000);
+  const shown = row.unitPicked
+    ? { amount: convertAmount(inBase, unit, row.amountUnit, row.dimension), unit: row.amountUnit }
+    : seededAmount(inBase, unit);
+  if (shown.amount == null) return null;
+  const places = shown.unit === 'fl_oz' || shown.unit === 'gal' ? 1000 : 100;
+  const amount = Math.round(shown.amount * places) / places;
   if (!(amount > 0)) return null;
   return {
     amount,
-    unit: seeded.unit,
+    unit: shown.unit,
+    // The rate on the record, in its base unit (the plan's own shape).
+    rate: isSendableRateUnit(base) ? { rate, unit: base } : null,
     note: `${rate} ${unitLabel(base)} per 1,000 sq ft × ${area.toLocaleString('en-US')} sq ft`,
   };
 }
@@ -461,7 +506,7 @@ function derivedAmount(row, lawnSqft) {
 // of an empty box. The tech's own entry and the plan's quantity pass through.
 function withDerivedAmount(row, lawnSqft) {
   const derived = derivedAmount(row, lawnSqft);
-  return derived ? { ...row, totalAmount: derived.amount, amountUnit: derived.unit, derivedNote: derived.note } : row;
+  return derived ? { ...row, totalAmount: derived.amount, amountUnit: derived.unit, derivedNote: derived.note, derivedRate: derived.rate } : row;
 }
 
 // One id, one planned product, however the plan lists it: the FIRST entry wins
@@ -491,6 +536,11 @@ function useProductRows(ctx, catalog) {
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => {
       if (row.productId !== productId) return row;
+      // A unit change on a row whose amount is figured (nothing typed, no plan
+      // quantity) keeps the figure: the row remembers the unit (unitPicked) and
+      // derivedAmount figures in it. Only a typed number is the tech's amount.
+      const unitOnly = 'amountUnit' in patch && !('totalAmount' in patch) && !row.amountPicked && !row.fromPlan;
+      if (unitOnly) return { ...row, amountUnit: patch.amountUnit, unitPicked: true };
       return {
         ...row,
         ...patch,
@@ -606,7 +656,7 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
     lawnAssessmentId: assessmentId,
     products: rows.map((row) => {
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
-      const planRate = plannedRateOf(row);
+      const planRate = rateOf(row);
       const requirement = requirementOf(row);
       return {
         productId: row.productId,
@@ -1085,19 +1135,59 @@ const ROLE_WORDS = {
 };
 const rateWords = (item) => (item.ratePer1000 > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '');
 
+// The protocol's operating gates on a product, as the tech reads them: the
+// known keys in plain words, any other key with its underscores opened up
+// and its value after it. trigger, tankMixWith and the annual counter are
+// read elsewhere (or are bookkeeping) and are not repeated here.
+const GATE_WORDS = {
+  spreaderVisitOnly: () => 'spreader visit only',
+  postAppIrrigation: () => 'water in after',
+  stressGate: () => 'not on stressed turf',
+  minDistanceFromWaterFt: (v) => `keep ${v} ft from water`,
+  applyAlone: () => 'apply alone',
+  sunnyTurfOnly: () => 'sunny turf only',
+  noWaterIn: () => 'do not water in',
+  delayWateringHours: (v) => `hold watering ${v} h`,
+  recheckDays: (v) => `recheck in ${v} days`,
+  novToMarOnly: () => 'Nov to Mar only',
+  requiresZeroNP: () => 'no N or P',
+  blackoutSensitive: () => 'blackout sensitive',
+  northPortBlocked: () => 'not in North Port',
+  holdForTropicalWatch: () => 'hold under a tropical watch',
+  rateRange: (v) => `label ${v}`,
+  concentration: (v) => `${v}`,
+  paleTurfRate: (v) => `pale turf ${v}`,
+  targetN: (v) => `target ${v}`,
+  targetK2O: (v) => `target ${v}`,
+};
+const GATE_KEYS_READ_ELSEWHERE = new Set(['trigger', 'tankMixWith', 'annualCounter']);
+function gateWords(gates) {
+  if (!gates || typeof gates !== 'object') return [];
+  return Object.entries(gates)
+    .filter(([key, value]) => !GATE_KEYS_READ_ELSEWHERE.has(key) && value !== false && value != null && value !== '')
+    .map(([key, value]) => {
+      if (GATE_WORDS[key]) return GATE_WORDS[key](value);
+      const text = key.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ').toLowerCase();
+      return value === true ? text : `${text} ${typeof value === 'object' ? JSON.stringify(value) : value}`;
+    });
+}
+
 // "Also in October's protocol": the month's window products the sheet does not
-// carry yet, one tap each. On a recurring visit the window's plan defaults are
-// the planned rows already, so only the opt-in products are offered; on any
-// other visit (no plan) every window product is. A product the catalog does not
-// list (inactive) cannot be added and is left out; one already on the sheet is
-// shown as such. Tapping adds the row on the protocol's method, figured at the
-// protocol's rate.
+// carry yet, one tap each. On a recurring visit whose plan is on the sheet the
+// window's plan defaults ARE the planned rows, so only the opt-in products are
+// offered; with no planned row on (another visit type, the plan unavailable or
+// its gates off) every window product is, the whole-lawn tool first. A product
+// the catalog does not list (inactive) cannot be added and is left out; one
+// already on the sheet is shown as such. Each line carries the protocol's
+// trigger, tank mix, every operating gate, the method and the rate. Tapping
+// adds the row on the protocol's method, figured at the protocol's rate.
 function ProtocolAddOns({ window, visitType, rows, catalog, locked, onAdd }) {
   const titleId = useId();
   if (!window) return null;
   const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
+  const planOn = visitType === 'recurring' && rows.some((row) => row.planned);
   const items = window.products
-    .filter((item) => visitType !== 'recurring' || !item.defaultInPlan)
+    .filter((item) => !planOn || !item.defaultInPlan)
     .map((item) => ({ ...item, product: byId.get(String(item.productId).toLowerCase()) || null }))
     .filter((item) => item.product);
   if (!items.length) return null;
@@ -1114,6 +1204,7 @@ function ProtocolAddOns({ window, visitType, rows, catalog, locked, onAdd }) {
         const joined = [
           triggerWords(item.trigger) || ROLE_WORDS[item.role] || '',
           item.tankMixWith ? `tank mix with ${item.tankMixWith}` : '',
+          ...gateWords(item.gates),
           methodLabel(item.applicationMethod).toLowerCase(),
           rateWords(item),
         ].filter(Boolean).join(' · ');

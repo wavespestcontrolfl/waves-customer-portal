@@ -735,12 +735,12 @@ describe('products', () => {
   const WINDOW = () => ({
     title: 'October Fall Feeding + Pre-Emergent (spreader)', month: 10, visitType: 'granular_production_plus_spots',
     products: [
-      { productId: P_GRANULE, name: 'Green Granules', role: 'fall_pre_emergent_nutrition', defaultInPlan: true, applicationMethod: 'granular_broadcast', ratePer1000: 4.02, rateUnit: 'lb', trigger: null, tankMixWith: null },
-      { productId: P_ART, name: 'Artavia 2 SC', role: 'fungicide_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'mapped_large_patch_with_velista_and_take_all_fall_2', tankMixWith: null },
-      { productId: P_TALAK, name: 'Talak 7.9%', role: 'insecticide_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'chinch_20_to_25_per_sqft', tankMixWith: null },
-      { productId: P_IRON, name: 'Iron Plus', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'broadcast_spray', ratePer1000: 0.5, rateUnit: 'fl_oz', trigger: null, tankMixWith: 'Celsius WG' },
+      { productId: P_GRANULE, name: 'Green Granules', role: 'fall_pre_emergent_nutrition', defaultInPlan: true, applicationMethod: 'granular_broadcast', ratePer1000: 4.02, rateUnit: 'lb', trigger: null, tankMixWith: null, gates: { targetN: '0.6 lb N/1000', blackoutSensitive: true } },
+      { productId: P_ART, name: 'Artavia 2 SC', role: 'fungicide_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'mapped_large_patch_with_velista_and_take_all_fall_2', tankMixWith: null, gates: { trigger: 'mapped_large_patch_with_velista_and_take_all_fall_2' } },
+      { productId: P_TALAK, name: 'Talak 7.9%', role: 'insecticide_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'chinch_20_to_25_per_sqft', tankMixWith: null, gates: { trigger: 'chinch_20_to_25_per_sqft', delayWateringHours: 24 } },
+      { productId: P_IRON, name: 'Iron Plus', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'broadcast_spray', ratePer1000: 0.5, rateUnit: 'fl_oz', trigger: null, tankMixWith: 'Celsius WG', gates: { tankMixWith: 'Celsius WG', spreaderVisitOnly: true, minDistanceFromWaterFt: 25, oddNewGate: 'x' } },
       // Not in the catalog the sheet has: cannot be built, so not offered.
-      { productId: 'aaaaaaaa-0000-4000-8000-000000000099', name: 'Ghost', role: 'x', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: null, tankMixWith: null },
+      { productId: 'aaaaaaaa-0000-4000-8000-000000000099', name: 'Ghost', role: 'x', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: null, tankMixWith: null, gates: {} },
     ],
   });
   const ARTAVIA = { id: P_ART, name: 'Artavia 2 SC', category: 'fungicide', formulation: 'SC' };
@@ -778,8 +778,10 @@ describe('products', () => {
     await openSheet({ request: makeRequest({ ctx: { ...ONE_TIME(), protocolWindow: WINDOW() } }), props: { catalog: [...CATALOG, ARTAVIA] } });
     const row = addons();
     expect(within(row).getByText('Green Granules')).toBeTruthy();
-    expect(within(row).getByText('Granular broadcast · 4.02 lb per 1,000 sq ft')).toBeTruthy();
-    expect(within(row).getByText('Weed spots · tank mix with Celsius WG · broadcast spray · 0.5 fl oz per 1,000 sq ft')).toBeTruthy();
+    // Every operating gate reads out: the known ones in words, an unknown one opened up with its value.
+    expect(within(row).getByText('Target 0.6 lb N/1000 · blackout sensitive · granular broadcast · 4.02 lb per 1,000 sq ft')).toBeTruthy();
+    expect(within(row).getByText('Weed spots · tank mix with Celsius WG · spreader visit only · keep 25 ft from water · odd new gate x · broadcast spray · 0.5 fl oz per 1,000 sq ft')).toBeTruthy();
+    expect(within(row).getByText('Chinch bugs, 20 to 25 per sq ft · hold watering 24 h · spot treatment')).toBeTruthy();
     fireEvent.click(within(row).getByRole('button', { name: 'Add Green Granules' }));
     const granules = editorFor('Green Granules');
     expect(pressedMethod(granules)).toBe('Granular broadcast');
@@ -787,6 +789,25 @@ describe('products', () => {
     expect(within(granules).getByLabelText('Green Granules').value).toBe('20.1');
     expect(within(granules).getByLabelText('Unit for Green Granules').value).toBe('lb');
     expect(within(granules).getByText('4.02 lb per 1,000 sq ft × 5,000 sq ft')).toBeTruthy();
+  });
+
+  test('a recurring visit with no planned row on (plan unavailable) offers the window\'s defaults too', async () => {
+    const ctx = context({ plannedProducts: { source: null, items: [] }, plannedProductsUnavailable: 'planned_products_lookup_failed', protocolWindow: WINDOW() });
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog: [...CATALOG, ARTAVIA] } });
+    expect(within(addons()).getByRole('button', { name: 'Add Green Granules' })).toBeTruthy();
+  });
+
+  test('a row from the protocol is figured from the protocol\'s rate only: with none, the catalog\'s rate never stands in', async () => {
+    // The window gives Talak no rate (a spot product); the catalog has one.
+    const window = WINDOW();
+    window.products[2] = { ...window.products[2], applicationMethod: 'broadcast_spray' };
+    await openSheet({ request: makeRequest({ ctx: { ...ONE_TIME(), protocolWindow: window } }), props: { catalog: [...RATED, ARTAVIA] } });
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add Talak 7.9%' }));
+    const talak = editorFor('Talak 7.9%');
+    expect(pressedMethod(talak)).toBe('Broadcast spray');
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('');
+    expect(within(talak).queryByText(/per 1,000 sq ft/)).toBeNull();
+    expect(within(talak).getByText('No amount entered. It is recorded without one.')).toBeTruthy();
   });
 
   test('no window, or a window with nothing the sheet can offer, shows no row', async () => {
@@ -812,8 +833,8 @@ describe('products', () => {
     await analyze();
     await submit();
     const sent = completeCalls()[0].body.products.find((p) => p.productId === P_TALAK);
-    expect(sent).toMatchObject({ applicationMethod: 'broadcast_spray', totalAmount: 10, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' });
-    expect(sent.rate).toBeUndefined();
+    // The rate it was figured from is on the record (annual-limit checks sum it), in its base unit.
+    expect(sent).toMatchObject({ applicationMethod: 'broadcast_spray', totalAmount: 10, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft', rate: 2, rateUnit: 'fl_oz' });
   });
 
   test('a granular product is figured in its dry unit, and a small liquid dose reads in spoons', async () => {
@@ -844,7 +865,7 @@ describe('products', () => {
     expect(within(talak).queryByText('No amount entered. It is recorded without one.')).toBeNull();
     await analyze();
     await submit();
-    expect(completeCalls()[0].body.products[0]).toMatchObject({ totalAmount: 0.004, amountUnit: 'fl_oz' });
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ totalAmount: 0.004, amountUnit: 'fl_oz', rate: 0.0008, rateUnit: 'fl_oz' });
   });
 
   test('moved to Spot treatment, an added product has no area, so nothing is figured and the box is empty again', async () => {
@@ -872,6 +893,22 @@ describe('products', () => {
     const sent = completeCalls()[0].body.products[0];
     expect(sent.totalAmount).toBeUndefined();
     expect(sent.amountUnit).toBeUndefined();
+    expect(sent.rate).toBeUndefined();
+  });
+
+  test('changing the unit of a figured amount keeps the figure, read in the new unit; a typed number then wins', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: RATED } });
+    await addProductByName('Talak 7.9%');
+    const talak = editorFor('Talak 7.9%');
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('10');
+    fireEvent.change(within(talak).getByLabelText('Unit for Talak 7.9%'), { target: { value: 'tsp' } });
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('60');
+    expect(within(talak).getByText('2 fl oz per 1,000 sq ft × 5,000 sq ft')).toBeTruthy();
+    fireEvent.change(within(talak).getByLabelText('Unit for Talak 7.9%'), { target: { value: 'gal' } });
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('0.078');
+    await analyze();
+    await submit();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ totalAmount: 0.078, amountUnit: 'gal', rate: 2, rateUnit: 'fl_oz' });
   });
 
   test('an amount the tech types wins over the figured one and survives a method change', async () => {
@@ -884,7 +921,9 @@ describe('products', () => {
     expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('12');
     await analyze();
     await submit();
-    expect(completeCalls()[0].body.products[0]).toMatchObject({ applicationMethod: 'spot_treatment', totalAmount: 12, amountUnit: 'fl_oz' });
+    const typed = completeCalls()[0].body.products[0];
+    expect(typed).toMatchObject({ applicationMethod: 'spot_treatment', totalAmount: 12, amountUnit: 'fl_oz' });
+    expect(typed.rate).toBeUndefined();
   });
 
   test('a planned product with no plan quantity is figured on the plan\'s own area; one with a quantity keeps the plan\'s', async () => {

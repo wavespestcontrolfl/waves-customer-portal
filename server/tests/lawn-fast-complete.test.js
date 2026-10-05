@@ -773,9 +773,9 @@ describe('this month\'s protocol window (the sheet\'s add-on row)', () => {
       month: 10,
       visitType: 'granular_production_plus_spots',
       products: [
-        { productId: P_GRAN, name: 'Test Feed Granular', role: 'fall_pre_emergent_nutrition', defaultInPlan: true, applicationMethod: 'granular_broadcast', ratePer1000: 4.02, rateUnit: 'lb', trigger: null, tankMixWith: null },
-        { productId: P_HERB, name: 'Test Weed Spray', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: 0.085, rateUnit: 'oz', trigger: null, tankMixWith: null },
-        { productId: P_UN, name: 'Test Unapproved', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'repeat_sedge', tankMixWith: 'Celsius WG' },
+        { productId: P_GRAN, name: 'Test Feed Granular', role: 'fall_pre_emergent_nutrition', defaultInPlan: true, applicationMethod: 'granular_broadcast', ratePer1000: 4.02, rateUnit: 'lb', trigger: null, tankMixWith: null, gates: { targetN: '0.6 lb N/1000' } },
+        { productId: P_HERB, name: 'Test Weed Spray', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: 0.085, rateUnit: 'oz', trigger: null, tankMixWith: null, gates: { annualCounter: 'celsius_oz_per_1000', stressGate: true } },
+        { productId: P_UN, name: 'Test Unapproved', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'repeat_sedge', tankMixWith: 'Celsius WG', gates: { trigger: 'repeat_sedge', tankMixWith: 'Celsius WG' } },
       ],
     });
     expect(ctx.readFailures).not.toContain('protocol_window');

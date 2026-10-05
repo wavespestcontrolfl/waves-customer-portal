@@ -546,9 +546,13 @@ async function loadProtocolWindow(svc, knex, readFailures) {
           defaultInPlan: product.default_in_plan === true,
           applicationMethod: protocolMethod({ applicationMode: product.application_mode }, row),
           ...protocolRate({ ratePer1000: product.rate_per_1000, rateUnit: product.rate_unit }),
-          // The protocol's own words for when this product goes down.
+          // The protocol's own words for when this product goes down, and
+          // EVERY operating gate on the row (spreaderVisitOnly, stressGate,
+          // minDistanceFromWaterFt, ...): the sheet reads them all out, so an
+          // add-on never shows without the conditions that make it valid.
           trigger: typeof gates.trigger === 'string' ? gates.trigger : null,
           tankMixWith: typeof gates.tankMixWith === 'string' ? gates.tankMixWith : null,
+          gates,
         };
       });
     return {
