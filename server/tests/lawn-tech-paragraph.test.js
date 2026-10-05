@@ -271,6 +271,10 @@ describe('validator: negation and uncertainty in the technician note', () => {
     const purpose = noted('Applied Arena to the front and side yards to protect against chinch bugs. Also applied LESCO 24-0-11 to the whole yard.');
     expect(check(sentenceOf('Our technician found chinch bugs in the trouble spot.', ['note']), purpose).problems).toContain('target_stated_as_found:chinch');
     expect(check(sentenceOf('We treated the front and side yards to protect against chinch bugs.', ['note']), purpose).problems).toEqual([]);
+    // A bare "chinch bugs" in a terse note stays a sighting; an application verb or "for" in the same clause makes it a purpose.
+    for (const note of ['Applied Arena for chinch bugs. Applied fertilizer to the lawn.', 'Sprayed Arena for chinch bugs front and side. Fertilizer whole yard.']) {
+      expect(check(sentenceOf('Our technician found chinch bugs in the front yard.', ['note']), noted(note)).problems).toContain('target_stated_as_found:chinch');
+    }
     // "treated for X" with a sighting elsewhere in the note still reads as affirmed.
     const both = noted('Treated for chinch bugs; there are chinch bugs at the trouble spot. Also applied LESCO 24-0-11 to the whole yard.');
     expect(check(sentenceOf('Our technician found chinch bugs at the trouble spot.', ['note']), both).problems).toEqual([]);

@@ -485,10 +485,13 @@ function occurrences(term, text) {
 // A mention that only states a treatment purpose ("applied Arena to protect
 // against chinch bugs", "treated for grubs") is not a sighting: on its own it
 // reads as 'purpose', which licenses a purpose claim and never found / seen.
+// In the note, an application verb or "for / against" around the term is a
+// purpose too ("applied Arena for chinch bugs", "sprayed for grubs").
+const NOTE_APPLICATION_RE = /\b(?:appl(?:y|ied|ying|ication)|treat(?:ed|ing|ment)?|spray(?:ed|ing)?|spread|put\s+(?:down|out)|used?|using|went\s+down|for|against|target\w*|protect\w*|prevent\w*|guard\w*)\b/i;
 function noteStanceOf(term, note) {
   const all = occurrences(term, note);
   if (!all.length) return null;
-  const sightings = all.filter((o) => o.stance !== 'affirmed' || !PURPOSE_CUE_RE.test(o.clause) || OBSERVED_CUE_RE.test(o.clause));
+  const sightings = all.filter((o) => o.stance !== 'affirmed' || !(PURPOSE_CUE_RE.test(o.clause) || NOTE_APPLICATION_RE.test(o.clause)) || OBSERVED_CUE_RE.test(o.clause));
   if (!sightings.length) return 'purpose';
   const stances = sightings.map((o) => o.stance);
   if (stances.includes('affirmed')) return stances.includes('negated') ? 'uncertain' : 'affirmed';
