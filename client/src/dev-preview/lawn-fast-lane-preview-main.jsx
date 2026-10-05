@@ -18,8 +18,8 @@
  *
  * Preview-only behavior: "Add" on a photo shot adds a placeholder picture
  * instead of opening the file picker, and the fake Confirm saves the scores
- * the tech typed (the intended behavior once PR #5878's server change lands;
- * on today's server a score the AI read keeps the AI value).
+ * the tech set with the - / + buttons or by typing (the server rule from PR
+ * #5878: a posted number wins).
  */
 import '../index.css';
 import '../styles/brand-tokens.css';
@@ -141,7 +141,7 @@ async function request(path, options = {}) {
   }
   if (path.endsWith('/lawn-assessment/confirm')) {
     await wait(400);
-    // Intended behavior once #5878's server change lands: a posted number wins.
+    // The server's rule (PR #5878): a posted number wins.
     const typed = Object.fromEntries(Object.entries(body?.adjustedScores || {}).filter(([, value]) => value != null));
     return { success: true, confirmed: true, assessment: { ...ASSESSMENT, ...typed, confirmed_by_tech: true }, visitAssessment: REVIEW };
   }

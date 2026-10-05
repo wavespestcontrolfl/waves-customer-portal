@@ -12,25 +12,16 @@
 import React, { useEffect, useRef, useState } from "react";
 import lawnScores from '@lawn-scores';
 import { createVisitReview, visitReviewPayload } from "./LawnVisitReview";
+import { Button, Input, Select, UiSurface } from "../ui";
 import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 
-// The admin palette values the block uses (same values as SchedulePage's D).
-const D = {
-  border: "#E2E8F0",
-  green: "#16A34A",
-  amber: "#F0A500",
-  red: "#C0392B",
-  text: "#334155",
-  muted: "#64748B",
-  white: "#FFFFFF",
-  heading: "#0F172A",
-};
-
-// The four scores the tech reviews/adjusts, matching the customer report's
+// The four scores the tech reviews and may change until the assessment is
+// confirmed (owner ruling 2026-10-04), matching the customer report's
 // consolidated diagnosis (Density / Weeds / Color / Stress-Damage). The AI still
 // assesses the underlying fungus/thatch/insect/drought/mechanical signals — those
 // stay on the assessment row for analytics + folding into stress_damage — but the
-// tech now corrects one "Stress" score directly instead of separate Fungus/Thatch.
+// tech corrects one "Condition" score directly. There are no separate Fungus or
+// Thatch fields: one the AI left blank takes its "no finding" score at confirm.
 export const LAWN_ASSESSMENT_METRICS = [
   { key: "turf_density", label: "Density" },
   { key: "weed_suppression", label: "Weed control" },
@@ -60,13 +51,6 @@ const LAWN_PHOTO_ZONES = [
 // engine's profile-completeness check no longer requires it; drought_stress
 // likewise no longer reaches the planner's drought-prep selection — both are
 // deliberate owner rulings, not oversights.
-
-function lawnScoreColor(value) {
-  const n = Number(value) || 0;
-  if (n >= 75) return D.green;
-  if (n >= 50) return D.amber;
-  return D.red;
-}
 
 function resizeLawnAssessmentImage(dataUrl, maxEdge = 1600, quality = 0.85) {
   return new Promise((resolve) => {
@@ -107,8 +91,7 @@ function parseAssessmentScores(row = {}) {
   const turf_density = lawnScores.lawnScoreValue(row.turf_density ?? row.turfDensity);
   const weed_suppression = lawnScores.lawnScoreValue(row.weed_suppression ?? row.weedSuppression);
   const color_health = lawnScores.lawnScoreValue(row.color_health ?? row.colorHealth);
-  // Preserve known AI components. Missing components get explicit controls
-  // during confirmation so unknown values never become invented scores.
+  // Preserve known AI components.
   const fungus_control = lawnScores.lawnScoreValue(row.fungus_control ?? row.fungusControl);
   const thatch_level = lawnScores.lawnScoreValue(row.thatch_level ?? row.thatchLevel);
   // Legacy assessments (created before the stress_damage column) have a null
@@ -125,29 +108,14 @@ function parseAssessmentScores(row = {}) {
   return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
 }
 
-// The AI's own read — used ONLY to decide which metrics stay editable, never
-// what's displayed (that's techScores/scoreSource, which may already hold a
-// technician's earlier fill of a genuinely blank metric from a prior partial
-// save). Run-backed: the run's immutable scores_adjusted snapshot
-// (visitAssessment.aiScores from the server), which a save never touches —
-// so a metric a technician already filled correctly stays editable instead
-// of looking "AI-known" just because it now has a value (Codex P1
-// 2026-09-24). Legacy (no run, visitAssessment null): the assessment row's
-// own RAW columns, mirroring the server's legacy /confirm rule exactly —
-// including that stress_damage is read raw, never parseAssessmentScores's
-// derived worst-of-fungus/thatch guess, which could already be non-null
-// while the server still considers Stress unknown.
-// Locked metrics always show the AI's own read. A row adjusted before the
-// read-only ruling can still carry an old technician value in its columns;
-// only AI-blank metrics keep the saved technician fill.
-function withAiScores(scores, aiScores) {
-  const out = { ...(scores || {}) };
-  for (const [key, value] of Object.entries(aiScores || {})) {
-    if (lawnScores.lawnScoreValue(value) != null) out[key] = value;
-  }
-  return out;
-}
-
+// The AI's own read — shown beside a score the technician changed, never
+// what's displayed (that's techScores/scoreSource, which may already hold the
+// technician's entry from a prior partial save). Run-backed: the run's
+// immutable scores_adjusted snapshot (visitAssessment.aiScores from the
+// server), which a save never touches. Legacy (no run, visitAssessment null):
+// the server's own read sent by the reload route, else the assessment row's
+// RAW columns — stress_damage is read raw, never parseAssessmentScores's
+// derived worst-of-fungus/thatch guess.
 function resolveAiScores(assessment = {}, visitAssessment, serverAiScores) {
   if (visitAssessment?.aiScores) return visitAssessment.aiScores;
   // Legacy rows: the reload route sends the server's own AI read.
@@ -223,8 +191,9 @@ export default function LawnAssessmentCompletionBlock({
   const [visitReview, setVisitReview] = useState(null);
   const [techScores, setTechScores] = useState(null);
   // Keys the technician actually typed this session. Only these are posted:
-  // the server ignores AI-known keys anyway, and resending a server-derived
-  // value (e.g. Stress) would read as an explicit entry and freeze it.
+  // the server keeps the saved value of an omitted key, and resending a
+  // server-derived value (e.g. Stress) would read as an explicit entry and
+  // freeze it.
   const [typedKeys, setTypedKeys] = useState(() => new Set());
   const [confirmedId, setConfirmedId] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -269,9 +238,9 @@ export default function LawnAssessmentCompletionBlock({
           aiScores: resolveAiScores(assessment, data.visitAssessment, data.aiScores),
           observations: assessment.observations || "",
         });
-        // A confirmed row shows exactly what was saved (and what the customer
-        // report uses); only a pending row shows the AI read for locked keys.
-        setTechScores(assessment.confirmed_by_tech || compact ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment, data.aiScores)));
+        // The row holds what was saved: the AI read, or the technician's
+        // entry from an earlier save.
+        setTechScores(scores);
         setTypedKeys(new Set());
         setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
         if (assessment.confirmed_by_tech) {
@@ -381,11 +350,9 @@ export default function LawnAssessmentCompletionBlock({
     });
   }
 
-  // Owner ruling 2026-09-24: lawn health scores are read-only from photos.
-  // The only manual entry allowed is filling a metric the AI left blank —
-  // this never touches a metric the AI already scored (the server enforces
-  // the same rule independently; this just keeps the tech from typing into
-  // a metric that won't take effect).
+  // Owner ruling 2026-10-04: the tech may change any of the four scores until
+  // the assessment is confirmed. An emptied field posts null, which the
+  // server reads as "back to the AI's score".
   function fillScore(key, rawValue) {
     setTypedKeys((prev) => new Set(prev).add(key));
     setTechScores((prev) => {
@@ -468,7 +435,7 @@ export default function LawnAssessmentCompletionBlock({
       // Show what the server actually saved.
       if (savedAssessment) {
         const saved = parseAssessmentScores(savedAssessment);
-        setTechScores(savedAssessment.confirmed_by_tech || compact ? saved : withAiScores(saved, result.aiScores));
+        setTechScores(saved);
         setTypedKeys(new Set());
       }
       if (visitAssessment) {
@@ -496,29 +463,62 @@ export default function LawnAssessmentCompletionBlock({
     }
   }
 
+  // The - and + buttons beside a score (owner 2026-10-05): one step per tap,
+  // clamped 0 to 100, and a held press repeats. A step counts as typed, so it
+  // posts like a typed number. From a blank score the step starts at the AI read
+  // (0 when it left none).
+  function stepScore(key, delta) {
+    setTypedKeys((prev) => new Set(prev).add(key));
+    setTechScores((prev) => {
+      if (!prev) return prev;
+      const current = Number(prev[key]);
+      const base = prev[key] != null && prev[key] !== "" && Number.isFinite(current)
+        ? current
+        : lawnScores.lawnScoreValue(result?.aiScores?.[key]) ?? 0;
+      return { ...prev, [key]: Math.max(0, Math.min(100, Math.round(base) + delta)) };
+    });
+  }
+  const holdRef = useRef({ timer: null, repeated: false });
+  function stopHold() {
+    clearTimeout(holdRef.current.timer);
+    clearInterval(holdRef.current.timer);
+    holdRef.current.timer = null;
+  }
+  useEffect(() => stopHold, []);
+  // Handlers for a step button: a tap (or Enter/Space) steps once; holding the
+  // press steps again every 120ms after a short pause, and the click that ends
+  // a hold does not step a second time.
+  function holdToRepeat(key, delta) {
+    return {
+      onClick: () => {
+        if (holdRef.current.repeated) { holdRef.current.repeated = false; return; }
+        stepScore(key, delta);
+      },
+      onPointerDown: () => {
+        stopHold();
+        holdRef.current.repeated = false;
+        holdRef.current.timer = setTimeout(() => {
+          holdRef.current.repeated = true;
+          stepScore(key, delta);
+          holdRef.current.timer = setInterval(() => stepScore(key, delta), 120);
+        }, 450);
+      },
+      onPointerUp: stopHold,
+      onPointerLeave: stopHold,
+      onPointerCancel: stopHold,
+    };
+  }
+
   const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
   const hasResult = !!result?.assessment?.id;
   const confirmed = !!confirmedId;
   useEffect(() => {
     onProgress?.({ photos: photos.length, assessed: hasResult });
   }, [photos.length, hasResult]);
-  // Keep the usual four controls; expose underlying scores only when the
-  // saved assessment lacks them. Keep them editable until the save completes.
-  // Same rule as the aiValue check below: whether an underlying signal is
-  // AI-blank comes from result.aiScores (the immutable read), never the
-  // mutable assessment row — otherwise a prior save's fill of a genuinely
-  // blank Fungus/Thatch would hide the tile entirely on reload instead of
-  // keeping it open for correction (Codex P1 2026-09-24).
-  // The one-screen sheet never shows those two extra tiles.
-  const metrics = [...LAWN_ASSESSMENT_METRICS, ...(compact ? [] : [
-    { key: "fungus_control", label: "Fungus control" },
-    { key: "thatch_level", label: "Thatch condition" },
-  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]) == null))];
-
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+    <UiSurface density="comfortable" className="flex flex-col gap-3 text-zinc-900">
       {loading && (
-        <div style={{ fontSize: 14, color: D.muted }}>Checking existing assessment...</div>
+        <div className="text-14 text-zinc-500">Checking existing assessment...</div>
       )}
       {/* Capture row — always visible so the mowing-height reading can be
           added even after the assessment is analyzed (Codex P1). "Add turf photos" +
@@ -530,151 +530,106 @@ export default function LawnAssessmentCompletionBlock({
         accept="image/*"
         multiple
         onChange={addPhotos}
-        style={{ display: "none" }}
+        className="hidden"
       />
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+      <div className="flex flex-wrap items-center gap-2">
         {!hasResult && (
           <>
-            <button
-              type="button"
+            <Button
+              variant="secondary"
               onClick={() => { pendingShotRef.current = null; fileRef.current?.click(); }}
               disabled={disabled || photos.length >= photoCap || analyzing || !modeKnown}
-              style={{
-                height: 38,
-                padding: "0 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.white,
-                color: D.heading,
-                fontSize: 14,
-                fontWeight: 500,
-                cursor: disabled || photos.length >= photoCap || analyzing || !modeKnown ? "not-allowed" : "pointer",
-                opacity: disabled || photos.length >= photoCap || analyzing || !modeKnown ? 0.55 : 1,
-              }}
             >
               Add turf photos
-            </button>
-            <span style={{ fontSize: 14, color: D.muted }}>{photos.length}/{photoCap}</span>
-            {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" style={{ fontSize: 14, color: D.muted }}>Checking photo options…</span>}
+            </Button>
+            <span className="text-14 text-zinc-500">{photos.length}/{photoCap}</span>
+            {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" className="text-14 text-zinc-500">Checking photo options…</span>}
           </>
         )}
-            {showGaugeReading && !compact && (
-              <>
-                <span style={{ fontSize: 14, color: D.muted, fontWeight: 500 }}>Lawn length</span>
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  step="0.25"
-                  min="0.5"
-                  max="8"
-                  value={gaugeHeightIn ?? ""}
-                  disabled={disabled || analyzing}
-                  placeholder="e.g. 4"
-                  onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
-                  style={{
-                    width: 64,
-                    height: 38,
-                    padding: "0 10px",
-                    borderRadius: 8,
-                    border: `1px solid ${D.border}`,
-                    background: D.white,
-                    color: D.heading,
-                    fontSize: 14,
-                  }}
-                />
-                <span style={{ fontSize: 14, color: D.muted }}>inches</span>
-              </>
-            )}
-          </div>
-          {!hasResult && (
-            <>
+        {showGaugeReading && !compact && (
+          <>
+            <span className="text-14 font-medium text-zinc-500">Lawn length</span>
+            <Input
+              type="number"
+              inputMode="decimal"
+              step="0.25"
+              min="0.5"
+              max="8"
+              value={gaugeHeightIn ?? ""}
+              disabled={disabled || analyzing}
+              placeholder="e.g. 4"
+              onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
+              className="!w-20"
+            />
+            <span className="text-14 text-zinc-500">inches</span>
+          </>
+        )}
+      </div>
+      {!hasResult && (
+        <>
           {/* GATE_LAWN_SHOT_LIST: the named shots, one line of how-to each. A
               shot's Add button brings the photo in already tagged with it. */}
           {shotList && (
-            <ul data-testid="lawn-shot-list" aria-label="Lawn photo shots" style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-              {LAWN_SHOTS.map((shot) => (
-                <li key={shot.key} data-testid={`lawn-shot-${shot.key}`} style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 10px", border: `1px solid ${D.border}`, borderRadius: 8, background: D.white }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 500, color: D.heading }}>
-                      {shot.label}
-                      {photos.some((photo) => photo.zone === shot.key) ? " (added)" : ""}
-                    </div>
-                    <div style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>{shot.instruction}</div>
-                  </div>
-                  <button
-                    type="button"
-                    aria-label={`Add photo for ${shot.label}`}
-                    disabled={disabled || analyzing || photos.length >= photoCap || shotIsFull(photos, shot.key) || readingShots.includes(shot.key)}
-                    onClick={() => { pendingShotRef.current = shot.key; fileRef.current?.click(); }}
-                    style={{ height: 34, padding: "0 12px", borderRadius: 8, border: `1px solid ${D.border}`, background: D.white, color: D.heading, fontSize: 14, cursor: "pointer" }}
+            <ul data-testid="lawn-shot-list" aria-label="Lawn photo shots" className="m-0 flex list-none flex-col gap-2 p-0">
+              {LAWN_SHOTS.map((shot) => {
+                const added = photos.some((photo) => photo.zone === shot.key);
+                return (
+                  <li
+                    key={shot.key}
+                    data-testid={`lawn-shot-${shot.key}`}
+                    className={`flex items-start gap-2 rounded-sm border-hairline px-3 py-2 ${added ? "border-zinc-900 bg-zinc-50" : "border-zinc-200 bg-white"}`}
                   >
-                    Add
-                  </button>
-                </li>
-              ))}
+                    <div className="min-w-0 flex-1">
+                      <div className="text-14 font-medium text-zinc-900">
+                        {shot.label}
+                        {added ? " (added)" : ""}
+                      </div>
+                      <div className="text-14 leading-snug text-zinc-500">{shot.instruction}</div>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      aria-label={`Add photo for ${shot.label}`}
+                      disabled={disabled || analyzing || photos.length >= photoCap || shotIsFull(photos, shot.key) || readingShots.includes(shot.key)}
+                      onClick={() => { pendingShotRef.current = shot.key; fileRef.current?.click(); }}
+                    >
+                      Add
+                    </Button>
+                  </li>
+                );
+              })}
             </ul>
           )}
           {photos.length > 0 && (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <div className="flex flex-wrap gap-2">
               {photos.map((photo, index) => (
-                <div key={`${photo.name}-${index}`} style={{ position: "relative", width: 96 }}>
+                <div key={`${photo.name}-${index}`} className="relative w-28">
                   <img
                     src={photo.preview}
                     alt=""
-                    style={{
-                      display: "block",
-                      width: 96,
-                      height: 78,
-                      objectFit: "cover",
-                      borderRadius: 8,
-                      border: `1px solid ${D.border}`,
-                    }}
+                    className="block h-20 w-28 rounded-sm border-hairline border-zinc-200 object-cover"
                   />
                   <button
                     type="button"
                     onClick={() => setPhotos((prev) => prev.filter((_, i) => i !== index))}
                     aria-label="Remove assessment photo"
-                    style={{
-                      position: "absolute",
-                      top: -7,
-                      right: -7,
-                      width: 22,
-                      height: 22,
-                      borderRadius: "50%",
-                      border: "none",
-                      background: D.heading,
-                      color: "#fff",
-                      cursor: "pointer",
-                      lineHeight: 1,
-                    }}
+                    className="absolute -right-2 -top-2 flex h-8 w-8 items-center justify-center rounded-full border-0 bg-zinc-900 p-0 text-14 leading-none text-white"
                   >
                     x
                   </button>
                   {/* Optional slot label — all optional, no count requirement.
                       Only one photo may hold "front" at a time (setPhotoZone). */}
-                  <select
+                  <Select
                     value={photo.zone || ""}
                     disabled={disabled || analyzing}
                     onChange={(e) => setPhotoZone(index, e.target.value || null)}
                     aria-label={`Slot for photo ${index + 1}`}
-                    style={{
-                      display: "block",
-                      width: "100%",
-                      marginTop: 4,
-                      height: 34,
-                      borderRadius: 6,
-                      border: `1px solid ${D.border}`,
-                      background: D.white,
-                      color: D.heading,
-                      fontSize: 14,
-                      padding: "0 2px",
-                    }}
+                    className="mt-1 !pl-2 !pr-6 !text-14"
                   >
                     <option value="">No slot</option>
                     {(shotList ? LAWN_SHOTS.map((shot) => ({ value: shot.key, label: shot.label })) : LAWN_PHOTO_ZONES).map((zone) => (
                       <option key={zone.value} value={zone.value}>{zone.label}</option>
                     ))}
-                  </select>
+                  </Select>
                 </div>
               ))}
             </div>
@@ -684,178 +639,107 @@ export default function LawnAssessmentCompletionBlock({
               visits (lawn-progress.js COMPARABLE_LEVELS), so a 1-photo visit
               can never show it. Analyze stays enabled at one photo. */}
           {shotList && shotListHint(photos) && (
-            <div data-testid="lawn-shot-list-hint" style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>
+            <div data-testid="lawn-shot-list-hint" className="text-14 leading-snug text-zinc-500">
               {shotListHint(photos)}
             </div>
           )}
           {!shotList && photos.length < 2 && (
-            <div data-testid="lawn-photo-nudge" style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>
+            <div data-testid="lawn-photo-nudge" className="text-14 leading-snug text-zinc-500">
               2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
             </div>
           )}
-          <button
-            type="button"
+          <Button
             onClick={analyze}
             disabled={disabled || photos.length === 0 || analyzing}
-            style={{
-              height: 40,
-              borderRadius: 8,
-              border: "none",
-              background: D.green,
-              color: "#fff",
-              fontSize: 14,
-              fontWeight: 500,
-              cursor: disabled || photos.length === 0 || analyzing ? "not-allowed" : "pointer",
-              opacity: disabled || photos.length === 0 || analyzing ? 0.55 : 1,
-            }}
           >
             {analyzing ? "Analyzing..." : "Analyze lawn"}
-          </button>
+          </Button>
         </>
       )}
       {hasResult && (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
-            {metrics.map((metric) => {
+          <ul aria-label="Lawn scores" className="m-0 list-none divide-y divide-zinc-200 rounded-sm border-hairline border-zinc-200 bg-white p-0">
+            {LAWN_ASSESSMENT_METRICS.map((metric) => {
               const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
-              // Whether the AI itself knew this metric — from result.aiScores
-              // (the run's immutable snapshot, or the assessment's raw
-              // columns for a legacy no-run row; see resolveAiScores), never
-              // from scoreSource or the mutable assessment row a reload
-              // reads back. A prior save's tech fill of a genuinely blank
-              // metric must not look "AI-known" just because it now has a
-              // value (Codex P1 2026-09-24) — and a fill-in input stays open
-              // (still editable, still shows what was typed) once the tech
-              // starts typing, instead of collapsing to read-only the moment
-              // it first has a value.
+              // The AI's own read, from result.aiScores (the run's immutable
+              // snapshot, or the server's read for a legacy no-run row; see
+              // resolveAiScores) — shown under a score the tech changed or
+              // emptied, so the original stays in view.
               const aiValue = lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]);
+              const busy = disabled || confirming;
               return (
-                <div
-                  key={metric.key}
-                  style={{
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
-                    padding: "8px 4px",
-                    textAlign: "center",
-                    background: D.white,
-                    minWidth: 0,
-                  }}
-                >
-                  {compact && !confirmed ? (
-                    // The sheet's tile (owner 2026-10-04): the tech may change
-                    // any of the four until Confirm. An emptied field posts null,
-                    // which goes back to the AI's score.
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      max={100}
-                      value={techScores?.[metric.key] ?? ""}
-                      disabled={disabled || confirming}
-                      aria-label={`${metric.label} score`}
-                      placeholder="0-100"
-                      onChange={(e) => fillScore(metric.key, e.target.value)}
-                      style={{
-                        width: "100%",
-                        height: 36,
-                        padding: "0 4px",
-                        borderRadius: 6,
-                        border: `1px solid ${D.border}`,
-                        background: D.white,
-                        color: value == null ? D.heading : lawnScoreColor(value),
-                        // 16px keeps iOS Safari from zooming the page on focus.
-                        fontSize: 16,
-                        fontWeight: 500,
-                        textAlign: "center",
-                        boxSizing: "border-box",
-                      }}
-                    />
-                  ) : (
-                    <div style={{ fontSize: 15, fontWeight: 500, color: value == null ? D.muted : lawnScoreColor(value), lineHeight: 1.1 }}>
+                <li key={metric.key} className="flex min-h-[56px] items-center justify-between gap-3 px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="text-14 font-medium text-zinc-900">{metric.label}</div>
+                    {!confirmed && aiValue != null && aiValue !== value && (
+                      <div data-testid={`lawn-ai-score-${metric.key}`} className="text-14 text-zinc-500">AI {aiValue}</div>
+                    )}
+                  </div>
+                  {confirmed ? (
+                    <div className="text-16 font-medium text-zinc-900">
                       {value == null ? "—" : `${value}/100`}
                     </div>
+                  ) : (
+                    <div className="flex shrink-0 items-center gap-1">
+                      <Button
+                        variant="secondary"
+                        aria-label={`Lower ${metric.label} score`}
+                        disabled={busy}
+                        className="ui-icon-action !text-18"
+                        {...holdToRepeat(metric.key, -1)}
+                      >
+                        {"\u2212"}
+                      </Button>
+                      <Input
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        max={100}
+                        value={techScores?.[metric.key] ?? ""}
+                        disabled={busy}
+                        aria-label={`${metric.label} score`}
+                        placeholder="0-100"
+                        onChange={(e) => fillScore(metric.key, e.target.value)}
+                        className="!w-[72px] text-center font-medium [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                      />
+                      <Button
+                        variant="secondary"
+                        aria-label={`Raise ${metric.label} score`}
+                        disabled={busy}
+                        className="ui-icon-action !text-18"
+                        {...holdToRepeat(metric.key, 1)}
+                      >
+                        +
+                      </Button>
+                    </div>
                   )}
-                  <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
-                  {compact && !confirmed && aiValue != null && aiValue !== value && (
-                    <div data-testid={`lawn-ai-score-${metric.key}`} style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>AI {aiValue}</div>
-                  )}
-                  {/* AI-known scores are read-only (owner ruling 2026-09-24).
-                      A metric the AI left blank (aiValue == null) is the one
-                      the tech can fill — the server enforces this too. */}
-                  {!compact && !confirmed && aiValue == null && (
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      max={100}
-                      value={techScores?.[metric.key] ?? ""}
-                      aria-label={`Enter ${metric.label}`}
-                      placeholder="0-100"
-                      onChange={(e) => fillScore(metric.key, e.target.value)}
-                      style={{
-                        width: "100%",
-                        marginTop: 6,
-                        height: 28,
-                        padding: "0 6px",
-                        borderRadius: 6,
-                        border: `1px solid ${D.border}`,
-                        background: D.white,
-                        color: D.heading,
-                        fontSize: 14,
-                        textAlign: "center",
-                        boxSizing: "border-box",
-                      }}
-                    />
-                  )}
-                </div>
+                </li>
               );
             })}
-          </div>
+          </ul>
           {/* The evidence review (photo quality, observation, photo findings,
               technician details) is not shown while completing a visit (owner
               2026-10-04: the technician takes photos, the AI reads them, the
               report is built). Confirm still sends the default review, which
               keeps every finding, so the report and tip ranking are unchanged.
               The office can still edit a review on the Lawn assessment page. */}
-          <div style={{ display: "flex", gap: 8 }}>
+          <div className="flex gap-2">
             {confirmed ? (
-              <div
-                style={{
-                  flex: 1,
-                  padding: "10px 12px",
-                  borderRadius: 8,
-                  background: `${D.green}14`,
-                  color: D.green,
-                  fontSize: 14,
-                  fontWeight: 500,
-                  textAlign: "center",
-                }}
-              >
+              <div className="flex min-h-[44px] flex-1 items-center justify-center gap-2 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 text-14 font-medium text-zinc-900">
+                <span aria-hidden="true">{"\u2713"}</span>
                 Assessment confirmed
               </div>
             ) : (
-              <button
-                type="button"
+              <Button
+                className="flex-1"
                 onClick={confirm}
                 disabled={disabled || confirming}
-                style={{
-                  flex: 1,
-                  height: 40,
-                  borderRadius: 8,
-                  border: "none",
-                  background: D.green,
-                  color: "#fff",
-                  fontSize: 14,
-                  fontWeight: 500,
-                  cursor: disabled || confirming ? "not-allowed" : "pointer",
-                  opacity: disabled || confirming ? 0.55 : 1,
-                }}
               >
                 {confirming ? "Confirming..." : "Confirm assessment"}
-              </button>
+              </Button>
             )}
-            <button
-              type="button"
+            <Button
+              variant="secondary"
               onClick={() => {
                 setPhotos([]);
                 setResult(null);
@@ -866,25 +750,13 @@ export default function LawnAssessmentCompletionBlock({
                 onConfirmed?.(null);
               }}
               disabled={disabled || analyzing || confirming}
-              style={{
-                height: 40,
-                padding: "0 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.white,
-                color: D.text,
-                fontSize: 14,
-                fontWeight: 500,
-                cursor: disabled || analyzing || confirming ? "not-allowed" : "pointer",
-                opacity: disabled || analyzing || confirming ? 0.55 : 1,
-              }}
             >
               Retake
-            </button>
+            </Button>
           </div>
         </>
       )}
-      {error && <div style={{ fontSize: 14, color: D.red, lineHeight: 1.45 }}>{error}</div>}
-    </div>
+      {error && <div className="text-14 leading-normal text-alert-fg">{error}</div>}
+    </UiSurface>
   );
 }

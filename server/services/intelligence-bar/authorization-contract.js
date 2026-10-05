@@ -110,6 +110,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'send_sms',
   'reply_via_sms',
   'trigger_review_request',
+  // The confirmed run emails and/or texts the customer their paid receipt.
+  'resend_receipt',
 ]);
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
@@ -168,6 +170,7 @@ const ACTION_LABELS = {
   bulk_update_leads: 'Change status on multiple leads',
   submit_review_reply: 'Post a public review reply',
   trigger_review_request: 'Send a review request',
+  resend_receipt: 'Re-send a paid receipt',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',

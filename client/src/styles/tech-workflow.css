@@ -324,3 +324,13 @@
 .tech-report-part-text { margin: 0; font-size: 16px; line-height: 1.45; overflow-wrap: anywhere; }
 .tech-report-confirm { box-sizing: border-box; width: 100%; margin: 0; }
 .ui-action.tech-report-back { margin-bottom: 12px; }
+
+/* The lawn fast lane (FastCompleteLawnSheet, class .tech-lawn-fast on its form
+   area): a SOFT selected state, light fill and a dark border with a check, in
+   place of the solid black the other sheets use (owner 2026-10-05). Scoped so the
+   pest, Tree & Shrub and re-service sheets are unchanged. */
+.tech-lawn-fast .ui-action.tech-visit-action[aria-pressed='true'],
+.tech-lawn-fast .ui-action.tech-visit-action[aria-pressed='true']:hover:where(:not(:disabled)) { background: var(--tech-subtle); border: 1px solid var(--tech-accent); color: var(--tech-text); }
+.tech-lawn-fast .ui-action.tech-visit-action[aria-pressed='true']::before { content: "\2713"; flex-shrink: 0; }
+.tech-lawn-fast .ui-action.tech-visit-tip[aria-pressed='true'] .tech-visit-tip-copy { color: var(--tech-muted); }
+.tech-lawn-fast .tech-product-editor { border: 0.5px solid var(--tech-border-strong); }

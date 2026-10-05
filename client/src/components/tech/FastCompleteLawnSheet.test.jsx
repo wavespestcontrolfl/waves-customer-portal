@@ -1053,12 +1053,51 @@ describe('zero stock', () => {
   });
 });
 
-describe('text size', () => {
+describe('text size and look', () => {
   test('no text on the sheet, including the shared photo step, is set under 14px', async () => {
     await openSheet();
     await analyze();
     const sized = Array.from(document.querySelectorAll('[style]')).filter((el) => el.style.fontSize);
-    expect(sized.length).toBeGreaterThan(5);
     for (const el of sized) expect(parseFloat(el.style.fontSize)).toBeGreaterThanOrEqual(14);
+    const small = Array.from(document.querySelectorAll('[class]')).filter((el) => /(^|\s)text-(11|12|13)(\s|$)/.test(el.getAttribute('class')));
+    expect(small).toEqual([]);
+  });
+
+  test('one admin look: Analyze lawn and Confirm assessment are the standard dark button, Retake the light one, and nothing is green', async () => {
+    await openSheet();
+    await addPhoto();
+    expect(screen.getByRole('button', { name: 'Analyze lawn' }).className).toContain('bg-zinc-900');
+    fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
+    await screen.findByLabelText('Density score');
+    expect(screen.getByRole('button', { name: 'Confirm assessment' }).className).toContain('bg-zinc-900');
+    expect(screen.getByRole('button', { name: 'Retake' }).className).toContain('bg-white');
+    await confirm();
+    // The confirmed state is a neutral row, not a green box.
+    expect(screen.getByText('Assessment confirmed').className).toContain('bg-zinc-50');
+    expect(document.body.innerHTML).not.toMatch(/green|emerald|#16A34A|#10B981|rgba?\(22, 163, 74/i);
+  });
+
+  test('the lawn sheet marks its form so a selected tile is soft (the style is scoped to .tech-lawn-fast)', async () => {
+    await openSheet();
+    expect(document.querySelector('.tech-visit-form-area.tech-lawn-fast')).not.toBeNull();
+  });
+
+  test('each of the four scores has Lower and Raise buttons in the sheet too', async () => {
+    await openSheet();
+    await analyzeOnly();
+    fireEvent.click(screen.getByRole('button', { name: 'Raise Condition score' }));
+    expect(screen.getByLabelText('Condition score').value).toBe('51');
+    fireEvent.click(screen.getByRole('button', { name: 'Lower Condition score' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Lower Condition score' }));
+    expect(screen.getByLabelText('Condition score').value).toBe('49');
+    await confirm();
+    expect(confirmCalls()[0].body.adjustedScores).toEqual({ stress_damage: 49 });
+  });
+
+  test('the sheet shows no price and no estimate card', async () => {
+    await openSheet();
+    await analyze();
+    expect(screen.queryByText(/\$\d/)).toBeNull();
+    expect(screen.queryByText(/estimate|pricing/i)).toBeNull();
   });
 });

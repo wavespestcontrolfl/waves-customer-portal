@@ -674,7 +674,7 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
   );
 
   return (
-    <div className="tech-visit-form-area">
+    <div className="tech-visit-form-area tech-lawn-fast">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
@@ -683,18 +683,16 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
               <h3 className="tech-visit-section-title">Lawn photos</h3>
               <span className="tech-visit-muted">Photos, Analyze lawn, then confirm</span>
             </div>
-            <div className="tech-visit-light-card">
-              <LawnAssessmentCompletionBlock
-                compact
-                service={blockService}
-                request={request}
-                disabled={locked || dictationPending}
-                onConfirmed={onConfirmed}
-                onReady={onReady}
-                onProgress={setProgress}
-                technicianNotes={form.note}
-              />
-            </div>
+            <LawnAssessmentCompletionBlock
+              compact
+              service={blockService}
+              request={request}
+              disabled={locked || dictationPending}
+              onConfirmed={onConfirmed}
+              onReady={onReady}
+              onProgress={setProgress}
+              technicianNotes={form.note}
+            />
           </section>
           <ProductsSection ctx={ctx} products={products} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} />
           {typed && (
