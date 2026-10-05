@@ -83,7 +83,9 @@ headers, its limiter and its recorded event (`report_question_asked` with
 `question_length` and `topic` only). `GATE_REPORT_ASK_AI` (dark, off unless
 exactly `true`, read at call time) changes only who writes `answer`: Claude
 Sonnet 5.5 from a fact sheet of the report (no rates, totals, EPA numbers or
-per-product target pests), screened, with the fixed-rule answer as the reply on
+per-product target pests; the question and all free text scrubbed of phones,
+emails, codes and street addresses, but a customer name written in prose is
+not detectable), screened, with the fixed-rule answer as the reply on
 any model miss
 (`server/services/service-report/report-ask-ai.js`). The AI answers Pest reports only (`data.serviceLine === 'pest'`). Lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks). On pest reports the AI answers only the rule router's `applied`, `results`, `findings`, `summary`, `next_visit` and `unrouted` topics. The `reentry`, `watering` and `next_steps` topics keep the fixed-rule answer, which states recorded instructions word for word.
 

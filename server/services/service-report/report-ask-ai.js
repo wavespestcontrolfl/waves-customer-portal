@@ -13,7 +13,9 @@
  *
  * What the model never sees (and so can never repeat): application rates,
  * totals and units, EPA registration numbers, per-product target pests,
- * prices, the customer's name, address, phone or email, the report token.
+ * prices, the customer's phone, email or street address, the report token.
+ * Free text is scrubbed in one place (scrubFacts); a customer's name written
+ * in prose cannot be detected and is not removed.
  * What it is told never to say is enforced again on the way out
  * (screenAskAnswer), so a prompt slip becomes the rules answer, not a
  * customer-visible claim.
@@ -272,18 +274,47 @@ function productsNamedIn(question, products) {
   return byFirst.length === 1 ? byFirst : [];
 }
 
-// Free text a customer or technician typed (the concern, the question) is
-// scrubbed before it reaches a model: phones and emails (redactContact),
-// access codes, letters included ("gate code A1B2": redactAccessCodes), then
-// any remaining run of 3+ digits (a house number, a code) is masked (Codex P1
-// r1 #5957). What stays: a one or two digit house number, a street name or a
-// city, none of which the digit rule can tell from ordinary words.
-function scrubFreeText(value, max) {
+// The one scrub for every free-text string that can reach a model: phones and
+// emails (redactContact), access codes, letters included ("gate code A1B2":
+// redactAccessCodes), a street address ("12 Example Lane": house number, up to
+// three words, a street suffix; first, so an access-code rule cannot half-mask
+// it), then any remaining run of 3+ digits (a code, a
+// house number past two digits) is masked (Codex P1 r1 #5957). It cannot see a
+// customer's NAME in prose, or a street name without a number and a suffix: no
+// pattern tells those from ordinary words, so those pass through.
+const STREET_SUFFIX = '(?:st|street|ln|lane|ave|avenue|rd|road|dr|drive|ct|court|cir|circle|blvd|way|pl|place|ter|trl|trail|pkwy|hwy)';
+const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){0,3}?${STREET_SUFFIX}\\b\\.?`, 'gi');
+
+function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  return clip(redactAccessCodes(redactContact(text)).replace(/\d{3,}/g, '[number]'), max);
+  const masked = redactAccessCodes(redactContact(text).replace(STREET_ADDRESS, '[address]')).replace(/\d{3,}/g, '[number]');
+  return clip(masked, max);
+}
+
+// The chokepoint (Codex P1 r1-r3 #5957: the question, the concern, then report
+// sections and free prose each reached the model unscrubbed): every string
+// leaf of the finished fact sheet passes through scrubFreeText before it is
+// serialized into the prompt, so a new field cannot skip it. Left as built:
+// the fixed company and contact lines, the calendar dates and arrival window
+// (a four digit year would read as a code), and each product's catalog name.
+const VERBATIM_FACTS = new Set(['company', 'contact', 'service_date', 'next_visit', 'asked_about_product']);
+
+function scrubLeaves(value) {
+  if (typeof value === 'string') return scrubFreeText(value);
+  if (Array.isArray(value)) return value.map(scrubLeaves);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, leaf]) => [key, scrubLeaves(leaf)]));
+  return value;
+}
+
+function scrubFacts(facts) {
+  return Object.fromEntries(Object.entries(facts).map(([key, value]) => {
+    if (VERBATIM_FACTS.has(key)) return [key, value];
+    if (key === 'products') return [key, value.map((product) => ({ ...scrubLeaves(product), name: product.name }))];
+    return [key, scrubLeaves(value)];
+  }));
 }
 
 // ── The fact sheet ──────────────────────────────────────────────────────
@@ -310,16 +341,29 @@ function buildReportAskFacts({ question, data = {}, nextAppointment, now } = {})
     }))
     .filter((finding) => finding.title || finding.detail);
 
-  return dropEmpty({
+  const recommendations = asArray(data.recommendations)
+    .slice(0, 3)
+    .map((rec) => clip(typeof rec === 'string' ? rec : rec?.text || rec?.title, 240))
+    .filter(Boolean);
+  const aiSummary = data.summary ? {} : dropEmpty({
+    headline: clip(data.dynamicContext?.aiSummary?.headline, 200),
+    body: clip(data.dynamicContext?.aiSummary?.body, 700),
+  });
+
+  return scrubFacts(dropEmpty({
     company: 'Waves Pest Control',
     service: cleanText(data.serviceDisplayName || data.serviceType),
     service_date: longDate(etDateIso(data.serviceDate)),
     technician_first_name: firstNameOf(data),
-    customer_concern: scrubFreeText(data.customerConcern, 400),
+    customer_concern: clip(data.customerConcern, 400),
     report_sections: sections,
     // The visit summary is only needed when the reviewed sections are absent.
     visit_summary: sections.length ? null : clip(data.summary, 700),
     findings,
+    // A report with no findings rows can still carry its recommendations.
+    recommendations,
+    // The Waves summary the rule router answers a no-rule question with.
+    waves_summary: Object.keys(aiSummary).length ? aiSummary : null,
     weather_during_visit: weatherFact(data.conditions || {}),
     pest_pressure: pressureFact(data),
     products,
@@ -331,7 +375,7 @@ function buildReportAskFacts({ question, data = {}, nextAppointment, now } = {})
     pet_precaution_today: petPrecautionFact(data),
     next_visit: nextVisitFact(nextAppointment),
     contact: `text us or call ${WAVES_SUPPORT_PHONE_DISPLAY}`,
-  });
+  }));
 }
 
 // ── The prompt ──────────────────────────────────────────────────────────
@@ -359,6 +403,14 @@ function buildReportAskPrompt({ question, data, nextAppointment, now } = {}) {
 }
 
 // ── Output screen ───────────────────────────────────────────────────────
+// Number words count too ("ninety dollars", "two ounces", "twelve bait
+// stations"), but only when directly followed by money, an application unit or
+// a product-count noun: "a few days", "one roach or two" and "two weeks" pass.
+const NUM_WORD = '(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine))?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|hundred|thousand|dozen|half(?:\\s+an?)?|couple\\s+of)';
+const UNIT_WORD = '(?:fl\\.?\\s*oz|oz|ounces?|gallons?|gal|grams?|pounds?|lbs?|ml|milliliters?|liters?|quarts?|pints?|tablespoons?|teaspoons?)';
+const COUNT_NOUN = '(?:bait\\s+(?:stations?|points?|placements?)|stations?|traps?|placements?)';
+const spelled = (tail) => new RegExp(`\\b${NUM_WORD}\\s+${tail}\\b`, 'i');
+
 // Everything the prompt forbids, checked again on the answer. A match is a
 // rejection, never an edit: the route then answers with the fixed rules.
 const ASK_BANNED = [
@@ -366,10 +418,13 @@ const ASK_BANNED = [
   [/\bnon[\s-]?toxic\b|\bharmless\b|\bchemical[\s-]?free\b|\bpet[\s-]?friendly\b|\bkid[\s-]?friendly\b|\beco[\s-]?friendly\b/i, 'safety claim'],
   [/\bfree\b/i, 'free'],
   [/\$\s?\d|\b\d+\s*(?:dollars?|bucks)\b|\b(?:price|prices|pricing|cost|costs|discount|quote)\b/i, 'price'],
+  [spelled('(?:dollars?|bucks|cents?)'), 'price'],
   [/\bguarantee[ds]?\b|\bwarrant(?:y|ies)\b|\bpromise[ds]?\b/i, 'guarantee'],
   [/\b(?:eliminated?|eradicated?|gone for good|pest[\s-]?free)\b/i, 'overclaim'],
   [/\bE\.?\s?P\.?\s?A\b\.?/i, 'epa'],
   [/\b\d+(?:\.\d+)?\s*(?:fl\.?\s*oz|oz|ounces?|gallons?|gal|ml|liters?|lbs?|pounds?|grams?|kg|%|percent)\b|%/i, 'amount'],
+  [spelled(UNIT_WORD), 'amount'],
+  [new RegExp(`\\b(?:\\d+|${NUM_WORD})\\s+${COUNT_NOUN}\\b`, 'i'), 'count'],
   [/\b(?:rate|rates|dilution|concentration|per\s+(?:gallon|1,?000)|ounces?\s+per)\b/i, 'rate'],
   [/https?:\/\/|www\./i, 'link'],
   [/[*_#`>]{2,}|^\s*[-*•]\s/m, 'markdown'],
@@ -382,12 +437,24 @@ function otherPhoneNumbers(text) {
   return found.filter((raw) => raw.replace(/\D/g, '').replace(/^1/, '') !== own);
 }
 
+// A word reduced to one stem so "ghost ants" and "ghost ant" compare equal:
+// ies to y, es after ch/sh/ss/x/z/o, else a trailing s (not ss, us or is).
+function stemWord(word) {
+  if (word.length > 4 && word.endsWith('ies')) return `${word.slice(0, -3)}y`;
+  if (/(?:ch|sh|ss|x|z|o)es$/.test(word)) return word.slice(0, -2);
+  if (word.length > 3 && /[^su]s$/.test(word)) return word.slice(0, -1);
+  return word;
+}
+
+// Lowercase stems with single spaces around, so a whole-word match is includes().
+const stemmedTerms = (text) => ` ${normalizeKey(text).split(' ').map(stemWord).join(' ')} `;
+
 function targetLabelsOf(data = {}) {
   const labels = new Set();
   for (const app of asArray(data.applications)) {
     for (const target of asArray(app.targets)) {
-      const label = cleanText(String(target).replace(/[_-]+/g, ' ')).toLowerCase();
-      if (label.length >= 3) labels.add(label);
+      const label = stemmedTerms(target);
+      if (label.trim().length >= 3) labels.add(label);
     }
   }
   return [...labels];
@@ -398,15 +465,11 @@ function targetLabelsOf(data = {}) {
 // wording (what_it_does, labeled_for) did not already name is a leaked list.
 function leaksTargetList(text, { question, data, facts }) {
   const approvedWording = asArray(facts?.products).map((product) => [product.what_it_does, product.labeled_for]);
-  const allowed = [question, data.customerConcern, facts?.report_sections, facts?.findings, facts?.visit_summary, approvedWording]
+  const allowed = stemmedTerms([question, data.customerConcern, facts?.report_sections, facts?.findings, facts?.recommendations, facts?.waves_summary, facts?.visit_summary, approvedWording]
     .map((part) => (typeof part === 'string' ? part : JSON.stringify(part)))
-    .join(' ')
-    .toLowerCase();
-  const lower = text.toLowerCase();
-  return targetLabelsOf(data).some((label) => {
-    const rx = new RegExp(`\\b${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
-    return rx.test(lower) && !rx.test(allowed);
-  });
+    .join(' '));
+  const said = stemmedTerms(text);
+  return targetLabelsOf(data).some((label) => said.includes(label) && !allowed.includes(label));
 }
 
 // The output screen, in order: the first check that fails names the rejection.

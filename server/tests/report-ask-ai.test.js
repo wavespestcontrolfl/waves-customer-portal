@@ -152,6 +152,19 @@ describe('buildReportAskFacts', () => {
     expect(facts.customer_concern).toMatch(/roaches in kitchen/);
   });
 
+  test('a report with no findings rows still carries its recommendations', () => {
+    const out = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], recommendations: ['Trim the shrubs back from the wall.', 'Keep the pantry sealed.'] } });
+    expect(out.recommendations).toEqual(['Trim the shrubs back from the wall.', 'Keep the pantry sealed.']);
+    expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [] } }).recommendations).toBeUndefined();
+  });
+
+  test('the Waves summary headline and body are carried when the report has no summary text', () => {
+    const dynamicContext = { aiSummary: { headline: 'A calm visit.', body: 'Light activity near the kitchen.' } };
+    const out = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], dynamicContext } });
+    expect(out.waves_summary).toEqual({ headline: 'A calm visit.', body: 'Light activity near the kitchen.' });
+    expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], summary: 'Plain summary.', dynamicContext } }).waves_summary).toBeUndefined();
+  });
+
   test('a full product name wins over a shared first word; an ambiguous first word names none', () => {
     const apps = [
       { product: { name: 'Advion Ant Bait Gel' }, applicationArea: 'Kitchen' },
@@ -278,6 +291,27 @@ describe('buildReportAskPrompt', () => {
     expect(questionLine).toMatch(/Was the kitchen done\?/);
   });
 
+  test('every free-text field of the fact sheet is scrubbed at the one chokepoint', () => {
+    const data = reportData({
+      reportSections: [{ title: 'Notes from Jane', paragraphs: ['Call Jane at 941-555-0100 or jane@example.com, she lives at 12 Example Lane.'] }],
+      summary: null,
+      findings: [{ title: 'Entry at 4821 Sample Court', detail: 'Gate code A1B2 at the side door', recommendation: 'Email tech@example.com' }],
+      recommendations: ['Text 941-555-0111 before the next visit'],
+      customerConcern: 'Roaches near 77 Test Avenue',
+      dynamicContext: { aiSummary: { headline: 'Visit at 900 Example Trail', body: 'Reach us at pat@example.com' } },
+    });
+    const { user } = buildReportAskPrompt({ question: 'I live at 12 Example Lane. What did you find?', data, nextAppointment, now: NOW });
+    expect(user).not.toMatch(/555|example\.com|Example Lane|Sample Court|Test Avenue|Example Trail|A1B2|4821|\b900\b/);
+    expect(user).toMatch(/\[address\]/);
+    expect(user).toMatch(/What did you find\?/);
+    // The fixed lines and the calendar date are left as built.
+    expect(user).toContain('Waves Pest Control');
+    expect(user).toContain(WAVES_SUPPORT_PHONE_DISPLAY);
+    expect(user).toContain('Friday, October 2, 2026');
+    expect(user).toContain('Tuesday, January 5, 2027');
+    expect(user).toContain('Alpine WSG');
+  });
+
   test('a question that names no product gets every product', () => {
     const prompt = buildReportAskPrompt({ question: 'What did you do about the cockroach?', data: reportData(), nextAppointment, now: NOW });
     expect(prompt.user).toContain('Alpine WSG');
@@ -313,6 +347,15 @@ describe('screenAskAnswer', () => {
     ['Call us at (555) 010-0199.', 'phone'],
     ['See https://example.test/page for more.', 'link'],
     ['It works on ghost ants and crazy ants.', 'target_list'],
+    ['It works on a ghost ant problem.', 'target_list'],
+    ['That visit was ninety dollars.', 'price'],
+    ['We used two ounces of it.', 'amount'],
+    ['We put down twenty-five grams.', 'amount'],
+    ['About half a gallon went down.', 'amount'],
+    ['A couple of ounces covered it.', 'amount'],
+    ['We placed twelve bait stations.', 'count'],
+    ['We set a dozen traps.', 'count'],
+    ['We placed 12 bait stations.', 'count'],
     ['', 'empty'],
   ])('rejects %j (%s)', (answer, reason) => {
     expect(screen(answer)).toBe(reason);
@@ -326,6 +369,17 @@ describe('screenAskAnswer', () => {
     const run = (answer) => screenAskAnswer(answer, { question: 'What is Taurus SC?', data: wording, facts: wordingFacts });
     expect(run('Taurus SC builds an outdoor barrier that stops ants.')).toBeNull();
     expect(run('Taurus SC also works on termites.')).toBe('target_list');
+  });
+
+  test('normal phrasing with number words passes', () => {
+    expect(screen('We will be back in two weeks, and a few days after that you may still see one roach or two.')).toBeNull();
+    expect(screen('Expect it to take two or three days, and half the kitchen was done first.')).toBeNull();
+  });
+
+  test('a target is matched by its singular or plural form', () => {
+    expect(screen('It also covers the ghost ant.')).toBe('target_list');
+    expect(screen('It also covers German roach.')).toBe('target_list');
+    expect(screen('We did treat for the ghost ant as you asked.', 'Did you treat for ghost ants?')).toBeNull();
   });
 
   test('more than four sentences is rejected', () => {
