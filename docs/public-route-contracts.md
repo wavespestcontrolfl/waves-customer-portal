@@ -155,8 +155,9 @@ lookup that fed it runs (`pestRainCardOn()`), so `pestWeekWeatherUncacheable`
 is always `false` and pest PDFs cache on first render. Everything below that describes
 `rain.lines` is the behavior that returns when `PEST_RAIN_CARD=true`.
 The same day the live page changed two client-only lines from fields it
-already receives: "Today's result" on a routine Pest V2 visit (re-entry
-targets with `treatmentPerformed === true`, plus the shown `pestPressure`
+already receives: "Today's result" on a routine Pest V2 visit (the
+`applications[].applicationArea` labels, classed by
+`shared/treatment-area-scopes.json`, with `treatmentPerformed === true`; plus the shown `pestPressure`
 label, worded "Pest pressure: …"), and the "Your plan" card (`planSummary` counts as a sentence,
 `planSummary.tier`, the account-wide `nextAppointment` named with its service,
 `reserviceEligible`). The one payload addition is `planSummary.tier`.

@@ -1326,36 +1326,38 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     const pestVisit = (overrides = {}) => ({
       serviceType: 'Quarterly Pest Control Service',
       isCallback: false,
-      applications: [],
+      applications: [{ applicationArea: 'Perimeter, Entry points' }, { applicationArea: 'Kitchen, Bathrooms' }],
       pestReportV2: { status: { key: 'protected', label: 'Protected' } },
       treatmentPerformed: true,
+      // Re-entry timers are guidance, never the source of the location.
       dynamicContext: { reentry: { targets: [{ key: 'exterior' }, { key: 'interior' }] } },
       pestPressure: { enabled: true, showOnCustomerReport: true, label: 'Very Low' },
       ...overrides,
     });
 
-    it('names both sides and the activity', () => {
+    it('names both sides and the pressure', () => {
       expect(smartStatusSummary(pestVisit(), 'static').result)
         .toBe('We treated outside and inside. Pest pressure: very low.');
     });
 
-    it('names one side only when only one was treated', () => {
-      expect(smartStatusSummary(pestVisit({ dynamicContext: { reentry: { targets: [{ key: 'exterior' }] } } }), 'static').result)
+    it('names one side only when only one was recorded', () => {
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Perimeter' }] }), 'static').result)
         .toBe('We treated outside. Pest pressure: very low.');
-      expect(smartStatusSummary(pestVisit({ dynamicContext: { reentry: { targets: [{ key: 'interior' }] } } }), 'static').result)
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Kitchen' }] }), 'static').result)
         .toBe('We treated inside. Pest pressure: very low.');
     });
 
-    it('makes no treatment claim when nothing was treated, and no activity claim when the gauge is hidden', () => {
+    it('makes no location claim from re-entry timers alone, or without the server\'s treatment verdict', () => {
+      // An application with no recorded area keeps a default interior timer.
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: '' }] }), 'static').result)
+        .toBe('Pest pressure: very low.');
       expect(smartStatusSummary(pestVisit({ treatmentPerformed: false }), 'static').result)
+        .toBe('Pest pressure: very low.');
+      // null = the product load failed.
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: null }), 'static').result)
         .toBe('Pest pressure: very low.');
       expect(smartStatusSummary(pestVisit({ pestPressure: { enabled: true, showOnCustomerReport: false, label: 'Very Low' } }), 'static').result)
         .toBe('We treated outside and inside.');
-      // null = the product load failed: re-entry timers stay, the claim does not.
-      expect(smartStatusSummary(pestVisit({ treatmentPerformed: null }), 'static').result)
-        .toBe('Pest pressure: very low.');
-      expect(smartStatusSummary(pestVisit({ treatmentPerformed: undefined }), 'static').result)
-        .toBe('Pest pressure: very low.');
       expect(smartStatusSummary(pestVisit({ treatmentPerformed: false, pestPressure: null }), 'static').result)
         .toBe('Service completed. Visit details are below.');
     });

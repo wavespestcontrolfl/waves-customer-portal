@@ -61,6 +61,7 @@ import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
+import TREATMENT_AREA_SCOPES from '../../../shared/treatment-area-scopes.json';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
@@ -1073,19 +1074,21 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
 
 // "Today's result" on a routine Pest V2 visit (owner 2026-10-04: "Service
 // completed. Visit details are below." says nothing). Two facts the record
-// already carries: where we treated (the re-entry targets of a visit the
-// server confirms was treated) and the activity the customer is shown on the
-// pressure gauge. No treatment and no shown pressure => null, and the caller
+// already carries: where we treated and the pressure the customer is shown
+// on the gauge. No treatment and no shown pressure => null, and the caller
 // keeps the generic line.
+// Where = the areas the technician recorded on the applied products, read
+// through the shared interior/exterior area list, on a visit the server
+// confirms was treated (treatmentPerformed === true; null means the product
+// load failed). Never the re-entry targets: a record with no area keeps a
+// default interior timer, which is guidance, not a location (Codex P1).
 function pestVisitResultLine(data = {}) {
   if (!data.pestReportV2) return null;
-  // Only on the server's affirmative verdict: null (product load failed)
-  // keeps its advisory re-entry timers, and those are not proof of treatment.
-  const targets = data.treatmentPerformed === true && Array.isArray(data.dynamicContext?.reentry?.targets)
-    ? data.dynamicContext.reentry.targets
+  const areas = data.treatmentPerformed === true && Array.isArray(data.applications)
+    ? data.applications.flatMap((app) => String(app?.applicationArea || '').split(',').map((area) => area.trim()))
     : [];
-  const outside = targets.some((target) => target?.key === 'exterior');
-  const inside = targets.some((target) => target?.key === 'interior');
+  const outside = areas.some((area) => TREATMENT_AREA_SCOPES.exterior.includes(area));
+  const inside = areas.some((area) => TREATMENT_AREA_SCOPES.interior.includes(area));
   let where = null;
   if (outside && inside) where = 'We treated outside and inside.';
   else if (outside) where = 'We treated outside.';
