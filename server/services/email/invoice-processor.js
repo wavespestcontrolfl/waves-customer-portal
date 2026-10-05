@@ -115,6 +115,22 @@ async function vendorForSender(address) {
   return candidates.map((d) => rows.find((r) => String(r.domain).toLowerCase() === d)).find(Boolean) || null;
 }
 
+// The 2026-04-14 seed labelled vendor_email_domains with names no expense
+// category has, so whereILike found nothing and every mapped vendor landed
+// uncategorized. Read the old labels as the Schedule C categories the
+// expense categorizer's own rules name (chemicals and supplies -> Supplies;
+// software, SaaS, hosting -> Software & Technology). An admin's own label
+// passes through unchanged. No data is rewritten.
+const LEGACY_VENDOR_CATEGORY = Object.freeze({
+  'products & chemicals': 'Supplies',
+  'software & services': 'Software & Technology',
+  'hosting & infrastructure': 'Software & Technology',
+});
+function realCategoryName(label) {
+  if (typeof label !== 'string' || !label.trim()) return null;
+  return LEGACY_VENDOR_CATEGORY[label.trim().toLowerCase()] || label.trim();
+}
+
 // A usable display name from the parsed invoice or the classifier, else null.
 function nameOrNull(v) {
   const s = typeof v === 'string' ? v.trim() : '';
@@ -137,8 +153,18 @@ function expenseDescription(vendorName, invoiceNumber) {
   return fullExpenseDescription(vendorName, invoiceNumber).slice(0, 300);
 }
 
+// Only a plain string or finite number up to INVOICE_NUMBER_MAX characters
+// can identify a receipt: the classifier's value is untyped, and an object
+// would stringify to "[object Object]" for every invoice.
+function scalarInvoiceNumber(n) {
+  const s = typeof n === 'string' || (typeof n === 'number' && Number.isFinite(n)) ? String(n).trim() : '';
+  return s && s.length <= INVOICE_NUMBER_MAX ? s : null;
+}
+// expenses.amount is decimal(12,2): compare at the scale the row is stored at.
+const toCents = (amount) => Math.round(Number(amount) * 100) / 100;
+
 function duplicateKey(vendorName, invoiceNumber) {
-  if (!invoiceNumber || vendorName === 'Unknown Vendor') return null;
+  if (!scalarInvoiceNumber(invoiceNumber) || vendorName === 'Unknown Vendor') return null;
   if (fullExpenseDescription(vendorName, invoiceNumber).length > 300 || String(vendorName).length > 200) return null;
   return `expense-dup:${String(vendorName).toLowerCase()}:${invoiceNumber}`;
 }
@@ -148,13 +174,13 @@ function duplicateKey(vendorName, invoiceNumber) {
 async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, invoiceDate) {
   if (!duplicateKey(vendorName, invoiceNumber)) return null;
   return conn('expenses')
-    .where({ vendor_name: String(vendorName).slice(0, 200), amount, expense_date: invoiceDate, description: expenseDescription(vendorName, invoiceNumber) })
+    .where({ vendor_name: String(vendorName).slice(0, 200), amount: toCents(amount), expense_date: invoiceDate, description: expenseDescription(vendorName, invoiceNumber) })
     .first('id');
 }
 
 async function processVendorInvoice(email, classification) {
   const vendor = await vendorForSender(email.from_address);
-  const expenseCategory = vendor?.expense_category || 'Uncategorized';
+  const expenseCategory = realCategoryName(vendor?.expense_category) || 'Uncategorized';
 
   // Check for PDF attachment
   const attachments = await db('email_attachments').where({ email_id: email.id });
@@ -237,11 +263,13 @@ async function processVendorInvoice(email, classification) {
   }
 
   // Vendor name: the domain mapping (deterministic), else the name printed on
-  // the invoice, else the classifier's, else "Unknown Vendor". Only a label:
+  // the invoice, else the classifier's, else the sender's display name (an
+  // HTML-only receipt has no parsed invoice), else "Unknown Vendor". Only a label:
   // the tax category below still comes from the domain mapping alone.
   const vendorName = vendor?.vendor_name
     || nameOrNull(parsedInvoice?.vendor_name)
     || nameOrNull(classification.extracted?.vendor_name)
+    || nameOrNull(email.from_name)
     || 'Unknown Vendor';
 
   // Create expense record

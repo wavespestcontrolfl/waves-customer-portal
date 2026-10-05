@@ -105,3 +105,31 @@ test('no duplicate check runs when the description would be clipped', async () =
   await processVendorInvoice({ id: 'e8', gmail_id: 'g', from_address: 'p@google.com', subject: 'Invoice' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Google', amount: 16.8 }));
 });
+
+test('an old seeded category label is read as the real category', async () => {
+  mockState.vendors = [{ domain: 'anthropic.com', vendor_name: 'Anthropic', expense_category: 'Software & Services' }];
+  extraction({ invoice_number: '25WSLCSD-0301', invoice_date: '2026-10-04', total: 10.05 });
+  await processVendorInvoice({ id: 'e9', gmail_id: 'g', from_address: 'invoice+statements@mail.anthropic.com', subject: 'Your receipt' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Anthropic', category_id: 'cat-sw' }));
+});
+
+test('a non-scalar classifier invoice number never drives the duplicate check', async () => {
+  mockState.duplicate = { id: 'exp-object' };
+  mockCreate.mockRejectedValue(new Error('no pdf parse'));
+  await processVendorInvoice({ id: 'e10', gmail_id: 'g', from_address: 'p@google.com', from_name: 'Google Payments', subject: 'Invoice' },
+    { extracted: { invoice_number: { id: 1 }, invoice_amount: '20.00', invoice_date: '2026-09-01' } });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 20 }));
+});
+
+test('the duplicate lookup compares the amount at the stored cent scale', async () => {
+  extraction({ vendor_name: 'Google', invoice_number: '77', invoice_date: '2026-09-01', total: 16.804 });
+  await processVendorInvoice({ id: 'e11', gmail_id: 'g', from_address: 'p@google.com', subject: 'Invoice' }, { extracted: {} });
+  expect(mockState.lastDuplicateFilter.amount).toBe(16.8);
+});
+
+test('an HTML-only receipt from an unmapped sender takes the sender display name', async () => {
+  mockCreate.mockRejectedValue(new Error('no pdf parse'));
+  await processVendorInvoice({ id: 'e12', gmail_id: 'g', from_address: 'no-reply@sendgrid.com', from_name: 'SendGrid', subject: 'Your payment was successful' },
+    { extracted: { invoice_amount: '19.95', invoice_date: '2026-09-07' } });
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'SendGrid', amount: 19.95 }));
+});
