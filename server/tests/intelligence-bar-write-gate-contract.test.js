@@ -587,7 +587,7 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // must exercise the gate, not the date guard.
     ['schedule-tools', 'executeScheduleTool', 'move_stops_to_day', { service_ids: [STOPS[0].id], new_date: '2099-06-12' }],
     ['schedule-tools', 'executeScheduleTool', 'swap_tech_assignments', { date: '2026-06-11', tech_a_name: 'Adam', tech_b_name: 'Jose' }],
-    ['procurement-tools', 'executeProcurementTool', 'adjust_stock', { product_name: 'Bifen', movement_type: 'restock', quantity: 32 }],
+    ['procurement-tools', 'executeProcurementTool', 'adjust_stock', { product_name: 'Bifen', movement_type: 'restock', quantity: 32, unit: 'fl_oz' }],
     ['procurement-tools', 'executeProcurementTool', 'create_restock_request', { product_name: 'Bifen', quantity: 128, unit: 'fl_oz' }],
     ['procurement-tools', 'executeProcurementTool', 'update_restock_request', { request_id: 'req-1', action: 'receive' }],
     // merge_customers carries its own `customers` seed (the shared SEED

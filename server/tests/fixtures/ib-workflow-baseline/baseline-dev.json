@@ -463,14 +463,7 @@
       "outcome": "pass"
     },
     "W10-dev-06": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "product_target_not_established",
-      "failures": [
-        "target_resolution:product_target_not_established",
-        "tool_result:missing_unit_not_clarified",
-        "side_effect:stock_changed_without_a_unit"
-      ]
+      "outcome": "pass"
     },
     "W10-dev-07": {
       "outcome": "fail",

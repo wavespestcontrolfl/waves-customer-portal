@@ -171,7 +171,7 @@ describe('adjust_stock', () => {
   test('a correction that lowers stock keeps its sign in the ledger quantity (Codex rd2 P2)', async () => {
     const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
     const result = await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'correction', set_total: 32, confirmed: true,
+      product_name: 'Bifen', movement_type: 'correction', set_total: 32, unit: 'fl_oz', confirmed: true,
     });
     expect(result.error).toBeUndefined();
     expect(result.success).toBe(true);
@@ -186,7 +186,7 @@ describe('adjust_stock', () => {
   test('set_total equal to current stock on a TRACKED product is rejected as a no-op', async () => {
     const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
     const result = await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'correction', set_total: 64, confirmed: true,
+      product_name: 'Bifen', movement_type: 'correction', set_total: 64, unit: 'fl_oz', confirmed: true,
     });
     expect(result.error).toMatch(/nothing to adjust/);
     expect(mutations).toEqual([]);
@@ -204,13 +204,13 @@ describe('adjust_stock', () => {
   test('rejects negative quantity for restock/damaged_lost and set_total outside correction', async () => {
     useDb({ products_catalog: [TRACKED_PRODUCT] });
     expect((await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'restock', quantity: -3,
+      product_name: 'Bifen', movement_type: 'restock', quantity: -3, unit: 'fl_oz',
     })).error).toMatch(/positive/);
     expect((await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'restock', set_total: 10,
+      product_name: 'Bifen', movement_type: 'restock', set_total: 10, unit: 'fl_oz',
     })).error).toMatch(/setTotal.*not allowed/);
     expect((await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'correction', quantity: 4, set_total: 10,
+      product_name: 'Bifen', movement_type: 'correction', quantity: 4, set_total: 10, unit: 'fl_oz',
     })).error).toMatch(/exclusive peers/);
   });
 
@@ -222,11 +222,65 @@ describe('adjust_stock', () => {
       ],
     });
     const result = await executeProcurementTool('adjust_stock', {
-      product_name: 'Bifen', movement_type: 'restock', quantity: 32, confirmed: true,
+      product_name: 'Bifen', movement_type: 'restock', quantity: 32, unit: 'fl_oz', confirmed: true,
     });
     expect(result.error).toMatch(/Multiple products match/);
     expect(result.candidates).toHaveLength(2);
     expect(mutations).toEqual([]);
+  });
+});
+
+describe('adjust_stock with no stated unit (the bar never assumes the inventory unit)', () => {
+  const TALAK = { ...TRACKED_PRODUCT, id: 'prod-talak', name: 'Talak', container_size: '96 fl oz', inventory_on_hand: 384 };
+  const NO_UNIT_CALLS = [
+    ['restock', { movement_type: 'restock', quantity: 2 }],
+    ['damaged_lost', { movement_type: 'damaged_lost', quantity: 2 }],
+    ['signed correction', { movement_type: 'correction', quantity: -2 }],
+    ['set_total', { movement_type: 'correction', set_total: 100 }],
+  ];
+
+  test.each(NO_UNIT_CALLS)('%s with no unit refuses with unit_required, names the inventory unit and container, writes nothing', async (_label, fields) => {
+    const mutations = useDb({ products_catalog: [TALAK] });
+    for (const extra of [{}, { confirmed: true }]) {
+      const result = await executeProcurementTool('adjust_stock', { product_name: 'Talak', ...fields, ...extra });
+      expect(result).toMatchObject({ success: false, code: 'unit_required' });
+      expect(result.preview).toBeUndefined();
+      expect(result.error).toMatch(/unit is missing/i);
+      expect(result.error).toContain('fl_oz');
+      expect(result.error).toContain('96 fl oz');
+    }
+    // The server-side confirmed path with a valid approval is refused the same way: no execution on an assumed unit.
+    const direct = await executeRaw('adjust_stock', { product_id: 'prod-talak', ...fields, _verified_inventory_version: 'any' },
+      { confirmed: true, isAdmin: true, technicianId: 'actor-1' });
+    expect(direct).toMatchObject({ success: false, code: 'unit_required' });
+    expect(mutations).toEqual([]);
+  });
+
+  test('a blank or whitespace unit counts as no unit', async () => {
+    const mutations = useDb({ products_catalog: [TALAK] });
+    for (const unit of ['', '   ']) {
+      const result = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'restock', quantity: 2, unit });
+      expect(result.code).toBe('unit_required');
+    }
+    expect(mutations).toEqual([]);
+  });
+
+  test('a product with no saved inventory unit still refuses and still asks for the unit', async () => {
+    const mutations = useDb({ products_catalog: [UNTRACKED_PRODUCT] });
+    const result = await executeProcurementTool('adjust_stock', { product_name: 'Prodiamine', movement_type: 'correction', set_total: 5 });
+    expect(result).toMatchObject({ success: false, code: 'unit_required' });
+    expect(mutations).toEqual([]);
+  });
+
+  test('a stated unit still previews and writes exactly as before', async () => {
+    const mutations = useDb({ products_catalog: [TALAK] });
+    const preview = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'restock', quantity: 192, unit: 'fl_oz' });
+    expect(preview).toMatchObject({ preview: true, change: 192, stock_after: 576, unit: 'fl_oz', entered_quantity: 192, entered_unit: 'fl_oz' });
+    expect(mutations).toEqual([]);
+    const done = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'restock', quantity: 2, unit: 'gal', confirmed: true });
+    expect(done).toMatchObject({ success: true, change: 256, stock_after: 640, unit: 'fl_oz' });
+    const movement = mutations.find(m => m.table === 'product_inventory_movements' && m.op === 'insert');
+    expect(movement.args[0]).toMatchObject({ movement_type: 'restock', quantity: 256, unit: 'fl_oz' });
   });
 });
 
