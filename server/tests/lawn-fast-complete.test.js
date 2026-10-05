@@ -38,6 +38,7 @@ const ASSESSMENT = uuid(2);
 const P_HERB = uuid(11);
 const P_GRAN = uuid(12);
 const P_UN = uuid(13);
+const P_OTHER = uuid(14);
 const P_MISSING = uuid(14);
 
 const PROFILE = (extra = {}) => ({
@@ -80,6 +81,8 @@ const granular = {
   post_application_watering: { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'label' },
 };
 const unapproved = { id: P_UN, name: 'Test Unapproved', category: 'fertilizer', formulation: 'granular', approved_for_service_report: false };
+// Not in any window: a substitute only.
+const other = { id: P_OTHER, name: 'Test Other Spray', category: 'herbicide', product_type: 'pesticide', formulation: 'SC', approved_for_service_report: true, default_rate_per_1000: '0.5000', rate_unit: 'fl oz' };
 
 describe('lawnFastIneligibleReason: one rule for every lawn visit type', () => {
   const reason = (profile, extra = {}) => lawnFastIneligibleReason({ svc: visit(), profile, ...extra });
@@ -786,22 +789,35 @@ describe('this month\'s protocol window (the sheet\'s add-on row)', () => {
     }));
   });
 
-  test('the visit\'s product substitutions apply: a substituted window product is offered as its substitute, at the substitution\'s rate, named for the original', async () => {
+  test('the visit\'s product substitutions apply: a substituted window product is offered as its substitute, at the substitution\'s rate, named for the original; a tank mix naming the original names the substitute; a substitute colliding with a product\'s own listing is offered once, as the listing', async () => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
     getProtocolWindowContext.mockResolvedValue(window());
-    const substitute = { ...unapproved, default_rate_per_1000: '0.5000', rate_unit: 'fl oz' };
     getAppointmentSubstitutions.mockResolvedValue(new Map([
-      // Test Weed Spray → Test Unapproved at the substitution's own rate.
-      [P_HERB, { original_product_id: P_HERB, substitute_product_id: P_UN, rate_per_1000: '3.0000', rate_unit: 'fl oz', substitute, original_product_name: 'Test Weed Spray' }],
-      // Test Feed Granular → Test Unapproved with no rate on the substitution: the substitute's catalog rate.
-      [P_GRAN, { original_product_id: P_GRAN, substitute_product_id: P_UN, rate_per_1000: null, rate_unit: null, substitute, original_product_name: 'Test Feed Granular' }],
+      // Test Weed Spray (the window's "Celsius WG") → Test Other Spray at the substitution's own rate.
+      [P_HERB, { original_product_id: P_HERB, substitute_product_id: P_OTHER, rate_per_1000: '3.0000', rate_unit: 'fl oz', substitute: other, original_product_name: 'Test Weed Spray' }],
+      // Test Feed Granular → Test Unapproved, which the window lists itself: offered once, as its own listing.
+      [P_GRAN, { original_product_id: P_GRAN, substitute_product_id: P_UN, rate_per_1000: null, rate_unit: null, substitute: unapproved, original_product_name: 'Test Feed Granular' }],
     ]));
-    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: catalog })), technicianId: 'tech-1' });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [...catalog, other] })), technicianId: 'tech-1' });
     expect(getAppointmentSubstitutions).toHaveBeenCalledWith(expect.anything(), VISIT, null, { strict: true });
-    expect(ctx.protocolWindow.products.map(({ productId, name, substituteFor, ratePer1000, rateUnit, applicationMethod }) => ({ productId, name, substituteFor, ratePer1000, rateUnit, applicationMethod }))).toEqual([
-      { productId: P_UN, name: 'Test Unapproved', substituteFor: 'Test Feed Granular', ratePer1000: 0.5, rateUnit: 'fl_oz', applicationMethod: 'granular_broadcast' },
-      { productId: P_UN, name: 'Test Unapproved', substituteFor: 'Test Weed Spray', ratePer1000: 3, rateUnit: 'fl_oz', applicationMethod: 'spot_treatment' },
-      { productId: P_UN, name: 'Test Unapproved', substituteFor: null, ratePer1000: null, rateUnit: null, applicationMethod: 'spot_treatment' },
+    expect(ctx.protocolWindow.products.map(({ productId, name, substituteFor, ratePer1000, rateUnit, applicationMethod, tankMixWith, gates }) => ({ productId, name, substituteFor, ratePer1000, rateUnit, applicationMethod, tankMixWith, gates }))).toEqual([
+      // Certainty's "tank mix with Celsius WG" now names Celsius's substitute, in the line and in the gates alike.
+      { productId: P_UN, name: 'Test Unapproved', substituteFor: null, ratePer1000: null, rateUnit: null, applicationMethod: 'spot_treatment', tankMixWith: 'Test Other Spray', gates: { trigger: 'repeat_sedge', tankMixWith: 'Test Other Spray' } },
+      { productId: P_OTHER, name: 'Test Other Spray', substituteFor: 'Test Weed Spray', ratePer1000: 3, rateUnit: 'fl_oz', applicationMethod: 'spot_treatment', tankMixWith: null, gates: { annualCounter: 'celsius_oz_per_1000', stressGate: true } },
+    ]);
+  });
+
+  test('two substitutions to one product the window does not list: offered once, the first in window order, at the substitute\'s catalog rate when the substitution carries none', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
+    getProtocolWindowContext.mockResolvedValue(window());
+    getAppointmentSubstitutions.mockResolvedValue(new Map([
+      [P_GRAN, { original_product_id: P_GRAN, substitute_product_id: P_OTHER, rate_per_1000: null, rate_unit: null, substitute: other, original_product_name: 'Test Feed Granular' }],
+      [P_HERB, { original_product_id: P_HERB, substitute_product_id: P_OTHER, rate_per_1000: '3.0000', rate_unit: 'fl oz', substitute: other, original_product_name: 'Test Weed Spray' }],
+    ]));
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [...catalog, other] })), technicianId: 'tech-1' });
+    expect(ctx.protocolWindow.products.map(({ productId, substituteFor, ratePer1000, rateUnit, applicationMethod }) => ({ productId, substituteFor, ratePer1000, rateUnit, applicationMethod }))).toEqual([
+      { productId: P_OTHER, substituteFor: 'Test Feed Granular', ratePer1000: 0.5, rateUnit: 'fl_oz', applicationMethod: 'broadcast_spray' },
+      { productId: P_UN, substituteFor: null, ratePer1000: null, rateUnit: null, applicationMethod: 'spot_treatment' },
     ]);
   });
 

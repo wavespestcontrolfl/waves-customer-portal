@@ -500,6 +500,70 @@ function protocolRate(product) {
 }
 
 /**
+ * The names a substituted product goes by (the window's own product_name, the
+ * catalog name), each mapped to its substitute's name, so a line that names a
+ * partner ("tank mix with Celsius WG") names the substitute when Celsius is
+ * substituted on this visit. Lower-cased keys.
+ */
+function substituteNames(substitutions, rows, listed) {
+  const renamed = new Map();
+  for (const [originalId, substitution] of substitutions) {
+    const names = [rows.get(originalId)?.name, substitution.original_product_name, ...listed.filter((p) => String(p.product_id) === originalId).map((p) => p.product_name)];
+    for (const name of names) if (typeof name === 'string' && name.trim()) renamed.set(name.trim().toLowerCase(), substitution.substitute.name);
+  }
+  return renamed;
+}
+
+/** One window product as the sheet reads it; `row` is the catalog row offered (the substitute's when substituted). */
+function windowProduct(product, { row, substitution, originalName, renamed }) {
+  const rawGates = product.gates && typeof product.gates === 'object' ? product.gates : {};
+  const partner = typeof rawGates.tankMixWith === 'string' ? rawGates.tankMixWith : null;
+  const tankMixWith = partner ? (renamed.get(partner.trim().toLowerCase()) || partner) : null;
+  const gates = partner && tankMixWith !== partner ? { ...rawGates, tankMixWith } : rawGates;
+  // A substituted product's rate: the substitution's, else the substitute's
+  // own catalog rate (the plan engine's rule), never the original's.
+  const rate = substitution
+    ? { ratePer1000: substitution.rate_per_1000 != null ? substitution.rate_per_1000 : row.default_rate_per_1000, rateUnit: substitution.rate_unit || row.rate_unit }
+    : { ratePer1000: product.rate_per_1000, rateUnit: product.rate_unit };
+  return {
+    productId: row.id,
+    name: row.name,
+    substituteFor: substitution ? (originalName || substitution.original_product_name || null) : null,
+    role: product.role || null,
+    defaultInPlan: product.default_in_plan === true,
+    applicationMethod: protocolMethod({ applicationMode: product.application_mode }, row),
+    ...protocolRate(rate),
+    // The protocol's own words for when this product goes down, and EVERY
+    // operating gate on the row (spreaderVisitOnly, stressGate,
+    // minDistanceFromWaterFt, ...): the sheet reads them all out, so an add-on
+    // never shows without the conditions that make it valid.
+    trigger: typeof gates.trigger === 'string' ? gates.trigger : null,
+    tankMixWith,
+    gates,
+  };
+}
+
+/**
+ * The window's products as the sheet reads them, each catalog product ONCE
+ * (the sheet keys its rows by product): a product's own listing beats a
+ * substitute that collides with it; among colliding substitutes, the first in
+ * window order wins. Only products with a catalog row.
+ */
+function windowProducts(listed, { rows, substitutions }) {
+  const renamed = substituteNames(substitutions, rows, listed);
+  const products = new Map();
+  for (const product of listed) {
+    const substitution = substitutions.get(String(product.product_id)) || null;
+    const row = substitution ? substitution.substitute : rows.get(String(product.product_id));
+    if (!row) continue;
+    const id = String(row.id);
+    if (products.has(id) && (substitution || !products.get(id).substituteFor)) continue;
+    products.set(id, windowProduct(product, { row, substitution, originalName: rows.get(String(product.product_id))?.name, renamed }));
+  }
+  return [...products.values()];
+}
+
+/**
  * The structured lawn protocol window for this visit's grass track and month,
  * with the products it lists, so the sheet can offer them as one-tap add-ons
  * ("Also in October's protocol"; owner 2026-10-05). `{ title, month, visitType,
@@ -513,7 +577,12 @@ function protocolRate(product) {
  * engine's getAppointmentSubstitutions) apply to the window's products as they
  * do to the plan's: a substituted product is offered as its substitute, at the
  * substitution's rate (else the substitute's catalog rate), named for the
- * original (`substituteFor`). The turf profile
+ * original (`substituteFor`); a tank-mix partner the window names by a
+ * substituted product's name is named by the substitute's. The window offers
+ * each catalog product ONCE (the sheet keys its rows by product): where a
+ * substitute collides with the product's own listing, the listing wins (its
+ * own rate, trigger and gates); where two substitutions collide, the first in
+ * window order does. The turf profile
  * is customer-owned (one per customer), so with SEVERAL properties on file it
  * may describe another lawn than this visit's: then only a visit with its own
  * protocol assignment resolves a window (the lawn re-service context's rule,
@@ -546,35 +615,7 @@ async function loadProtocolWindow(svc, knex, readFailures) {
     const substitutions = await require('./waveguard-plan-engine').getAppointmentSubstitutions(knex, svc.id, null, { strict: true });
     const listed = (context.products || []).filter((product) => product.product_id);
     const rows = await loadCatalogRows(listed.map((product) => String(product.product_id)), knex);
-    const products = listed
-      .map((product) => {
-        const substitution = substitutions.get(String(product.product_id)) || null;
-        const row = substitution ? substitution.substitute : rows.get(String(product.product_id));
-        if (!row) return null;
-        const gates = product.gates && typeof product.gates === 'object' ? product.gates : {};
-        // A substituted product's rate: the substitution's, else the substitute's
-        // own catalog rate (the plan engine's rule), never the original's.
-        const rate = substitution
-          ? { ratePer1000: substitution.rate_per_1000 != null ? substitution.rate_per_1000 : row.default_rate_per_1000, rateUnit: substitution.rate_unit || row.rate_unit }
-          : { ratePer1000: product.rate_per_1000, rateUnit: product.rate_unit };
-        return {
-          productId: row.id,
-          name: row.name,
-          substituteFor: substitution ? (rows.get(String(product.product_id))?.name || substitution.original_product_name || null) : null,
-          role: product.role || null,
-          defaultInPlan: product.default_in_plan === true,
-          applicationMethod: protocolMethod({ applicationMode: product.application_mode }, row),
-          ...protocolRate(rate),
-          // The protocol's own words for when this product goes down, and
-          // EVERY operating gate on the row (spreaderVisitOnly, stressGate,
-          // minDistanceFromWaterFt, ...): the sheet reads them all out, so an
-          // add-on never shows without the conditions that make it valid.
-          trigger: typeof gates.trigger === 'string' ? gates.trigger : null,
-          tankMixWith: typeof gates.tankMixWith === 'string' ? gates.tankMixWith : null,
-          gates,
-        };
-      })
-      .filter(Boolean);
+    const products = windowProducts(listed, { rows, substitutions });
     return {
       title: context.window.title || null,
       month: Number(context.window.month) || null,
