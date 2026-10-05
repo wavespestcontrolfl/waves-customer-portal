@@ -230,7 +230,7 @@ function classifierAmount(value) {
 // Booking phase: the AI category suggestion (outside any transaction), then
 // the duplicate check and the insert under one advisory lock. Logs carry ids
 // only: the vendor name can be a person's display name.
-async function bookExpense(email, { vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate, dateFromInvoice, taxYear, quarter }) {
+async function bookExpense(email, { vendorName, vendorSource, expenseCategory, parsedInvoice, amount, amountFromClassifier, invoiceNumber, invoiceDate, dateFromInvoice, taxYear, quarter }) {
   try {
     const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
     // ONLY a deterministic vendor-domain mapping auto-sets the tax category.
@@ -268,7 +268,7 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
     const outcome = await db.transaction(async (trx) => {
       // Same clipping guard as duplicateKey: a clipped description is no identity.
       const fullDescriptionFits = fullExpenseDescription(vendorName, invoiceNumber).length <= 300 && String(vendorName).length <= 200;
-      if (!parsedInvoice && fullDescriptionFits) {
+      if (amountFromClassifier && fullDescriptionFits) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`expense-notice:${String(email.from_address || '').toLowerCase()}`]);
         const copy = await findSameNoticeExpense(trx, email.id, amount, expenseDescription(vendorName, invoiceNumber));
         if (copy) {
@@ -429,6 +429,9 @@ async function processVendorInvoice(email, classification) {
   // is the extraction's answer, not a missing one — `||` fell through to the
   // classifier's amount and created an expense for it (Codex r18 on #4884).
   const amount = parsedInvoice?.total ?? (classifierAmount(classification.extracted?.invoice_amount) || 0);
+  // The subject guard and the notice-copy check follow where the AMOUNT came
+  // from: a parsed PDF with no total also falls back to the classifier.
+  const amountFromClassifier = parsedInvoice?.total == null;
   const invoiceNumber = parsedInvoice?.invoice_number || classification.extracted?.invoice_number;
   const rawInvoiceDate = parsedInvoice?.invoice_date || classification.extracted?.invoice_date;
   const parsedDate = rawInvoiceDate ? new Date(rawInvoiceDate) : null;
@@ -441,14 +444,14 @@ async function processVendorInvoice(email, classification) {
   const invoiceDate = candidateDate && taxPeriodFor(candidateDate) ? candidateDate : etDateString();
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
-  if (amount > 0 && !parsedInvoice && NOT_A_CHARGE_SUBJECT.test(String(email.subject || ''))) {
+  if (amount > 0 && amountFromClassifier && NOT_A_CHARGE_SUBJECT.test(String(email.subject || ''))) {
     await db('emails').where({ id: email.id }).update({
       auto_action: 'invoice_detected:not_a_charge',
       updated_at: new Date(),
     });
   } else if (amount > 0) {
     await bookExpense(email, {
-      vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate,
+      vendorName, vendorSource, expenseCategory, parsedInvoice, amount, amountFromClassifier, invoiceNumber, invoiceDate,
       dateFromInvoice: invoiceDate === candidateDate, taxYear, quarter,
     });
   } else {

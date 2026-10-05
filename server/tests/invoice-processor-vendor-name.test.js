@@ -219,3 +219,11 @@ test('the notice-copy check skips a vendor name too long for its column', async 
     { extracted: { invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 25 }));
 });
+
+test('a parsed PDF with no total falls back to the classifier amount and keeps the subject guard', async () => {
+  extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0021', invoice_date: '2026-01-15' });
+  await processVendorInvoice({ id: 'e21', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: '$12.00 payment to Acme Cloud was unsuccessful' },
+    { extracted: { invoice_amount: '$12.00' } });
+  expect(inserted()).toBeUndefined();
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:not_a_charge' })]);
+});
