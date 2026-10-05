@@ -308,7 +308,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             <span className={'font-medium ' + (done ? 'text-ink-tertiary' : 'text-zinc-900')} style={{ fontSize: 15 }}>
               {displayName}
             </span>
-            {done && <Badge tone="neutral">Done</Badge>}
+            {done && <Badge tone="neutral" density="comfortable">Done</Badge>}
             {service.tier && <Badge tone="neutral">{service.tier}</Badge>}
             {owesCompletion?.(service) && (
               // Completed but the closeout (invoice / report / text) is still

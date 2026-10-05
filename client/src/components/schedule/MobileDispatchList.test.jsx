@@ -545,6 +545,7 @@ describe('MobileDispatchList completed visits', () => {
     expect(screen.getByText('Sample Done').className).toContain('text-ink-tertiary');
     expect(screen.getByText('Sample Next').className).toContain('text-zinc-900');
     expect(screen.getAllByText('Done')).toHaveLength(1);
+    expect(screen.getByText('Done').className).toContain('text-14');
     expect(screen.queryByText('~20 min drive from Sample One')).toBeNull();
     expect(screen.getByText('~12 min drive from Sample Done')).toBeInTheDocument();
   });
