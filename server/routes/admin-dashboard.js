@@ -1984,6 +1984,18 @@ router.get('/channel-roi', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/service-lines?period=mtd[&from=YYYY-MM-DD]
+// "By service line" Growth card: per line close rate (resolved-only), open
+// estimates over 7 days, first-90-day retention and cost per new customer.
+// Read-only; every query degrades to null + a caveat (services/dashboard-service-lines.js).
+router.get('/service-lines', dashboardCache, async (req, res, next) => {
+  try {
+    const { computeServiceLines } = require('../services/dashboard-service-lines');
+    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
+    res.json(await computeServiceLines(win));
+  } catch (err) { next(err); }
+});
+
 // under "Unmapped" so a missing seed row is visible, not invisible.
 router.get('/calls-by-source', dashboardCache, async (req, res, next) => {
   try {
