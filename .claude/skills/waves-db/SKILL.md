@@ -44,6 +44,18 @@ Rules:
   `AT TIME ZONE` — reviewers have falsely flagged correct timestamptz SQL
   as naive. Verify the column's `udt_name` in the target environment before
   accepting the finding; production access still requires §3 authorization.
+- **Deriving a calendar DAY is its own trap**, and the commonest one:
+  `to_char(ts, 'YYYY-MM-DD')` or a `::date` cast with no conversion
+  reports Railway's UTC session day, so a row between 00:00 UTC and ET
+  midnight lands one day late (retention and KPI cohorts miscount at the
+  boundary). A `timestamp without time zone` column needs BOTH casts —
+  `AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'`; a single
+  `AT TIME ZONE 'America/New_York'` on that type re-reads the stored UTC
+  clock as though it were already Eastern and is just as wrong as none.
+  In JS the same bug reads `toISOString().slice(0, 10)` on an instant, or
+  browser-local `getFullYear/getMonth/getDate` in React — compare against
+  `etDateString()` (`client/src/lib/timezone.js`) instead. Formatting a
+  real `date` column this way is correct and not a finding.
 
 ## 3. Local DB access — Codex uses dev/preview only
 

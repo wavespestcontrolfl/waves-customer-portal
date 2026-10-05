@@ -58,7 +58,9 @@ and sub-components consumed by V2 (`CompletionPanel` / `RescheduleModal` /
 `STAGE_MAP` / `KANBAN_STAGES` / `LEAD_SOURCES` / `CustomerMap` /
 `CustomerIntelligenceTab` / `STATUS_CONFIG` / `PIPELINE_FILTERS` /
 `DECLINE_REASONS` / `classifyEstimate` / `getUrgencyIndicator` /
-`detectCompetitor` / `ALL_NUMBERS` / `NUMBER_LABEL_MAP`). The
+`detectCompetitor` / `ALL_NUMBERS` / `NUMBER_LABEL_MAP` /
+`PRODUCT_DESCRIPTIONS` / `TRACK_SAFETY_RULES` / `stripLegacyBoilerplate`).
+This list is the one AGENTS.md points at — keep it complete. The
 `export default function ...Page()` component is gone from each — do not
 resurrect it, and do not delete these files as "dead code".
 
@@ -106,7 +108,11 @@ Anton / Luckiest Guy / Baloo there. Full decisions:
 ## Hard lines (both systems)
 
 - 14px minimum for readable text (Virginia uses this 8 hours a day).
-  POLICY on customer surfaces: 16px body / 14px label floors, and no raw
+  POLICY on customer surfaces: 16px body / 14px label floors — on a
+  customer surface 14px is the LABEL size only, so a body sentence,
+  explanatory paragraph or note at 14px (or a split-the-difference 15px)
+  is a finding even though `check:portal-brand` passes it; new portal and
+  billing cards are where this keeps slipping through. And no raw
   emoji in JSX source (including comments — use icon components). The
   mechanical gate (`npm run check:portal-brand`, runs in Railway prebuild
   — one violation kills EVERY build) enforces only a SUBSET: selected
