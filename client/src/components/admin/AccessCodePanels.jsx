@@ -11,6 +11,7 @@
  * stores one.
  */
 import { useState } from "react";
+import { addETDays, etDateString, formatETDateOnly } from "../../lib/timezone";
 import { ActionFeedback, Badge, Button, Input, Select, Textarea, cn } from "../ui";
 
 export const ACCESS_KINDS = [
@@ -29,34 +30,21 @@ export const kindLabel = (kind) => KIND_LABEL[kind] || "Access code";
 // A visit that is over no longer carries a one-visit code (the server's list).
 const ENDED_VISIT_STATUSES = new Set(["completed", "cancelled", "canceled", "skipped", "no_show", "rescheduled"]);
 const VISIT_WINDOW_DAYS = 14;
-const ET = "America/New_York";
-
-// "YYYY-MM-DD" for a date-only string or an instant, in Eastern time.
+// Dates through the portal's shared ET helpers (client/src/lib/timezone.js).
+// A date-only value (a Postgres date, possibly serialized as UTC midnight)
+// keeps its calendar day; an instant becomes its ET calendar day.
 function dayKey(value) {
   if (!value) return "";
   const text = String(value);
-  if (/^\d{4}-\d{2}-\d{2}/.test(text) && text.length <= 10) return text.slice(0, 10);
-  // A calendar date serialized as UTC midnight ("2026-10-08T00:00:00.000Z") is
-  // that calendar day, not the evening before in Eastern time.
-  if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.000)?Z$/.test(text)) return text.slice(0, 10);
+  const dateOnly = /^(\d{4}-\d{2}-\d{2})(?:T00:00:00(?:\.000)?Z)?$/.exec(text);
+  if (dateOnly) return dateOnly[1];
   const d = new Date(text);
-  if (Number.isNaN(d.getTime())) return "";
-  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: ET, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);
-  return parts;
+  return Number.isNaN(d.getTime()) ? "" : etDateString(d);
 }
 
-function shiftDay(key, days) {
-  const d = new Date(`${key}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
+const shiftDay = (key, days) => etDateString(addETDays(new Date(`${key}T12:00:00Z`), days));
 
-function fmtDay(key, opts = { month: "short", day: "numeric" }) {
-  if (!key) return "";
-  const d = new Date(`${key}T12:00:00Z`);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("en-US", { ...opts, timeZone: "UTC" });
-}
+const fmtDay = (key, opts = { month: "short", day: "numeric" }) => (key ? formatETDateOnly(key, opts) : "");
 
 export function lifeLabel(row) {
   if (row.life !== "visit") return "Always";

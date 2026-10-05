@@ -673,7 +673,9 @@ async function listForVisit(conn, req, visitId) {
   // The visit may have been reassigned or moved to another home while the
   // codes were read: answer only if it is still in scope with the same home.
   const again = await scoped().first('scheduled_services.property_id');
-  if (!again || (again.property_id || null) !== (visit.property_id || null)) {
+  const homesNow = again ? await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id') : [];
+  const homeNow = again && (again.property_id || (homesNow.length === 1 ? homesNow[0] : null));
+  if (!again || (homeNow || null) !== (visitHome || null)) {
     return fail(isTechnicianRequest(req) ? 403 : 409, isTechnicianRequest(req) ? 'service_not_assigned' : 'visit_changed');
   }
   // Only what a stop needs: never the customer's message, its source or who decided.
