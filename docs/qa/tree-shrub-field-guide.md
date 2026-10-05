@@ -55,7 +55,7 @@ The owner merges; this lane stops before merge.
   at 1440px and 390px. All 12 admin months and five representative phone months
   across three tank sizes exercised without horizontal overflow or page errors.
 - Snapshot expansion: two owned spreaders only; switching to push shows 092807.
-  Merit expansion: soil kit only. Talus hold and label link verified in place.
+  Merit expansion: soil kit only. Label link verified in place.
 - Final preview caught large oil doses rounding up in the inherited formatter.
   Dedicated truck-measure tests now pin 1¼ / 5 / 140¾ fl oz for the 1% oil
   reference, with approximation marks; range bounds stay inside their sources.
@@ -90,12 +90,30 @@ The owner merges; this lane stops before merge.
 ## Open content inputs
 
 Exact labels for 13-0-13, Mn Combo, Sequestar and Copper; KPHITE method/container
-match; Talus and Headway replacements; Mainspring program-range choice; and the
-later March/May/October/November program decisions remain unresolved. Their
-holds are visible. Both LESCO bag prices remain pending, never zero.
+match; Mainspring program-range choice; and the later
+March/May/October/November program decisions remain unresolved. Their
+holds are visible. Talus (residential use prohibited) and Headway (turf-only
+label) were removed from the program on 2026-10-05, with no replacement product. Both LESCO bag prices remain pending, never zero.
 
 Label summaries and source URLs live together in
 `server/config/tree-shrub-field-guide.json`. The 8-0-12 bag and KPHITE T&O
 manufacturer PDFs were rechecked for this build; the other summaries retain
 the source versions reviewed for the approved mockup. The company palm chart
 is explicitly distinguished from the fertilizer bag directions.
+
+## Program date rules (2026-10-05)
+
+Visits start on the customer's signup date (6x about every 60 days, 9x about
+every 40), and the quarterly 4x track is retired. Each visit uses the card for
+its calendar month, and all 12 cards now name Snapshot and the season's palm
+feed (8-0-12 October to May, 0-0-16 June to September) as routine lines. The
+existing due gates decide what shows: the palm feed waits until 3 calendar
+months after the last feed, Snapshot waits 60 days and one per quarter, and the
+June 1 to September 30 N/P blackout still blocks 8-0-12.
+
+TriStar 8.5 SL (acetamiprid, Group 4A) is a conditional secondary line in months
+with scale or whitefly lines, for live finds only. Its label summary uses the
+Cleary label 62432_4 (06/29/2021, EPA 8033-106-1001): 8.5 to 16.5 fl oz per 100
+gal for hard and soft scales and whiteflies, 4 applications a year, 7 days
+between applications, 25.3 fl oz per acre per application, 92.5 fl oz per acre
+per year. It has no catalog row yet, so Fast Complete never suggests it.

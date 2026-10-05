@@ -22,12 +22,12 @@ describe('10/10 SWFL tree and shrub protocol config', () => {
     expect(program.final_operating_sentence).toMatch(/legal by ordinance zone/);
   });
 
-  test('keeps Snapshot as the quarterly bed differentiator', () => {
+  test('every month offers Snapshot; the 60-day/quarter rule decides what is due (signup-date visits)', () => {
     const snapshotVisits = protocols.tree_shrub.visits
       .filter((row) => /Snapshot 2\.5TG/i.test(row.primary))
       .map((row) => row.visit);
 
-    expect(snapshotVisits).toEqual([1, 4, 7, 10]);
+    expect(snapshotVisits).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     expect(protocols.tree_shrub.calibration.snapshot_rates.join('\n')).toMatch(/2\.3 lb\/1,000 sq ft/);
     expect(protocols.tree_shrub.calibration.snapshot_rates.join('\n')).toMatch(/4\.6 lb\/1,000 sq ft/);
   });
