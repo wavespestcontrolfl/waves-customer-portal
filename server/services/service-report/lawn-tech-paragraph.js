@@ -419,8 +419,10 @@ s t re ve ll d m
 
 // Every word of a candidate paragraph, minus the ones the rules above allow.
 function wordsOutsideVocabulary(text, inputs, hay) {
+  // The technician's free text is NOT a source of words: a name typed there
+  // must never reach the customer. Only system-built inputs count.
   const known = new Set(words([
-    hay.note, hay.findingHigh, hay.findingLow, hay.prior, hay.progress, hay.fact, hay.targets,
+    hay.findingHigh, hay.findingLow, hay.prior, hay.progress, hay.fact, hay.targets,
     ...inputs.products.flatMap((p) => [p.name, p.activeIngredient]),
   ].filter(Boolean).join(' ')));
   const out = [];
@@ -509,8 +511,18 @@ function provenanceOf(term, hay) {
   };
 }
 
+// Does this sentence name this applied product (its first distinctive token)?
+function productNamedIn(product, sentence) {
+  const tok = words(product.name).find((w) => w.length >= 3 && !GENERIC_NAME_TOKENS.has(w) && !COMMON_WORDS.has(w));
+  return !!tok && new RegExp(`\\b${escapeRe(tok)}\\b`, 'i').test(sentence);
+}
+// Does this product's own target list or role carry the term?
+function productLicenses(product, term) {
+  return term.re.test(product.targets.join(' ')) || (!!term.generic && term.re.test(ROLE_WORDS[product.kind] || ''));
+}
+
 // One mention of a term in the paragraph, against the record. null = fine.
-function mentionProblem(term, sentence, mention, prov, from) {
+function mentionProblem(term, sentence, mention, prov, from, inputs) {
   const key = term.key;
   if (mention.stance === 'negated') {
     if (prov.noteStance === 'negated') return from.includes('note') ? null : `negation_unsourced:${key}`;
@@ -518,7 +530,13 @@ function mentionProblem(term, sentence, mention, prov, from) {
     return `absence_not_in_record:${key}`;
   }
   const purposeOnly = PURPOSE_CUE_RE.test(mention.clause) && !OBSERVED_CUE_RE.test(mention.clause);
-  if (purposeOnly && prov.purpose) return from.includes('product') || (prov.noteStance === 'purpose' && from.includes('note')) ? null : `purpose_without_product_source:${key}`;
+  if (purposeOnly && prov.purpose) {
+    // A purpose claim that names a product must match THAT product's own targets
+    // or role: Arena's chinch bugs never become the fertilizer's.
+    const named = inputs.products.filter((p) => productNamedIn(p, sentence));
+    if (named.length && !named.some((p) => productLicenses(p, term))) return `purpose_not_this_product:${key}`;
+    return from.includes('product') || (prov.noteStance === 'purpose' && from.includes('note')) ? null : `purpose_without_product_source:${key}`;
+  }
   // From here the paragraph says the condition is (or may be) PRESENT.
   // The technician's note wins over every other input: a term the note negates
   // or doubts cannot be stated as found, whatever a finding or fixed line says.
@@ -639,9 +657,12 @@ function validateParagraph(answer, rawInputs) {
   sentences.forEach((sentence) => {
     const tokens = sentence.split(/\s+/).map((t) => t.replace(/^[("']+|[)"'.,;:!?]+$/g, '')).filter(Boolean);
     tokens.forEach((t, idx) => {
-      if (idx === 0 || !/^[A-Z]/.test(t) || t === 'I') return;
+      if (!/^[A-Z]/.test(t) || t === 'I') return;
       const w = t.toLowerCase();
       if (applied.has(w) || GRASS_AND_PLACE_WORDS.has(w) || /^\d/.test(t)) return;
+      // A sentence may open with an ordinary word; a capitalized word that is
+      // not ordinary is a name wherever it stands.
+      if (idx === 0 && (PARAGRAPH_WORDS.has(w) || GENERIC_NAME_TOKENS.has(w) || TERMS.some((term) => term.re.test(t)))) return;
       // Fixed code, no token: the name may be a person's, copied from the note,
       // and the write gate logs these codes.
       fail('unrecognized_name');
@@ -661,7 +682,7 @@ function validateParagraph(answer, rawInputs) {
       named.push(term);
       const prov = provenanceOf(term, hay);
       for (const mention of occurrences(term, sentence)) {
-        const problem = mentionProblem(term, sentence, mention, prov, from);
+        const problem = mentionProblem(term, sentence, mention, prov, from, inputs);
         if (problem) { fail(problem); continue; }
         // A cause the record carries must be sourced to where the record has it: the
         // note, a finding or the last visit. A product's source licenses a purpose

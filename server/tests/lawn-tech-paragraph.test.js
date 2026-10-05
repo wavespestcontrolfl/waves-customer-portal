@@ -165,6 +165,7 @@ describe('validator: rejects', () => {
     ['an unknown diagnosis hidden behind a known symptom word', 'Our technician found nematode damage in the lawn. Arena 50 WDG went on the front yard.', 'word_not_in_inputs'],
     ['an unknown product at the start of a sentence', 'Our technician found chinch bugs in the trouble spot. Zorbex went on the front yard.', 'word_not_in_inputs'],
     ['a person\'s name', 'Our technician found chinch bugs in the trouble spot. Marcus treated the front yard with Arena 50 WDG.', 'word_not_in_inputs'],
+    ['a target of one product claimed for another', 'Our technician found chinch bugs in the trouble spot. LESCO 24-0-11 protects against white grubs.', 'purpose_not_this_product:grub'],
     ['a promise', 'Our technician found chinch bugs in the trouble spot. The lawn will recover on its own.', 'promise:will'],
     ['a next visit', 'Our technician found chinch bugs in the trouble spot. We are checking the spot again next visit.', 'promise:next visit'],
     ['result timing', 'Our technician found chinch bugs in the trouble spot. You should see improvement within two weeks.', 'timing'],
@@ -255,6 +256,15 @@ describe('validator: negation and uncertainty in the technician note', () => {
     expect(check(sentenceOf('Our technician found thinning turf near the driveway.', ['note', 'finding']), maybeThin).problems)
       .toContain('uncertain_stated_as_fact:thin');
     expect(check(sentenceOf('Our technician may have seen some thinning turf near the driveway.', ['note', 'finding']), maybeThin).problems).toEqual([]);
+  });
+
+  test('a name typed in the note never reaches the paragraph, at any position or case', () => {
+    const named = noted('Marcus applied Arena to the front and side yards. There are chinch bugs at the trouble spot. Also applied LESCO 24-0-11 to the whole yard.');
+    for (const second of ['Marcus treated the front yard with Arena 50 WDG.', 'The front yard was treated by marcus with Arena 50 WDG.']) {
+      const problems = check(sentenceOf(second, ['note', 'product']), named).problems;
+      expect(problems.some((c) => c === 'word_not_in_inputs' || c === 'unrecognized_name')).toBe(true);
+      expect(problems.join(' ')).not.toMatch(/marcus/i);
+    }
   });
 
   test('a purpose-only mention in the note is not a sighting', () => {

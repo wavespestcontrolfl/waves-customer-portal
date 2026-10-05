@@ -2662,7 +2662,7 @@ technician's note wins over the photo read); states a low-confidence photo findi
 without a hedge; says it found, saw or there is something the condition vocabulary
 does not know (fail closed, `observed_unrecognized`); uses any word that is not
 ordinary English (a fixed list in the module), a known condition, a grass or place
-word, or a word the inputs themselves carry (`word_not_in_inputs`: no invented
+word, or a word the system-built inputs carry (findings, progress, facts, targets, product names; never the note's free text) (`word_not_in_inputs`: no invented
 diagnosis, product or person can reach the customer; codes never carry the raw
 word); or fails `customerCopyViolations`, the writer-rules timing screen
 or the next-visit claim lint. The model also returns a per-sentence `sources` list
