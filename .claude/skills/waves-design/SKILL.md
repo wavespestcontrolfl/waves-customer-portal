@@ -120,17 +120,20 @@ Anton / Luckiest Guy / Baloo there. Full decisions:
   (`FS.bodyLg`, owner D1 2026-09-05); `FS.body` 14 stays correct for meta
   rows, table cells, buttons, eyebrows and fine print — so flag a primary
   or running-prose paragraph at 14px, and any off-scale size (a
-  split-the-difference 15px is not a token), not every 14px string.
-  `check:portal-brand` only scans `fontSize: 11`/`13` literals, so it
-  passes both; the scale is `docs/design/customer-doc-style-guide.md` +
+  split-the-difference 15px is not a token), not every 14px string. The
+  scale is `docs/design/customer-doc-style-guide.md` +
   `client/src/theme-doc.js`. New portal and billing cards are where this
-  keeps slipping. And no raw
-  emoji in JSX source (including comments — use icon components). The
-  mechanical gate (`npm run check:portal-brand`, runs in Railway prebuild
-  — one violation kills EVERY build) enforces only a SUBSET: selected
-  customer directories (`components/estimate` excluded) and inline
-  `fontSize: 11`/`13` literals — so a passing gate is NOT proof of
-  compliance; the policy applies repo-wide regardless of gate coverage.
+  keeps slipping. And no raw emoji in JSX source (including comments —
+  use icon components). The mechanical gate (`npm run check:portal-brand`,
+  runs in Railway prebuild — one violation kills EVERY build) scans all of
+  `client/src` and catches every size UNDER the 14 floor: 1–13px literals
+  (decimals and ternaries included), `FS.micro`/`FS.caption`,
+  `text-xs`/`text-[13px]`, CSS `font-size`, and SVG `fontSize` attributes
+  — minus a short `EXCLUDED_FILES` list (the `?mode=pdf` print documents,
+  demos) and a shrink-only `LEGACY_BASELINE` of per-file counts, which are
+  debt to pay down, not exemptions. Its blind spot is precisely the policy
+  above: `text-sm`/14 is legal by design and 15 is unmatched, so a 14px or
+  15px prose paragraph passes the gate — a pass is NOT proof of compliance.
 - Never apply customer-facing brand styling (Luckiest Guy / Baloo 2 / gold
   pill / mascot) inside `/admin/*` — admin stays monochrome.
 - **iOS PWA safe areas:** `viewport-fit=cover` is global in the standalone
