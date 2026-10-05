@@ -64,11 +64,16 @@ async function withReceiptSendLock(invoiceId, run, { leaseMs = LEASE_MS } = {}) 
   const held = { lost: false };
   trackConnectionLoss(connection, held);
   let released = false;
-  const closeSession = async () => {
-    if (released) return;
-    released = true;
-    held.lost = true;
-    await slots.release(connection);
+  let closing = null;
+  // One release, shared: a caller that arrives while the lease timer's release is still in progress
+  // waits for that same release, so the slot is free by the time withReceiptSendLock returns.
+  const closeSession = () => {
+    if (!closing) {
+      released = true;
+      held.lost = true;
+      closing = slots.release(connection);
+    }
+    return closing;
   };
   // The lease is a deadline that only moves later (owner.extendLease): re-armed from the provider handoff
   // so a request that starts near the end of the lease is not cut off while it is still in flight.
