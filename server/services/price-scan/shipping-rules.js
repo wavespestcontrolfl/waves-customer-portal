@@ -174,8 +174,11 @@ function weightInfo(input) {
 const usd = (n) => `$${round2(n).toFixed(2)}`;
 
 // The published band price for a weight, or null above the top band (no published price).
+// The table is published to 0.01 lb, so round first: Shopify stores whole grams, and 2268 g
+// (a 5 lb bag) converts to 5.000088 lb, which must stay in the 5 lb band.
 function gemplersTableAmount(weightLb) {
-  const band = GEMPLERS_WEIGHT_TABLE.find((b) => weightLb <= b.upToLb);
+  const lb = Math.round(weightLb * 100) / 100;
+  const band = GEMPLERS_WEIGHT_TABLE.find((b) => lb <= b.upToLb);
   return band ? band.usd : null;
 }
 

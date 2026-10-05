@@ -115,6 +115,14 @@ describe('shippingFor — Gemplers weight must be a real weight to be firm', () 
     expect(gem('1 gal', { weightLb: 6 })).toMatchObject({ amount: 11.99, basis: 'weight_table' });
     expect(gem('1 gal', { weightLb: 6 }).note).not.toMatch(/weight estimated/);
   });
+  test('whole-gram listing weights at a band edge stay in that band (rounded to the table precision)', () => {
+    const lbOfGrams = (g) => g / 453.59237;
+    expect(gem('1 gal', { weightLb: lbOfGrams(2268) }).amount).toBe(10.99); // 5.000088 lb -> 5 lb band
+    expect(gem('1 gal', { weightLb: lbOfGrams(4536) }).amount).toBe(11.99); // 10 lb band
+    expect(gem('1 gal', { weightLb: lbOfGrams(9072) }).amount).toBe(14.99); // 20 lb band
+    expect(gem('1 gal', { weightLb: lbOfGrams(18144) }).amount).toBe(21.99); // 40 lb band
+    expect(gem('1 gal', { weightLb: 5.02 }).amount).toBe(11.99); // a real step over the edge moves up
+  });
 });
 
 describe('shippingFor — Gemplers special freight is never firm', () => {
