@@ -10,7 +10,7 @@ const OTHER = '5550100456';
 
 // A small stateful stand-in for the three tables the follow-up touches. Queries
 // are evaluated by the shape the service builds (claim / finish / demote marker).
-function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn = true } = {}) {
+function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn = true, demoteGateOn = true } = {}) {
   jest.resetModules();
   const state = {
     optin: rows.map((r) => ({ followup_claimed_at: null, followup_done_at: null, caller_demoted_at: null, ...r })),
@@ -69,7 +69,7 @@ function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn
   dbMock.raw = (sql, binds) => (binds ? { sql, binds } : sql);
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-  jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => gateOn) }));
+  jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => gateOn), onSiteCallerDemoteLive: jest.fn(() => demoteGateOn) }));
   jest.doMock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: jest.fn(async () => state.visitState === 'wait') }));
   const sendReplay = replay || jest.fn(async () => ({ sent: true }));
   jest.doMock('../services/appointment-reminders', () => ({
@@ -239,6 +239,37 @@ describe('on-site follow-up: caller demotion + confirmation replay', () => {
     expect(await optin.settleOnSiteFollowUps(['c1'])).toBe(0);
     expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 0 });
     expect(sendReplay).not.toHaveBeenCalled();
+  });
+
+  test('GATE_ONSITE_CALLER_DEMOTE off (dark): a YES demotes nobody and replays nothing; the sweep closes the row so a later flip never acts on it', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row(), row({ phone_key: OTHER, visit_id: null })], customer: spouse(), demoteGateOn: false });
+    expect(await optin.settleOnSiteFollowUps(['c1'], { inReplyToYes: true })).toBe(0);
+    expect(await optin.demoteCallerForConfirmedOnSite('c1', KEY, 'v1')).toBe('skipped');
+    expect(state.optin[0].followup_done_at).toBeNull();
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 0 });
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+    // Closed: the visit-bound row only (a portal ask carries no visit and no obligation).
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+    expect(state.optin[1].followup_done_at).toBeNull();
+  });
+
+  test('the gate reader is strict: only GATE_ONSITE_CALLER_DEMOTE=true turns it on', () => {
+    jest.resetModules();
+    jest.dontMock('../config/feature-gates');
+    const { onSiteCallerDemoteLive } = require('../config/feature-gates');
+    const prior = process.env.GATE_ONSITE_CALLER_DEMOTE;
+    try {
+      delete process.env.GATE_ONSITE_CALLER_DEMOTE;
+      expect(onSiteCallerDemoteLive()).toBe(false);
+      process.env.GATE_ONSITE_CALLER_DEMOTE = '1';
+      expect(onSiteCallerDemoteLive()).toBe(false);
+      process.env.GATE_ONSITE_CALLER_DEMOTE = 'true';
+      expect(onSiteCallerDemoteLive()).toBe(true);
+    } finally {
+      if (prior === undefined) delete process.env.GATE_ONSITE_CALLER_DEMOTE; else process.env.GATE_ONSITE_CALLER_DEMOTE = prior;
+    }
   });
 });
 

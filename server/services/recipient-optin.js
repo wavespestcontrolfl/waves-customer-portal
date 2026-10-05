@@ -28,6 +28,12 @@ function isDoubleOptinEnabled() {
   return isEnabled('recipientDoubleOptin');
 }
 
+// The on-site follow-up (caller demotion + confirmation replay) runs only with
+// the opt-in gate on AND its own gate (GATE_ONSITE_CALLER_DEMOTE, dark by default).
+function isOnSiteFollowUpLive() {
+  return isDoubleOptinEnabled() && require('../config/feature-gates').onSiteCallerDemoteLive?.() === true;
+}
+
 // True only when the opt-in rail can actually ASK a recipient: the double
 // opt-in gate is on AND the recipient_optin_request template row exists and is
 // active (the same lookup claimRecipientOptins uses to decide "dark"). The
@@ -296,9 +302,9 @@ async function settleCustomerFollowUps(customerId, { inReplyToYes = false } = {}
 
 // Runs the follow-up for each customer (their confirmed, visit-bound, unfinished
 // rows); one customer's failure never stops the rest. No-op while the opt-in
-// gate is off. Returns how many rows ran.
+// gate or GATE_ONSITE_CALLER_DEMOTE is off. Returns how many rows ran.
 async function settleOnSiteFollowUps(customerIds = [], opts = {}) {
-  if (!isDoubleOptinEnabled()) return 0;
+  if (!isOnSiteFollowUpLive()) return 0;
   let settled = 0;
   for (const customerId of new Set(customerIds)) {
     try {
@@ -315,6 +321,17 @@ async function settleOnSiteFollowUps(customerIds = [], opts = {}) {
 // Random rotation so a long-waiting customer never starves later ones.
 async function sweepOnSiteFollowUps({ limit = 25 } = {}) {
   if (!isDoubleOptinEnabled()) return { settled: 0 };
+  if (!isOnSiteFollowUpLive()) {
+    // Dark: a YES recorded now owes no follow-up. Its row is closed here so a
+    // later flip never demotes a caller or replays a confirmation for an old YES.
+    await db('recipient_optin')
+      .where({ status: 'confirmed' })
+      .whereNotNull('visit_id')
+      .whereNull('followup_done_at')
+      .update({ followup_done_at: new Date(), followup_claimed_at: null })
+      .catch(() => {});
+    return { settled: 0 };
+  }
   let rows = [];
   try {
     rows = await db('recipient_optin')
@@ -339,7 +356,7 @@ async function sweepOnSiteFollowUps({ limit = 25 } = {}) {
 // exists — is applied now if it never was (the earlier YES found no live visit).
 // Best-effort; never throws.
 async function demoteCallerForConfirmedOnSite(customerId, phoneKey, visitId) {
-  if (!customerId || !phoneKey || !visitId || !isDoubleOptinEnabled()) return 'skipped';
+  if (!customerId || !phoneKey || !visitId || !isOnSiteFollowUpLive()) return 'skipped';
   try {
     const row = await db('recipient_optin').where({ customer_id: customerId, phone_key: phoneKey, status: 'confirmed' }).first('caller_demoted_at');
     if (!row || row.caller_demoted_at) return 'skipped';
