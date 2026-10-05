@@ -151,7 +151,8 @@ function accessCodeKind(text) {
 //  - it ends its sentence or its line;
 //  - the message has no negation, hedge, dead-code report, question, or word
 //    that continues a credential (then, press, pound, star);
-//  - the message names one kind of code.
+//  - the message names one kind of code and a credential word (code, pin,
+//    combo, keypad).
 // Anything else leaves the field empty for a person.
 const CODE_BLOCKERS = /\b(?:not|never|no|then|followed|plus|press|pound|star|hash|asterisk)\b|n['’]t/i;
 function matchesNaturalAccessCode({ field, value }, { messageBody = '', properties = [] } = {}) {
@@ -169,6 +170,9 @@ function matchesNaturalAccessCode({ field, value }, { messageBody = '', properti
   const digits = candidate.replace(/\D/g, '');
   if (properties.some((property) => (String(property.address_line1 || '').match(/^\s*(\d+)/) || [])[1] === digits
     || String(property.zip || '').slice(0, 5) === digits)) return false;
+  // A kind word alone does not make a number a credential ("the gate repair
+  // costs 1500"): the message must also name a code.
+  if (!/\b(?:code|pin|combo|combination|passcode|password|key ?pad)\b/i.test(body)) return false;
   return accessCodeKind(body) === field;
 }
 
