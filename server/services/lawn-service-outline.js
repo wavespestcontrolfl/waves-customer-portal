@@ -1,11 +1,13 @@
 const crypto = require('crypto');
-const protocols = require('../config/protocols.json');
+const { lawnProtocols } = require('./lawn-program');
+const featureGates = require('../config/feature-gates');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const TEMPLATE_VERSION = 'mvp-1';
 const CONTENT_LIBRARY_VERSION = 'seed-v1';
 const PRODUCT_REGISTRY_VERSION = 'public-facts-v1';
 const PROTOCOL_VERSION = 'lawn-v4';
+const V13_PROTOCOL_VERSION = 'lawn-v13';
 const LAWN_SERVICE_TIME_ZONE = 'America/New_York';
 
 const BANNED_PHRASES = [
@@ -221,15 +223,21 @@ function customerProtocolBullets(visit) {
     .map((line) => `${line} may be relevant when turf condition, weather, label directions, and local rules allow.`);
 }
 
+// The stamp on an outline and the staleness check against it: the v13 program
+// (GATE_LAWN_V13) writes its own, so a flip shows older outlines as updated.
+function protocolVersion() {
+  return featureGates.lawnV13Live?.() === true ? V13_PROTOCOL_VERSION : PROTOCOL_VERSION;
+}
+
 function protocolVisitForMonth(turfType, month) {
-  const track = protocols.lawn?.[turfType];
+  const track = lawnProtocols()?.[turfType];
   if (!track) return null;
   const monthName = MONTHS[Number(month) - 1];
   return (track.visits || []).find((visit) => String(visit.month || '').toLowerCase() === monthName.toLowerCase()) || null;
 }
 
 function protocolTrack(turfType) {
-  return protocols.lawn?.[turfType] || null;
+  return lawnProtocols()?.[turfType] || null;
 }
 
 async function loadApprovedModules(db) {
@@ -729,7 +737,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
       templateVersion: TEMPLATE_VERSION,
       contentLibraryVersion: CONTENT_LIBRARY_VERSION,
       productRegistryVersion: PRODUCT_REGISTRY_VERSION,
-      protocolVersion: PROTOCOL_VERSION,
+      protocolVersion: protocolVersion(),
     },
   };
 }
@@ -738,7 +746,7 @@ module.exports = {
   BANNED_PHRASES,
   CONTENT_LIBRARY_VERSION,
   PRODUCT_REGISTRY_VERSION,
-  PROTOCOL_VERSION,
+  protocolVersion,
   TEMPLATE_VERSION,
   buildOutline,
   createPublicToken,

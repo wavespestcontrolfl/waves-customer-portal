@@ -5540,12 +5540,29 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           loadProfile: (row) => require('../service-completion-profiles').resolveCompletionProfileForScheduledService(row, knex, { strict: true }),
         });
       }
+      // GATE_LAWN_V13: the program line's v13 sentences are for a visit whose plan
+      // resolved the staged v13 version only. The version the closeout recorded
+      // (completion ledger row, else the scheduled visit's pin) rides in; a visit
+      // with neither (completed before protocol assignment existed, or never
+      // attributed) passes none and keeps the legacy sentences. An unreadable
+      // record means no line.
+      let pinnedProtocolVersion = null;
+      if (programVisit && typeof featureGates.lawnV13Live === 'function' && featureGates.lawnV13Live()) {
+        try {
+          const completion = await knex('lawn_protocol_service_completions').where({ service_record_id: service.id }).first('protocol_version');
+          const scheduled = !completion?.protocol_version && service.scheduled_service_id
+            ? await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('lawn_protocol_version') : null;
+          pinnedProtocolVersion = completion?.protocol_version || scheduled?.lawn_protocol_version || null;
+        // read-failure-exempt: only the program line depends on the pin; an unreadable pin drops it (old season note), no treatment-memory input.
+        } catch { programVisit = false; }
+      }
       reportV2 = buildLawnReportV2({
         lawnAssessment,
         wateringInstruction,
         mowingHeight,
         applications,
         ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
+        ...(pinnedProtocolVersion ? { protocolVersion: pinnedProtocolVersion } : {}),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structuredCustomerConcern(structured),
         waterSnapshot,

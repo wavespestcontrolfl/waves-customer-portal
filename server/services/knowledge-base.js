@@ -830,6 +830,7 @@ const KnowledgeBaseService = {
     // 'standard'), which previously rendered as literal "$inventory" garbage.
     try {
       const protocols = require('../config/protocols.json');
+      const { lawnProtocols } = require('./lawn-program');
       const costLine = (v) => {
         const mc = Number(v.material_cost);
         const lc = Number(v.labor_cost);
@@ -856,7 +857,7 @@ const KnowledgeBaseService = {
         await upsert(slug, track.name || programKey, lines.join('\n'), 'protocols', tags);
       };
 
-      for (const [trackId, track] of Object.entries(protocols.lawn || {})) {
+      for (const [trackId, track] of Object.entries(lawnProtocols() || {})) {
         await syncProgram(trackId, track, ['lawn', trackId]);
       }
       for (const [programKey, program] of Object.entries(protocols)) {
