@@ -1003,4 +1003,120 @@ jest.setTimeout(30000);
     expect(await sweepMissedCallTextBacks({ limit: 50 })).toEqual({ sent: 1, offered: 1 });
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
   });
+
+  describe('empty voicemail (GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL)', () => {
+    const REJECTED = '[Recording had no usable speech; an implausible transcription was rejected.]';
+    const gates = (emptyVoicemail) => isEnabled.mockImplementation((gate) => (gate === 'missedCallTextBackEmptyVoicemail' ? emptyVoicemail : true));
+    // The processor's rejection write (transcriptRejectionUpdate): voicemail
+    // outcome, 'rejected', stamped when it lands (updated_at).
+    function rejected(minutesAgo, landedMinutesAgo, extra = {}) {
+      return call(minutesAgo, {
+        answered_by: 'voicemail',
+        call_outcome: 'voicemail',
+        status: 'completed',
+        recording_sid: `RE${randomUUID().replaceAll('-', '')}`,
+        recording_url: 'https://example.invalid/recording',
+        transcription_status: 'rejected',
+        transcription: REJECTED,
+        updated_at: new Date(NOW - landedMinutesAgo * 60 * 1000),
+        ...extra,
+      });
+    }
+
+    test('gate off: a rejected recording is untouched — hook and sweep send nothing', async () => {
+      gates(false);
+      const row = rejected(READY_MINUTES_AGO + 4, 1);
+      await database('call_log').insert(row);
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'not_missed' });
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 0 });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      expect((await stored(row)).metadata).toEqual({});
+    });
+
+    test('gate on: the sweep texts a 25s+ unknown caller whose recording was rejected, and stamps the outcome', async () => {
+      gates(true);
+      const row = rejected(READY_MINUTES_AGO + 4, 1);
+      await database('call_log').insert(row);
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const after = await stored(row);
+      expect(after.metadata.missed_call_text_outcome).toBe('sent');
+      expect(after.metadata.missed_call_text_empty_voicemail).toBe(true);
+      expect(await claimRow()).toMatchObject({ outcome: CLAIM.SENT, call_log_id: row.id });
+    });
+
+    test('gate on: a marker-only completed transcript is texted too', async () => {
+      gates(true);
+      const row = rejected(READY_MINUTES_AGO + 4, 1, { transcription_status: 'completed', transcription: '[VOICEMAIL]' });
+      await database('call_log').insert(row);
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
+    });
+
+    test('gate on: a recording still pending transcription is not texted by hook or sweep', async () => {
+      gates(true);
+      const row = rejected(READY_MINUTES_AGO + 4, 1, { transcription_status: 'pending', transcription: null });
+      await database('call_log').insert(row);
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 0 });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'not_missed' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: a recording with a real message stays the voicemail lane\'s', async () => {
+      gates(true);
+      const row = rejected(READY_MINUTES_AGO + 4, 1, { transcription_status: 'completed', transcription: 'Hi, please call me about ants.' });
+      await database('call_log').insert(row);
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 0 });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'not_missed' });
+    });
+
+    test('gate on: the 25s floor still applies', async () => {
+      gates(true);
+      const row = rejected(READY_MINUTES_AGO + 4, 1, { duration_seconds: 20 });
+      await database('call_log').insert(row);
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 0 });
+      expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'not_missed' });
+    });
+
+    test('gate on: a rejection that lands late opens the send slot when it lands', async () => {
+      gates(true);
+      // Call ended ~39 minutes ago; the rejection landed 5 minutes ago. A
+      // no-recording call this old is long past its slot.
+      const row = rejected(40, 5);
+      await database('call_log').insert(row);
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
+      expect((await stored(row)).metadata.missed_call_text_outcome).toBe('sent');
+    });
+
+    test('gate on: a rejection that landed over 30 minutes ago has missed its slot', async () => {
+      gates(true);
+      const row = rejected(60, 40);
+      await database('call_log').insert(row);
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 1 });
+      expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:too_old');
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: a transcript that gained words after the read loses the lease', async () => {
+      gates(true);
+      const row = rejected(READY_MINUTES_AGO + 4, 1);
+      await database('call_log').insert(row);
+      const stale = await stored(row);
+      await database('call_log').where({ id: row.id }).update({ transcription_status: 'completed', transcription: 'Please call me back about termites.' });
+      const { _private: { attemptForRow } } = require('../services/missed-call-text-back');
+      expect(await attemptForRow(stale, NOW)).toEqual({ outcome: 'skipped', reason: 'lease_lost' });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: other rules hold — a customer on file, and a voicemail-lane alert, still skip', async () => {
+      gates(true);
+      const known = rejected(READY_MINUTES_AGO + 4, 1, { from_phone: '+19415550177' });
+      const alerted = rejected(READY_MINUTES_AGO + 4, 1, { from_phone: '+19415550178', voicemail_callback_alerted_at: new Date(NOW - 60 * 1000) });
+      await database('customers').insert({ id: randomUUID(), first_name: 'Test', phone: '+19415550177' });
+      await database('call_log').insert([known, alerted]);
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 1 });
+      expect((await stored(known)).metadata.missed_call_text_outcome).toBe('skipped:existing_customer');
+      expect((await stored(alerted)).metadata).toEqual({});
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+  });
 });

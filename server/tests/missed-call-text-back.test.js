@@ -23,8 +23,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const {
   GATE, MESSAGE_TYPE, CLAIM, MAX_CALL_AGE_MS, SEND_SLOT_MS, VOICEMAIL_GRACE_MS,
-  _private: { textBackCoreEligible, callEndedAt, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
+  _private: { textBackCoreEligible, emptyVoicemailOn, EMPTY_VOICEMAIL_LANDING_MS, callEndedAt, sendSlotDeadline, tooOldToText, callbackClause, fromNumberForDialed, normalizePhoneE164 },
 } = require('../services/missed-call-text-back');
+const { isEnabled } = require('../config/feature-gates');
+const {
+  missedCallShapeEligible, missedCallEligible, isEmptyVoicemailRecording,
+} = require('../services/missed-call-bell');
 
 // 2026-09-08T15:00Z = 11:00 ET (EDT) — inside the 8am–8pm send window.
 const IN_WINDOW = new Date('2026-09-08T15:00:00Z').getTime();
@@ -282,5 +286,131 @@ describe('seeded copy (server/models/migrations/20260926180000_missed_call_text_
   test('renders with the formatted dialed line in the callback_clause', () => {
     const rendered = TEMPLATE.body.replace('{callback_clause}', callbackClause('+19412975749'));
     expect(rendered).toBe("Hi there, it's Waves. Sorry we missed your call. Text us here with what you need, or call back anytime at (941) 297-5749.");
+  });
+});
+
+// A recording the processor finished with and found speech-less
+// (call-recording-processor.js transcriptRejectionUpdate: status 'rejected',
+// answered_by/call_outcome 'voicemail').
+const REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
+function emptyVoicemailCall(extra = {}) {
+  return call({
+    answered_by: 'voicemail',
+    call_outcome: 'voicemail',
+    recording_sid: 'RE123',
+    recording_url: 'https://example.invalid/r',
+    transcription_status: 'rejected',
+    transcription: REJECTED_SENTINEL,
+    ...extra,
+  });
+}
+
+describe('empty voicemail (GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL)', () => {
+  const OPTS = { emptyVoicemail: true };
+
+  test('the widening is its own gate, read through isEnabled', () => {
+    isEnabled.mockImplementation((gate) => gate === 'missedCallTextBackEmptyVoicemail');
+    expect(emptyVoicemailOn()).toBe(true);
+    isEnabled.mockImplementation((gate) => gate !== 'missedCallTextBackEmptyVoicemail');
+    expect(emptyVoicemailOn()).toBe(false);
+    isEnabled.mockImplementation(() => true);
+  });
+
+  test('gate off (no option): a rejected recording is still the voicemail lane\'s — unchanged', () => {
+    expect(textBackCoreEligible(emptyVoicemailCall())).toBe(false);
+    expect(textBackCoreEligible(emptyVoicemailCall(), { emptyVoicemail: false })).toBe(false);
+    expect(textBackCoreEligible(call({ recording_url: 'https://example.invalid/r' }))).toBe(false);
+  });
+
+  test('gate on: a 25s+ unknown caller with a rejected recording is eligible', () => {
+    expect(textBackCoreEligible(emptyVoicemailCall(), OPTS)).toBe(true);
+    expect(textBackCoreEligible(emptyVoicemailCall({ duration_seconds: 25 }), OPTS)).toBe(true);
+  });
+
+  test('gate on: a completed transcript of only the dead-air markers is eligible', () => {
+    for (const transcription of ['[VOICEMAIL]', '[NO SPEECH]', '[voicemail] [no speech].', REJECTED_SENTINEL]) {
+      expect(textBackCoreEligible(emptyVoicemailCall({ transcription_status: 'completed', transcription }), OPTS)).toBe(true);
+    }
+  });
+
+  test('gate on: a recording still pending transcription is NOT eligible', () => {
+    for (const transcription_status of ['pending', 'processing', null, undefined]) {
+      expect(textBackCoreEligible(emptyVoicemailCall({ transcription_status, transcription: null }), OPTS)).toBe(false);
+    }
+    expect(textBackCoreEligible(emptyVoicemailCall({ transcription_status: 'completed', transcription: null }), OPTS)).toBe(false);
+  });
+
+  test('gate on: a recording with real words, or a failed transcription, is NOT eligible', () => {
+    expect(textBackCoreEligible(emptyVoicemailCall({ transcription_status: 'completed', transcription: 'Hi, I need pest control, call me back.' }), OPTS)).toBe(false);
+    expect(textBackCoreEligible(emptyVoicemailCall({ transcription_status: 'completed', transcription: '[VOICEMAIL] call me about ants' }), OPTS)).toBe(false);
+    expect(textBackCoreEligible(emptyVoicemailCall({ transcription_status: 'failed', transcription: null }), OPTS)).toBe(false);
+    expect(textBackCoreEligible(emptyVoicemailCall({ transcription_status: 'rejected', transcription: 'real words survived' }), OPTS)).toBe(false);
+  });
+
+  test('gate on: every other rule still applies', () => {
+    expect(textBackCoreEligible(emptyVoicemailCall({ duration_seconds: 24 }), OPTS)).toBe(false); // 25s floor
+    expect(textBackCoreEligible(emptyVoicemailCall({ customer_id: 'cust-1' }), OPTS)).toBe(false); // unknown callers only
+    expect(textBackCoreEligible(emptyVoicemailCall({ from_phone: 'anonymous' }), OPTS)).toBe(false);
+    expect(textBackCoreEligible(emptyVoicemailCall({ voicemail_callback_alerted_at: new Date(IN_WINDOW) }), OPTS)).toBe(false);
+    expect(textBackCoreEligible(emptyVoicemailCall({ call_outcome: 'ai_handled' }), OPTS)).toBe(false);
+    expect(textBackCoreEligible(emptyVoicemailCall({ call_outcome: 'ai_transferred' }), OPTS)).toBe(false);
+    expect(textBackCoreEligible(emptyVoicemailCall({ answered_by: 'human' }), OPTS)).toBe(false);
+  });
+
+  test('gate on does not change a call with no recording at all', () => {
+    expect(textBackCoreEligible(call(), OPTS)).toBe(true);
+    expect(textBackCoreEligible(call({ duration_seconds: 10 }), OPTS)).toBe(false);
+  });
+
+  test('send slot: opens when the rejection lands, not at the 5-minute grace', () => {
+    const MIN = 60 * 1000;
+    // Call ended 11:00 ET (created + 40s duration); the processor rejects it at 11:12.
+    const landed = IN_WINDOW + 12 * MIN;
+    const row = emptyVoicemailCall({ updated_at: new Date(landed) });
+    expect(sendSlotDeadline(row)).toBe(landed + SEND_SLOT_MS);
+    // Textable 25 minutes after landing (a no-recording call's slot would be long closed)...
+    expect(tooOldToText(row, landed + 25 * MIN)).toBe(false);
+    // ...and not after the slot closes.
+    expect(tooOldToText(row, landed + 31 * MIN)).toBe(true);
+  });
+
+  test('send slot: a rejection that lands inside the grace keeps the normal slot', () => {
+    const row = emptyVoicemailCall({ updated_at: new Date(IN_WINDOW + 60 * 1000) });
+    expect(sendSlotDeadline(row)).toBe(IN_WINDOW + 40 * 1000 + VOICEMAIL_GRACE_MS + SEND_SLOT_MS);
+  });
+
+  test('send slot: a very late rejection cannot slide the slot out by hours', () => {
+    const row = emptyVoicemailCall({ updated_at: new Date(IN_WINDOW + 5 * 60 * 60 * 1000) });
+    expect(sendSlotDeadline(row)).toBe(IN_WINDOW + 40 * 1000 + VOICEMAIL_GRACE_MS + EMPTY_VOICEMAIL_LANDING_MS + SEND_SLOT_MS);
+  });
+
+  test('send slot: a call with no recording is unchanged by the empty-voicemail rule', () => {
+    const MIN = 60 * 1000;
+    const row = call({ updated_at: new Date(IN_WINDOW + 12 * MIN) });
+    expect(sendSlotDeadline(row)).toBe(callEndedAt(row) + VOICEMAIL_GRACE_MS + SEND_SLOT_MS);
+  });
+});
+
+describe('missed-call bell lane is unchanged by the empty-voicemail widening', () => {
+  const BELL_OPTS = { unknownCallers: true };
+
+  test('missedCallShapeEligible defaults: any recording is still the voicemail lane\'s', () => {
+    expect(missedCallShapeEligible(emptyVoicemailCall(), BELL_OPTS)).toBe(false);
+    expect(missedCallShapeEligible(emptyVoicemailCall(), { ...BELL_OPTS, emptyVoicemail: false })).toBe(false);
+    expect(missedCallShapeEligible(call({ recording_sid: 'RE1' }), BELL_OPTS)).toBe(false);
+    expect(missedCallShapeEligible(call(), BELL_OPTS)).toBe(true);
+  });
+
+  test('missedCallEligible (what ringMissedCallIfUnanswered calls) never rings an empty-voicemail call', () => {
+    expect(missedCallEligible(emptyVoicemailCall(), IN_WINDOW, BELL_OPTS)).toBe(false);
+    // A known customer with an empty recording: still the voicemail lane's.
+    expect(missedCallEligible(emptyVoicemailCall({ customer_id: 'cust-1' }), IN_WINDOW)).toBe(false);
+  });
+
+  test('isEmptyVoicemailRecording: needs a recording and a finished no-speech verdict', () => {
+    expect(isEmptyVoicemailRecording(emptyVoicemailCall())).toBe(true);
+    expect(isEmptyVoicemailRecording(call({ transcription_status: 'rejected', transcription: REJECTED_SENTINEL }))).toBe(false); // no recording
+    expect(isEmptyVoicemailRecording(emptyVoicemailCall({ transcription_status: 'pending', transcription: null }))).toBe(false);
+    expect(isEmptyVoicemailRecording(null)).toBe(false);
   });
 });
