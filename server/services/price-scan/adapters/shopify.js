@@ -7,10 +7,9 @@
 // variant's size (variant.title), price (in cents), and stock (available). That's more
 // reliable than scraping the DOM, so this adapter searches (/search?q=), picks the best
 // product link, then reads .js and size-matches via the shared pickVariantOffer.
-const { searchQuery, selectSearchCandidates } = require('./base');
-const { pickVariantOffer, extractSizeToken, quantityToOz, verifyMatch } = require('../extract');
+const { searchQuery, selectSearchCandidates, targetOzOf } = require('./base');
+const { pickVariantOffer, extractSizeToken, verifyMatch } = require('../extract');
 const { isUnavailable } = require('../compare');
-const { convertToOz } = require('../../product-costing');
 // Approved storefront hosts — the weekly scan navigates the server browser to this origin,
 // so the adapter MUST anchor the actual hostname to the allowlist before navigating. Shared
 // with the registry (the vendor-routing layer) so the two allowlists can't drift.
@@ -144,101 +143,121 @@ function hazmatFromShopify(data) {
   });
 }
 
+// ORDERED sources of product links for a search term; the first that returns any wins.
+// Shopify's /search?q= page is SERVER-RENDERED for most themes — the result links are in the
+// HTML at domcontentloaded — so we must NOT waitForSelector: a vendor that doesn't carry the
+// product would otherwise burn the full timeout per product, and the serial weekly scan
+// (25-product batches) turns that into minutes. A real no-match returns [] instantly.
+// Client-rendered search pages (Gemplers) have no product links in the DOM yet, so the
+// theme-independent predictive-search JSON is the second source.
+const LINK_SOURCES = [
+  (page) => page.$$eval('a[href*="/products/"]', (els) => [...new Set(els.map((e) => e.getAttribute('href')).filter(Boolean))]),
+  async (page, origin, q, timeout) => {
+    await page.goto(`${origin}/search/suggest.json?q=${encodeURIComponent(q)}&resources%5Btype%5D=product&resources%5Blimit%5D=10`, { waitUntil: 'domcontentloaded', timeout });
+    const txt = await page.evaluate(() => (document.body ? document.body.innerText : ''));
+    return handlesFromSuggest(JSON.parse(txt)).map((h) => `/products/${h}`);
+  },
+];
+
+async function findProductLinks(page, origin, q, timeout) {
+  await page.goto(`${origin}/search?q=${encodeURIComponent(q)}`, { waitUntil: 'domcontentloaded', timeout });
+  for (const source of LINK_SOURCES) {
+    const found = await source(page, origin, q, timeout).catch(() => []);
+    if (found.length) return found;
+  }
+  return [];
+}
+
+const descriptionText = (data) => String(data.description || data.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000) || null;
+
+// The scan candidate for a size-matched offer. weight_lb is the PRICED variant's real listing
+// weight (grams -> lb), the only weight a weight-table vendor may treat as firm.
+function buildCandidate(data, offer, proofUrl, ctx) {
+  const variant = (data.variants || []).find((v) => v.id === offer.variantId);
+  const grams = Number(variant && variant.weight);
+  return {
+    price: offer.price, currency: 'USD', availability: offer.availability,
+    name: data.title || null, quantity: offer.quantity, source_url: proofUrl,
+    // The description as text, so a body EPA reg can corroborate the match (distinguishing
+    // same-brand siblings, e.g. Bifen I/T vs Bifen XTS).
+    text: descriptionText(data),
+    competing_same_size: !!offer.competingSameSize, price_type: 'public', vendor_id: ctx.vid, vendor: ctx.vname,
+    free_shipping: freeShippingFromShopify(data), // per-item "ships free" flag (flagged-free vendors only)
+    hazmat_shipping: hazmatFromShopify(data), // hazardous/DOT item: hazmat-extra vendors price it as an estimate
+    weight_lb: grams > 0 ? grams / 453.592 : null,
+  };
+}
+
+// A priced page with no size-matched variant: the first variant as an unverified fallback
+// (-> a precise 'unverified' skip), or null when the product lists no variants.
+function fallbackCandidate(data, productUrl, ctx) {
+  const first = data.variants && data.variants[0];
+  if (!first) return null;
+  return {
+    price: Number(first.price) / 100, currency: 'USD',
+    availability: first.available === false ? 'out_of_stock' : 'unknown',
+    name: data.title || null, quantity: extractSizeToken(data.title) || null,
+    source_url: productUrl, price_type: 'public', vendor_id: ctx.vid, vendor: ctx.vname,
+  };
+}
+
+// Tier of a size-matched candidate: 0 = failed verification, 1 = verified but unbuyable,
+// 2 = buyable name+size match lacking EPA confirmation, 3 = EPA-confirmed (or no EPA needed)
+// and buyable. A same-brand sibling that only passes name+size must not win when the product
+// has an EPA reg an EPA-confirmed candidate could match later.
+function verifyTier(cand, product) {
+  const verdict = verifyMatch({ name: cand.name, text: cand.text, quantity: cand.quantity, competingOffers: cand.competing_same_size }, product);
+  if (!verdict.matched) return 0;
+  if (isUnavailable(cand)) return 1;
+  return (!product.epaReg || verdict.signals.epa) ? 3 : 2;
+}
+
+const vendorIds = (vendor) => ({ vid: vendor.vendor_id || vendor.id, vname: vendor.name || vendor.vendor_id || vendor.id });
+
+// Proof link points at the PRICED variant, not the page default — on a multi-variant product
+// the matched size is often not the default, so the review queue must open the exact variant
+// the price/availability came from.
+const proofUrlOf = (productUrl, offer) => (offer.variantId != null ? `${productUrl}?variant=${offer.variantId}` : productUrl);
+
 async function fetchCandidate(page, vendor, product) {
   const timeout = DEFAULT_TIMEOUT;
   const origin = baseOrigin(vendor);
   if (!origin) return null;
-  const targetOz = product.packSizeValue != null && product.packSizeUnit
-    ? convertToOz(product.packSizeValue, product.packSizeUnit)
-    : quantityToOz(product.quantity);
+  const targetOz = targetOzOf(product);
+  const q = searchQuery(product);
+  if (!vendor.url && !q) return null;
 
-  // Resolve candidate product URLs: an explicit direct URL, else search by name.
-  let links;
-  if (vendor.url) {
-    links = [vendor.url];
-  } else {
-    const q = searchQuery(product);
-    if (!q) return null;
-    // Shopify's /search?q= page is SERVER-RENDERED — the result links are in the HTML at
-    // domcontentloaded — so we must NOT waitForSelector here: a vendor that doesn't carry
-    // the product would otherwise burn the full timeout per product, and the serial weekly
-    // scan (25-product batches) turns that into minutes. Read links straight from the DOM;
-    // a real no-match returns [] instantly. (Mirrors base.js's no-block-for-server-rendered.)
-    await page.goto(`${origin}/search?q=${encodeURIComponent(q)}`, { waitUntil: 'domcontentloaded', timeout });
-    let found = await page.$$eval('a[href*="/products/"]', (els) => [...new Set(els.map((e) => e.getAttribute('href')).filter(Boolean))]).catch(() => []);
-    // Client-rendered search pages (Gemplers) have no product links in the DOM yet; fall back
-    // to Shopify's predictive-search JSON endpoint, which is theme-independent.
-    if (!found.length) {
-      try {
-        await page.goto(`${origin}/search/suggest.json?q=${encodeURIComponent(q)}&resources%5Btype%5D=product&resources%5Blimit%5D=10`, { waitUntil: 'domcontentloaded', timeout });
-        const txt = await page.evaluate(() => (document.body ? document.body.innerText : ''));
-        found = handlesFromSuggest(JSON.parse(txt)).map((h) => `/products/${h}`);
-      } catch (e) { found = []; }
-    }
-    links = selectSearchCandidates(found, product, MAX_CANDIDATES);
-  }
+  // Candidate product URLs: an explicit direct URL, else search by name.
+  const links = vendor.url ? [vendor.url]
+    : selectSearchCandidates(await findProductLinks(page, origin, q, timeout), product, MAX_CANDIDATES);
 
-  const vid = vendor.vendor_id || vendor.id;
-  const vname = vendor.name || vendor.vendor_id || vendor.id;
-  const wantsEpa = !!(product && product.epaReg);
+  const ctx = vendorIds(vendor);
   // Search is fuzzy/relevance-ranked, so open the top candidates and VERIFY each (name/EPA/
   // size) before trusting it — a wrong same-size SIBLING ranked first must not block the real
-  // match. Prefer EPA-confirmed + buyable; then a buyable name+size match; then a verified-
-  // but-unbuyable; then the best priced+size-matched page (a precise 'unverified' skip).
-  let firstBuyable = null;
-  let firstUnbuyable = null;
+  // match. Prefer tier 3 (returned at once), then a buyable name+size match, then a verified-
+  // but-unbuyable one, then the best priced+size-matched page (a precise 'unverified' skip).
+  const picks = {};
   let fallback = null;
   let candidateError = null; // a per-candidate fetch failure, surfaced only if nothing verifies
   for (const link of links) {
     const handle = handleOf(link);
-    if (!handle) continue;
-    let data;
-    try { data = await fetchProductJs(page, origin, handle, timeout); } catch (e) { candidateError = e; continue; }
+    let data = null;
+    try { data = handle ? await fetchProductJs(page, origin, handle, timeout) : null; } catch (e) { candidateError = e; }
     if (!data) continue;
-    const offer = targetOz ? pickVariantOffer(variantsFromShopify(data), { targetOz }) : null;
     const productUrl = `${origin}/products/${handle}`;
-    // Proof link points at the PRICED variant, not the page default — on a multi-variant
-    // product the matched size is often not the default, so the review queue must open the
-    // exact variant the price/availability came from. Falls back to the bare product URL.
-    const proofUrl = offer && offer.variantId != null ? `${productUrl}?variant=${offer.variantId}` : productUrl;
-    if (!offer) {
-      if (!fallback && data.variants && data.variants.length) {
-        fallback = {
-          price: Number(data.variants[0].price) / 100, currency: 'USD',
-          availability: data.variants[0].available === false ? 'out_of_stock' : 'unknown',
-          name: data.title || null, quantity: extractSizeToken(data.title) || null,
-          source_url: productUrl, price_type: 'public', vendor_id: vid, vendor: vname,
-        };
-      }
-      continue;
-    }
-    // Strip the product description to text so a body EPA reg can corroborate the match
-    // (distinguishing same-brand siblings, e.g. Bifen I/T vs Bifen XTS).
-    const bodyText = String(data.description || data.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000) || null;
-    const cand = {
-      price: offer.price, currency: 'USD', availability: offer.availability,
-      name: data.title || null, quantity: offer.quantity, source_url: proofUrl, text: bodyText,
-      competing_same_size: !!offer.competingSameSize, price_type: 'public', vendor_id: vid, vendor: vname,
-      free_shipping: freeShippingFromShopify(data), // per-item "ships free" flag (flagged-free vendors only)
-      hazmat_shipping: hazmatFromShopify(data), // hazardous/DOT item: hazmat-extra vendors price it as an estimate
-    };
-    const verdict = verifyMatch({ name: cand.name, text: bodyText, quantity: cand.quantity, competingOffers: cand.competing_same_size }, product);
-    if (verdict.matched) {
-      const buyable = !isUnavailable(cand);
-      // EPA-confirmed + buyable is ideal; a same-brand sibling that only passes name+size must
-      // not win when the product has an EPA reg an EPA-confirmed candidate could match later.
-      if ((!wantsEpa || verdict.signals.epa) && buyable) return cand;
-      if (buyable) { if (!firstBuyable) firstBuyable = cand; }
-      else if (!firstUnbuyable) firstUnbuyable = cand;
-    }
-    if (!fallback) fallback = cand; // priced + size-matched, unverified -> precise 'unverified' skip
+    const offer = targetOz ? pickVariantOffer(variantsFromShopify(data), { targetOz }) : null;
+    if (!offer) { fallback = fallback || fallbackCandidate(data, productUrl, ctx); continue; }
+    const cand = buildCandidate(data, offer, proofUrlOf(productUrl, offer), ctx);
+    const tier = verifyTier(cand, product);
+    if (tier === 3) return cand;
+    if (tier && !picks[tier]) picks[tier] = cand;
+    fallback = fallback || cand; // priced + size-matched, unverified -> precise 'unverified' skip
   }
-  // If NOTHING verified and a candidate's .js fetch threw, surface that error as a
-  // precise 'fetch_error': the scan was INCOMPLETE (the candidate that errored might
-  // have been the real match), so a priced-but-unverified fallback must not report a
-  // clean 'unverified' (which reads as "found it, no match here, don't retry") when the
-  // truth is "a fetch failed, retry". Only a verified match suppresses the error.
-  const verified = firstBuyable || firstUnbuyable;
+  // If NOTHING verified and a candidate's .js fetch threw, surface that error as a precise
+  // 'fetch_error': the scan was INCOMPLETE (the candidate that errored might have been the
+  // real match), so a priced-but-unverified fallback must not report a clean 'unverified'.
+  // Only a verified match suppresses the error.
+  const verified = picks[2] || picks[1];
   if (!verified && candidateError) throw candidateError;
   return verified || fallback;
 }

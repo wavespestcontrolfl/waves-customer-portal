@@ -243,7 +243,9 @@ describe('Shopify additions: Golf Course Lawn Store + Gemplers', () => {
 
   test('shipping rules for the two stores', () => {
     const gem = (price, quantity) => shippingFor({ vendor: { source_url: 'https://gemplers.com/products/x' }, price, quantity });
-    expect(gem(33.99, '17 oz')).toMatchObject({ amount: 10.99, basis: 'weight_table' }); // aerosol ~1 lb... under 5 lb
+    // plain "oz" is ambiguous (fluid vs weight ounce): the table amount stays, labelled an estimate
+    expect(gem(33.99, '17 oz')).toMatchObject({ amount: 10.99, basis: 'estimated' });
+    expect(gem(33.99, '17 oz').note).toMatch(/weight estimated/);
     expect(gem(274.99, '1 gal').basis).toBe('free_over');
     const golf = { vendor: { source_url: 'https://golfcourselawn.store/products/x' }, price: 155.99, quantity: '15 lb' };
     expect(shippingFor(golf).basis).toBe('estimated');
@@ -276,6 +278,89 @@ describe('search wait covers every configured link selector', () => {
     const page = fakePage();
     await a.fetchCandidate(page, { vendor_id: 'v' }, { productName: 'x' });
     expect(page.calls.wait[0].sel).toBe('a.product-link');
+  });
+});
+
+describe('collectSnapshot variant sources (Magento config, then DOM rows)', () => {
+  const magentoHtml = (extra = '') => `<html><body><h1>Prod</h1>${extra}
+    <script type="text/x-magento-init">{"x":{"y":{"spConfig":{
+      "optionPrices":{"11":{"finalPrice":{"amount":44.5}},"12":{"finalPrice":{"amount":30},"size":"1 Pint"},"13":{"finalPrice":{"amount":9}}},
+      "attributes":{"a1":{"options":[{"id":"o1","label":"1 Gallon"},{"id":"o3","label":"  "}]}},
+      "index":{"11":{"a1":"o1"},"13":{"a1":"o3"}},
+      "salable":{"a1":{"o1":["11"]}}}}}}</script></body></html>`;
+  const cfg = { magentoVariants: true, titleSelector: 'h1', priceSelectors: [] };
+
+  test('Magento jsonConfig: size from the option label or optionPrices.size, stock from the salable map', () => {
+    const snap = snapshotOf(magentoHtml(), cfg);
+    expect(snap.variants).toEqual([
+      { size: '1 Gallon', price: 44.5, availabilityRaw: 'InStock' },
+      { size: '1 Pint', price: 30, availabilityRaw: null },
+    ]); // child 13 has a blank label -> skipped
+  });
+
+  test('a Magento variant that is not salable is OutOfStock', () => {
+    const html = magentoHtml().replace('"salable":{"a1":{"o1":["11"]}}', '"salable":{"a1":{"o1":["99"]}}');
+    expect(snapshotOf(html, cfg).variants[0]).toMatchObject({ size: '1 Gallon', availabilityRaw: 'OutOfStock' });
+  });
+
+  test('the Magento source wins; DOM rows are only the fallback; neither opted in -> none', () => {
+    const rows = '<div class="vl"><span class="n">Prod 1 Qt.</span><span itemprop="price" content="12.5"></span></div>';
+    const both = snapshotOf(magentoHtml(rows), { ...cfg, variantRows: { line: '.vl', name: '.n', price: '[itemprop="price"]' } });
+    expect(both.variants.map((v) => v.size)).toEqual(['1 Gallon', '1 Pint']);
+    const rowsOnly = snapshotOf(magentoHtml(rows), { ...cfg, magentoVariants: false, variantRows: { line: '.vl', name: '.n', price: '[itemprop="price"]' } });
+    expect(rowsOnly.variants).toEqual([{ size: 'Prod 1 Qt.', price: 12.5, availabilityRaw: null }]);
+    expect(snapshotOf(magentoHtml(rows), { ...cfg, magentoVariants: false }).variants).toEqual([]);
+  });
+});
+
+describe('shopify fetchCandidate link sources and weight', () => {
+  const data = () => JSON.parse(read('golfcourselawn-product.json'));
+  const vendor = { vendor_id: 'v1', name: 'Golf Course Lawn Store', website: 'https://golfcourselawn.store' };
+  const product = { name: 'Acelepryn G Insecticide', productName: 'Acelepryn G Insecticide', quantity: '25 lb' };
+  function pageWith({ dom = [], suggest = null }) {
+    const urls = [];
+    let last = '';
+    return {
+      urls,
+      goto: async (u) => { urls.push(u); last = u; },
+      $$eval: async () => dom,
+      evaluate: async () => {
+        if (/suggest\.json/.test(last)) return JSON.stringify(suggest);
+        return JSON.stringify(data());
+      },
+    };
+  }
+
+  test('DOM links are used when present (suggest.json is not fetched)', async () => {
+    const page = pageWith({ dom: ['/products/acelepryn-g-insecticide-grub-and-armyworm-control'] });
+    const cand = await shopify.fetchCandidate(page, vendor, product);
+    expect(cand.price).toBe(155.99);
+    expect(page.urls.some((u) => /suggest\.json/.test(u))).toBe(false);
+  });
+
+  test('no DOM links -> falls back to the predictive-search handles', async () => {
+    const suggest = { resources: { results: { products: [{ handle: 'acelepryn-g-insecticide-grub-and-armyworm-control' }] } } };
+    const page = pageWith({ dom: [], suggest });
+    const cand = await shopify.fetchCandidate(page, vendor, product);
+    expect(cand).toMatchObject({ price: 155.99, quantity: '25 lb' });
+    expect(page.urls.some((u) => /suggest\.json/.test(u))).toBe(true);
+  });
+
+  test('neither source finds anything -> null', async () => {
+    const page = pageWith({ dom: [], suggest: { resources: {} } });
+    expect(await shopify.fetchCandidate(page, vendor, product)).toBeNull();
+  });
+
+  test('the candidate carries the priced variant weight in pounds (25 lb from 11340 g)', async () => {
+    const page = pageWith({ dom: ['/products/acelepryn-g-insecticide-grub-and-armyworm-control'] });
+    const cand = await shopify.fetchCandidate(page, vendor, product);
+    expect(cand.weight_lb).toBeCloseTo(25, 3);
+  });
+
+  test('a real listing weight makes a Gemplers weight-table price firm; none keeps it an estimate', () => {
+    const src = { source_url: 'https://gemplers.com/products/x' };
+    expect(shippingFor({ vendor: src, price: 30, quantity: '1 gal', weightLb: 4 })).toMatchObject({ amount: 10.99, basis: 'weight_table' });
+    expect(shippingFor({ vendor: src, price: 30, quantity: '1 gal' }).basis).toBe('estimated');
   });
 });
 

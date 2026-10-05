@@ -8,7 +8,7 @@
 // shipping basis may still win — it stays labelled on best.shipping for every consumer.
 
 const { deriveNormalizedUnitPrice, quantityToOz } = require('./extract');
-const { shippingFor } = require('./shipping-rules');
+const { shippingFor, normalizeShipping } = require('./shipping-rules');
 
 const DEFAULTS = {
   minSavingsPct: 0.02, // 2%
@@ -28,9 +28,8 @@ const round2 = (n) => Math.round(Number(n) * 100) / 100;
 // failing any host, its display name. `free_shipping` / `freeShipping` is the adapter's
 // per-item "ships free" flag (used only by flagged-free vendors).
 function shippingOfCandidate(c) {
-  if (c && c.shipping && Number.isFinite(Number(c.shipping.amount)) && c.shipping.basis) {
-    return { amount: round2(c.shipping.amount), basis: c.shipping.basis, note: c.shipping.note || '' };
-  }
+  const attached = normalizeShipping(c && c.shipping);
+  if (attached) return attached;
   return shippingFor({
     vendor: c,
     vendorName: c && typeof c.vendor === 'string' ? c.vendor : undefined,
@@ -38,6 +37,7 @@ function shippingOfCandidate(c) {
     quantity: c && c.quantity,
     freeShipping: !!(c && (c.free_shipping === true || c.freeShipping === true)),
     hazmat: !!(c && (c.hazmat_shipping === true || c.hazmat === true)),
+    weightLb: c && c.weight_lb,
   });
 }
 

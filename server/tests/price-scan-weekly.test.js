@@ -171,6 +171,23 @@ describe('matchKey', () => {
   test('a changed competitor price yields a different key (a new ask)', () => {
     expect(matchKey(a)).not.toBe(matchKey({ ...a, competitor: { ...a.competitor, price: 80 } }));
   });
+  test('a corrected shipping basis, amount or promo is a new ask, not a duplicate', () => {
+    const est = { ...a, competitor: { ...a.competitor, shipping: { amount: 15, basis: 'estimated' } } };
+    const firm = { ...a, competitor: { ...a.competitor, shipping: { amount: 15, basis: 'weight_table' } } };
+    const free = { ...a, competitor: { ...a.competitor, shipping: { amount: 0, basis: 'free' } } };
+    const promo = { ...a, competitor: { ...a.competitor, shipping: { amount: 0, basis: 'free', promo: true } } };
+    const keys = [a, est, firm, free, promo].map(matchKey);
+    expect(new Set(keys).size).toBe(5);
+    expect(matchKey(est)).toBe(matchKey({ ...a, competitor: { ...a.competitor, shipping: { amount: 15, basis: 'estimated', note: 'other note' } } })); // note text is not part of the key
+    const baseShip = { ...a, baseline: { ...a.baseline, shipping: { amount: 5, basis: 'flat' } } };
+    expect(matchKey(baseShip)).not.toBe(matchKey(a));
+  });
+  test('an active draft priced on the old shipping does not suppress the corrected one', async () => {
+    const old = { ...a, competitor: { ...a.competitor, shipping: { amount: 0, basis: 'free' } } };
+    const corrected = { ...a, competitor: { ...a.competitor, shipping: { amount: 15, basis: 'estimated' } } };
+    const seen = new Set([matchKey(old)]);
+    expect([old, corrected].filter((m) => !seen.has(matchKey(m)))).toEqual([corrected]);
+  });
 });
 
 describe('runWeeklyScan (injected deps)', () => {

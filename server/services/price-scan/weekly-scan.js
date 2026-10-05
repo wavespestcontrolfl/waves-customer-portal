@@ -72,6 +72,11 @@ function parseMatches(m) {
   return [];
 }
 
+function shippingKey(sh) {
+  if (!sh) return '-';
+  return [sh.basis || '', Number(sh.amount) || 0, sh.promo ? 'promo' : ''].join(':');
+}
+
 // Content key for ONE opportunity line — product + competitor URL + both prices. A
 // changed price yields a new key (a genuinely new ask). Dedup is PER-MATCH, not
 // per-draft, so a later {A,B} scan when {A} is already pending re-stages only B.
@@ -81,6 +86,10 @@ function matchKey(m) {
     String((m && m.competitor && m.competitor.source_url) || ''),
     Number(m && m.competitor && m.competitor.price) || 0,
     Number(m && m.baseline && m.baseline.price) || 0,
+    // Delivered basis: a corrected shipping basis / amount / promo is a different ask, not a
+    // duplicate of an older active draft that was priced on the old shipping.
+    shippingKey(m && m.competitor && m.competitor.shipping),
+    shippingKey(m && m.baseline && m.baseline.shipping),
   ].join('|');
 }
 

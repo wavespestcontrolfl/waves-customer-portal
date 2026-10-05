@@ -79,6 +79,37 @@ describe('shippingFor — Gemplers', () => {
   });
 });
 
+describe('shippingFor — Gemplers weight must be a real weight to be firm', () => {
+  const g = (quantity, extra = {}) => shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity, ...extra });
+  test('explicit lb / kg / g quantities are real weights -> firm table price', () => {
+    expect(g('5 lb')).toMatchObject({ amount: 10.99, basis: 'weight_table' });
+    expect(g('2 kg')).toMatchObject({ amount: 10.99, basis: 'weight_table' });
+    expect(g('500 g').basis).toBe('weight_table');
+  });
+  test('a volume-derived weight (9 lb/gal) stays estimated, even far from a band boundary', () => {
+    const r = g('1 gal');
+    expect(r).toMatchObject({ amount: 14.99, basis: 'estimated' });
+    expect(r.note).toMatch(/weight estimated/);
+    expect(shippingProofText(r)).toMatch(/shipping estimated/);
+  });
+  test('a liquid whose guessed weight sits right at a band boundary is estimated either side of it', () => {
+    // 9 lb/gal: 20 lb ~ 2.22 gal -> 2.2 gal = 19.8 lb (14.99 band), 2.3 gal = 20.7 lb (21.99 band)
+    expect(g('2.2 gal')).toMatchObject({ amount: 14.99, basis: 'estimated' });
+    expect(g('2.3 gal')).toMatchObject({ amount: 21.99, basis: 'estimated' });
+  });
+  test('a plain or weight "oz" is ambiguous -> estimated', () => {
+    expect(g('17 oz')).toMatchObject({ amount: 10.99, basis: 'estimated' });
+    expect(g('17 fl oz').basis).toBe('estimated');
+  });
+  test('an explicit listing weight (variant grams) is firm, whatever the quantity text says', () => {
+    expect(g('1 gal', { weightLb: 6 })).toMatchObject({ amount: 14.99, basis: 'weight_table' });
+    expect(g('1 gal', { weightLb: 6 }).note).not.toMatch(/weight estimated/);
+  });
+  test('beyond the table is still an estimate even with a real weight', () => {
+    expect(g('150 lb').basis).toBe('estimated');
+  });
+});
+
 describe('shippingFor — Gemplers hazardous items are never firm', () => {
   test('a hazmat item under the threshold is estimated (table floor + hazmat allowance), not weight_table', () => {
     const r = shippingFor({ vendorHost: 'gemplers.com', price: 33.99, quantity: '17 oz', hazmat: true });

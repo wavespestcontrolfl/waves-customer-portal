@@ -19,7 +19,7 @@
 
 const { parsePackSize, convertToOz } = require('../product-costing');
 const { wrapServiceEmail, ctaButton, colors } = require('../email-template');
-const { shippingFor, shippingLabel, shippingProofText } = require('./shipping-rules');
+const { shippingFor, shippingLabel, shippingProofText, normalizeShipping } = require('./shipping-rules');
 
 const round = (n, p = 2) => Math.round(Number(n) * 10 ** p) / 10 ** p;
 const fmtMoney = (n) => `$${round(n, 2).toFixed(2)}`;
@@ -45,10 +45,8 @@ function perPackUnit(price, quantity) {
 // ({ amount, basis }), else the vendor rule looked up from the side's own host (competitor
 // source_url) or name. The SiteOne baseline is free by rule. Never throws.
 function shippingOfSide(side, fallbackVendorHost) {
-  const sh = side && side.shipping;
-  if (sh && Number.isFinite(Number(sh.amount)) && sh.basis) {
-    return { amount: round(sh.amount, 2), basis: sh.basis, note: sh.note || '' };
-  }
+  const attached = normalizeShipping(side && side.shipping);
+  if (attached) return attached;
   return shippingFor({
     vendor: side || {},
     vendorHost: fallbackVendorHost,
@@ -57,6 +55,7 @@ function shippingOfSide(side, fallbackVendorHost) {
     quantity: side && side.quantity,
     freeShipping: !!(side && (side.free_shipping === true || side.freeShipping === true)),
     hazmat: !!(side && (side.hazmat_shipping === true || side.hazmat === true)),
+    weightLb: side && side.weight_lb,
   });
 }
 const landedOf = (side, shipping) => {

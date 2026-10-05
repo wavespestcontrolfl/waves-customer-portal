@@ -11,7 +11,9 @@
 // (vendor policy pages read 2026-10-05). SiteOne, Veseris and Amazon are free per the
 // owner (free for this account). No I/O — unit-tested.
 //
-//   shippingFor({ vendorHost?, vendor?, vendorName?, price?, quantity?, freeShipping?, hazmat? })
+//   shippingFor({ vendorHost?, vendor?, vendorName?, price?, quantity?, freeShipping?, hazmat?, weightLb? })
+//     weightLb = an actual listing weight in pounds (variant grams); only a real weight, or a
+//     quantity in lb/kg/g, lets a weight-table vendor return a firm figure.
 //     hazmat = the item is flagged hazardous/DOT (vendors whose rule says hazmat costs extra
 //     then return 'estimated', never a firm figure).
 //     vendor = a vendor row or scanned candidate (host/url/website/source_url are read);
@@ -142,6 +144,20 @@ function weightLbFromQuantity(quantity) {
   return (oz / 128) * LIQUID_LB_PER_GAL;
 }
 
+// Units that are an actual WEIGHT in the listing text. Plain "oz"/"ounce" is ambiguous (fluid
+// or weight ounce) and a volume is converted through a density guess, so neither is firm.
+const FIRM_WEIGHT_UNITS = new Set(['lb', 'pound', 'g', 'gram', 'gm', 'kg']);
+
+// { lb, firm } for this item. firm = the weight is a real listing weight: an explicit
+// input.weightLb (e.g. the variant's grams) or a quantity stated in lb / kg / g.
+function weightInfo(input) {
+  const given = Number(input.weightLb);
+  if (Number.isFinite(given) && given > 0) return { lb: given, firm: true };
+  const lb = weightLbFromQuantity(input.quantity);
+  const pack = parsePackSize(input.quantity);
+  return { lb, firm: lb != null && !!pack && FIRM_WEIGHT_UNITS.has(pack.unit) };
+}
+
 const usd = (n) => `$${round2(n).toFixed(2)}`;
 
 function gemplersTableAmount(weightLb) {
@@ -166,55 +182,50 @@ function estimated(weightLb, baseNote) {
   return { amount: round2(amount), basis: 'estimated', note };
 }
 
-function applyRule(rule, input) {
-  const price = Number(input.price);
-  const weightLb = weightLbFromQuantity(input.quantity);
-  switch (rule.type) {
-    case 'free':
-      return { amount: 0, basis: 'free', note: rule.note || 'free shipping' };
-    case 'flat':
-      return { amount: round2(rule.amount), basis: 'flat', note: rule.note || `flat ${usd(rule.amount)} shipping` };
-    case 'free_over': {
-      const over = Number.isFinite(price) && price >= rule.threshold;
-      // Hazardous (DOT) items carry an extra charge the vendor does not publish ("call"), so
-      // neither the free-over threshold nor the weight table is a firm number for them. Keep
-      // the best published figure as the floor, add the default estimate as an allowance for
-      // the unpublished hazmat fee, and label the whole thing 'estimated' so the email never
-      // calls it firm.
-      if (rule.hazmatExtra && input.hazmat === true) {
-        const floor = over ? 0 : (weightLb == null ? 0 : gemplersTableAmount(weightLb).amount);
-        const allowance = defaultShippingUsd();
-        const base = over ? `free over ${usd(rule.threshold)}` : (weightLb == null ? 'weight unknown' : `${usd(floor)} by weight`);
-        return {
-          amount: round2(floor + allowance),
-          basis: 'estimated',
-          note: `${base} + ~${usd(allowance)} est. hazmat fee (hazardous item; fee not published)`,
-        };
-      }
-      if (over) {
-        return { amount: 0, basis: 'free_over', note: `free shipping over ${usd(rule.threshold)}` };
-      }
-      if (weightLb == null) {
-        return estimated(null, `weight unknown; under ${usd(rule.threshold)} pays by weight`);
-      }
-      const { amount, interpolated } = gemplersTableAmount(weightLb);
-      return {
-        amount,
-        basis: interpolated ? 'estimated' : 'weight_table',
-        note: `${usd(amount)} by weight (~${Math.round(weightLb)} lb), under ${usd(rule.threshold)}`,
-      };
-    }
-    case 'flagged_free':
-      if (input.freeShipping === true) {
-        return rule.promo
-          ? { amount: 0, basis: 'free', promo: true, note: `free shipping (${rule.note})` }
-          : { amount: 0, basis: 'free', note: 'free shipping (item flagged free)' };
-      }
-      return estimated(weightLb, rule.note);
-    case 'estimated':
-    default:
-      return estimated(weightLb, rule.note);
+// Gemplers-style rule: free at/over the threshold, else the published weight table. Hazardous
+// (DOT) items carry an extra charge the vendor does not publish ("call"), so neither the
+// free-over threshold nor the table is a firm number for them: keep the best published figure
+// as the floor, add the default estimate as an allowance for the unpublished hazmat fee, and
+// label the whole thing 'estimated' so the email never calls it firm.
+function freeOverRule(rule, input, w) {
+  const over = Number(input.price) >= rule.threshold;
+  const noWeight = w.lb == null;
+  const table = noWeight ? null : gemplersTableAmount(w.lb);
+  const floor = over || noWeight ? 0 : table.amount;
+  if (rule.hazmatExtra && input.hazmat === true) {
+    const allowance = defaultShippingUsd();
+    const base = over ? `free over ${usd(rule.threshold)}` : (noWeight ? 'weight unknown' : `${usd(floor)} by weight`);
+    return { amount: round2(floor + allowance), basis: 'estimated', note: `${base} + ~${usd(allowance)} est. hazmat fee (hazardous item; fee not published)` };
   }
+  if (over) return { amount: 0, basis: 'free_over', note: `free shipping over ${usd(rule.threshold)}` };
+  if (noWeight) return estimated(null, `weight unknown; under ${usd(rule.threshold)} pays by weight`);
+  // Only a real listing weight yields a firm table price; a weight derived from a volume
+  // (9 lb/gal) or an ambiguous "oz" keeps the table amount but stays an estimate.
+  return {
+    amount: table.amount,
+    basis: w.firm && !table.interpolated ? 'weight_table' : 'estimated',
+    note: `${usd(table.amount)} by weight (~${Math.round(w.lb)} lb${w.firm ? '' : ', weight estimated'}), under ${usd(rule.threshold)}`,
+  };
+}
+
+function flaggedFreeRule(rule, input, w) {
+  if (input.freeShipping !== true) return estimated(w.lb, rule.note);
+  return rule.promo
+    ? { amount: 0, basis: 'free', promo: true, note: `free shipping (${rule.note})` }
+    : { amount: 0, basis: 'free', note: 'free shipping (item flagged free)' };
+}
+
+// Rule type -> how the shipping for one item is worked out. An unknown type is 'estimated'.
+const RULE_TYPES = {
+  free: (rule) => ({ amount: 0, basis: 'free', note: rule.note || 'free shipping' }),
+  flat: (rule) => ({ amount: round2(rule.amount), basis: 'flat', note: rule.note || `flat ${usd(rule.amount)} shipping` }),
+  free_over: freeOverRule,
+  flagged_free: flaggedFreeRule,
+  estimated: (rule, input, w) => estimated(w.lb, rule.note),
+};
+
+function applyRule(rule, input) {
+  return (RULE_TYPES[rule.type] || RULE_TYPES.estimated)(rule, input, weightInfo(input));
 }
 
 // opts.rules lets a test (or a future per-vendor override) swap the rule table.
@@ -248,7 +259,16 @@ function shippingProofText(shipping) {
   return `${usd(amt)} shipping by published rule (firm)`;
 }
 
+// A shipping object a caller attached ({ amount, basis, ... }) -> the same object with a rounded
+// amount and a string note, or null when it is not usable. Copies EVERY field (promo, ...), so
+// nothing shippingLabel / shippingProofText reads is dropped on the way through.
+function normalizeShipping(sh) {
+  if (!sh || !Number.isFinite(Number(sh.amount)) || !sh.basis) return null;
+  return { ...sh, amount: round2(sh.amount), note: sh.note || '' };
+}
+
 module.exports = {
+  normalizeShipping,
   shippingFor,
   shippingLabel,
   shippingProofText,

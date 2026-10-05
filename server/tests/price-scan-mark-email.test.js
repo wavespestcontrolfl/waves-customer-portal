@@ -4,6 +4,7 @@ const {
   perOzEquiv,
   hasProof,
   savingsPctOf,
+  shippingOfSide,
 } = require('../services/price-scan/mark-email');
 
 const PROOF = 'https://www.domyown.com/taurus-sc-termiticide-78-oz-p-1817.html';
@@ -230,5 +231,27 @@ describe('mark-email delivered prices + shipping proof', () => {
       competitor: { vendor: 'DoMyOwn', price: 99.5, quantity: '1 gal', source_url: 'https://www.domyown.com/tiny-p-1.html' },
     };
     expect(composeMarkEmail([tiny])).not.toBeNull();
+  });
+});
+
+describe('mark-email keeps every shipping field the proof text reads', () => {
+  test('a forwarded SeedBarn promo is not called firm', () => {
+    const seed = {
+      product: 'Grass Seed',
+      baseline: { vendor: 'SiteOne', price: 95, quantity: '1 gal' },
+      competitor: {
+        vendor: 'SeedBarn', price: 60, quantity: '1 gal', source_url: 'https://seedbarn.com/products/x',
+        shipping: { amount: 0, basis: 'free', promo: true, note: 'free shipping (time-limited promo, recheck)' },
+      },
+    };
+    const out = composeMarkEmail([seed]);
+    expect(out.text).toContain('free shipping (current promo, recheck)');
+    expect(out.text).not.toMatch(/SeedBarn[^\n]*free shipping \(firm\)/);
+    expect(out.html).toContain('free shipping (current promo, recheck)');
+    expect(shippingOfSide(seed.competitor)).toMatchObject({ promo: true, amount: 0, basis: 'free' });
+  });
+  test('compare keeps promo too when it normalizes an attached shipping object', () => {
+    const { shippingOfCandidate } = require('../services/price-scan/compare');
+    expect(shippingOfCandidate({ price: 1, shipping: { amount: 0, basis: 'free', promo: true } }).promo).toBe(true);
   });
 });
