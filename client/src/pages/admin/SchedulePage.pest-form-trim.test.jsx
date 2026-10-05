@@ -224,6 +224,32 @@ describe('restoring a saved draft on a regular pest visit', () => {
     expect(body.areasServiced).toEqual(['Perimeter', 'Kitchen', 'Yard']);
   });
 
+  // Codex P2 #5889: a ticked area that no row names must not be dropped.
+  it('adds an old draft\'s visit-level areas to the first row when every row already names an area', async () => {
+    const service = regularPest();
+    const row = (id, name, applicationArea) => ({
+      productId: id, name, rate: '', rateUnit: '', totalAmount: 4, amountUnit: 'fl_oz',
+      applicationMethod: 'perimeter_spray', applicationArea, areaUnit: 'linear_ft', targets: [],
+    });
+    const onSubmit = vi.fn().mockResolvedValue({});
+    localStorage.setItem(draftKey(service), JSON.stringify({
+      serviceId: service.id,
+      notes: 'Saved note',
+      areasServiced: ['Kitchen', 'Perimeter', 'Yard'],
+      selectedProducts: [row('p1', 'Taurus SC', 'Perimeter'), row('p2', 'Atticus Talak 7.9 F', 'Yard')],
+    }));
+    await mount(service, { onSubmit });
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    await screen.findByText('Taurus SC');
+    await waitFor(() => expect(screen.getAllByText('Treatment areas')).toHaveLength(2));
+    fillLinearFeet();
+    await act(async () => { fireEvent.click(submitButton()); });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.products.map((p) => p.applicationArea)).toEqual(['Perimeter, Kitchen', 'Yard']);
+    expect(body.areasServiced).toEqual(['Perimeter', 'Kitchen', 'Yard']);
+  });
+
   it('keeps a protocol action the draft already carries and still sends it', async () => {
     const service = regularPest();
     const onSubmit = vi.fn().mockResolvedValue({});

@@ -13614,8 +13614,13 @@ export function CompletionPanel({
     && isPestDefaultMixVisit(service);
   // A string key keeps the memo (an effect dependency downstream) steady
   // while a product row's other fields change.
+  // `areasServiced` is empty here except for an old draft's ticks waiting
+  // for a product row to carry them (the migration effect below).
   const productRowAreasKey = isRegularPestVisit
-    ? areasFromProductRows(selectedProducts, AREAS_BY_SERVICE.pest).join(PRODUCT_ROW_AREAS_SEP)
+    ? areasFromProductRows(
+      [...selectedProducts, { applicationArea: areasServiced.join(", ") }],
+      AREAS_BY_SERVICE.pest,
+    ).join(PRODUCT_ROW_AREAS_SEP)
     : "";
   const completionAreasServiced = useMemo(
     () => (isRegularPestVisit
@@ -13711,17 +13716,25 @@ export function CompletionPanel({
   // A regular pest visit has no visit-level areas either (owner 2026-10-04),
   // but there the areas belong on the product rows, so a draft saved before
   // the change hands its ticked areas to the rows that name none (what the
-  // old submit did for a single tick) and then empties the hidden state, so
-  // every consumer reads the rows.
+  // old submit did for a single tick). An area no row then names joins the
+  // first row, so none is dropped (Codex P2 #5889). With no product row yet
+  // the ticks stay in the hidden state, still sent by completionAreasServiced,
+  // until a row exists to carry them.
   useEffect(() => {
     if (!isRegularPestVisit || !areasServiced.length) return;
-    const carried = AREAS_BY_SERVICE.pest.filter((area) => areasServiced.includes(area)).join(", ");
-    if (carried) {
-      setSelectedProducts((prev) => (
-        prev.some((p) => p && !p.applicationArea)
-          ? prev.map((p) => (p && !p.applicationArea ? { ...p, applicationArea: carried } : p))
-          : prev
-      ));
+    const carried = areasFromProductRows([{ applicationArea: areasServiced.join(", ") }], AREAS_BY_SERVICE.pest);
+    if (carried.length) {
+      if (!selectedProducts.some(Boolean)) return;
+      setSelectedProducts((prev) => {
+        const filled = prev.map((p) => (p && !p.applicationArea ? { ...p, applicationArea: carried.join(", ") } : p));
+        const named = new Set(filled.flatMap((p) => (p ? parseApplicationAreas(p.applicationArea) : [])));
+        const missing = carried.filter((area) => !named.has(area));
+        const first = filled.findIndex(Boolean);
+        if (!missing.length || first < 0) return filled;
+        return filled.map((p, index) => (index === first
+          ? { ...p, applicationArea: [...parseApplicationAreas(p.applicationArea), ...missing].join(", ") }
+          : p));
+      });
     }
     setAreasServiced([]);
   }, [isRegularPestVisit, areasServiced, selectedProducts]);
