@@ -315,9 +315,30 @@ function figureBlock(t, idx) {
 // ZIP (ZIP+4 on its first five digits); a span with no ZIP is not held to
 // it. Judged per figure: another block naming the typed ZIP vouches for
 // nothing here.
+// The city too: a span that names a city before "FL" ("…, Sarasota FL") and
+// it is not the typed one is another locality's listing, unless the span's
+// ZIP is the typed ZIP (the ZIP is the stronger identity; Lakewood Ranch and
+// Bradenton share ZIPs). A span naming no city is not held to it.
 function zipAgrees(t, addressAt, idx, blockEnd, anchors) {
-  if (!anchors.zip) return true;
-  return !zipsIn(t.slice(addressAt, Math.max(idx, blockEnd)), anchors.number).some((z) => z !== anchors.zip);
+  const span = t.slice(addressAt, Math.max(idx, blockEnd));
+  const zips = zipsIn(span, anchors.number);
+  if (anchors.zip && zips.some((z) => z !== anchors.zip)) return false;
+  if (anchors.zip && zips.includes(anchors.zip)) return true;
+  return cityAgrees(span, anchors.city);
+}
+
+const CITY_BEFORE_STATE_RE = /\b([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,2})\s*,?\s+(?:FL|Florida)\b/g;
+function cityAgrees(span, city) {
+  const typed = String(city || '').trim().toLowerCase();
+  if (!typed) return true;
+  CITY_BEFORE_STATE_RE.lastIndex = 0;
+  let m;
+  let named = false;
+  while ((m = CITY_BEFORE_STATE_RE.exec(span))) {
+    named = true;
+    if (m[1].toLowerCase().replace(/\s+/g, ' ').endsWith(typed)) return true;
+  }
+  return !named;
 }
 
 // The block names exactly one suite, this one, within reach of the figure.

@@ -80,6 +80,12 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Bradenton FL 34202. Other properties: 4400 Test Commons Pkwy Sarasota FL 34205 Suite 103 2,000 SF', z)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 2,000 SF, Tampa FL 33602', z)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 2,000 SF, Bradenton FL 34202', z)).toEqual([2000]);
+    // A different city with no ZIP is another locality; the typed city, no city at all, or the typed ZIP agree.
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Sarasota FL, Suite 103 — 2,000 SF', z)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Sarasota FL Suite 103 — 2,000 SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Bradenton FL, Suite 103 — 2,000 SF', c)).toEqual([2000]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Lakewood Ranch FL 34202, Suite 103 — 2,000 SF', z)).toEqual([2000]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Suite 103 — 2,000 SF', z)).toEqual([2000]);
     // A bare five-digit figure is a size, not a ZIP; this number on another street in between is another address.
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 12000 SF', z)).toEqual([12000]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy. 4400 Other Street Suite 103 2,000 SF', c)).toEqual([]);
