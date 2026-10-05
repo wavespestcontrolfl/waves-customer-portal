@@ -18885,12 +18885,32 @@ router.put('/:token/contact-phone', contactPhoneLimiter, async (req, res, next) 
     }
     // The decision and the write live in services/estimate-contact-gaps (saveAcceptContactPhone) so they are tested
     // without the route; the matcher and the office alert are this route's own.
-    const outcome = await saveAcceptContactPhone({
+    // LIVE call-linkage revalidation ATOMIC with the write, as the decline does: one transaction, the estimate row
+    // locked first (estimates → leads → call_log, the repo-wide order), the call row locked by staleCallLinkageReason
+    // and held through the UPDATE. A linkage correction committing after the pre-check above therefore makes this a
+    // generic 404, never a phone written onto a wrong-lead estimate. The office bell for a matched number is raised
+    // after the transaction (no notification I/O under the row locks).
+    let pendingAlert = null;
+    const locked = await db.transaction(async (trx) => {
+      const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+      const lockedRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'status', 'estimate_data');
+      if (!lockedRow) return { stale: true };
+      let linkData = null;
+      try {
+        linkData = typeof lockedRow.estimate_data === 'string' ? JSON.parse(lockedRow.estimate_data) : (lockedRow.estimate_data || null);
+      } catch { linkData = null; }
+      if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
+        await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
+      }
+      if (linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true, estimateStatus: lockedRow.status })) {
+        return { stale: true };
+      }
+      return { outcome: await saveAcceptContactPhone({
       estimate,
       rawPhone: req.body?.contactPhone,
-      database: db,
+      database: trx,
       countCustomersWithPhone: async (phone) => (await matchAcceptCustomerByPhone({ customer_phone: phone }, db, { authoritative: true })).candidateCount,
-      onExistingCustomerPhone: ({ typedPhone, candidateCount }) => raiseAcceptTypedPhoneMatchAlert({ estimate, typedPhone, candidateCount }),
+      onExistingCustomerPhone: ({ typedPhone, candidateCount }) => { pendingAlert = { typedPhone, candidateCount }; },
       // TOCTOU: the accept-active check above ran on a pre-read. The UPDATE itself refuses a row a concurrent accept,
       // decline, archive, expiry or off-surface marker has since made ineligible: the same predicates the
       // /preferences and /select-tier writes carry, plus the pre-read's updated_at (any concurrent write = reload).
@@ -18911,7 +18931,11 @@ router.put('/:token/contact-phone', contactPhoneLimiter, async (req, res, next) 
           ));
         }
       },
+    }) };
     });
+    if (locked.stale) return res.status(404).json({ error: 'Estimate not found' });
+    const { outcome } = locked;
+    if (pendingAlert) await raiseAcceptTypedPhoneMatchAlert({ estimate, ...pendingAlert });
     if (outcome.zeroRows) {
       // Nothing was written. Either a concurrent writer closed the gap (already on file), or the estimate stopped
       // being eligible / changed under the request: the zero-row answer every atomic public write gives.

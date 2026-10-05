@@ -1616,6 +1616,14 @@ zero-row answer, never the bell or the 409). The matcher loads
 `customer_phone_typed` itself when a caller passed a projection without it
 (the slot routes' `ESTIMATE_PARK_COLUMNS` also carries it), so no reader can
 mistake a typed phone for the office's.
+The save runs in one transaction with the estimate row and the linked call
+row locked, revalidating call linkage (`staleCallLinkageReason`, as the
+decline does): a correction that lands after the pre-check answers the
+generic 404. A staff save of the estimate (`admin-estimate-persistence`)
+clears `customer_phone_typed`, also when the number is unchanged: the
+office's save is its own word for the phone. A deposit receipt to an
+unlinked estimate treats a typed phone as no phone before acceptance (the
+receipt goes by email).
 `matchAcceptCustomerByPhone` — the one matcher every card and accept
 route reads — treats ANY candidate as a contradiction while the estimate
 still carries that typed number (`phoneTypedByCustomer`): no match, and the

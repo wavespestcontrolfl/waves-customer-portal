@@ -363,7 +363,7 @@ function depositChargeNote(amountDollars, cardSurcharge) {
 async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0, paymentIntentId }) {
   const estimate = await db('estimates')
     .where({ id: estimateId })
-    .first('id', 'customer_id', 'customer_phone', 'customer_name', 'customer_email', 'token');
+    .first('id', 'customer_id', 'customer_phone', 'customer_phone_typed', 'status', 'customer_name', 'customer_email', 'token');
   if (!estimate) return;
 
   // For customer-linked estimates, contact the CUSTOMER's verified
@@ -379,7 +379,11 @@ async function sendDepositReceipt({ estimateId, amountDollars, cardSurcharge = 0
     : null;
   const receiptOptOut = prefs?.payment_receipt === false;
   const channel = estimate.customer_id ? (prefs?.payment_receipt_channel || 'sms') : 'sms';
-  const phone = String((customer ? customer.phone : estimate.customer_phone) || '').trim();
+  // A phone the customer typed on the accept card gets no automated text before acceptance
+  // (estimate-contact-gaps typedPhoneBlocksPreAcceptSms): for an unlinked estimate it counts as no phone here, so
+  // the receipt goes by email when there is one.
+  const typedPhoneBlocked = !customer && require('./estimate-contact-gaps').typedPhoneBlocksPreAcceptSms(estimate);
+  const phone = typedPhoneBlocked ? '' : String((customer ? customer.phone : estimate.customer_phone) || '').trim();
   const leadEmail = String(estimate.customer_email || '').trim();
 
   // Deliverability of the email leg, resolved up-front with the SAME
