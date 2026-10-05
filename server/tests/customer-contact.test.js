@@ -351,6 +351,20 @@ describe('customer contact recipient routing', () => {
       .toEqual(['terry@example.com', 'pat@example.com', 'lee@example.com', 'lana@example.com']);
   });
 
+  test('a property profile whose own contact is a tenant on a manager account gets no report; a tenant account does', () => {
+    const tenantProperty = { ...customer, contact_role: 'tenant', account_contact_role: 'property_manager' };
+    expect(getServiceReportEmailRecipients(tenantProperty, {})).toEqual([]);
+    // The manager side still gets its billing copy.
+    expect(getServiceReportEmailRecipients(tenantProperty, { service_report_notify_billing: true, billing_email: 'ap@example.com' })
+      .map((r) => r.email)).toEqual(['ap@example.com']);
+    // A tenant who is the account (no manager above) gets their own report.
+    expect(getServiceReportEmailRecipients({ ...customer, contact_role: 'tenant' }, {}).map((r) => r.email))
+      .toEqual(['terry@example.com', 'lana@example.com']);
+    // The account role wins over the property row's own role for the slots.
+    expect(getServiceReportEmailRecipients({ ...customer, contact_role: 'owner', account_contact_role: 'property_manager' }, {})
+      .map((r) => r.email)).toEqual(['lana@example.com']);
+  });
+
   test('DISABLE_CONTACT_CONSENT_GATE=1 restores ungated fanout (kill switch)', () => {
     const unstamped = { ...customer, service_contacts_consent_at: null };
     process.env.DISABLE_CONTACT_CONSENT_GATE = '1';

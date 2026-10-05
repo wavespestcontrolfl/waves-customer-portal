@@ -62,7 +62,7 @@ const invoiceEmail = () => require('../invoice-email');
 // loaded only when a follow-up step is planned or run, never at IB boot.
 const followupBooking = () => require('../completion-followup-booking');
 const {
-  getServiceReportEmailRecipients, PREFS_UNAVAILABLE,
+  getServiceReportEmailRecipients, withAccountContactRole, PREFS_UNAVAILABLE,
 } = require('../customer-contact');
 
 const CLOSEOUT_REPAIR_TOOLS = [
@@ -277,7 +277,11 @@ function maskEmail(address) {
 // shared resolvers fail closed (no recipients) exactly as the workers do.
 async function loadContact(customerId, knex) {
   if (!customerId) return { customer: null, prefs: PREFS_UNAVAILABLE };
-  const customer = await knex('customers').where({ id: customerId }).first();
+  const row = await knex('customers').where({ id: customerId }).first();
+  // The account's role decides who may read the report (a property profile of
+  // a manager account): an unreadable account primary fails closed.
+  const customer = row ? await withAccountContactRole(row, { db: knex }).catch(() => null) : null;
+  if (row && !customer) return { customer: row, prefs: PREFS_UNAVAILABLE };
   const prefs = await knex('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
   return { customer: customer || null, prefs: prefs || {} };
 }

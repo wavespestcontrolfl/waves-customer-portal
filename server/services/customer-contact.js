@@ -274,11 +274,27 @@ function serviceReportEmailOptedOut(prefs) {
 // unchanged: an occupant still needs to know when the tech arrives.
 const REPORT_ALLOWED_ROLES_ON_MANAGED_ACCOUNT = new Set(['property_manager', 'landlord']);
 
+// The account-level role: a property profile's account_contact_role (the
+// account primary's, set by withAccountPrimaryFallback / withAccountContactRole)
+// wins over the row's own contact_role, which describes that property's
+// contact (a tenant on a managed rental, say), not the account.
+function managedAccount(customer) {
+  const accountRole = clean(customer?.account_contact_role) || clean(customer?.contact_role);
+  return accountRole.toLowerCase() === 'property_manager';
+}
+
 function slotWithheldFromReports(customer, slot) {
   const role = String(slot?.contactRole || '').trim().toLowerCase();
   if (role === 'tenant') return true;
-  const accountRole = String(customer?.contact_role || '').trim().toLowerCase();
-  return accountRole === 'property_manager' && !REPORT_ALLOWED_ROLES_ON_MANAGED_ACCOUNT.has(role);
+  return managedAccount(customer) && !REPORT_ALLOWED_ROLES_ON_MANAGED_ACCOUNT.has(role);
+}
+
+// The row's own contact is withheld too when it is a tenant on a manager's
+// account (a property profile whose contact is the occupant). A tenant who is
+// the account itself gets their own reports.
+function primaryWithheldFromReports(customer) {
+  return clean(customer?.contact_role).toLowerCase() === 'tenant'
+    && clean(customer?.account_contact_role).toLowerCase() === 'property_manager';
 }
 
 function getServiceReportEmailRecipients(customer, prefs = {}) {
@@ -321,7 +337,7 @@ function getServiceReportEmailRecipients(customer, prefs = {}) {
   const notifyBilling = prefs.service_report_notify_billing === true && !!clean(prefs.billing_email);
   return uniqueByEmail([
     ...recipients,
-    notifyPrimary ? primary : null,
+    notifyPrimary && !primaryWithheldFromReports(customer) ? primary : null,
     notifyBilling ? getBillingContact(customer, prefs) : null,
   ].filter(Boolean));
 }
@@ -376,12 +392,10 @@ function withAccountPrimaryFallback(row, primaryRow) {
   if (filled.length) {
     out.account_primary_fallback = { customer_id: primaryRow.id, fields: filled };
   }
-  // The account's role (property manager, ...) is an account fact: a
-  // property profile without its own takes the primary's, so the report
-  // rule (slotWithheldFromReports) sees a manager account on every property.
-  if (!clean(row.contact_role) && clean(primaryRow.contact_role)) {
-    out.contact_role = clean(primaryRow.contact_role);
-  }
+  // The account's role (property manager, ...) is an account fact, kept apart
+  // from the property row's own contact_role: the report rule
+  // (slotWithheldFromReports) sees a manager account on every property.
+  if (clean(primaryRow.contact_role)) out.account_contact_role = clean(primaryRow.contact_role);
   return out;
 }
 
@@ -406,15 +420,15 @@ async function loadAccountPrimaryRow(row, { db = null, forShare = false, rethrow
   }
 }
 
-// The row with the account's contact_role filled in from the primary profile
-// when the row has none, and nothing else changed. For senders that apply the
-// report rule but keep their own recipient fields. Requires account_id and
+// The row with account_contact_role set from the account primary profile,
+// and nothing else changed. For senders that apply the report rule but keep
+// their own recipient fields. Requires account_id and
 // is_primary_profile on the row. A failed read throws: the caller retries
 // rather than send findings to an occupant of a managed rental.
-async function withAccountContactRole(row, { db = null } = {}) {
-  if (!row || clean(row.contact_role)) return row;
-  const primary = await loadAccountPrimaryRow(row, { db, rethrow: true });
-  return primary && clean(primary.contact_role) ? { ...row, contact_role: clean(primary.contact_role) } : row;
+async function withAccountContactRole(row, { db = null, forShare = false } = {}) {
+  if (!row) return row;
+  const primary = await loadAccountPrimaryRow(row, { db, rethrow: true, forShare });
+  return primary && clean(primary.contact_role) ? { ...row, account_contact_role: clean(primary.contact_role) } : row;
 }
 
 // One-call form: the row with the primary's contact fields filled in where
@@ -452,6 +466,7 @@ module.exports = {
   getServiceContactSlots,
   isServiceContactRole,
   slotWithheldFromReports,
+  primaryWithheldFromReports,
   withAccountContactRole,
   getBillingContact,
   getAppointmentContacts,

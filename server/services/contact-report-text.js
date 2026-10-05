@@ -66,7 +66,9 @@ async function loadCustomer(customerId, conn = db, { forUpdate = false } = {}) {
   if (forUpdate) query.forUpdate();
   const row = await query.first();
   if (!row) return null;
-  return require('./customer-contact').withAccountPrimaryContact(row, { db: conn, rethrow: true });
+  // forUpdate holds the account primary too: its contact_role decides who
+  // may get the report link (customer-contact.js slotWithheldFromReports).
+  return require('./customer-contact').withAccountPrimaryContact(row, { db: conn, rethrow: true, forShare: forUpdate });
 }
 
 // The consent-stamped slot contacts of this customer row. The account holder
@@ -242,7 +244,9 @@ async function recheckContactReportText(meta = {}, { conn = db } = {}) {
     const visit = await visitQuery.first('id');
     if (!visit) return { eligible: false, reason: 'contact-report-summary-revoked' };
   }
-  const customer = await loadCustomer(meta.customer_id, conn);
+  // In the locked handoff the account primary is held FOR SHARE as well:
+  // a role change on it either commits first (seen here) or waits.
+  const customer = await loadCustomer(meta.customer_id, conn, { forUpdate: !!conn.isTransaction });
   if (!customer) return { eligible: false, reason: 'customer-missing' };
   const stillConfirmed = (await confirmedContacts(customer, conn)).some((c) => phoneKey(c.phone) === phoneKey(meta.to_phone));
   if (!stillConfirmed) return { eligible: false, reason: 'contact-removed' };
