@@ -26924,7 +26924,9 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
       offerTiers: withContractBase.offerTiers.map((tier) => (tier === bestOfferTier
         ? {
           ...tier,
-          services: bestView.services,
+          // `services` stays the PR 1 key list; the page's section objects
+          // ride beside it.
+          sections: bestView.services,
           combinedRecurring: bestView.combinedRecurring ?? null,
           waveGuardTier: bestView.waveGuardTier ?? withContractBase.waveGuardTier ?? null,
         }

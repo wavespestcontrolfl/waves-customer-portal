@@ -42,13 +42,10 @@ function humanizeKey(key) {
   return String(key || '').replace(/_/g, ' ').trim();
 }
 
-// `tier.services` is a list of service keys on the base payload and a list of
-// pricing sections (objects with a `key`) once the server attaches the tier's
-// own contract view; read both.
+// `tier.services` is the server's list of service keys (the tier's own
+// `sections` are the page's rendering objects, not read here).
 function tierServiceKeys(tier) {
-  return (Array.isArray(tier?.services) ? tier.services : [])
-    .map((entry) => (typeof entry === 'string' ? entry : entry?.key))
-    .filter(Boolean);
+  return (Array.isArray(tier?.services) ? tier.services : []).filter((key) => typeof key === 'string' && key);
 }
 
 function companionKeys(tier) {

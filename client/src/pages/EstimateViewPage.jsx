@@ -305,7 +305,7 @@ export function pricingViewForOfferTier(pricing, tierKey) {
     ...pricing,
     frequencies: best.frequencies,
     serviceCadenceCombos: best.serviceCadenceCombos,
-    services: Array.isArray(best.services) && best.services.length > 0 ? best.services : pricing.services,
+    services: Array.isArray(best.sections) && best.sections.length > 0 ? best.sections : pricing.services,
     combinedRecurring: best.combinedRecurring ?? pricing.combinedRecurring,
     waveGuardTier: best.waveGuardTier ?? pricing.waveGuardTier,
   };

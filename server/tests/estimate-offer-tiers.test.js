@@ -199,7 +199,8 @@ describe('pricing bundle offer tiers', () => {
     expect(best.serviceCadenceCombos.every((c) => c.perServiceTreatments.some((r) => r.service === 'lawn_care'))).toBe(true);
     // The page renders Best's sections from the tier itself; the bundle's own
     // sections stay pest-only.
-    expect(best.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
+    expect(best.services).toEqual(['pest_control', 'lawn_care']);
+    expect(best.sections.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
     expect(best.combinedRecurring).toBeTruthy();
     expect(best.waveGuardTier).toBe('Silver');
     // (the pest-only bundle renders one combined 'bundle' section, no lawn)

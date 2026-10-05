@@ -6536,8 +6536,9 @@ member evidence, no manual discount) carries `pricing.offerTiers` on `/data`
 — `good` (one-time visit, `oneTimeTotal`), `better` (pest-only plan,
 `usesBundleFrequencies:true` — the bundle's own pest-only ladder) and `best`
 (the full quoted bundle with its OWN `frequencies` + `serviceCadenceCombos`,
-`pestOnly:false`, plus its own contract view for the page: `services` as
-pricing sections, `combinedRecurring` and `waveGuardTier`) — plus `pricing.offerTierDefaultKey`. Served only on a
+`pestOnly:false`, `services` as the key list, plus its own contract view for
+the page: `sections` (pricing sections), `combinedRecurring` and
+`waveGuardTier`) — plus `pricing.offerTierDefaultKey`. Served only on a
 live accept-active surface, never to a LIVE active member (fail-closed), and
 a tiered payload withholds the `serviceOptOut` block (no remove / add
 rails). `PUT /:token/accept` takes `selectedTier`: absent = today's
