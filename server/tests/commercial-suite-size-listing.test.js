@@ -117,6 +117,11 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('4400 Test Other St Suite 103 2,000 SF', noDir)).toEqual([]);
     expect(P.extractSuiteSizes('4400 N Test St Suite 103 2,000 SF', noDir)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Street, Suite 103 2,000 SF', noDir)).toEqual([2000]);
+    // The street must END after the typed words: an extension or bypass is another road.
+    expect(P.extractSuiteSizes('4400 Test Street Extension Suite 103 2,000 SF', noDir)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test St Bypass Suite 103 2,000 SF', noDir)).toEqual([]);
+    const withCity = P.addressAnchors({ street: '4400 Test St', unit: '103', city: 'Lakewood Ranch', zip: '34202' });
+    expect(P.extractSuiteSizes('4400 Test St Lakewood Ranch FL 34202 Suite 103 2,000 SF', withCity)).toEqual([2000]);
     // A combined suite's figure is the combined area, never one suite's.
     expect(P.extractSuiteSizes('4400 Test St E Suite 103/104: 3,000 SF', e)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test St E Suites 103 & 104 — 3,000 SF', e)).toEqual([]);

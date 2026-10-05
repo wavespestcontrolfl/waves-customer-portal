@@ -114,13 +114,16 @@ test('an aged-out listing stamp is re-read once, then not again for 30 days afte
   process.env.GATE_LOOKUP_LISTING_SIZE = 'true';
   const at = (days) => new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
   const aged = { value: 1350, source: 'listing_verified_text', unitKey: '103', resolvedAt: at(95) };
-  expect(listingStampNeedsRefresh({ _commercialSuiteSize: aged })).toBe(true);
-  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, refreshCheckedAt: at(3) } })).toBe(false);
-  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, refreshCheckedAt: at(31) } })).toBe(true);
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: aged }, '103')).toBe(true);
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, refreshCheckedAt: at(3) } }, '103')).toBe(false);
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, refreshCheckedAt: at(31) } }, '103')).toBe(true);
+  // Only the stamp's own unit: an aggregate row served for Unit 105 neither refreshes nor marks Unit 103's stamp.
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: aged }, '105')).toBe(false);
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: aged }, null)).toBe(false);
   // A fresh stamp, another source, no stamp, or the gate off: no refresh.
-  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, resolvedAt: at(5) } })).toBe(false);
-  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, source: 'license_seats' } })).toBe(false);
-  expect(listingStampNeedsRefresh({})).toBe(false);
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, resolvedAt: at(5) } }, '103')).toBe(false);
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, source: 'license_seats' } }, '103')).toBe(false);
+  expect(listingStampNeedsRefresh({}, '103')).toBe(false);
   delete process.env.GATE_LOOKUP_LISTING_SIZE;
-  expect(listingStampNeedsRefresh({ _commercialSuiteSize: aged })).toBe(false);
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: aged }, '103')).toBe(false);
 });

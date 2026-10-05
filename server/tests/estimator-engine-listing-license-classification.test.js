@@ -24,9 +24,10 @@ const ARGS = { addressLine: '4400 Test Commons Pkwy Suite 103, Bradenton, FL 342
 beforeEach(() => { resolved.calls.length = 0; });
 
 test('a license found with the phone classifies the suite; the listing size, source and link stand', async () => {
-  resolved.current = { value: 1400, source: 'license_seats', businessName: 'Example Taco Shop', seats: 25 };
+  resolved.current = { value: 1400, source: 'license_seats', businessName: 'Example Taco Shop', seats: 25, evidence: [{ source: 'license_seats', detail: '25 seats' }] };
   const out = await classifyListingSuiteByLicense(LISTING, ARGS);
   expect(out).toMatchObject({ value: 1350, source: 'listing_verified_text', url: 'https://www.loopnet.com/x', licenseBacked: true, businessType: 'restaurant_food', businessName: 'Example Taco Shop', seats: 25 });
+  expect(out.evidence.map((e) => e.source)).toEqual(['license_seats']);
   expect(resolved.calls[0].input.phone).toBe('+19415550100');
   expect(resolved.calls[0].opts).toMatchObject({ skipWebSearch: true, skipListing: true });
 });
