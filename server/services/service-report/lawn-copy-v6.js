@@ -60,6 +60,50 @@ function countWords(text) {
   return t ? t.split(/\s+/).length : 0;
 }
 
+// The sentences of one approved piece (a row's visible-change or by-next-visit
+// text can hold two: "By your next visit, color may be up. Thickening takes longer.").
+function splitSentences(text) {
+  return String(text || '').trim().split(/(?<=[.!?])\s+(?=[A-Z])/).filter(Boolean);
+}
+
+// Lower-cased words with no punctuation, for "is this already said" checks.
+const sentenceWords = (text) => String(text || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean).join(' ');
+
+const BY_NEXT_VISIT_RX = /^\s*by your next visit\b/i;
+
+/**
+ * The composition rule for the "What to expect" block, applied wherever the block
+ * is built or replayed (so web, PDF and every summary that reuses it agree).
+ * Pieces arrive in the engine's row order, each { text, needsVisit }:
+ *  - at most ONE by-next-visit piece: the first one (the first product's) stays,
+ *    the others are left out whole;
+ *  - a sentence already stated (the same words, or contained in a sentence
+ *    printed before it: "Thickening takes longer" after "...and thickening takes
+ *    longer") is not printed again.
+ * Every sentence that stays is printed verbatim. A piece left with no sentence
+ * is dropped.
+ */
+function composeExpectPieces(pieces) {
+  const out = [];
+  const said = [];
+  let hasNextVisit = false;
+  for (const piece of Array.isArray(pieces) ? pieces : []) {
+    const text = clean(piece && piece.text);
+    if (!text) continue;
+    const nextVisit = Boolean(piece.needsVisit || piece.gapBased) || BY_NEXT_VISIT_RX.test(text);
+    if (nextVisit && hasNextVisit) continue;
+    const kept = splitSentences(text).filter((sentence) => {
+      const words = ` ${sentenceWords(sentence)} `;
+      return !said.some((prior) => prior.includes(words));
+    });
+    if (!kept.length) continue;
+    kept.forEach((sentence) => said.push(` ${sentenceWords(sentence)} `));
+    if (nextVisit) hasNextVisit = true;
+    out.push({ ...piece, text: kept.join(' ') });
+  }
+  return out;
+}
+
 function parseJsonObject(value) {
   if (!value) return {};
   if (typeof value === 'object') return value;
@@ -121,33 +165,46 @@ function buildWhatToExpect(reportV2, ctx, deps) {
   const rows = (Array.isArray(built && built.rows) ? built.rows : [])
     .filter((row) => row && row.approved === true && typeof row.id === 'string' && Array.isArray(row.sentences));
   const visitKnown = Number.isFinite(ctx.nextVisitGapDays);
-  const pieces = [];
-  const picked = [];
-  // Each printed sentence, in order, with whether it was timed from the gap to
-  // the next visit (a row judged by absence words its line without one).
-  const sentences = [];
-  let words = 0;
+  // Every candidate sentence, in the engine's row order (at most 2 rows).
+  const candidates = [];
+  let rowsUsed = 0;
   for (const row of rows) {
-    if (picked.length >= MAX_EXPECT_ROWS) break;
-    const keys = [];
+    if (rowsUsed >= MAX_EXPECT_ROWS) break;
+    const before = candidates.length;
     for (const key of EXPECT_SENTENCE_KEYS) {
       // "By your next visit..." needs a visit the report shows: with no known
       // gap there is none, even for a row whose line is not timed by it.
       if (key === 'byNextVisit' && !visitKnown) continue;
       const sentence = row.sentences.find((s) => s && s.key === key && clean(s.text));
       if (!sentence) continue;
-      const w = countWords(sentence.text);
-      if (words + w > FIELD_CAPS.whatToExpect) continue;
-      words += w;
-      pieces.push(sentence.text.trim());
-      keys.push(key);
-      sentences.push({
-        key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
+      candidates.push({
+        id: row.id, key, text: sentence.text.trim(), needsVisit: key === 'byNextVisit', gapBased: key === 'byNextVisit' && !row.judgedByAbsence,
       });
     }
-    if (keys.length) picked.push({ id: row.id, keys });
+    if (candidates.length > before) rowsUsed += 1;
   }
-  return { text: pieces.length ? pieces.join(' ') : null, rows: picked, sentences };
+  // The 42-word cap picks the sentences (a sentence that would pass it is
+  // skipped whole), then one composition rule (composeExpectPieces) takes out
+  // the repeats. Composing never brings a skipped sentence back in.
+  const capped = [];
+  let words = 0;
+  for (const piece of candidates) {
+    const w = countWords(piece.text);
+    if (words + w > FIELD_CAPS.whatToExpect) continue;
+    words += w;
+    capped.push(piece);
+  }
+  const composed = composeExpectPieces(capped);
+  const picked = [];
+  // Each printed sentence, in order, with whether it was timed from the gap to
+  // the next visit (a row judged by absence words its line without one).
+  const sentences = composed.map((piece) => {
+    const entry = picked.find((p) => p.id === piece.id);
+    if (entry) entry.keys.push(piece.key);
+    else picked.push({ id: piece.id, keys: [piece.key] });
+    return { key: piece.key, text: piece.text, needsVisit: piece.needsVisit, gapBased: piece.gapBased };
+  });
+  return { text: composed.length ? composed.map((piece) => piece.text).join(' ') : null, rows: picked, sentences };
 }
 
 /**
@@ -191,8 +248,8 @@ function cleanFields(fields) {
 // so a reschedule can never leave a stale sentence in a stored document.
 function staticWhatToExpect(sentences, fallback) {
   if (!Array.isArray(sentences)) return fallback || null;
-  const kept = sentences.filter((s) => s && !s.needsVisit && !s.gapBased && clean(s.text)).map((s) => s.text.trim());
-  return kept.length ? kept.join(' ') : null;
+  const kept = composeExpectPieces(sentences.filter((s) => s && !s.needsVisit && !s.gapBased));
+  return kept.length ? kept.map((s) => s.text).join(' ') : null;
 }
 
 // A frozen entry's fields for THIS render. Everything replays as frozen except
@@ -209,9 +266,10 @@ function replayFields(entry, ctx = {}) {
   const shownIso = ctx.nextVisitIso || null;
   const moved = (entry.nextVisitIso || null) !== shownIso;
   const dropped = (s) => (s.gapBased && moved) || ((s.needsVisit || s.gapBased) && !shownIso);
-  if (!sentences.some((s) => s && dropped(s))) return { ...fields, whatToExpectStatic };
-  const kept = sentences.filter((s) => s && !dropped(s) && clean(s.text)).map((s) => s.text.trim());
-  return { ...fields, whatToExpect: kept.length ? kept.join(' ') : null, whatToExpectStatic };
+  // The block is composed again from the kept sentences (composeExpectPieces):
+  // a copy frozen before the rule replays without its repeated sentences.
+  const kept = composeExpectPieces(sentences.filter((s) => s && !dropped(s)));
+  return { ...fields, whatToExpect: kept.length ? kept.map((s) => s.text).join(' ') : null, whatToExpectStatic };
 }
 
 /** One assessment's frozen entry out of a record's structured_notes, or null. */
@@ -313,5 +371,5 @@ module.exports = {
   resolveLawnCopyV6ForRender,
   storedLawnCopyV6For,
   freezeLawnCopyV6,
-  _test: { buildWatching, buildWhatToExpect, watchedIssues, WATCH_TOPIC },
+  _test: { buildWatching, buildWhatToExpect, watchedIssues, WATCH_TOPIC, composeExpectPieces },
 };
