@@ -1864,17 +1864,24 @@ function parseContainerSize(text) {
   return { amount: Number(match[1]), unit: UNIT_ALIASES[normalized] || normalized };
 }
 
-// The numbers the operator stated in the trusted text: digits and decimals, spelled numbers the repo already parses
-// (one to nineteen, twenty to ninety, a tens-plus-ones compound), and a singular container noun ("a jug", "the spilled bag") as 1.
-function statedNumbers(texts) {
+// The container counts the operator stated, read only from a container phrase. The count is the number directly attached to
+// a container noun: `<number> <noun>` with only whitespace or a hyphen between ("0.5 bottle", "2 jugs", "two-jug"); the
+// number is digits/decimal or a spelled number the repo already parses. A singular noun with no number directly before it
+// ("a jug", "the spilled bag") counts as 1; a plural with none supplies no count ("some jugs"). Numbers anywhere else
+// (a "10%" concentration, product-name digits, "78 ounces") are never counts. Each phrase is its own count; phrases are not summed.
+const CONTAINER_PHRASE_RE = /\b(bottles?|jugs?|bags?|cases?|containers?|pails?|buckets?|boxes|box|cans?|tubes?|packs?|drums?)\b/gi;
+const COUNT_BEFORE_RE = new RegExp(`(?:(?<![\\d.])(\\d+(?:\\.\\d+)?)|\\b(${PERCENT_NUMBER_WORD_ALT}))[\\s-]*$`, 'i');
+function containerCounts(texts) {
   const out = [];
-  const spelled = new RegExp(`\\b(${PERCENT_NUMBER_WORD_ALT})\\b`, 'gi');
-  const singular = /\b(?:bottle|jug|bag|case|container|pail|bucket|box|can|tube|pack|drum)\b/i;
   for (const raw of texts || []) {
     const text = String(raw || '');
-    for (const m of text.matchAll(/\d+(?:\.\d+)?/g)) out.push(Number(m[0]));
-    for (const m of text.matchAll(spelled)) { const v = percentWordsToValue(m[1]); if (v != null) out.push(v); }
-    if (singular.test(text)) out.push(1);
+    for (const m of text.matchAll(CONTAINER_PHRASE_RE)) {
+      const attached = text.slice(0, m.index).match(COUNT_BEFORE_RE);
+      if (attached) {
+        const count = attached[1] != null ? Number(attached[1]) : percentWordsToValue(attached[2]);
+        if (count > 0) out.push(count);
+      } else if (!/s$/i.test(m[1])) out.push(1);
+    }
   }
   return out;
 }
@@ -1889,12 +1896,12 @@ function unitGroundedIn(unit, texts, product, amount) {
     .some(re => re && words.some(t => re.test(t)));
   if (named) return true;
   // Admitted only through a container noun ("two jugs"): the amount must be a whole-container conversion, N x the
-  // catalog container size (in the writer's own conversion) for some number N the operator stated, within 0.5%.
+  // catalog container size (in the writer's own conversion) for the count N of ONE container phrase, within 0.5%.
   if (!words.some(t => CONTAINER_WORDS.test(t))) return false;
   const size = parseContainerSize(product?.container_size);
   const target = Math.abs(Number(amount));
   if (!size || !(target > 0)) return false;
-  return statedNumbers(words).some((n) => {
+  return containerCounts(words).some((n) => {
     const converted = convertInventoryQuantity(n * size.amount, size.unit, unit);
     return converted != null && Math.abs(converted - target) <= target * 0.005;
   });
