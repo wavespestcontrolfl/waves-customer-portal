@@ -836,7 +836,7 @@ async function getUnansweredThreads(input) {
     // Check for a reply after this message. An unresolved review-ask
     // reservation (Codex #4331 P2) is excluded — its unconfirmed placeholder
     // must not read as a real reply and mask a genuinely unanswered thread.
-    const reply = await excludeUnresolvedSendReservations(db('sms_log'))
+    const reply = await excludeCanceledSms(excludeUnresolvedSendReservations(db('sms_log')))
       .where('direction', 'outbound')
       .where('created_at', '>', msg.created_at)
       .where(function () {
@@ -869,6 +869,32 @@ async function getUnansweredThreads(input) {
   };
 }
 
+
+// What a stored sms_log status means for "did the customer get this text".
+// A kept cancelled text (cancel_queued_message keeps its row) and a still-queued
+// or failed one must never read as a sent Waves message in a thread or search
+// result, or the model could tell the operator "we already texted them that".
+// Sent-like statuses and inbound rows carry the plain status only.
+function deliveryLabel(row) {
+  const status = String(row.status || '').toLowerCase();
+  const out = { status: row.status || null };
+  if (row.direction !== 'outbound') return out;
+  if (status === 'canceled' || status === 'cancelled') {
+    return { ...out, canceled: true, note: 'Scheduled text, cancelled before it was sent. The customer never received it.' };
+  }
+  if (status === 'scheduled' || status === 'sending') {
+    return { ...out, not_sent_yet: true, note: 'Scheduled text, not sent yet. The customer has not received it.' };
+  }
+  if (['failed', 'undelivered', 'blocked'].includes(status)) {
+    return { ...out, not_delivered: true, note: 'This text did not reach the customer.' };
+  }
+  return out;
+}
+
+// A cancelled text is not a reply and not a send: keep it out of the "was this
+// thread answered" checks and out of the sent counts.
+const excludeCanceledSms = (qb, alias = 'sms_log') => qb
+  .whereRaw(`COALESCE(${alias}.status, '') NOT IN ('canceled', 'cancelled')`);
 
 async function getConversationThread(input) {
   const { limit: rawLimit } = input;
@@ -906,7 +932,7 @@ async function getConversationThread(input) {
     .select(
       'sms_log.id', 'sms_log.direction', 'sms_log.message_body',
       'sms_log.from_phone', 'sms_log.to_phone',
-      'sms_log.message_type', 'sms_log.created_at',
+      'sms_log.message_type', 'sms_log.created_at', 'sms_log.status',
       'customers.first_name', 'customers.last_name',
     )
     .orderBy('sms_log.created_at', 'desc')
@@ -926,6 +952,7 @@ async function getConversationThread(input) {
       type: m.message_type,
       time: m.created_at,
       from: m.direction === 'inbound' ? (customerName || m.from_phone) : 'Waves',
+      ...deliveryLabel(m),
     })),
     returned_count: messages.length,
     has_more: fetched.length > limit,
@@ -998,6 +1025,7 @@ async function searchMessages(input) {
       customer: m.first_name ? `${m.first_name} ${m.last_name}` : null,
       phone: m.direction === 'inbound' ? m.from_phone : m.to_phone,
       time: m.created_at,
+      ...deliveryLabel(m),
     })),
     search_params: { search, direction, message_type, days_back },
   };
@@ -1011,13 +1039,13 @@ async function getSmsStats(days) {
   // #4331 P2): an in-flight, unconfirmed placeholder must not inflate the
   // outbound-count signal — a resolved row still counts normally.
   const [byDirection, byType, byDay] = await Promise.all([
-    excludeUnresolvedSendReservations(db('sms_log')).where('created_at', '>=', since)
+    excludeCanceledSms(excludeUnresolvedSendReservations(db('sms_log'))).where('created_at', '>=', since)
       .select('direction', db.raw('COUNT(*) as count'))
       .groupBy('direction'),
-    excludeUnresolvedSendReservations(db('sms_log')).where('created_at', '>=', since)
+    excludeCanceledSms(excludeUnresolvedSendReservations(db('sms_log'))).where('created_at', '>=', since)
       .select('message_type', db.raw('COUNT(*) as count'))
       .groupBy('message_type').orderByRaw('COUNT(*) DESC'),
-    excludeUnresolvedSendReservations(db('sms_log')).where('created_at', '>=', since)
+    excludeCanceledSms(excludeUnresolvedSendReservations(db('sms_log'))).where('created_at', '>=', since)
       .select(db.raw("DATE(created_at) as day"), db.raw('COUNT(*) as count'), 'direction')
       .groupBy('day', 'direction').orderBy('day'),
   ]);
@@ -1496,7 +1524,7 @@ async function getTodaysActivity() {
   // resolved row still counts/replies normally.
   const [smsIn, smsOut, calls, unanswered] = await Promise.all([
     db('sms_log').modify((qb) => excludeRecruitingSmsLog(qb)).where('direction', 'inbound').where('created_at', '>=', since).count('* as c').first(),
-    excludeUnresolvedSendReservations(db('sms_log')).modify((qb) => excludeRecruitingSmsLog(qb)).where('direction', 'outbound').where('created_at', '>=', since).count('* as c').first(),
+    excludeCanceledSms(excludeUnresolvedSendReservations(db('sms_log'))).modify((qb) => excludeRecruitingSmsLog(qb)).where('direction', 'outbound').where('created_at', '>=', since).count('* as c').first(),
     db('call_log').where('created_at', '>=', since)
       .modify((qb) => require('../voice-agent/relay-protocol').whereNotSandboxCall(qb)) // bake-off calls are not today's activity
       .select(
@@ -1513,6 +1541,7 @@ async function getTodaysActivity() {
             .whereRaw('reply.created_at > sms_log.created_at'),
           'reply',
         )
+          .modify((q) => excludeCanceledSms(q, 'reply'))
           .whereRaw("RIGHT(REPLACE(reply.to_phone, '+', ''), 10) = RIGHT(REPLACE(sms_log.from_phone, '+', ''), 10)");
       })
       .count('* as c').first(),

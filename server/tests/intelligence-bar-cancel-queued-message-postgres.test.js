@@ -278,6 +278,62 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     expect(listed.messages.map((m) => m.message_id)).toEqual([secondId]);
   });
 
+  test('a cancelled-and-kept text shows in the thread and in search labelled canceled, never as a sent message; a queued one is labelled not sent yet', async () => {
+    const custId = await customer();
+    const sentId = await scheduledSms(custId, { status: 'sent', scheduled_for: null, message_body: 'Synthetic sent text', created_at: new Date(Date.now() - 7200000) });
+    const keptId = await scheduledSms(custId, { message_body: 'Synthetic staff text that gets cancelled', created_at: new Date(Date.now() - 3600000) });
+    const queuedId = await scheduledSms(custId, { message_body: 'Synthetic text still queued', created_at: new Date(Date.now() - 1800000) });
+    const preview = await executeCommsTool('cancel_queued_message', { message_id: keptId, customer_id: custId, channel: 'sms' });
+    const confirmed = await executeCommsTool('cancel_queued_message', {
+      message_id: keptId, customer_id: custId, channel: 'sms', confirmed: true, _verified_message_version: preview._version,
+    });
+    expect(confirmed.success).toBe(true);
+
+    const thread = await executeCommsTool('get_conversation_thread', { customer_id: custId, phone: '+19415550100' });
+    expect(thread.error).toBeUndefined();
+    const byBody = Object.fromEntries(thread.messages.map((m) => [m.body, m]));
+    expect(thread.messages).toHaveLength(3);
+    expect(byBody['Synthetic staff text that gets cancelled']).toMatchObject({
+      direction: 'outbound', status: 'canceled', canceled: true, from: 'Waves',
+      note: 'Scheduled text, cancelled before it was sent. The customer never received it.',
+    });
+    expect(byBody['Synthetic text still queued']).toMatchObject({ status: 'scheduled', not_sent_yet: true });
+    expect(byBody['Synthetic sent text']).toMatchObject({ status: 'sent' });
+    expect(byBody['Synthetic sent text'].canceled).toBeUndefined();
+    expect(byBody['Synthetic sent text'].not_sent_yet).toBeUndefined();
+
+    const found = await executeCommsTool('search_messages', { customer_id: custId, search: 'gets cancelled', days_back: 30 });
+    expect(found.messages).toHaveLength(1);
+    expect(found.messages[0]).toMatchObject({ id: keptId, status: 'canceled', canceled: true });
+    expect(sentId).toBeTruthy();
+    expect(queuedId).toBeTruthy();
+  });
+
+  test('a cancelled-and-kept text does not count as a reply or as sent in the stats and today readers', async () => {
+    const custId = await customer();
+    await trx('sms_log').where({ customer_id: custId }).del();
+    await trx('sms_log').insert({
+      id: randomUUID(), customer_id: custId, direction: 'inbound', from_phone: '+19415550177', to_phone: '+19413529161',
+      message_body: 'Synthetic question from a customer', message_type: 'inbound', status: 'received',
+      created_at: new Date(Date.now() - 60000),
+    });
+    const keptId = await scheduledSms(custId, { to_phone: '+19415550177', message_body: 'Synthetic reply that is cancelled', created_at: new Date() });
+    const preview = await executeCommsTool('cancel_queued_message', { message_id: keptId, customer_id: custId, channel: 'sms' });
+    await executeCommsTool('cancel_queued_message', {
+      message_id: keptId, customer_id: custId, channel: 'sms', confirmed: true, _verified_message_version: preview._version,
+    });
+    expect((await trx('sms_log').where({ id: keptId }).first()).status).toBe('canceled');
+
+    const stats = await executeCommsTool('get_sms_stats', { days: 1 });
+    expect(stats.error).toBeUndefined();
+    expect(stats.total_sent).toBe(0);
+    expect(stats.total_received).toBe(1);
+    const today = await executeCommsTool('get_todays_activity', {});
+    expect(today.error).toBeUndefined();
+    expect(today.sms_sent).toBe(0);
+    expect(today.unanswered_messages).toBe(1); // the cancelled reply did not answer the customer
+  });
+
   test('the voice-corpus miner never mines a cancelled-and-kept text as a human reply', async () => {
     const { _test: { mineSmsPairs } } = require('../services/sms-voice-corpus-miner');
     const custId = await customer();
