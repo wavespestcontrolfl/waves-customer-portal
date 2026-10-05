@@ -494,6 +494,8 @@ app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 // BEFORE the global limiter, or an over-budget IP gets a 429 (and no
 // no-store/CORP) from a route that is supposed to be dark / generic.
 app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
+// Accept-card phone capture: the same reason. Its privacy headers and its gate-off 404 land before the global limiter.
+app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard);
 
 app.use('/api/', limiter);
 

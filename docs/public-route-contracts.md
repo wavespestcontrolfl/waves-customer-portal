@@ -1610,9 +1610,13 @@ no card captured, the office told). So a customer who acquires the number
 after the save is not reused either. A phone the office later puts on the
 estimate differs from the stamp and is trusted as before. A diff that lets a
 typed phone resolve to an existing customer, or that writes it when it
-matches one, is a P0. The route sets `Cache-Control: no-store`,
-`Pragma: no-cache` and `Referrer-Policy: no-referrer` on every response, and
-its limiter is skipped while the gate is off (the 404 never becomes a 429). The 200/409 difference tells a token
+matches one, is a P0. `contactPhonePreGuard` (mounted on
+`/api/estimates` in `server/index.js` BEFORE the global `/api/` limiter, like
+`mapImagePreGuard`) stamps `Cache-Control: no-cache, no-store,
+must-revalidate`, `Pragma: no-cache` and `Referrer-Policy: no-referrer` on
+EVERY response of this route — the malformed-token 404, the global and the
+route limiter's 429s and the handler's answers — and answers the gate-off
+404 there, so a dark route never reads as a 429. The 200/409 difference tells a token
 holder whether a number is a customer's; that is bounded by design (a
 non-customer number is saved and closes the gap, a customer number rings the
 office, and the limiter caps attempts). The page keeps the card step and the

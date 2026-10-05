@@ -18837,12 +18837,26 @@ const contactPhoneLimiter = rateLimit({
   keyGenerator: (req) => `${require('../middleware/rate-limit-key').rateLimitKey(req)}:${req.params.token}`,
   message: { error: 'Too many attempts. Please wait a moment and try again, or call our office.' },
 });
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like mapImagePreGuard. It stamps the
+// privacy headers first, so EVERY response of this route carries them: router.param's malformed-token 404, the global
+// limiter's 429, this route's own 429 and the handler's answers. With the gate off it answers the route's 404 here, so
+// a dark route can never read as a 429. Raw-path match (one non-slash token segment, optional trailing slash).
+const CONTACT_PHONE_PATH_RE = /^\/[^/]+\/contact-phone\/?$/i;
+function stampContactPhoneHeaders(res) {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Referrer-Policy', 'no-referrer');
+}
+function contactPhonePreGuard(req, res, next) {
+  if (req.method !== 'PUT' || !CONTACT_PHONE_PATH_RE.test(req.path || '')) return next();
+  stampContactPhoneHeaders(res);
+  if (!featureGates.isEnabled('estimateAcceptPhone')) return res.status(404).json({ error: 'Estimate not found' });
+  return next();
+}
 router.put('/:token/contact-phone', contactPhoneLimiter, async (req, res, next) => {
   try {
-    // Tokenized estimate response: never cached, never sent as a referrer. Stamped before any branch.
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.set('Referrer-Policy', 'no-referrer');
+    // Also stamped here: the handler must be correct on its own, without the pre-guard mount.
+    stampContactPhoneHeaders(res);
     if (!featureGates.isEnabled('estimateAcceptPhone')) return res.status(404).json({ error: 'Estimate not found' });
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
@@ -30686,6 +30700,7 @@ module.exports = router;
 // Codex round 2 on #4608: exported so estimate-annual-guard.js's content-derivation regex tests can assert exact parity against the canonical token format gate, instead of a hand-copied literal that could silently drift from it.
 module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.mapImagePreGuard = mapImagePreGuard;
+module.exports.contactPhonePreGuard = contactPhonePreGuard;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
