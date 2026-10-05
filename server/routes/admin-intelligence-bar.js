@@ -1707,6 +1707,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // same parse as the optimistic-append check below — so a stale tab
       // never grounds off turns appended by another tab it never saw.
       threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
+      // adjust_stock only: the unit the model passed must appear in the operator's own words (owner-direct and card alike).
+      unit: toolUse.name === 'adjust_stock' ? (params.unit ?? null) : undefined,
     });
     if (target.error) return { failed: true, modelResult: target };
     if (toolUse.name !== 'update_restock_request') {

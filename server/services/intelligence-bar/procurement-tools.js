@@ -17,6 +17,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const inventory = require('../inventory-operations');
+const { normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 const PROCUREMENT_TOOLS = [
@@ -1540,13 +1541,13 @@ function operationMatches(toolName, texts, preview) {
 
 const TARGET_UNAVAILABLE = Object.freeze({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
 
-async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null, toolName = null } = {}) {
-  const grounded = await groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName });
+async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null, toolName = null, trace = null } = {}) {
+  const grounded = await groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName, trace });
   if (grounded?.productId) return { productId: grounded.productId };
   return grounded?.mismatch ? { ...TARGET_UNAVAILABLE, code: 'target_relationship_mismatch' } : TARGET_UNAVAILABLE;
 }
 
-async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName }) {
+async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName, trace = null }) {
   if (!preview?.product?.id || isNotAnInstruction(prompt)) return null;
   // `texts` are the operator's words the grounding rests on (this prompt,
   // plus the prior turn that named the product): they must also ask for the
@@ -1558,7 +1559,10 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
     if (result.conflict || result.named.size !== 1) return null;
     const [id] = result.named;
     if (id !== preview.product.id) return { mismatch: true };
-    return operationMatches(toolName, texts, preview) ? { productId: id } : null;
+    if (!operationMatches(toolName, texts, preview)) return null;
+    // The operator words the grounding rested on are the only words a unit may be read from.
+    if (trace) trace.texts = texts;
+    return { productId: id };
   };
   // Naming comes from the operator's FULL raw text via the closed-vocabulary
   // residual rule (productsNamedIn) — never targetClause, which also strips
@@ -1600,7 +1604,18 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
-async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq }) {
+async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq, unit }) {
+  const trace = { texts: [prompt] };
+  const target = await resolveInventoryTarget({ toolName, prompt, pageData, preview, actorId, threadId, threadSeq, trace });
+  // `unit` is the unit the model passed to adjust_stock (the route always supplies it for that tool, null when absent).
+  // A stock-changing call is admitted only when the operator's own words, the same trusted text the product and the
+  // operation were grounded on, contain that unit. A unit the model took from the catalog is refused for both the
+  // owner-direct write and the card.
+  if (target.error || toolName !== 'adjust_stock' || unit === undefined) return target;
+  return unitGroundedIn(unit, trace.texts, preview?.product) ? target : unitRequiredRefusal(preview?.product);
+}
+
+async function resolveInventoryTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq, trace }) {
   const { targetClause, UUID_RE } = require('./task-context');
   // A colon/quote can be part of a catalog identity. Never turn a qualified
   // product into the shorter base product by applying the contact-body split.
@@ -1659,7 +1674,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // No pattern matched at all, so the operator named no target the grammar
   // can read: this is the one place the free-phrasing fallback runs (and,
   // for a bare follow-up like "1 bottle", recent operator turns).
-  if (!selected) return resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName });
+  if (!selected) return resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName, trace });
   // A trailing destination ("… to inventory", "… into our stock") names
   // where the stock goes, not the product: "add two bottles of Taurus SC to
   // inventory" must look up "Taurus SC" (the grammar captured the whole
@@ -1811,19 +1826,62 @@ function inventoryWriteOptions(input, actionContext, source) {
   return { actorId: actionContext.technicianId, expectedVersion: input._verified_inventory_version, source };
 }
 
+// ─── UNIT GROUNDING ─────────────────────────────────────────────
+
+// The writer's own unit table (inventory-units) is the vocabulary: normalizeInventoryUnit collapses "gals", "lbs" and
+// "gallons" the way the writer does, and these are the spoken words that name each canonical unit. "ounces" names oz and
+// fl_oz (the writer treats a bare oz as ambiguous). A container noun ("two jugs") grounds the unit the model converted
+// to from the catalog container size; that is the one case where the model's unit may differ from the operator's word.
+const UNIT_ALIASES = { floz: 'fl_oz', gallon: 'gal', quart: 'qt', pint: 'pt', liter: 'l', ounce: 'oz', pound: 'lb', gram: 'g' };
+const UNIT_WORDS = {
+  fl_oz: /\bfl_oz\b|\bfl\.?\s*oz\b|\bfloz\b|\bfluid\s+(?:ounces?|oz)\b/i,
+  gal: /\b(?:gal|gals|gallons?)\b/i,
+  qt: /\b(?:qt|qts|quarts?)\b/i,
+  pt: /\b(?:pt|pts|pints?)\b/i,
+  ml: /\b(?:ml|mls|millilit(?:er|re)s?)\b/i,
+  l: /\blit(?:er|re)s?\b|\b\d+(?:\.\d+)?\s*l\b/i,
+  oz: /\b(?:oz|ounces?)\b/i,
+  lb: /\b(?:lb|lbs|pounds?)\b/i,
+  g: /\bgrams?\b|\b\d+(?:\.\d+)?\s*g\b/i,
+  kg: /\b(?:kg|kgs|kilograms?)\b/i,
+  each: /\b(?:each|items?|units?|pieces?)\b/i,
+};
+const CONTAINER_WORDS = /\b(?:bottles?|jugs?|bags?|cases?|containers?|pails?|buckets?|boxes|box|cans?|tubes?|packs?|drums?)\b/i;
+
+function unitGroundedIn(unit, texts, product) {
+  if (!String(unit ?? '').trim()) return false;
+  if (!unitDefinition(unit)) return true; // an unsupported unit never writes; the writer refuses it in its own words
+  const normalized = normalizeInventoryUnit(unit);
+  const canonical = UNIT_ALIASES[normalized] || normalized;
+  const words = (texts || []).map(t => String(t || ''));
+  const named = (canonical === 'fl_oz' ? [UNIT_WORDS.fl_oz, UNIT_WORDS.oz] : [UNIT_WORDS[canonical]])
+    .some(re => re && words.some(t => re.test(t)));
+  if (named) return true;
+  return !!product?.container_size && words.some(t => CONTAINER_WORDS.test(t));
+}
+
+// The one refusal for a stock write whose unit the operator did not state. It never hands the model a unit to retry with:
+// the unit has to come from the operator. With threads off a one-word reply cannot be tied back to the product and the
+// amount, so the question asks for product, amount and unit in one message.
+function unitRequiredRefusal(product, { amountMissing = false } = {}) {
+  const name = product?.name || 'the product';
+  const container = product?.container_size ? ` For the question only: ${name} comes in a ${product.container_size} container.` : '';
+  return { success: false, code: amountMissing ? 'unit_and_amount_required' : 'unit_required',
+    error: `${amountMissing ? 'The amount and the unit are missing' : 'The unit is missing'}, so no stock was changed. `
+      + `The unit has to come from the operator's own words: never use the product's saved unit or the catalog as the unit, and do not call again until the operator states it. `
+      + `Ask the operator one short question to restate the product, the amount and the unit in one message (for example "2 gallons of ${name}"). A one-word answer may not be enough.${container}` };
+}
+
 async function adjustStock(input, actionContext) {
   const resolved = await resolveProduct(input);
   if (resolved.error) return resolved;
   // A quantity with no stated unit never changes stock: the writer would read it in the product's own inventory unit
-  // (fl oz), so "2 jugs" became 2 fl oz. Refused at the preview too, so no card and no owner-direct write is ever built
-  // on an assumed unit; the model asks the operator one short question and calls again with the unit they said.
+  // (fl oz), so "2 jugs" became 2 fl oz. Refused at the preview too, so no card and no owner-direct write is built on an
+  // assumed unit. (The route then checks the unit the model did pass against the operator's own words.)
   if (!String(input.unit ?? '').trim()) {
-    const { name, inventory_unit: inventoryUnit, container_size: containerSize } = resolved.product;
-    const unitFact = inventoryUnit
-      ? ` ${name} is counted in ${inventoryUnit}${containerSize ? ` (container size ${containerSize})` : ''}.`
-      : containerSize ? ` ${name} has a container size of ${containerSize}.` : '';
-    return { success: false, code: 'unit_required',
-      error: `The unit is missing, so no stock was changed.${unitFact} Ask the operator one short question about the unit of the amount (for example "2 what: gallons, fl oz?"), then call again with the unit they say. Never guess the unit.` };
+    // A call missing the amount as well asks for both at once, so the operator is not asked twice.
+    const amountMissing = input.quantity == null && input.set_total == null;
+    return unitRequiredRefusal(resolved.product, { amountMissing });
   }
   const fields = { movementType: input.movement_type, quantity: input.quantity, setTotal: input.set_total,
     unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };

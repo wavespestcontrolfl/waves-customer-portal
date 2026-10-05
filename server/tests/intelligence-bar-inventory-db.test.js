@@ -453,6 +453,19 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(await onHand(row.id)).toBe(8);
   }, 30000);
 
+  test('a unit the model passes that the operator never said is refused with no card and no stock change', async () => {
+    const row = await product();
+    // The operator said lb; a model-filled kg (convertible, so the writer would accept it) is not the operator's unit.
+    const refused = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'kg' }, `Add 2 lb of ${row.name} that arrived`);
+    expect(refused.body.pendingActions || []).toHaveLength(0);
+    expect(await onHand(row.id)).toBe(10);
+    expect(await db('product_inventory_movements').where({ product_id: row.id })).toHaveLength(0);
+    // The unit the operator said still builds its card and commits.
+    const proposed = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'lb' }, `Add 2 lb of ${row.name} that arrived`);
+    expect((await confirm(proposed)).body.success).toBe(true);
+    expect(await onHand(row.id)).toBe(12);
+  }, 40000);
+
   test('model duplicate override requires explicit operator intent', async () => {
     const row = await product();
     await requestFor(row);

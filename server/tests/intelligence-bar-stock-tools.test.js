@@ -239,20 +239,35 @@ describe('adjust_stock with no stated unit (the bar never assumes the inventory 
     ['set_total', { movement_type: 'correction', set_total: 100 }],
   ];
 
-  test.each(NO_UNIT_CALLS)('%s with no unit refuses with unit_required, names the inventory unit and container, writes nothing', async (_label, fields) => {
+  test.each(NO_UNIT_CALLS)('%s with no unit refuses with unit_required, names the container size only as a fact, writes nothing', async (_label, fields) => {
     const mutations = useDb({ products_catalog: [TALAK] });
     for (const extra of [{}, { confirmed: true }]) {
       const result = await executeProcurementTool('adjust_stock', { product_name: 'Talak', ...fields, ...extra });
       expect(result).toMatchObject({ success: false, code: 'unit_required' });
       expect(result.preview).toBeUndefined();
       expect(result.error).toMatch(/unit is missing/i);
-      expect(result.error).toContain('fl_oz');
+      // The refusal gives the container size as a fact for the question, never the saved unit as an answer to retry with.
       expect(result.error).toContain('96 fl oz');
+      expect(result.error).not.toContain('fl_oz');
+      expect(result.error).toMatch(/operator's own words/);
+      expect(result.error).toMatch(/product, the amount and the unit in one message/);
     }
     // The server-side confirmed path with a valid approval is refused the same way: no execution on an assumed unit.
     const direct = await executeRaw('adjust_stock', { product_id: 'prod-talak', ...fields, _verified_inventory_version: 'any' },
       { confirmed: true, isAdmin: true, technicianId: 'actor-1' });
     expect(direct).toMatchObject({ success: false, code: 'unit_required' });
+    expect(mutations).toEqual([]);
+  });
+
+  test('no amount and no unit reports both in one refusal (the operator is not asked twice)', async () => {
+    const mutations = useDb({ products_catalog: [TALAK] });
+    const result = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'damaged_lost' });
+    expect(result).toMatchObject({ success: false, code: 'unit_and_amount_required' });
+    expect(result.error).toMatch(/amount and the unit are missing/i);
+    // A unit with no amount keeps the writer's own amount validation.
+    const amountOnly = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'damaged_lost', unit: 'fl_oz' });
+    expect(amountOnly.code).not.toBe('unit_required');
+    expect(amountOnly.error).toMatch(/quantity/i);
     expect(mutations).toEqual([]);
   });
 
@@ -539,6 +554,69 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       preview: { product: { id: TAURUS.id, name: TAURUS.name } },
     });
     expect(result).toEqual({ productId: TAURUS.id });
+  });
+
+  // The unit the model passes must appear in the operator's own words (the same trusted text the product and the operation
+  // were grounded on). A unit the model took from the catalog is refused, for the owner-direct write and the card alike.
+  describe('adjust_stock unit grounding', () => {
+    const preview = { product: { id: TAURUS.id, name: TAURUS.name, container_size: '78 fl oz' }, movement_type: 'restock' };
+    const resolve = (prompt, unit, extra = {}) => resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview, unit, ...extra });
+
+    test.each([
+      ['We bought 2 gallons of Taurus SC', 'gal'],
+      ['We bought 2 gal of Taurus SC', 'gallon'],
+      ['We bought 64 fl oz of Taurus SC', 'fl_oz'],
+      ['We bought 64 fluid ounces of Taurus SC', 'fl_oz'],
+      ['We bought 64 ounces of Taurus SC', 'oz'],
+      ['We bought 64 ounces of Taurus SC', 'fl_oz'],
+      ['We bought 5 lbs of Taurus SC', 'lb'],
+      ['We bought 5 pounds of Taurus SC', 'lbs'],
+      ['We bought 3 quarts of Taurus SC', 'qt'],
+      ['We bought 2 jugs of Taurus SC', 'fl_oz'],
+    ])('"%s" admits the unit %s', async (prompt, unit) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      expect(await resolve(prompt, unit)).toEqual({ productId: TAURUS.id });
+    });
+
+    test.each([
+      ['We bought 2 gallons of Taurus SC', 'lb'],
+      ['We bought 5 lbs of Taurus SC', 'fl_oz'],
+      ['We bought 5 lbs of Taurus SC', 'gal'],
+      ['We bought 2 of Taurus SC', 'fl_oz'],
+      ['We bought 2 of Taurus SC', null],
+      ['We bought 2 of Taurus SC', ''],
+    ])('"%s" refuses a model-supplied unit %s that the operator never said', async (prompt, unit) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const result = await resolve(prompt, unit);
+      expect(result).toMatchObject({ success: false, code: 'unit_required' });
+      expect(result.productId).toBeUndefined();
+      expect(result.error).not.toContain('fl_oz');
+      expect(result.error).toMatch(/operator's own words/);
+    });
+
+    test('the same words ground the owner-direct and the card path alike (one resolver, no preview-only exception)', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      // Callers that pass no unit (every other tool) are unchanged.
+      expect(await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'We bought 2 of Taurus SC', preview })).toEqual({ productId: TAURUS.id });
+    });
+
+    test('a unit stated in the prior grounded operator turn is admitted for a bare follow-up (threads on)', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+      IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We bought 2 gallons of Taurus SC']);
+      expect(await resolve('Yes', 'gal', { actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5 })).toEqual({ productId: TAURUS.id });
+    });
+
+    test('a one-word unit answer after a refusal grounds only when the thread is readable; with threads off it asks to restate', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
+      IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We bought 2 of Taurus SC']);
+      expect(await resolve('gallons', 'gal', { actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5 })).toEqual({ productId: TAURUS.id });
+      // Threads off (the default): nothing ties "gallons" back to the product, so the route cannot finish it. That is why the
+      // refusal asks for product, amount and unit in one message instead of promising a one-word reply.
+      IbThreadsMock.threadsEnabled.mockReturnValue(false);
+      expect(await resolve('gallons', 'gal')).toMatchObject({ code: 'target_clarification_required' });
+    });
   });
 
   test('a real ungrammatical voice-typed prompt is allowed for the matching preview product (Alpine WSG)', async () => {

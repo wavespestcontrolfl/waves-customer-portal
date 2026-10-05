@@ -1610,11 +1610,11 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 18
+        "first_tool_result_ms": 24,
+        "verified_completion_ms": 39
       },
       "notes": [
-        "adjust_stock: unit_required: The unit is missing, so no stock was changed. Talak is counted in fl_oz (container size 96 fl oz). Ask the operator one short question about",
+        "adjust_stock: unit_required: The unit is missing, so no stock was changed. The unit has to come from the operator's own words: never use the product's saved unit or the ",
         "undeclared adjust_stock allowed: the naive restock with no unit, which the writer must clarify"
       ],
       "strength": null,
