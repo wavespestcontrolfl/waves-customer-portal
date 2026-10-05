@@ -10,13 +10,11 @@
  *   missed_call_notified_at — a LEASE (fence token; reclaimable once stale,
  *                             so a crash mid-delivery never loses the alert)
  *   missed_call_settled_at  — terminal: delivered (or superseded)
- *   missed_call_superseded  — 'called_back' when settled without a bell
- *                             because a later call reached us (or we them)
  */
 const db = require('../models/db');
 const logger = require('./logger');
 const { isSentinelPhone, PHONE_SENTINELS } = require('./external-phone');
-const { whereNotBlockedCall } = require('../middleware/spam-block');
+const { whereNotBlockedCall, phoneKeySql } = require('../middleware/spam-block');
 
 const UNANSWERED = new Set(['missed', 'voicemail', 'unknown']);
 // A row with NO answered_by (the Studio-flow status_callback fallback in
@@ -115,39 +113,21 @@ function missedCallEligible(row, now = Date.now(), opts = {}) {
   return true;
 }
 
-// Later-call outcomes that mean someone already spoke with the caller
-// (missed-call-text-back.js's same set).
-const ANSWERED_BY_SOMEONE = ['human', 'ai_agent'];
-
-/**
- * Did the caller reach us after this missed call? True when a later inbound
- * call from the same number was answered (by a person or Sandy) or left a
- * voicemail (the voicemail lane rings for that one), or we called them back
- * and their leg was dialed (bridged_at). A caller who hangs up and redials
- * seconds later is the common case: on 2026-10-03 and 10-05 the redial was
- * answered and the first attempt still rang "did not leave a voicemail".
- */
-async function calledBackSince(row) {
-  const digits = String(row.from_phone || '').replace(/\D/g, '').slice(-10);
-  if (digits.length !== 10) return false;
-  const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-  const phoneMatches = (column) => [`RIGHT(regexp_replace(COALESCE(${column}, ''), '[^0-9]', '', 'g'), 10) = ?`, [digits]];
-  const later = await db('call_log')
-    .modify((q) => whereNotSandboxCall(q))
-    .where('created_at', '>=', row.created_at)
-    .whereNot('id', row.id)
-    .where((q) => q
-      .where((out) => out.where('direction', 'outbound').whereRaw(...phoneMatches('to_phone')).whereNotNull('bridged_at'))
-      .orWhere((inb) => inb.where('direction', 'inbound').whereRaw(...phoneMatches('from_phone'))
-        .where((handled) => handled
-          .whereIn('answered_by', ANSWERED_BY_SOMEONE)
-          .orWhereIn('call_outcome', ['ai_handled', 'ai_transferred'])
-          .orWhereNotNull('recording_sid')
-          .orWhereNotNull('recording_url')
-          .orWhereNotNull('voicemail_callback_alerted_at'))))
-    .first('id');
-  return Boolean(later);
-}
+// The caller already got through on a later call: a person or Sandy
+// answered it, the voicemail lane rang for it, or we called back and their
+// leg was dialed (bridged_at). A redial seconds later is the common case
+// (2026-10-03 and 10-05: the redial was answered, the first attempt still
+// rang). A recording alone is not proof: a dead-air voicemail rings nothing.
+// Excluded in both the claim and the sweep, so such a call is never offered.
+const LATER_KEY = phoneKeySql('later.from_phone');
+const CALLER_KEY = phoneKeySql('call_log.from_phone');
+const CALLED_BACK_SQL = 'NOT EXISTS (SELECT 1 FROM call_log later'
+  + ' WHERE later.id <> call_log.id AND later.created_at >= call_log.created_at'
+  + " AND COALESCE(later.source, '') <> 'voice_relay_sandbox'"
+  + ` AND ((later.direction = 'outbound' AND later.bridged_at IS NOT NULL AND ${phoneKeySql('later.to_phone')} = ${CALLER_KEY})`
+  + ` OR (later.direction = 'inbound' AND ${LATER_KEY} = ${CALLER_KEY}`
+  + " AND (later.answered_by IN ('human', 'ai_agent') OR later.call_outcome IN ('ai_handled', 'ai_transferred')"
+  + ' OR later.voicemail_callback_alerted_at IS NOT NULL))))';
 
 function parseMeta(meta) {
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
@@ -181,6 +161,7 @@ async function ringMissedCallIfUnanswered(callSid) {
       .whereNull('voicemail_callback_alerted_at')
       .whereRaw("COALESCE(call_outcome,'') NOT IN ('ai_handled', 'ai_transferred')")
       .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
+      .whereRaw(CALLED_BACK_SQL)
       .update({ metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('missed_call_notified_at', ?::text)", [token]) });
     if (!claimed) return false;
     // Every later write is fenced on the token: a stale owner waking up
@@ -197,12 +178,6 @@ async function ringMissedCallIfUnanswered(callSid) {
         .whereRaw("metadata->>'triggerKey' = 'customer_missed_call'")
         .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(row.id)]).first('id');
       if (prior) { await settle(); return false; }
-    }
-    // The caller already got through on a later call: nothing to return.
-    // Settle so the sweep stops re-offering this call.
-    if (await calledBackSince(row)) {
-      await fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_settled_at', ?::text, 'missed_call_superseded', 'called_back')", [new Date().toISOString()]) });
-      return false;
     }
     const customer = row.customer_id
       ? await db('customers').where('id', row.customer_id).first('first_name', 'last_name', 'phone')
@@ -296,6 +271,7 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
       .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
       .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
       .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
+      .whereRaw(CALLED_BACK_SQL)
       // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
       .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
       .where('created_at', '>', new Date(now - 24 * 60 * 60 * 1000))
