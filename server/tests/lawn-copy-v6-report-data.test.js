@@ -604,3 +604,101 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
     expect(await sigWith([visit('2027-01-15')])).toBe(await sigWith([visit('2027-02-12')]));
   });
 });
+
+// GATE_LAWN_TECH_PARAGRAPH (owner 2026-10-05) through the real report builder:
+// a render only READS the paragraph frozen at completion. No model call, no new
+// query, nothing on the payload but reportV2.lead.techParagraph, and the PDF key
+// follows the frozen text.
+describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
+  const ENV = ['GATE_LAWN_TECH_PARAGRAPH', 'GATE_LAWN_REPORT_LEAD', 'GATE_LAWN_REPORT_COPY_V6'];
+  const saved = {};
+  const TEXT = 'Our technician saw chinch bugs at the trouble spot, which explains the damaged turf in the photo. Arena 50 WDG went on the front and side yards to treat them.';
+  const entry = (text = TEXT) => ({ v: 1, promptVersion: 'lawn_tech_paragraph_v1', assessmentId: 'la-cur', text, sources: [], frozenAt: '2026-09-30T18:41:00.000Z' });
+  const recordsWith = (text) => ({ 'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK }, ...(text ? { lawnTechParagraph: { 'la-cur': entry(text) } } : {}) } } });
+
+  beforeEach(() => {
+    ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
+    jest.clearAllMocks();
+    history.installedForVisit.mockResolvedValue(CUR);
+    history.historyForReport.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    history.historyForAssessment.mockResolvedValue({ current: CUR, rows: [CUR], identity: 'h', eligibleVisitIds: [], isBaseline: true });
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'no_key' });
+  });
+  afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
+
+  const render = (recs) => {
+    const { knex, log } = withRecords(fixtures(), recs);
+    return buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-tp', knex, {}).then((data) => ({ data, log }));
+  };
+  const reconciled = (data) => applyLawnReportReconciliation({ ...data }, null);
+  const live = () => { process.env.GATE_LAWN_TECH_PARAGRAPH = 'true'; process.env.GATE_LAWN_REPORT_LEAD = 'true'; };
+  const techCalls = () => dispatchWithFallback.mock.calls.filter(([, payload]) => payload && payload.laneId === 'lawn_tech_paragraph');
+
+  test('gate off: a frozen paragraph is invisible: same payload, no carrier, no key', async () => {
+    process.env.GATE_LAWN_REPORT_LEAD = 'true';
+    const bare = await render(recordsWith(null));
+    const frozen = await render(recordsWith(TEXT));
+    expect(frozen.data.reportV2.techParagraph).toBeUndefined();
+    expect(JSON.stringify(reconciled(frozen.data))).not.toContain(TEXT);
+    expect(JSON.parse(JSON.stringify(reconciled(frozen.data)))).toEqual(JSON.parse(JSON.stringify(reconciled(bare.data))));
+  });
+
+  test('gate on: the lead carries the frozen text and nothing else carries it; no model call', async () => {
+    live();
+    const { data, log } = await render(recordsWith(TEXT));
+    expect(data.reportV2.techParagraph).toBe(TEXT);
+    expect(Object.keys(data.reportV2)).not.toContain('techParagraph');
+    const out = reconciled(data);
+    expect(out.reportV2.lead.techParagraph).toBe(TEXT);
+    expect(Object.prototype.hasOwnProperty.call(out.reportV2, 'techParagraph')).toBe(false);
+    expect(JSON.stringify(out).split(TEXT).length - 1).toBe(1);
+    expect(techCalls()).toHaveLength(0);
+    expect(log.updates).toHaveLength(0);
+    expect(data.lawnAssessment.weekWeatherUncacheable).toBe(false);
+  });
+
+  test('gate on, nothing frozen (a miss at completion): no paragraph, healthy render, never a call at render time', async () => {
+    live();
+    const { data } = await render(recordsWith(null));
+    expect(data.reportV2.techParagraph).toBeUndefined();
+    expect(reconciled(data).reportV2.lead).not.toHaveProperty('techParagraph');
+    expect(techCalls()).toHaveLength(0);
+  });
+
+  test('a frozen text that fails the read-time screens prints nothing', async () => {
+    live();
+    const { data } = await render(recordsWith('We will be back soon to make sure everything recovers.'));
+    expect(data.reportV2.techParagraph).toBeUndefined();
+  });
+
+  test('the PDF cache signature: unchanged while the gate is off or nothing is frozen; moves with the frozen text', async () => {
+    const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
+    const sig = async (text) => (await resolveCanonicalLawnRender(svc, withRecords(fixtures(), recordsWith(text)).knex)).signature;
+    const off = await sig(TEXT);
+    live();
+    const none = await sig(null);
+    const withText = await sig(TEXT);
+    const other = await sig('Our technician found thin spots near the driveway, so we fed the whole lawn with LESCO 24-0-11.');
+    process.env.GATE_LAWN_TECH_PARAGRAPH = 'false';
+    const leadOnly = await sig(TEXT);
+    expect(leadOnly).toBe(none); // gate off: the frozen text does not key the PDF
+    expect(withText).not.toBe(none);
+    expect(other).not.toBe(withText);
+    expect(off).not.toBe(withText);
+  });
+
+  test('an unreadable record stamps a one-off key, so the PDF re-renders instead of serving a stale hit', async () => {
+    live();
+    const svc = { id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' };
+    const { knex } = withRecords(fixtures(), recordsWith(TEXT));
+    const wrapped = (table) => {
+      const q = knex(table);
+      if (table === 'service_records') q.first = async () => { throw new Error('read failed'); };
+      return q;
+    };
+    wrapped.raw = knex.raw;
+    const a = (await resolveCanonicalLawnRender(svc, wrapped)).signature;
+    const b = (await resolveCanonicalLawnRender(svc, wrapped)).signature;
+    expect(a).not.toBe(b);
+  });
+});

@@ -1073,6 +1073,16 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
+        {/* GATE_LAWN_TECH_PARAGRAPH: the same frozen paragraph the web lead prints under
+            "What we applied today", word for word (lead.techParagraph). Absent key
+            prints nothing. */}
+        {v2Lead?.techParagraph ? (
+          <div className="doc-keep">
+            <SectionHeader>From your technician</SectionHeader>
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{v2Lead.techParagraph}</p>
+          </div>
+        ) : null}
+
         {/* Re-service card: the customer's booking words (frozen at completion,
             scrubbed server-side; quote marks only for verbatim words) and the
             performed-visit summary. The web page's "Still seeing…" button has
