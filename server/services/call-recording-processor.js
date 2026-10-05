@@ -19301,6 +19301,12 @@ const CallRecordingProcessor = {
                           return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');
                         });
                     } else {
+                      // No new ask: the phone may already have said YES (an
+                      // earlier call), so no YES will arrive for this booking —
+                      // its follow-up (caller demotion, and the confirmation
+                      // when no fan-out sends it: a reused booking) is re-armed
+                      // on this visit for the opt-in sweep.
+                      await require('./recipient-optin').rearmOnSiteFollowUp(customerId, phoneKey, svc.id);
                       await markOptinAsk(entry, 'not_sent:no_new_ask');
                     }
                   } catch (askErr) {
@@ -20511,6 +20517,40 @@ const CallRecordingProcessor = {
                           .catch(() => null);
                         if (recentDup) continue;
                         if (!(await claimStillOwned())) return false;
+                        // One sender at a time for this phone + visit: the
+                        // replay in flight owns the text ('busy'); otherwise
+                        // the fan-out holds the row claim across its send.
+                        const followUpClaim = await require('./recipient-optin').claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);
+                        if (followUpClaim === 'busy' || followUpClaim === 'sent') continue;
+                        // `result` = the send's outcome: an accepted or
+                        // uncertain handoff is stamped on the row with the
+                        // release, so the replay never follows it even where
+                        // the best-effort sms_log write was lost.
+                        const releaseFollowUpClaim = (result = null) => {
+                          if (followUpClaim !== 'claimed') return null;
+                          // Accepted, or handed off with an unknown fate. A
+                          // held / blocked send (sent false, nothing handed
+                          // off) is NOT evidence: the replay still owes it.
+                          const certainty = result ? require('./messaging/send-customer-message').classifyDeliveryCertainty(result) : 'not_sent';
+                          const confirmed = certainty === 'sent'
+                            || (certainty === 'unknown' && (result.sent === true || result.deliveryOutcome === 'uncertain'));
+                          return require('./recipient-optin').releaseFanOutFollowUpClaim(customerId, contact.phone, scheduledServiceId, { confirmed });
+                        };
+                        // Read AFTER the claim settles: the follow-up's replay
+                        // (this contact answered YES while this booking was
+                        // still processing) may already have texted this
+                        // visit's confirmation to this phone. Its body differs,
+                        // so the content dedupe above cannot see it; sms_log
+                        // carries the visit on every send made with
+                        // appointmentId (twilio.js noticeScope).
+                        // Only with the follow-up live: dark, this fan-out
+                        // is byte-for-byte what it was.
+                        if (require('./recipient-optin').isOnSiteFollowUpLive() && await require('./appointment-reminders').confirmationLoggedForVisitPhone({
+                          scheduledServiceId, phone: contact.phone,
+                        }).catch(() => false)) {
+                          await releaseFollowUpClaim();
+                          continue;
+                        }
                         const contactResult = await sendCustomerMessage({
                           to: contact.phone,
                           body: contactBody,
@@ -20538,7 +20578,10 @@ const CallRecordingProcessor = {
                             original_message_type: 'confirmation',
                             appointment_contact_role: contact.role,
                           },
-                        });
+                        }).then(
+                          async (result) => { await releaseFollowUpClaim(result); return result; },
+                          async (sendErr) => { await releaseFollowUpClaim(sendErr && sendErr.providerOutcome); throw sendErr; },
+                        );
                         if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
                           && contactResult.deferred && contactResult.nextAllowedAt
                           && confirmationRearmed) {

@@ -1641,8 +1641,11 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
         cron.schedule('*/15 * * * *', async () => {
           try {
             await runExclusive('recipient-optin-sweep', async () => {
-              const { sweepUndispatchedOptins } = require('./services/recipient-optin');
+              const { sweepUndispatchedOptins, sweepOnSiteFollowUps } = require('./services/recipient-optin');
               await sweepUndispatchedOptins();
+              // Caller demotion + booking-confirmation replays to on-site
+              // recipients that were held or failed after their YES.
+              await sweepOnSiteFollowUps();
             });
           } catch (err) {
             logger.error(`[cron] recipient opt-in sweep failed: ${err.message}`);

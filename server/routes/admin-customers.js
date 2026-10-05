@@ -4690,6 +4690,9 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
       await trx('notification_prefs')
         .where({ customer_id: req.params.id })
         .update(dbUpdates);
+      if (dbUpdates.appointment_notify_primary !== undefined) {
+        await require('../services/recipient-optin').noteHolderSetNotifyPrimary(trx, req.params.id);
+      }
     });
 
     const prefs = await db('notification_prefs')
