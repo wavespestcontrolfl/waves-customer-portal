@@ -527,7 +527,11 @@ export default function LawnAssessmentCompletionBlock({
         if (holdRef.current.repeated) { holdRef.current.repeated = false; return; }
         stepScore(key, delta);
       },
-      onPointerDown: () => {
+      onPointerDown: (event) => {
+        // On touch, pointerdown captures the pointer, so pointerleave never
+        // fires while the finger is down and a slide away would keep stepping.
+        // Releasing the capture makes leave/cancel fire as on a mouse (Codex r2 P2).
+        try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch { /* not captured */ }
         stopHold();
         holdRef.current.repeated = false;
         holdRef.current.timer = setTimeout(() => {
