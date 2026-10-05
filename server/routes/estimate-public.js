@@ -25072,7 +25072,12 @@ function serviceCadenceComboKey(selection = {}) {
 // excluded: withManualDiscount nets the discount into payload.frequencies
 // only, and a second ladder it never touched could show a different number.
 function buildOfferTierFieldsForV1({ estimate, estData, v1, prefs, pestOnlyChoice, v1FloorOptions, anchorOneTimePrice }) {
-  if (!pestOnlyChoice || !offerTiersGateOn()) return {};
+  if (!pestOnlyChoice) return {};
+  // A row already accepted on 'best' keeps its tier view even after the gate
+  // is turned off: what was booked must keep reading as what was booked
+  // (the /data projection never serves the picker on an accepted row).
+  const acceptedBest = OfferTiers.acceptedOfferTierKey(estData) === 'best';
+  if (!offerTiersGateOn() && !acceptedBest) return {};
   if (normalizeManualDiscountSummary(estData)) return {};
   const OptOut = require('../services/estimate-service-opt-out');
   const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
@@ -29516,7 +29521,14 @@ async function composeEstimateDataPayload(estimate, {
     // cta.monthlyBilled below are read by the same page, so resolving twice
     // risks handing it two different answers (pre-push audit P1).
     const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
-    const pricingBundle = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
+    const pricingBundleAsBuilt = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
+    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): once a 'best' accept is on the
+    // row (customerSelection.offerTier, written with the price lock), every
+    // read serves the Best tier's own view — what was booked — instead of the
+    // one-time toggle's pest-only ladder; the picker fields are dropped.
+    const pricingBundle = (estimate.status === 'accepted' || estimate.price_locked_at)
+      ? OfferTiers.acceptedBestPricingView(pricingBundleAsBuilt, estimateDataForIntelligence)
+      : pricingBundleAsBuilt;
     const {
       defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance,
     } = await resolveEstimateAcceptance(estimate, estimateDataForIntelligence, pricingBundle);

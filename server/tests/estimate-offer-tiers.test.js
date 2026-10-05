@@ -207,6 +207,19 @@ describe('pricing bundle offer tiers', () => {
     expect(bundle.offerTierDefaultKey).toBeUndefined();
   });
 
+  test('gate off: a row already accepted on best still builds its tier view, so the accepted recap keeps what was booked', async () => {
+    delete process.env[GATE];
+    const accepted = pestLawnOneTimeToggleEstimate({ status: 'accepted' });
+    accepted.estimate_data.customerSelection = { offerTier: 'best', frequencyKey: 'quarterly' };
+    const bundle = await buildPricingBundle(accepted, { monthlyBilled: false });
+    const best = (bundle.offerTiers || []).find((t) => t.key === 'best');
+    expect(best).toBeTruthy();
+    const view = OfferTiers.acceptedBestPricingView(bundle, accepted.estimate_data);
+    expect(view.frequencies.find((f) => f.key === 'quarterly').monthly).toBeCloseTo(84.08, 2);
+    expect(view.acceptedOfferTier).toBe('best');
+    expect(view.offerTiers).toBeUndefined();
+  });
+
   test('ineligible shapes carry no tiers: no one-time toggle, pest-only, member snapshot, manual discount', async () => {
     process.env[GATE] = 'true';
     const noToggle = await buildPricingBundle(pestLawnOneTimeToggleEstimate({ show_one_time_option: false }), { monthlyBilled: false });
@@ -263,5 +276,22 @@ describe('resolveBestOfferTierForSlots (slot routes)', () => {
     await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: memberDb, isActiveMember: async () => true })).resolves.toBeNull();
     await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: memberDb, isActiveMember: async () => { throw new Error('db'); } })).resolves.toBeNull();
     await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: memberDb, isActiveMember: async () => false })).resolves.toBe('best');
+  });
+});
+
+describe('accepted Best view', () => {
+  test('a row accepted on best serves the tier view with the picker fields dropped; anything else is untouched', () => {
+    const best = { key: 'best', frequencies: [{ key: 'quarterly', monthly: 84.08 }], serviceCadenceCombos: [{ key: 'c' }], waveGuardTier: 'Silver' };
+    const bundle = { frequencies: [{ key: 'quarterly', monthly: 32.1 }], waveGuardTier: 'Bronze', offerTiers: [{ key: 'good' }, { key: 'better' }, best], offerTierDefaultKey: 'better' };
+    const view = OfferTiers.acceptedBestPricingView(bundle, { customerSelection: { offerTier: 'best' } });
+    expect(view.frequencies[0].monthly).toBe(84.08);
+    expect(view.waveGuardTier).toBe('Silver');
+    expect(view.acceptedOfferTier).toBe('best');
+    expect(view.offerTiers).toBeUndefined();
+    expect(view.offerTierDefaultKey).toBeUndefined();
+    expect(OfferTiers.acceptedBestPricingView(bundle, { customerSelection: { offerTier: 'better' } })).toBe(bundle);
+    expect(OfferTiers.acceptedBestPricingView(bundle, {})).toBe(bundle);
+    expect(OfferTiers.acceptedOfferTierKey({ customerSelection: { offerTier: ' BEST ' } })).toBe('best');
+    expect(OfferTiers.acceptedOfferTierKey({ customerSelection: { offerTier: 'gold' } })).toBeNull();
   });
 });

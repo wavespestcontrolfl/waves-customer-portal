@@ -6546,7 +6546,10 @@ a tier whose service mode disagrees with `serviceMode` is 400
 companion exclusion drops (the pest-only list filters and the
 `result.recurring.services` rewrite are skipped), prices off the stored
 `best` ladder / combos, refuses `prepay_annual` (400), and is recorded as
-`estimate_data.customerSelection.offerTier`. `/available-slots` (query),
+`estimate_data.customerSelection.offerTier`; from then on (accepted or
+price-locked row) `/data` serves the Best tier's own view — ladder, combos and
+summary, picker fields dropped, `pricing.acceptedOfferTier: 'best'` — even
+after the gate is turned off, so the recap keeps what was booked. `/available-slots` (query),
 `/find-slots` and `/reserve` (body) take `offerTier`; only `best` changes
 the visit profile (every quoted program; part of the slot-cache key), and
 only when the live gate is on, the estimate's stored bundle offers that
