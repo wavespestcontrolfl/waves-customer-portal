@@ -536,6 +536,19 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect((await row(older)).status).toBe('completed');
   });
 
+  test('two assessments, two estimates: each estimate closes its own assessment — the later estimate never hides the earlier one from its assessment', async () => {
+    const threeDaysAgo = etDateString(addETDays(new Date(), -3));
+    const customerId = await customer();
+    // A on day -3 with E1 sent the same day after the arrival; B yesterday with E2 sent after it.
+    const a = await visit(customerId, { day: threeDaysAgo, en_route_at: minutesAgo(60 * 74), arrived_at: minutesAgo(60 * 73), check_in_time: minutesAgo(60 * 73) });
+    await estimate(customerId, { sentAt: minutesAgo(60 * 72) });
+    const b = await visit(customerId, { day: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
+    await estimate(customerId, { sentAt: minutesAgo(60 * 24) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 2, closed: 2 });
+    expect((await row(a)).status).toBe('completed');
+    expect((await row(b)).status).toBe('completed');
+  });
+
   test('money is a person\'s: a priced assessment, a prepaid one and one with a linked invoice are never candidates', async () => {
     const priced = await customer();
     const pricedVisit = await visit(priced, { estimated_price: 75 });

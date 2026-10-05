@@ -106,19 +106,6 @@ function assessmentEstimateCloseRefusal(visit, estimateSentAt, { today = etDateS
   return startedTime == null || sentTime > startedTime ? null : 'estimate_before_visit';
 }
 
-// The newest estimate this customer was SENT inside the window. The newest
-// send is the strongest proof, so one row decides.
-async function newestSentEstimate(conn, customerId, { now }) {
-  if (!customerId) return null;
-  return conn('estimates')
-    .where({ customer_id: customerId })
-    .whereNotNull('sent_at')
-    .whereNot('status', 'draft')
-    .where('sent_at', '>=', new Date(now.getTime() - ESTIMATE_WINDOW_DAYS * 86400000))
-    .orderBy('sent_at', 'desc')
-    .first('id', 'sent_at', 'status');
-}
-
 // This closeout's own completion attempt, committed but not finished (the
 // canonical completion commits status='completed' before its post-commit
 // work and parks a crashed run under its idempotency key).
@@ -228,13 +215,31 @@ async function matchedAssessmentId(conn, customerId, estimateSentAt) {
   return newest ? newest.id : null;
 }
 
-// Reads beyond the visit row that keep it open: another assessment is the
-// one this estimate came out of, an invoice is linked to it (money: a
+// The estimate that speaks for THIS assessment: the newest sent estimate of
+// the customer (inside the window) whose matched assessment is this visit.
+// The customer's newest estimate overall may belong to a later assessment —
+// A with E1, then B with E2 — and must not hide E1 from A (pre-push audit P1).
+// The candidate query selects by the same pairing in SQL.
+async function estimateForAssessment(conn, visit, { now }) {
+  if (!visit.customer_id) return null;
+  const sent = await conn('estimates')
+    .where({ customer_id: visit.customer_id })
+    .whereNotNull('sent_at')
+    .whereNot('status', 'draft')
+    .where('sent_at', '>=', new Date(now.getTime() - ESTIMATE_WINDOW_DAYS * 86400000))
+    .orderBy('sent_at', 'desc')
+    .select('id', 'sent_at', 'status');
+  for (const estimate of sent) {
+    if (String(await matchedAssessmentId(conn, visit.customer_id, estimate.sent_at)) === String(visit.id)) return estimate;
+  }
+  return null;
+}
+
+// Reads beyond the visit row that keep it open: an invoice is linked to it (money: a
 // person's), its technician's job timer is still running (they are working
 // it right now), or it is one stop of a grouped visit (the whole visit
 // closes together).
-async function liveRefusal(conn, visit, estimate) {
-  if (String(await matchedAssessmentId(conn, visit.customer_id, estimate.sent_at)) !== String(visit.id)) return 'estimate_matches_another_assessment';
+async function liveRefusal(conn, visit) {
   const invoice = await conn('invoices').where({ scheduled_service_id: visit.id }).whereNot('status', 'void').first('id');
   if (invoice) return 'assessment_has_invoice';
   const { visitJobTimerRunning } = require('./invoice-issued-closeout');
@@ -296,10 +301,10 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
       // built and this lock. Not a refusal of the visit — the next tick
       // asks again in the backfill posture (see closeOne: no audit, no rest).
       if ((dateOnlyString(lockedVisit.scheduled_date) < lockedToday) !== pastDay) return CLOCK_ROLLED_OVER;
-      const estimate = await newestSentEstimate(trx, lockedVisit.customer_id, { now });
+      const estimate = await estimateForAssessment(trx, lockedVisit, { now });
       if (!estimate) return 'estimate_not_sent';
       return assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: lockedToday })
-        || await liveRefusal(trx, lockedVisit, estimate);
+        || await liveRefusal(trx, lockedVisit);
     },
   });
   const body = (result && result.body) || {};
@@ -326,12 +331,12 @@ async function closeOne(conn, row, { today, now }) {
       resumeKey = await parkedKey(conn, visitId);
       if (!resumeKey) return { closed: false, reason: 'nothing_parked' };
     } else {
-      estimate = await newestSentEstimate(conn, visit.customer_id, { now });
+      estimate = await estimateForAssessment(conn, visit, { now });
       if (!estimate) return { closed: false, reason: 'estimate_not_sent' };
       // Not this rule's to decide, or not yet: no audit row, nothing to rest.
       const byRule = assessmentEstimateCloseRefusal(visit, estimate.sent_at, { today });
       if (byRule) return { closed: false, reason: byRule };
-      const live = await liveRefusal(conn, visit, estimate);
+      const live = await liveRefusal(conn, visit);
       if (live) {
         await audit(AUDIT_REFUSED, { visitId, estimateId: estimate.id, code: live });
         return { closed: false, reason: live };
