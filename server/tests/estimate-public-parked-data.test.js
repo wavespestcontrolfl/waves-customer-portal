@@ -283,7 +283,9 @@ describe('grouped sibling (r8): an unlinked estimate whose group already has an 
       return original(table);
     });
     try {
-      await expect(estimatePublicRouter.matchAcceptCustomerByPhone(grouped())).rejects.toThrow('estimates read failed');
+      // customer_phone_typed present (null = an office phone): the matcher reads no extra column, so the one
+      // estimates read this fake fails is the owner lookup under test.
+      await expect(estimatePublicRouter.matchAcceptCustomerByPhone({ ...grouped(), customer_phone_typed: null })).rejects.toThrow('estimates read failed');
     } finally { db.mockImplementation(original); }
   });
 });

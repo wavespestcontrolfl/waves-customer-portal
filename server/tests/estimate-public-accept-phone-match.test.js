@@ -242,3 +242,92 @@ describe('acceptPhoneParkedVerdict (the preflight park decision)', () => {
     expect(dbMock).not.toHaveBeenCalled();
   });
 });
+
+// Owner 2026-10-04: a phone the customer TYPED on the accept card (PUT /:token/contact-phone stamps its provenance on
+// the estimate) proves nothing about who typed it. It never resolves to an existing customer, at the save or later.
+describe('a phone typed by the customer never resolves to an existing customer', () => {
+  const typed = (overrides = {}) => janeEstimate({
+    customer_phone: '+19415550142',
+    customer_phone_typed: '+19415550142',
+    ...overrides,
+  });
+
+  it('a lone candidate that AGREES on email or address is still refused and parked', async () => {
+    // Without the stamp this exact pair is an ordinary match (the email agrees).
+    mockDbFixtures['customers:list'] = [{ ...BOB, email: 'jane@example.com' }];
+    expect((await matchAcceptCustomerByPhone(janeEstimate())).match.id).toBe('cust-bob');
+    const res = await matchAcceptCustomerByPhone(typed());
+    expect(res.match).toBeNull();
+    expect(res.contradicted).toBe(true);
+    expect(res.rejectedCustomerId).toBe('cust-bob');
+    expect(await acceptPhoneParkedVerdict(typed())).toEqual({ rejectedCustomerId: 'cust-bob' });
+  });
+
+  it('several candidates are refused too, even one a unique email would have picked', async () => {
+    const LANDLORD = { ...BOB, id: 'cust-landlord', email: 'owner@example.com', address_line1: '10 Oak Ln' };
+    const RENTAL = { ...BOB, id: 'cust-rental', email: 'jane@example.com', address_line1: '55 Pine Ct' };
+    mockDbFixtures['customers:list'] = [LANDLORD, RENTAL];
+    const res = await matchAcceptCustomerByPhone(typed());
+    expect(res.match).toBeNull();
+    expect(res.contradicted).toBe(true);
+    expect(res.candidateCount).toBe(2);
+  });
+
+  it('a grouped estimate with an accepted sibling does not clear the contradiction for a typed phone', async () => {
+    // For an office-supplied phone the grouped-owner rule un-parks a contradicted lone candidate; a typed phone
+    // must stay parked, or that candidate's saved card could read as covering the booking.
+    const recurringCards = require('../services/recurring-card-on-file');
+    const spy = jest.spyOn(recurringCards, 'resolveGroupedEstimateOwnerId').mockResolvedValue('cust-sibling-owner');
+    try {
+      mockDbFixtures['customers:list'] = [BOB];
+      const res = await matchAcceptCustomerByPhone(typed({ estimate_group_id: 'group-1' }));
+      expect(res.contradicted).toBe(true);
+      expect(res.match).toBeNull();
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('a projection that did not load the column: the matcher reads it itself', async () => {
+    mockDbFixtures['customers:list'] = [{ ...BOB, email: 'jane@example.com' }];
+    mockDbFixtures['estimates:first'] = { customer_phone_typed: '+19415550142' };
+    const projection = janeEstimate({ customer_phone: '+19415550142' });
+    expect('customer_phone_typed' in projection).toBe(false);
+    const res = await matchAcceptCustomerByPhone(projection);
+    expect(res.contradicted).toBe(true);
+    expect(res.match).toBeNull();
+  });
+
+  it('no candidate: an ordinary no-match, so the accept creates the new customer', async () => {
+    mockDbFixtures['customers:list'] = [];
+    const res = await matchAcceptCustomerByPhone(typed());
+    expect(res).toEqual({ match: null, candidateCount: 0 });
+  });
+
+  it('the accept transaction identity snapshot carries the column, so the in-transaction match refuses too', async () => {
+    mockDbFixtures['customers:list'] = [{ ...BOB, email: 'jane@example.com' }];
+    const snapshot = { customer_phone: '+19415550142', customer_email: 'jane@example.com', address: '742 Evergreen Ter, Sarasota, FL 34236', customer_phone_typed: '+19415550142' };
+    expect((await matchAcceptCustomerByPhone(snapshot)).contradicted).toBe(true);
+  });
+
+  it('a phone the office later puts on the estimate is the office\'s: the typed mark no longer applies', async () => {
+    mockDbFixtures['customers:list'] = [{ ...BOB, phone: '(941) 555-0199', email: 'jane@example.com' }];
+    const res = await matchAcceptCustomerByPhone(typed({ customer_phone: '9415550199' }));
+    expect(res.match.id).toBe('cust-bob');
+    expect(res.contradicted).toBeUndefined();
+  });
+});
+
+// The accept's account step (ensureCustomerAccount → findAccountByContact) makes its own phone lookup after the
+// matcher. For a typed phone it must refuse a phone match that appeared in between, never attach to it. The accept
+// transaction is too heavy to drive here, so the wiring is pinned at the source (the helper's forceNewAccount
+// behavior is covered by the admin-customers suites).
+describe('a typed phone never joins an existing account at the account step', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+  it('passes forceNewAccount (and never ignorePhoneMatch) for a typed phone, and parks on PHONE_MATCH_CONFIRM', () => {
+    expect(src).toMatch(/const typedAcceptPhone = phoneTypedByCustomer\(estimate\);\s*\n\s*const account = await ensureCustomerAccount\(trx, \{\s*\n\s*\.\.\.\(typedAcceptPhone \? \{ forceNewAccount: true \} : \{\}\),/);
+    expect(src).not.toMatch(/typedAcceptPhone[^\n]*ignorePhoneMatch/);
+    expect(src).toMatch(/if \(typedAcceptPhone && accountErr\?\.code === 'PHONE_MATCH_CONFIRM'\)[\s\S]{0,900}code: ACCEPT_NEEDS_OFFICE_REVIEW/);
+  });
+});

@@ -759,3 +759,72 @@ describe('estimate-map-image helpers', () => {
     expect(out.e).toBeNull();
   });
 });
+
+// Owner 2026-10-04: PUT /:token/contact-phone (the accept-card phone capture). Same pre-guard shape as the map proxy:
+// its privacy headers must be on EVERY response, including the two that are produced before the handler runs.
+describe('contact-phone pre-guard (mounted before the global /api limiter)', () => {
+  const rateLimit = require('express-rate-limit');
+  const featureGates = require('../config/feature-gates');
+
+  async function withGuardedApp(globalMax, fn) {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/estimates', estimatePublicRouter.contactPhonePreGuard);
+    app.use('/api/', rateLimit({ windowMs: 60 * 1000, max: globalMax, standardHeaders: true, legacyHeaders: false }));
+    app.use('/api/estimates', estimatePublicRouter);
+    const server = app.listen(0);
+    try {
+      return await fn(`http://127.0.0.1:${server.address().port}/api/estimates`);
+    } finally {
+      server.close();
+    }
+  }
+  const put = (url) => fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contactPhone: '(941) 555-0142' }) });
+  const expectPrivacyHeaders = (res) => {
+    expect(res.headers.get('cache-control')).toBe('no-cache, no-store, must-revalidate');
+    expect(res.headers.get('pragma')).toBe('no-cache');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+  };
+  const gateOn = () => featureGates.isEnabled.mockImplementation((name) => name === 'estimateAcceptPhone');
+  afterEach(() => featureGates.isEnabled.mockImplementation(() => false));
+
+  test('server/index.js mounts the guard before the global /api/ limiter', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'index.js'), 'utf8');
+    const guardAt = src.indexOf("app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard)");
+    const limiterAt = src.indexOf("app.use('/api/', limiter)");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(limiterAt).toBeGreaterThan(guardAt);
+  });
+
+  test('gate on: a malformed token 404 and a global-limiter 429 both carry the privacy headers', async () => {
+    gateOn();
+    await withGuardedApp(1, async (base) => {
+      const malformed = await put(`${base}/bad!/contact-phone`);
+      expect(malformed.status).toBe(404);
+      expectPrivacyHeaders(malformed);
+      const limited = await put(`${base}/bad!/contact-phone`);
+      expect(limited.status).toBe(429);
+      expectPrivacyHeaders(limited);
+    });
+  });
+
+  test('gate off: the route is dark, and an over-budget client still gets its 404, never a 429', async () => {
+    await withGuardedApp(1, async (base) => {
+      for (let i = 0; i < 3; i += 1) {
+        const res = await put(`${base}/abcdefghijklmnopqrstu/contact-phone`);
+        expect(res.status).toBe(404);
+        expectPrivacyHeaders(res);
+      }
+    });
+  });
+
+  test('other routes and methods pass through untouched', async () => {
+    gateOn();
+    const next = jest.fn();
+    const res = { set: jest.fn() };
+    estimatePublicRouter.contactPhonePreGuard({ method: 'GET', path: '/abcdefghijklmnopqrstu/contact-phone' }, res, next);
+    estimatePublicRouter.contactPhonePreGuard({ method: 'PUT', path: '/abcdefghijklmnopqrstu/accept' }, res, next);
+    expect(next).toHaveBeenCalledTimes(2);
+    expect(res.set).not.toHaveBeenCalled();
+  });
+});
