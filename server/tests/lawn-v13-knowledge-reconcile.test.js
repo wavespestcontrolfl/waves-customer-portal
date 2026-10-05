@@ -184,6 +184,58 @@ describe('a corpus failure after the entries were rewritten is retried, not forg
     expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(false);
   });
 
+  test('a corpus sync that was SKIPPED (its connector failed to load) writes no marker, and the next tick retries it', async () => {
+    const tables = seeded();
+    makeDb(tables);
+    const { CONNECTORS } = require('../services/knowledge-index/connectors');
+    const kbConnector = CONNECTORS.find((c) => c.source === 'kb');
+    jest.spyOn(kbConnector, 'load').mockRejectedValueOnce(new Error('loader failed'));
+    const first = await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+    expect(first.index.kb).toMatchObject({ source: 'kb', skipped: true });
+    expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBe('v13');
+    expect(marker(tables, 'lawn_knowledge.kb_corpus')).toBeUndefined();
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
+    const spy = jest.spyOn(ingest, 'syncCorpus');
+    const second = await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+    expect(spy.mock.calls.map(([c]) => c.source)).toEqual(['kb']);
+    expect(second.index.kb.skipped).toBeUndefined();
+    expect(marker(tables, 'lawn_knowledge.kb_corpus')).toBe('v13');
+  });
+
+  test('the nightly writes the marker too, from the program it loaded: a gate-off nightly after a v13 reconcile leaves the next gate-on tick stale', async () => {
+    const tables = seeded();
+    makeDb(tables);
+    const { CONNECTORS } = require('../services/knowledge-index/connectors');
+    const corpus = (source) => CONNECTORS.find((c) => c.source === source);
+    await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+    expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBe('v13');
+    // An old-gate pod's nightly rebuilds both corpora with the gate off.
+    await withGate(undefined, async () => { await ingest.syncCorpus(corpus('protocol')); await ingest.syncCorpus(corpus('kb')); });
+    // The protocol corpus now holds the legacy program; the kb corpus holds the (still v13-tagged) entries.
+    expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBe('legacy');
+    expect(marker(tables, 'lawn_knowledge.kb_corpus')).toBe('v13');
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
+    const spy = jest.spyOn(ingest, 'syncCorpus');
+    await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+    expect(spy.mock.calls.map(([c]) => c.source)).toEqual(['protocol']);
+    expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBe('v13');
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
+  });
+
+  test('the nightly with the gate off while the entries still hold v13: the kb marker says v13, so the gate-off tick is stale and rewrites the entries', async () => {
+    const tables = seeded();
+    makeDb(tables);
+    await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+    const { CONNECTORS } = require('../services/knowledge-index/connectors');
+    await withGate(undefined, () => ingest.syncCorpus(CONNECTORS.find((c) => c.source === 'kb')));
+    expect(marker(tables, 'lawn_knowledge.kb_corpus')).toBe('v13');
+    expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(true);
+    await withGate(undefined, () => KB.reconcileLawnProtocolKnowledge());
+    expect(TRACKS.every((t) => !tagsOf(kbRow(tables, slugOf(t))).includes('lawn-v13'))).toBe(true);
+    expect(marker(tables, 'lawn_knowledge.kb_corpus')).toBe('legacy');
+    expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBe('legacy');
+  });
+
   test('the index not in use: markers are ignored (stale only by the entry tags)', async () => {
     const tables = { knowledge_base: [] };
     makeDb(tables);

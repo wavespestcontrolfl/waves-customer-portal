@@ -376,14 +376,6 @@ async function staleCorpora(gateOn) {
   return stale;
 }
 
-// One writer at a time (the knowledge-index lock): update, else insert.
-async function setCorpusMarker(source, gateOn) {
-  const key = LAWN_CORPUS_MARKERS[source];
-  const value = gateOn ? 'v13' : 'legacy';
-  const updated = await db('system_settings').where({ key }).update({ value, updated_at: new Date() });
-  if (!updated) await db('system_settings').insert({ key, value, category: 'knowledge', updated_at: new Date() });
-}
-
 const KnowledgeBaseService = {
   async create({ title, content, category, tags, source, confidence, metadata, status }) {
     const safeTitle = cleanText(title) || 'Knowledge Base Entry';
@@ -1023,6 +1015,25 @@ const KnowledgeBaseService = {
     return (await staleCorpora(gateOn)).length > 0;
   },
 
+  // The lawn program an index corpus is ABOUT to load, read before its load so a gate flip
+  // mid-sync can only make the marker conservative: 'protocol' loads lawnProtocols() (the
+  // gate); 'kb' loads the stored KB entries (what their tags say they hold).
+  async lawnCorpusProgram(source) {
+    if (source === 'protocol') return require('../config/feature-gates').lawnV13Live?.() === true ? 'v13' : 'legacy';
+    const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
+    return rows.length && rows.every((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG)) ? 'v13' : 'legacy';
+  },
+
+  // Called by syncCorpus for the 'protocol' and 'kb' corpora after a sync that really ran
+  // (never a skipped one), by the reconcile and the nightly alike: the marker says which
+  // program those chunks now hold. One writer at a time (the knowledge-index lock):
+  // update, else insert.
+  async recordLawnCorpusProgram(source, program) {
+    const key = LAWN_CORPUS_MARKERS[source];
+    const updated = await db('system_settings').where({ key }).update({ value: program, updated_at: new Date() });
+    if (!updated) await db('system_settings').insert({ key, value: program, category: 'knowledge', updated_at: new Date() });
+  },
+
   // The reconcile under the nightly knowledge-index lock ('knowledge-index-sync', the
   // same one the 02:40 ET run takes), so the two never rebuild the corpora together:
   // a held lock skips this tick and the next one retries. The outer lock records no
@@ -1048,14 +1059,14 @@ const KnowledgeBaseService = {
     const kb = await this.syncLawnProtocolEntries();
     const index = {};
     // Each corpus that still holds the other program, kb after the entries above so the
-    // index never re-persists the old text; its marker is written only once its sync
-    // succeeded, so a failure here is retried on the next tick (with the finished
-    // corpora skipped).
+    // index never re-persists the old text. A failure here is retried on the next tick
+    // (the finished corpora are skipped).
     const { syncCorpus } = require('./knowledge-index/ingest');
     const { CONNECTORS } = require('./knowledge-index/connectors');
+    // syncCorpus itself writes the marker (see recordLawnCorpusProgram), and only when the
+    // sync really ran: a skipped corpus leaves it stale for the next tick.
     for (const source of await staleCorpora(gateOn)) {
       index[source] = await syncCorpus(CONNECTORS.find((connector) => connector.source === source));
-      await setCorpusMarker(source, gateOn);
     }
     logger.info(`[kb-sync] Lawn protocol knowledge reconciled: ${JSON.stringify({ kb, index })}`);
     return { stale: true, kb, index };
