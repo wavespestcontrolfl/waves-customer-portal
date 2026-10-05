@@ -813,6 +813,38 @@ describe('complete and send', () => {
     expect(screen.queryByTestId('fast-complete-sent')).toBeNull();
   });
 
+  test('the send carries the photo descriptions the report was written from (Codex P2 on #5701)', async () => {
+    const request = makeRequest({ photos: [
+      { id: 'p1', url: 'https://example.test/p1.jpg', caption: '  Counter edge  ' },
+      { id: 'p2', url: 'https://example.test/p2.jpg' },
+      { id: 'p3', url: 'https://example.test/p3.jpg', caption: 'Garage door sweep' },
+    ] });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0].photoCaptionsSeen).toEqual(['Counter edge', 'Garage door sweep']);
+    cleanup();
+
+    // No described photo: an empty list, so one described elsewhere still refuses.
+    const bare = makeRequest();
+    await openSheet(bare);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(bare.bodies('/complete')[0].photoCaptionsSeen).toEqual([]);
+  });
+
+  test('a photo description changed on another device stops the send with the reason', async () => {
+    const message = 'A photo description changed after this report was written. Close this visit and reopen it, then write the report again.';
+    const request = makeRequest({ complete: [conflict('photo_captions_changed', message)] });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.queryByTestId('fast-complete-sent')).toBeNull();
+  });
+
   test('a refused removal shows why and keeps the hold', async () => {
     const request = makeRequest({
       trace: (path, options) => {
