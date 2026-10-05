@@ -193,6 +193,14 @@ describe('plain refusals — nothing previewed, nothing sent', () => {
     expect(plain._version.opted_out).toBe(false);
   });
 
+  test('opted out with a queued automatic receipt: the card says the queue will not send it', async () => {
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
+    db.mockImplementation(fakeDb({ receipt_delivery_jobs: [{ id: 'job-1', invoice_id: INV, status: 'queued' }] }));
+    const out = await run({});
+    expect(out.automatic_receipt).toMatch(/opted out of payment receipts, so it will close without sending/);
+    expect(out.automatic_receipt).not.toMatch(/try again on its own/);
+  });
+
   test('receipt settings unreadable: refused', async () => {
     receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: false, prefsLookupFailed: true });
     expect((await run({})).error).toMatch(/receipt settings could not be read/);
@@ -508,6 +516,15 @@ describe('result wording comes only from what the writer reported about the auto
     expect(out.automatic_receipt).toBe(queue);
     expect(out.note).toMatch(mustMatch);
     expect(out.note).not.toMatch(mustNotMatch);
+  });
+
+  test('an opted-out customer: a job back in the queue is said to close without sending, never to email on its own', async () => {
+    receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: true, prefsLookupFailed: false });
+    sendInvoiceReceipt.mockResolvedValue({ ...emailFailed, queue: 'returned_to_queue' });
+    const out = await confirm({});
+    expect(out.note).toMatch(/opted out of payment receipts, so it will close without sending/);
+    expect(out.note).not.toMatch(/try again on its own/);
+    receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: false, prefsLookupFailed: false });
   });
 
   test('no result sentence promises "not retried" / "not re-sent" unconditionally', async () => {

@@ -136,7 +136,10 @@ function optionalCardLines({ memo, queuedJob, closeout, optedOut }) {
   return {
     ...(memo ? { memo, memo_note: 'The note appears in the receipt email only; the text receipt does not carry it.' } : {}),
     ...(queuedJob ? {
-      automatic_receipt: 'An automatic receipt is queued for this invoice. If this send does not deliver the email, it goes back in the queue and will try again on its own; a delivered email closes it.',
+      // The queue honors the opt-out (processReceiptDeliveryJob closes the job as receipt_opted_out).
+      automatic_receipt: optedOut
+        ? 'An automatic receipt is queued for this invoice, but the customer opted out of payment receipts, so it will close without sending. Only this send can deliver the receipt.'
+        : 'An automatic receipt is queued for this invoice. If this send does not deliver the email, it goes back in the queue and will try again on its own; a delivered email closes it.',
     } : {}),
     ...(closeout ? { visit_closeout: closeoutLine } : {}),
     ...(optedOut ? { opted_out: 'This customer opted out of payment receipts. Send only if they asked for this receipt.' } : {}),
@@ -257,9 +260,11 @@ function channelOutcome(requested, result, certainty, { reasons = {}, isExpected
 
 // What the queue will actually do, from the writer's own report of the automatic
 // receipt job (releaseOperatorReceiptClaim) — never a guess.
-function queueNote(queue, { allDelivered }) {
+function queueNote(queue, { allDelivered, optedOut = false }) {
   switch (queue) {
-    case 'returned_to_queue': return 'The automatic receipt for this invoice is back in the queue and will try again on its own (it can email the customer the receipt), so a manual resend is not needed for that.';
+    case 'returned_to_queue': return optedOut
+      ? 'The automatic receipt job is back in the queue, but the customer opted out of payment receipts, so it will close without sending. Nothing else will send this receipt.'
+      : 'The automatic receipt for this invoice is back in the queue and will try again on its own (it can email the customer the receipt), so a manual resend is not needed for that.';
     case 'held_for_reconciliation': return 'The automatic receipt for this invoice was held, not re-queued: the queue will not send it again. Check whether the customer got the receipt before sending again.';
     case 'release_failed': return 'The automatic receipt job could not be settled here; the queue recovers it on its own and may email the customer the receipt again.';
     case 'none':
@@ -390,7 +395,7 @@ async function commit(input, actionContext) {
     ...(visitCloseout ? { visit_closeout: visitCloseout } : {}),
     ...(queue ? { automatic_receipt: queue } : {}),
     ...(lockLost ? { send_lock_lost: lockLost, ...(stampWritten === false ? { receipt_stamp_written: false } : {}), ...(stampBy === 'settlement' ? { receipt_stamp_by: 'settlement' } : {}) } : {}),
-    note: [headline(verdict), lockNote(lockLost, stampWritten, stampBy), queueNote(queue, { allDelivered: delivered && clean })].filter(Boolean).join(' '),
+    note: [headline(verdict), lockNote(lockLost, stampWritten, stampBy), queueNote(queue, { allDelivered: delivered && clean, optedOut: version.opted_out === true })].filter(Boolean).join(' '),
   };
 }
 

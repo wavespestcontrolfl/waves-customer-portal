@@ -213,10 +213,23 @@ describe('expect — the writer owns the final check, under the claim and ahead 
     const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved: pinned, rederive } });
     expect(out.status).toBe(200);
     expect(out.delivery).toEqual({ email: 'sent', sms: 'not_sent' });
-    expect(out.body.sms).toEqual({ ok: false, error: 'recipient or amount changed after approval' });
+    expect(out.body.sms).toEqual({ ok: false, error: 'recipient, amount or receipt opt-out changed after approval' });
     expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
     // The second re-check sits between the two legs.
     expect(sendReceiptEmail.mock.invocationCallOrder.at(-1)).toBeLessThan(rederive.mock.invocationCallOrder[2]);
+  });
+
+  test('an opt-out set while the closeout runs: no leg sends (the operator must see it on a fresh card)', async () => {
+    const pinned = { ...approved, recipients_key: 'pinned', opted_out: false };
+    const rederive = jest.fn()
+      .mockResolvedValueOnce({ ...pinned })
+      .mockResolvedValue({ ...pinned, opted_out: true });
+    sendReceiptEmail.mockClear();
+    InvoiceService.sendReceipt.mockClear();
+    const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved: pinned, rederive } });
+    expect(sendReceiptEmail).not.toHaveBeenCalled();
+    expect(InvoiceService.sendReceipt).not.toHaveBeenCalled();
+    expect(out.body.email).toEqual({ ok: false, error: 'recipient, amount or receipt opt-out changed after approval' });
   });
 
   test('a linked visit the closeout just completed does not block the text leg', async () => {
@@ -474,10 +487,10 @@ describe('the provider-handoff guard binds the approved recipient and amount (ex
     mixed();
     const out = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved, rederive, matches: (f) => f.channel !== 'email' } });
     expect(out.delivery).toEqual({ email: 'not_sent', sms: 'sent' });
-    expect(out.body.email).toEqual({ ok: false, error: 'recipient or amount changed after approval' });
+    expect(out.body.email).toEqual({ ok: false, error: 'recipient, amount or receipt opt-out changed after approval' });
     const out2 = await sendInvoiceReceipt(ID, { via: 'both', expect: { approved, rederive, matches: () => false } });
     expect(out2.delivery).toEqual({ email: 'not_sent', sms: 'not_sent' });
-    expect(out2.body.sms).toEqual({ ok: false, error: 'recipient or amount changed after approval' });
+    expect(out2.body.sms).toEqual({ ok: false, error: 'recipient, amount or receipt opt-out changed after approval' });
   });
 
   test('a sender that gives no facts is refused (fail closed), and a matches that throws is not a send', async () => {
