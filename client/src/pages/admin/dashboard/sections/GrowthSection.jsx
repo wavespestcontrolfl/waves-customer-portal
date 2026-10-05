@@ -19,6 +19,7 @@ import { KpiStrip, KpiTile } from "../KpiTile";
 import Verdict from "../Verdict";
 import FunnelBySource from "../FunnelBySource";
 import ChannelROI from "../ChannelROI";
+import ServiceLineTiles from "../ServiceLineTiles";
 import {
   capitalVerdict,
   captureVerdict,
@@ -61,6 +62,8 @@ export default function GrowthSection({
   leadFunnelError,
   channelRoiLoading,
   channelRoiError,
+  serviceLines,
+  serviceLinesError,
   onDrillSource,
   isMobile,
   pending = {},
@@ -272,6 +275,32 @@ export default function GrowthSection({
           <div />
         )}
       </div>
+
+      {/* By service line — close rate, aging backlog, 90-day retention and ad
+          cost per new customer for each line, same period selector as the
+          attribution cards below. */}
+      {serviceLines && serviceLinesError && <ActionFeedback error onRetry={onRetry} className="mb-3">
+        Service line numbers could not be refreshed. Showing last loaded data.
+      </ActionFeedback>}
+      {isMobile ? (
+        <MobileFold
+          title="By Service Line"
+          sub={serviceLines?.period?.label || kpis?.periodLabel || "Month to Date"}
+        >
+          <div className="px-1 pt-1">
+            <ServiceLineTiles data={serviceLines} pending={pending.serviceLines} onRetry={onRetry} />
+          </div>
+        </MobileFold>
+      ) : (
+        <div className="mb-5">
+          <ChartCard
+            title="By service line"
+            sub={serviceLines?.period?.label || kpis?.periodLabel || "Month to Date"}
+          >
+            <ServiceLineTiles data={serviceLines} pending={pending.serviceLines} onRetry={onRetry} />
+          </ChartCard>
+        </div>
+      )}
 
       {/* Capital allocation — acquisition channels banded by LTV:CAC. Basis
           (stated on the card itself): 12-mo lifetime GROSS PROFIT ÷ all-in

@@ -1867,6 +1867,10 @@ describeOrSkip('email division wiring (Postgres)', () => {
         for (const alias of ['monthly', 'every 6 months', '6x', 'nonsense']) {
           expect((await gate(alias)).code).toBe('plan_not_quarterly');
         }
+        // A child keeps the cadence it was generated with; the series ROOT states
+        // the plan's current one, so the root's wins in both directions.
+        expect((await gate('monthly', { parentPattern: 'quarterly' })).ok).toBe(true);
+        expect((await gate('quarterly', { parentPattern: 'monthly' })).code).toBe('plan_not_quarterly');
       });
 
       test('plan products are read from THIS appointment\'s recurring pest series and property only: Taurus at property A never qualifies a Talak-only quarterly plan at property B', async () => {
@@ -2104,6 +2108,36 @@ describeOrSkip('email division wiring (Postgres)', () => {
         ]);
         const r3 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', ambiguous, customer), mode: 'shadow', deps: consultDeps() });
         expect(r3.payload.pest_or_problem_named).toBe('pest problem');
+      });
+
+      test('the boundary rebuild share-locks a lead linked ONLY through estimate_data.lead_id: its interest cannot change before the transaction ends', async () => {
+        const customer = await makeCustomer();
+        // No leads.estimate_id points at the estimate: the stamp is the only linkage.
+        const [lead] = await db('leads').insert({ customer_id: customer.id, service_interest: 'Ghost ants in the kitchen' }).returning('id');
+        const leadId = lead.id || lead;
+        const estimateId = await makeEstimate(customer.id, customer.email, {
+          service_interest: 'Pest control', estimate_data: JSON.stringify({ lead_id: leadId, lead_linkage: 'stamp' }),
+        });
+        const run = runFor('nurture.expired_1', estimateId, customer);
+        const blockedWrite = () => db.transaction(async (other) => {
+          await other.raw("SET LOCAL lock_timeout = '300ms'");
+          await other('leads').where({ id: leadId }).update({ service_interest: 'termites' });
+        });
+
+        await db.transaction(async (trx) => {
+          const result = await Builders.buildEmailDivisionPayload({
+            run, mode: 'boundary', conn: trx, lock: true, deps: consultDeps(),
+          });
+          expect(result.ok).toBe(true);
+          expect(result.payload.pest_or_problem_named).toBe('ghost ants');
+          // 55P03 = lock_not_available: the stamped lead is held to the end of the boundary transaction.
+          await expect(blockedWrite()).rejects.toMatchObject({ code: '55P03' });
+        });
+        // Released with the transaction; and an unlocked (build-time) read holds nothing.
+        await db.transaction(async (trx) => {
+          await Builders.buildEmailDivisionPayload({ run, mode: 'shadow', conn: trx, deps: consultDeps() });
+          await expect(blockedWrite()).resolves.toBeUndefined();
+        });
       });
 
       test('area intel uses the ESTIMATE\'s own property city (its property record, else its own address), never customers.city; no city drops the sentence', async () => {
