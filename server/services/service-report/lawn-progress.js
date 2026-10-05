@@ -64,7 +64,7 @@
  *     leaves unspoken (every color verdict rests on the two color scores, the
  *     in-window "no clear gain yet" included).
  *   - a color move smaller than COLOR_NO_CHANGE_POINTS is no change even in
- *     compatible light: a would-be `behind` or `seasonal` from it is withheld
+ *     compatible light: a would-be `behind` from it is withheld
  *     (`unclear`, gate 'color_dead_band'), never rewritten.
  *   - the overall direction is the gate-off one, kept only when thickness, weeds and
  *     stress damage agree with it (overallDirectionByDrivers); a color-driven move or
@@ -296,13 +296,14 @@ function appliedRows(applied, priorDate, issues = []) {
 // different one. So an item is either what gate-off says or `unclear`, and
 // `unclear` is withheld by the copy. It withholds a color item (a) when the two
 // visits' light is unknown or different, and (b) in compatible light when the move
-// is under the dead band and gate-off would have said "behind" or "mostly seasonal"
-// (a move that small is neither). Returns the gate name, or null to leave it alone.
+// is under the dead band and gate-off would have said "behind" (a move that small
+// is no change). Returns the gate name, or null to leave it alone.
 function colorGuardGate(metric, gates, state, scoreDelta) {
   if (metric !== 'color_health' || gates.color == null || state === 'unclear') return null;
   if (!gates.color.comparable) return gates.color.reason;
-  const small = Math.abs(scoreDelta) < gates.color.band;
-  return small && (state === 'behind' || state === 'seasonal') ? 'color_dead_band' : null;
+  // Gate-off already stops calling a small color move "mostly seasonal" across a
+  // season change, so the only small-move line left to withhold is "behind".
+  return state === 'behind' && Math.abs(scoreDelta) < gates.color.band ? 'color_dead_band' : null;
 }
 
 function itemForMetric({ row, metric, days, cur, prior, gates, band }) {

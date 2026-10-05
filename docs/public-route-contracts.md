@@ -2670,9 +2670,13 @@ Every code path that reads the gate (`lawnLightingLive()` in
    is holding steady.", "Color is behind where we expected.", "The color change
    since then is mostly seasonal.", "It is too early to judge the color
    response.") are withheld unless both visits have a stored, compatible light,
-   and, in compatible light, a "behind" or "mostly seasonal" that rests on a color
-   move under 8 points (`COLOR_NO_CHANGE_POINTS`, the category band) is withheld
-   too (nothing is said; it is never rewritten to "holding steady"). The overall
+   and, in compatible light, a "behind" that rests on a color move under 8 points
+   (`COLOR_NO_CHANGE_POINTS`, the category band) is withheld too (nothing is said;
+   it is never rewritten to "holding steady"). Across a cool-season change the
+   gate-off engine itself (main, #5900) already calls a color move "mostly
+   seasonal" only when it reaches the band, and reads a smaller one as its normal
+   verdict (a would-be "behind" reads "holding steady"); in compatible light the
+   gate leaves that exactly as it is, so there is nothing further to withhold. The overall
    sentence ("Your overall lawn score is up / down since then." / "...holding
    steady.") is first decided exactly as gate-off decides it and is kept only when
    thickness, weeds and stress damage agree with it (up with the no-color blend up

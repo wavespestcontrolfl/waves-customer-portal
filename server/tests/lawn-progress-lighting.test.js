@@ -122,18 +122,32 @@ describe('a small color move is no change, even in compatible light (nothing is 
   });
 });
 
-describe('a small color move across a cool-season boundary is not "seasonal"', () => {
+describe('a small color move across a cool-season boundary (the gate-off baseline since main #5900)', () => {
   const season = { priorSeason: 'peak', curSeason: 'dormant', days: 120 };
-  test('gate on, compatible light: 70 -> 70 and any move under the band are withheld (neither seasonal nor anything else); a real move is still seasonal', () => {
-    for (const color of [-7, -1, 0, 1, 7]) {
-      expect(colorItem(compare({ ...season, guard: SUN, cur: { color_health: 70 + color } }))).toMatchObject({ state: 'unclear', legacyState: 'seasonal', gate: 'color_dead_band' });
+  const SMALL = [-7, -1, 0, 1, 7];
+
+  test('GATE OFF: a move under the band is never "seasonal" and never "behind" (70 -> 70 reads holding steady); a real move is seasonal', () => {
+    for (const color of SMALL) {
+      expect(colorItem(compare({ ...season, cur: { color_health: 70 + color } }))).toMatchObject({ state: 'holding_steady', gate: 'seasonal_no_move' });
     }
-    expect(colorItem(compare({ ...season, guard: SUN, cur: { color_health: 62 } })).state).toBe('seasonal');
-    expect(colorItem(compare({ ...season, guard: SUN, cur: { color_health: 78 } })).state).toBe('seasonal');
+    expect(colorItem(compare({ ...season, cur: { color_health: 62 } })).state).toBe('seasonal');
+    expect(colorItem(compare({ ...season, cur: { color_health: 78 } })).state).toBe('seasonal');
   });
 
-  test('GATE OFF (unchanged here, reported separately): the same 70 -> 70 still reads seasonal', () => {
-    expect(colorItem(compare({ ...season, cur: { color_health: 70 } })).state).toBe('seasonal');
+  test('gate on, compatible light: exactly what gate-off says (the gate withholds nothing here: gate-off already prints no "seasonal" for a small move)', () => {
+    for (const color of [...SMALL, -20, -8, 8, 20]) {
+      const off = colorItem(compare({ ...season, cur: { color_health: 70 + color } }));
+      const on = colorItem(compare({ ...season, guard: SUN, cur: { color_health: 70 + color } }));
+      expect({ state: on.state, gate: on.gate }).toEqual({ state: off.state, gate: off.gate });
+      expect(on).not.toHaveProperty('legacyState');
+    }
+  });
+
+  test('gate on, unknown or different light: the gate-off line is withheld, with the gate-off state kept as legacyState', () => {
+    for (const guard of [NO_READ, SUN_VS_CLOUD]) {
+      expect(colorItem(compare({ ...season, guard, cur: { color_health: 70 } }))).toMatchObject({ state: 'unclear', legacyState: 'holding_steady' });
+      expect(colorItem(compare({ ...season, guard, cur: { color_health: 40 } }))).toMatchObject({ state: 'unclear', legacyState: 'seasonal' });
+    }
   });
 });
 
