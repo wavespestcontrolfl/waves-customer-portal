@@ -2067,7 +2067,10 @@ router.post('/:token/ask', async (req, res, next) => {
     // timeout, empty or rejected answer) keeps the fixed-rule answer above, so
     // the reply shape and the recorded event are the same either way. Off =
     // the fixed-rule answer alone, no model call.
-    if (require('../config/feature-gates').reportAskAiLive?.() === true) {
+    // Pest reports only: a lawn or tree & shrub report carries aftercare the
+    // fact sheet does not hold (watering holds, water-in tasks), which the
+    // fixed-rule answer must keep honoring (pre-push audit P1).
+    if (data.serviceLine === 'pest' && require('../config/feature-gates').reportAskAiLive?.() === true) {
       const { answerReportQuestionWithAI } = require('../services/service-report/report-ask-ai');
       const ai = await answerReportQuestionWithAI({ question, data, nextAppointment });
       if (ai) answer = ai.answer;

@@ -80,7 +80,7 @@ are unchanged; snapshots remain authoritative when the rollout gate is off.
 Ask Waves AI answers (owner 2026-10-05): `POST /api/reports/:token/ask` keeps
 its request (`{ question }`, 500 characters), its reply (`{ answer }`), its
 headers, its limiter and its recorded event (`report_question_asked` with
-`question_length` and `topic` only). `GATE_REPORT_ASK_AI` (dark, off unless
+`question_length` and `topic` only). `GATE_REPORT_ASK_AI` (dark, off unless Pest reports only (`data.serviceLine === 'pest'`): lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks).
 exactly `true`, read at call time) changes only who writes `answer`: Claude
 Sonnet 5.5 from a fact sheet of the report (no rates, totals, EPA numbers or
 per-product target pests), screened, with the fixed-rule answer as the reply on

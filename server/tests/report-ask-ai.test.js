@@ -426,6 +426,19 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: QUESTION.length, topic: 'applied' });
   });
 
+  test('gate on, a lawn report: the fixed-rule answer and no model call (its aftercare stays rule-driven)', async () => {
+    process.env.GATE_REPORT_ASK_AI = 'true';
+    buildReportV1Data.mockResolvedValue({ serviceLine: 'lawn', applications: [] });
+    mockDb();
+    const lawnRules = routeServiceReportQuestion({ question: QUESTION, data: { serviceLine: 'lawn', applications: [] } }).answer;
+    await withServer(async (baseUrl) => {
+      const { status, body } = await ask(baseUrl, QUESTION);
+      expect(status).toBe(200);
+      expect(body).toEqual({ answer: lawnRules });
+    });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
   test('gate on: the model answer, same reply shape, same event (length and topic only)', async () => {
     process.env.GATE_REPORT_ASK_AI = 'true';
     dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { answer: 'No products were recorded on this report.' }, provider: 'anthropic' });
