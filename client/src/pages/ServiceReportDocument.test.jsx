@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import ServiceReportDocument from './ServiceReportDocument';
+import { LawnLeadCard } from '../components/report/lawnV2/LawnReportV2';
 
 afterEach(() => cleanup());
 
@@ -453,6 +454,40 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(render(<ServiceReportDocument data={withKey} token="tok123" />).container.textContent).toContain(`What to expect: ${expectLine}`);
     const without = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Looking healthy' } } };
     expect(render(<ServiceReportDocument data={without} token="tok124" />).container.textContent).not.toContain('What to expect');
+  });
+
+  it('prints "From your technician" (GATE_LAWN_TECH_PARAGRAPH) word for word, and nothing when the key is absent', () => {
+    const text = 'Our technician saw chinch bugs at the trouble spot, which explains the damaged turf in the photo. Arena 50 WDG went on the front and side yards to treat them.';
+    const snapshot = { overallScore: 86, statusHeadline: 'Looking healthy' };
+    const withKey = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Looking healthy', techParagraph: text } } };
+    const { container, unmount } = render(<ServiceReportDocument data={withKey} token="tok126" />);
+    expect(container.textContent).toContain('From your technician');
+    expect(screen.getByText(text)).toBeInTheDocument();
+    unmount();
+    const without = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Looking healthy' } } };
+    expect(render(<ServiceReportDocument data={without} token="tok127" />).container.textContent).not.toContain('From your technician');
+    // Tree & shrub payloads never carry a lead, and one that did would still not print it.
+    cleanup();
+    const treeShrub = { ...BASE_DATA, serviceLine: 'tree_shrub', reportV2: { snapshot, lead: { techParagraph: text } } };
+    expect(render(<ServiceReportDocument data={treeShrub} token="tok128" />).container.textContent).not.toContain(text);
+  });
+
+  it('web and PDF print the same paragraph under the same label (1:1 mirror)', () => {
+    const text = 'Our technician found chinch bugs in the trouble spot, and the damage you see in that photo is from them. We treated the front and side yards with Arena 50 WDG to go after them.';
+    const snapshot = { overallScore: 94, statusHeadline: 'Looking great' };
+    const lead = { headline: 'Looking great', applied: 'Today we applied an insect control and a fertilizer.', techParagraph: text };
+    const web = render(<LawnLeadCard lead={lead} snapshot={snapshot} />);
+    const webBlock = web.getByTestId('lawn-lead-tech');
+    const webLabel = webBlock.children[0].textContent;
+    const webText = webBlock.children[1].textContent;
+    web.unmount();
+    const pdf = render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead } }} token="tok129" />);
+    const pdfParagraph = pdf.getByText(text);
+    const pdfLabel = pdfParagraph.parentElement.children[0].textContent;
+    expect(webText).toBe(text);
+    expect(pdfParagraph.textContent).toBe(webText);
+    expect(pdfLabel.toLowerCase()).toBe(webLabel.toLowerCase());
+    expect(pdf.container.textContent.split('From your technician').length - 1).toBe(1);
   });
 
   it('prints the lead headline (the frozen v6 one) as Overall, so a later assessment correction cannot make the PDF disagree', () => {
