@@ -20529,9 +20529,13 @@ const CallRecordingProcessor = {
                         // (this contact answered YES while this booking was
                         // still processing) may already have texted this
                         // visit's confirmation to this phone. Its body differs,
-                        // so the content dedupe above cannot see it.
-                        if (await require('./appointment-reminders').confirmationLoggedForVisitPhone({
-                          scheduledServiceId, phone: contact.phone, entryPoint: 'recipient_optin_confirmed_replay',
+                        // so the content dedupe above cannot see it; sms_log
+                        // carries the visit on every send made with
+                        // appointmentId (twilio.js noticeScope).
+                        // Only with the follow-up live: dark, this fan-out
+                        // is byte-for-byte what it was.
+                        if (require('./recipient-optin').isOnSiteFollowUpLive() && await require('./appointment-reminders').confirmationLoggedForVisitPhone({
+                          scheduledServiceId, phone: contact.phone,
                         }).catch(() => false)) {
                           await releaseFollowUpClaim();
                           continue;
@@ -20562,8 +20566,6 @@ const CallRecordingProcessor = {
                           metadata: {
                             original_message_type: 'confirmation',
                             appointment_contact_role: contact.role,
-                            // The replay's per-visit dedupe reads this.
-                            scheduled_service_id: scheduledServiceId,
                           },
                         }).finally(releaseFollowUpClaim);
                         if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'

@@ -685,7 +685,7 @@ const ALLOWLIST = [
   },
   {
     file: 'services/appointment-reminders.js',
-    snippet: "let q = db('sms_log')",
+    snippet: "const priorSend = await db('sms_log')",
     reason: 'confirmationLoggedForVisitPhone per-visit dedupe existence check (the on-site replay and the call pipeline contact fan-out): deliberately counts an in-flight reservation — a confirmation already being sent to this phone for this visit must block a second one; it presents nothing as a delivered message.',
   },
 ];

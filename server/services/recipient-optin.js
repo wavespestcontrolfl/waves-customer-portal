@@ -1242,6 +1242,7 @@ module.exports = {
   settleOnSiteFollowUps,
   sweepOnSiteFollowUps,
   rearmOnSiteFollowUp,
+  isOnSiteFollowUpLive,
   claimFollowUpForFanOut,
   releaseFanOutFollowUpClaim,
   visitAskState,

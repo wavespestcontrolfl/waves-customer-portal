@@ -439,13 +439,16 @@ describe('one sender at a time: the call fan-out takes the replay\'s row claim',
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
     expect(src).toContain("claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);\n                        if (followUpClaim === 'busy') continue;");
     // The replay check runs AFTER the claim settles (a replay that finished in between is seen).
-    expect(src).toContain("scheduledServiceId, phone: contact.phone, entryPoint: 'recipient_optin_confirmed_replay',\n");
-    expect(src.indexOf("entryPoint: 'recipient_optin_confirmed_replay'")).toBeGreaterThan(src.indexOf('claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId)'));
+    expect(src).toContain("require('./recipient-optin').isOnSiteFollowUpLive() && await require('./appointment-reminders').confirmationLoggedForVisitPhone({\n                          scheduledServiceId, phone: contact.phone,\n                        })");
+    expect(src.indexOf('confirmationLoggedForVisitPhone({')).toBeGreaterThan(src.indexOf('claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId)'));
     // Re-arming is idempotent per visit and never clears an in-flight claim.
     const optinSrc = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
     expect(optinSrc).toContain(".whereRaw('NOT (visit_id IS NOT DISTINCT FROM ? AND followup_done_at IS NULL)', [visitId])\n      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null });");
     expect(src).toContain('}).finally(releaseFollowUpClaim);');
-    expect(src).toContain('scheduled_service_id: scheduledServiceId,\n                          },\n                        }).finally(releaseFollowUpClaim);');
+    // The visit reaches sms_log through the send's appointmentId (twilio.js noticeScope), which the dedupe reads.
+    const twilio = require('fs').readFileSync(require.resolve('../services/twilio.js'), 'utf8');
+    expect(twilio).toContain("noticeScope(options.appointmentId)");
+    expect(require('fs').readFileSync(require.resolve('../services/messaging/notice-scope.js'), 'utf8')).toContain('scheduled_service_id: String(appointmentId)');
   });
 });
 
