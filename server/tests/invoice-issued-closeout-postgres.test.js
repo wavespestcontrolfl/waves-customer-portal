@@ -567,9 +567,14 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // 10. en_route → not a candidate
     const v10 = await visit({ status: 'en_route' }); const i10 = await paid(v10); await auditRow(v10.id, i10.id, refused, 'error');
 
+    // 11. refused UNDER THE LOCK because a timer started mid-closeout (issued_visit_in_progress); it has stopped → retried
+    const v11 = await visit({ status: 'on_site' }); const i11 = await paid(v11); await auditRow(v11.id, i11.id, refused, 'issued_visit_in_progress');
+    // 12. refused under the lock because the day moved (issued_visit_rescheduled); it is eligible now → retried
+    const v12 = await visit(); const i12 = await paid(v12); await auditRow(v12.id, i12.id, refused, 'issued_visit_rescheduled');
+
     const out = await retryFailedPaidInvoiceCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 6, retried: 4, closed: 4 });
-    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort()).toEqual([v1.id, v2.id, v3.id, v8.id].sort());
+    expect(out).toEqual({ candidates: 8, retried: 6, closed: 6 });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort()).toEqual([v1.id, v2.id, v3.id, v8.id, v11.id, v12.id].sort());
     for (const [args] of mockCompleteScheduledService.mock.calls) {
       expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
       expect(args.issuedInvoiceCloseout.trigger).toBe('paid');
