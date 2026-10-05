@@ -278,7 +278,10 @@ function sendSlotDeadline(row) {
 
 // Stamp, once and never moved, the first time this lane sees a call's
 // recording finished and speech-less (the slot's opening time, see
-// sendSlotDeadline). Returns the row with the stamp in its metadata.
+// sendSlotDeadline). Returns the row with the stamp in its metadata, or null
+// when the stamp could not be written or read back: the caller must leave the
+// call unsettled for the next sweep pass, never judge it on the unstamped
+// (earlier) deadline.
 async function stampEmptyVoicemailSeen(row) {
   const key = 'missed_call_text_empty_voicemail_seen_at';
   if (parseMeta(row.metadata)[key]) return row;
@@ -287,10 +290,12 @@ async function stampEmptyVoicemailSeen(row) {
       .whereRaw("COALESCE(metadata->>'missed_call_text_empty_voicemail_seen_at', '') = ''")
       .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('missed_call_text_empty_voicemail_seen_at', ?::text)", [new Date(Date.now()).toISOString()]) });
     const current = await db('call_log').where({ id: row.id }).first('metadata');
-    return { ...row, metadata: { ...parseMeta(row.metadata), ...parseMeta(current && current.metadata) } };
+    const stored = parseMeta(current && current.metadata);
+    if (!stored[key]) return null;
+    return { ...row, metadata: { ...parseMeta(row.metadata), ...stored } };
   } catch (e) {
     logger.warn(`[missed-call-text-back] empty-voicemail stamp failed for call ${String(row.twilio_call_sid).slice(-6)}: ${e.code || e.name || 'db_error'}`);
-    return row;
+    return null;
   }
 }
 
@@ -791,7 +796,13 @@ async function attemptForRow(inputRow, now = Date.now()) {
   // True only for a call eligible BECAUSE its recording held no speech.
   const viaEmptyVoicemail = emptyVoicemail && isEmptyVoicemailRecording(row);
   if (parseMeta(row.metadata).missed_call_text_settled_at) return { outcome: 'skipped', reason: 'already_settled' };
-  if (viaEmptyVoicemail) row = await stampEmptyVoicemailSeen(row);
+  if (viaEmptyVoicemail) {
+    const stamped = await stampEmptyVoicemailSeen(row);
+    // Unstamped: stay unsettled so a later pass retries, instead of letting
+    // precheckRow judge the call on the earlier, plain deadline (too_old).
+    if (!stamped) return { outcome: 'error', reason: 'empty_voicemail_stamp_failed' };
+    row = stamped;
+  }
 
   const settle = async (outcome) => {
     try {

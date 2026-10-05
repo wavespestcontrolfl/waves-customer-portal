@@ -1112,6 +1112,32 @@ jest.setTimeout(30000);
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
+    test('gate on: a failed sighting stamp leaves the call unsettled for the next pass, never too_old', async () => {
+      gates(true);
+      // First seen after the plain grace+30min deadline: only the stamp keeps it alive.
+      const row = rejected(40, 5);
+      await database('call_log').insert(row);
+      // Route the lane's db through a wrapper whose raw() fails for the stamp write only.
+      const wrapper = (...args) => database(...args);
+      wrapper.transaction = (...args) => database.transaction(...args);
+      wrapper.raw = (sql, ...rest) => {
+        if (typeof sql === 'string' && sql.includes('missed_call_text_empty_voicemail_seen_at')) throw Object.assign(new Error('boom'), { code: 'ECONNRESET' });
+        return database.raw(sql, ...rest);
+      };
+      mockConn = wrapper;
+      try {
+        expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'error', reason: 'empty_voicemail_stamp_failed' });
+      } finally {
+        mockConn = database;
+      }
+      const after = await stored(row);
+      expect(after.metadata.missed_call_text_settled_at).toBeUndefined();
+      expect(after.metadata.missed_call_text_outcome).toBeUndefined();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+      // The next pass stamps and texts it.
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
+    });
+
     test('gate on: a transcript that gained words after the read loses the lease', async () => {
       gates(true);
       const row = rejected(READY_MINUTES_AGO + 4, 1);
