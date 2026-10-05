@@ -262,6 +262,9 @@ export function putFastCompletionAttempt(serviceId, operatorId, attempt, now = D
     // The server refused this exact body for good, but the device could not
     // delete it: a reload offers it to discard, never to retry.
     ...(attempt.refused === true ? { refused: true } : {}),
+    // The sheet that made the body, when its findings alone cannot say (the
+    // lawn visit sheet shares its findings type with the lawn re-service).
+    ...(typeof attempt.sheet === "string" && attempt.sheet ? { sheet: attempt.sheet } : {}),
   };
   const key = fastCompletionAttemptKey(serviceId, operatorId);
   if (!key) return Promise.resolve(false);

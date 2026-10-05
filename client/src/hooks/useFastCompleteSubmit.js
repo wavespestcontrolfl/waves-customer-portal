@@ -39,6 +39,7 @@ import { shouldResetCompletionIdempotencyKey } from '../lib/completion-idempoten
 import {
   deleteFastCompletionAttempt,
   getFastCompletionAttempt,
+  hasFastCompletionMarker,
   putFastCompletionAttempt,
 } from '../lib/completion-resume-store';
 
@@ -57,6 +58,9 @@ const savedNotice = (cleared) => (cleared ? {} : { notice: SAVED_COPY_NOTICE });
 const KEPT_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here.';
 // A saved copy the server had refused, found again after a reload.
 const REFUSED_COPY_NOTICE = 'The server refused this saved completion. Discard it here to start a new one.';
+// A saved attempt this device marks but cannot read now: nothing new may be
+// sent over it, so the sheet waits for a read (GitHub Codex P2 on #6001).
+const UNREADABLE_COPY_NOTICE = 'A completion is saved on this device but can’t be read right now. Tap Try again.';
 const STORAGE_WARNING = 'This device can’t save a reload-safe copy right now. Keep this screen open. You can still send after this warning.';
 
 // A lapsed login, a timeout or a rate limit leaves the outcome open. A 403
@@ -109,7 +113,7 @@ function sameScope(left, right) {
 }
 
 export default function useFastCompleteSubmit({
-  base, request, serviceId, operatorId, confirmable = false,
+  base, request, serviceId, operatorId, confirmable = false, sheet = '',
 }) {
   const keyRef = useRef(genIdempotencyKey());
   const pendingBodyRef = useRef(null);
@@ -130,6 +134,8 @@ export default function useFastCompleteSubmit({
   const [done, setDone] = useState(null);
   const [prompt, setPrompt] = useState(null);
   const [storageWarning, setStorageWarning] = useState('');
+  // Bumped by Try again on an unreadable saved attempt: the read runs again.
+  const [readTick, setReadTick] = useState(0);
 
   // A scope change invalidates every late read and response from the previous
   // operator/visit. Its durable row remains available to that original scope.
@@ -166,6 +172,11 @@ export default function useFastCompleteSubmit({
       if (!available) {
         storageWarningSeenRef.current = true;
         setStorageWarning(STORAGE_WARNING);
+        if (hasFastCompletionMarker(scope.serviceId, scope.operatorId)) {
+          setRestored(true);
+          setFailure('unreadable');
+          setError(UNREADABLE_COPY_NOTICE);
+        }
       }
       if (attempt?.body && typeof attempt.body.idempotencyKey === 'string' && attempt.body.idempotencyKey) {
         pendingBodyRef.current = attempt.body;
@@ -187,7 +198,7 @@ export default function useFastCompleteSubmit({
       setRecovering(false);
     });
     return () => { active = false; };
-  }, [serviceId, operatorId]);
+  }, [serviceId, operatorId, readTick]);
 
   // Removes exactly the row a send or discard stood on, captured before its
   // network call or storage read: never whatever row is current when a late
@@ -225,9 +236,9 @@ export default function useFastCompleteSubmit({
   const markRefused = useCallback(async (scope, storedBody, summary) => {
     if (!scope.serviceId || !scope.operatorId || !storedBody) return;
     await putFastCompletionAttempt(scope.serviceId, scope.operatorId, {
-      body: storedBody, summary, expectedBody: storedBody, refused: true,
+      body: storedBody, summary, expectedBody: storedBody, refused: true, sheet,
     });
-  }, []);
+  }, [sheet]);
 
   // A definitive answer removes the send's stored copy; a refused copy that
   // stays is marked refused. True when no copy of that answer remains.
@@ -243,7 +254,7 @@ export default function useFastCompleteSubmit({
     const stored = await putFastCompletionAttempt(
       scope.serviceId,
       scope.operatorId,
-      { body, summary, expectedBody: persistedBodyRef.current },
+      { body, summary, expectedBody: persistedBodyRef.current, sheet },
     );
     if (!sameScope(scopeRef.current, scope)) return 'stale';
     if (stored) {
@@ -280,7 +291,7 @@ export default function useFastCompleteSubmit({
     storageWarningSeenRef.current = true;
     setFailure('storage');
     return 'warned';
-  }, [failure]);
+  }, [failure, sheet]);
 
   const settleFailure = useCallback(async (err, scope, body, summary, storedBody) => {
     const outcome = completionFailureOutcome(err, { confirmable });
@@ -441,6 +452,7 @@ export default function useFastCompleteSubmit({
   return {
     recovering, restored, submitting, error, failure, done, prompt, storageWarning,
     submit, retry, confirm, discard, dismissPrompt: discard,
+    recheck: () => setReadTick((tick) => tick + 1),
     pendingSummary: pendingSummaryRef.current,
     retryPending: failure === 'retry' || failure === 'storage',
     storageBypassPending: failure === 'storage',

@@ -510,3 +510,12 @@ describe('definite refusals (GitHub Codex P2s on #5967)', () => {
     expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.refused).toBeUndefined();
   });
 });
+
+it('a sheet tag rides every saved copy of its attempt (lawn visit sheet)', async () => {
+  const request = vi.fn().mockRejectedValue(Object.assign(new Error('Offline'), { status: 503 }));
+  const view = renderHook(() => useFastCompleteSubmit({ ...scope, request, sheet: 'lawn_visit' }));
+  await waitFor(() => expect(view.result.current.recovering).toBe(false));
+  await act(async () => { await view.result.current.submit(() => photoBody, 'Lawn visit'); });
+  expect(view.result.current.failure).toBe('retry');
+  expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toMatchObject({ sheet: 'lawn_visit', summary: 'Lawn visit' });
+});

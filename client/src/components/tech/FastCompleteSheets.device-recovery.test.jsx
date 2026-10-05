@@ -8,6 +8,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import FastCompleteSheet from './FastCompleteSheet';
 import FastCompleteLawnReserviceSheet from './FastCompleteLawnReserviceSheet';
 import FastCompleteTreeShrubSheet from './FastCompleteTreeShrubSheet';
+import FastCompleteLawnSheet from './FastCompleteLawnSheet';
 import { getFastCompletionAttempt, putFastCompletionAttempt } from '../../lib/completion-resume-store';
 
 beforeEach(() => {
@@ -20,6 +21,7 @@ for (const [name, Sheet, reportFlow] of [
   ['report', FastCompleteSheet, true],
   ['lawn', FastCompleteLawnReserviceSheet, false],
   ['tree/shrub', FastCompleteTreeShrubSheet, false],
+  ['lawn visit', FastCompleteLawnSheet, false],
 ]) {
   test.each(['receipt', 'already_saved'])(`${name} recovery shows the saved result for %s while context is unavailable`, async (outcome) => {
     const body = { idempotencyKey: 'saved-key', technicianNotes: 'Retained exact work' };
@@ -58,7 +60,8 @@ for (const [name, Sheet, reportFlow] of [
     render(<Sheet service={{ id: `visit-stall-${name}`, reportFlow }} operatorId="tech-stall" request={request}
       onClose={onClose} onCompleted={vi.fn()} onFullForm={vi.fn()} />);
     expect(await screen.findByText(/Checking for an unfinished completion/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    // The lawn visit sheet's header closes with Back.
+    fireEvent.click(screen.getByRole('button', { name: Sheet === FastCompleteLawnSheet ? 'Back' : 'Close' }));
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0);
   });
@@ -76,6 +79,26 @@ for (const [name, Sheet, reportFlow] of [
     expect(await screen.findByText(/Another completion for this visit/)).toBeInTheDocument();
     await waitFor(async () => expect((await getFastCompletionAttempt('visit-a', 'tech-a')).attempt).toBeNull());
     expect(screen.getByText(/Another completion for this visit/)).toBeInTheDocument();
+  });
+
+  test(`${name} waits on a saved attempt it cannot read, then shows it on Try again (GitHub Codex P2 on #6001)`, async () => {
+    const body = { idempotencyKey: 'unread-key', technicianNotes: 'Unread work' };
+    await putFastCompletionAttempt('visit-u', 'tech-a', { body, summary: 'Unread visit' });
+    const store = globalThis.indexedDB;
+    globalThis.indexedDB = undefined;
+    const onFullForm = vi.fn();
+    const request = vi.fn(async (path) => {
+      if (path.endsWith('/complete')) return { success: true };
+      throw Object.assign(new Error('Not this sheet'), { status: 404 });
+    });
+    render(<Sheet service={{ id: 'visit-u', reportFlow }} operatorId="tech-a" request={request}
+      onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={onFullForm} />);
+    expect(await screen.findByText(/saved on this device but can’t be read right now/)).toBeInTheDocument();
+    expect(onFullForm).not.toHaveBeenCalled();
+    expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0);
+    globalThis.indexedDB = store;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('button', { name: 'Retry', exact: true })).toBeInTheDocument();
   });
 
   test(`${name} shows a refused copy found after a reload to discard only, then a fresh form (GitHub Codex P2 on #5967)`, async () => {
@@ -162,4 +185,19 @@ test('recovered confirmation shows a failed discard and retains the saved attemp
   fireEvent.click(back);
   await waitFor(async () => expect((await getFastCompletionAttempt('visit-a', 'tech-a')).attempt).toBeNull());
   expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(1);
+});
+
+test('the lawn visit sheet holds its full-form hand-off while a saved attempt is shown, and tags the attempt as its own', async () => {
+  const body = { idempotencyKey: 'lawn-key', technicianNotes: 'Lawn work' };
+  await putFastCompletionAttempt('visit-l', 'tech-a', { body, summary: 'Lawn visit', sheet: 'lawn_visit' });
+  const request = vi.fn(async () => { throw Object.assign(new Error('Not this sheet'), { status: 404 }); });
+  const onFullForm = vi.fn();
+  render(<FastCompleteLawnSheet service={{ id: 'visit-l' }} operatorId="tech-a" request={request}
+    onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={onFullForm} />);
+  expect(await screen.findByRole('button', { name: 'Retry', exact: true })).toBeInTheDocument();
+  expect(onFullForm).not.toHaveBeenCalled();
+  expect((await getFastCompletionAttempt('visit-l', 'tech-a')).attempt.sheet).toBe('lawn_visit');
+  fireEvent.click(screen.getByRole('button', { name: 'Discard saved retry' }));
+  await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
+  expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0);
 });
