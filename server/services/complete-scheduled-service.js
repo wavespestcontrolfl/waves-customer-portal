@@ -3463,14 +3463,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // gates, no Tree/Shrub closeout lockout) and stamps its provenance on
     // the record below. Internal input only — the HTTP body cannot set it.
     const issuedInvoiceCloseout = completionInput.issuedInvoiceCloseout || null;
-    // A service caller's own recheck, run under the visit row lock in the
-    // record transaction (assessment-estimate-closeout.js): `async (trx,
-    // lockedVisitRow, loadedVisitRow) => null | reason`. `loadedVisitRow` is
-    // the unlocked row this completion loaded and builds its record from, so
-    // the caller can refuse a visit that drifted between that load and the lock. A reason refuses the completion
-    // before anything is written (409 locked_visit_guard_refused). Never
-    // read from a request body — only an in-process caller can pass a function.
-    const lockedVisitGuard = typeof completionInput.lockedVisitGuard === 'function' ? completionInput.lockedVisitGuard : null;
+    // The estimate-sent assessment closeout (assessment-estimate-closeout.js,
+    // in-process only): `{ now }`. Its rule is re-decided on the LOCKED visit
+    // row in the record transaction (recheckLockedAssessment); a refusal is a
+    // 409 assessment_estimate_close_refused before anything is written.
+    const assessmentEstimateCloseout = completionInput.assessmentEstimateCloseout && typeof completionInput.assessmentEstimateCloseout === 'object'
+      ? completionInput.assessmentEstimateCloseout : null;
     // A system closeout that is nobody's work and nobody's bill
     // (assessment-estimate-closeout.js): the completion mints no invoice
     // (so nothing can be charged for it) and writes neither the
@@ -6008,19 +6006,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
               throw Object.assign(new Error('visit became project-backed during the issued-invoice closeout'), { code: 'project_required_completion' });
             }
           }
-          // The caller's recheck on the LOCKED row: whatever it read before
-          // this lock (a start stamp, a running timer, the visit's day) is
-          // decided again here, so nothing that changed in between is
-          // completed over.
-          if (lockedVisitGuard && lockedSvcRow) {
-            const guardReason = await lockedVisitGuard(trx, lockedSvcRow, svc);
-            if (guardReason) {
-              throw Object.assign(new Error(`visit refused by its caller's locked recheck: ${guardReason}`), { code: 'locked_visit_guard_refused', guardReason: String(guardReason) });
+          // The estimate-sent assessment closeout, re-decided on the LOCKED
+          // row: whatever it read before this lock (a start stamp, a running
+          // timer, the visit's day, the estimate) is decided again here, so
+          // nothing that changed in between is completed over.
+          if (assessmentEstimateCloseout && lockedSvcRow) {
+            const refusal = await require('../services/assessment-estimate-closeout')
+              .recheckLockedAssessment(trx, lockedSvcRow, svc, assessmentEstimateCloseout);
+            if (refusal) {
+              throw Object.assign(new Error(`assessment closeout refused under the lock: ${refusal}`), { code: 'assessment_estimate_close_refused', refusal: String(refusal) });
             }
-            // The guard admitted the LOCKED row, so its status is the
+            // The recheck admitted the LOCKED row, so its status is the
             // transition source (as for the issued-invoice closeout, GitHub
             // r10 P2 #4127): pending → confirmed, or en_route → on_site,
-            // between the load and this lock is still the visit the guard
+            // between the load and this lock is still the visit it
             // judged, and transitionJobStatus needs the exact current status.
             fromStatus = lockedSvcRow.status;
           }
@@ -8211,12 +8210,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             code: 'issued_visit_rescheduled',
           } });
         }
-        if (err && err.code === 'locked_visit_guard_refused') {
+        if (err && err.code === 'assessment_estimate_close_refused') {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
           return ({ status: 409, body: {
-            error: 'This visit changed while it was being closed — it stays open.',
-            code: 'locked_visit_guard_refused',
-            reason: err.guardReason || null,
+            error: 'This assessment changed while it was being closed — it stays open.',
+            code: 'assessment_estimate_close_refused',
+            reason: err.refusal || null,
           } });
         }
         if (err && err.code === 'issued_visit_in_progress') {
@@ -9366,7 +9365,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // refuses when this flag is set (release/503 → the retry re-runs the
     // lookups); every other lane keeps the non-blocking behavior.
     let invoiceLookupFailed = false;
-    if (!packetEffects) {
+    // A system quiet closeout is nobody's bill: it adopts no invoice linked
+    // to the visit — one minted concurrently (queued behind this completion's
+    // mint lock) belongs to whoever minted it, and is never back-linked,
+    // credited or charged here (Codex r8 P1 #5903). Same for the two
+    // lookups below.
+    if (!packetEffects && !systemQuietCloseout) {
       try {
         if (!recapReviewOnly) {
           const existingPaid = await db('invoices')
@@ -9386,7 +9390,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let terminalCompletionInvoice = null;
     let completionLiveBesideInvoice = null;
     let completionTerminalIncludedSetupFee = false;
-    if (!packetEffects) {
+    if (!packetEffects && !systemQuietCloseout) {
       try {
         // Invoice-issued closeout: the invoice that triggered it IS this
         // visit's invoice — pinned by id, never "the newest linked row"
@@ -9857,7 +9861,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // If the tech already minted an invoice for this visit pre-completion
     // (Charge now → Tap-to-Pay flow), reuse it instead of cutting a second one.
     let preMintedInvoice = null;
-    if (!packetEffects) {
+    if (!packetEffects && !systemQuietCloseout) {
       try {
         if (!recapReviewOnly) {
           // The issued invoice is pinned above (existingCompletionInvoice) —

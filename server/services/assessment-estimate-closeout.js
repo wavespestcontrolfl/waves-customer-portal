@@ -50,7 +50,7 @@ const AUDIT_REFUSED = 'visit.assessment_close_on_estimate_sent_refused';
 // hashes its request and matches a committed attempt's resume on it, so the
 // request is constant and carries no visit identity (a date correction or a
 // customer merge between attempts would change the hash and strand the
-// retry). Identity is decided on the locked row by lockedVisitGuard.
+// retry). Identity is decided on the locked row by recheckLockedAssessment.
 // What the completion's record is built from; compared between the row it
 // loaded and the row it locked.
 const IDENTITY_FIELDS = ['customer_id', 'scheduled_date', 'service_type', 'service_id'];
@@ -355,47 +355,54 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
     // be charged), and no "<technician> completed" activity line or
     // job_complete notification is written for the assigned technician.
     systemQuietCloseout: true,
-    // The WHOLE decision once more, on the visit row the completion has
-    // LOCKED, from that row alone: still an assessment, an estimate sent to the
-    // customer the row names NOW, the rule, and no running timer or open
-    // group. A reschedule, a reclassification, a customer merge, an arrival
-    // or a timer start after this module's reads is therefore decided on
-    // what is true under the lock, never completed over.
-    // A RESUME carries no guard: that attempt already committed the visit as
-    // completed on evidence that was good then, and only its post-commit
-    // work is owed.
-    lockedVisitGuard: resuming ? null : async (trx, lockedVisit, loadedVisit) => {
-      // The completion builds its record (customer, service day, service
-      // line) from the row it LOADED before this lock. If the locked row
-      // differs from that load in any of them, the verdict below would be
-      // about one visit and the record about another: refuse, and the next
-      // tick reads the visit as it now is.
-      if (IDENTITY_FIELDS.some((field) => identityValue(lockedVisit, field) !== identityValue(loadedVisit, field))) return 'visit_changed';
-      if (!(await isAssessmentBooking(lockedVisit, trx))) return 'not_assessment';
-      const lockedToday = etDateString();
-      const estimate = await estimateForAssessment(trx, lockedVisit, { now });
-      if (!estimate) return 'estimate_not_sent';
-      const refusal = assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: lockedToday })
-        || await liveRefusal(trx, lockedVisit);
-      if (refusal) return refusal;
-      // Admitted: record the pairing in THIS transaction, so it commits with
-      // the completion or not at all, and a resume keeps it (pre-push audit
-      // P1). Not best-effort: a failed insert aborts the close.
-      await require('./audit-log').recordAuditEvent({
-        actor_type: 'system',
-        action: AUDIT_PAIRED,
-        resource_type: 'scheduled_services',
-        resource_id: lockedVisit.id,
-        metadata: { estimateId: estimate.id },
-        critical: true,
-        trx,
-      });
-      return null;
-    },
+    // A RESUME carries no recheck: that attempt already committed the visit
+    // as completed on evidence that was good then; only its post-commit work
+    // is owed.
+    // The estimate-sent assessment closeout: the completion re-decides it on
+    // the row it LOCKS (recheckLockedAssessment). A resume carries none.
+    assessmentEstimateCloseout: resuming ? null : { now },
   });
   const body = (result && result.body) || {};
   const status = (result && result.status) || null;
-  return { closed: status === 200 && body.success === true, status, code: (body.code === 'locked_visit_guard_refused' && body.reason) || body.code || null };
+  return { closed: status === 200 && body.success === true, status, code: (body.code === 'assessment_estimate_close_refused' && body.reason) || body.code || null };
+}
+
+// The WHOLE decision once more, on the visit row the completion has LOCKED,
+// called by completeScheduledService inside its record transaction for an
+// `assessmentEstimateCloseout` request: still an assessment, unchanged since
+// the completion loaded it, an estimate handed off to the customer the row
+// names NOW, the rule, and no hold, invoice, running timer or open group. A
+// reschedule, reclassification, merge, arrival or timer start after this
+// module's reads is decided on what is true under the lock. Returns null to
+// admit (writing the estimate pairing in that same transaction) or the
+// reason to refuse.
+async function recheckLockedAssessment(trx, lockedVisit, loadedVisit, { now = new Date() } = {}) {
+  // The completion builds its record (customer, service day, service
+  // line) from the row it LOADED before this lock. If the locked row
+  // differs from that load in any of them, the verdict below would be
+  // about one visit and the record about another: refuse, and the next
+  // tick reads the visit as it now is.
+  if (IDENTITY_FIELDS.some((field) => identityValue(lockedVisit, field) !== identityValue(loadedVisit, field))) return 'visit_changed';
+  if (!(await isAssessmentBooking(lockedVisit, trx))) return 'not_assessment';
+  const lockedToday = etDateString();
+  const estimate = await estimateForAssessment(trx, lockedVisit, { now });
+  if (!estimate) return 'estimate_not_sent';
+  const refusal = assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: lockedToday })
+    || await liveRefusal(trx, lockedVisit);
+  if (refusal) return refusal;
+  // Admitted: record the pairing in THIS transaction, so it commits with
+  // the completion or not at all, and a resume keeps it (pre-push audit
+  // P1). Not best-effort: a failed insert aborts the close.
+  await require('./audit-log').recordAuditEvent({
+    actor_type: 'system',
+    action: AUDIT_PAIRED,
+    resource_type: 'scheduled_services',
+    resource_id: lockedVisit.id,
+    metadata: { estimateId: estimate.id },
+    critical: true,
+    trx,
+  });
+  return null;
 }
 
 // One candidate visit: decide, close, audit. Never throws.
@@ -470,6 +477,7 @@ async function closeAssessmentsWithSentEstimates({ conn = db, now = new Date(), 
 
 module.exports = {
   assessmentEstimateCloseRefusal,
+  recheckLockedAssessment,
   closeAssessmentsWithSentEstimates,
   AUDIT_CLOSED,
   AUDIT_PAIRED,

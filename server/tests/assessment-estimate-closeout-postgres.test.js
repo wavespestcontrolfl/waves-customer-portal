@@ -388,27 +388,22 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(await audits(visitId, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'estimate_before_visit' }) })]);
   });
 
-  test('the completion\'s lockedVisitGuard hook refuses before anything is written, and is ignored unless it is a function', async () => {
+  test('the completion re-decides an assessmentEstimateCloseout request on the locked row and refuses before anything is written', async () => {
     const { completeScheduledService } = require('../services/complete-scheduled-service');
     const customerId = await customer();
     const visitId = await visit(customerId);
-    const request = (lockedVisitGuard) => completeScheduledService({
+    // No estimate was ever handed off: the recheck refuses under the lock.
+    const result = await completeScheduledService({
       serviceId: visitId, idempotencyKey: randomUUID(),
-      body: { visitOutcome: 'completed', sendCompletionSms: false, requestReview: false },
+      body: { visitOutcome: 'completed', sendCompletionSms: false, requestReview: false, backfill: true },
       actor: { techRole: 'admin', technicianId: null, technician: null },
-      lockedVisitGuard,
+      systemQuietCloseout: true,
+      assessmentEstimateCloseout: { now: new Date() },
     });
-    const seen = [];
-    expect(await request(async (trx, locked) => { seen.push(locked.id); return 'not_now'; })).toMatchObject({ status: 409, body: { code: 'locked_visit_guard_refused', reason: 'not_now' } });
-    expect(seen).toEqual([visitId]);
-    // The second argument is the locked row, the third the row the completion loaded.
-    let loadedId = null;
-    await request(async (trx, locked, loaded) => { loadedId = loaded.id; return 'not_now'; });
-    expect(loadedId).toBe(visitId);
+    expect(result).toMatchObject({ status: 409, body: { code: 'assessment_estimate_close_refused', reason: 'estimate_not_sent' } });
     expect((await row(visitId)).status).toBe('on_site');
     expect(await mockPg('service_records').where({ scheduled_service_id: visitId })).toHaveLength(0);
-    // Not a function (a request body can never smuggle one in): ignored.
-    expect(await request('refuse')).toMatchObject({ status: 200, body: { success: true } });
+    expect(await audits(visitId, AUDIT_PAIRED)).toHaveLength(0);
   });
 
   test('refused on the visit day, retried after midnight under the same key with the same request — never a changed payload', async () => {
@@ -461,8 +456,8 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const resume = calls[1];
     expect(resume.idempotencyKey).toBe(`assessment-estimate:${parked}:backfill`);
     expect(resume.body).toMatchObject({ backfill: true, idempotencyKey: `assessment-estimate:${parked}:backfill` });
-    expect(resume.lockedVisitGuard).toBeNull();
-    expect(typeof calls[0].lockedVisitGuard).toBe('function');
+    expect(resume.assessmentEstimateCloseout).toBeNull();
+    expect(calls[0].assessmentEstimateCloseout).toEqual({ now: expect.any(Date) });
     expect((await row(open)).status).toBe('completed');
   });
 
@@ -646,7 +641,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const calls = Completion.completeScheduledService.mock.calls.map(([input]) => input);
     expect(calls.map((input) => input.serviceId)).toEqual([parked]);
     expect(calls[0].idempotencyKey).toBe(`assessment-estimate:${parked}:backfill`);
-    expect(calls[0].lockedVisitGuard).toBeNull();
+    expect(calls[0].assessmentEstimateCloseout).toBeNull();
   });
 
   test('only a COMMITTED attempt is resumed: a pre-commit pending attempt on a visit someone else completed is not finished through this lane', async () => {
@@ -720,6 +715,32 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     };
     await closeAssessmentsWithSentEstimates({ conn: mockPg });
     expect(await audits(refusedVisit, AUDIT_PAIRED)).toHaveLength(0);
+  });
+
+  test('an invoice minted for the visit while the close holds its mint lock is never adopted by the close: no back-link, credit or charge', async () => {
+    const customerId = await customer();
+    const visitId = await visit(customerId);
+    await estimate(customerId);
+    const invoiceId = randomUUID();
+    // The office mints an invoice that lands after the close's locked recheck admitted the visit
+    // (modeled after the claim: the recheck already ran on the empty state).
+    const Recheck = require('../services/assessment-estimate-closeout');
+    const original = Recheck.recheckLockedAssessment;
+    Recheck.recheckLockedAssessment = async (trx, locked, loaded, opts) => {
+      const verdict = await original(trx, locked, loaded, opts);
+      if (!verdict) {
+        await trx('invoices').insert({ id: invoiceId, customer_id: customerId, scheduled_service_id: visitId, invoice_number: `TST-${invoiceId.slice(0, 8)}`,
+          token: randomUUID().replace(/-/g, ''), status: 'sent', total: 50, subtotal: 50, service_date: startDay(), service_type: 'Waves Assessment', line_items: JSON.stringify([]) });
+      }
+      return verdict;
+    };
+    try {
+      expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    } finally { Recheck.recheckLockedAssessment = original; }
+    const invoiceRow = await mockPg('invoices').where({ id: invoiceId }).first();
+    expect(invoiceRow).toMatchObject({ status: 'sent', service_record_id: null });
+    expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
+    expect(await mockPg('payments').where({ customer_id: customerId })).toHaveLength(0);
   });
 
   test('money is a person\'s: a priced assessment, a prepaid one and one with a linked invoice are never candidates', async () => {
