@@ -11907,6 +11907,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
+      // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a Good (one-time) accept has
+      // no selectedFrequency branch to ride, so the chosen tier is recorded
+      // here for every tiered accept (the recurring branch above wrote it
+      // already for Better / Best; this is idempotent on the same key).
+      if (offerTier && nextEstimateData && nextEstimateData.customerSelection?.offerTier !== offerTier.key) {
+        nextEstimateData.customerSelection = {
+          ...(nextEstimateData.customerSelection || {}),
+          offerTier: offerTier.key,
+          selectedAt: nextEstimateData.customerSelection?.selectedAt || new Date().toISOString(),
+        };
+        acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
+      }
       const acceptedEstimateForScheduling = nextEstimateData
         ? {
             ...estimateForPricing,
