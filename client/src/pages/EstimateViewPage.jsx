@@ -10215,6 +10215,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               disabled={ctaPhase === 'submitting'}
               pricing={data.pricing}
               estimate={estimate}
+              // The tiles quote the cadence chosen below, like the price card.
+              selectedFrequencyKey={serviceMode !== 'one_time' ? selectedFrequency : null}
+              selectedCombo={bestOfferActive ? selectedCombo : null}
             />
           ) : null}
           {!tiered && !estimate.isOneTimeOnly && !manualScheduleAccept && !restartQuote && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (

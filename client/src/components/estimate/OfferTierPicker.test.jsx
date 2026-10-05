@@ -189,4 +189,29 @@ describe('OfferTierPicker', () => {
     expect(best).not.toHaveTextContent('Save 10%');
     expect(best).toHaveTextContent('WaveGuard Silver');
   });
+
+  it('quotes the cadence the customer chose below, and the matched combo rows on an active Best', () => {
+    const monthlyBetter = { ...betterFrequency, key: 'monthly', label: 'Monthly', visitsPerYear: 12,
+      perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control (Monthly)', perTreatment: 74.9, displayPrice: 67.41, visitsPerYear: 12 }] };
+    const monthlyBest = { ...bestFrequency, key: 'monthly', label: 'Monthly', perServiceTreatments: [
+      { service: 'pest_control', label: 'Pest Control (Monthly)', perTreatment: 74.9, displayPrice: 67.41, visitsPerYear: 12 },
+      { service: 'lawn_care', label: 'Lawn Care', perTreatment: 77, displayPrice: 69.3, visitsPerYear: 9 },
+    ] };
+    const withMonthly = tiers.map((t) => (t.key === 'best' ? { ...t, frequencies: [bestFrequency, monthlyBest] } : t));
+    const monthlyPricing = { ...pricing, frequencies: [betterFrequency, monthlyBetter] };
+    const { unmount } = renderPicker({ tiers: withMonthly, pricing: monthlyPricing, selectedFrequencyKey: 'monthly' });
+    const [, better, best] = screen.getAllByRole('radio');
+    expect(better).toHaveTextContent('$67.41');
+    expect(best).toHaveTextContent('$67.41 + $69.30');
+    unmount();
+    // Active Best with a 12x lawn combo: the tile shows the combo's rows.
+    const combo = { perServiceTreatments: [
+      { service: 'pest_control', perTreatment: 107, displayPrice: 96.3, visitsPerYear: 4 },
+      { service: 'lawn_care', perTreatment: 79, displayPrice: 71.1, visitsPerYear: 12 },
+    ] };
+    renderPicker({ tiers: withMonthly, pricing: monthlyPricing, selectedKey: 'best', selectedFrequencyKey: 'quarterly', selectedCombo: combo });
+    const bestActive = screen.getAllByRole('radio')[2];
+    expect(bestActive).toHaveTextContent('$96.30 + $71.10');
+    expect(bestActive).toHaveTextContent('lawn 12×/yr');
+  });
 });

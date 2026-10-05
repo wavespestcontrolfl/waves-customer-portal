@@ -122,7 +122,11 @@ function Pill({ children, style }) {
   );
 }
 
-function tileModel(tier, tiers, pricing, estimate = null) {
+function tileModel(tier, tiers, pricing, estimate = null, selection = {}) {
+  // The tiles follow the cadence the customer has chosen below (the price
+  // card's own selection), so a tile never shows the quarterly figure beside
+  // a monthly price card. No selection yet = the section default.
+  const preferredKey = selection.frequencyKey || pestSectionDefaultKey(pricing);
   const key = tier.key;
   // The server's guarantee decision (serviceMixMakesNoGuaranteeClaim): on a
   // no-guarantee estimate no tile may claim a callback or the Waves
@@ -142,7 +146,7 @@ function tileModel(tier, tiers, pricing, estimate = null) {
     };
   }
   if (key === 'better') {
-    const frequency = defaultFrequency(pricing?.frequencies, pestSectionDefaultKey(pricing));
+    const frequency = defaultFrequency(pricing?.frequencies, preferredKey);
     const perApp = perApplicationNetForFrequency(frequency) ?? (Number(frequency?.perVisit) > 0 ? Number(frequency.perVisit) : null);
     const visits = pestVisitsFor(frequency);
     return {
@@ -156,13 +160,18 @@ function tileModel(tier, tiers, pricing, estimate = null) {
   }
   // best
   const better = tiers.find((t) => t?.key === 'better') || null;
-  const betterFrequency = better ? defaultFrequency(pricing?.frequencies, pestSectionDefaultKey(pricing)) : null;
-  const bestFrequency = defaultFrequency(tier.frequencies, betterFrequency?.key || null);
+  const betterFrequency = better ? defaultFrequency(pricing?.frequencies, preferredKey) : null;
+  const bestFrequency = defaultFrequency(tier.frequencies, preferredKey || betterFrequency?.key || null);
   const companions = companionKeys(tier);
   const name = companions.length
     ? `Pest + ${companions.map((k) => COMPANION_NAMES[k] || humanizeKey(k)).join(' + ')}`
     : (tier.label || 'Pest control + companion plan');
-  const rows = Array.isArray(bestFrequency?.perServiceTreatments) ? bestFrequency.perServiceTreatments : [];
+  // While Best is the active tier, a matched cadence combo (lawn 9× / 12×,
+  // tree & shrub 6× / 9×) carries the exact rows the price card shows.
+  const comboRows = selection.bestActive && Array.isArray(selection.combo?.perServiceTreatments) && selection.combo.perServiceTreatments.length
+    ? selection.combo.perServiceTreatments
+    : null;
+  const rows = comboRows || (Array.isArray(bestFrequency?.perServiceTreatments) ? bestFrequency.perServiceTreatments : []);
   const pestVisits = pestVisitsFor(bestFrequency);
   const parts = [`${pestVisits ? `${pestVisits}×/yr ` : ''}pest`];
   for (const k of companions) {
@@ -224,7 +233,7 @@ function chipStyle(chip) {
   return waveGuardChipStyle(chip.tier);
 }
 
-export default function OfferTierPicker({ tiers, selectedKey, onSelect, disabled = false, pricing = null, estimate = null }) {
+export default function OfferTierPicker({ tiers, selectedKey, onSelect, disabled = false, pricing = null, estimate = null, selectedFrequencyKey = null, selectedCombo = null }) {
   const narrow = useNarrow();
   if (!Array.isArray(tiers) || tiers.length === 0) return null;
 
@@ -261,7 +270,11 @@ export default function OfferTierPicker({ tiers, selectedKey, onSelect, disabled
         }}
       >
         {tiers.map((tier) => {
-          const model = tileModel(tier, tiers, pricing, estimate);
+          const model = tileModel(tier, tiers, pricing, estimate, {
+            frequencyKey: selectedFrequencyKey,
+            combo: selectedCombo,
+            bestActive: selectedKey === 'best',
+          });
           const selected = tier.key === selectedKey;
           return (
             <button
