@@ -217,6 +217,16 @@ const CHIP_ACTIONS = [
 const CHIP_ACTION_BY_LABEL = Object.fromEntries(
   CHIP_ACTIONS.map((chip) => [chip.label, chip]),
 );
+// The one protocol action a regular pest visit still records (owner
+// 2026-10-05): the "Swept eaves and webs" box. It is the pest protocol's own
+// sweep step (server/config/protocols.json), so the customer report's spider
+// section (buildSpiderExpectation) reads it as a recorded sweep: exterior,
+// no treatment applied.
+export const PEST_SWEEP_ACTION = {
+  label: "Swept eaves, window frames, door frames, and lanai",
+  scope: "exterior",
+  treatmentApplied: false,
+};
 // Completion-panel quick-entry chips are service-aware: pest-line services
 // (pest control, mosquito, termite, rodent) get a pest-focused list, while
 // plant-health services (lawn, tree/shrub) keep the original broad list that
@@ -18987,6 +18997,18 @@ export function CompletionPanel({
       applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
     }
   }
+  // The "Swept eaves and webs" box on a regular pest visit (owner 2026-10-05).
+  // Ticking it is the same as picking the sweep from the old dropdown
+  // (applyProtocolAction: label, scope, [Protocol] note line); unticking is
+  // the same as the x on its pill (removeSelectedLabel).
+  const pestSweepLabel = activeSelectedLabels(selectedProtocolActionLabels).find(
+    (label) => String(label).trim().toLowerCase() === PEST_SWEEP_ACTION.label.toLowerCase(),
+  );
+  function handlePestSweepChange(checked) {
+    if (generating) return;
+    if (checked) applyProtocolAction(PEST_SWEEP_ACTION);
+    else if (pestSweepLabel) removeSelectedLabel("protocol", pestSweepLabel);
+  }
   function handleLawnFindingAdd(text) {
     if (generating || photoAnalyzing || activeSelectedLabels(selectedObservationLabels).includes(text)) return;
     const detached = invalidateGeneratedReportOnTypedEdit();
@@ -20308,6 +20330,30 @@ export function CompletionPanel({
               );
             })}
             {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
+            {isRegularPestVisit && (
+              <div style={{ marginBottom: 20 }}>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    fontFamily: font,
+                    fontSize: 14,
+                    color: M.ink,
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(pestSweepLabel)}
+                    disabled={generating}
+                    onChange={(e) => handlePestSweepChange(e.target.checked)}
+                    style={{ width: 18, height: 18, accentColor: M.ink }}
+                  />
+                  Swept eaves and webs
+                </label>
+              </div>
+            )}
             {!isTypedFindings && !hideProtocolActionsField && (
               <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
@@ -22803,6 +22849,22 @@ export function CompletionPanel({
               );
             })}
             {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
+            {isRegularPestVisit && (
+              <div style={{ marginBottom: 12 }}>
+                <label
+                  style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: D.text, cursor: "pointer" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(pestSweepLabel)}
+                    disabled={generating}
+                    onChange={(e) => handlePestSweepChange(e.target.checked)}
+                    style={{ width: 16, height: 16 }}
+                  />
+                  Swept eaves and webs
+                </label>
+              </div>
+            )}
             {!isTypedFindings && !hideProtocolActionsField && (
             <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
