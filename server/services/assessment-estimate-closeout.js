@@ -31,14 +31,31 @@ const UNSTARTED_STATUSES = ['pending', 'confirmed'];
 
 const AUDIT_CLOSED = 'visit.assessment_closed_on_estimate_sent';
 const AUDIT_REFUSED = 'visit.assessment_close_on_estimate_sent_refused';
-// The completion hashes its request, and the posture is part of it: a visit
-// closes live on its own day and in the backfill posture afterwards. One key
-// per (visit, posture), so an attempt refused on the visit day (a running
-// timer, say) does not leave the next day's backfill attempt rejected as a
-// changed payload under the same key (pre-push audit P1).
+// The completion hashes its request and refuses a key reused with a
+// different one. What this module sends can change between two attempts on
+// the same visit — the posture (live on the visit day, backfill after), and
+// the identity it expects (staff correct the date or the customer after a
+// refused attempt). So the key is DERIVED from the request: the same request
+// always has the same key, and a different one never collides with an
+// earlier pre-commit attempt (pre-push audit P1 ×2 — the posture first, then
+// the identity; deriving the key closes the class). A committed attempt is
+// resumed under the key it was parked with, read back from the table.
 const KEY_PREFIX = 'assessment-estimate:';
-const idempotencyKeyFor = (visitId, posture) => `${KEY_PREFIX}${visitId}:${posture}`;
-const postureOfKey = (key) => (String(key || '').endsWith(':backfill') ? 'backfill' : 'live');
+function requestIdentity(visit) {
+  return {
+    customerId: visit.customer_id,
+    serviceType: visit.service_type,
+    scheduledDate: dateOnlyString(visit.scheduled_date),
+  };
+}
+function idempotencyKeyFor(visit, posture) {
+  const identity = requestIdentity(visit);
+  const digest = require('crypto').createHash('sha256')
+    .update([identity.customerId, identity.serviceType, identity.scheduledDate].join('|'))
+    .digest('hex').slice(0, 16);
+  return `${KEY_PREFIX}${visit.id}:${posture}:${digest}`;
+}
+const postureOfKey = (key) => (String(key || '').split(':')[2] === 'backfill' ? 'backfill' : 'live');
 
 // How far back an estimate's send still closes an assessment, how old an
 // assessment may be, and how long a refused visit rests before it is asked
@@ -100,18 +117,18 @@ async function newestSentEstimate(conn, customerId, { now }) {
 // This closeout's own completion attempt, committed but not finished (the
 // canonical completion commits status='completed' before its post-commit
 // work and parks a crashed run under its idempotency key).
-const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempts a WHERE a.service_id = s.id AND a.idempotency_key IN ('assessment-estimate:' || s.id::text || ':live', 'assessment-estimate:' || s.id::text || ':backfill') AND a.status NOT IN ('succeeded', 'failed'))";
+const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempts a WHERE a.service_id = s.id AND a.idempotency_key LIKE 'assessment-estimate:' || s.id::text || ':%' AND a.status NOT IN ('succeeded', 'failed'))";
 
-// The posture of this closeout's parked attempt, so a resume sends the very
-// request that attempt committed (its key and its backfill flag).
-async function parkedPosture(conn, visitId) {
+// The key this closeout's parked attempt was claimed under, so a resume sends
+// the request that attempt committed (its key and its posture).
+async function parkedKey(conn, visitId) {
   const attempt = await conn('service_completion_attempts')
     .where({ service_id: visitId })
-    .whereIn('idempotency_key', [idempotencyKeyFor(visitId, 'live'), idempotencyKeyFor(visitId, 'backfill')])
+    .where('idempotency_key', 'like', `${KEY_PREFIX}${visitId}:%`)
     .whereNotIn('status', ['succeeded', 'failed'])
     .orderBy('updated_at', 'desc')
     .first('idempotency_key');
-  return attempt ? postureOfKey(attempt.idempotency_key) : null;
+  return attempt ? attempt.idempotency_key : null;
 }
 
 // The rule and the rest, as SQL, so a row the sweep cannot act on this tick
@@ -190,10 +207,11 @@ async function liveRefusal(conn, visit) {
 // span from a days-old arrival to now is not labor). `expectedVisit` makes
 // the completion refuse, under its own row lock, a visit that was moved,
 // reassigned to another customer or reclassified after this module read it.
-async function closeAssessment(visit, { today, now, posture = null, resuming = false }) {
+async function closeAssessment(visit, { today, now, resumeKey = null }) {
   const { completeScheduledService } = require('./complete-scheduled-service');
-  const pastDay = posture ? posture === 'backfill' : dateOnlyString(visit.scheduled_date) < today;
-  const key = idempotencyKeyFor(visit.id, pastDay ? 'backfill' : 'live');
+  const resuming = Boolean(resumeKey);
+  const pastDay = resuming ? postureOfKey(resumeKey) === 'backfill' : dateOnlyString(visit.scheduled_date) < today;
+  const key = resumeKey || idempotencyKeyFor(visit, pastDay ? 'backfill' : 'live');
   const result = await completeScheduledService({
     serviceId: visit.id,
     idempotencyKey: key,
@@ -203,11 +221,7 @@ async function closeAssessment(visit, { today, now, posture = null, resuming = f
       requestReview: false,
       idempotencyKey: key,
       ...(pastDay ? { backfill: true } : {}),
-      expectedVisit: {
-        customerId: visit.customer_id,
-        serviceType: visit.service_type,
-        scheduledDate: dateOnlyString(visit.scheduled_date),
-      },
+      expectedVisit: requestIdentity(visit),
     },
     actor: { techRole: 'admin', technicianId: null, technician: null },
     // The same decision once more, on the visit row the completion has
@@ -243,10 +257,10 @@ async function closeOne(conn, row, { today, now }) {
     // out of the window since, and requiring it again would strand the
     // attempt for good (pre-push audit P1).
     const resuming = Boolean(row.own_attempt_parked) && visit.status === 'completed';
-    let posture = null;
+    let resumeKey = null;
     if (resuming) {
-      posture = await parkedPosture(conn, visitId);
-      if (!posture) return { closed: false, reason: 'nothing_parked' };
+      resumeKey = await parkedKey(conn, visitId);
+      if (!resumeKey) return { closed: false, reason: 'nothing_parked' };
     } else {
       estimate = await newestSentEstimate(conn, visit.customer_id, { now });
       if (!estimate) return { closed: false, reason: 'estimate_not_sent' };
@@ -260,7 +274,7 @@ async function closeOne(conn, row, { today, now }) {
       }
     }
     const estimateId = estimate ? estimate.id : null;
-    const outcome = await closeAssessment(visit, { today, now, posture, resuming });
+    const outcome = await closeAssessment(visit, { today, now, resumeKey });
     if (outcome.closed) {
       logger.info(`[assessment-estimate-closeout] visit ${visitId} ${resuming ? 'completion resumed' : `completed: estimate ${estimateId} was sent after it`}`);
       await audit(AUDIT_CLOSED, { visitId, estimateId, status: outcome.status, ...(resuming ? { code: 'resumed' } : {}) });

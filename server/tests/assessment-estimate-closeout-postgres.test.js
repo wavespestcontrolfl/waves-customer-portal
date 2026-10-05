@@ -365,7 +365,8 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
       await mockPg('time_entries').insert({ id: timerId, technician_id: visitRow.technician_id, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(), job_id: visitId });
     };
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
-    expect(await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key')).toEqual([`assessment-estimate:${visitId}:live`]);
+    const firstKeys = await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key');
+    expect(firstKeys).toEqual([expect.stringMatching(new RegExp(`^assessment-estimate:${visitId}:live:[0-9a-f]{16}$`))]);
     // Next day: the timer stopped and the visit day has passed → backfill
     // posture. The completion reads the real clock, so the day passing is
     // modeled by moving the fixture one day back (visit, stamps and send),
@@ -378,7 +379,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(closed.status).toBe('completed');
     expect(closed.service_time_minutes).toBeNull();
     expect((await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key')).sort())
-      .toEqual([`assessment-estimate:${visitId}:backfill`, `assessment-estimate:${visitId}:live`]);
+      .toEqual([expect.stringMatching(new RegExp(`^assessment-estimate:${visitId}:backfill:[0-9a-f]{16}$`)), firstKeys[0]]);
   });
 
   test('a completion this closeout committed and left parked is resumed from its own posture — with no fresh estimate needed, no locked guard, and behind the open visits', async () => {
@@ -386,7 +387,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const parkedCustomer = await customer();
     const parked = await visit(parkedCustomer, { status: 'completed', day: YESTERDAY });
     await estimate(parkedCustomer, { status: 'draft', sentAt: null });
-    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: parked, idempotency_key: `assessment-estimate:${parked}:backfill`, status: 'side_effects_pending', request_hash: 'x' });
+    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: parked, idempotency_key: `assessment-estimate:${parked}:backfill:0123456789abcdef`, status: 'side_effects_pending', request_hash: 'x' });
     // Someone else's parked completion on a completed assessment is not this sweep's.
     const foreign = await visit(await customer(), { status: 'completed', day: YESTERDAY });
     await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: foreign, idempotency_key: randomUUID(), status: 'side_effects_pending', request_hash: 'x' });
@@ -400,11 +401,34 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const calls = Completion.completeScheduledService.mock.calls.map(([input]) => input);
     expect(calls.map((input) => input.serviceId)).toEqual([open, parked]);
     const resume = calls[1];
-    expect(resume.idempotencyKey).toBe(`assessment-estimate:${parked}:backfill`);
-    expect(resume.body).toMatchObject({ backfill: true, idempotencyKey: `assessment-estimate:${parked}:backfill` });
+    expect(resume.idempotencyKey).toBe(`assessment-estimate:${parked}:backfill:0123456789abcdef`);
+    expect(resume.body).toMatchObject({ backfill: true, idempotencyKey: `assessment-estimate:${parked}:backfill:0123456789abcdef` });
     expect(resume.lockedVisitGuard).toBeNull();
     expect(typeof calls[0].lockedVisitGuard).toBe('function');
     expect((await row(open)).status).toBe('completed');
+  });
+
+  test('a refused attempt followed by a date correction in the same posture gets a new key — never idempotency_key_mismatch forever', async () => {
+    const customerId = await customer();
+    const twoDaysAgo = etDateString(addETDays(new Date(), -2));
+    const visitId = await visit(customerId, { day: twoDaysAgo, en_route_at: minutesAgo(60 * 50), arrived_at: minutesAgo(60 * 49), check_in_time: minutesAgo(60 * 49) });
+    const visitRow = await row(visitId);
+    await estimate(customerId, { sentAt: minutesAgo(60 * 20) });
+    const timerId = randomUUID();
+    mockRace.beforeClaim = async () => {
+      await mockPg('time_entries').insert({ id: randomUUID(), technician_id: visitRow.technician_id, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: minutesAgo(120) });
+      await mockPg('time_entries').insert({ id: timerId, technician_id: visitRow.technician_id, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(), job_id: visitId });
+    };
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
+    const [firstKey] = await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key');
+    // The office corrects the visit's day (still a past day → still backfill); the timer has stopped.
+    await mockPg('time_entries').where({ id: timerId }).update({ status: 'completed', clock_out: new Date(), duration_minutes: 1 });
+    await mockPg('scheduled_services').where({ id: visitId }).update({ scheduled_date: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg, now: new Date(Date.now() + 7 * 3600000), today: TODAY })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(visitId)).status).toBe('completed');
+    const keys = await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key');
+    expect(keys).toHaveLength(2);
+    expect(keys.filter((key) => key !== firstKey)[0]).toMatch(new RegExp(`^assessment-estimate:${visitId}:backfill:[0-9a-f]{16}$`));
   });
 
   test('gate off: nothing is read and nothing closes', async () => {
