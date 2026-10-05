@@ -8894,6 +8894,62 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // in the same MOA group; we only fire one alert per MOA group per
     // job. Without this guard a 3-product completion in the same
     // violating group would create 3 identical cards.
+    // Shared active-ingredient yearly cap (prodiamine across formulations): its own
+    // step, because the work is already done and ledgered whatever the outcome. It
+    // runs for an incomplete visit that applied product and again on a resume of a
+    // committed completion, reading the products from the ledger rows this record
+    // wrote (not the request body). The advisory is rebuilt from the computed
+    // violation every time, so a retry response still carries it; the dispatch alert
+    // is deduped durably per job and ingredient. Never blocks, never messages a customer.
+    if (record?.id) {
+      const reportSharedCap = async (trx = null) => {
+        const connection = trx || db;
+        if (packetEffects) {
+          const item = await connection('visit_completion_packet_items')
+            .where({ id: packetContext.itemId, service_record_id: record.id }).forUpdate().first('id');
+          if (!item) throw new Error('Visit member completion record changed');
+        }
+        const ledgered = await connection('property_application_history')
+          .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct('product_id');
+        if (!ledgered.length) return;
+        const LimitChecker = require('../services/application-limits');
+        const { createAlert } = require('../services/dispatch-alerts');
+        const capDate = svc.scheduled_date instanceof Date ? svc.scheduled_date : new Date(`${svc.scheduled_date}T12:00:00`);
+        const reported = new Set();
+        for (const { product_id: productId } of ledgered) {
+          const { blocks } = await LimitChecker.checkLimits(svc.customer_id, productId, capDate, connection);
+          for (const v of blocks.filter((b) => b.type === 'annual_max_rate' && b.matchType === 'active_ingredient')) {
+            if (reported.has(v.matchValue)) continue;
+            reported.add(v.matchValue);
+            applicationLimitAdvisory = {
+              advisory: true,
+              blocks: [...(applicationLimitAdvisory?.blocks || []), { code: 'application_limit_active_ingredient', message: v.message }],
+            };
+            if (await connection('dispatch_alerts').where({ type: 'application_limit', job_id: svc.id })
+              .whereRaw("payload->>'active_ingredient' = ?", [v.matchValue]).first('id')) continue;
+            const capProduct = await connection('products_catalog').where({ id: productId }).first();
+            try {
+              await createAlert({
+                type: 'application_limit', severity: 'critical', techId: svc.technician_id, jobId: svc.id,
+                payload: { limit_type: v.type, active_ingredient: v.matchValue, product_name: capProduct?.name || null, current: v.current, max: v.max, message: v.message },
+                trx,
+              });
+            } catch (alertErr) {
+              if (packetEffects) throw alertErr;
+              logger.error(`[dispatch] application_limit createAlert failed: ${alertErr.message}`);
+            }
+          }
+        }
+      };
+      try {
+        if (packetEffects) await db.transaction(reportSharedCap);
+        else await reportSharedCap();
+      } catch (err) {
+        if (packetEffects) throw err;
+        logger.error(`[dispatch] shared-cap check failed (non-blocking): ${err.message}`);
+      }
+    }
+
     if (!isIncompleteVisit && (!resumingCommittedCompletion || packetEffects) && products?.length) {
       const writeMoaAlerts = async (trx = null) => {
         const connection = trx || db;
@@ -8917,7 +8973,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           ? svc.scheduled_date
           : new Date(`${svc.scheduled_date}T12:00:00`);
         const alertedMoa = new Set();
-        const alertedCap = new Set();
         for (const p of products) {
           if (!p.productId) continue;
           const result = await LimitChecker.checkLimits(svc.customer_id, p.productId, proposedDate, connection);
@@ -8932,46 +8987,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...result.warnings.map((v) => ({ ...v, alertSeverity: 'warn' })),
           ];
           for (const v of violations) {
-            // The shared active-ingredient yearly cap is the one non-MOA limit this
-            // path reports: the tech already applied the product, so the response
-            // carries an advisory and one application_limit alert goes to dispatch.
-            // Other limit types (annual_max_apps, seasonal_blackout, etc.) are
-            // operationally distinct and would belong to other alert kinds.
-            if (v.type === 'annual_max_rate' && v.matchType === 'active_ingredient' && v.alertSeverity === 'critical') {
-              if (!alertedCap.has(v.matchValue)) {
-                alertedCap.add(v.matchValue);
-                const capProduct = await connection('products_catalog').where({ id: p.productId }).first();
-                applicationLimitAdvisory = {
-                  advisory: true,
-                  blocks: [...(applicationLimitAdvisory?.blocks || []), { code: 'application_limit_active_ingredient', message: v.message }],
-                };
-                if (!(packetEffects && await connection('dispatch_alerts')
-                  .where({ type: 'application_limit', job_id: svc.id })
-                  .whereRaw("payload->>'active_ingredient' = ?", [v.matchValue]).first('id'))) {
-                  try {
-                    await createAlert({
-                      type: 'application_limit',
-                      severity: 'critical',
-                      techId: svc.technician_id,
-                      jobId: svc.id,
-                      payload: {
-                        limit_type: v.type,
-                        active_ingredient: v.matchValue,
-                        product_name: capProduct?.name || null,
-                        current: v.current,
-                        max: v.max,
-                        message: v.message,
-                      },
-                      trx,
-                    });
-                  } catch (alertErr) {
-                    if (packetEffects) throw alertErr;
-                    logger.error(`[dispatch] application_limit createAlert failed: ${alertErr.message}`);
-                  }
-                }
-              }
-              continue;
-            }
+            // The shared active-ingredient yearly cap has its own step below.
+            if (v.matchType === 'active_ingredient') continue;
             // Only the MOA-rotation family of limit violations produces moa_violation alerts.
             if (!['moa_rotation_max', 'consecutive_use_max'].includes(v.type)) continue;
             const productCatalog = await connection('products_catalog').where({ id: p.productId }).first();

@@ -252,7 +252,8 @@ class ApplicationLimitChecker {
     if (used >= 1 || total > 1 + 1e-9) {
       return { violated: true, message: `${label}${withThis} — ${used >= 1 ? 'LIMIT REACHED' : 'THIS APPLICATION WOULD EXCEED IT'}${detail}.`, current: pct(used), max: 100 };
     }
-    if (used >= AI_CAP_APPROACHING || unsized) {
+    // Approaching is the projected season (earlier applications plus the one being planned).
+    if (total >= AI_CAP_APPROACHING || unsized) {
       return { approaching: true, message: `${label}${withThis}${detail}.`, current: pct(used), max: 100 };
     }
     return { violated: false, current: pct(used), max: 100 };

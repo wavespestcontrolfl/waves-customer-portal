@@ -1839,6 +1839,62 @@ postgres('visit completion packet records on PostgreSQL', () => {
     }
   });
 
+  // One prodiamine product with a 1 oz/1000 sq ft yearly cap and a standalone visit.
+  async function capVisit() {
+    await mockPg('products_catalog').where({ id: fixture.productId }).update({ active_ingredient: 'Prodiamine', rate_unit: 'oz', default_rate_per_1000: 0.5 });
+    await mockPg('product_limits').insert({ product_id: fixture.productId, match_type: 'active_ingredient', match_value: 'prodiamine',
+      limit_type: 'annual_max_rate', limit_value: 1, limit_unit: 'oz/1000sf/year', severity: 'hard_block' });
+    const childId = randomUUID();
+    await mockPg('scheduled_services').insert({ id: childId, customer_id: fixture.customerId, technician_id: fixture.techId,
+      service_id: fixture.catalogId, service_type: 'Fixture General Pest Control', scheduled_date: etDateString(),
+      window_start: '14:00', window_end: '15:00', status: 'on_site', estimated_price: 60, estimated_duration_minutes: 60 });
+    const body = (extra = {}) => ({ ...submission().items[0].body, sendCompletionSms: false, requestReview: false, ...extra,
+      products: [{ productId: fixture.productId, rate: 1.2, rateUnit: 'oz', totalAmount: 1, amountUnit: 'oz',
+        applicationMethod: 'broadcast', areaValue: 1000, areaUnit: 'sqft' }] });
+    const cleanup = async () => {
+      await mockPg('dispatch_alerts').where({ job_id: childId }).del().catch(() => {});
+      await mockPg('service_records').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('invoices').where({ scheduled_service_id: childId }).update({ scheduled_service_id: null }).catch(() => {});
+      await mockPg('scheduled_services').where({ id: childId }).del().catch(() => {});
+    };
+    const alerts = () => mockPg('dispatch_alerts').where({ type: 'application_limit', job_id: childId });
+    return { childId, body, cleanup, alerts };
+  }
+  const CAP_MESSAGE = /prodiamine across all products this year is 120% of the yearly label cap — LIMIT REACHED/;
+
+  test('an INCOMPLETE visit that applied prodiamine across the cap still gets the advisory and one alert (MOA alerts stay complete-only)', async () => {
+    const { childId, body, cleanup, alerts } = await capVisit();
+    try {
+      await mockPg('products_catalog').where({ id: fixture.productId }).update({ moa_group: 'fixture_moa' });
+      await mockPg('product_limits').insert({ product_id: fixture.productId, limit_type: 'moa_rotation_max', limit_value: 0, severity: 'warning' });
+      const result = await completeScheduledService({ serviceId: childId, idempotencyKey: randomUUID(), actor: submission().actor,
+        body: body({ visitOutcome: 'incomplete', incompleteReason: 'Rain stopped the visit' }) });
+      expect(result.status).toBe(200);
+      expect(result.body.completionAdvisories).toEqual([expect.stringMatching(CAP_MESSAGE)]);
+      expect(await alerts()).toHaveLength(1);
+      expect(await mockPg('service_records').where({ scheduled_service_id: childId }).first('status')).toMatchObject({ status: 'incomplete' });
+      expect(await mockPg('dispatch_alerts').where({ type: 'moa_violation', job_id: childId })).toHaveLength(0);
+    } finally { await cleanup(); }
+  });
+
+  test('a resume of a committed completion rebuilds the advisory and never doubles the alert (alert present, or lost before the crash)', async () => {
+    const { childId, body, cleanup, alerts } = await capVisit();
+    try {
+      const idempotencyKey = randomUUID();
+      const input = { serviceId: childId, idempotencyKey, actor: submission().actor, body: body() };
+      expect((await completeScheduledService(input)).status).toBe(200);
+      expect(await alerts()).toHaveLength(1);
+      for (const alertSurvived of [true, false]) {
+        if (!alertSurvived) await alerts().del();
+        await mockPg('service_completion_attempts').where({ service_id: childId }).update({ status: 'side_effects_pending' });
+        const resumed = await completeScheduledService(input);
+        expect(resumed.status).toBe(200);
+        expect(resumed.body.completionAdvisories).toEqual([expect.stringMatching(CAP_MESSAGE)]);
+        expect(await alerts()).toHaveLength(1);
+      }
+    } finally { await cleanup(); }
+  });
+
   test('a prodiamine application inside the yearly cap completes with no advisory and no alert', async () => {
     await mockPg('products_catalog').where({ id: fixture.productId }).update({ active_ingredient: 'Prodiamine', rate_unit: 'oz', default_rate_per_1000: 0.5 });
     await mockPg('product_limits').insert({ product_id: fixture.productId, match_type: 'active_ingredient', match_value: 'prodiamine',

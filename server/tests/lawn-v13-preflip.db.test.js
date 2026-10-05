@@ -13,6 +13,7 @@ const applicationLimits = require('../services/application-limits');
 const capMigration = require('../models/migrations/20261006140000_lawn_v13_prodiamine_year_cap');
 const aprilMigration = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
+const { randomUUID } = require('crypto');
 
 const STW_4FL = 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide';
 const STW_15 = 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer';
@@ -197,6 +198,34 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect([await count(), await aprilRows()]).toEqual([3, 1]);
     });
 
+    test('down with a completion actual on the Dimension row keeps that row switched off, restores the 24-0-11 gates and drops the audit row; up brings the kept row back without a duplicate', async () => {
+      const rowOf = (name) => knex('lawn_protocol_products').where({ product_name: name });
+      const [dimension] = await rowOf(DIMENSION);
+      const [actual] = await knex('lawn_protocol_product_actuals').insert({
+        lawn_protocol_service_completion_id: randomUUID(), protocol_product_id: dimension.id, product_name: DIMENSION,
+      }).returning('*');
+      try {
+        await aprilMigration.down(knex);
+        const kept = await rowOf(DIMENSION);
+        expect(kept).toHaveLength(1);
+        expect(kept[0]).toMatchObject({ id: dimension.id, default_in_plan: false });
+        expect(kept[0].gates).toEqual({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true });
+        expect((await rowOf(F24))[0].gates).toEqual({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true });
+        expect(await knex('lawn_protocol_audit_log').where({ action: 'v13_april_9x' })).toHaveLength(0);
+
+        await aprilMigration.up(knex);
+        await aprilMigration.up(knex);
+        const back = await rowOf(DIMENSION);
+        expect(back).toHaveLength(1);
+        expect(back[0]).toMatchObject({ id: dimension.id, default_in_plan: true });
+        expect(back[0].gates).toEqual({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true, planVisitsPerYear: 9 });
+        expect((await rowOf(F24))[0].gates.planVisitsPerYear).toBe(12);
+        expect(await knex('lawn_protocol_audit_log').where({ action: 'v13_april_9x' })).toHaveLength(1);
+      } finally {
+        await knex('lawn_protocol_product_actuals').where({ id: actual.id }).del();
+      }
+    });
+
     test('April rows: the 9x row mirrors the 24-0-11 row and carries its plan; the 24-0-11 row is marked 12x', async () => {
       const rows = await knex('lawn_protocol_products').whereIn('product_name', [F24, DIMENSION]).orderBy('product_name');
       const dimension = rows.find((r) => r.product_name === DIMENSION);
@@ -221,13 +250,15 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(result.status).toBe('blocked');
     });
 
-    test('January 4FL plus October granular at the v13 rates stays under: the October plan computes 40.2 lb with no cap block or warning', async () => {
+    test('January 4FL plus October granular at the v13 rates stays under: the October plan computes 40.2 lb, with a warning at 95.6% of the cap and no block', async () => {
       setGates();
       const { scheduled, customerId } = await visit('2026-10-12');
       await applied(customerId, STW_4FL, '2026-01-12', 0.5, 'fl oz');
       const result = await plan(scheduled);
       expect(codes(result)).not.toContain('lawn_v13_annual_limit');
-      expect(result.propertyGate.warnings.some((w) => /yearly label cap/.test(w.message))).toBe(false);
+      const warning = result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_limit_warning' && /yearly label cap/.test(w.message));
+      expect(warning.message).toMatch(/is 45\.4% of the yearly label cap; this application brings it to 95\.6%/);
+      expect(warning.limitType).toBe('annual_max_rate');
       expect(item(result, STW_15).mix).toMatchObject({ amount: 40.2 });
     });
 
@@ -270,7 +301,8 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       await applied(other, STW_4FL, '2026-02-01', null, null); // standard 0.5 fl oz = 45.4%, flagged
       const byDefault = await applicationLimits.checkLimits(other, catalog[STW_15].id, new Date('2026-10-20T16:00:00Z'), knex, { proposed: { ratePer1000: 4.02, unit: 'lb' } });
       expect(byDefault.blocks).toEqual([]);
-      expect(byDefault.warnings).toEqual([]);
+      // 45.4% (sized at the standard rate, and said so) plus the planned 50.2% projects to 95.6%: a warning, not a block.
+      expect(byDefault.warnings).toEqual([expect.objectContaining({ current: 45.4, message: expect.stringMatching(/brings it to 95\.6% \(1 sized at the product's standard rate\)/) })]);
     });
 
     test('retracted rows and last year\'s rows do not count; the planned visit\'s own ledger rows are left out of a re-plan', async () => {
