@@ -18187,8 +18187,9 @@ const CallRecordingProcessor = {
                     attachedManualBookingId = primaryRow.id;
                     // A package-only plan (nobody discussed visit 2) asks for no
                     // task when the booking already has its linked visit 2.
-                    attachSkippedFollowUpPlan = !!callFollowUpPlan && !(callFollowUpPlan.packageOnly
-                      && await trx('scheduled_services').where({ followup_source_service_id: primaryRow.id }).first('id'));
+                    attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                    if (attachSkippedFollowUpPlan && callFollowUpPlan.packageOnly
+                      && await trx('scheduled_services').where({ followup_source_service_id: primaryRow.id }).first('id')) attachSkippedFollowUpPlan = false;
                     // Codex round-4 P1 (PR #4807): this row's source_call_log_id
                     // linkage may itself be durable from an earlier pass (a
                     // reprocess landing here via the `linked` lookup in
@@ -18423,8 +18424,9 @@ const CallRecordingProcessor = {
                   attachedManualBookingId = attachable.row.id;
                   // A package-only plan asks for no task when the booking
                   // already has its linked visit 2.
-                  attachSkippedFollowUpPlan = !!callFollowUpPlan && !(callFollowUpPlan.packageOnly
-                    && await trx('scheduled_services').where({ followup_source_service_id: attachable.row.id }).first('id'));
+                  attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                  if (attachSkippedFollowUpPlan && callFollowUpPlan.packageOnly
+                    && await trx('scheduled_services').where({ followup_source_service_id: attachable.row.id }).first('id')) attachSkippedFollowUpPlan = false;
                   // Codex round-4 P1 (PR #4807): the update just above stamped
                   // source_call_log_id onto this human-created booking — the
                   // ONLY linkage the hold stamp keys on — but this attach path
