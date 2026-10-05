@@ -166,7 +166,7 @@ describe('source contracts', () => {
     // profile re-resolve, through the ONE function the wrapper's resolver
     // uses (issuedCloseoutVisitRefusal — Codex round 16 P2 #4131 kept NULL
     // live in both; owner 2026-10-04 admits an arrived visit in both).
-    expect(completion).toMatch(/issuedCloseoutVisitRefusal\(lockedSvcRow\?\.status, lockedDay, \{[\s\S]{0,200}?trigger: issuedInvoiceCloseout\.trigger,[\s\S]{0,900}?code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,600}?if \(lockedRefusal\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,3000}?const lockedProfile = await resolveLockedProfile/);
+    expect(completion).toMatch(/issuedCloseoutVisitRefusal\(lockedSvcRow\?\.status, lockedDay, \{[\s\S]{0,200}?trigger: issuedInvoiceCloseout\.trigger,[\s\S]{0,500}?issuedDay: invoiceIssuedDay\(lockedIssuedInvoice, issuedInvoiceCloseout\.trigger\),[\s\S]{0,700}?code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,600}?if \(lockedRefusal\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,3000}?const lockedProfile = await resolveLockedProfile/);
     // …and a job timer started on the visit since the wrapper's read refuses under the same lock (r1 P1 #5886).
     expect(completion).toMatch(/if \(await visitJobTimerRunning\(trx, svc\.id\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);\s*\}[\s\S]{0,800}?fromStatus = lockedSvcRow\.status;/);
   });
@@ -591,6 +591,34 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     // With the audit table reachable the same failure IS recorded.
     expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', actorTechnicianId: f.techId, conn: flaky })).toMatchObject({ reason: 'error', audited: true });
     expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first()).toMatchObject({ metadata: expect.objectContaining({ code: 'error', trigger: 'paid' }) });
+  });
+
+  // The prepayment rule under the completion's own locks: the invoice row
+  // LOCKED in the record transaction carries the proof, re-decided against
+  // the LOCKED visit — so a closeout that reaches the completion directly
+  // (any caller, any earlier read) cannot complete a prepaid visit nobody
+  // arrived at.
+  test('the locked recheck refuses an unstarted visit whose invoice was settled on or before its day, and completes it when settled after', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const request = () => completeScheduledService({
+      serviceId: f.serviceId, idempotencyKey: randomUUID(),
+      body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true },
+      actor: { techRole: 'admin', technicianId: null, technician: null },
+      issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'paid' },
+    });
+    // Settled at ET noon ON the visit day (f.day is yesterday): a prepayment.
+    const visitDayNoon = new Date(`${f.day}T16:30:00Z`);
+    await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'paid', paid_at: visitDayNoon });
+    expect(await request()).toMatchObject({ status: 409, body: { code: 'issued_visit_rescheduled' } });
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('confirmed');
+    expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+    // The wrapper reaches the same verdict from the same stamp, and audits it.
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', conn: mockPg })).toMatchObject({ closed: false, reason: 'visit_prepaid', visitId: f.serviceId });
+    // Settled today, the day after the visit: the visit happened as far as the invoice can prove → closes.
+    await mockPg('invoices').where({ id: f.invoiceId }).update({ paid_at: new Date() });
+    expect(await request()).toMatchObject({ status: 200, body: { success: true } });
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('completed');
   });
 
   // Owner ruling 2026-10-04. The GPS arrival sets on_site on nearly every

@@ -5729,6 +5729,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
 
         completionTimerEntriesSnapshot = null;
+        let lockedIssuedInvoice = null;
         const persistRecord = async (trx) => {
           // Invoice-issued closeout: the pre-claim check above ran unlocked
           // (pre-push P1). Re-check the issued invoice HERE, locked, in the
@@ -5787,12 +5788,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             const ScheduledInvoiceMint = require('../services/scheduled-invoice-mint');
             await ScheduledInvoiceMint.acquireScheduledInvoiceMintLock(trx, svc.id);
-            const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id');
+            const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at');
             const InvoiceServiceForIssued = require('../services/invoice');
             if (!issuedNow || InvoiceServiceForIssued.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(issuedNow.status))
               || String(issuedNow.scheduled_service_id) !== String(svc.id)) {
               throw Object.assign(new Error('issued invoice no longer reusable'), { code: 'issued_invoice_not_reusable' });
             }
+            // The LOCKED invoice's own stamps are the prepayment rule's proof
+            // in the locked visit recheck below.
+            lockedIssuedInvoice = issuedNow;
           }
           // Baseline -> customer -> visit matches confirmation. Take this before
           // the existing row locks because linking can change the installed row.
@@ -5900,7 +5904,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { issuedCloseoutVisitRefusal, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
+            const { issuedCloseoutVisitRefusal, invoiceIssuedDay, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
             // ONE rule for status and day, re-derived on the LOCKED row — the
             // same function the wrapper's unlocked resolver used (Codex round
             // 16 P2 #4131: a NULL status is live in both). An arrived
@@ -5912,11 +5916,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : issuedCloseoutVisitRefusal(lockedSvcRow?.status, lockedDay, {
                 today: etDateString(),
                 trigger: issuedInvoiceCloseout.trigger,
+                // The prepayment proof, from the invoice row LOCKED above: a
+                // visit nobody arrived at closes only on an invoice settled /
+                // delivered after its day — re-decided here against the
+                // locked visit, so no reschedule between any earlier read
+                // and this lock can complete a prepaid, unworked visit.
+                issuedDay: invoiceIssuedDay(lockedIssuedInvoice, issuedInvoiceCloseout.trigger),
               });
-            // A refusal of the DAY (moved, now in the future, or a day the
-            // trigger does not close) keeps its own code: the next send /
-            // payment re-resolves the visit on the day it is then on.
-            if (['visit_moved', 'visit_in_future', 'visit_scheduled_today'].includes(lockedRefusal)) {
+            // A refusal of the DAY (moved, now in the future, a day the
+            // trigger does not close, or a day the invoice does not prove)
+            // keeps its own code: the next send / payment re-resolves the
+            // visit on the day it is then on.
+            if (['visit_moved', 'visit_in_future', 'visit_scheduled_today', 'visit_prepaid'].includes(lockedRefusal)) {
               throw Object.assign(new Error('visit rescheduled during the issued-invoice closeout'), { code: 'issued_visit_rescheduled' });
             }
             // A refusal of the STATUS (pre-push P1 r9): a technician who set

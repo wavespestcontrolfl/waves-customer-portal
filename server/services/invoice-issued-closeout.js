@@ -52,29 +52,54 @@ function dateOnly(value) {
   return m ? m[1] : null;
 }
 
+// The ET day the invoice's own row says it was settled (trigger 'paid':
+// paid_at) or last delivered (any other trigger: the newest of sent_at /
+// sms_sent_at / email_sent_at). Null when the row carries no such stamp — the
+// caller then has only "now" to go on.
+function invoiceIssuedDay(invoice, trigger) {
+  if (!invoice) return null;
+  const stamps = trigger === 'paid'
+    ? [invoice.paid_at]
+    : [invoice.sent_at, invoice.sms_sent_at, invoice.email_sent_at];
+  const times = stamps.map((value) => (value ? new Date(value).getTime() : NaN)).filter(Number.isFinite);
+  return times.length ? etDateString(new Date(Math.max(...times))) : null;
+}
+
 // THE status + day rule, shared by the unlocked resolver, the canonical
-// completion's locked recheck and (as SQL) the settled-statement sweep, so
-// the three can never drift apart. Returns null when the visit may close,
-// else the reason it stays open.
-//  - A past day: an unstarted or an arrived visit closes on a send or a
-//    payment — the invoice went out, so the visit happened.
-//  - Today: only an ARRIVED visit closes, and only on money received. A send
-//    proves nothing about today (the office picker sends pre-completion
-//    invoices before the tech arrives — Codex P1 r7 #4131), and a payment
-//    against a visit nobody has reached is a PREPAYMENT: closing it would
-//    take the stop away from its technician (owner ruling 2026-10-04,
-//    replacing the "payment closes any same-day visit" rule of #4127).
+// completion's locked recheck and (as SQL prefilters) the retry sweeps, so
+// they can never drift apart. Returns null when the visit may close, else
+// the reason it stays open.
+//  - ARRIVED (on_site): the technician was there. A past day closes on a
+//    send or a payment; today closes only on money received (a send proves
+//    nothing about today — the office picker sends pre-completion invoices
+//    before the tech arrives, Codex P1 r7 #4131).
+//  - UNSTARTED (pending / confirmed / NULL): nobody is known to have gone, so
+//    the INVOICE must carry the proof: it was settled / delivered on a LATER
+//    ET day than the visit (`issuedDay`, from the invoice's own stamps).
+//    Settled or delivered on or before the visit day, it is a PREPAYMENT:
+//    the day passing does not turn that into evidence the visit happened (it
+//    may have been rained out and never moved), and closing it would take
+//    the stop away from its technician (owner ruling 2026-10-04, replacing
+//    the "payment closes any same-day visit" rule of #4127). Because the
+//    proof is a durable stamp and not the clock at call time, a live
+//    trigger, a redelivered webhook and a retry sweep days later all reach
+//    the SAME verdict — there is no separate guard for unattended passes to
+//    forget (pre-push audit: five findings on such guards). With no stamp on
+//    the row the call time stands in, which is the live trigger's "past day".
 //  - An ALLOWLIST (pre-push audit P1, slice 6): a missing trigger or one this
 //    module has never heard of fails CLOSED on a same-day visit.
 //  - Future or unparseable dates, en_route and every terminal status never
 //    close.
-function issuedCloseoutVisitRefusal(status, scheduledDate, { today = etDateString(), trigger = null } = {}) {
+function issuedCloseoutVisitRefusal(status, scheduledDate, { today = etDateString(), trigger = null, issuedDay = null } = {}) {
   const arrived = isArrivedVisitStatus(status);
   if (!arrived && !isLiveVisitStatus(status)) return `visit_${status}`;
   const day = dateOnly(scheduledDate);
   if (!day || day > today) return 'visit_in_future';
-  if (day < today) return null;
-  return arrived && trigger === 'paid' ? null : 'visit_scheduled_today';
+  if (day === today) return arrived && trigger === 'paid' ? null : 'visit_scheduled_today';
+  if (arrived) return null;
+  // Never later than the call: a stamp from the future proves nothing yet.
+  const proofDay = issuedDay && issuedDay < today ? issuedDay : today;
+  return day < proofDay ? null : 'visit_prepaid';
 }
 
 // A job timer still running on this visit means its technician is working
@@ -148,30 +173,19 @@ async function probeVisitRefusal(conn, svc) {
 // refusal carries it as `visit` so the caller can audit the refusal — and
 // resume its OWN partially committed closeout on a completed one (see
 // resumableIssuedCloseoutAttempt), never anyone else's.
-async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null, unattendedIssuedAt } = {}) {
+async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null } = {}) {
   if (!invoice) return { svc: null, reason: 'no_invoice' };
   const linked = await linkedVisitForInvoice(conn, invoice);
   if (!linked.svc) return { svc: null, reason: linked.reason, ...(linked.visit ? { visit: linked.visit } : {}) };
   const { svc } = linked;
   const leaveOpen = (reason) => ({ svc: null, reason, visit: svc });
-  // Status and day decide together (issuedCloseoutVisitRefusal): a NULL
-  // status is a live visit (Codex P2 r8 #4131), an arrived visit closes on a
-  // past day or on money received today, and nothing closes a visit nobody
-  // has reached today.
-  const refusedByState = issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger });
+  // Status, day and the invoice's own proof decide together
+  // (issuedCloseoutVisitRefusal): a NULL status is a live visit (Codex P2 r8
+  // #4131), an arrived visit closes on a past day or on money received
+  // today, and a visit nobody arrived at closes only on an invoice settled
+  // or delivered after its day.
+  const refusedByState = issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger, issuedDay: invoiceIssuedDay(invoice, trigger) });
   if (refusedByState) return leaveOpen(refusedByState);
-  // An UNATTENDED pass (a retry sweep; nobody sent or settled anything just
-  // now) carries the instant the invoice / statement was delivered or
-  // settled, and the prepayment guard is decided HERE, on the visit row this
-  // function just read — not on the sweep's earlier candidate snapshot, which
-  // a reschedule can outdate (pre-push audit P1). The completion's locked
-  // recheck then refuses any move after this read. See
-  // prepaidAndNobodyArrived for the rule.
-  if (unattendedIssuedAt !== undefined && !isArrivedVisitStatus(svc.status)) {
-    const issued = unattendedIssuedAt ? new Date(unattendedIssuedAt) : null;
-    const issuedDay = issued && !Number.isNaN(issued.getTime()) ? etDateString(issued) : null;
-    if (!issuedDay || issuedDay <= dateOnly(svc.scheduled_date)) return leaveOpen('prepaid_nobody_arrived');
-  }
   // Every read from here on is against a visit already in hand: a failed
   // one is an outage of THIS visit's closeout, rethrown carrying the visit
   // (`linkedVisit`) so the caller audits it as a failure (code 'error') —
@@ -339,21 +353,13 @@ async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null })
 
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
 
-// The prepayment guard, shared by both sweeps, for a visit NOBODY ARRIVED AT.
-// ONE test, on current state only: was the invoice / statement delivered or
-// settled on a LATER ET day than the day the visit is on NOW
-// (`issued_after_service_day`)? If not, the invoice proves only that money
-// or paper moved on or before the visit; the day passing does not turn that
-// into evidence the visit happened (it may have been rained out and never
-// moved), so no sweep completes it — whatever the audit trail says: no row,
-// `visit_scheduled_today`, or a rescheduling race that moved the visit to a
-// day after the invoice (pre-push audit P1 ×3: each audit code handled one
-// at a time left the next one open). If so, it is no prepayment, and the
-// ordinary send / payment path closes exactly that visit.
-// An ARRIVED visit is never a prepayment case: the technician was there.
-// This is the sweeps' PREFILTER on their candidate snapshot; the closeout
-// re-decides the same rule on its own fresh read of the visit
-// (resolveVisitForIssuedInvoice, `unattendedIssuedAt`).
+// The sweeps' PREFILTER for the prepayment rule (issuedCloseoutVisitRefusal,
+// `visit_prepaid`): a visit nobody arrived at whose invoice / statement was
+// NOT settled or delivered on a later ET day than the visit. The closeout
+// would refuse it by the same rule, from the invoice's own stamps, on its
+// fresh read and again under the completion's lock — this only keeps the
+// sweep from re-auditing that refusal every day. Correctness lives in the
+// rule, not here.
 function prepaidAndNobodyArrived(row) {
   return !isArrivedVisitStatus(row.visit_status) && !row.issued_after_service_day;
 }
@@ -373,7 +379,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       .where((q) => retryableVisitFilter(q, today))
       .orderBy(['ps.id', 'i.id'])
       .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', 's.status as visit_status',
-        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${settledAfterServiceDaySql('ps.paid_at')} as issued_after_service_day`), 'ps.paid_at as issued_at');
+        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${settledAfterServiceDaySql('ps.paid_at')} as issued_after_service_day`));
   } catch (err) {
     logger.error(`[invoice-issued-closeout] settled-statement retry: candidate lookup failed: ${err.message}`);
     return { candidates: 0, retried: 0, closed: 0 };
@@ -395,7 +401,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       if (last && !refusedForTheMoment(last)) continue;
     }
     retried += 1;
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today, unattendedIssuedAt: row.issued_at || null });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today });
     if (out?.closed) closed += 1;
   }
   if (retried) logger.info(`[invoice-issued-closeout] settled-statement retry: ${rows.length} open linked child(ren), ${retried} retried, ${closed} closed`);
@@ -455,7 +461,7 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
         .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
       .orderBy('i.id')
       .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
-        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`), conn.raw(`${ISSUED_AT_SQL} as issued_at`));
+        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
   } catch (err) {
     logger.error(`[invoice-issued-closeout] issued-invoice retry: candidate lookup failed: ${err.message}`);
     return none;
@@ -476,7 +482,7 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
     }
     retried += 1;
     const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today, unattendedIssuedAt: row.issued_at || null });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today });
     if (out?.closed) closed += 1;
   }
   if (retried) logger.info(`[invoice-issued-closeout] issued-invoice retry: ${rows.length} candidate(s), ${retried} retried, ${closed} closed`);
@@ -550,7 +556,7 @@ async function refuseVoidedInvoice(run) {
 // link has nothing to audit against — the send / payment itself is logged.
 // Sets run.svc / run.resuming and returns null to continue, else the refusal.
 async function resolveCloseoutTarget(run) {
-  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today, trigger: run.trigger, unattendedIssuedAt: run.unattendedIssuedAt });
+  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today, trigger: run.trigger });
   run.linkedVisitId = resolved.visit?.id || null;
   if (resolved.svc) {
     run.svc = resolved.svc;
@@ -671,10 +677,10 @@ async function auditCloseoutFailure(run, err) {
 // auditCloseoutOutcome and runQuietCloseout. Three bounded phases share one
 // `run` context (GitHub r11 P2 #4127): void refusal → target resolution →
 // the quiet canonical completion.
-async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), unattendedIssuedAt } = {}) {
+async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString() } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
-  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, unattendedIssuedAt, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
+  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
   try {
     if (!(await loadCloseoutInvoice(run))) return { closed: false, reason: 'no_invoice' };
     const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run));
@@ -695,6 +701,7 @@ module.exports = {
   isLiveVisitStatus,
   isArrivedVisitStatus,
   issuedCloseoutVisitRefusal,
+  invoiceIssuedDay,
   resolveVisitForIssuedInvoice,
   resumableIssuedCloseoutAttempt,
   closeOutVisitForIssuedInvoice,

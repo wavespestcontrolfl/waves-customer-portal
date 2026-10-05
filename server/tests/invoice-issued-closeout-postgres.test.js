@@ -77,6 +77,17 @@ describe('backfillCompletionPlan same-day switch', () => {
     expect(rule('on_site', '2040-03-05', 'paid')).toBe('visit_in_future');
     expect(rule('confirmed', '2040-03-05', 'paid')).toBe('visit_in_future');
     expect(rule('confirmed', 'not-a-date', 'paid')).toBe('visit_in_future');
+    // UNSTARTED on a past day: the invoice must have been settled / delivered
+    // AFTER the visit day. With no stamp, the call day stands in (above).
+    const proof = (issuedDay, day = '2040-03-02') => issuedCloseoutVisitRefusal('confirmed', day, { ...options, trigger: 'paid', issuedDay });
+    expect(proof('2040-03-03')).toBeNull();
+    expect(proof('2040-03-02')).toBe('visit_prepaid');
+    expect(proof('2040-03-01')).toBe('visit_prepaid');
+    // A stamp from the future proves nothing yet: the call day stands in.
+    expect(proof('2040-03-09')).toBeNull();
+    expect(proof('2040-03-09', '2040-03-03')).toBeNull();
+    // An ARRIVED visit ignores the stamp.
+    expect(issuedCloseoutVisitRefusal('on_site', '2040-03-02', { ...options, trigger: 'paid', issuedDay: '2040-03-01' })).toBeNull();
     // en_route (nobody has reached the property) and every terminal status
     // stay as they are, on any day.
     for (const status of ['en_route', 'completed', 'cancelled', 'skipped', 'no_show']) {
@@ -659,24 +670,29 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId)).toEqual([svc.id]);
   });
 
-  test('an unattended (sweep) closeout re-decides the prepayment guard on its own fresh read of the visit — a reschedule after the sweep picked its candidates cannot complete a prepaid visit nobody arrived at (pre-push audit P1)', async () => {
+  test('a visit NOBODY ARRIVED AT closes only on an invoice settled or delivered AFTER its day — the same verdict for a live trigger, a redelivered webhook and a sweep, whatever day the visit is moved to (the prepayment rule)', async () => {
     const paidAt = new Date('2040-03-02T15:00:00Z');
-    // The sweep saw this visit on 2040-03-01 (paid the day after: no prepayment)…
+    // Visit on 03-01, paid the day after: no prepayment → closes.
     const svc = await visit({ date: '2040-03-01' });
     const inv = await invoice({ scheduled_service_id: svc.id, status: 'paid', paid_at: paidAt, date: '2040-03-01' });
-    expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid', unattendedIssuedAt: paidAt })).svc.id).toBe(svc.id);
-    // …then it was moved onto the payment day itself (still in the past) before the closeout ran.
-    await trx('scheduled_services').where({ id: svc.id }).update({ scheduled_date: '2040-03-02' });
-    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid', unattendedIssuedAt: paidAt })).toMatchObject({ svc: null, reason: 'prepaid_nobody_arrived' });
-    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY, unattendedIssuedAt: paidAt })).toMatchObject({ closed: false, reason: 'prepaid_nobody_arrived', visitId: svc.id });
-    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
-    // No issue instant at all fails closed for an unstarted visit.
-    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid', unattendedIssuedAt: null })).toMatchObject({ svc: null, reason: 'prepaid_nobody_arrived' });
-    // A LIVE trigger (an operator or the customer just acted) is not subject to it…
     expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(svc.id);
-    // …and an ARRIVED visit never is.
+    // Moved onto the payment day itself (still in the past): now a prepayment
+    // for the day it is on → refused, days later, by any caller.
+    await trx('scheduled_services').where({ id: svc.id }).update({ scheduled_date: '2040-03-02' });
+    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid' })).toMatchObject({ svc: null, reason: 'visit_prepaid' });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_prepaid', visitId: svc.id });
+    expect(await issuedCloseoutTarget(inv, { today: TODAY, conn: trx })).toBeNull();
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    // The proof is per trigger: a payment stamp says nothing for a send…
+    expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'sent' })).svc.id).toBe(svc.id);
+    // …and a delivery stamp on the visit day refuses the send too; a later delivery proves it.
+    const sentSameDay = await invoice({ scheduled_service_id: svc.id, date: '2040-03-02', sent_at: new Date('2040-03-02T15:00:00Z') });
+    expect(await resolveVisitForIssuedInvoice(trx, sentSameDay, { today: TODAY, trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_prepaid' });
+    await trx('invoices').where({ id: sentSameDay.id }).update({ email_sent_at: new Date('2040-03-03T15:00:00Z') });
+    expect((await resolveVisitForIssuedInvoice(trx, await trx('invoices').where({ id: sentSameDay.id }).first(), { today: TODAY, trigger: 'sent' })).svc.id).toBe(svc.id);
+    // An ARRIVED visit is never a prepayment case.
     await trx('scheduled_services').where({ id: svc.id }).update({ status: 'on_site' });
-    expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid', unattendedIssuedAt: paidAt })).svc.id).toBe(svc.id);
+    expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(svc.id);
   });
 
   test('issued-invoice retry: an ARRIVED visit with a delivered or settled invoice is retried whether or not a closeout ever ran; an UNSTARTED one only after a closeout that ran and failed; real refusals, prepayments, statement children and old invoices are left alone (GitHub r1 P1, r3 P1 ×2 #5886)', async () => {
