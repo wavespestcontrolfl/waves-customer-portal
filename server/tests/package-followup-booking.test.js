@@ -14,7 +14,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/visit-groups', () => ({ maybeGroupRow: jest.fn(async () => {}) }));
 jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange: jest.fn() }));
 jest.mock('../services/technician-eligibility', () => ({ assertAssignableTechnician: jest.fn(async () => true) }));
-jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn(async () => []) }));
+jest.mock('../services/scheduling/occupancy', () => ({
+  findConflictingVisits: jest.fn(async () => []),
+  fenceBookingDay: jest.fn(async () => ({ acquired: true, keys: [] })),
+}));
 jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(async () => ({ id: 'alert-1' })) }));
 jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn(async () => {}) }));
 jest.mock('../services/booking/create-scheduled-service', () => ({
@@ -22,7 +25,7 @@ jest.mock('../services/booking/create-scheduled-service', () => ({
 }));
 
 const { assertAssignableTechnician } = require('../services/technician-eligibility');
-const { findConflictingVisits } = require('../services/scheduling/occupancy');
+const { findConflictingVisits, fenceBookingDay } = require('../services/scheduling/occupancy');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const { createScheduledService } = require('../services/booking/create-scheduled-service');
 const { maybeGroupRow } = require('../services/visit-groups');
@@ -87,6 +90,7 @@ beforeEach(() => {
   createScheduledService.mockImplementation(async ({ insertData, source }) => ({ id: 'child-1', ...insertData, source_action: source.sourceAction }));
   assertAssignableTechnician.mockResolvedValue(true);
   findConflictingVisits.mockResolvedValue([]);
+  fenceBookingDay.mockResolvedValue({ acquired: true, keys: [] });
 });
 afterAll(() => {
   if (prior === undefined) delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
@@ -293,9 +297,22 @@ describe('ensurePackageFollowUpVisit', () => {
     trx.transaction = async (fn) => { savepoints += 1; return inner(fn); };
     const child = await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS });
     expect(child.id).toBe('child-1');
-    // One savepoint for the child, a second one confining the probe.
-    expect(savepoints).toBe(2);
+    // One savepoint for the child, one for the day fence, one confining the probe.
+    expect(savepoints).toBe(3);
     expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('the child day is fenced before the insert; a missed fence still books and raises the card', async () => {
+    const { trx } = fakeTrx();
+    await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS });
+    expect(fenceBookingDay).toHaveBeenCalledWith(expect.anything(), { date: '2026-10-19', techId: 'tech-1' });
+    expect(fenceBookingDay.mock.invocationCallOrder[0]).toBeLessThan(createScheduledService.mock.invocationCallOrder[0]);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+
+    fenceBookingDay.mockResolvedValueOnce({ acquired: false, keys: [], reason: 'timeout' });
+    const child = await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS });
+    expect(child.id).toBe('child-1');
+    expect(raiseAdminAlert).toHaveBeenCalledWith('schedule_conflict', expect.objectContaining({ action: 'Second treatment slot was not checked' }), expect.anything());
   });
 
   test('a failed child write never fails the primary: logged, null, savepoint rolled back', async () => {

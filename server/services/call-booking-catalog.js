@@ -617,7 +617,10 @@ const PACKAGE_CHILD_STILL_SPACED_SQL = '(source_action <> ? OR scheduled_date - 
 // treatment of the cancelled package, so it goes with visit 1 even after
 // the customer confirmed it (codex #5896 r1 P1). The call child keeps its
 // pending + unconfirmed rule.
-const LINKED_FOLLOWUP_CANCEL_SQL = "((source_action = ? AND status = 'pending' AND customer_confirmed = false) OR (source_action = ? AND status IN ('pending', 'confirmed')))";
+// 'rescheduled' counts: a customer reschedule request parks the child there
+// until it is rebooked, and it must not be rebooked after its package was
+// cancelled.
+const LINKED_FOLLOWUP_CANCEL_SQL = "((source_action = ? AND status = 'pending' AND customer_confirmed = false) OR (source_action = ? AND status IN ('pending', 'confirmed', 'rescheduled')))";
 const applyCallFollowUpCancelFilter = (q, parentServiceId) => q
   .where({ parent_service_id: parentServiceId })
   .whereRaw(LINKED_FOLLOWUP_CANCEL_SQL, ['ai_call_pipeline_followup', PACKAGE_FOLLOWUP_SOURCE_ACTION]);

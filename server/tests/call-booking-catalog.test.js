@@ -1719,7 +1719,7 @@ describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade
     // cancelled package (codex #5896 r1 P1).
     expect(log.selectWhere).toEqual({ parent_service_id: 'svc-parent' });
     expect(log.selectWhereRaw).toEqual({
-      sql: "((source_action = ? AND status = 'pending' AND customer_confirmed = false) OR (source_action = ? AND status IN ('pending', 'confirmed')))",
+      sql: "((source_action = ? AND status = 'pending' AND customer_confirmed = false) OR (source_action = ? AND status IN ('pending', 'confirmed', 'rescheduled')))",
       bindings: ['ai_call_pipeline_followup', 'package_followup_auto'],
     });
     expect(transitionJobStatus).toHaveBeenCalledTimes(2);

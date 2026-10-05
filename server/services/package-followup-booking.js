@@ -62,9 +62,13 @@
  * taking a second date key mid-transaction would invert the
  * scheduling/occupancy.js ORDERING CONTRACT). A clash still books — owner
  * ruling 2026-08-25, staff-side saves never block on conflicts — and rings
- * a Schedule needs-you card so the office re-spaces it. The probe runs in
- * its own savepoint (a failed probe statement must not abort the child's);
- * the card is raised only after the caller's outermost commit.
+ * a Schedule needs-you card so the office re-spaces it. Before the insert
+ * the child's own day is fenced with the bounded, try-only fenceBookingDay
+ * (never waits past its cap, so it cannot deadlock against the ordering
+ * contract); a missed fence still books and raises the card, because the
+ * probe could not see a concurrent uncommitted booking. The fence and the
+ * probe each run in their own savepoint (a failed statement must not abort
+ * the child's); the card is raised only after the caller's outermost commit.
  *
  * Reminders: NOT registered here (customer comms never ride a booking
  * helper — booking contract header). The reminder self-heal sweep
@@ -187,7 +191,7 @@ async function promotePendingCallChild(sp, child) {
 // (a caught error would otherwise leave the child's savepoint aborted and
 // lose the insert). The card waits for the caller's outermost commit: a
 // later rollback must not leave a card pointing at a visit that never was.
-async function warnOnOverlap(trx, { child, customerId, outerTrx }) {
+async function warnOnOverlap(trx, { child, customerId, outerTrx, fenceMissed = false }) {
   const start = hhmm(child.window_start);
   const end = hhmm(child.window_end);
   if (!start || !end) return;
@@ -207,13 +211,15 @@ async function warnOnOverlap(trx, { child, customerId, outerTrx }) {
     logger.warn(`[package-followup] overlap probe failed for child ${child.id} (booked unprobed): ${err.message}`);
     return;
   }
-  if (!clash.length) return;
+  if (!clash.length && !fenceMissed) return;
   const raise = async () => {
     const { raiseAdminAlert } = require('./admin-alert-compose');
     await raiseAdminAlert('schedule_conflict', {
       area: 'Schedule',
-      action: 'Second treatment overlaps another visit',
-      why: 'Visit 2 was booked two weeks after visit 1 onto a slot that already has a stop.',
+      action: clash.length ? 'Second treatment overlaps another visit' : 'Second treatment slot was not checked',
+      why: clash.length
+        ? 'Visit 2 was booked two weeks after visit 1 onto a slot that already has a stop.'
+        : 'Visit 2 was booked while another booking held that day, so its slot could not be checked for an overlap.',
       severity: 'needs-you',
       who: 'person',
       subject: { type: 'visit', id: String(child.id) },
@@ -324,6 +330,16 @@ async function bookInSavepoint(sp, outerTrx, primary, cols, { promotePendingCall
     }
   }
   const insertData = buildChildInsert(primary, catalogRow, columns, { date, technicianId, now: new Date() });
+  // Bounded try-only fence on the child's own tech-day, in its own savepoint.
+  let fenceMissed = false;
+  try {
+    const { fenceBookingDay } = require('./scheduling/occupancy');
+    const fence = await sp.transaction((fenceSp) => fenceBookingDay(fenceSp, { date, techId: technicianId }));
+    fenceMissed = !fence || !fence.acquired;
+  } catch (fenceErr) {
+    fenceMissed = true;
+    logger.warn(`[package-followup] day fence failed for visit 2 of ${primary.id} on ${date} (booking unfenced): ${fenceErr.message}`);
+  }
   let child;
   try {
     child = await createScheduledService({
@@ -355,7 +371,7 @@ async function bookInSavepoint(sp, outerTrx, primary, cols, { promotePendingCall
       trx: outerTrx,
     });
   }
-  await warnOnOverlap(sp, { child: { ...child, scheduled_date: date }, customerId: primary.customer_id, outerTrx });
+  await warnOnOverlap(sp, { child: { ...child, scheduled_date: date }, customerId: primary.customer_id, outerTrx, fenceMissed });
   logger.info(`[package-followup] visit 2 ${child.id} booked for ${date} from ${catalogRow.service_key} visit ${primary.id}`);
   return child;
 }
