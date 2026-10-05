@@ -20526,11 +20526,16 @@ const CallRecordingProcessor = {
                         // uncertain handoff is stamped on the row with the
                         // release, so the replay never follows it even where
                         // the best-effort sms_log write was lost.
-                        const releaseFollowUpClaim = (result = null) => (followUpClaim === 'claimed'
-                          ? require('./recipient-optin').releaseFanOutFollowUpClaim(customerId, contact.phone, scheduledServiceId, {
-                            confirmed: !!result && require('./messaging/send-customer-message').classifyDeliveryCertainty(result) !== 'not_sent',
-                          })
-                          : null);
+                        const releaseFollowUpClaim = (result = null) => {
+                          if (followUpClaim !== 'claimed') return null;
+                          // Accepted, or handed off with an unknown fate. A
+                          // held / blocked send (sent false, nothing handed
+                          // off) is NOT evidence: the replay still owes it.
+                          const certainty = result ? require('./messaging/send-customer-message').classifyDeliveryCertainty(result) : 'not_sent';
+                          const confirmed = certainty === 'sent'
+                            || (certainty === 'unknown' && (result.sent === true || result.deliveryOutcome === 'uncertain'));
+                          return require('./recipient-optin').releaseFanOutFollowUpClaim(customerId, contact.phone, scheduledServiceId, { confirmed });
+                        };
                         // Read AFTER the claim settles: the follow-up's replay
                         // (this contact answered YES while this booking was
                         // still processing) may already have texted this
@@ -20575,7 +20580,7 @@ const CallRecordingProcessor = {
                           },
                         }).then(
                           async (result) => { await releaseFollowUpClaim(result); return result; },
-                          async (sendErr) => { await releaseFollowUpClaim(); throw sendErr; },
+                          async (sendErr) => { await releaseFollowUpClaim(sendErr && sendErr.providerOutcome); throw sendErr; },
                         );
                         if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
                           && contactResult.deferred && contactResult.nextAllowedAt

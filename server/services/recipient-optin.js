@@ -315,6 +315,17 @@ async function restoreDemotedCallers(h, phoneKey = null) {
     }
   }
   for (const row of restore) {
+    // Same lock order as a settings save (prefs row, then the opt-in row), and
+    // re-read under it: a save that just made the preference the holder's own
+    // choice (caller_choice_at) is never overwritten.
+    await h('notification_prefs').where({ customer_id: row.customer_id }).forUpdate().first('customer_id');
+    const still = await h('recipient_optin')
+      .where({ customer_id: row.customer_id, phone_key: row.phone_key })
+      .whereNotNull('caller_demoted_at')
+      .whereNull('caller_choice_at')
+      .forUpdate()
+      .first('phone_key');
+    if (!still) continue;
     await h('notification_prefs').where({ customer_id: row.customer_id }).update({ appointment_notify_primary: true });
     // The follow-up is owed again too: a renewed YES (or consent coming
     // back) for a visit still ahead demotes the caller again.
@@ -485,11 +496,12 @@ async function rearmOnSiteFollowUp(customerId, phoneKey, visitId) {
   try {
     const armed = await db('recipient_optin')
       .where({ customer_id: customerId, phone_key: phoneKey, status: 'confirmed' })
-      // Idempotent for a reprocess: a row already armed on this visit is left
-      // as it is. An in-flight claim is never cleared here (a second worker
-      // could then send beside it); an older visit's worker finishes bound to
-      // its own visit_id and cannot touch this one.
-      .whereRaw('NOT (visit_id IS NOT DISTINCT FROM ? AND followup_done_at IS NULL)', [visitId])
+      // Only for a DIFFERENT visit: a reprocess of the same visit leaves the
+      // row as it is, armed or finished (its completion and the fan-out's
+      // fanout_confirmed_at stay, so nothing is sent twice). An in-flight
+      // claim is never cleared here; an older visit's worker finishes bound
+      // to its own visit_id and cannot touch this one.
+      .whereRaw('visit_id IS DISTINCT FROM ?', [visitId])
       .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null, fanout_confirmed_at: null });
     return armed ? 'armed' : 'skipped';
   } catch (err) {

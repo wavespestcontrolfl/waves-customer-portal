@@ -5997,6 +5997,12 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     // uncertain may have reached the person = final, never resent.
     return REPLAY_DELIVERY_RESULT[classifyDeliveryCertainty(result)];
   } catch (err) {
+    // A send that threw AFTER the provider took it (err.providerOutcome) may
+    // have reached the person: final, never resent.
+    if (err && err.providerOutcome && classifyDeliveryCertainty(err.providerOutcome) !== 'not_sent') {
+      logger.warn(`[appt-remind] confirmation replay threw after the provider handoff (${err.name}); not retried`);
+      return { sent: false, reason: 'delivery_uncertain' };
+    }
     // An unreadable visit / prefs / dedupe read fails CLOSED and retries.
     logger.warn(`[appt-remind] confirmation replay to service contact failed (${err.name})`);
     return { sent: false, reason: 'error' };

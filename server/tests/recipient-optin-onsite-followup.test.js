@@ -450,9 +450,10 @@ describe('one sender at a time: the call fan-out takes the replay\'s row claim',
     expect(src.indexOf('confirmationLoggedForVisitPhone({')).toBeGreaterThan(src.indexOf('claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId)'));
     // Re-arming is idempotent per visit and never clears an in-flight claim.
     const optinSrc = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
-    expect(optinSrc).toContain(".whereRaw('NOT (visit_id IS NOT DISTINCT FROM ? AND followup_done_at IS NULL)', [visitId])\n      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null, fanout_confirmed_at: null });");
+    expect(optinSrc).toContain(".whereRaw('visit_id IS DISTINCT FROM ?', [visitId])\n      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null, fanout_confirmed_at: null });");
     expect(src).toContain('async (result) => { await releaseFollowUpClaim(result); return result; },');
-    expect(src).toContain("confirmed: !!result && require('./messaging/send-customer-message').classifyDeliveryCertainty(result) !== 'not_sent',");
+    expect(src).toContain('async (sendErr) => { await releaseFollowUpClaim(sendErr && sendErr.providerOutcome); throw sendErr; },');
+    expect(src).toContain("|| (certainty === 'unknown' && (result.sent === true || result.deliveryOutcome === 'uncertain'));");
     // The visit reaches sms_log through the send's appointmentId (twilio.js noticeScope), which the dedupe reads.
     const twilio = require('fs').readFileSync(require.resolve('../services/twilio.js'), 'utf8');
     expect(twilio).toContain("noticeScope(options.appointmentId)");
