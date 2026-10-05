@@ -382,6 +382,13 @@ describe('shared-parcel flag copy: a commercial profile is never told it is a mo
     expect(flag.reason).not.toMatch(/homes|land-lease|mobile-home/);
   });
 
+  test('a supplied resolved category is authoritative: a commercial-looking record resolved residential keeps the residential copy', () => {
+    const rc = record({ propertyType: 'Commercial' });
+    const ai = { propertyType: 'COMMERCIAL', isCommercial: true };
+    expect(flagOf(rc, ai, { commercialProfile: false }).reason).toContain('land-lease community');
+    expect(flagOf(rc, ai).reason).toContain('one of 24 addresses on a single county parcel');
+  });
+
   test('a roll-confirmed park keeps the park copy, whatever the category', () => {
     const confirmed = record({ propertyType: 'Commercial', _raw: { multiSitusParcel: { situsCount: 24, parkConfirmed: true } } });
     expect(flagOf(confirmed, { propertyType: 'COMMERCIAL', isCommercial: true }, { commercialProfile: true }).reason).toContain('land-lease community');

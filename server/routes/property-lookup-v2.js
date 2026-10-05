@@ -4340,7 +4340,7 @@ function calcPestPressureMult(pressure) {
 // ─────────────────────────────────────────────
 // FIELD VERIFY FLAGS
 // ─────────────────────────────────────────────
-function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false, commercialProfile = false } = {}) {
+function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false, commercialProfile } = {}) {
   const flags = [];
 
   // Geocoder snapped the typed house number to a different premise — this
@@ -4644,8 +4644,12 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // 24-address plaza). The roll's address count alone cannot tell a plaza
   // from a campus or a park whose attributes did not load, so the copy
   // states only what is known: several addresses, one parcel.
-  const sharedCommercialParcel = Boolean(parkParcel) && parkParcel.parkConfirmed !== true
-    && (commercialProfile === true || detectCategory(rc, ai || {}) === 'COMMERCIAL');
+  // The supplied resolved category is authoritative (a unit lookup the
+  // guardrails reclassified to residential must keep residential copy);
+  // the record's own read is used only when no category was supplied.
+  const commercialRead = typeof commercialProfile === 'boolean'
+    ? commercialProfile : detectCategory(rc, ai || {}) === 'COMMERCIAL';
+  const sharedCommercialParcel = Boolean(parkParcel) && parkParcel.parkConfirmed !== true && commercialRead;
   if (sharedCommercialParcel) {
     flags.push({
       field: 'parkParcel',
