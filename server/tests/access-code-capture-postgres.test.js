@@ -235,6 +235,30 @@ postgres('access codes section', () => {
       expect(read).not.toHaveBeenCalled();
     });
 
+    test('a statement that names a code, or an old question, does not make a bare number a reply', async () => {
+      const c = await customer();
+      await text(c.id, 'Your gate code was updated on file.', { at: '2040-03-10T14:00:00Z', direction: 'outbound' });
+      await text(c.id, '4821');
+      const old = await customer();
+      await text(old.id, 'What is the gate code?', { at: '2040-03-07T14:00:00Z', direction: 'outbound' });
+      await text(old.id, '4821');
+      const read = stub([gateItem({ code: '4821', quote: '4821' })]);
+      expect(await sweep(read)).toMatchObject({ read: 0 });
+      expect(read).not.toHaveBeenCalled();
+    });
+
+    test('a property added during the model call makes the code account-wide', async () => {
+      const c = await customer({ properties: 1 });
+      await text(c.id, 'The gate code is #4821');
+      const [first] = await trx('customer_properties').where({ customer_id: c.id }).select('*');
+      const read = jest.fn(async () => {
+        await trx('customer_properties').insert({ ...first, id: randomUUID(), address_line1: '9 Example Ct', is_primary: false, address_key: null });
+        return { items: [gateItem()] };
+      });
+      expect(await sweep(read)).toMatchObject({ found: 1 });
+      expect((await rows(c.id))[0].property_id).toBeNull();
+    });
+
     test('a bare number is read only after our last text asked for a code', async () => {
       const asked = await customer();
       await text(asked.id, 'What is the gate code?', { at: '2040-03-10T14:50:00Z', direction: 'outbound' });

@@ -88,7 +88,13 @@ function flagsAccess(text, { priorAskedForCode = false } = {}) {
   return priorAskedForCode === true && BARE_CREDENTIAL.test(body);
 }
 
-const askedForCode = (text) => ASKED_FOR_CODE.test(String(text || ''));
+// Our text asked for a credential only when it names one AND asks: a question
+// mark, or a request ("send", "let us know", "what is"). "Your gate code was
+// updated" asks nothing.
+const ASKS = /\?|\b(?:send|text|share|reply|let (?:us|me) know|what(?:'s| is)|need|provide|give)\b/i;
+const askedForCode = (text) => ASKED_FOR_CODE.test(String(text || '')) && ASKS.test(String(text || ''));
+// A reply answers a question only while the question is recent.
+const ASK_WINDOW_HOURS = 48;
 
 // ---- values ---------------------------------------------------------------------------
 
@@ -261,6 +267,7 @@ async function priorOutboundAskedForCode(conn, message) {
   const prior = await conn('sms_log')
     .where({ customer_id: message.customer_id, direction: 'outbound', to_phone: message.from_phone })
     .where('created_at', '<', new Date(message.created_at))
+    .where('created_at', '>=', new Date(new Date(message.created_at).getTime() - ASK_WINDOW_HOURS * 3600000))
     // Only a text that reached the customer can have asked them anything.
     .whereIn('status', ['sent', 'delivered'])
     .whereNotNull('message_body')
@@ -327,7 +334,10 @@ async function fileFoundItems(conn, { message, properties }, items, receipt) {
           && canonicalLower(prefs[field]) === canonicalLower(item.code));
       });
     }
-    const propertyId = properties.length === 1 ? properties[0].id : null;
+    // Re-read under the customer lock: a property added or closed during the
+    // model call changes which home the code belongs to.
+    const liveProperties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
+    const propertyId = liveProperties.length === 1 ? liveProperties[0].id : null;
     let inserted = 0;
     if (toInsert.length) {
       const rows = await trx('customer_access_codes').insert(toInsert.map((item) => ({
