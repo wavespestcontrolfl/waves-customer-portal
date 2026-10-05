@@ -3514,6 +3514,12 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // so the pre-read `appt` may name a tech who was swapped out meanwhile).
   let committedTechId = null;
   let overlapAdvisory = null;
+  // A package visit 1 with a live visit 2: the card shows one visit, so the
+  // bar does not move it (ib-write-tools: the card shows everything the
+  // commit does). The Schedule screen moves both.
+  if (await require('../package-followup-booking').hasLivePackageChild(db, [appt.id])) {
+    return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.' };
+  }
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
@@ -3536,6 +3542,10 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // would strand its siblings and parent at the old stop. Throws an
       // operational 409 the executor surfaces as the tool error.
       await require('../visit-groups').assertRowMovableAlone(trx, appointment_id, appt.visit_id);
+      // Package visit 2 recheck, atomic with this write (the preflight
+      // above is only a fast refusal).
+      await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [appointment_id],
+        'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.');
       const committed = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)
@@ -3707,7 +3717,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 // invoice, no inspection-credit offer, and is neither a follow-up child nor
 // grouped — nothing this card would need to void, reverse, or disclose a
 // group/follow-up side effect for. Anything else cancels from Dispatch.
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
 
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
@@ -3987,6 +3997,13 @@ async function cancelAppointment(input, actionContext = {}) {
         const { prepaidCommitmentReason } = require('../appointment-cancel-impact');
         const { cardRailRows } = require('../appointment-cancel-impact');
         if (await prepaidCommitmentReason(trx, lockedRow) || (await cardRailRows(trx, appointment_id)).length > 0) {
+          throw new Error('__cancel_card_refused__');
+        }
+        // A linked follow-up (call-booked child or package visit 2) booked
+        // since the proposal: cancelling this visit would cancel that one
+        // too, which the card never showed. Re-read on this trx and refuse.
+        const { linkedFollowUpRows } = require('../appointment-cancel-impact');
+        if ((await linkedFollowUpRows(trx, appointment_id)).length > 0) {
           throw new Error('__cancel_card_refused__');
         }
         const { cardRailFingerprint } = require('../appointment-cancel-impact');

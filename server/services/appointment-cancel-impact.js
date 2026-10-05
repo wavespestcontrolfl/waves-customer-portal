@@ -145,6 +145,14 @@ async function cardRailRows(conn, scheduledServiceId) {
   ].sort();
 }
 
+// Live linked follow-ups a cancel of THIS visit would take with it (the
+// parent-cancel cascade, call-booking-catalog cancelCallFollowUpsForParentCancel
+// — a call-booked child, or a package visit 2). Same filter the cascade runs.
+async function linkedFollowUpRows(conn, scheduledServiceId) {
+  const { applyCallFollowUpCancelFilter } = require('./call-booking-catalog');
+  return applyCallFollowUpCancelFilter(conn('scheduled_services'), scheduledServiceId).select('id');
+}
+
 async function cardRailFingerprint(conn, scheduledServiceId) {
   return crypto.createHash('sha256').update(JSON.stringify(await cardRailRows(conn, scheduledServiceId))).digest('hex');
 }
@@ -330,8 +338,13 @@ function feeRailClear(fee) {
 // card does not pin, so the visit is cancelled from Dispatch instead. Sorted
 // codes, so the frozen impact (and its drift comparison) covers the verdict
 // too.
-function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal, anyInvoiceLinked, anyInspectionCreditOffer, prepaidCommitment = null, anyCardRail = false }) {
+function cardCancelRefusals({ row, fee, invoices, inspectionCreditReversal, anyInvoiceLinked, anyInspectionCreditOffer, prepaidCommitment = null, anyCardRail = false, anyLinkedFollowUp = false }) {
   const refusals = [];
+  // A live linked follow-up (a call-booked child or a package visit 2,
+  // owner ruling 2026-10-04): cancelling this visit also cancels that one —
+  // a second visit the card does not show. Bare visits only: it cancels
+  // from Dispatch, where the cascade runs.
+  if (anyLinkedFollowUp) refusals.push('linked_followup');
   // ANY card-rail row at all (Codex round-10 P1): a completed /secure
   // request can be fee-exempt only because a Bill-To payer is set today,
   // and clearing customers.payer_id changes neither the request id nor its
@@ -429,6 +442,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
 
   const prepaidCommitment = await prepaidCommitmentReason(db, row);
   const anyCardRail = (await cardRailRows(db, scheduledServiceId)).length > 0;
+  const anyLinkedFollowUp = (await linkedFollowUpRows(db, scheduledServiceId)).length > 0;
   const [railFee, invoiceRows, customerNotice, anyInvoiceRow, anyCreditRow] = await Promise.all([
     previewCancelFee(scheduledServiceId, now),
     InvoiceService.previewInvoiceVoidForCancelledService(scheduledServiceId),
@@ -505,6 +519,7 @@ async function computeCancelAppointmentImpact(scheduledServiceId, { now = new Da
       anyInspectionCreditOffer: Boolean(anyCreditRow),
       prepaidCommitment,
       anyCardRail,
+      anyLinkedFollowUp,
     }),
     customer_notice: customerNotice,
     technician_notice: technicianNotice,
@@ -543,6 +558,7 @@ function cancelImpactsMatch(a, b) {
 
 module.exports = {
   computeCancelAppointmentImpact,
+  linkedFollowUpRows,
   cancelImpactsMatch,
   previewCancelFee,
   feeRailClear,
