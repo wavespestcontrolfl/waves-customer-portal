@@ -221,6 +221,33 @@ postgres('access codes section', () => {
       expect((await rows(c.id)).map((r) => r.status).sort()).toEqual(['dismissed', 'dismissed']);
     });
 
+    test('a corrected text that changes the life of the same code updates the waiting row both ways', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'The door code is 4821');
+      await sweep(stub([gateItem({ kind: 'door', code: '4821', quote: 'The door code is 4821' })]));
+      await trx('sms_log').where({ id }).update({ message_body: 'The door code is 4821 for today only' });
+      await sweep(stub([gateItem({ kind: 'door', code: '4821', life: 'visit', quote: 'The door code is 4821 for today only' })]));
+      let list = await rows(c.id);
+      expect(list.map((r) => [r.life, r.status, r.source_quote])).toEqual([['visit', 'found', 'The door code is 4821 for today only']]);
+      await trx('sms_log').where({ id }).update({ message_body: 'The door code is 4821 from now on' });
+      await sweep(stub([gateItem({ kind: 'door', code: '4821', quote: 'The door code is 4821 from now on' })]));
+      list = await rows(c.id);
+      expect(list.map((r) => [r.life, r.status])).toEqual([['standing', 'found']]);
+    });
+
+    test('a text corrected to be too long, or emptied, dismisses what it filed', async () => {
+      const long = await customer();
+      const a = await text(long.id, 'The gate code is #4821');
+      const empty = await customer();
+      const b = await text(empty.id, 'The gate code is #4821');
+      await sweep(stub([gateItem()]));
+      await trx('sms_log').where({ id: a }).update({ message_body: `The gate code is #4821. ${'x'.repeat(700)}` });
+      await trx('sms_log').where({ id: b }).update({ message_body: '' });
+      await sweep(stub([gateItem()]));
+      expect((await rows(long.id)).map((r) => r.status)).toEqual(['dismissed']);
+      expect((await rows(empty.id)).map((r) => r.status)).toEqual(['dismissed']);
+    });
+
     test('a corrected text never touches a row the office already decided', async () => {
       const c = await customer();
       const id = await text(c.id, 'The gate code is #4821');

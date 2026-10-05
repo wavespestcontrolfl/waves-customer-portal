@@ -290,16 +290,27 @@ function isLive(r, now = new Date()) {
   return !from || new Date(from) >= addETDays(now, -VISIT_WINDOW_DAYS);
 }
 
-// The text's current words are the only evidence: every row this text filed
-// that the office has not decided yet, and that the latest read no longer
-// supports, is dismissed (a changed code, removed directions, or no access
-// information at all). Decided rows stay as history.
+// The text's current words are the only evidence for the rows it filed that
+// the office has not decided yet. Each waiting row is brought in line with the
+// latest read: the same code and directions take the read's life and quote
+// (a "today only" added or removed); anything the read no longer supports is
+// dismissed, and with no items (a text corrected to say nothing, made too
+// long, or emptied) all of them are. Decided rows stay as history.
 async function reconcileSource(trx, message, items) {
-  const keep = new Set(items.map((item) => `${item.kind}:${item.value_hash}:${normalizeText(item.instructions)}`));
+  const key = (r) => `${r.kind}:${r.value_hash}:${normalizeText(r.instructions)}`;
+  const latest = new Map(items.map((item) => [key(item), item]));
   const waiting = await trx('customer_access_codes')
     .where({ customer_id: message.customer_id, source_type: 'sms', source_id: message.id, status: 'found' })
-    .forUpdate().select('id', 'kind', 'value_hash', 'instructions');
-  const stale = waiting.filter((r) => !keep.has(`${r.kind}:${r.value_hash}:${normalizeText(r.instructions)}`)).map((r) => r.id);
+    .forUpdate().select('id', 'kind', 'value_hash', 'instructions', 'life', 'source_quote');
+  const stale = [];
+  for (const row of waiting) {
+    const item = latest.get(key(row));
+    if (!item) { stale.push(row.id); continue; }
+    if (item.life !== row.life || item.quote !== row.source_quote) {
+      await trx('customer_access_codes').where({ id: row.id })
+        .update({ life: item.life, source_quote: item.quote, updated_at: trx.fn.now() });
+    }
+  }
   if (stale.length) {
     await trx('customer_access_codes').whereIn('id', stale)
       .update({ status: 'dismissed', decided_at: trx.fn.now(), updated_at: trx.fn.now() });
@@ -381,7 +392,13 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
   return runExclusive('access-code-net', async () => {
     const candidates = await conn('sms_log as s')
       .where('s.direction', 'inbound').whereNotNull('s.customer_id')
-      .whereRaw("btrim(coalesce(s.message_body, '')) <> ''")
+      // A blank text is still selected when it filed something earlier, so the
+      // correction can clear it; a blank text with nothing filed is skipped.
+      .where(function textOrFiled() {
+        this.whereRaw("btrim(coalesce(s.message_body, '')) <> ''").orWhereExists(function filed() {
+          this.select(1).from('customer_access_codes as f').whereRaw('f.source_id = s.id').where('f.status', 'found');
+        });
+      })
       .where('s.created_at', '>=', since).where('s.created_at', '<=', now)
       .whereExists(function availableCustomer() {
         this.select(1).from('customers as c').whereRaw('c.id = s.customer_id').whereNull('c.deleted_at');
@@ -402,8 +419,13 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
       const receipt = { source_type: 'message', source_id: message.id, extractor_version: VERSION,
         source_hash: hashExtractionSource(message.message_body) };
       try {
-        if (!eligibleMessage(message) || String(message.message_body).length > MAX_BODY) {
-          await recordExtractionAttempt({ ...receipt, trx: conn, status: 'no_fields' });
+        if (!eligibleMessage(message) || String(message.message_body || '').trim() === ''
+          || String(message.message_body).length > MAX_BODY) {
+          // A text corrected out of reach (emptied, too long) drops what it filed.
+          await conn.transaction(async (trx) => {
+            if (await lockCustomer(trx, message.customer_id)) await reconcileSource(trx, message, []);
+            await recordExtractionAttempt({ ...receipt, trx, status: 'no_fields' });
+          });
           tally.skipped += 1;
           continue;
         }
