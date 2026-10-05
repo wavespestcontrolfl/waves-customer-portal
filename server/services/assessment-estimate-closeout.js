@@ -34,6 +34,9 @@ const UNSTARTED_STATUSES = ['pending', 'confirmed'];
 // Visits that never happened: an estimate is never matched to one.
 const DEAD_STATUSES = ['cancelled', 'no_show', 'skipped', 'rescheduled'];
 
+// Refusals that only mean "the visit changed while it was being closed":
+// retried on the next tick, never rested.
+const RACE_CODES = ['visit_changed', 'service_reassigned', 'visit_identity_changed'];
 const AUDIT_CLOSED = 'visit.assessment_closed_on_estimate_sent';
 const AUDIT_REFUSED = 'visit.assessment_close_on_estimate_sent_refused';
 // The close ALWAYS runs in the backfill posture, on the visit day too
@@ -191,7 +194,11 @@ function candidateVisits(conn, { today, now }) {
             // Only a refusal about the visit rests it. A failure (a thrown
             // error, or a 5xx the completion returned) is an outage, retried
             // on the very next tick (Codex r4 P2 #5903).
-            .whereRaw("COALESCE(al.metadata ->> 'code', '') <> 'error' AND COALESCE(NULLIF(al.metadata ->> 'status', '')::int, 0) < 500");
+            .whereRaw("COALESCE(al.metadata ->> 'code', '') <> 'error' AND COALESCE(NULLIF(al.metadata ->> 'status', '')::int, 0) < 500")
+            // …nor does a race with an edit between the completion's load and
+            // its lock: a fresh read of the now-settled visit decides on the
+            // next tick (Codex r7 P2 #5903).
+            .whereRaw(`COALESCE(al.metadata ->> 'code', '') NOT IN (${RACE_CODES.map(() => '?').join(', ')})`, RACE_CODES);
         }))
       // This closeout's own committed attempt, owed its post-commit work: it
       // resumes from the state it froze, so no current eligibility applies —

@@ -590,7 +590,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(await mockPg('service_records').where({ scheduled_service_id: b })).toHaveLength(0);
   });
 
-  test('a failure does not rest the visit: the next tick retries it; a refusal about the visit still rests', async () => {
+  test('a failure or an edit race does not rest the visit: the next tick retries it; a refusal about the visit still rests', async () => {
     const failed = await customer();
     const failedVisit = await visit(failed);
     await estimate(failed);
@@ -603,7 +603,12 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const refusedVisit = await visit(refused);
     await estimate(refused);
     await mockPg('audit_log').insert({ actor_type: 'system', action: AUDIT_REFUSED, resource_type: 'scheduled_services', resource_id: refusedVisit, metadata: JSON.stringify({ code: 'grouped_visit', status: 409 }) });
-    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 2, closed: 2 });
+    const raced = await customer();
+    const racedVisit = await visit(raced);
+    await estimate(raced);
+    await mockPg('audit_log').insert({ actor_type: 'system', action: AUDIT_REFUSED, resource_type: 'scheduled_services', resource_id: racedVisit, metadata: JSON.stringify({ code: 'service_reassigned', status: 409 }) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 3, closed: 3 });
+    expect((await row(racedVisit)).status).toBe('completed');
     expect((await row(failedVisit)).status).toBe('completed');
     expect((await row(outageVisit)).status).toBe('completed');
     expect((await row(refusedVisit)).status).toBe('on_site');
