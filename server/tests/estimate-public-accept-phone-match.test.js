@@ -289,6 +289,16 @@ describe('a phone typed by the customer never resolves to an existing customer',
     }
   });
 
+  it('a projection that did not load the column: the matcher reads it itself', async () => {
+    mockDbFixtures['customers:list'] = [{ ...BOB, email: 'jane@example.com' }];
+    mockDbFixtures['estimates:first'] = { customer_phone_typed: '+19415550142' };
+    const projection = janeEstimate({ customer_phone: '+19415550142' });
+    expect('customer_phone_typed' in projection).toBe(false);
+    const res = await matchAcceptCustomerByPhone(projection);
+    expect(res.contradicted).toBe(true);
+    expect(res.match).toBeNull();
+  });
+
   it('no candidate: an ordinary no-match, so the accept creates the new customer', async () => {
     mockDbFixtures['customers:list'] = [];
     const res = await matchAcceptCustomerByPhone(typed());

@@ -1610,6 +1610,12 @@ and the UPDATE carries the same eligibility predicates as those writes
 re-price / address markers, and the pre-read's `updated_at`), so a decline,
 archive, expiry or off-surface marker that lands after the pre-read refuses
 it (zero rows → the generic zero-row answer, 404 or 409 "no longer active").
+A matched number is refused only after the same guarded predicate is
+re-read (an estimate that stopped being open during the lookup gets the
+zero-row answer, never the bell or the 409). The matcher loads
+`customer_phone_typed` itself when a caller passed a projection without it
+(the slot routes' `ESTIMATE_PARK_COLUMNS` also carries it), so no reader can
+mistake a typed phone for the office's.
 `matchAcceptCustomerByPhone` — the one matcher every card and accept
 route reads — treats ANY candidate as a contradiction while the estimate
 still carries that typed number (`phoneTypedByCustomer`): no match, and the

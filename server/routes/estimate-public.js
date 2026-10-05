@@ -601,7 +601,15 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
   // whatever their email or address: any candidate is a contradiction, and the standing B18 park answers it (nothing
   // created, no card captured, the office told). This is the one matcher every card and accept route reads, so the
   // rule holds at the save and for every later request, including a customer who acquired the number afterwards.
-  const typedPhone = phoneTypedByCustomer(estimate);
+  // The mark is a column. A caller that loaded a PROJECTION without it (an estimate row with an id but no
+  // customer_phone_typed key) would read every typed phone as the office's, so the matcher loads the one column
+  // itself rather than trust each projection to include it. A snapshot (no id) must carry the value.
+  let typedMark = estimate.customer_phone_typed;
+  if (typedMark === undefined && estimate.id) {
+    const markRow = await database('estimates').where({ id: estimate.id }).first('customer_phone_typed');
+    typedMark = markRow?.customer_phone_typed ?? null;
+  }
+  const typedPhone = phoneTypedByCustomer({ customer_phone: estimate.customer_phone, customer_phone_typed: typedMark });
   let contradicted = typedPhone
     ? candidates.length > 0
     : candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate);

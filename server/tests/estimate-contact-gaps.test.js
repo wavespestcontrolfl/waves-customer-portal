@@ -226,13 +226,14 @@ describe('sanitizeContactPhone', () => {
 });
 
 describe('saveAcceptContactPhone', () => {
-  function harness({ updated = 1 } = {}) {
-    const calls = { where: [], whereRaw: [], update: [] };
+  function harness({ updated = 1, stillOpen = true } = {}) {
+    const calls = { where: [], whereRaw: [], update: [], first: 0 };
     const qb = {
       where: (arg) => { calls.where.push(arg); return qb; },
       whereNull: (col) => { calls.where.push({ null: col }); return qb; },
       whereRaw: (sql) => { calls.whereRaw.push(sql); return qb; },
       modify: (fn) => { fn(qb); return qb; },
+      first: async () => { calls.first += 1; return stillOpen ? { id: 'est-1' } : null; },
       update: async (row) => { calls.update.push(row); return updated; },
     };
     const database = (table) => { calls.table = table; return qb; };
@@ -268,6 +269,23 @@ describe('saveAcceptContactPhone', () => {
     expect(out.body.code).toBe('CUSTOMER_CONTACT_REQUIRED');
     expect(calls.update).toEqual([]);
     expect(onExistingCustomerPhone).toHaveBeenCalledWith({ typedPhone: '+19415550142', candidateCount: 2 });
+  });
+
+  test('a matched number on an estimate that stopped being open: zero-row answer, no bell, no 409', async () => {
+    const { database, calls } = harness({ stillOpen: false });
+    const onExistingCustomerPhone = jest.fn();
+    const guardUpdate = jest.fn((qb) => qb.whereRaw('ELIGIBLE'));
+    const out = await saveAcceptContactPhone({
+      estimate: ESTIMATE, rawPhone: '941-555-0142', database,
+      countCustomersWithPhone: async () => 1, onExistingCustomerPhone, guardUpdate,
+    });
+    expect(out).toMatchObject({ zeroRows: true });
+    expect(out.status).not.toBe(409);
+    expect(onExistingCustomerPhone).not.toHaveBeenCalled();
+    // The recheck ran under the same guard as the write would have.
+    expect(calls.first).toBe(1);
+    expect(guardUpdate).toHaveBeenCalledTimes(1);
+    expect(calls.update).toEqual([]);
   });
 
   test('an estimate that already has a phone or a customer ignores the field entirely', async () => {

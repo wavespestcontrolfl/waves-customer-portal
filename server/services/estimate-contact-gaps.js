@@ -288,14 +288,24 @@ async function saveAcceptContactPhone({ estimate, rawPhone, database, countCusto
   if (error || !typedPhone) {
     return { status: 400, body: { error: 'Please enter a valid 10-digit mobile number.', code: 'CONTACT_PHONE_INVALID' } };
   }
+  // The one predicate both outcomes are decided under: this estimate is STILL
+  // unlinked, phone-less and (the caller's guard) accept-eligible.
+  const stillOpen = () => database('estimates').where({ id: estimate.id }).whereNull('customer_id')
+    .whereRaw("length(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g')) < 10")
+    .modify((qb) => { if (guardUpdate) guardUpdate(qb); });
   const candidateCount = await countCustomersWithPhone(typedPhone);
   if (candidateCount > 0) {
+    // Revalidated before the refusal: an accept, a decline, an archive or
+    // another phone save that committed during the lookup must get the
+    // zero-row answer, never a bell and a 409 that says the number is a
+    // customer's for an estimate that is no longer open.
+    if (!(await stillOpen().first('id'))) {
+      return { status: 200, body: { saved: false, alreadyOnFile: true }, zeroRows: true };
+    }
     if (onExistingCustomerPhone) await onExistingCustomerPhone({ typedPhone, candidateCount });
     return { status: 409, body: { ...CALL_OFFICE_REFUSAL } };
   }
-  const saved = await database('estimates').where({ id: estimate.id }).whereNull('customer_id')
-    .whereRaw("length(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g')) < 10")
-    .modify((qb) => { if (guardUpdate) guardUpdate(qb); })
+  const saved = await stillOpen()
     .update({
       customer_phone: typedPhone,
       customer_phone_typed: typedPhone,
