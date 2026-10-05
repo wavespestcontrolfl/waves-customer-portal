@@ -659,6 +659,26 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId)).toEqual([svc.id]);
   });
 
+  test('an unattended (sweep) closeout re-decides the prepayment guard on its own fresh read of the visit — a reschedule after the sweep picked its candidates cannot complete a prepaid visit nobody arrived at (pre-push audit P1)', async () => {
+    const paidAt = new Date('2040-03-02T15:00:00Z');
+    // The sweep saw this visit on 2040-03-01 (paid the day after: no prepayment)…
+    const svc = await visit({ date: '2040-03-01' });
+    const inv = await invoice({ scheduled_service_id: svc.id, status: 'paid', paid_at: paidAt, date: '2040-03-01' });
+    expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid', unattendedIssuedAt: paidAt })).svc.id).toBe(svc.id);
+    // …then it was moved onto the payment day itself (still in the past) before the closeout ran.
+    await trx('scheduled_services').where({ id: svc.id }).update({ scheduled_date: '2040-03-02' });
+    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid', unattendedIssuedAt: paidAt })).toMatchObject({ svc: null, reason: 'prepaid_nobody_arrived' });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY, unattendedIssuedAt: paidAt })).toMatchObject({ closed: false, reason: 'prepaid_nobody_arrived', visitId: svc.id });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    // No issue instant at all fails closed for an unstarted visit.
+    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid', unattendedIssuedAt: null })).toMatchObject({ svc: null, reason: 'prepaid_nobody_arrived' });
+    // A LIVE trigger (an operator or the customer just acted) is not subject to it…
+    expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(svc.id);
+    // …and an ARRIVED visit never is.
+    await trx('scheduled_services').where({ id: svc.id }).update({ status: 'on_site' });
+    expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid', unattendedIssuedAt: paidAt })).svc.id).toBe(svc.id);
+  });
+
   test('issued-invoice retry: an ARRIVED visit with a delivered or settled invoice is retried whether or not a closeout ever ran; an UNSTARTED one only after a closeout that ran and failed; real refusals, prepayments, statement children and old invoices are left alone (GitHub r1 P1, r3 P1 ×2 #5886)', async () => {
     const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
     const refused = 'visit.completion_on_invoice_issued_refused';

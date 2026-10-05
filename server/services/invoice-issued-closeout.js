@@ -148,7 +148,7 @@ async function probeVisitRefusal(conn, svc) {
 // refusal carries it as `visit` so the caller can audit the refusal — and
 // resume its OWN partially committed closeout on a completed one (see
 // resumableIssuedCloseoutAttempt), never anyone else's.
-async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null } = {}) {
+async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateString(), trigger = null, unattendedIssuedAt } = {}) {
   if (!invoice) return { svc: null, reason: 'no_invoice' };
   const linked = await linkedVisitForInvoice(conn, invoice);
   if (!linked.svc) return { svc: null, reason: linked.reason, ...(linked.visit ? { visit: linked.visit } : {}) };
@@ -160,6 +160,18 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // has reached today.
   const refusedByState = issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger });
   if (refusedByState) return leaveOpen(refusedByState);
+  // An UNATTENDED pass (a retry sweep; nobody sent or settled anything just
+  // now) carries the instant the invoice / statement was delivered or
+  // settled, and the prepayment guard is decided HERE, on the visit row this
+  // function just read — not on the sweep's earlier candidate snapshot, which
+  // a reschedule can outdate (pre-push audit P1). The completion's locked
+  // recheck then refuses any move after this read. See
+  // prepaidAndNobodyArrived for the rule.
+  if (unattendedIssuedAt !== undefined && !isArrivedVisitStatus(svc.status)) {
+    const issued = unattendedIssuedAt ? new Date(unattendedIssuedAt) : null;
+    const issuedDay = issued && !Number.isNaN(issued.getTime()) ? etDateString(issued) : null;
+    if (!issuedDay || issuedDay <= dateOnly(svc.scheduled_date)) return leaveOpen('prepaid_nobody_arrived');
+  }
   // Every read from here on is against a visit already in hand: a failed
   // one is an outage of THIS visit's closeout, rethrown carrying the visit
   // (`linkedVisit`) so the caller audits it as a failure (code 'error') —
@@ -339,6 +351,9 @@ const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.co
 // at a time left the next one open). If so, it is no prepayment, and the
 // ordinary send / payment path closes exactly that visit.
 // An ARRIVED visit is never a prepayment case: the technician was there.
+// This is the sweeps' PREFILTER on their candidate snapshot; the closeout
+// re-decides the same rule on its own fresh read of the visit
+// (resolveVisitForIssuedInvoice, `unattendedIssuedAt`).
 function prepaidAndNobodyArrived(row) {
   return !isArrivedVisitStatus(row.visit_status) && !row.issued_after_service_day;
 }
@@ -358,7 +373,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       .where((q) => retryableVisitFilter(q, today))
       .orderBy(['ps.id', 'i.id'])
       .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', 's.status as visit_status',
-        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${settledAfterServiceDaySql('ps.paid_at')} as issued_after_service_day`));
+        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${settledAfterServiceDaySql('ps.paid_at')} as issued_after_service_day`), 'ps.paid_at as issued_at');
   } catch (err) {
     logger.error(`[invoice-issued-closeout] settled-statement retry: candidate lookup failed: ${err.message}`);
     return { candidates: 0, retried: 0, closed: 0 };
@@ -380,7 +395,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       if (last && !refusedForTheMoment(last)) continue;
     }
     retried += 1;
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today, unattendedIssuedAt: row.issued_at || null });
     if (out?.closed) closed += 1;
   }
   if (retried) logger.info(`[invoice-issued-closeout] settled-statement retry: ${rows.length} open linked child(ren), ${retried} retried, ${closed} closed`);
@@ -440,7 +455,7 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
         .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
       .orderBy('i.id')
       .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
-        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
+        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`), conn.raw(`${ISSUED_AT_SQL} as issued_at`));
   } catch (err) {
     logger.error(`[invoice-issued-closeout] issued-invoice retry: candidate lookup failed: ${err.message}`);
     return none;
@@ -461,7 +476,7 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
     }
     retried += 1;
     const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today, unattendedIssuedAt: row.issued_at || null });
     if (out?.closed) closed += 1;
   }
   if (retried) logger.info(`[invoice-issued-closeout] issued-invoice retry: ${rows.length} candidate(s), ${retried} retried, ${closed} closed`);
@@ -535,7 +550,7 @@ async function refuseVoidedInvoice(run) {
 // link has nothing to audit against — the send / payment itself is logged.
 // Sets run.svc / run.resuming and returns null to continue, else the refusal.
 async function resolveCloseoutTarget(run) {
-  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today, trigger: run.trigger });
+  const resolved = await resolveVisitForIssuedInvoice(run.conn, run.invoice, { today: run.today, trigger: run.trigger, unattendedIssuedAt: run.unattendedIssuedAt });
   run.linkedVisitId = resolved.visit?.id || null;
   if (resolved.svc) {
     run.svc = resolved.svc;
@@ -656,10 +671,10 @@ async function auditCloseoutFailure(run, err) {
 // auditCloseoutOutcome and runQuietCloseout. Three bounded phases share one
 // `run` context (GitHub r11 P2 #4127): void refusal → target resolution →
 // the quiet canonical completion.
-async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString() } = {}) {
+async function closeOutVisitForIssuedInvoice({ invoiceId, trigger, actorTechnicianId = null, actorRole = null, conn = db, today = etDateString(), unattendedIssuedAt } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { closed: false, reason: 'gate_off' };
   if (!invoiceId || !['sent', 'paid'].includes(trigger)) return { closed: false, reason: 'bad_input' };
-  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
+  const run = { invoiceId, trigger, actorTechnicianId, actorRole, conn, today, unattendedIssuedAt, invoice: null, linkedVisitId: null, svc: null, resuming: false, label: null, idempotencyKey: null };
   try {
     if (!(await loadCloseoutInvoice(run))) return { closed: false, reason: 'no_invoice' };
     const refused = (await refuseVoidedInvoice(run)) || (await resolveCloseoutTarget(run));
