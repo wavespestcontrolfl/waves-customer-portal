@@ -56,7 +56,7 @@ import useModalFocus from '../../hooks/useModalFocus';
 import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import LawnAssessmentCompletionBlock from '../lawn/LawnAssessmentCompletionBlock';
-import { LAWN_FINDINGS_TYPE } from '../../lib/lawn-fast-complete';
+import { LAWN_FINDINGS_TYPE, savedLawnArea } from '../../lib/lawn-fast-complete';
 import { detectServiceCategory } from '../../lib/service-colors';
 import { LAWN_DEFAULT_AREAS } from '../../lib/lawn-completion';
 import { defaultApplicationMethodForLine, normalizeApplicationMethod } from '../../lib/product-rate-prefill';
@@ -124,6 +124,7 @@ const REFUSAL_MESSAGES = {
   lawn_fast_not_found: 'This visit was not found. Close the sheet and reload the schedule.',
   typed_findings_required: NOT_ON_THIS_SHEET_MESSAGE,
   area_sqft_required: 'The lawn area is missing for a sprayed or spread product. Tell the office.',
+  property_service_area_changed: 'This property\u2019s lawn area changed. We reloaded it. Tap Complete again.',
   linear_ft_required: 'A perimeter product needs linear feet, which this sheet does not take. Tell the office.',
   waveguard_inventory_lockout: STOCK_LOCKOUT_MESSAGE,
 };
@@ -138,13 +139,17 @@ export function plainRefusalMessage(err) {
 // The request the submit hook uses: same call, but a refusal the server named
 // carries the sheet's plain message (status and code stay, so the hook sorts it
 // as it always does).
-function plainErrors(request) {
+// A completion refused because the property's areas changed under the sheet
+// (`property_service_area_changed`) also reads the areas again, once, through
+// `onAreaChanged`, so the next tap sends the current version.
+function plainErrors(request, onAreaChanged) {
   return async (path, options) => {
     try {
       return await request(path, options);
     } catch (err) {
       const message = plainRefusalMessage(err);
       if (message && err) err.message = message;
+      if (err?.code === 'property_service_area_changed') onAreaChanged?.current?.();
       throw err;
     }
   };
@@ -325,23 +330,25 @@ const lawnSqftOf = (planned) => {
   const item = (planned || []).find((entry) => Number(entry?.treatedSqft) > 0 && (!entry.areaUnit || entry.areaUnit === 'sqft'));
   return item ? Number(item.treatedSqft) : null;
 };
-// The lawn area on the customer's turf profile, read once for a visit whose plan
-// gives none (a one-time visit, or a plan without a figure). A failed read is no
-// figure.
-function useProfileLawnSqft({ request, customerId, needed }) {
-  const [sqft, setSqft] = useState(null);
+// The visit's OWN property areas (GET /admin/schedule/:serviceId/property-areas):
+// the server resolves the property this visit is at (a secondary property
+// included) and answers its saved areas with a `version`. Nothing customer-wide
+// is read. `status` is 'loading', 'ready', or 'unavailable' (the feature is off,
+// the read failed, or the property could not be resolved): then no lawn area is
+// known here. `reload` reads it again (after a refused completion).
+function useVisitPropertyAreas({ request, serviceId }) {
+  const [state, setState] = useState({ status: 'loading', data: null });
+  const [attempt, setAttempt] = useState(0);
   useEffect(() => {
-    if (!needed || !customerId) return undefined;
     let active = true;
-    request(`/admin/customers/${customerId}/turf-profile`)
-      .then((data) => {
-        const n = Number(data?.profile?.lawn_sqft);
-        if (active) setSqft(Number.isFinite(n) && n > 0 ? n : null);
-      })
-      .catch(() => { if (active) setSqft(null); });
+    if (!serviceId) { setState({ status: 'unavailable', data: null }); return undefined; }
+    request(`/admin/schedule/${serviceId}/property-areas`)
+      .then((data) => { if (active) setState(data?.enabled === true && data.areas ? { status: 'ready', data } : { status: 'unavailable', data: null }); })
+      .catch(() => { if (active) setState({ status: 'unavailable', data: null }); });
     return () => { active = false; };
-  }, [request, customerId, needed]);
-  return sqft;
+  }, [request, serviceId, attempt]);
+  const reload = useCallback(() => setAttempt((n) => n + 1), []);
+  return { ...state, reload };
 }
 const areaOf = (row, lawnSqft) => {
   const requirement = requirementOf(row);
@@ -411,7 +418,7 @@ const LABEL_REASONS = new Set([ADD_PHOTO, ANALYZE_PHOTOS, CONFIRM_ASSESSMENT, AD
 
 const unusableMessage = (reason) => (reason === 'property_check_failed' ? PROPERTY_CHECK_MESSAGE : PROPERTY_SCOPE_MESSAGE);
 
-function missingRequirement({ form, rows, lawnSqft, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+function missingRequirement({ form, rows, lawnSqft, areasLoading, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
   const [, reason = ''] = [
@@ -423,6 +430,7 @@ function missingRequirement({ form, rows, lawnSqft, photos, assessed, assessment
     [!assessmentId && !assessed, ANALYZE_PHOTOS],
     [!assessmentId, CONFIRM_ASSESSMENT],
     [!rows.length, ADD_PRODUCTS],
+    [missingArea && areasLoading, 'Checking the lawn area\u2026'],
     [missingArea, missingArea && (requirementOf(missingArea).unit === 'linear_ft'
       ? `${missingArea.name} needs linear feet, which this sheet does not take. Tell the office.`
       : `The lawn area is not on file for ${missingArea.name}. Tell the office.`)],
@@ -432,7 +440,7 @@ function missingRequirement({ form, rows, lawnSqft, photos, assessed, assessment
   return reason;
 }
 
-function completionBody({ form, rows, ctx, assessmentId, lawnSqft, typed, tipsAvailable }) {
+function completionBody({ form, rows, ctx, assessmentId, lawnSqft, propertyAreas, typed, tipsAvailable }) {
   // Plan defaults the tech removed: the lawn actuals ledger records them as
   // skipped (id and name only, no reason asked).
   // The server wants each product once (ids lower-case), a uuid, and a name of
@@ -467,6 +475,13 @@ function completionBody({ form, rows, ctx, assessmentId, lawnSqft, typed, tipsAv
       };
     }),
     ...(skipped.length ? { lawnProtocolCompletion: { skippedProducts: skipped } } : {}),
+    // The visit's coverage, frozen on the record the way the full form's is: the
+    // property this visit is at, the version of its areas the sheet read, and
+    // the lawn area the products went down on. Only while the areas were read.
+    // The server takes it only for a visit it reads as a lawn service (snapshotVisitArea).
+    ...(propertyAreas?.version && propertyAreas.propertyId && lawnSqft > 0 && detectServiceCategory(ctx.visit?.serviceType) === 'lawn'
+      ? { propertyServiceArea: { propertyId: propertyAreas.propertyId, version: propertyAreas.version, kind: 'lawn', treatedSqft: lawnSqft } }
+      : {}),
     ...(typed ? { structuredFindings: { type: LAWN_FINDINGS_TYPE, values: { lawn_condition: form.condition } } } : {}),
     technicianNotes: form.note.trim(),
     techTips: techTipsOf(form, tipsAvailable),
@@ -536,7 +551,12 @@ export default function FastCompleteLawnSheet({ service, request, catalog = [], 
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const ctx = useLawnFastContext({ base, request, service });
-  const submitRequest = useMemo(() => plainErrors(request), [request]);
+  // The visit's own property areas, read once here (see useVisitPropertyAreas) and
+  // read again, once, when a completion is refused because they changed.
+  const propertyAreas = useVisitPropertyAreas({ request, serviceId: service?.id });
+  const reloadAreas = useRef(null);
+  reloadAreas.current = propertyAreas.reload;
+  const submitRequest = useMemo(() => plainErrors(request, reloadAreas), [request]);
   const submission = useFastCompleteSubmit({ base, request: submitRequest });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. "+ Other
@@ -572,12 +592,12 @@ export default function FastCompleteLawnSheet({ service, request, catalog = [], 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
       <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting} onBack={close} />
-      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} isMobile={isMobile} />
+      <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} isMobile={isMobile} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, request, catalog, ctx, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, isMobile }) {
+function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, isMobile }) {
   if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   if (ctx.handoff) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Opening the full form…</ActionFeedback>;
@@ -592,7 +612,7 @@ function SheetBody({ service, request, catalog, ctx, submission, locked, dictati
     );
   }
   if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
-  return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} isMobile={isMobile} />;
+  return <LawnFastForm service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onOverlay={onOverlay} isMobile={isMobile} />;
 }
 
 // The photo step's report of the confirmed assessment, plus the context's own
@@ -652,15 +672,18 @@ function useStockHold({ ctx, service, rows, products, request }) {
   return { stockRow, checkingStock, checkStock };
 }
 
-function LawnFastForm({ service, request, catalog, ctx, submission, locked, dictationPending, onDictationPending, onOverlay, isMobile }) {
+function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, isMobile }) {
   const base = `/admin/dispatch/${service?.id}`;
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
   const { rows } = products;
   const planSqft = useMemo(() => lawnSqftOf(ctx.planned), [ctx.planned]);
-  const profileSqft = useProfileLawnSqft({ request, customerId: ctx.raw?.customerId ?? service?.routedCustomerId ?? null, needed: planSqft == null });
-  const lawnSqft = planSqft ?? profileSqft;
+  // The plan's figure, else the lawn area this visit's property has saved. The
+  // customer-wide turf profile is never used: at a secondary property it can be
+  // the primary's lawn.
+  const lawnSqft = planSqft ?? savedLawnArea(propertyAreas.data?.areas);
+  const areasLoading = planSqft == null && propertyAreas.status === 'loading';
   const [form, setForm] = useState({ note: '', condition: '', tipId: '', customTip: '', blogPost: null });
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
@@ -697,12 +720,12 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
     onPick: products.addProduct,
   });
 
-  const missingReason = missingRequirement({ form, rows, lawnSqft, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const missingReason = missingRequirement({ form, rows, lawnSqft, areasLoading, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, ctx, assessmentId, lawnSqft, typed, tipsAvailable }),
+      () => completionBody({ form, rows, ctx, assessmentId, lawnSqft, propertyAreas: propertyAreas.data, typed, tipsAvailable }),
       [names, 'Lawn assessment confirmed'].filter(Boolean).join(' · '),
     );
   };

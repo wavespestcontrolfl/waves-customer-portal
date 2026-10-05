@@ -153,7 +153,8 @@ async function request(path, options = {}) {
   if (path.endsWith('/tech-tips')) return TIPS;
   if (path.includes('/blog-posts')) return path.includes('?q=') ? { available: true, posts: POSTS } : { available: true, posts: [] };
   if (path === '/admin/customers/cust-preview') return { customer: { email: 'jordan.sample@example.com' } };
-  if (path.includes('/turf-profile')) return { profile: { lawn_sqft: LAWN_SQFT } };
+  // The visit's own property areas (the sheet reads nothing customer-wide).
+  if (path.endsWith('/property-areas')) return { enabled: true, propertyId: 'prop-preview', customerId: 'cust-preview', addressKey: 'preview', version: 'c'.repeat(64), areas: { beds: null, mosquito: null, lawn: { sqft: LAWN_SQFT, source: 'recorded', reviewedAt: null } } };
   if (path === '/admin/dispatch/products/catalog') return { products: CATALOG };
   if (path.endsWith('/complete')) {
     await wait(700);

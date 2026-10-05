@@ -94,12 +94,16 @@ const SCORES = { turf_density: 80, weed_suppression: 70, color_health: 60, stres
 const ASSESSED = { id: 'assessment-1', confirmed_by_tech: false, ...SCORES };
 const REVIEW = { status: 'complete', findings: [{ finding_id: 'f-1', name: 'Dollarweed', confidence: 'high' }], photoQuality: [] };
 
+// GET /admin/schedule/:id/property-areas for the visit's own property.
+const VERSION = 'a'.repeat(64);
+const areasAnswer = (areas, extra = {}) => ({ enabled: true, propertyId: 'prop-1', customerId: 'cust-1', addressKey: 'k', version: VERSION, areas: { beds: null, lawn: null, mosquito: null, ...areas }, ...extra });
+
 const refusal = (status, code, message, details = {}) => Object.assign(new Error(message), { status, code, details: { code, error: message, ...details } });
 
 let requests;
 let completeErrors;
 let lookup;
-let turfProfile;
+let propertyAreasAnswer;
 let tips;
 let blogAnswer;
 let customerAnswer;
@@ -116,7 +120,7 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
       if (contextError) throw contextError;
       return ctx;
     }
-    if (path.includes('/turf-profile')) { if (turfProfile instanceof Error) throw turfProfile; return turfProfile; }
+    if (path.endsWith('/property-areas')) { if (propertyAreasAnswer instanceof Error) throw propertyAreasAnswer; return propertyAreasAnswer; }
     if (/^\/admin\/customers\/[^/]+$/.test(path)) return customerAnswer;
     if (path.endsWith('/tech-tips')) { if (tips instanceof Error) throw tips; return tips; }
     if (path.includes('/blog-posts')) { if (blogAnswer instanceof Error) throw blogAnswer; return typeof blogAnswer === 'function' ? blogAnswer(path) : blogAnswer; }
@@ -158,7 +162,7 @@ beforeEach(() => {
   requests = [];
   completeErrors = [];
   lookup = { shotListEnabled: true, assessment: null };
-  turfProfile = { profile: { lawn_sqft: 5000 } };
+  propertyAreasAnswer = areasAnswer({ lawn: { sqft: 5000, source: 'recorded', reviewedAt: null } });
   tips = { available: false, groups: [] };
   blogAnswer = { available: false, posts: [] };
   customerAnswer = { customer: { email: '' } };
@@ -563,23 +567,109 @@ describe('products', () => {
     expect(completeCalls()[0].body.products.find((p) => p.productId === P_GRANULE)).toMatchObject({ areaValue: 6000, areaUnit: 'sqft' });
   });
 
-  test('a plan with no area uses the lawn area on the customer\'s turf profile', async () => {
-    await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
-    expect(await within(editorFor('Talak 7.9%')).findByText('Broadcast spray · whole lawn, 5,000 sq ft')).toBeTruthy();
-    await analyzeAndComplete();
-    expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 5000, areaUnit: 'sqft' });
-  });
-
-  test.each([
-    ['has none', { profile: { lawn_sqft: null } }],
-    ['cannot be read', new Error('down')],
-  ])('a plan with no area and a profile that %s holds Complete in words, and invents none', async (_label, answer) => {
-    turfProfile = answer;
+  const talakNeedsArea = async () => {
     await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
     await analyze();
+  };
+  const heldInWords = async () => {
+    await talakNeedsArea();
     await waitFor(() => expect(footerNote()).toBe('The lawn area is not on file for Talak 7.9%. Tell the office.'));
     expect(completeButton().disabled).toBe(true);
     expect(completeCalls()).toHaveLength(0);
+  };
+
+  test('a plan with no area uses the lawn area its own property has recorded (the primary property), read from the visit, never the customer\'s turf profile', async () => {
+    const { request } = await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
+    expect(await within(editorFor('Talak 7.9%')).findByText('Broadcast spray · whole lawn, 5,000 sq ft')).toBeTruthy();
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 5000, areaUnit: 'sqft' });
+    expect(request.mock.calls.some(([path]) => path === '/admin/schedule/svc-lawn/property-areas')).toBe(true);
+    expect(request.mock.calls.some(([path]) => /turf-profile/.test(path))).toBe(false);
+  });
+
+  test('a secondary property\'s own reviewed area is the one used', async () => {
+    propertyAreasAnswer = areasAnswer({ lawn: { sqft: 2200, source: 'measured', reviewedAt: '2026-09-01T00:00:00.000Z', reviewedBy: 'tech-1' } }, { propertyId: 'prop-2' });
+    await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
+    expect(await within(editorFor('Talak 7.9%')).findByText('Broadcast spray · whole lawn, 2,200 sq ft')).toBeTruthy();
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 2200, areaUnit: 'sqft' });
+  });
+
+  test('a secondary property with no saved area is held in words, and the primary\'s figure is not borrowed', async () => {
+    propertyAreasAnswer = areasAnswer({ lawn: null }, { propertyId: 'prop-2' });
+    await heldInWords();
+  });
+
+  test.each([
+    ['a lookup estimate from imagery', { lawn: { sqft: 4100, source: 'imagery', reviewedAt: null } }],
+    ['a computed county estimate', { lawn: { sqft: 4100, source: 'computed', reviewedAt: null } }],
+    ['a recorded area of zero', { lawn: { sqft: 0, source: 'recorded', reviewedAt: null } }],
+  ])('%s is not a saved area: held in words', async (_label, areas) => {
+    propertyAreasAnswer = areasAnswer(areas);
+    await heldInWords();
+  });
+
+  test.each([
+    ['the feature is off (enabled false)', { enabled: false }],
+    ['the feature answers 404', Object.assign(new Error('Not found'), { status: 404 })],
+    ['the read fails', new Error('down')],
+  ])('when %s, no lawn area is known: held in words, and no turf profile is read', async (_label, answer) => {
+    propertyAreasAnswer = answer;
+    const request = makeRequest({ ctx: plannedOne('broadcast_spray') });
+    await openSheet({ request });
+    await analyze();
+    await waitFor(() => expect(footerNote()).toBe('The lawn area is not on file for Talak 7.9%. Tell the office.'));
+    expect(completeButton().disabled).toBe(true);
+    expect(request.mock.calls.some(([path]) => /turf-profile/.test(path))).toBe(false);
+  });
+
+  test('a plan that gives the area still completes with the property areas off, and sends no property coverage', async () => {
+    propertyAreasAnswer = { enabled: false };
+    await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray', { treatedSqft: 4100, areaUnit: 'sqft' }) }) });
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 4100 });
+    expect(completeCalls()[0].body).not.toHaveProperty('propertyServiceArea');
+  });
+
+  test('the completion carries the visit\'s coverage as the full form does: property, version, lawn, the area treated', async () => {
+    propertyAreasAnswer = areasAnswer({ lawn: { sqft: 2200, source: 'measured', reviewedAt: '2026-09-01T00:00:00.000Z' } }, { propertyId: 'prop-2' });
+    await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.propertyServiceArea).toEqual({ propertyId: 'prop-2', version: VERSION, kind: 'lawn', treatedSqft: 2200 });
+  });
+
+  test('no coverage is sent for a visit the server would not read as a lawn service', async () => {
+    const ctx = plannedOne('spot_treatment', { treatedSqft: 4100, areaUnit: 'sqft' });
+    await openSheet({ request: makeRequest({ ctx: { ...ctx, service: { ...VISIT, serviceType: 'Quarterly Pest Control' } } }), props: { service: { ...SERVICE, routedServiceType: undefined } } });
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body).not.toHaveProperty('propertyServiceArea');
+  });
+
+  test('a visit whose products need no area still sends the coverage when the plan gave one', async () => {
+    await openSheet({ request: makeRequest({ ctx: plannedOne('spot_treatment', { treatedSqft: 4100, areaUnit: 'sqft' }) }) });
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.propertyServiceArea).toMatchObject({ kind: 'lawn', treatedSqft: 4100, version: VERSION });
+  });
+
+  test('property_service_area_changed (409): the areas are read again once, the words say tap Complete again, and the next tap sends the new version under a new key', async () => {
+    completeErrors.push(refusal(409, 'property_service_area_changed', 'Property areas changed. Reload and review the job coverage.'));
+    await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
+    await analyze();
+    const reads = () => requests.filter((r) => r.path.endsWith('/property-areas')).length;
+    expect(reads()).toBe(1);
+    propertyAreasAnswer = areasAnswer({ lawn: { sqft: 5200, source: 'recorded', reviewedAt: null } }, { version: 'b'.repeat(64) });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    await screen.findByText('This property\u2019s lawn area changed. We reloaded it. Tap Complete again.');
+    await waitFor(() => expect(reads()).toBe(2));
+    await waitFor(() => expect(within(editorFor('Talak 7.9%')).getByText(/5,200 sq ft/)).toBeTruthy());
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeCalls()).toHaveLength(2));
+    expect(completeCalls()[1].body.propertyServiceArea).toMatchObject({ version: 'b'.repeat(64), treatedSqft: 5200 });
+    expect(completeCalls()[1].body.idempotencyKey).not.toBe(completeCalls()[0].body.idempotencyKey);
+    expect(confirmCalls()).toHaveLength(1);
+    expect(reads()).toBe(2);
   });
 
   test('a perimeter product is held in words: this sheet has no linear-feet entry', async () => {

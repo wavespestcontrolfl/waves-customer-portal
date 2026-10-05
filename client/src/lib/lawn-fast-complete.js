@@ -27,3 +27,18 @@ export function isLawnFastCompleteEligible(service) {
     && (!profile?.findingsType || profile.findingsType === LAWN_FINDINGS_TYPE)
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
+
+// The lawn area the VISIT'S OWN property has saved, from
+// GET /admin/schedule/:serviceId/property-areas (`areas.lawn`): a reviewed area,
+// or a recorded one (source 'recorded', the property's own recorded size; for the
+// primary property the server reads it from the turf profile itself) with a
+// positive size. A lookup estimate (source 'imagery' or 'computed', never
+// reviewed) is not saved and is never used. null when there is none. The same
+// rule as recordedLawnArea() in PR #5901's lib/lawn-completion.js (not on main
+// yet); fold the two together once that merges.
+export function savedLawnArea(areas) {
+  const lawn = areas?.lawn;
+  const sqft = Number(lawn?.sqft);
+  if (!(sqft > 0)) return null;
+  return lawn.reviewedAt || lawn.source === 'recorded' ? sqft : null;
+}
