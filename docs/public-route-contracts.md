@@ -155,8 +155,8 @@ The same day the live page changed two client-only lines from fields it
 already receives: "Today's result" on a routine Pest V2 visit (re-entry
 targets with `treatmentPerformed === true`, plus the shown `pestPressure`
 label), and the "Your plan" card (`planSummary` counts as a sentence,
-`waveGuardTier`, the next same-service visit date, `reserviceEligible`). No
-payload field was added for either.
+`planSummary.tier`, the next same-service visit named with its service,
+`reserviceEligible`). The one payload addition is `planSummary.tier`.
 
 Pest Report V2 "expectations" blocks (owner-approved 2026-09-27/28,
 `GATE_PEST_REPORT_EXPECTATIONS` — dark, off unless exactly `'true'`, read at
@@ -547,7 +547,9 @@ unless exactly `true`, read at startup). On, the LIVE service-report payload
 (`/api/reports/:token/data`, the only caller that opts in with
 `planSummary: true`, built with `mode: 'live'`; the `/ask` Q&A build and every
 other build neither read nor carry it) may carry `planSummary: { year, visitsThisYear,
-reservicesThisYear }` for the token's own customer, only when that customer
+reservicesThisYear, tier }` (`tier` added 2026-10-04: the member's CURRENT
+`customers.waveguard_tier` when it is Bronze, Silver, Gold or Platinum, else
+`null`; never the tier frozen on the visit) for the token's own customer, only when that customer
 is an active plan member (`isActivePlanCustomer`, fail-closed to non-member)
 with at least one performed visit this year; anyone else gets no field and no
 plan wording on the page. The plan is account-level, so the counts cover the

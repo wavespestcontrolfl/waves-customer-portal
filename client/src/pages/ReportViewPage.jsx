@@ -2838,11 +2838,16 @@ function PlanSummaryCard({ data, mode }) {
   const yearLine = reservices > 0
     ? `We've completed ${visits} ${visitWord} for you this year, including ${reservices} ${reserviceWord}.`
     : `We've completed ${visits} ${visitWord} for you this year.`;
-  const tier = String(data.waveGuardTier || data.waveguardTier || '').trim();
+  // The current tier the server sends with the counts, never the tier frozen
+  // on this visit (data.waveGuardTier): an old report must not name a tier
+  // the customer has since left.
+  const tier = String(plan.tier || '').trim();
   // The upcoming-visits card already lists the dates when it is on the page.
-  const nextVisit = data.upcomingVisitsCard
-    ? null
-    : planNextVisitDateLabel(data.nextSameServiceAppointment || data.nextAppointment);
+  // nextAppointment prefers this report's own service line, so the line names
+  // the service: another line's visit may come sooner.
+  const nextAppointment = data.upcomingVisitsCard ? null : (data.nextSameServiceAppointment || data.nextAppointment);
+  const nextVisit = planNextVisitDateLabel(nextAppointment);
+  const nextVisitService = String(nextServiceName(nextAppointment?.serviceType) || '').replace(/\s+service$/i, '').trim();
   return (
     <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
       {/* h2, not .section-eyebrow: the glass theme hides every
@@ -2852,7 +2857,9 @@ function PlanSummaryCard({ data, mode }) {
       <h2>Your plan</h2>
       {tier && <p className="map-context-copy">You&apos;re a WaveGuard {tier} member.</p>}
       <p className="map-context-copy">{yearLine}</p>
-      {nextVisit && <p className="map-context-copy">Your next visit is {nextVisit}.</p>}
+      {nextVisit && nextVisitService && (
+        <p className="map-context-copy">Your next {nextVisitService} visit is {nextVisit}.</p>
+      )}
       {data.reserviceEligible === true && (
         <p className="map-context-copy">Something come up between visits? Text us and we&apos;ll come back out.</p>
       )}
@@ -2862,11 +2869,11 @@ function PlanSummaryCard({ data, mode }) {
 
 // "Mon, Jan 4" for the plan card, or null for a missing, unreadable or past
 // date (a report opened months later must not promise a visit that has gone).
-function planNextVisitDateLabel(nextAppointment) {
+// Past is judged on the Eastern calendar, whatever the browser's zone.
+function planNextVisitDateLabel(nextAppointment, todayEt = etDateString()) {
   const date = calendarDateFromDateOnlyValue(nextAppointment?.scheduledDate);
   if (!date) return null;
-  const today = new Date();
-  if (date.getTime() < Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())) return null;
+  if (date.toISOString().slice(0, 10) < todayEt) return null;
   return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 

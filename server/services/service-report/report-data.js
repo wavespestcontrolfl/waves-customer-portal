@@ -6466,7 +6466,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             return row.record_is_callback === true || PLAN_CALLBACK_RESERVICE_KEYS.has(frozenKey);
           })
           .map(visitIdentity)).size;
-        planSummary = { year: yearEt, visitsThisYear, reservicesThisYear };
+        // The member's CURRENT tier, not the tier frozen on this visit
+        // (waveGuardTier): the card describes the plan as it stands when
+        // the report is opened (Codex P2 #5888).
+        const currentTier = ['Bronze', 'Silver', 'Gold', 'Platinum'].includes(service.waveguard_tier)
+          ? service.waveguard_tier
+          : null;
+        planSummary = { year: yearEt, visitsThisYear, reservicesThisYear, tier: currentTier };
       }
     }
   } catch { /* best-effort */ }

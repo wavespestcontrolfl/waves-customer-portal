@@ -1430,7 +1430,9 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
   // names the membership, the next visit and how to reach us between visits.
   it('names the membership, the next visit and the between-visits line when the payload carries them', async () => {
     const payload = structuredClone(legacyLawnReport);
-    payload.planSummary = { year: 2026, visitsThisYear: 2, reservicesThisYear: 0 };
+    // The card reads the CURRENT tier sent with the counts, not the tier
+    // frozen on the visit (Codex P2 #5888).
+    payload.planSummary = { year: 2026, visitsThisYear: 2, reservicesThisYear: 0, tier: 'Gold' };
     payload.waveGuardTier = 'Bronze';
     payload.reserviceEligible = true;
     payload.nextAppointment = null;
@@ -1439,17 +1441,17 @@ describe('ReportViewPage — "Your plan" section (planSummary)', () => {
 
     await screen.findByRole('heading', { name: 'Your plan', level: 2 });
     const section = container.querySelector('#your-plan');
-    expect(within(section).getByText("You're a WaveGuard Bronze member.")).toBeInTheDocument();
+    expect(within(section).getByText("You're a WaveGuard Gold member.")).toBeInTheDocument();
     expect(within(section).getByText("We've completed 2 visits for you this year.")).toBeInTheDocument();
-    expect(within(section).getByText('Your next visit is Mon, Jan 5.')).toBeInTheDocument();
+    expect(within(section).getByText('Your next Quarterly Pest Control visit is Mon, Jan 5.')).toBeInTheDocument();
     expect(within(section).getByText("Something come up between visits? Text us and we'll come back out.")).toBeInTheDocument();
     expect(within(section).queryByText(/no charge|free|\$/i)).toBeNull();
   });
 
   it('leaves out a next visit that has passed, the membership line with no tier and the between-visits line for a customer who is not eligible', async () => {
     const payload = structuredClone(legacyLawnReport);
-    payload.planSummary = { year: 2026, visitsThisYear: 2, reservicesThisYear: 0 };
-    payload.waveGuardTier = null;
+    payload.planSummary = { year: 2026, visitsThisYear: 2, reservicesThisYear: 0, tier: null };
+    payload.waveGuardTier = 'Bronze';
     payload.reserviceEligible = false;
     payload.nextAppointment = null;
     payload.nextSameServiceAppointment = { serviceType: 'Quarterly Pest Control Service', scheduledDate: '2020-01-06', windowStart: null };
