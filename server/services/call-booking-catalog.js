@@ -758,7 +758,8 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
             windowStart: String(k.window_start).slice(0, 5),
             windowEnd: probeEnd,
             excludeServiceIds: [String(k.id)],
-            excludeStatuses: ['completed', 'cancelled'],
+            // Rows that do not occupy the slot (AGENTS.md occupancy rule).
+            excludeStatuses: ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'],
             // The write below CASes on k.technician_id, so the child lands on
             // the destination day with exactly this technician; another
             // technician's overlapping stop is no clash (gate-dark,
@@ -875,7 +876,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
   const now = new Date();
   const childQuery = applyCallFollowUpCancelFilter(conn('scheduled_services'), parentServiceId);
   if (packageOnly) childQuery.where({ source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION });
-  const children = await childQuery.select('id', 'status');
+  const children = await childQuery.select('id', 'status', 'source_action');
   let cancelled = 0;
   for (const child of children) {
     try {
@@ -886,6 +887,10 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
           toStatus: 'cancelled',
           transitionedBy: actorId || null,
           notes: `Cancelled with parent call booking ${parentServiceId}`,
+          // A package visit 2 arms reminders, so its own cancel could text the
+          // customer; the parent's cancellation owns that choice (an operator
+          // may have chosen no text), so the child never sends its own.
+          ...(child.source_action === PACKAGE_FOLLOWUP_SOURCE_ACTION ? { notifyCustomer: false } : {}),
           trx,
         });
         await trx('scheduled_services')

@@ -19,7 +19,6 @@ jest.mock('../services/scheduling/occupancy', () => ({
   fenceBookingDay: jest.fn(async () => ({ acquired: true, keys: [] })),
 }));
 jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(async () => ({ id: 'alert-1' })) }));
-jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn(async () => {}) }));
 jest.mock('../services/booking/create-scheduled-service', () => ({
   createScheduledService: jest.fn(async ({ insertData, source }) => ({ id: 'child-1', ...insertData, source_action: source.sourceAction })),
 }));
@@ -253,9 +252,11 @@ describe('ensurePackageFollowUpVisit', () => {
     const { trx, log } = fakeTrx({ existingChild: existing });
     expect(await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS })).toBe(existing);
     expect(createScheduledService).not.toHaveBeenCalled();
-    const childLookup = log.lookups.find((l) => l.table === 'scheduled_services');
-    expect(childLookup.where).toEqual({ followup_source_service_id: 'visit-1' });
-    expect(childLookup.notIn).toEqual({ col: 'status', vals: ['cancelled', 'skipped', 'no_show'] });
+    const lookups = log.lookups.filter((l) => l.table === 'scheduled_services');
+    // First any prior child (the idempotency marker), then the live one.
+    expect(lookups[0].where).toEqual({ followup_source_service_id: 'visit-1' });
+    expect(lookups[0].notIn).toBeNull();
+    expect(lookups[1].notIn).toEqual({ col: 'status', vals: ['cancelled', 'skipped', 'no_show'] });
   });
 
   test.each([
@@ -277,29 +278,9 @@ describe('ensurePackageFollowUpVisit', () => {
     expect(createScheduledService).not.toHaveBeenCalled();
   });
 
-  test('office confirm promotes a pending call-booked visit 2 to a confirmed package child; other callers leave it', async () => {
-    const { transitionJobStatus } = require('../services/job-status');
-    const pendingCallChild = { id: 'child-call', scheduled_date: '2026-10-19', status: 'pending', technician_id: 'tech-1', source_action: 'ai_call_pipeline_followup', customer_confirmed: false, window_start: '13:00:00', window_end: '14:00:00' };
-    const left = fakeTrx({ existingChild: pendingCallChild });
-    expect(await ensurePackageFollowUpVisit({ trx: left.trx, primary: PRIMARY, cols: COLS })).toBe(pendingCallChild);
-    expect(transitionJobStatus).not.toHaveBeenCalled();
-
-    const promoted = fakeTrx({ existingChild: pendingCallChild });
-    const updates = [];
-    const base = promoted.trx;
-    const trx = (table) => ({ ...base(table), where: (arg) => ({ ...base(table).where(arg), update: async (patch) => { updates.push({ arg, patch }); return 1; } }) });
-    trx.transaction = async (fn) => fn(trx);
-    const out = await ensurePackageFollowUpVisit({ trx, primary: { ...PRIMARY, service_id: 'svc-bedbug' }, cols: COLS, promotePendingCallFollowUp: true });
-    expect(transitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'child-call', fromStatus: 'pending', toStatus: 'confirmed', trx }));
-    // Package shape on promotion: $0 included, and the full treatment block
-    // from its agreed start (bed bug catalog duration 120 min → 13:00–15:00).
-    expect(updates).toEqual([{ arg: { id: 'child-call' }, patch: expect.objectContaining({
-      source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION, estimated_price: 0, followup_included: true, create_invoice_on_complete: false, window_end: '15:00',
-    }) }]);
-    expect(out).toMatchObject({ id: 'child-call', status: 'confirmed', source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION });
-    // The widened window is fenced and probed like a new child.
-    expect(fenceBookingDay).toHaveBeenCalledWith(expect.anything(), { date: '2026-10-19', techId: 'tech-1' });
-    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-10-19', windowStart: '13:00', windowEnd: '15:00', excludeServiceIds: ['child-call'] }));
+  test('a visit 2 retired on purpose is never replaced by a retry', async () => {
+    const { trx } = fakeTrx({ existingChild: { id: 'child-old', status: 'cancelled' } });
+    expect(await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS })).toBeNull();
     expect(createScheduledService).not.toHaveBeenCalled();
   });
 

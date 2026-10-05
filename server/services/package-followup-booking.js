@@ -13,11 +13,12 @@
  * create, estimate acceptance (public + one-tap), public self-book, the
  * Intelligence Bar, the Leads page — booked visit 1 alone.
  *
+ * The call pipeline writes its own child (it carries the call's linkage and
+ * number hold) in this same confirmed shape — see ensureCallFollowUpVisit.
  * Office-review bookings (the voice agent's and the outbound-callback
- * pipeline's pending rows) get visit 2 when the office CONFIRMS visit 1
- * (job-status.js): a pending request is not a booking yet. The call
- * pipeline writes its own child (it carries the call's linkage and number
- * hold) in this same confirmed shape — see ensureCallFollowUpVisit.
+ * pipeline's pending rows) get no automatic visit 2 in this change: a
+ * pending request is not a booking yet, and booking visit 2 at office
+ * activation is a follow-up change.
  *
  * One helper, called by each primary writer INSIDE its own transaction,
  * right after the primary row exists:
@@ -159,64 +160,6 @@ async function liveChildOf(trx, primaryId) {
     .first('id', 'scheduled_date', 'status', 'technician_id', 'source_action', 'customer_confirmed', 'window_start', 'window_end');
 }
 
-// An outbound-callback booking's visit 2 was written by the call pipeline
-// while visit 1 was still a pending office-review request: pending,
-// customer-hidden, "confirm the time". Once the office confirms visit 1 the
-// owner ruling applies to it too (nobody confirms visit 2): flip it to
-// confirmed through the canonical status writer and hand it the package
-// marker, so the customer sees it and the move/cancel hooks carry it. It
-// also takes the package child's own shape: the $0 included billing fields
-// (the call writer leaves an unpriced child billable, which would let its
-// completion bill or owe a third visit) and the full treatment block from
-// its agreed start (the call writer books a bare hour).
-async function promotePendingCallChild(sp, child, { primary, catalogRow, outerTrx }) {
-  const { CALL_FOLLOWUP_SOURCE_ACTION } = require('./call-booking-source-actions');
-  if (child.source_action !== CALL_FOLLOWUP_SOURCE_ACTION || child.status !== 'pending' || child.customer_confirmed) return child;
-  await require('./job-status').transitionJobStatus({
-    jobId: child.id, fromStatus: 'pending', toStatus: 'confirmed', transitionedBy: null,
-    notes: 'Package visit 2 confirmed with visit 1', trx: sp,
-  });
-  const now = new Date();
-  const patch = {
-    source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION, confirmed_at: now, updated_at: now,
-    estimated_price: 0, followup_included: true, create_invoice_on_complete: false,
-  };
-  const toMin = (v) => { const t = hhmm(v); return t ? Number(t.slice(0, 2)) * 60 + Number(t.slice(3)) : null; };
-  const start = toMin(child.window_start);
-  const pStart = toMin(primary.window_start);
-  const pEnd = toMin(primary.window_end);
-  if (start != null) {
-    const blockMin = Math.max(60, pStart != null && pEnd != null && pEnd > pStart ? pEnd - pStart : 0, Number(catalogRow.default_duration_minutes) || 0);
-    const endMin = Math.min(start + blockMin, 23 * 60 + 59);
-    const curEnd = toMin(child.window_end);
-    if (curEnd == null || endMin > curEnd) patch.window_end = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
-  }
-  // A wider window takes the same advisory checks a new child does: the
-  // bounded day fence, then the overlap probe on the promoted window, with
-  // the Schedule card after commit on a clash or a missed fence.
-  let fenceMissed = false;
-  if (patch.window_end) {
-    const day = dateOnly(child.scheduled_date);
-    try {
-      const { fenceBookingDay } = require('./scheduling/occupancy');
-      const fence = await sp.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: day, techId: child.technician_id || null }));
-      fenceMissed = !fence || !fence.acquired;
-    } catch (fenceErr) {
-      fenceMissed = true;
-      logger.warn(`[package-followup] day fence failed for promoted visit 2 ${child.id}: ${fenceErr.message}`);
-    }
-  }
-  await sp('scheduled_services').where({ id: child.id }).update(patch);
-  if (patch.window_end) {
-    await warnOnOverlap(sp, {
-      child: { ...child, window_end: patch.window_end, scheduled_date: dateOnly(child.scheduled_date), parent_service_id: primary.id },
-      customerId: primary.customer_id, outerTrx, fenceMissed,
-    });
-  }
-  logger.info(`[package-followup] pending call-booked visit 2 ${child.id} confirmed with its package visit 1`);
-  return { ...child, status: 'confirmed', source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION };
-}
-
 // Advisory, lock-free, tech-scoped: the office hears about a clash on a
 // Schedule needs-you card; the booking is never blocked. The probe reads
 // through its OWN savepoint so a failed statement rolls back only itself
@@ -325,11 +268,11 @@ function buildChildInsert(primary, catalogRow, cols, { date, technicianId, now }
  * back only itself — the primary booking commits, the failure is logged,
  * and dispatch's closeout card remains the fallback path for visit 2.
  */
-async function ensurePackageFollowUpVisit({ trx, primary, cols = null, promotePendingCallFollowUp = false } = {}) {
+async function ensurePackageFollowUpVisit({ trx, primary, cols = null } = {}) {
   if (!packageFollowupAutobookLive()) return null;
   if (!trx || !primaryEligible(primary)) return null;
   try {
-    return await trx.transaction((sp) => bookInSavepoint(sp, trx, primary, cols, { promotePendingCallFollowUp }));
+    return await trx.transaction((sp) => bookInSavepoint(sp, trx, primary, cols));
   } catch (err) {
     // Lost the one-live-child race (uq_scheduled_services_followup_source_open)
     // to a concurrent writer: the obligation is covered either way. Read the
@@ -348,11 +291,14 @@ async function ensurePackageFollowUpVisit({ trx, primary, cols = null, promotePe
   }
 }
 
-async function bookInSavepoint(sp, outerTrx, primary, cols, { promotePendingCallFollowUp = false } = {}) {
+async function bookInSavepoint(sp, outerTrx, primary, cols) {
   const catalogRow = await resolvePackageCatalogRow(sp, primary);
   if (!catalogRow) return null;
-  const existing = await liveChildOf(sp, primary.id);
-  if (existing) return promotePendingCallFollowUp ? promotePendingCallChild(sp, existing, { primary, catalogRow, outerTrx }) : existing;
+  // Any child ever linked to this visit 1 is the idempotency marker: a live
+  // one is returned, and one that was cancelled, skipped or missed on
+  // purpose is never replaced by a retry.
+  const prior = await sp('scheduled_services').where({ followup_source_service_id: primary.id }).first('id', 'status');
+  if (prior) return FOLLOWUP_CHILD_INACTIVE_STATUSES.includes(String(prior.status)) ? null : liveChildOf(sp, primary.id);
   const date = packageFollowUpDate(primary.scheduled_date, catalogRow.follow_up_interval_days);
   if (!date) return null;
   const columns = cols || await sp('scheduled_services').columnInfo();
@@ -435,6 +381,7 @@ async function mirrorPrimaryAddressOntoPackageChildren({ database, estimateId } 
             OR c.service_address_line1 IS DISTINCT FROM p.service_address_line1
             OR c.service_address_line2 IS DISTINCT FROM p.service_address_line2
             OR c.service_address_city IS DISTINCT FROM p.service_address_city
+            OR c.service_address_state IS DISTINCT FROM p.service_address_state
             OR c.service_address_zip IS DISTINCT FROM p.service_address_zip
             OR c.lat IS DISTINCT FROM p.lat
             OR c.lng IS DISTINCT FROM p.lng)

@@ -527,27 +527,6 @@ async function transitionJobStatus({
       }
     }
 
-    // Two-treatment package (cockroach / flea / bed bug): an office-review
-    // booking (voice agent, outbound callback) becomes a real booking at
-    // office confirm, so visit 2 books HERE, not at the pending request — and
-    // a visit 2 the call pipeline already wrote pending is confirmed with it.
-    // Gate-dark, savepoint-isolated, idempotent, no-op for every other
-    // service and source (package-followup-booking.js).
-    if (String(toStatus || '') === 'confirmed') {
-      try {
-        const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
-        const { packageFollowupAutobookLive } = require('../config/feature-gates');
-        if (packageFollowupAutobookLive()) {
-          const primary = await t('scheduled_services').where({ id: jobId }).first();
-          if (primary && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(primary.source_action)) {
-            await require('./package-followup-booking').ensurePackageFollowUpVisit({ trx: t, primary, promotePendingCallFollowUp: true });
-          }
-        }
-      } catch (packageErr) {
-        logger.warn(`[job-status] package visit 2 failed for ${jobId}: ${packageErr.message}`);
-      }
-    }
-
     // A package visit 1 that was skipped or missed never delivered
     // treatment 1: its auto-booked visit 2 ($0, included, confirmed, arming
     // reminders) must not stay on the schedule as if it were treatment 2.
