@@ -537,6 +537,23 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // Another visit's running timer never blocks this one.
   });
 
+  test('no job timer starts on a COMPLETED visit — the geofence arrival that raced a closeout is refused before any time_entries write (GitHub r2 P1 #5886)', async () => {
+    const timeTracking = require('../services/time-tracking');
+    const techId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Fixture Tech' });
+    await trx('time_entries').insert({ id: randomUUID(), technician_id: techId, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(Date.now() - 3600000) });
+    // The technician's timer on another stop is running.
+    const current = await visit({ status: 'on_site', technician_id: techId, date: '2040-03-02' });
+    const currentTimer = randomUUID();
+    await trx('time_entries').insert({ id: currentTimer, technician_id: techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(Date.now() - 600000), job_id: current.id });
+    const done = await visit({ status: 'completed', technician_id: techId });
+    // Unscoped, exactly as geofence-handler calls it.
+    await expect(timeTracking.startJob(techId, done.id, { lat: 27.4, lng: -82.5 })).rejects.toMatchObject({ status: 409, code: 'job_already_completed' });
+    expect(await trx('time_entries').where({ job_id: done.id })).toHaveLength(0);
+    // The refusal came before the "close any other active job" write.
+    expect((await trx('time_entries').where({ id: currentTimer }).first()).status).toBe('active');
+  });
+
   test('a failed timer lookup is audited as an error against the visit, so the paid-invoice sweep can retry it (pre-push audit P1)', async () => {
     const svc = await visit({ status: 'on_site' });
     const inv = await invoice({ scheduled_service_id: svc.id, status: 'paid', paid_at: new Date() });
@@ -603,9 +620,12 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // 12. refused under the lock because the day moved (issued_visit_rescheduled); it is eligible now → retried
     const v12 = await visit(); const i12 = await paid(v12); await auditRow(v12.id, i12.id, refused, 'issued_visit_rescheduled');
 
+    // 13. refused under the lock because the visit was reassigned / reclassified mid-closeout (issued_visit_identity_changed) → retried on a fresh read
+    const v13 = await visit({ status: 'on_site' }); const i13 = await paid(v13); await auditRow(v13.id, i13.id, refused, 'issued_visit_identity_changed');
+
     const out = await retryFailedPaidInvoiceCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 8, retried: 6, closed: 6 });
-    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort()).toEqual([v1.id, v2.id, v3.id, v8.id, v11.id, v12.id].sort());
+    expect(out).toEqual({ candidates: 9, retried: 7, closed: 7 });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort()).toEqual([v1.id, v2.id, v3.id, v8.id, v11.id, v12.id, v13.id].sort());
     for (const [args] of mockCompleteScheduledService.mock.calls) {
       expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
       expect(args.issuedInvoiceCloseout.trigger).toBe('paid');

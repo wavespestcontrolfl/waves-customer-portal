@@ -288,12 +288,13 @@ function retryableVisitFilter(q, today) {
 // Refusals of the MOMENT, not of the visit: the day had not passed, the
 // technician's job timer was still running, or the visit changed under the
 // completion's row lock while the closeout was in flight (issued_visit_* —
-// a timer started, the technician set out, the day moved). The candidate
+// a timer started, the technician set out, the day moved, the visit was
+// reassigned or reclassified). The candidate
 // filter and the next pass's own resolver decide whether the moment has
 // passed; a visit that is still not eligible is then refused by the resolver
 // with a code that is NOT in this list (visit_en_route, visit_in_future, …),
 // so nothing is retried forever.
-const TRANSIENT_REFUSAL_CODES = ['error', 'visit_scheduled_today', 'visit_timer_running', 'issued_visit_in_progress', 'issued_visit_rescheduled'];
+const TRANSIENT_REFUSAL_CODES = ['error', 'visit_scheduled_today', 'visit_timer_running', 'issued_visit_in_progress', 'issued_visit_rescheduled', 'issued_visit_identity_changed'];
 
 // Shared retry loop. `retryWhenNeverRan`: a candidate with NO paid-trigger
 // audit row is retried too (statement children — their settlement is the only

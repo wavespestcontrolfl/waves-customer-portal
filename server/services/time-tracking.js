@@ -260,6 +260,18 @@ async function startJob(technicianId, jobId, { lat, lng, scopeReq = null } = {})
       if (job) {
         customerId = job.customer_id;
         serviceType = job.service_type;
+        // A completed visit takes no new job timer (GitHub r2 P1 #5886).
+        // The office can complete a visit its technician arrived at (the
+        // invoice-issued closeout, which refuses a visit whose timer is
+        // RUNNING); an automatic geofence arrival that picked the visit just
+        // before that commit would otherwise start a timer on it afterwards
+        // and count until auto clock-out. Decided on the row lock just
+        // taken — the same lock the completion holds while it checks for a
+        // running timer — so exactly one of the two wins. Before any
+        // time_entries write, so the technician's current timer is untouched.
+        if (job.status === 'completed') {
+          throw Object.assign(new Error('This visit is already completed.'), { status: 409, code: 'job_already_completed' });
+        }
         // A live street-level address hold cannot be worked yet: refuse before any timer is created
         // (the same 409 the status routes give). Re-read under the row lock just taken.
         if (await require('./street-level-hold').isStreetLevelHoldVisit(jobId, trx)) {
