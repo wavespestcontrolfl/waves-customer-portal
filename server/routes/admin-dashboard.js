@@ -1991,8 +1991,15 @@ router.get('/channel-roi', dashboardCache, async (req, res, next) => {
 router.get('/service-lines', dashboardCache, async (req, res, next) => {
   try {
     const { computeServiceLines } = require('../services/dashboard-service-lines');
-    const win = resolveAttributionWindow(req.query.period, parseCustomRange(req.query));
-    res.json(await computeServiceLines(win));
+    // Close rate and retention take the plain period; only the cost-per-customer
+    // input is floored at the attribution fresh start (pre-floor ad data is dirty,
+    // estimate outcomes and cohorts are not).
+    const range = parseCustomRange(req.query);
+    const win = range && range.from
+      ? { from: range.from, to: etDateString(), label: `Since ${range.from}` }
+      : { from: periodStartDate(req.query.period), to: etDateString(), label: periodLabel(req.query.period) };
+    const adWin = resolveAttributionWindow(req.query.period, range);
+    res.json(await computeServiceLines(win, { adWin }));
   } catch (err) { next(err); }
 });
 

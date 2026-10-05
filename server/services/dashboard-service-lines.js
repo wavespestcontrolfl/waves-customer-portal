@@ -45,7 +45,7 @@ const BASE_CAVEATS = [
   'An estimate or customer with several service lines counts once in EACH of its lines, so rows add up to more than the totals.',
   'Close rate = accepted / (accepted + declined or expired) resolved in the period; open offers and dead or converted-elsewhere rows are left out.',
   'Open >7d is the live backlog today (sent or viewed over 7 days ago), not limited to the period.',
-  'Cost per new customer = allocated ad spend / converted leads in the period; organic and referral leads carry no spend.',
+  'Cost per new customer = allocated ad spend / distinct customers won from leads in the period; organic and referral leads carry no spend.',
 ];
 
 function labelFor(key) {
@@ -137,10 +137,27 @@ function addDaysStr(dateStr, n) {
   return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
 }
 
+// Exit date by CAUSE, mirroring /retention-cohort: live now = active, not
+// deleted, in a customer stage. Otherwise churned/dormant exit on churned_at
+// (else the stage-change date); a soft delete exits on deleted_at; an
+// active=false row with neither is an undatable deactivation and is dropped
+// from the cohort (null), never backdated or counted as retained.
+const LEFT_STAGES = new Set(['churned', 'dormant']);
+function exitDateStr(c) {
+  const liveNow = c.active === true && c.deleted_at == null && CUSTOMER_STAGES.includes(c.pipeline_stage);
+  if (liveNow) return Infinity;
+  let exit = null;
+  if (LEFT_STAGES.has(c.pipeline_stage)) exit = c.churned_at || c.stage_changed_at;
+  else if (c.deleted_at) exit = c.deleted_at;
+  return exit ? String(exit).slice(0, 10) : null;
+}
+
+// true = retained past day 90, false = left inside 90 days, null = undatable (excluded).
 function isRetained90(c) {
-  if (CUSTOMER_STAGES.includes(c.pipeline_stage)) return true;
-  if (!c.churned_at || !c.conv) return false;
-  return String(c.churned_at).slice(0, 10) > addDaysStr(c.conv, 90);
+  const exit = exitDateStr(c);
+  if (exit === Infinity) return true;
+  if (exit == null || !c.conv) return null;
+  return exit > addDaysStr(c.conv, 90);
 }
 
 function buildRetention(customers, linesByCustomer) {
@@ -148,6 +165,7 @@ function buildRetention(customers, linesByCustomer) {
   for (const c of customers) {
     const keys = linesByCustomer.get(c.id) || [UNKNOWN_KEY];
     const retained = isRetained90(c);
+    if (retained == null) continue; // undatable deactivation → not in the cohort
     for (const k of keys) {
       if (!byLine.has(k)) byLine.set(k, { cohort: 0, retained: 0 });
       const cell = byLine.get(k);
@@ -159,14 +177,22 @@ function buildRetention(customers, linesByCustomer) {
 }
 
 // ── 4: cost per new customer ─────────────────────────────────────────────
+// converted = DISTINCT customers acquired: a lead counts only when it is won
+// or converted AND carries a customer_id, and two won leads for the same
+// customer (an add-on sold to an existing account) count once.
 function buildCac(leads) {
   const byLine = new Map();
+  const seen = new Map(); // line key -> Set(customer_id)
   for (const l of leads) {
     const k = leadLineKey(l.service_interest);
-    if (!byLine.has(k)) byLine.set(k, { leads: 0, converted: 0, spend: 0 });
+    if (!byLine.has(k)) { byLine.set(k, { leads: 0, converted: 0, spend: 0 }); seen.set(k, new Set()); }
     const cell = byLine.get(k);
     cell.leads += 1;
-    if (l.status === 'won' || l.converted_at) cell.converted += 1;
+    const won = l.status === 'won' || !!l.converted_at;
+    if (won && l.customer_id && !seen.get(k).has(l.customer_id)) {
+      seen.get(k).add(l.customer_id);
+      cell.converted += 1;
+    }
     cell.spend += Number(l.ad_cost) || 0;
   }
   return byLine;
@@ -276,17 +302,27 @@ async function fetchRetentionInputs(win) {
   const customers = await qb.select(
     'id',
     'pipeline_stage',
+    'active',
+    db.raw("to_char(deleted_at, 'YYYY-MM-DD') as deleted_at"),
+    db.raw("to_char((pipeline_stage_changed_at AT TIME ZONE 'America/New_York')::date, 'YYYY-MM-DD') as stage_changed_at"),
     db.raw("to_char(churned_at, 'YYYY-MM-DD') as churned_at"),
     db.raw(`to_char(${CONVERSION_DATE_SQL}, 'YYYY-MM-DD') as conv`),
   );
+  // Lines come from the estimates accepted in the customer's FIRST 90 days
+  // only (accepted_at, else created_at, on or before conv + 90d) — a lawn
+  // upsell a year later must not rewrite the historical lawn cohort.
+  const day90ByCustomer = new Map(customers.filter((c) => c.conv).map((c) => [c.id, addDaysStr(c.conv, 90)]));
   const linesByCustomer = new Map();
   const ids = customers.map((c) => c.id);
   for (let i = 0; i < ids.length; i += CHUNK) {
     const rows = await db('estimates')
       .whereIn('customer_id', ids.slice(i, i + CHUNK))
       .where('status', 'accepted')
-      .select('customer_id', 'estimate_data', 'service_interest', 'notes');
+      .select('customer_id', 'estimate_data', 'service_interest', 'notes',
+        db.raw("to_char(COALESCE(accepted_at, created_at) AT TIME ZONE 'America/New_York', 'YYYY-MM-DD') as accepted_on"));
     for (const row of rows) {
+      const day90 = day90ByCustomer.get(row.customer_id);
+      if (day90 && row.accepted_on && String(row.accepted_on).slice(0, 10) > day90) continue;
       const set = new Set(linesByCustomer.get(row.customer_id) || []);
       for (const k of estimateLineKeys(row)) set.add(k);
       linesByCustomer.set(row.customer_id, [...set]);
@@ -306,12 +342,15 @@ async function fetchLeadRows(win) {
     // Same prospect scoping as calculateSourceROI (lead-attribution.js).
     .modify(scopeToProspects);
   return qb.select(
-    'id', 'service_interest', 'status', 'converted_at',
+    'id', 'service_interest', 'status', 'converted_at', 'customer_id',
     db.raw('(SELECT COALESCE(SUM(asa.ad_cost), 0) FROM ad_service_attribution asa WHERE asa.lead_id = leads.id) as ad_cost'),
   );
 }
 
-async function computeServiceLines(win, { now = new Date() } = {}) {
+// win = the plain dashboard period (close rate, retention); adWin = the same
+// period floored at the attribution fresh start (cost per customer only —
+// estimate outcomes and retention are not attribution data).
+async function computeServiceLines(win, { now = new Date(), adWin = win } = {}) {
   const nowMs = now.getTime();
   const winMs = {
     fromMs: parseETDateTime(`${win.from}T00:00`).getTime(),
@@ -334,10 +373,11 @@ async function computeServiceLines(win, { now = new Date() } = {}) {
       const { customers, linesByCustomer } = await fetchRetentionInputs(win);
       return buildRetention(customers, linesByCustomer);
     }),
-    guard('Cost per new customer', async () => buildCac(await fetchLeadRows(win))),
+    guard('Cost per new customer', async () => buildCac(await fetchLeadRows(adWin))),
   ]);
 
-  return { period: win, lines: assembleLines({ close, retention, cac }), caveats };
+  if (adWin.from !== win.from) caveats.push(`Cost per new customer uses lead data from ${adWin.from} (attribution baseline); the other columns use the full period.`);
+  return { period: win, adPeriod: adWin, lines: assembleLines({ close, retention, cac }), caveats };
 }
 
 module.exports = {
@@ -347,5 +387,6 @@ module.exports = {
   buildCac,
   assembleLines,
   isRetained90,
+  exitDateStr,
   BASE_CAVEATS,
 };

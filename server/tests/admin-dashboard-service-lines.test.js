@@ -144,21 +144,46 @@ describe('computeServiceLines', () => {
 
   it('computes 90-day retention and cost per new customer from their own queries', async () => {
     db.__results.estimates = [];
+    const live = { active: true, deleted_at: null, stage_changed_at: null };
     db.__results.customers = [
-      { id: 'c1', pipeline_stage: 'active_customer', churned_at: null, conv: '2026-05-01' },
-      { id: 'c2', pipeline_stage: 'churned', churned_at: '2026-06-01', conv: '2026-05-01' }, // left inside 90d
-      { id: 'c3', pipeline_stage: 'churned', churned_at: '2026-09-01', conv: '2026-05-01' }, // left after 90d
-      { id: 'c4', pipeline_stage: 'dormant', churned_at: null, conv: '2026-05-01' }, // not retained
+      { id: 'c1', pipeline_stage: 'active_customer', churned_at: null, conv: '2026-05-01', ...live },
+      { id: 'c2', pipeline_stage: 'churned', churned_at: '2026-06-01', conv: '2026-05-01', ...live }, // left inside 90d
+      { id: 'c3', pipeline_stage: 'churned', churned_at: '2026-09-01', conv: '2026-05-01', ...live }, // left after 90d
+      // dormant with no churned_at: exit = stage-change date (after day 90 → retained)
+      { id: 'c4', pipeline_stage: 'dormant', churned_at: null, conv: '2026-05-01', ...live, stage_changed_at: '2026-09-15' },
+      // still "active_customer" by stage but soft-deleted inside 90d → NOT retained
+      { id: 'c5', pipeline_stage: 'active_customer', churned_at: null, conv: '2026-05-01', ...live, deleted_at: '2026-06-10' },
+      // active=false, no churn, no delete: undatable → dropped from the cohort
+      { id: 'c6', pipeline_stage: 'active_customer', churned_at: null, conv: '2026-05-01', ...live, active: false },
     ];
-    db.__results.estimatesByCustomer = [1, 2, 3, 4].map((n) => ({ customer_id: `c${n}`, estimate_data: {}, service_interest: 'Lawn care' }));
+    db.__results.estimatesByCustomer = [
+      ...[1, 2, 3, 4, 5, 6].map((n) => ({ customer_id: `c${n}`, estimate_data: {}, service_interest: 'Lawn care', accepted_on: '2026-05-02' })),
+      // a pest upsell accepted a year after conversion must NOT put c1 in the pest cohort
+      { customer_id: 'c1', estimate_data: {}, service_interest: 'Pest control', accepted_on: '2027-04-01' },
+    ];
     db.__results.leads = [
-      { id: 'l1', service_interest: 'Lawn care', status: 'won', converted_at: null, ad_cost: '30.00' },
-      { id: 'l2', service_interest: 'Lawn care', status: 'new', converted_at: null, ad_cost: '10.00' },
-      { id: 'l3', service_interest: 'Lawn care', status: 'new', converted_at: '2026-10-03T00:00:00Z', ad_cost: null },
+      { id: 'l1', service_interest: 'Lawn care', status: 'won', converted_at: null, customer_id: 'cx1', ad_cost: '30.00' },
+      { id: 'l2', service_interest: 'Lawn care', status: 'new', converted_at: null, customer_id: null, ad_cost: '10.00' },
+      { id: 'l3', service_interest: 'Lawn care', status: 'new', converted_at: '2026-10-03T00:00:00Z', customer_id: 'cx2', ad_cost: null },
+      // second won lead for an existing customer: not a new acquisition
+      { id: 'l4', service_interest: 'Lawn care', status: 'won', converted_at: null, customer_id: 'cx1', ad_cost: '5.00' },
+      // marked won by hand with no customer: not a new customer
+      { id: 'l5', service_interest: 'Lawn care', status: 'won', converted_at: null, customer_id: null, ad_cost: '0' },
     ];
     const out = await computeServiceLines(WIN, { now: NOW });
     const lawn = lawnRow(out.lines);
-    expect(lawn.ret90).toEqual({ cohort: 4, retained: 2, rate: 50 });
-    expect(lawn.cac).toEqual({ leads: 3, converted: 2, spend: 40, value: 20 });
+    expect(lawn.ret90).toEqual({ cohort: 5, retained: 3, rate: 60 });
+    const pest = out.lines.find((l) => l.key === 'pest');
+    expect(pest.ret90).toEqual({ cohort: 0, retained: 0, rate: null });
+    expect(lawn.cac).toEqual({ leads: 5, converted: 2, spend: 45, value: 22.5 });
+  });
+
+  it('uses the plain period for close rate and the floored window only for cost per customer', async () => {
+    db.__results.estimates = [];
+    const adWin = { from: '2026-09-15', to: WIN.to, label: 'floored' };
+    const out = await computeServiceLines(WIN, { now: NOW, adWin });
+    expect(out.period).toEqual(WIN);
+    expect(out.adPeriod).toEqual(adWin);
+    expect(out.caveats.some((c) => c.includes('2026-09-15') && /attribution baseline/.test(c))).toBe(true);
   });
 });
