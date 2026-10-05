@@ -88,7 +88,7 @@ it('keeps today\'s Dispatch deep link when the gate is false or absent', async (
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   // Two open services: the picker lists them, and the tapped row goes to the deep link.
   fireEvent.click(await screen.findByText('Fixture svc-lawn-off'));
-  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-lawn-off');
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-lawn-off'));
   expect(screen.queryByText(/Lawn re-service sheet/)).not.toBeInTheDocument();
 });
 
@@ -100,7 +100,7 @@ it('keeps the deep link for a typed lawn visit that is not a re-service even wit
   })];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-lawn-onetime');
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-lawn-onetime'));
   expect(screen.queryByText(/Lawn re-service sheet/)).not.toBeInTheDocument();
 });
 
@@ -111,7 +111,7 @@ it('does not route a pest re-service or a tree & shrub visit to the lawn sheet',
   })];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-ts');
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-ts'));
   expect(screen.queryByText(/Lawn re-service sheet/)).not.toBeInTheDocument();
 });
 
@@ -130,6 +130,6 @@ it('sends the sheet\'s full-form escape to the Dispatch typed completion', async
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   fireEvent.click(await screen.findByRole('button', { name: 'Sheet full form' }));
-  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-lawn-escape');
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-lawn-escape'));
   expect(screen.queryByText(/Lawn re-service sheet/)).not.toBeInTheDocument();
 });

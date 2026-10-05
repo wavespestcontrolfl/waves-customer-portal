@@ -58,7 +58,7 @@ import { isTreeShrubFastCompleteEligible } from '../../lib/tree-shrub-fast-compl
 import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLawnReserviceSheet';
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
-import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
+import { getFastCompletionAttempt, listFastCompletionAttempts, pruneFastCompletionAttempts, pruneRecapClipDrafts } from '../../lib/completion-resume-store';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
@@ -228,6 +228,35 @@ function isLawnReserviceFastCompleteEligible(service) {
   return service?.lawnReserviceFastCompleteEnabled === true
     && service?.completionProfile?.serviceKey === 'lawn_re_service'
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
+}
+
+// When a saved completion was stored on this device, for the picker, which
+// otherwise shows nothing that tells two off-route attempts apart (GitHub
+// Codex P2 on 102b99cb1b).
+function savedAtLabel(storedAt) {
+  const when = Number(storedAt);
+  if (!Number.isFinite(when) || when <= 0) return '';
+  return new Date(when).toLocaleString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+}
+// The scan without one service's attempt: a tap's own read found it gone.
+function withoutRecoveryAttempt(scan, serviceId) {
+  if (!scan.attempts.has(String(serviceId))) return scan;
+  const attempts = new Map(scan.attempts);
+  attempts.delete(String(serviceId));
+  return { ...scan, attempts };
+}
+const RECOVERY_READ_NOTICE = 'Could not read the completion saved on this device. Tap to try again.';
+// A durable retry must reopen the sheet that prepared its exact body even if
+// the live route now says completed. Report-flow bodies overlap the typed
+// findings used by the lawn and Tree & Shrub sheets, so their frozen report
+// base wins; the remaining findings type identifies the focused sheet.
+function fastCompletionRecoveryKind(attempt) {
+  const body = attempt?.body;
+  if (!body || typeof body !== 'object') return null;
+  if (Object.hasOwn(body, 'reportDraftBase')) return 'report';
+  if (body.structuredFindings?.type === 'tree_shrub') return 'tree_shrub';
+  if (body.structuredFindings?.type === 'one_time_lawn_treatment') return 'lawn_reservice';
+  return 'pest';
 }
 
 // Typed specialty jobs (profile cut over to the service-report flow with a
@@ -434,6 +463,14 @@ export default function TechHomePage({ section = 'today' }) {
   const [fastCompleteService, setFastCompleteService] = useState(null);
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnReserviceFastService, setLawnReserviceFastService] = useState(null);
+  const [fastRecoveryScan, setFastRecoveryScan] = useState(() => ({ operatorId: null, attempts: new Map() }));
+  const reportRouteSeq = useRef(0);
+  const [recoveryReadNotice, setRecoveryReadNotice] = useState('');
+  // Bumped by a tap while the device read failed: the tap scans again.
+  const [recoveryScanTick, setRecoveryScanTick] = useState(0);
+  // The services this device's last scan holds a saved attempt for, as a tap
+  // reads them.
+  const knownRecoveryIds = useRef(new Set());
   const [enRouteState, setEnRouteState] = useState({ pendingId: null, message: '', isError: false });
   const [onSiteState, setOnSiteState] = useState({ pendingId: null, message: '', isError: false });
   const [rainOutService, setRainOutService] = useState(null); // service object → sheet open
@@ -537,7 +574,14 @@ export default function TechHomePage({ section = 'today' }) {
   // Recap clips kept on this device past the draft retention window are
   // abandoned (the visit left the route): sweep them here, since a tech who
   // stays in this page never runs the admin schedule's full sweep.
-  useEffect(() => { pruneRecapClipDrafts().catch(() => {}); }, []);
+  useEffect(() => {
+    pruneRecapClipDrafts().catch(() => {});
+    // The store's own retention only: /complete takes an overdue visit's
+    // retry from its assigned technician at any age (no date cutoff;
+    // completionOwnershipError), so nothing shorter may drop one (GitHub
+    // Codex P2 on b1ebfd50ce).
+    pruneFastCompletionAttempts().catch(() => {});
+  }, []);
 
   useEffect(() => {
     fetchSchedule();
@@ -649,6 +693,39 @@ export default function TechHomePage({ section = 'today' }) {
   const myServices = currentTechId
     ? schedule.filter((s) => String(serviceTechnicianId(s)) === String(currentTechId))
     : [];
+  // Attempts remain reachable after midnight or a move removes the service
+  // from today's route. Device ownership is independent of current assignment;
+  // the server still verifies access and the original visit before any write.
+  useEffect(() => {
+    let active = true;
+    listFastCompletionAttempts(staffIdForDevice).then((result) => {
+      if (!active) return;
+      // An unreadable device keeps the last list this operator had: a passing
+      // storage failure must not drop saved completions. When that list held
+      // any, it says so and the next tap scans again; a device that cannot
+      // store them at all (a private window) has none to lose and stays quiet
+      // (GitHub Codex P2 on 458cc517e5).
+      if (!result.available) {
+        setFastRecoveryScan((scan) => (scan.operatorId === staffIdForDevice ? scan : { operatorId: staffIdForDevice, attempts: new Map() }));
+        if (knownRecoveryIds.current.size) setRecoveryReadNotice(RECOVERY_READ_NOTICE);
+        return;
+      }
+      setFastRecoveryScan({ operatorId: staffIdForDevice, attempts: new Map(result.attempts.map((attempt) => [attempt.serviceId, attempt])) });
+      setRecoveryReadNotice((notice) => (notice === RECOVERY_READ_NOTICE ? '' : notice));
+    });
+    return () => { active = false; };
+  }, [schedule, staffIdForDevice, recoveryScanTick, fastCompleteService, treeShrubFastService, lawnReserviceFastService]);
+  // Once this operator's device has been scanned, its attempts stand while a
+  // later route refresh or sheet close re-scans: keying the scan to the
+  // schedule object made every refresh disable the completion buttons for a
+  // moment, dropping a tap. A tap re-reads its visit's attempt anyway
+  // (openServiceReport), so a list a re-scan is about to replace never
+  // misroutes.
+  const recoveryScanCurrent = fastRecoveryScan.operatorId === staffIdForDevice;
+  const fastRecoveryAttempts = recoveryScanCurrent ? fastRecoveryScan.attempts : new Map();
+  const fastRecoveryServiceIds = new Set(fastRecoveryAttempts.keys());
+  knownRecoveryIds.current = fastRecoveryServiceIds;
+  const fastRecoveryCheckPending = !!staffIdForDevice && !recoveryScanCurrent;
   // "Next Stop" = first non-terminal service in the day's route.
   // Skipping past completed/skipped/cancelled/no_show means a tech with
   // an earlier dead job (skipped or no-showed) sees the actual upcoming
@@ -810,11 +887,23 @@ export default function TechHomePage({ section = 'today' }) {
     if (isLaneReportEligible(service)) setFastCompleteService(service);
     else openProjectOrContinue(service);
   }, [openProjectOrContinue]);
-  const projectServices = (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
+  const currentProjectServices = (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
     !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service)
+    || fastRecoveryServiceIds.has(String(service.id))
     || (!TERMINAL_STATUSES_VISIT.has(service.status)
       && !['sent', 'closed'].includes(service.linkedProject?.status))
   ));
+  // A saved attempt whose visit is off today's route (moved, or a past day)
+  // is listed on its own; a route that failed to load still lists the visits
+  // with a saved attempt.
+  const projectServices = [
+    ...currentProjectServices.filter((service) => !scheduleError || fastRecoveryServiceIds.has(String(service.id))),
+    ...[...fastRecoveryAttempts.values()]
+      .filter((attempt) => !selectedVisitKey && !myServices.some((service) => String(service.id) === attempt.serviceId))
+      .map((attempt) => ({ id: attempt.serviceId, customerName: 'Saved completion',
+        serviceType: attempt.summary || 'Unfinished completion', status: 'unknown',
+        savedAt: attempt.storedAt, fastCompletionRecoveryOnly: true })),
+  ];
   // Shared by every entry point that would otherwise call setRecapService
   // directly: a pest re-service under the gate opens the one-screen Fast
   // Complete sheet instead of the full recap modal. Everything else routes
@@ -835,22 +924,63 @@ export default function TechHomePage({ section = 'today' }) {
     else if (isTypedReportEligible(service, { stationMapOff })) setFastCompleteService(service);
     else openTypedCompletion(service);
   }, [stationMapOff]);
+  // Read the operator-scoped durable attempt before any normal eligibility
+  // decision. A successful /complete may already have made the schedule row
+  // terminal while its saved body still needs the same-key side effects
+  // retry; routing that row to recap or Dispatch would strand the attempt.
+  const openServiceReport = useCallback(async (service) => {
+    const seq = ++reportRouteSeq.current;
+    setRecoveryReadNotice('');
+    // Re-read at the tap: another tab or a just-closed sheet may have
+    // discarded or completed the attempt since the picker was rendered.
+    const result = staffIdForDevice
+      ? await getFastCompletionAttempt(service.id, staffIdForDevice)
+      : { attempt: null };
+    if (seq !== reportRouteSeq.current || String(staffRef.current?.id || '') !== staffIdForDevice) return;
+    const recoveryKind = fastCompletionRecoveryKind(result.attempt);
+    if (recoveryKind) {
+      const recoveryService = {
+        ...service,
+        fastCompletionRecoveryReportFlow: recoveryKind === 'report',
+      };
+      if (recoveryKind === 'tree_shrub') setTreeShrubFastService(recoveryService);
+      else if (recoveryKind === 'lawn_reservice') setLawnReserviceFastService(recoveryService);
+      else setFastCompleteService(recoveryService);
+      return;
+    }
+    // A saved attempt this device knows of that cannot be read now: a fresh
+    // completion here would race the saved one (its photos and report), so
+    // nothing opens until it reads; the device says so (GitHub Codex P2s on
+    // 102b99cb1b and 458cc517e5).
+    if (result.available === false && (service.fastCompletionRecoveryOnly || knownRecoveryIds.current.has(String(service.id)))) {
+      setRecoveryReadNotice(RECOVERY_READ_NOTICE);
+      return;
+    }
+    // The tap's own read found no saved attempt for a service the list held
+    // one for (another tab discarded or finished it): the stale entry leaves
+    // the list, for an off-route entry and a route row alike, before any
+    // routing (GitHub Codex P2s on 102b99cb1b and b1ebfd50ce).
+    if (result.available !== false && knownRecoveryIds.current.has(String(service.id))) {
+      setFastRecoveryScan((scan) => withoutRecoveryAttempt(scan, service.id));
+    }
+    if (service.fastCompletionRecoveryOnly) return;
+    if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
+    // Same routing for the row, the picker and the quick action: a cut-over
+    // typed job must not open CreateProjectModal.
+    if (usesDispatchCompletion(service)) openTypedVisit(service);
+    else if (isPestControlService(service)) openPestCompletion(service);
+    else openProjectOrLane(service);
+  }, [staffIdForDevice, openTypedVisit, openPestCompletion, openProjectOrLane]);
   const handleProjectQuickAction = useCallback(() => {
+    if (recoveryReadNotice) setRecoveryScanTick((tick) => tick + 1);
+    // With nothing to open, a tap after a failed read only scans again.
+    if (projectServices.length === 0) return;
     if (projectServices.length === 1) {
-      const only = projectServices[0];
-      // Same routing as the row/picker handlers — a cut-over typed job must
-      // not open CreateProjectModal through the quick action either.
-      if (usesDispatchCompletion(only)) {
-        openTypedVisit(only);
-      } else if (isPestControlService(only)) {
-        openPestCompletion(only);
-      } else {
-        openProjectOrLane(only);
-      }
+      openServiceReport(projectServices[0]);
       return;
     }
     setShowProjectPicker(true);
-  }, [projectServices, openProjectOrLane, openPestCompletion, openTypedVisit]);
+  }, [projectServices, openServiceReport, recoveryReadNotice]);
 
   const openFieldVisit = (stop) => {
     if (navigationBusy) return;
@@ -860,16 +990,13 @@ export default function TechHomePage({ section = 'today' }) {
     if (navigationBusy) return;
     setSearchParams((params) => { params.delete('visit'); return params; });
   };
-  const openServiceReport = (service) => {
-    if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
-    if (usesDispatchCompletion(service)) openTypedVisit(service);
-    else if (isPestControlService(service)) openPestCompletion(service);
-    else openProjectOrLane(service);
-  };
+  const soleRecovery = projectServices.length === 1
+    && fastRecoveryServiceIds.has(String(projectServices[0].id));
+  const completionRoutesLoading = loading || fastRecoveryCheckPending;
   const fieldTools = [
     { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`${base}/protocols${visitSearch}`) },
     { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`${base}/lawn-diagnostic${visitSearch}`) },
-    { label: 'Project Report', description: 'Open the existing service report workflow', icon: 'project', disabled: loading || !!scheduleError || projectServices.length === 0, onClick: handleProjectQuickAction },
+    { label: completionRoutesLoading ? 'Checking Saved Completions…' : soleRecovery ? 'Recover Completion' : 'Project Report', description: recoveryReadNotice || (soleRecovery ? 'Open the completion saved on this device' : 'Open the existing service report workflow'), icon: 'project', disabled: completionRoutesLoading || (projectServices.length === 0 && !recoveryReadNotice), onClick: handleProjectQuickAction },
     ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate(`${base}/estimate`) }] : []),
     ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`${base}/social-post${visitSearch}`) }] : []),
   ];
@@ -900,7 +1027,7 @@ export default function TechHomePage({ section = 'today' }) {
       />
         <TechFieldHome
           section={section} stops={stops} nextStop={fieldNextStop}
-          loading={loading} refreshing={refreshing} error={scheduleError} notice={routeNotice} rainChance={rainChance}
+          loading={loading} refreshing={refreshing} error={scheduleError} notice={[routeNotice, recoveryReadNotice].filter(Boolean).join(' ')} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards />}
@@ -1007,12 +1134,11 @@ export default function TechHomePage({ section = 'today' }) {
       {showProjectPicker && (
         <ProjectServicePicker
           services={projectServices}
+          recoveryServiceIds={fastRecoveryServiceIds}
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
-            if (usesDispatchCompletion(service)) openTypedVisit(service);
-            else if (isPestControlService(service)) openPestCompletion(service);
-            else openProjectOrLane(service);
+            openServiceReport(service);
           }}
         />
       )}
@@ -1069,6 +1195,7 @@ export default function TechHomePage({ section = 'today' }) {
             // step needs from the row (the tracer's map center and whether
             // this visit takes a satellite trace at all).
             ...reportFlowFields(fastCompleteService, { stationMapOff }),
+            ...(fastCompleteService.fastCompletionRecoveryReportFlow ? { reportFlow: true } : {}),
             // GATE_NOTE_BOX_PHOTOS rides the same row: only an exact true puts
             // the visit's photos in the note's box (the report flow only;
             // never lawn or tree, shrub & palm, which the payload leaves off).
@@ -1078,6 +1205,7 @@ export default function TechHomePage({ section = 'today' }) {
             lng: fastCompleteService.lng ?? null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           // GATE_FAST_COMPLETE_VOICE_FILL rides the same schedule row: only an
           // exact true shows the mic, the Check chips and the office note.
           voiceFillEnabled={fastCompleteService.fastCompleteVoiceFillEnabled === true}
@@ -1120,6 +1248,7 @@ export default function TechHomePage({ section = 'today' }) {
             routedAddress: typeof treeShrubFastService.address === 'string' ? treeShrubFastService.address : null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           onClose={(options) => {
             setTreeShrubFastService(null);
             if (options?.refresh) fetchSchedule();
@@ -1152,6 +1281,7 @@ export default function TechHomePage({ section = 'today' }) {
             routedAddress: typeof lawnReserviceFastService.address === 'string' ? lawnReserviceFastService.address : null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           // One gate for every sheet's voice fill: only an exact true turns it on.
           voiceFillEnabled={lawnReserviceFastService.fastCompleteVoiceFillEnabled === true}
           onClose={(options) => {
@@ -1252,7 +1382,7 @@ export default function TechHomePage({ section = 'today' }) {
   );
 }
 
-function ProjectServicePicker({ services, onClose, onSelect }) {
+function ProjectServicePicker({ services, recoveryServiceIds, onClose, onSelect }) {
   return (
     <div
       role="dialog"
@@ -1316,11 +1446,14 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
                   }}
                 >
                   <div style={{ fontSize: 14, fontWeight: 500 }}>
-                    {service.customer_name || service.customerName || 'Customer'}
+                    {service.fastCompletionRecoveryOnly
+                      ? [service.customerName, savedAtLabel(service.savedAt)].filter(Boolean).join(' · ')
+                      : service.customer_name || service.customerName || 'Customer'}
                   </div>
                   <div style={{ fontSize: 14, color: FIELD.muted, marginTop: 3 }}>
-                    {status.replace(/_/g, ' ')}
+                    {service.fastCompletionRecoveryOnly ? `saved on this device · ${service.serviceType}` : status.replace(/_/g, ' ')}
                     {serviceWindowLabel(service) ? ` · ${serviceWindowLabel(service)}` : ''}
+                    {recoveryServiceIds?.has(String(service.id)) ? ' · saved completion on this device' : ''}
                   </div>
                 </button>
               );
