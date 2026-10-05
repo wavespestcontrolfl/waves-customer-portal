@@ -39,7 +39,9 @@ describe('the v13 watering rules', () => {
     }
     // Stored on main by earlier label reads (20260930000001 seed).
     const storedOnMain = new Set(['Arena 50 WDG', 'Celsius WG', 'Atticus Talak 7.9 F']);
-    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name)]);
+    // Blindside (the v13 fallback weed spot) has its own migration.
+    const blindside = require('../models/migrations/20261006090000_watering_rule_blindside');
+    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME]);
     expect([...names].filter((name) => !covered.has(name))).toEqual([]);
   });
 
@@ -76,6 +78,13 @@ describe('the v13 watering rules', () => {
     // ...while the same pair at 3 PM ET gives hold, then water in by 11 PM.
     const afternoonPair = buildWateringInstruction({ rules: [dylox, certainty], completedAt: new Date('2026-10-14T19:00:00Z') });
     expect(afternoonPair.state).toBe('hold_then_water_in');
+  });
+
+  test('Blindside is the label 24-hour hold', () => {
+    const blindside = require('../models/migrations/20261006090000_watering_rule_blindside');
+    const checked = validateRule(blindside.RULE);
+    expect(checked.errors).toEqual([]);
+    expect(checked.rule).toMatchObject({ mode: 'hold', hold_hours: 24, source: 'label' });
   });
 
   test('no 48-hour runoff advisory is turned into a hold', () => {
