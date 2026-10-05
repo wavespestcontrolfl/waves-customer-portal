@@ -37,6 +37,9 @@ describe('native customer-app bootstrap reproducibility', () => {
     // Pods targets take their floor from podspecs: post_install raises them too.
     expect(source).toContain('waves: iOS floor');
     expect(source).toContain('installer.pods_project.targets.each');
+    // A Podfile floor above 15 is kept, and a Podfile with no post_install gets one.
+    expect(source).toContain("s/^platform :ios, '([0-9]|1[0-4])");
+    expect(source).toContain('post_install do |installer|\\n" + hook + "end');
     // A missing Homebrew wrapper must not end the script under pipefail.
     expect(source).toMatch(/POD_GEM_HOME="\$\(.*\|\| true\)"/);
     // The manual add step prints only when the automatic attach failed.

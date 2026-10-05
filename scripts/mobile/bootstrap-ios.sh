@@ -102,7 +102,8 @@ fi
 # 14.0, and every target (App + Pods) then fails to build. Raise the floor in
 # the Podfile (Pods targets) and the App project before sync runs pod install.
 IOS_MIN="15.0"
-sed -i '' -E "s/^platform :ios, '[0-9.]+'/platform :ios, '${IOS_MIN}'/" ios/App/Podfile
+# Only a floor below 15 is raised; a higher one is kept.
+sed -i '' -E "s/^platform :ios, '([0-9]|1[0-4])(\.[0-9]+)*'/platform :ios, '${IOS_MIN}'/" ios/App/Podfile
 sed -i '' -E "s/IPHONEOS_DEPLOYMENT_TARGET = 1[0-4]\.[0-9]+;/IPHONEOS_DEPLOYMENT_TARGET = ${IOS_MIN};/g" ios/App/App.xcodeproj/project.pbxproj
 # Each generated Pods target takes its floor from its podspec (Capacitor's
 # says 14.0), not from the Podfile platform, and the template's
@@ -120,7 +121,8 @@ if ! grep -q 'waves: iOS floor' ios/App/Podfile; then
            "    end\n" \
            "  end\n"
     out = src.sub(/^(post_install do \|installer\|\n(?:.*assertDeploymentTarget.*\n)?)/) { $1 + hook }
-    abort("Podfile has no post_install hook to extend") if out == src
+    # An older or customized Podfile with no post_install: add a whole one.
+    out = src.rstrip + "\n\npost_install do |installer|\n" + hook + "end\n" if out == src
     File.write(path, out)
   '
 fi
