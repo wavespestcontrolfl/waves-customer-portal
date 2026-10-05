@@ -339,20 +339,15 @@ async function restoreDemotedCallers(h, phoneKey = null) {
 // A settings save (portal or office) that names appointment_notify_primary
 // after this flow switched it off: from now on the value is the holder's own
 // choice, so a later STOP / removal of the contact never overwrites it. Runs in
-// the save's transaction, in its own savepoint: it never fails the save.
+// the save's transaction (which already holds the prefs row) and is atomic
+// with it: the preference never commits without its marker.
 async function noteHolderSetNotifyPrimary(h, customerId) {
   if (!customerId) return;
-  const mark = (x) => x('recipient_optin')
+  await (h || db)('recipient_optin')
     .where({ customer_id: customerId })
     .whereNotNull('caller_demoted_at')
     .whereNull('caller_choice_at')
     .update({ caller_choice_at: new Date() });
-  try {
-    if (h && typeof h.transaction === 'function') await h.transaction(mark);
-    else await mark(h || db);
-  } catch (err) {
-    logger.warn(`[recipient-optin] holder-choice marker failed (${err.code || err.name || 'error'})`);
-  }
 }
 
 // `replyPhoneKey` is the phone whose YES triggered this run: only ITS replay
@@ -539,20 +534,18 @@ async function claimFollowUpForFanOut(customerId, phone, visitId) {
   const phoneKey = recipientPhoneKey(phone);
   if (!customerId || !phoneKey || !visitId || !isOnSiteFollowUpLive()) return 'none';
   try {
-    // Either sender already texted this visit's confirmation to this phone.
-    const texted = await db('recipient_optin')
-      .where({ customer_id: customerId, phone_key: phoneKey, visit_id: visitId })
-      .whereNotNull('fanout_confirmed_at')
-      .first('phone_key');
-    if (texted) return 'sent';
-    const open = () => db('recipient_optin')
-      .where({ customer_id: customerId, phone_key: phoneKey, visit_id: visitId, status: 'confirmed' })
-      .whereNull('followup_done_at');
-    const claimed = await open()
+    const forVisit = () => db('recipient_optin').where({ customer_id: customerId, phone_key: phoneKey, visit_id: visitId });
+    const claimed = await forVisit()
+      .where({ status: 'confirmed' })
+      .whereNull('followup_done_at')
+      .whereNull('fanout_confirmed_at')
       .where((q) => q.whereNull('followup_claimed_at').orWhere('followup_claimed_at', '<', new Date(Date.now() - FOLLOWUP_CLAIM_TTL_MS)))
       .update({ followup_claimed_at: new Date() });
     if (claimed) return 'claimed';
-    return (await open().first('phone_key')) ? 'busy' : 'none';
+    // Read AFTER the claim attempt, so a replay that finished in between is seen.
+    const row = await forVisit().first('status', 'followup_done_at', 'fanout_confirmed_at');
+    if (row && row.fanout_confirmed_at) return 'sent';
+    return row && row.status === 'confirmed' && !row.followup_done_at ? 'busy' : 'none';
   } catch (err) {
     logger.warn(`[recipient-optin] fan-out follow-up claim failed (${err.code || err.name || 'error'})`);
     return 'none';
@@ -574,13 +567,23 @@ async function releaseFanOutFollowUpClaim(customerId, phone, visitId, { confirme
 // card outage must never roll back an opt-out). The phone stays on any
 // unconsented list (it never consented).
 async function onRecipientDeclined(phoneKey, { dbh = db } = {}) {
-  // In its own savepoint (an opt-out is never rolled back by this); the sweep
+  // AFTER the decline commits, in its own transaction: the restore takes the
+  // prefs row before the opt-in row (the settings-save order), which the
+  // decline's transaction, already holding the opt-in row, could not do
+  // without a deadlock. An opt-out is never rolled back by this; the sweep
   // retries a restore that fails here.
-  try {
-    if (dbh && typeof dbh.transaction === 'function') await dbh.transaction((h) => restoreDemotedCallers(h, phoneKey));
-    else await restoreDemotedCallers(dbh, phoneKey);
-  } catch (err) {
-    logger.warn(`[recipient-optin] demoted-caller restore failed (${err.code || err.name || 'error'})`);
+  const restore = async () => {
+    try {
+      await db.transaction((trx) => restoreDemotedCallers(trx, phoneKey));
+    } catch (err) {
+      logger.warn(`[recipient-optin] demoted-caller restore failed (${err.code || err.name || 'error'})`);
+    }
+  };
+  if (dbh && dbh.isTransaction) {
+    const committed = commitPromiseOf(dbh);
+    if (committed) committed.then(restore, () => {});
+  } else {
+    await restore();
   }
   await bestEffort(dbh, (h) => updateCaptureCard(h, phoneKey, { optin_result: 'declined' }));
 }
