@@ -19,7 +19,10 @@
 //     products only). The method is the common three as chips (Spot treatment,
 //     Broadcast spray, Granular broadcast) and the rest under "More methods",
 //     offered by the context (`methods`), the lawn re-service sheet's own control.
-//     No area box:
+//     Nobody types an amount on a fast complete (owner 2026-10-05): a row with no
+//     plan quantity is figured from the catalog's rate per 1,000 sq ft times
+//     the area it goes down on (derivedAmount), and says so under the box; a
+//     typed amount wins. No area box:
 //     every lawn visit treats the whole lawn, so a sprayed or spread product
 //     goes down on its own planned area or the visit property's saved
 //     whole-lawn area (/complete requires one);
@@ -70,15 +73,15 @@ import LawnAssessmentCompletionBlock from '../lawn/LawnAssessmentCompletionBlock
 import { LAWN_FINDINGS_TYPE } from '../../lib/lawn-fast-complete';
 import { detectServiceCategory } from '../../lib/service-colors';
 import { LAWN_DEFAULT_AREAS, recordedLawnArea } from '../../lib/lawn-completion';
-import { defaultApplicationMethodForLine, normalizeApplicationMethod } from '../../lib/product-rate-prefill';
+import { defaultApplicationMethodForLine, isPerBasisUnit, normalizeApplicationMethod, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import {
   UNIT_CHOICES, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
-import { submittedAmount } from '../../lib/measure-units';
+import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
-  SavedView, TipSection, VisitNote, methodChoicesOf, techTipsOf, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  SavedView, TipSection, VisitNote, methodChoicesOf, techTipsOf, unitLabel, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -395,6 +398,43 @@ const areaOf = (row, wholeLawn) => {
   if (requirement?.unit !== 'sqft') return null;
   return row.plannedSqft || wholeLawn || null;
 };
+
+// The amount a row is figured at when nobody typed one and the plan gave none
+// (owner 2026-10-05: a fast complete never asks the tech to work this out):
+// the catalog's rate per 1,000 sq ft times the area the row goes down on, in
+// the rate's own unit (spoons for a small liquid dose, as every seeded amount).
+// The area is the one the row submits (its sqft method's); a planned spot row
+// goes down on the plan's own area. No area, a per-basis rate (per gallon, per
+// acre, per spot), a rate in mL or a rate in another measure than the row's
+// figures nothing, and the box stays empty. Returns { amount, unit, note } or
+// null; `note` is the working, read under the box.
+function derivedAmount(row, lawnSqft) {
+  if (row.amountPicked || row.fromPlan) return null;
+  const area = requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (row.planned ? row.plannedSqft : null);
+  if (!(area > 0)) return null;
+  const resolved = resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
+  const rate = Number(resolved.rate);
+  const rateUnit = String(resolved.rateUnit || '').trim();
+  if (!(rate > 0) || !rateUnit || isPerBasisUnit(rateUnit) || isMlUnit(rateUnit)) return null;
+  const base = rateUnit.split('/')[0].trim().toLowerCase();
+  const unit = measureUnit(base, row.dimension);
+  if (!unit) return null;
+  // Two decimals in the rate's unit, as the full form figures it (derivedTotalAmount).
+  const seeded = seededAmount(Math.round(rate * (area / 1000) * 100) / 100, unit);
+  if (!(seeded.amount > 0)) return null;
+  return {
+    amount: seeded.amount,
+    unit: seeded.unit,
+    note: `${rate} ${unitLabel(base)} per 1,000 sq ft × ${area.toLocaleString('en-US')} sq ft`,
+  };
+}
+
+// A row as the sheet reads, checks and sends it: its figured amount in place
+// of an empty box. The tech's own entry and the plan's quantity pass through.
+function withDerivedAmount(row, lawnSqft) {
+  const derived = derivedAmount(row, lawnSqft);
+  return derived ? { ...row, totalAmount: derived.amount, amountUnit: derived.unit, derivedNote: derived.note } : row;
+}
 
 // One id, one planned product, however the plan lists it: the FIRST entry wins
 // (the full form's lawnPlanSelections keeps the first too). Ids compare
@@ -778,12 +818,14 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
-  const { rows } = products;
   // The whole-lawn area: this visit property's recorded lawn area (or the area
   // the technician set when none is recorded), never a planned product's own
   // (possibly partial) area and never the customer-wide turf profile (at a
   // secondary property that can be the primary's lawn).
   const lawnSqft = propertyAreas.wholeLawn;
+  // Every reader of the rows (Complete's checks, the stock hold, the body, the
+  // cards) sees the figured amounts; only the tech's entries live in state.
+  const rows = useMemo(() => products.rows.map((row) => withDerivedAmount(row, lawnSqft)), [products.rows, lawnSqft]);
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or
   // failed: PropertyServiceAreas shows the error with Retry).
@@ -891,7 +933,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               technicianNotes={form.note}
             />
           </section>
-          <ProductsSection ctx={ctx} products={products} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} rows={rows} products={products} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -961,8 +1003,8 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ ctx, products, lawnSqft, locked, other, popover, inlineSearch }) {
-  const { rows, updateRow, removeRow } = products;
+function ProductsSection({ ctx, rows, products, lawnSqft, locked, other, popover, inlineSearch }) {
+  const { updateRow, removeRow } = products;
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
@@ -997,6 +1039,7 @@ function ProductEditor({ row, methods, lawnSqft, locked, onChange, onRemove }) {
       <MethodSection row={row} methods={methods} locked={locked} onChange={onChange} />
       {areaText && <p className="tech-visit-muted">{areaText}</p>}
       <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
+      {row.derivedNote && <p className="tech-visit-muted">{row.derivedNote}</p>}
       {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
       <div className="tech-product-editor-actions">
         <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>

@@ -52,7 +52,7 @@ const CATALOG = [
   { id: IDS.prodiamine, name: 'Prodiamine 65 WDG', category: 'pre-emergent', formulation: 'WDG', inventory_on_hand: '200.0000', inventory_unit: 'oz' },
   { id: IDS.dismiss, name: 'Dismiss NXT', category: 'herbicide', formulation: 'SC', inventory_on_hand: '60.0000', inventory_unit: 'fl_oz' },
   // Tagged rows: the lawn sheet lists the lawn-tagged insecticide and not the roach bait.
-  { id: '77777777-7777-4777-8777-000000000001', name: 'Arena 50 WDG', category: 'insecticide', formulation: 'WDG', service_lines: ['lawn', 'pest'], inventory_on_hand: '40.0000', inventory_unit: 'oz' },
+  { id: '77777777-7777-4777-8777-000000000001', name: 'Arena 50 WDG', category: 'insecticide', formulation: 'WDG', service_lines: ['lawn', 'pest'], default_rate_per_1000: 0.46, default_unit: 'oz/1000sf', inventory_on_hand: '40.0000', inventory_unit: 'oz' },
   { id: '77777777-7777-4777-8777-000000000002', name: 'Advion WDG Granular', category: 'insecticide', formulation: 'WDG', service_lines: ['pest'], inventory_on_hand: '10.0000', inventory_unit: 'oz' },
 ];
 const LAWN_SQFT = 5750;

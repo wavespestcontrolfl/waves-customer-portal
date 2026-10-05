@@ -722,6 +722,92 @@ describe('products', () => {
     expect(completeCalls()[0].body.products.find((p) => p.productId === P_IRON)).toMatchObject({ applicationMethod: 'broadcast_spray', areaValue: 5000, areaUnit: 'sqft' });
   });
 
+  // ── the figured amount (owner 2026-10-05: nobody types one on a fast complete) ──
+  const RATED = [{ ...CATALOG[0], default_rate_per_1000: 2, default_unit: 'fl_oz/1000sf' }, CATALOG[1], { ...CATALOG[2], default_rate_per_1000: 3, default_unit: 'lb' }];
+
+  test('an added sprayed product is figured from the catalog rate per 1,000 sq ft on the whole lawn, says so, and sends that amount with no rate keys', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: RATED } });
+    await addProductByName('Talak 7.9%');
+    const talak = editorFor('Talak 7.9%');
+    // 2 fl oz per 1,000 on the 5,000 sq ft lawn.
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('10');
+    expect(within(talak).getByLabelText('Unit for Talak 7.9%').value).toBe('fl_oz');
+    expect(within(talak).getByText('2 fl oz per 1,000 sq ft × 5,000 sq ft')).toBeTruthy();
+    expect(within(talak).queryByText('No amount entered. It is recorded without one.')).toBeNull();
+    await analyze();
+    await submit();
+    const sent = completeCalls()[0].body.products.find((p) => p.productId === P_TALAK);
+    expect(sent).toMatchObject({ applicationMethod: 'broadcast_spray', totalAmount: 10, amountUnit: 'fl_oz', areaValue: 5000, areaUnit: 'sqft' });
+    expect(sent.rate).toBeUndefined();
+  });
+
+  test('a granular product is figured in its dry unit, and a small liquid dose reads in spoons', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: RATED } });
+    await addProductByName('Green Granules');
+    const granules = editorFor('Green Granules');
+    expect(within(granules).getByLabelText('Green Granules').value).toBe('15');
+    expect(within(granules).getByLabelText('Unit for Green Granules').value).toBe('lb');
+    // 0.1 fl oz per 1,000 on 5,000 sq ft is half a fluid ounce: 3 tsp.
+    cleanup();
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: [{ ...RATED[0], default_rate_per_1000: 0.1 }] } });
+    await addProductByName('Talak 7.9%');
+    expect(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%').value).toBe('3');
+    expect(within(editorFor('Talak 7.9%')).getByLabelText('Unit for Talak 7.9%').value).toBe('tsp');
+    await analyze();
+    await submit();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ totalAmount: 0.5, amountUnit: 'fl_oz' });
+  });
+
+  test('moved to Spot treatment, an added product has no area, so nothing is figured and the box is empty again', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: RATED } });
+    await addProductByName('Talak 7.9%');
+    const talak = editorFor('Talak 7.9%');
+    pickMethod(talak, 'Spot treatment');
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('');
+    expect(within(talak).getByText('No amount entered. It is recorded without one.')).toBeTruthy();
+    pickMethod(talak, 'Broadcast spray');
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('10');
+  });
+
+  test('an amount the tech types wins over the figured one and survives a method change', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: RATED } });
+    await addProductByName('Talak 7.9%');
+    const talak = editorFor('Talak 7.9%');
+    fireEvent.change(within(talak).getByLabelText('Talak 7.9%'), { target: { value: '12' } });
+    expect(within(talak).queryByText(/per 1,000 sq ft/)).toBeNull();
+    pickMethod(talak, 'Spot treatment');
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('12');
+    await analyze();
+    await submit();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ applicationMethod: 'spot_treatment', totalAmount: 12, amountUnit: 'fl_oz' });
+  });
+
+  test('a planned product with no plan quantity is figured on the plan\'s own area; one with a quantity keeps the plan\'s', async () => {
+    const ctx = context({ plannedProducts: { source: 'plan', items: [
+      { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'broadcast_spray', amount: 6.4, amountUnit: 'fl_oz', treatedSqft: 6000, areaUnit: 'sqft' },
+      { productId: P_IRON, name: 'Iron Plus', applicationMethod: 'spot_treatment', amount: null, amountUnit: 'fl_oz', treatedSqft: 1500, areaUnit: 'sqft' },
+    ] } });
+    const catalog = [RATED[0], { ...CATALOG[1], default_rate_per_1000: 4, default_unit: 'fl_oz' }, RATED[2]];
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog } });
+    // The plan's 6.4 stands, not 2 x 6 = 12.
+    expect(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%').value).toBe('6.4');
+    expect(within(editorFor('Talak 7.9%')).queryByText(/per 1,000 sq ft/)).toBeNull();
+    // 4 fl oz per 1,000 on the plan's 1,500 sq ft spot area.
+    expect(within(editorFor('Iron Plus')).getByLabelText('Iron Plus').value).toBe('6');
+    expect(within(editorFor('Iron Plus')).getByText('4 fl oz per 1,000 sq ft × 1,500 sq ft')).toBeTruthy();
+  });
+
+  test.each([
+    ['a per-gallon rate', { default_rate_per_1000: 2, default_unit: 'fl_oz/gal' }],
+    ['a rate in mL', { default_rate_per_1000: 2, default_unit: 'ml' }],
+    ['no catalog rate', {}],
+  ])('%s figures nothing: the box stays empty', async (_label, fields) => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: [{ ...CATALOG[0], ...fields }] } });
+    await addProductByName('Talak 7.9%');
+    expect(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%').value).toBe('');
+    expect(within(editorFor('Talak 7.9%')).getByText('No amount entered. It is recorded without one.')).toBeTruthy();
+  });
+
   test('a method from More methods is sent as is', async () => {
     await openSheet();
     const talak = editorFor('Talak 7.9%');
