@@ -700,16 +700,24 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const a15 = await visit({ status: 'en_route' }); await paid(a15);
 
     // ── UNSTARTED (pending / confirmed), past day: nobody is known to have gone ──
-    // U1. paid, NEVER ran → left alone: a prepayment whose day passed is not proof the visit happened
-    const u1 = await visit(); await paid(u1);
+    // U1. paid ON the visit day (2040-03-03 fixture day, paid then), NEVER ran → left alone: a prepayment whose day passed is not proof the visit happened
+    const u1 = await visit(); await paid(u1, { paid_at: new Date('2040-03-03T15:00:00Z') });
+    // U7. paid BEFORE the visit day, never ran → left alone
+    const u7 = await visit(); await paid(u7, { paid_at: new Date('2040-03-01T15:00:00Z') });
+    // U8. paid on a LATER day than the visit, never ran (the process died before the closeout) → retried: no prepayment, the live path closes exactly this
+    const u8 = want(await visit(), 'paid'); await paid(u8, { paid_at: new Date('2040-03-04T15:00:00Z') });
+    // U9. …and the same for a send delivered after the visit day
+    const u9 = want(await visit({ status: 'pending' }), 'sent'); await sent(u9, { sent_at: new Date('2040-03-04T15:00:00Z') });
+    // U10. 11:30 PM ET on the visit day is 03:30Z the next day — still the visit day in ET → left alone
+    const u10 = await visit(); await paid(u10, { paid_at: new Date('2040-03-04T03:30:00Z') });
     // U2. paid before anyone arrived (visit_scheduled_today), the day has passed → STILL left alone
     const u2 = await visit(); const iu2 = await paid(u2); await auditRow(u2.id, iu2.id, 'visit_scheduled_today');
     // U3. a closeout that RAN on an eligible day and failed → retried
     const u3 = want(await visit(), 'paid'); const iu3 = await paid(u3); await auditRow(u3.id, iu3.id, 'error');
     // U4. …also for a send
     const u4 = want(await visit({ status: 'pending' }), 'sent'); const iu4 = await sent(u4); await auditRow(u4.id, iu4.id, 'issued_visit_rescheduled', { trigger: 'sent' });
-    // U5. sent, never ran → left alone
-    const u5 = await visit(); await sent(u5);
+    // U5. sent on the visit day, never ran → left alone
+    const u5 = await visit(); await sent(u5, { sent_at: new Date('2040-03-03T15:00:00Z') });
     // U6. unstarted TODAY with an error row → not a candidate today
     const u6 = await visit({ date: TODAY }); const iu6 = await paid(u6, { date: TODAY }); await auditRow(u6.id, iu6.id, 'error');
 
@@ -720,7 +728,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const c2 = await visit({ status: 'completed' }); await paid(c2);
 
     const out = await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 18, retried: 13, closed: 13 });
+    expect(out).toEqual({ candidates: 22, retried: 15, closed: 15 });
     const calls = mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout.trigger]);
     expect(calls.sort()).toEqual(expectRetried.sort());
     // A retry is nobody's action: the system is the actor.

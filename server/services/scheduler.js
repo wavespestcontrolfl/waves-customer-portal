@@ -4444,10 +4444,6 @@ function initScheduledJobs() {
         const StatementFollowups = require('./payer-statement-followups');
         const result = await StatementFollowups.runPending();
         logger.info(`Payer statement dunning done: ${result.sent} sent, ${result.skipped} skipped`);
-        // Settled-statement child closeouts that failed or never ran have no
-        // other retry (GitHub r10 P2 #4127); gated on its own flag inside.
-        const sweep = await require('./invoice-issued-closeout').retrySettledStatementCloseouts();
-        if (sweep.retried) logger.info(`Settled-statement closeout retry: ${sweep.retried} retried, ${sweep.closed} closed`);
       });
     } catch (err) {
       logger.error(`Payer statement dunning failed: ${err.message}`);
@@ -4468,6 +4464,12 @@ function initScheduledJobs() {
       await runExclusive('invoice-issued-closeout-retry', async () => {
         const sweep = await require('./invoice-issued-closeout').retryIssuedInvoiceCloseouts();
         if (sweep.retried) logger.info(`Invoice-issued closeout retry: ${sweep.retried} retried, ${sweep.closed} closed`);
+        // Settled-statement child closeouts that failed or never ran have no
+        // other retry (GitHub r10 P2 #4127). Here, not on the Tue–Fri dunning
+        // tick it used to ride: a child must not wait out a weekend either
+        // (GitHub r4 P2 #5886). Gated on the same flag inside.
+        const statements = await require('./invoice-issued-closeout').retrySettledStatementCloseouts();
+        if (statements.retried) logger.info(`Settled-statement closeout retry: ${statements.retried} retried, ${statements.closed} closed`);
       });
     } catch (err) {
       logger.error(`Invoice-issued closeout retry failed: ${err.message}`);

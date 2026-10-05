@@ -380,6 +380,10 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
 const DELIVERED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
 const SETTLED_INVOICE_STATUSES = ['paid', 'prepaid'];
 const ISSUED_AT_SQL = "COALESCE(i.paid_at, i.sent_at, i.sms_sent_at, i.email_sent_at)";
+// The invoice was delivered / settled on a LATER ET day than the visit was
+// scheduled for: the opposite of a prepayment. The ordinary send / payment
+// path closes such a visit, so a run of it that never happened is owed.
+const ISSUED_AFTER_SERVICE_DAY_SQL = `((${ISSUED_AT_SQL}) AT TIME ZONE 'America/New_York')::date > s.scheduled_date`;
 
 // THE durable retry for every invoice outside a statement (GitHub r1 P1 and
 // r3 P1 ×2 #5886). Every rail — the Stripe webhook, cash / check / reconcile,
@@ -400,8 +404,11 @@ const ISSUED_AT_SQL = "COALESCE(i.paid_at, i.sent_at, i.sms_sent_at, i.email_sen
 //  - UNSTARTED (pending / confirmed / NULL), past day: nobody is known to have
 //    gone. A prepayment whose day simply passed is NOT proof the visit
 //    happened (it may have been rained out and never moved), so this sweep
-//    never completes one on its own: it retries only a closeout that RAN on an
-//    eligible day and failed (an audited error, 5xx or under-the-lock race).
+//    never completes one on its own. It retries a closeout that RAN on an
+//    eligible day and failed (an audited error, 5xx or under-the-lock race),
+//    and one that never ran when the invoice was delivered / settled on a
+//    LATER day than the visit (GitHub r4 P2): that is no prepayment — the
+//    ordinary send / payment path closes exactly that visit.
 //    `visit_scheduled_today` does not count — that row says "prepaid before
 //    anyone arrived", which is exactly the case to leave to a person.
 // A visit already completed with this closeout's own attempt parked is
@@ -427,7 +434,8 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
             .orWhere((sameDay) => sameDay.where('s.scheduled_date', '=', today).whereIn('i.status', SETTLED_INVOICE_STATUSES))))
         .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
       .orderBy('i.id')
-      .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
+      .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
+        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
   } catch (err) {
     logger.error(`[invoice-issued-closeout] issued-invoice retry: candidate lookup failed: ${err.message}`);
     return none;
@@ -444,7 +452,7 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
         continue;
       }
       if (last && !refusedForTheMoment(last)) continue;
-      if (!isArrivedVisitStatus(row.visit_status) && !last) continue;
+      if (!isArrivedVisitStatus(row.visit_status) && !last && !row.issued_after_service_day) continue;
       if (prepaidAndNobodyArrived(last, row.visit_status)) continue;
     }
     retried += 1;

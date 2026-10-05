@@ -188,6 +188,7 @@ describe('source contracts', () => {
     const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
     expect(scheduler).toMatch(/cron\.schedule\('37 11 \* \* \*', async \(\) => \{\s*try \{\s*await runExclusive\('invoice-issued-closeout-retry', async \(\) => \{\s*const sweep = await require\('\.\/invoice-issued-closeout'\)\.retryIssuedInvoiceCloseouts\(\);/);
     expect(scheduler.match(/retryIssuedInvoiceCloseouts\(/g)).toHaveLength(1);
+    expect(scheduler.match(/retrySettledStatementCloseouts\(/g)).toHaveLength(1);
   });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -239,7 +240,9 @@ describe('source contracts', () => {
     const referral = fs.readFileSync(path.join(__dirname, '../services/referral-engine.js'), 'utf8');
     expect(referral).toMatch(/async function creditReferralOnFirstService\(\{ customerId, serviceId, notify = true \}\)[\s\S]*?if \(notify && outcome\.referral\.promoter_id\) \{/);
     const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
-    expect(scheduler).toMatch(/StatementFollowups\.runPending\(\);[\s\S]{0,600}?retrySettledStatementCloseouts\(\);/);
+    // The settled-statement retry rides the DAILY closeout cron (GitHub r4 P2 #5886), no longer the Tue–Fri dunning tick.
+    expect(scheduler).toMatch(/runExclusive\('invoice-issued-closeout-retry', async \(\) => \{[\s\S]{0,900}?retrySettledStatementCloseouts\(\);/);
+    expect(scheduler).not.toMatch(/StatementFollowups\.runPending\(\);[\s\S]{0,600}?retrySettledStatementCloseouts\(\);/);
     // Statement delivery carries the operator through to the child closeouts.
     const payers = fs.readFileSync(path.join(__dirname, '../routes/admin-payers.js'), 'utf8');
     expect(payers.match(/sendStatementEmail\(statement\.id, \{[^}]*actorTechnicianId: req\.technicianId \|\| null, actorRole: req\.techRole \|\| null \}\)/g)).toHaveLength(2);
