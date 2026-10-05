@@ -169,13 +169,36 @@ describe('computeServiceLines', () => {
       { id: 'l4', service_interest: 'Lawn care', status: 'won', converted_at: null, customer_id: 'cx1', ad_cost: '5.00' },
       // marked won by hand with no customer: not a new customer
       { id: 'l5', service_interest: 'Lawn care', status: 'won', converted_at: null, customer_id: null, ad_cost: '0' },
+      // spam lead that still carried allocated spend: spend stays, lead does not count
+      { id: 'l6', service_interest: 'Lawn care', status: 'spam', converted_at: null, customer_id: null, ad_cost: '15.00', is_prospect: false },
+      // multi-line interest: lands in BOTH the lawn and pest CAC rows
+      { id: 'l7', service_interest: 'Pest control and lawn care', status: 'won', converted_at: null, customer_id: 'cx3', ad_cost: '20.00', is_prospect: true },
     ];
     const out = await computeServiceLines(WIN, { now: NOW });
     const lawn = lawnRow(out.lines);
     expect(lawn.ret90).toEqual({ cohort: 5, retained: 3, rate: 60 });
     const pest = out.lines.find((l) => l.key === 'pest');
     expect(pest.ret90).toEqual({ cohort: 0, retained: 0, rate: null });
-    expect(lawn.cac).toEqual({ leads: 5, converted: 2, spend: 45, value: 22.5 });
+    // leads: l1 l2 l3 l4 l5 l7 (l6 is not a prospect); converted: cx1, cx2, cx3;
+    // spend: 30+10+0+5+0+15+20 = 80
+    expect(lawn.cac).toEqual({ leads: 6, converted: 3, spend: 80, value: 26.67 });
+    expect(pest.cac).toEqual({ leads: 1, converted: 1, spend: 20, value: 20 });
+  });
+
+  it('anchors sent and aging on the first delivery evidence, not sent_at alone', async () => {
+    db.__results.estimates = [
+      // accepted while the send claim was in flight: no sent_at, firstDeliveredAt in window
+      { id: 'e1', status: 'accepted', sent_at: null, accepted_at: '2026-10-03T15:00:00Z', created_at: '2026-10-03T14:00:00Z',
+        estimate_data: { deliveryState: { firstDeliveredAt: '2026-10-03T14:30:00Z' } }, service_interest: 'Lawn care' },
+      // open row resent yesterday but first delivered 20 days ago: still aging
+      { id: 'e2', status: 'sent', sent_at: '2026-10-04T15:00:00Z', created_at: '2026-09-10T14:00:00Z',
+        estimate_data: { deliveryState: { firstDeliveredAt: '2026-09-15T14:00:00Z' } }, service_interest: 'Lawn care' },
+    ];
+    const out = await computeServiceLines(WIN, { now: NOW });
+    const lawn = lawnRow(out.lines);
+    expect(lawn.sent).toBe(1);
+    expect(lawn.accepted).toBe(1);
+    expect(lawn.aging7).toBe(1);
   });
 
   it('uses the plain period for close rate and the floored window only for cost per customer', async () => {
