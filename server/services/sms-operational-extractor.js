@@ -7,6 +7,7 @@ const { dispatchWithFallback } = require('./llm/call');
 const { COMMITMENT_KINDS, kindBelongsToParty, parseDueAt } = require('./call-commitments');
 const { parseQuotedETDeadline, parseQuotedETDay, expandWeekdayAbbreviations, etDateString, formatETDay, validCalendarDate, addETDays } = require('../utils/datetime-et');
 const { scrubPans, scrubSegments } = require('../utils/pan-scrub');
+const { gateEnvValue } = require('../config/feature-gates');
 
 // The shared proposal rule_version column is varchar(16).
 const VERSION = 'sms-ops-v22';
@@ -114,6 +115,47 @@ function isQuestionSource(source) {
   return /[?¿؟]/u.test(text) || INTERROGATIVE.test(text) || INDIRECT_INTERROGATIVE.test(text);
 }
 
+// Owner ruling 2026-10-04: a client's access code saves from the client's own
+// wording, not only from one sentence form ("Gate code is 1234" was dropped).
+// Read at call time so the flip needs no redeploy.
+const accessCodeCaptureEnabled = () => gateEnvValue('GATE_ACCESS_CODE_CAPTURE');
+const PROPERTY_GATE_WORDS = /\b(?:side|back|rear|yard|backyard|left|right|pool|fence|driveway|property)\s+gate\b/i;
+const CODE_HEDGE = /\b(?:i think|i believe|i guess|maybe|perhaps|possibly|probably|not sure|unsure|might be|should be|used to be)\b|\d[#*]?\s+or\s+[#*]?\d/i;
+// Which one kind of code the message talks about; null when it names none or
+// more than one ("the gate and the garage"), because the digits then cannot be
+// tied to a kind. A plain "gate" beside a side or back gate is that same gate;
+// a plain "gate" alone is the neighborhood gate.
+function accessCodeKind(text) {
+  const propertyGate = new RegExp(PROPERTY_GATE_WORDS.source, 'i').test(text);
+  const communityGate = /\b(?:community|neighborhood|entrance|entry|front|main)\s+gate\b/i.test(text);
+  const kinds = [];
+  if (propertyGate) kinds.push('property_gate_code');
+  if (communityGate || (!propertyGate && /\bgate\b/i.test(text))) kinds.push('neighborhood_gate_code');
+  if (/\b(?:lock|key|code)\s?box\b/i.test(text)) kinds.push('lockbox_code');
+  if (/\bgarage\b/i.test(text)) kinds.push('garage_code');
+  return kinds.length === 1 ? kinds[0] : null;
+}
+
+// The client's own wording: one kind of code, one number in the whole message,
+// and that number is the value. A house number, a ZIP, a phone number, a second
+// number or a hedge leaves the field empty for a person.
+function matchesNaturalAccessCode({ field, value }, { messageBody = '', properties = [] } = {}) {
+  const candidate = String(value || '').trim();
+  const body = String(messageBody || '');
+  if (!/^[#*]?\d{3,8}[#*]?$/.test(candidate) || !body.includes(candidate)) return false;
+  const digits = candidate.replace(/\D/g, '');
+  const numbers = new Set(body.match(/\d{3,}/g) || []);
+  if (numbers.size !== 1 || !numbers.has(digits)) return false;
+  if (CODE_HEDGE.test(body)) return false;
+  if (properties.some((property) => (String(property.address_line1 || '').match(/^\s*(\d+)/) || [])[1] === digits
+    || String(property.zip || '').slice(0, 5) === digits)) return false;
+  return accessCodeKind(body) === field;
+}
+
+function matchesAccessCode(item, context) {
+  return matchesExplicitAccessCode(item) || (accessCodeCaptureEnabled() && matchesNaturalAccessCode(item, context));
+}
+
 function matchesExplicitAccessCode({ quote, field, value }) {
   // Missing-code descriptions and relational phrases are not credentials,
   // even if the model proposes them verbatim. Preserve the empty field for
@@ -203,7 +245,7 @@ Facts:
 - Capture explicitly reported operational facts and instructions, not diagnoses or technical recommendations. Keep the customer's equipment/irrigation reports distinguished from verified findings.
 - value must be an exact substring of quote, except contact_preference which must be call, text or email. Capture only the useful operational preference, never its medical explanation.
 - For EVERY fact, quote must retain the whole CURRENT message, including every sentence and qualifier. For controller locations, notes, instructions, pet details and irrigation issues, value MUST equal quote. Never shorten a message to a standalone instruction that omits another clause. If separate topics do not belong together in the field, mark duration uncertain for staff review.
-- Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.
+- Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.${accessCodeCaptureEnabled() ? ' A plain "gate code" with no side, back or yard word is the neighborhood gate (field neighborhood_gate_code). For a code, value is the code alone with its # or * symbol.' : ''}
 - An instruction for today/one visit/vacation is visit_only, not durable. Ambiguous duration is uncertain. A change to payment, billing, ownership or communication consent is an obligation to resolve, never a profile fact.
 - property_id may identify the sole provided property. With zero or multiple properties, use null, including requests covering all properties; opaque ids alone cannot prove which address the customer means. Never infer another person's authority or merge accounts.
 
@@ -358,7 +400,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   const facts = message.direction !== 'inbound' || message.message_body.length > 600 ? [] : parsed.facts.filter((item) => {
     if (!grounded(item) || item.quote.trim() !== completeSource || isQuestionSource(completeSource)) return false;
     if (item.field === 'contact_preference') return explicitContactPreference(item.quote) === item.value;
-    if (item.field.endsWith('_code')) return matchesExplicitAccessCode(item);
+    if (item.field.endsWith('_code')) return matchesAccessCode(item, { messageBody: message.message_body, properties });
     return item.value === item.quote && message.message_body.includes(item.value);
   });
   const factDropped = parsed.facts.length - facts.length;
@@ -402,4 +444,4 @@ async function extractSmsOperations(context) {
   return groundExtraction(result.json, context);
 }
 
-module.exports = { VERSION, FACT_FIELDS, SCHEMA, buildPrompt, groundExtraction, statesClock, explicitContactPreference, matchesExplicitAccessCode, stringifySmsEvidence, extractSmsOperations };
+module.exports = { VERSION, FACT_FIELDS, SCHEMA, buildPrompt, groundExtraction, statesClock, explicitContactPreference, matchesExplicitAccessCode, matchesAccessCode, matchesNaturalAccessCode, stringifySmsEvidence, extractSmsOperations };
