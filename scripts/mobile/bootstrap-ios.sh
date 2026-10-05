@@ -291,20 +291,31 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         // the scene. Pass it on once the push plugin's handler exists; the
         // plugin retains pushNotificationActionPerformed until JS listens.
         if let response = connectionOptions.notificationResponse {
-            deliverNotificationResponse(response, attemptsLeft: 100)
+            pendingNotificationResponse = response
+            deliverPendingNotificationResponse(delay: 0.1)
         }
     }
 
-    private func deliverNotificationResponse(_ response: UNNotificationResponse, attemptsLeft: Int) {
+    // Kept until Capacitor's push handler exists, however long the bridge
+    // takes to load; dropped only if the scene goes away.
+    private var pendingNotificationResponse: UNNotificationResponse?
+
+    private func deliverPendingNotificationResponse(delay: TimeInterval) {
+        guard let response = pendingNotificationResponse else { return }
         let center = UNUserNotificationCenter.current()
         if let router = center.delegate as? NotificationRouter, router.pushNotificationHandler != nil {
+            pendingNotificationResponse = nil
             router.userNotificationCenter(center, didReceive: response, withCompletionHandler: {})
-        } else if attemptsLeft > 0 {
-            // Up to 10 s for the bridge and its plugins to load.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                self?.deliverNotificationResponse(response, attemptsLeft: attemptsLeft - 1)
-            }
+            return
         }
+        // Check often at first, then once a second.
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.deliverPendingNotificationResponse(delay: min(delay * 2, 1.0))
+        }
+    }
+
+    func sceneDidDisconnect(_ scene: UIScene) {
+        pendingNotificationResponse = nil
     }
 
     func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {

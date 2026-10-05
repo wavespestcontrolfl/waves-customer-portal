@@ -60,6 +60,9 @@ describe('native customer-app bootstrap reproducibility', () => {
     // A push tapped while the app was closed reaches Capacitor's push handler.
     expect(source).toContain('connectionOptions.notificationResponse');
     expect(source).toContain('router.userNotificationCenter(center, didReceive: response');
+    // The tap is kept until the handler exists: no attempt limit.
+    expect(source).toContain('private var pendingNotificationResponse: UNNotificationResponse?');
+    expect(source).not.toContain('attemptsLeft');
     // CocoaPods' embed-frameworks script cannot run inside Xcode's user-script sandbox.
     expect(source).toContain('s/ENABLE_USER_SCRIPT_SANDBOXING = YES;/ENABLE_USER_SCRIPT_SANDBOXING = NO;/g');
     // The manifest is written only after the delegate is in the target.
