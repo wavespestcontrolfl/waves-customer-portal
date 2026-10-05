@@ -17,7 +17,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal, ibBookingOverlapProposal,
   CARD_CANCEL_REFUSED_MESSAGE,
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
@@ -1312,8 +1312,23 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._booking_discount_name = booking.discountName;
       params._booking_discount_type = booking.discountType;
       params._booking_discount_amount = booking.discountAmount;
+      // Whether another visit already overlaps this time when the card is
+      // built (owner 2026-10-05). The executor books through an overlap that
+      // already existed (warning only) but refuses one that is NEW since
+      // this card, so the operator sees a fresh card first. Set
+      // unconditionally: a model-supplied value can never stand in. A
+      // windowless or invalid-window booking has nothing to probe: no pin.
+      let overlapNow = null;
+      try {
+        overlapNow = await ibBookingOverlapProposal(params.scheduled_date, params.time_window);
+      } catch {
+        return { failed: true, modelResult: { error: 'Could not check whether another visit already overlaps this time — try again in a moment. Nothing was changed.' } };
+      }
+      if (overlapNow == null) delete params._booking_overlap;
+      else params._booking_overlap = overlapNow;
       preview = {
         ...preview,
+        ...(overlapNow ? { slot_overlap: { already_overlaps: true } } : {}),
         pinned_price: {
           amount: booking.price,
           source: booking.source,

@@ -582,6 +582,68 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
   });
 });
 
+describe('create_appointment — an overlap that is NEW since the card gets a fresh card (owner 2026-10-05)', () => {
+  const clash = () => chain({
+    whereNotIn: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockResolvedValue([{ id: 'other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed' }]),
+  });
+  const adaCustomer = () => chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'Lovelace', ...MEMBER_BILLING }) });
+  const wireClash = () => {
+    const insertChain = chain();
+    wireDb({ customers: [adaCustomer(), adaCustomer()], scheduled_services: [clash(), insertChain] });
+    return insertChain;
+  };
+  const bookAt = (extra = {}) => executeTool('create_appointment', {
+    customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '10:00 AM', ...extra,
+  });
+
+  test('the card pinned no overlap and one appeared: preview_changed, nothing inserted, no confirmation text', async () => {
+    const insertChain = wireClash();
+    const result = await bookAt({ _booking_overlap: false });
+    expect(result).toEqual({
+      error: 'Another visit now overlaps this time. Nothing was booked and no text was sent. Confirm the new card to book it anyway, or pick another time.',
+      preview_changed: true,
+    });
+    expect(insertChain.insert).not.toHaveBeenCalled();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
+  });
+
+  test('the card pinned an overlap that already existed: books with the warning, as before', async () => {
+    const insertChain = wireClash();
+    const result = await bookAt({ _booking_overlap: true });
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(result.warning).toMatch(/2099-01-15/);
+    expect(insertChain.insert).toHaveBeenCalled();
+  });
+
+  test('no pin (never proposed through a card): books with the warning, as before', async () => {
+    const insertChain = wireClash();
+    const result = await bookAt();
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(result.warning).toMatch(/2099-01-15/);
+    expect(insertChain.insert).toHaveBeenCalled();
+  });
+
+  test('the card pinned no overlap and the slot is still free: books with no warning', async () => {
+    const insertChain = chain();
+    wireDb({ customers: [adaCustomer(), adaCustomer()], scheduled_services: [chain(), insertChain] });
+    const result = await bookAt({ _booking_overlap: false });
+    expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(result.warning).toBeUndefined();
+  });
+
+  test('ibBookingOverlapProposal answers true, false and null (no timed window) with the same probe', async () => {
+    const { ibBookingOverlapProposal } = require('../services/intelligence-bar/tools');
+    const probeWith = (rows) => chain({ whereNotIn: jest.fn().mockReturnThis(), orderBy: jest.fn().mockResolvedValue(rows) });
+    wireDb({ scheduled_services: [probeWith([{ id: 'other', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00', status: 'confirmed' }]), probeWith([])] });
+    await expect(ibBookingOverlapProposal('2099-01-15', '10:00 AM')).resolves.toBe(true);
+    await expect(ibBookingOverlapProposal('2099-01-15', '10:00 AM')).resolves.toBe(false);
+    await expect(ibBookingOverlapProposal('2099-01-15', undefined)).resolves.toBeNull();
+    await expect(ibBookingOverlapProposal('not a date', '10:00 AM')).resolves.toBeNull();
+  });
+});
+
 describe('create_appointment — billing gate (ADMIN-BUG-R12)', () => {
   // The executor sets no price. A customer whose billing needs a number ON
   // the visit would get a visit that completes with no invoice, so the
