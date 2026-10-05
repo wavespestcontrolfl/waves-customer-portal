@@ -203,12 +203,19 @@ test('a copy of a notice (same sender, same second, same amount) links to the bo
   expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ expense_id: 'exp-first-notice', auto_action: 'expense_duplicate:10' })]);
 });
 
-test('a receipt with a parsed PDF skips the subject guard and the notice-copy check', async () => {
-  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z') };
-  mockState.copy = { id: 'exp-should-not-match' };
+test('a receipt with a parsed PDF total skips the subject guard', async () => {
   extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0018', invoice_date: '2026-01-15', total: 30 });
   await processVendorInvoice({ id: 'e18', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Invoice due: paid in full' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 30 }));
+});
+
+test('a PDF receipt processed after its notice copy links to the booked expense (order does not matter)', async () => {
+  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z') };
+  mockState.copy = { id: 'exp-notice-first' };
+  extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0024', invoice_date: '2026-01-15', total: 30 });
+  await processVendorInvoice({ id: 'e24', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Your receipt' }, { extracted: {} });
+  expect(inserted()).toBeUndefined();
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ expense_id: 'exp-notice-first' })]);
 });
 
 test('the notice-copy check requires the same description, so different invoice numbers never match', async () => {

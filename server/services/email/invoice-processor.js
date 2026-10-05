@@ -231,7 +231,7 @@ function classifierAmount(value) {
 // Booking phase: the AI category suggestion (outside any transaction), then
 // the duplicate check and the insert under one advisory lock. Logs carry ids
 // only: the vendor name can be a person's display name.
-async function bookExpense(email, { vendorName, vendorSource, expenseCategory, parsedInvoice, amount, amountFromClassifier, invoiceNumber, invoiceDate, dateFromInvoice, taxYear, quarter }) {
+async function bookExpense(email, { vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate, dateFromInvoice, taxYear, quarter }) {
   try {
     const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
     // ONLY a deterministic vendor-domain mapping auto-sets the tax category.
@@ -277,7 +277,10 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
       }
       // Same clipping guard as duplicateKey: a clipped description is no identity.
       const fullDescriptionFits = fullExpenseDescription(vendorName, invoiceNumber).length <= 300 && String(vendorName).length <= 200;
-      if (amountFromClassifier && fullDescriptionFits) {
+      // Every receipt runs it, whatever the amount source, so the match does not
+      // depend on which of two copies is processed first; the per-sender lock
+      // covers two copies processed at once.
+      if (fullDescriptionFits) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`expense-notice:${String(email.from_address || '').toLowerCase()}`]);
         const copy = await findSameNoticeExpense(trx, email.id, amount, expenseDescription(vendorName, invoiceNumber));
         if (copy) {
@@ -462,7 +465,7 @@ async function processVendorInvoice(email, classification) {
     });
   } else if (amount > 0) {
     await bookExpense(email, {
-      vendorName, vendorSource, expenseCategory, parsedInvoice, amount, amountFromClassifier, invoiceNumber, invoiceDate,
+      vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate,
       dateFromInvoice: invoiceDate === candidateDate, taxYear, quarter,
     });
   } else {
