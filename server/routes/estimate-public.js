@@ -150,6 +150,13 @@ const {
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
 const OfferTiers = require('../services/estimate-offer-tiers');
+// GATE_ESTIMATE_OFFER_TIERS read at call time. Tests mock feature-gates with
+// a partial object, so the env read is the fallback when the reader is absent.
+function offerTiersGateOn() {
+  return typeof featureGates.estimateOfferTiersLive === 'function'
+    ? featureGates.estimateOfferTiersLive()
+    : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
+}
 const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
@@ -10437,7 +10444,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const { tier: offerTier, error: offerTierError } = OfferTiers.resolveSelectedOfferTier(
       pricingBundleAsOffered,
       selectedOfferTierRaw,
-      { serviceMode, gateOn: featureGates.estimateOfferTiersLive() },
+      { serviceMode, gateOn: offerTiersGateOn() },
     );
     if (offerTierError) {
       return res.status(400).json({ error: offerTierError, code: 'offer_tier_unavailable' });
@@ -25065,7 +25072,7 @@ function serviceCadenceComboKey(selection = {}) {
 // excluded: withManualDiscount nets the discount into payload.frequencies
 // only, and a second ladder it never touched could show a different number.
 function buildOfferTierFieldsForV1({ estimate, estData, v1, prefs, pestOnlyChoice, v1FloorOptions, anchorOneTimePrice }) {
-  if (!pestOnlyChoice || !featureGates.estimateOfferTiersLive()) return {};
+  if (!pestOnlyChoice || !offerTiersGateOn()) return {};
   if (normalizeManualDiscountSummary(estData)) return {};
   const OptOut = require('../services/estimate-service-opt-out');
   const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
@@ -29960,7 +29967,7 @@ async function composeEstimateDataPayload(estimate, {
       try { offerTiersBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
       catch (_) { offerTiersBlockedByMembership = true; }
     }
-    const offerTiersServed = featureGates.estimateOfferTiersLive()
+    const offerTiersServed = offerTiersGateOn()
       && Array.isArray(pricingBundle?.offerTiers)
       && !offerTiersBlockedByMembership
       && !adminDraftPreview
