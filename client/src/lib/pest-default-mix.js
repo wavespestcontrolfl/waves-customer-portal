@@ -9,14 +9,16 @@
 // 90/10 Nonionic Surfactant (the old bare "Non-ionic Surfactant" catalog
 // row it matched no longer exists as such), and (c) extends coverage to
 // the one-time pest control visit, which the 2026-08-29 list deliberately
-// left off. The visit STARTS with all three recorded, at the house
-// totals — 4 oz of each concentrate, 0.25 oz of surfactant.
+// left off. Owner ruling 2026-10-03 (pest stop walkthrough) drops the
+// LESCO 90/10 surfactant from the pest mix, so the visit STARTS with the
+// two concentrates recorded, at the house totals — 4 oz of each. Taurus
+// stays preselected until the owner rules on its every-visit cadence.
 //
 // Single source of truth for BOTH completion surfaces (codex P1 on
 // #3611): the full CompletionPanel (admin dispatch) seeds complete
 // product rows with the totals; ServiceRecapModal (the tech portal's
 // primary pest completion, also the admin quick lane) pre-selects the
-// same three products — its payload records rates only, so the totals
+// same two products — its payload records rates only, so the totals
 // live on the full form. Everything stays editable/deselectable on both.
 
 // Matching is by EXACT catalog identity — an entry whose row is missing
@@ -26,7 +28,6 @@
 export const PEST_DEFAULT_MIX = [
   { pattern: /^taurus\s*sc\b/i, totalAmount: 4 },
   { pattern: /^atticus\s*talak\b/i, totalAmount: 4 },
-  { pattern: /^lesco\s*90\s*\/?\s*10\s*non-?ionic\s+surfactant$/i, totalAmount: 0.25 },
 ];
 
 // Everything the mix must NOT seed on: other service lines (lawn, T&S,

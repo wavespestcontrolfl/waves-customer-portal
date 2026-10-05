@@ -4,7 +4,8 @@
 // handling (lib/pest-default-mix.js): Codex r3 P1 on #5049 — the seed
 // (now also live on one-time pest) ignored visitOutcome entirely, so
 // picking inspection_only / customer_declined after it fired left Taurus
-// SC / Atticus Talak 7.9 F / LESCO 90/10 Nonionic Surfactant selected, and
+// SC / Atticus Talak 7.9 F selected (LESCO 90/10 is no longer seeded, owner
+// ruling 2026-10-03), and
 // submit would record applied products, compliance rows, and inventory
 // deductions for a visit declared not performed. This mirrors
 // SchedulePage.protocol-completion-defaults.test.jsx's own outcome-gating
@@ -67,7 +68,7 @@ afterEach(() => {
   localStorage.clear();
 });
 
-it('seeds Taurus SC + Atticus Talak 7.9 F + LESCO 90/10 Nonionic Surfactant on a completed general-pest visit', async () => {
+it('seeds Taurus SC + Atticus Talak 7.9 F, and not LESCO 90/10 Nonionic Surfactant (owner ruling 2026-10-03), on a completed general-pest visit', async () => {
   stubFetch();
   await act(async () => {
     render(
@@ -81,7 +82,7 @@ it('seeds Taurus SC + Atticus Talak 7.9 F + LESCO 90/10 Nonionic Surfactant on a
   });
   await screen.findByText('Taurus SC');
   expect(screen.getByText('Atticus Talak 7.9 F')).toBeTruthy();
-  expect(screen.getByText('LESCO 90/10 Nonionic Surfactant')).toBeTruthy();
+  expect(screen.queryByText('LESCO 90/10 Nonionic Surfactant')).toBeNull();
 });
 
 it('clears the seeded pest-mix rows on customer_declined, then reseeds once the outcome returns to completed (Codex r3 P1, PR #5049)', async () => {
@@ -107,7 +108,7 @@ it('clears the seeded pest-mix rows on customer_declined, then reseeds once the 
   fireEvent.change(outcomeSelect, { target: { value: 'completed' } });
   await waitFor(() => expect(screen.queryByText('Taurus SC')).not.toBeNull());
   expect(screen.getByText('Atticus Talak 7.9 F')).toBeTruthy();
-  expect(screen.getByText('LESCO 90/10 Nonionic Surfactant')).toBeTruthy();
+  expect(screen.queryByText('LESCO 90/10 Nonionic Surfactant')).toBeNull();
 });
 
 it('clears the seeded pest-mix rows on inspection_only too', async () => {
@@ -145,11 +146,11 @@ it('a hand-removed pest-mix row stays removed while the outcome stays completed 
   });
   await screen.findByText('Taurus SC');
   fireEvent.click(screen.getAllByRole('button', { name: 'Remove product' })[0]);
-  await waitFor(() => expect(screen.getAllByRole('button', { name: 'Remove product' })).toHaveLength(2));
+  await waitFor(() => expect(screen.getAllByRole('button', { name: 'Remove product' })).toHaveLength(1));
   // No outcome switch happens here — the removal is the tech's own edit,
   // which the outcome-driven clearing effect must never touch or restore.
   await act(async () => { await Promise.resolve(); });
-  expect(screen.getAllByRole('button', { name: 'Remove product' })).toHaveLength(2);
+  expect(screen.getAllByRole('button', { name: 'Remove product' })).toHaveLength(1);
 });
 
 it('a hand-removed pest-mix row stays removed across declined → completed (pre-push audit on #5049 r3)', async () => {
@@ -177,7 +178,6 @@ it('a hand-removed pest-mix row stays removed across declined → completed (pre
   await waitFor(() => expect(screen.queryAllByRole('button', { name: 'Remove product' })).toHaveLength(0));
   fireEvent.change(outcomeSelect, { target: { value: 'completed' } });
   await screen.findByText('Taurus SC');
-  await screen.findByText('LESCO 90/10 Nonionic Surfactant');
   // The deliberate removal survives the outcome round-trip.
   expect(screen.queryByText('Atticus Talak 7.9 F')).toBeNull();
 });

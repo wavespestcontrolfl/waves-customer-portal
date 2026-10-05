@@ -247,7 +247,6 @@ describe('generate and read', () => {
     expect(payload.products.map((product) => [product.name, product.applicationMethod, product.applicationArea, product.targets])).toEqual([
       ['Taurus SC', 'spot_treatment', undefined, ['ghost ants']],
       ['Atticus Talak 7.9 F', 'spot_treatment', undefined, ['ghost ants']],
-      ['LESCO 90/10 Nonionic Surfactant', 'spot_treatment', undefined, ['ghost ants']],
     ]);
     // The four parts, titled, and what was heard.
     for (const title of ['What we found', 'What we did and why', 'What to expect', 'What’s next']) {
@@ -614,7 +613,7 @@ describe('complete and send', () => {
     await screen.findByTestId('fast-complete-sent');
     const [body] = request.bodies('/complete');
     expect(body.areasServiced).toEqual(['Outside']);
-    expect(body.products.map((product) => product.applicationArea)).toEqual(['Outside', 'Outside', 'Outside']);
+    expect(body.products.map((product) => product.applicationArea)).toEqual(['Outside', 'Outside']);
   });
 
   test('a bill the pay link did not reach can be paid now on the tech\'s phone', async () => {
@@ -695,7 +694,7 @@ describe('complete and send', () => {
     await screen.findByTestId('fast-complete-sent');
     const [body] = request.bodies('/complete');
     expect(body.products.map((product) => [product.applicationMethod, product.areaValue, product.areaUnit])).toEqual([
-      ['perimeter_spray', 182, 'linear_ft'], ['perimeter_spray', 182, 'linear_ft'], ['perimeter_spray', 182, 'linear_ft'],
+      ['perimeter_spray', 182, 'linear_ft'], ['perimeter_spray', 182, 'linear_ft'],
     ]);
   });
 

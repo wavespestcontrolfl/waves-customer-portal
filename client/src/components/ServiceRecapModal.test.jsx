@@ -211,9 +211,9 @@ describe('ServiceRecapModal application rates', () => {
 // The default pest tank mix (lib/pest-default-mix) seeds the primary
 // field-tech completion too (codex P1 on #3611): a FRESH recurring
 // general-pest, one-time pest, or pest re-service recap pre-selects
-// Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10 Nonionic
-// Surfactant (owner ruling 2026-09-26 — supersedes the 2026-08-29
-// Talstar P / bare-surfactant list), rates prefilled exactly as a manual
+// Taurus SC and Atticus Talak 7.9 F (owner ruling 2026-09-26 — supersedes
+// the 2026-08-29 Talstar P / bare-surfactant list; owner ruling 2026-10-03
+// drops the LESCO 90/10 surfactant), rates prefilled exactly as a manual
 // tap would.
 describe('ServiceRecapModal default pest tank mix', () => {
   test('a fresh recurring pest recap pre-selects the mix with catalog rate prefills', async () => {
@@ -228,20 +228,16 @@ describe('ServiceRecapModal default pest tank mix', () => {
 
     expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
-    // The bare "Non-ionic Surfactant" row is never substituted into the mix —
-    // exact catalog identity only.
+    // Owner ruling 2026-10-03: LESCO is not preselected, and the bare
+    // "Non-ionic Surfactant" row is never substituted into the mix.
+    expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeNull();
     expect(screen.getByRole('button', { name: 'Non-ionic Surfactant' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Non-ionic Surfactant', pressed: true })).toBeNull();
     // Rates seed from the same catalog prefill a manual tap would use —
     // for Taurus the pest 4-oz house default (it outranks the dilution
-    // band's low bound, same precedence the Adjourn SC test pins). The
-    // surfactant gets its own real label rate (0.2 fl_oz/gal) — an
-    // adjuvant with a genuine catalog rate is never overridden by the
-    // insecticide 4-oz house default (isAdjuvantProduct only suppresses
-    // that default for a RATELESS adjuvant).
+    // band's low bound, same precedence the Adjourn SC test pins).
     expect(screen.getByLabelText('Application rate for Taurus SC').value).toBe('4');
-    expect(screen.getByLabelText('Application rate for LESCO 90/10 Nonionic Surfactant').value).toBe('0.2');
   });
 
   test('a bare one-time "Pest Control Service" recap still seeds nothing (alias-list exclusion)', async () => {
@@ -270,7 +266,7 @@ describe('ServiceRecapModal default pest tank mix', () => {
 
     expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeNull();
   });
 
   test('a bare "Pest Control Service" recap carrying the one_time_pest_control key DOES seed the mix (Codex r4, PR #5049)', async () => {
@@ -287,7 +283,7 @@ describe('ServiceRecapModal default pest tank mix', () => {
 
     expect(await screen.findByRole('button', { name: 'Taurus SC', pressed: true })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Atticus Talak 7.9 F', pressed: true })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'LESCO 90/10 Nonionic Surfactant', pressed: true })).toBeNull();
   });
 
   test('a reopened recap keeps the recorded selection — no mix injection', async () => {

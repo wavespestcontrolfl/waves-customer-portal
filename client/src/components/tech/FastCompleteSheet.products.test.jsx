@@ -380,7 +380,12 @@ describe('FastCompleteSheet added product amounts', () => {
     // Taurus usually logged in gal: its house 4 fl oz must not open as 4 gal.
     const request = await openSheet(makeRequest({ commonProducts: [{ productId: 'taurus', visits: 120, usualUnit: 'gal', usualAmount: 1 }] }));
     expect(screen.getByRole('button', { name: 'Taurus SC — 4 fl oz' })).toBeTruthy();
-    // The surfactant's 0.25 fl oz is 1½ tsp on its tile and in Edit amounts.
+    // Owner ruling 2026-10-03: LESCO is not seeded. A hand-added surfactant
+    // at 1½ tsp is 0.25 fl oz on the record, shown as 1½ tsp in Edit amounts.
+    expect(screen.queryByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant/ })).toBeNull();
+    const lesco = addProduct('LESCO 90/10 Nonionic Surfactant');
+    enterAmount(lesco, 1.5, 'tsp');
+    fireEvent.click(within(lesco).getByRole('button', { name: 'Done' }));
     fireEvent.click(screen.getByRole('button', { name: 'Edit amounts' }));
     expect(screen.getByLabelText('LESCO 90/10 Nonionic Surfactant').value).toBe('1.5');
     expect(screen.getByLabelText('Unit for LESCO 90/10 Nonionic Surfactant').value).toBe('tsp');
@@ -500,7 +505,7 @@ describe('FastCompleteSheet added product amounts', () => {
     fillVisit();
     const body = await completeBody(request);
     expect(productIn(body, 'alpine')).toBeUndefined();
-    expect(body.products.map((p) => p.productId).sort()).toEqual(['lesco', 'talak', 'taurus']);
+    expect(body.products.map((p) => p.productId).sort()).toEqual(['talak', 'taurus']);
   });
 });
 

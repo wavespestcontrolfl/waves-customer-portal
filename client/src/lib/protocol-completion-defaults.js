@@ -20,8 +20,8 @@
 // sources:
 //   - lawn: lawn-completion-defaults.js / lawn-completion.js (governed plan)
 //   - pest: pest-default-mix.js — a client-side pattern match against the
-//     SAME server-curated product names (Taurus SC / Atticus Talak 7.9 F /
-//     LESCO 90/10 Nonionic Surfactant, or the roach mix), kept as its own
+//     SAME server-curated product names (Taurus SC / Atticus Talak 7.9 F;
+//     LESCO surfactant dropped, owner 2026-10-03; or the roach mix), kept as its own
 //     mechanism rather than switched to this fetch-based one.
 // Today this hook effectively seeds cockroach visits; it applies to any
 // other program the owner later adds a completionDefaultProducts list to.
