@@ -181,6 +181,21 @@ function reviewedLine(value, { allowLong = false } = {}) {
   return clip(stripped, allowLong ? 400 : 260);
 }
 
+// The visit's recorded pet precaution, as the fact sheet can carry it. A
+// line with a fixed wait ("for 2 hours") does not survive reviewedLine's
+// timing strip, so petPrecautionLost() tells the route to keep the
+// fixed-rule re-entry answer, which states it.
+function recordedPetPrecaution(data = {}) {
+  return cleanText(data.dynamicContext?.reentry?.petAdvisory) || cleanText(data.advisory?.pet_advisory) || null;
+}
+function petPrecautionFact(data = {}) {
+  const recorded = recordedPetPrecaution(data);
+  return recorded ? reviewedLine(recorded) : null;
+}
+function petPrecautionLost(data = {}) {
+  return Boolean(recordedPetPrecaution(data)) && !petPrecautionFact(data);
+}
+
 function productFacts(app = {}) {
   const product = app.product || {};
   const copy = product.report_copy || {};
@@ -278,6 +293,9 @@ function buildReportAskFacts({ question = '', data = {}, nextAppointment = null,
     asked_about_product: named.length ? named.map((product) => product.name).join(', ') : null,
     products_note: products.length ? null : 'No product applications are recorded on this report.',
     reentry: reentryFacts(data, now),
+    // The visit's own recorded pet precaution (pre-push audit P1): the
+    // fixed-rule re-entry answer carries it, so the AI must see it too.
+    pet_precaution_today: petPrecautionFact(data),
     next_visit: next,
     contact: `text us or call ${WAVES_SUPPORT_PHONE_DISPLAY}`,
   };
@@ -294,7 +312,7 @@ RULES
 3. Answer the question that was asked, about the thing that was asked. A question about one product talks about that product only: what it does and where it went. Do not bring in the other products or the rest of the visit.
 4. If the customer's own concern (customer_concern) bears on the question, lead with it and tie the answer to it.
 5. Never give amounts, rates, totals, mix strengths, percentages, counts of product used, or EPA numbers.
-6. Never use the word "safe" in any form (safe, safely, safety). Never say "non-toxic", "harmless", "chemical-free" or "pet-friendly". For a question about pets, kids, or when anyone can go back out, give the dry or re-entry instruction from the facts (pets_and_kids_wording, label_reentry, label_precaution, reentry) in plain words. If the facts hold none, say treated areas should dry completely before pets and kids go back, and offer to confirm by text or call.
+6. Never use the word "safe" in any form (safe, safely, safety). Never say "non-toxic", "harmless", "chemical-free" or "pet-friendly". For a question about pets, kids, or when anyone can go back out, give the dry or re-entry instruction from the facts (pet_precaution_today first when present, then pets_and_kids_wording, label_reentry, label_precaution, reentry) in plain words, and always include pet_precaution_today when it is present. If the facts hold none, say treated areas should dry completely before pets and kids go back, and offer to confirm by text or call.
 7. Never list which pests a product targets. If asked what a product is for, use only its what_it_does and labeled_for lines (for example "labeled for 25+ pests").
 8. applied_where says where a product went: outside, inside, inside and outside, or not recorded. For "not recorded", say the report does not say where.
 9. Never mention prices, costs, discounts, the word "free", guarantees, or promises of results. Never say pests are gone or eliminated.
@@ -449,4 +467,5 @@ module.exports = {
   screenAskAnswer,
   placeOfApplication,
   answerReportQuestionWithAI,
+  petPrecautionLost,
 };

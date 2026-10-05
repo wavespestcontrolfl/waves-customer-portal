@@ -2070,10 +2070,14 @@ router.post('/:token/ask', async (req, res, next) => {
     // Pest reports only: a lawn or tree & shrub report carries aftercare the
     // fact sheet does not hold (watering holds, water-in tasks), which the
     // fixed-rule answer must keep honoring (pre-push audit P1).
+    // A re-entry question on a visit whose recorded pet precaution the fact
+    // sheet cannot carry (a fixed wait) keeps the rule answer that states it.
     if (data.serviceLine === 'pest' && require('../config/feature-gates').reportAskAiLive?.() === true) {
-      const { answerReportQuestionWithAI } = require('../services/service-report/report-ask-ai');
-      const ai = await answerReportQuestionWithAI({ question, data, nextAppointment });
-      if (ai) answer = ai.answer;
+      const { answerReportQuestionWithAI, petPrecautionLost } = require('../services/service-report/report-ask-ai');
+      if (!(topic === 'reentry' && petPrecautionLost(data))) {
+        const ai = await answerReportQuestionWithAI({ question, data, nextAppointment });
+        if (ai) answer = ai.answer;
+      }
     }
     // The question's text is never stored — only its length and the topic
     // the answer came from (report-assistant.js REPORT_QUESTION_TOPICS), so

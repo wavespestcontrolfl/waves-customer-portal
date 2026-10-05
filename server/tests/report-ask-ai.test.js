@@ -55,6 +55,7 @@ const featureGates = require('../config/feature-gates');
 const {
   SYSTEM_PROMPT,
   buildReportAskFacts,
+  petPrecautionLost,
   buildReportAskPrompt,
   screenAskAnswer,
   placeOfApplication,
@@ -133,6 +134,18 @@ const NOW = new Date('2026-10-05T14:00:00Z');
 describe('buildReportAskFacts', () => {
   const facts = buildReportAskFacts({ data: reportData(), nextAppointment, now: NOW });
   const sheet = JSON.stringify(facts);
+
+  test('carries the visit\'s recorded pet precaution', () => {
+    const withPet = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated zones until dry.' } } } });
+    expect(withPet.pet_precaution_today).toBe('Keep pets off treated zones until dry.');
+    // A fixed wait does not survive the timing strip; the route then keeps
+    // the rule answer for re-entry questions.
+    const timed = { serviceLine: 'pest', applications: [], advisory: { pet_advisory: 'Keep pets indoors for 2 hours.' } };
+    expect(buildReportAskFacts({ data: timed }).pet_precaution_today).toBeUndefined();
+    expect(petPrecautionLost(timed)).toBe(true);
+    expect(petPrecautionLost({ dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated zones until dry.' } } })).toBe(false);
+    expect(petPrecautionLost({})).toBe(false);
+  });
 
   test('carries the visit facts the answer needs', () => {
     expect(facts.service).toBe('Quarterly Pest Control');
