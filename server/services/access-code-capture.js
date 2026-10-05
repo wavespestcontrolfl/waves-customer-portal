@@ -546,8 +546,15 @@ async function sourceStillSupports(trx, row) {
   if (row.source_type !== 'sms' || !row.source_id) return true;
   const source = await trx('sms_log').where({ id: row.source_id }).forUpdate().first('customer_id', 'message_body');
   if (!source) return true;
-  return source.customer_id === row.customer_id
-    && normalizeText(source.message_body).includes(normalizeText(row.source_quote));
+  if (source.customer_id !== row.customer_id) return false;
+  // The sweep has read these exact words for this owner, and that read left
+  // this row waiting (reconcile removes what it no longer supports), so its
+  // code, directions and life are what the current text says.
+  const read = await trx('data_hygiene_source_extractions')
+    .where({ source_type: 'message', source_id: row.source_id, extractor_version: VERSION, status: 'ok' })
+    .where('source_hash', sourceHash({ customer_id: source.customer_id, message_body: source.message_body }))
+    .first('id');
+  return !!read;
 }
 const OWNED_SOURCE_SQL = `(a.source_type <> 'sms' OR a.source_id IS NULL OR NOT EXISTS (
   SELECT 1 FROM sms_log src WHERE src.id = a.source_id AND src.customer_id IS DISTINCT FROM a.customer_id))`;
@@ -659,6 +666,17 @@ async function fillEmptyProfileField(trx, customerId, { kind, life, code }) {
 }
 
 // The active standing row that already holds this kind and value, if any.
+// A one-visit code repeated for the same visit (a second text, a retried add)
+// is a duplicate; the same code for another appointment is not.
+async function visitTwin(trx, customerId, next, scheduledServiceId, exceptId = null) {
+  if (next.life !== 'visit' || !scheduledServiceId) return false;
+  const q = trx('customer_access_codes').where({ customer_id: customerId, kind: next.kind, value_hash: next.value_hash,
+    status: 'active', life: 'visit', scheduled_service_id: scheduledServiceId })
+    .whereRaw("coalesce(instructions, '') = ?", [next.instructions || '']);
+  if (exceptId) q.whereNot('id', exceptId);
+  return !!(await q.first('id'));
+}
+
 async function standingTwin(trx, customerId, { kind, life, value_hash: hash }, exceptId = null) {
   if (life !== 'standing') return null;
   const q = trx('customer_access_codes').where({ customer_id: customerId, kind, value_hash: hash, status: 'active', life: 'standing' })
@@ -685,7 +703,7 @@ async function supersedeOrRefuse(trx, customerId, next, { exceptId = null, admin
 
 // Audit metadata never carries a code, a quote or instructions.
 const audit = (trx, adminUserId, action, id, metadata) => recordAuditEvent({
-  trx, critical: true, actor_type: 'admin', actor_id: adminUserId || null, action,
+  trx, critical: true, actor_type: adminUserId ? 'admin' : 'system', actor_id: adminUserId || null, action,
   resource_type: 'customer_access_codes', resource_id: id, metadata,
 });
 
@@ -734,6 +752,7 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
         ? await visitFor(trx, row.customer_id, { from: row.source_at ? new Date(row.source_at) : now, chosenId }) : { id: null };
       if (visit.error) return fail(400, visit.error);
       const scheduledServiceId = visit.id;
+      if (await visitTwin(trx, row.customer_id, next, scheduledServiceId, row.id)) return fail(409, 'duplicate_active');
       const profileField = await fillEmptyProfileField(trx, row.customer_id, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));
       const [updated] = await trx('customer_access_codes').where({ id }).update({
@@ -860,6 +879,7 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
     const visit = next.life === 'visit' ? await visitFor(trx, customerId, { from: now, chosenId }) : { id: null };
     if (visit.error) return fail(400, visit.error);
     const scheduledServiceId = visit.id;
+    if (await visitTwin(trx, customerId, next, scheduledServiceId)) return fail(409, 'duplicate_active');
     const profileField = await fillEmptyProfileField(trx, customerId, next);
     const [row] = await trx('customer_access_codes').insert({
       customer_id: customerId, property_id: visit.propertyId || (properties.length === 1 ? properties[0].id : null),

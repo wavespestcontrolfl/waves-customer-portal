@@ -821,6 +821,38 @@ postgres('access codes section', () => {
       expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('found');
     });
 
+    test('an accept needs the text\'s current words to have been read', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'I set up a visitor pass for you, check your email');
+      await sweep(stub([gateItem({ kind: 'pass', code: null, instructions: 'check your email', quote: 'I set up a visitor pass for you' })]));
+      const [row] = await rows(c.id);
+      await trx('sms_log').where({ id }).update({ message_body: 'I set up a visitor pass for you' });
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, code: 'source_changed' });
+    });
+
+    test('the same one-visit code for the same visit is a duplicate; for another visit it is not', async () => {
+      const c = await customer();
+      const one = await visit(c.id, day(1));
+      const two = await visit(c.id, day(3));
+      const add = (v) => access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'visit', code: '#9090', scheduledServiceId: v, now: NOW });
+      expect(await add(one)).toMatchObject({ ok: true });
+      expect(await add(one)).toMatchObject({ ok: false, status: 409, code: 'duplicate_active' });
+      expect(await add(two)).toMatchObject({ ok: true });
+    });
+
+    test('a sweep retirement is recorded as a system action', async () => {
+      const winner = await customer();
+      const loser = await customer();
+      const id = await text(winner.id, 'The garage code is 1357');
+      await sweep(stub([gateItem({ kind: 'garage', code: '1357', quote: 'The garage code is 1357' })]));
+      const [row] = await rows(winner.id);
+      await access.accept(trx, row.id, { adminUserId: ADMIN_ID });
+      await trx('sms_log').where({ id }).update({ customer_id: loser.id });
+      await sweep(stub([]));
+      const ev = await trx('audit_log').where({ action: 'access_code.source_moved', resource_id: row.id }).first('actor_type', 'actor_id');
+      expect(ev).toMatchObject({ actor_type: 'system', actor_id: null });
+    });
+
     test('a refused accept leaves the active twin untouched', async () => {
       const winner = await customer();
       const loser = await customer();
