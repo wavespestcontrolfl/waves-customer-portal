@@ -1208,16 +1208,6 @@ describe('executeMerge', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
   });
 
-  it('registers access_code_profile_mirror with a handler that drops both receipts (derived rows never abort a merge)', async () => {
-    const { UNIQUE_COLLISION_HANDLERS, dropMirrorReceipts } = dedupe._test;
-    expect(UNIQUE_COLLISION_HANDLERS.access_code_profile_mirror).toBe(dropMirrorReceipts);
-    const del = jest.fn().mockResolvedValue(2);
-    const whereIn = jest.fn(() => ({ del }));
-    const fakeTrx = jest.fn(() => ({ whereIn }));
-    await expect(dropMirrorReceipts(fakeTrx, 'access_code_profile_mirror', 'customer_id', 'w', 'l')).resolves.toMatch(/dropped 2/);
-    expect(whereIn).toHaveBeenCalledWith('customer_id', ['w', 'l']);
-  });
-
   it('registers irrigation_week_plans with the keep-available handler (same-week snapshots fold, never abort — codex #3565 gh-r14)', () => {
     const { UNIQUE_COLLISION_HANDLERS, repointWeekPlansKeepAvailable } = dedupe._test;
     expect(UNIQUE_COLLISION_HANDLERS.irrigation_week_plans).toBe(repointWeekPlansKeepAvailable);

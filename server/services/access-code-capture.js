@@ -559,10 +559,12 @@ async function mirrorCustomer(conn, customerId) {
   return conn.transaction(async (trx) => {
     const out = { created: 0, retired: 0 };
     if (!(await lockCustomer(trx, customerId))) return out;
+    // The kill switch holds under the locks too: off now means no write.
+    if (!enabled()) return out;
     const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
     const prefs = await trx('property_preferences').where({ customer_id: customerId }).forUpdate()
       .first(...PROFILE_KINDS.map((k) => PROFILE_FIELD[k]));
-    const state = await trx('access_code_profile_mirror').where({ customer_id: customerId }).forUpdate().first();
+    const state = await trx('access_code_profile_mirror').where({ subject_id: customerId }).forUpdate().first();
     const hashes = { ...(state?.hashes || {}) };
     const oneHome = homes.length === 1;
     if (oneHome && prefs) {
@@ -616,9 +618,13 @@ async function mirrorCustomer(conn, customerId) {
           continue;
         }
         const hash = valueHash(value, null);
-        const others = await live().whereNot('value_hash', hash).forUpdate();
+        // The same code as the profile's in any letter case or spacing is the
+        // same credential (as syncProfileField reads it): adopted, never replaced.
+        const SAME_CODE = "lower(regexp_replace(code, '\\s', '', 'g')) = ?";
+        const canon = canonicalLower(value);
+        const others = await live().whereRaw(`NOT (${SAME_CODE})`, [canon]).forUpdate();
         await retireAll(others);
-        const same = await live().where('value_hash', hash).forUpdate().first('id', 'property_id');
+        const same = await live().whereRaw(SAME_CODE, [canon]).forUpdate().first('id', 'property_id');
         // An adopted older row with no home is bound to the sole home, so the
         // visit read (which needs an exact home) can still return it.
         if (same && !same.property_id) await trx('customer_access_codes').where({ id: same.id }).update({ property_id: home, updated_at: trx.fn.now() });
@@ -644,9 +650,9 @@ async function mirrorCustomer(conn, customerId) {
     // (the edit time is copied in SQL: a JavaScript date drops the microseconds
     // and would never compare equal again)
     await trx.raw(`
-      INSERT INTO access_code_profile_mirror (customer_id, profile_updated_at, one_home, hashes, mirrored_at)
+      INSERT INTO access_code_profile_mirror (subject_id, profile_updated_at, one_home, hashes, mirrored_at)
       VALUES (?, (SELECT updated_at FROM property_preferences WHERE customer_id = ?), ?, ?::jsonb, now())
-      ON CONFLICT (customer_id) DO UPDATE SET profile_updated_at = EXCLUDED.profile_updated_at,
+      ON CONFLICT (subject_id) DO UPDATE SET profile_updated_at = EXCLUDED.profile_updated_at,
         one_home = EXCLUDED.one_home, hashes = EXCLUDED.hashes, mirrored_at = EXCLUDED.mirrored_at`,
     [customerId, customerId, oneHome, JSON.stringify(hashes)]);
     return out;
@@ -661,12 +667,12 @@ async function mirrorProfileCodes(conn = db, { limit = MIRROR_BATCH } = {}) {
   const tally = { checked: 0, created: 0, retired: 0, failed: 0 };
   const candidates = await conn('property_preferences as p')
     .join('customers as c', 'c.id', 'p.customer_id').whereNull('c.deleted_at')
-    .leftJoin('access_code_profile_mirror as m', 'm.customer_id', 'p.customer_id')
+    .leftJoin('access_code_profile_mirror as m', 'm.subject_id', 'p.customer_id')
     .where(function hasCode() {
       this.whereRaw(`(${PROFILE_NONEMPTY_SQL})`).orWhereRaw("(m.hashes - '_home') <> '{}'::jsonb");
     })
     .where(function due() {
-      this.whereNull('m.customer_id')
+      this.whereNull('m.subject_id')
         .orWhereRaw('m.profile_updated_at IS DISTINCT FROM p.updated_at')
         .orWhereRaw(`m.mirrored_at < now() - interval '${MIRROR_RECHECK_HOURS} hours'`)
         .orWhereRaw('m.one_home IS DISTINCT FROM ((SELECT count(*) FROM customer_properties cp WHERE cp.customer_id = p.customer_id AND cp.active = true) = 1)')

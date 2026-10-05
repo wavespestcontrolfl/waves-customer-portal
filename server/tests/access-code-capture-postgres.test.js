@@ -1564,7 +1564,7 @@ postgres('access codes section', () => {
       const c = await customer({ prefs: { garage_code: '2468' } });
       expect(await sweep(stub([]))).toMatchObject({ skipped: 'gate_off' });
       expect(await live(c.id)).toEqual([]);
-      expect(await trx('access_code_profile_mirror').where({ customer_id: c.id })).toEqual([]);
+      expect(await trx('access_code_profile_mirror').where({ subject_id: c.id })).toEqual([]);
     });
 
     test('the tick mirrors with the gate on, and a failure fails the job', async () => {
@@ -1713,6 +1713,23 @@ postgres('access codes section', () => {
       expect(await mirror()).toMatchObject({ checked: 0 });
     });
 
+    test('a profile code that differs only by letter case adopts the office row and keeps its directions', async () => {
+      const c = await customer({ prefs: { garage_code: 'AB12' } });
+      const [a] = c.propertyIds;
+      const office = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: 'ab12', instructions: 'Side keypad', propertyId: a });
+      await trx('property_preferences').where({ customer_id: c.id }).update({ garage_code: 'AB12', updated_at: trx.fn.now() });
+      await mirror();
+      expect((await trx('customer_access_codes').where({ id: office.row.id }).first()).status).toBe('active');
+    });
+
+    test('the receipt table is invisible to the customer merge (no customer_id column, no foreign key)', async () => {
+      const cols = await trx('information_schema.columns').where({ table_name: 'access_code_profile_mirror' }).pluck('column_name');
+      expect(cols).toContain('subject_id');
+      expect(cols).not.toContain('customer_id');
+      const fks = await trx.raw("SELECT 1 FROM pg_constraint WHERE conrelid = 'access_code_profile_mirror'::regclass AND contype = 'f'");
+      expect(fks.rows).toHaveLength(0);
+    });
+
     test('an adopted older row with no home is bound to the sole home', async () => {
       const c = await customer({ prefs: { garage_code: '2468' } });
       const [a] = c.propertyIds;
@@ -1732,7 +1749,7 @@ postgres('access codes section', () => {
         address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
       });
       await mirror();
-      expect((await trx('access_code_profile_mirror').where({ customer_id: c.id }).first()).hashes).toEqual({});
+      expect((await trx('access_code_profile_mirror').where({ subject_id: c.id }).first()).hashes).toEqual({});
       expect(a).toBeTruthy();
     });
 
