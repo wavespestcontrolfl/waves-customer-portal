@@ -80,6 +80,12 @@ describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)',
     ['a short number on the next line', 'neighborhood_gate_code', 'Gate code is 5550\n12', '5550'],
     ['a short number anywhere else', 'neighborhood_gate_code', 'Gate code for Example Creek is 5 digits.\n\n#55501', '#55501'],
     ['a continuation on the next line', 'neighborhood_gate_code', 'Gate code is 5550\nthen the bell', '5550'],
+    ['a key symbol standing before the code', 'neighborhood_gate_code', 'Gate code is # 5550', '5550'],
+    ['a key symbol standing after the code', 'neighborhood_gate_code', 'Gate code is 5550\n#', '5550'],
+    ['a star standing before the code', 'neighborhood_gate_code', 'Gate code is * 5550', '5550'],
+    ['a modal hedge (may)', 'neighborhood_gate_code', 'Gate code may be 5550', '5550'],
+    ['a modal hedge (could)', 'neighborhood_gate_code', 'Gate code could be 5550', '5550'],
+    ['a past code', 'neighborhood_gate_code', 'Gate code was 5550', '5550'],
   ])('gate on still refuses %s', (_name, field, quote, value) => {
     process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
     const item = codeFact(field, quote, value);

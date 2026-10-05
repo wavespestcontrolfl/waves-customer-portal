@@ -120,7 +120,7 @@ function isQuestionSource(source) {
 // Read at call time so the flip needs no redeploy.
 const accessCodeCaptureEnabled = () => gateEnvValue('GATE_ACCESS_CODE_CAPTURE');
 const PROPERTY_GATE_WORDS = /\b(?:side|back|rear|yard|backyard|left|right|pool|fence|driveway|property)\s+gate\b/i;
-const CODE_HEDGE = /\b(?:i think|i believe|i guess|maybe|perhaps|possibly|probably|not sure|unsure|might be|should be|used to be)\b|\d[#*]?\s+or\s+[#*]?\d/i;
+const CODE_HEDGE = /\b(?:think|believe|guess|maybe|perhaps|possibly|probably|sure|unsure|may|might|could|should|would|supposed|used to|was|were|if)\b|\d[#*]?\s+or\s+[#*]?\d/i;
 // A code the client reports as dead or replaced, anywhere in the message.
 const CODE_INVALIDATED = /\b(?:no longer|any ?more|wrong|incorrect|changed|expired|invalid|broken|old code|used to|stopped working|(?:does|did|do|will|would)(?: not|n['’]t) work)\b/i;
 // Which one kind of code the message talks about; null when it names none or
