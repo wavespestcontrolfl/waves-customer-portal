@@ -18,7 +18,9 @@ jest.mock('../models/db', () => {
     };
     return q;
   };
-  return jest.fn(chain);
+  const mockDb = jest.fn(chain);
+  mockDb.transaction = async (cb) => { const trx = (t) => chain(t); trx.raw = async () => {}; return cb(trx); };
+  return mockDb;
 });
 
 const { processVendorInvoice } = require('../services/email/invoice-processor');

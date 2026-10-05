@@ -137,10 +137,15 @@ function expenseDescription(vendorName, invoiceNumber) {
   return fullExpenseDescription(vendorName, invoiceNumber).slice(0, 300);
 }
 
-async function findDuplicateExpense(vendorName, invoiceNumber, amount) {
+function duplicateKey(vendorName, invoiceNumber) {
   if (!invoiceNumber || vendorName === 'Unknown Vendor') return null;
   if (fullExpenseDescription(vendorName, invoiceNumber).length > 300 || String(vendorName).length > 200) return null;
-  return db('expenses')
+  return `expense-dup:${String(vendorName).toLowerCase()}:${invoiceNumber}`;
+}
+
+async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount) {
+  if (!duplicateKey(vendorName, invoiceNumber)) return null;
+  return conn('expenses')
     .where({ vendor_name: String(vendorName).slice(0, 200), amount, description: expenseDescription(vendorName, invoiceNumber) })
     .first('id');
 }
@@ -255,16 +260,6 @@ async function processVendorInvoice(email, classification) {
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
   if (amount > 0) {
-    const duplicate = await findDuplicateExpense(vendorName, invoiceNumber, amount);
-    if (duplicate) {
-      await db('emails').where({ id: email.id }).update({
-        expense_id: duplicate.id,
-        auto_action: `expense_duplicate:${amount}`,
-        updated_at: new Date(),
-      });
-      logger.info(`[invoice-processor] Duplicate of expense ${duplicate.id}: ${vendorName} $${amount} (#${invoiceNumber})`);
-      return;
-    }
     try {
       const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
       // ONLY a deterministic vendor-domain mapping auto-sets the tax category.
@@ -294,29 +289,52 @@ async function processVendorInvoice(email, classification) {
         if (partial !== null) deductibleAmount = partial;
       }
 
-      const [expense] = await db('expenses').insert({
-        // Column limits (description varchar 300, vendor_name varchar 200): the
-        // vendor name and the classifier's own invoice number are not bounded
-        // upstream, so clip here rather than fail the insert.
-        description: expenseDescription(vendorName, invoiceNumber),
-        amount,
-        tax_deductible_amount: deductibleAmount,
-        category_id: categoryRow?.id || null,
-        vendor_name: String(vendorName).slice(0, 200),
-        expense_date: invoiceDate,
-        tax_year: taxYear,
-        quarter,
-        payment_method: 'invoice',
-        notes: `Auto-imported from email. Subject: "${email.subject}". Pending review.${aiSuggestionNote}`,
-      }).returning('*');
-
-      await db('emails').where({ id: email.id }).update({
-        expense_id: expense.id,
-        auto_action: `expense_created:${amount}`,
-        updated_at: new Date(),
+      // Duplicate check and insert run under one advisory lock per vendor +
+      // invoice number, so two copies of a receipt processed at the same
+      // time cannot both insert. The AI suggestion above stays outside the
+      // transaction: no lock is held across a model call.
+      const key = duplicateKey(vendorName, invoiceNumber);
+      const outcome = await db.transaction(async (trx) => {
+        if (key) {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
+          const duplicate = await findDuplicateExpense(trx, vendorName, invoiceNumber, amount);
+          if (duplicate) {
+            await trx('emails').where({ id: email.id }).update({
+              expense_id: duplicate.id,
+              auto_action: `expense_duplicate:${amount}`,
+              updated_at: new Date(),
+            });
+            return { duplicateOf: duplicate.id };
+          }
+        }
+        const [created] = await trx('expenses').insert({
+          // Column limits (description varchar 300, vendor_name varchar 200): the
+          // vendor name and the classifier's own invoice number are not bounded
+          // upstream, so clip here rather than fail the insert.
+          description: expenseDescription(vendorName, invoiceNumber),
+          amount,
+          tax_deductible_amount: deductibleAmount,
+          category_id: categoryRow?.id || null,
+          vendor_name: String(vendorName).slice(0, 200),
+          expense_date: invoiceDate,
+          tax_year: taxYear,
+          quarter,
+          payment_method: 'invoice',
+          notes: `Auto-imported from email. Subject: "${email.subject}". Pending review.${aiSuggestionNote}`,
+        }).returning('*');
+        await trx('emails').where({ id: email.id }).update({
+          expense_id: created.id,
+          auto_action: `expense_created:${amount}`,
+          updated_at: new Date(),
+        });
+        return { expense: created };
       });
 
-      logger.info(`[invoice-processor] Expense created: ${vendorName} $${amount} (#${invoiceNumber || 'N/A'})`);
+      if (outcome.duplicateOf) {
+        logger.info(`[invoice-processor] Duplicate of expense ${outcome.duplicateOf}: ${vendorName} $${amount} (#${invoiceNumber})`);
+      } else {
+        logger.info(`[invoice-processor] Expense created: ${vendorName} $${amount} (#${invoiceNumber || 'N/A'})`);
+      }
     } catch (err) {
       logger.error(`[invoice-processor] Expense creation failed: ${err.message}`);
       await db('emails').where({ id: email.id }).update({
