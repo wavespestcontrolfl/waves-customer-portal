@@ -171,7 +171,8 @@ function headerLabel(dateStr) {
 // land past the customer's 2-hour arrival window (driveLateMin). Absent
 // fields (week view, older payload) and a leg without coordinates render
 // nothing, never "~0 min".
-const ON_THE_WAY = new Set(['en_route', 'on_site', 'in_progress']);
+// Visits that can no longer run late: on the way, being worked, or done.
+const ON_THE_WAY = new Set(['en_route', 'on_site', 'in_progress', 'completed']);
 
 function DriveLine({ service, statusById }) {
   if (!service.driveInShown || !Number.isFinite(service.driveFromPrevMin)) return null;
