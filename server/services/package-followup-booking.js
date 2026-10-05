@@ -25,9 +25,12 @@
  * It is a no-op (returns null) unless ALL of:
  *   - GATE_PACKAGE_FOLLOWUP_AUTOBOOK is exactly 'true' (call-time read);
  *   - the primary resolves to a package catalog row (service_id, else
- *     service_key_snapshot, else — for a row with neither — an exact name
- *     match on one live package row) whose service_key is in
- *     PACKAGE_FOLLOWUP_SERVICE_KEYS;
+ *     service_key_snapshot) whose service_key is in
+ *     PACKAGE_FOLLOWUP_SERVICE_KEYS. A label is never read: the customer
+ *     self-serve writers that carry only a label (the /book funnel's
+ *     "Pest Control" row, availability.confirmBooking's estimate label) do
+ *     not name a catalog service, so they book no visit 2 until they carry
+ *     the accepted estimate's catalog identity (follow-up change);
  *   - the primary is a real customer visit: customer_id set, a calendar
  *     date, not recurring, not a callback, not itself an included
  *     follow-up, not terminal, not a slot hold (reservation_expires_at).
@@ -124,10 +127,7 @@ function packageFollowUpDate(primaryDate, intervalDays) {
 
 // The catalog row the primary was sold as: service_id first (completion
 // resolution trusts it before any label), then the durable key snapshot.
-// A row with NEITHER (the availability confirm path writes only the
-// estimate's service label) resolves on an exact, case-insensitive name
-// match to exactly one live package row — never a fuzzy label read.
-// Null when nothing names a live package row.
+// Never the display name. Null when neither names a live package row.
 async function resolvePackageCatalogRow(trx, primary) {
   const cols = ['id', 'service_key', 'name', 'category', 'follow_up_interval_days', 'default_duration_minutes'];
   if (primary.service_id) {
@@ -135,16 +135,9 @@ async function resolvePackageCatalogRow(trx, primary) {
     return byId && isPackageFollowUpServiceKey(byId.service_key) ? byId : null;
   }
   const key = String(primary.service_key_snapshot || '').trim();
-  if (key) {
-    if (!isPackageFollowUpServiceKey(key)) return null;
-    const byKey = await trx('services').where({ service_key: key, is_active: true }).whereRaw('is_archived IS NOT TRUE').select(cols);
-    return byKey.length === 1 ? byKey[0] : null;
-  }
-  const label = String(primary.service_type || '').trim().toLowerCase();
-  if (!label) return null;
-  const byName = await trx('services').whereIn('service_key', PACKAGE_FOLLOWUP_SERVICE_KEYS)
-    .where({ is_active: true }).whereRaw('is_archived IS NOT TRUE').whereRaw('lower(trim(name)) = ?', [label]).select(cols);
-  return byName.length === 1 ? byName[0] : null;
+  if (!key || !isPackageFollowUpServiceKey(key)) return null;
+  const byKey = await trx('services').where({ service_key: key, is_active: true }).whereRaw('is_archived IS NOT TRUE').select(cols);
+  return byKey.length === 1 ? byKey[0] : null;
 }
 
 function primaryEligible(primary) {
@@ -395,9 +388,11 @@ async function bookInSavepoint(sp, outerTrx, primary, cols, { promotePendingCall
 
 // Estimate acceptance stamps visit 1's property + service address AFTER the
 // booking commits (estimate-property-linkage linkAcceptedEstimateProperty).
-// Visit 2 was written with visit 1, so it copied the still-empty fields:
-// copy the stamp onto every live, still-unstamped package child of this
-// estimate's visits. Never throws; no query while the gate is off.
+// Visit 2 was written with visit 1, so it copied the fields as they were
+// then — empty, or a fallback address the linkage has since replaced: copy
+// the stamp onto every live package child of this estimate's visits whose
+// property or address differs from its parent's. Never throws; no query
+// while the gate is off.
 async function mirrorPrimaryAddressOntoPackageChildren({ database, estimateId } = {}) {
   if (!packageFollowupAutobookLive() || !database || !estimateId) return 0;
   try {
@@ -412,8 +407,12 @@ async function mirrorPrimaryAddressOntoPackageChildren({ database, estimateId } 
           AND c.followup_source_service_id = p.id
           AND c.source_action = ?
           AND p.source_estimate_id = ?
-          AND c.service_address_line1 IS NULL
           AND p.service_address_line1 IS NOT NULL
+          AND (c.property_id IS DISTINCT FROM p.property_id
+            OR c.service_address_line1 IS DISTINCT FROM p.service_address_line1
+            OR c.service_address_line2 IS DISTINCT FROM p.service_address_line2
+            OR c.service_address_city IS DISTINCT FROM p.service_address_city
+            OR c.service_address_zip IS DISTINCT FROM p.service_address_zip)
           AND c.status NOT IN ('completed', 'cancelled', 'canceled', 'skipped', 'no_show')`,
       [PACKAGE_FOLLOWUP_SOURCE_ACTION, estimateId],
     );

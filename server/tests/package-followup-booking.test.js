@@ -2,7 +2,7 @@
  * package-followup-booking — visit 2 of a two-treatment package (cockroach /
  * flea / bed bug) booked with visit 1 (owner rulings 2026-10-04). Pins: the
  * gate is the only switch; only package catalog rows qualify (by service_id,
- * else key snapshot, else an exact name match for a row with neither); the
+ * else key snapshot — never a label); the
  * child shape (14 days exactly, no
  * weekend roll, confirmed, $0 included, both link columns, package source
  * marker, inherited tech/window/address); idempotency on a live child; the
@@ -128,7 +128,9 @@ describe('mirrorPrimaryAddressOntoPackageChildren (estimate accept stamps visit 
     const [sql, bindings] = database.raw.mock.calls[0];
     expect(bindings).toEqual([PACKAGE_FOLLOWUP_SOURCE_ACTION, 'est-1']);
     expect(sql).toMatch(/c\.parent_service_id = p\.id/);
-    expect(sql).toMatch(/c\.service_address_line1 IS NULL/);
+    // Any difference from the parent's stamp is mirrored, not only an empty child (codex #5896 r3 P1).
+    expect(sql).toMatch(/c\.property_id IS DISTINCT FROM p\.property_id/);
+    expect(sql).toMatch(/c\.service_address_line1 IS DISTINCT FROM p\.service_address_line1/);
     expect(sql).toMatch(/p\.source_estimate_id = \?/);
     database.raw.mockRejectedValueOnce(new Error('boom'));
     expect(await mirrorPrimaryAddressOntoPackageChildren({ database, estimateId: 'est-1' })).toBe(0);
@@ -203,21 +205,13 @@ describe('ensurePackageFollowUpVisit', () => {
     expect(insertData).toMatchObject({ scheduled_date: '2026-10-19', service_id: 'svc-flea', service_key_snapshot: 'flea_tick', estimated_duration_minutes: 90 });
   });
 
-  test('a non-package catalog row is a no-op — a stamped identity always beats the label', async () => {
+  test('a non-package catalog row is a no-op — and the label is never consulted', async () => {
     const { trx } = fakeTrx();
     expect(await ensurePackageFollowUpVisit({ trx, primary: { ...PRIMARY, service_id: 'svc-pest' }, cols: COLS })).toBeNull();
     expect(await ensurePackageFollowUpVisit({ trx, primary: { ...PRIMARY, service_id: null, service_key_snapshot: 'pest_general_quarterly' }, cols: COLS })).toBeNull();
+    // A label-only row (the /book funnel, availability.confirmBooking) names no catalog service.
+    expect(await ensurePackageFollowUpVisit({ trx, primary: { ...PRIMARY, service_id: null, service_key_snapshot: null, service_type: 'Bed Bug Treatment' }, cols: COLS })).toBeNull();
     expect(createScheduledService).not.toHaveBeenCalled();
-  });
-
-  test('a row with no catalog identity (availability confirm path) resolves on an exact name match only', async () => {
-    const { trx } = fakeTrx();
-    const bare = { ...PRIMARY, service_id: null, service_key_snapshot: null };
-    expect(await ensurePackageFollowUpVisit({ trx, primary: { ...bare, service_type: 'Roach problem in kitchen' }, cols: COLS })).toBeNull();
-    expect(await ensurePackageFollowUpVisit({ trx, primary: { ...bare, service_type: 'General Pest Control' }, cols: COLS })).toBeNull();
-    expect(createScheduledService).not.toHaveBeenCalled();
-    await ensurePackageFollowUpVisit({ trx, primary: { ...bare, service_type: '  bed bug treatment ' }, cols: COLS });
-    expect(createScheduledService.mock.calls[0][0].insertData).toMatchObject({ service_id: 'svc-bedbug', service_key_snapshot: 'bed_bug_treatment', scheduled_date: '2026-10-19' });
   });
 
   test('idempotent: a live child linked by followup_source_service_id is returned, not duplicated', async () => {

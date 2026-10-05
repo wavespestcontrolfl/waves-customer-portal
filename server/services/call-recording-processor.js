@@ -17678,7 +17678,7 @@ const CallRecordingProcessor = {
                   // A terminal primary gets no visit 2 — reprocessing an old
                   // call whose booking since completed or was cancelled must
                   // not book a stray child off it.
-                  if (['cancelled', 'completed', 'skipped'].includes(primaryRow.status)) return null;
+                  if (['cancelled', 'completed', 'skipped', 'no_show'].includes(primaryRow.status)) return null;
                   // A street-level address hold has no visit 2 until the office
                   // confirms the address: the promised follow-up rides on the review
                   // card (payload.follow_up_plan) instead of a child at an unverified
