@@ -204,7 +204,7 @@ Use for: "we have 64 oz of Bifen on the shelf", "add the 2 gallons I bought toda
         movement_type: { type: 'string', enum: ['restock', 'correction', 'damaged_lost'], description: 'restock = stock purchased/added; correction = physical count fix (signed quantity or set_total); damaged_lost = write-off' },
         quantity: { type: 'number', description: 'Amount to add (restock), remove (damaged_lost), or signed delta (correction)' },
         set_total: { type: 'number', description: 'Correction only: set the absolute on-hand amount (what is physically on the shelf). Pass this OR quantity, not both.' },
-        unit: { type: 'string', description: 'Unit of the entered amount (fl_oz, gal, qt, oz, lb, g, kg...). Defaults to the product inventory unit; required for a first count.' },
+        unit: { type: 'string', description: 'Unit of the entered amount (fl_oz, gal, qt, oz, lb, g, kg...). Required: pass the unit the operator actually said and never invent or default one. If the operator gave an amount with no unit, ask them which unit before calling.' },
         lot_number: { type: 'string' },
         reason: { type: 'string', description: 'Why the physical stock count changed' },
         note: { type: 'string' },
@@ -1773,6 +1773,22 @@ function inventoryWriteOptions(input, actionContext, source) {
 async function adjustStock(input, actionContext) {
   const resolved = await resolveProduct(input);
   if (resolved.error) return resolved;
+  // A quantity with no stated unit never changes stock: the writer would read it in the product's own inventory unit
+  // (fl oz), so "2 jugs" became 2 fl oz. Refused at the preview too, so no card and no owner-direct write is ever built
+  // on an assumed unit; the model asks the operator one short question and calls again with the unit they said.
+  if (!String(input.unit ?? '').trim()) {
+    const { name, inventory_unit: inventoryUnit, container_size: containerSize } = resolved.product;
+    const unitFact = inventoryUnit
+      ? ` ${name} is counted in ${inventoryUnit}${containerSize ? ` (container size ${containerSize})` : ''}.`
+      : containerSize ? ` ${name} has a container size of ${containerSize}.` : '';
+    // A call missing the amount as well asks for both in one refusal, so the operator is not asked twice.
+    if (input.quantity == null && input.set_total == null) {
+      return { success: false, code: 'unit_and_amount_required',
+        error: `The amount and the unit are missing, so no stock was changed.${unitFact} Ask the operator one short question for both the amount and its unit (for example "how much, and in what unit: gallons, fl oz?"), then call again with what they say. Never guess either.` };
+    }
+    return { success: false, code: 'unit_required',
+      error: `The unit is missing, so no stock was changed.${unitFact} Ask the operator one short question about the unit of the amount (for example "2 what: gallons, fl oz?"), then call again with the unit they say. Never guess the unit.` };
+  }
   const fields = { movementType: input.movement_type, quantity: input.quantity, setTotal: input.set_total,
     unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };
   if (!actionContext.confirmed) return inventory.previewStockAdjustment(resolved.product.id, fields);

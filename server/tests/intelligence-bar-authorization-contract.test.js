@@ -184,6 +184,20 @@ test('bulk_update_customers with an email change discloses the per-customer emai
   expect(labels.some((l) => l.includes(CONTACT_FANOUT_DISCLOSURE))).toBe(false);
 });
 
+test('a stock write card shows the product, the entered amount and unit, and on hand before and after (owner 2026-10-05)', () => {
+  const adjust = buildContract({ toolName: 'adjust_stock', params: { movement_type: 'restock', quantity: 2, unit: 'gal' }, displayParams: {}, preview: {
+    preview: true, tool: 'adjust_stock', product: { id: 'p-1', name: 'Synthetic Talak' }, movement_type: 'restock',
+    stock_before: 384, change: 256, stock_after: 640, unit: 'fl_oz', entered_quantity: 2, entered_unit: 'gal' } });
+  expect(adjust.effects[0]).toMatchObject({ label: 'Synthetic Talak: restock 2 gal; on hand 384 → 640 fl_oz', before: '384 fl_oz', after: '640 fl_oz' });
+  const receive = buildContract({ toolName: 'update_restock_request', params: { action: 'receive', quantity: 2, unit: 'gal' }, displayParams: {}, preview: {
+    preview: true, tool: 'update_restock_request', product: { id: 'p-1', name: 'Synthetic Talak' }, action: 'receive',
+    stock_before: 384, adds: 256, stock_after: 640, unit: 'fl_oz', entered_quantity: 2, entered_unit: 'gal' } });
+  expect(receive.effects[0]).toMatchObject({ label: 'Synthetic Talak: receive 2 gal; on hand 384 → 640 fl_oz' });
+  // A mark-ordered or cancel on a restock request changes no stock and gets no stock line.
+  const ordered = buildContract({ toolName: 'update_restock_request', params: { action: 'mark_ordered' }, displayParams: {}, preview: { preview: true, action: 'mark_ordered', product: { name: 'Synthetic Talak' } } });
+  expect(ordered.effects.some((e) => /on hand/.test(e.label))).toBe(false);
+});
+
 test('two-step previews surface their resolved facts as effects (capped) and fingerprint exactly', () => {
   const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
   const preview = {
