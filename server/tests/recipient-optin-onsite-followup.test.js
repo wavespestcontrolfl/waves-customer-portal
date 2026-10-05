@@ -480,7 +480,20 @@ describe('the demoted contact stops being confirmed: the caller gets appointment
     expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
   });
 
-  test('a confirmed contact is never restored by the sweep', async () => {
+  test('the contact is removed from the account (or its consent is cleared) while still confirmed: the sweep restores the caller', async () => {
+    const removed = load({ rows: [row({ caller_demoted_at: new Date(), followup_done_at: new Date() })], customer: spouse({ service_contact_phone: null }) });
+    removed.state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await removed.optin.sweepOnSiteFollowUps();
+    expect(removed.state.prefs[0].appointment_notify_primary).toBe(true);
+    expect(removed.state.optin[0].caller_demoted_at).toBeNull();
+
+    const unconsented = load({ rows: [row({ caller_demoted_at: new Date(), followup_done_at: new Date() })], customer: spouse({ service_contacts_consent_at: null }) });
+    unconsented.state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await unconsented.optin.sweepOnSiteFollowUps();
+    expect(unconsented.state.prefs[0].appointment_notify_primary).toBe(true);
+  });
+
+  test('a confirmed contact who is still textable is never restored by the sweep', async () => {
     const { optin, state } = load({ rows: [row({ caller_demoted_at: new Date(), followup_done_at: new Date() })], customer: spouse() });
     state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
     await optin.sweepOnSiteFollowUps();

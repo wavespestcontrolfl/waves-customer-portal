@@ -282,22 +282,39 @@ async function demoteCallerForPhone(customer, phoneKey) {
   });
 }
 
-// A contact this flow demoted the caller for is no longer confirmed (a STOP /
-// NO declined the row): the caller's appointment texts come back on, or the
-// account would have no recipient at all. Only rows carrying caller_demoted_at
-// (this flow switched the texts off; a holder's own earlier opt-out is never
-// marked) are restored, and the marker is cleared so a later YES can demote
-// again. Runs whatever the gates say: a rollback must still restore.
+// The contact this flow demoted the caller for can no longer be texted: the
+// caller's appointment texts come back on, or the account would have no
+// recipient at all. Two ways it happens:
+//   - a STOP / NO declined the row (restored with the decline itself, by phone);
+//   - the contact was removed or edited away, or the account's contact consent
+//     was cleared (an office or portal edit): the row stays confirmed, so the
+//     sweep checks each marked row against the SAME resolver the senders use.
+// Only rows carrying caller_demoted_at (this flow switched the texts off; a
+// holder's own earlier opt-out is never marked) are restored, and the marker
+// is cleared so a later YES can demote again. Runs whatever the gates say: a
+// rollback must still restore.
 async function restoreDemotedCallers(h, phoneKey = null) {
-  const q = h('recipient_optin').whereNot({ status: 'confirmed' }).whereNotNull('caller_demoted_at').whereNotNull('customer_id');
-  if (phoneKey) q.where({ phone_key: phoneKey });
-  const rows = await q.select('customer_id', 'phone_key');
-  for (const row of rows || []) {
+  const marked = () => {
+    const q = h('recipient_optin').whereNotNull('caller_demoted_at').whereNotNull('customer_id');
+    if (phoneKey) q.where({ phone_key: phoneKey });
+    return q;
+  };
+  const restore = [...(await marked().whereNot({ status: 'confirmed' }).select('customer_id', 'phone_key') || [])];
+  if (!phoneKey) {
+    const { getAppointmentContacts } = require('./customer-contact');
+    for (const row of await marked().where({ status: 'confirmed' }).select('customer_id', 'phone_key') || []) {
+      const customer = await h('customers').where({ id: row.customer_id }).first();
+      const textable = !!customer && getAppointmentContacts(customer, { appointment_notify_primary: false })
+        .some((c) => recipientPhoneKey(c.phone) === row.phone_key);
+      if (!textable) restore.push(row);
+    }
+  }
+  for (const row of restore) {
     await h('notification_prefs').where({ customer_id: row.customer_id }).update({ appointment_notify_primary: true });
     await h('recipient_optin').where({ customer_id: row.customer_id, phone_key: row.phone_key }).update({ caller_demoted_at: null });
-    logger.info(`[recipient-optin] caller's appointment texts restored: on-site contact ***${row.phone_key.slice(-4)} is no longer confirmed`);
+    logger.info(`[recipient-optin] caller's appointment texts restored: on-site contact ***${row.phone_key.slice(-4)} can no longer be texted`);
   }
-  return (rows || []).length;
+  return restore.length;
 }
 
 // `replyPhoneKey` is the phone whose YES triggered this run: only ITS replay
@@ -384,7 +401,8 @@ async function settleOnSiteFollowUps(customerIds = [], opts = {}) {
 // window, a pending primary confirmation, an office-review hold, a failed read).
 // Random rotation so a long-waiting customer never starves later ones.
 async function sweepOnSiteFollowUps({ limit = 25 } = {}) {
-  // Backstop for a restore the STOP's own savepoint could not finish.
+  // Restores a caller whose demoted contact was removed or lost consent, and
+  // is the backstop for a restore the STOP's own savepoint could not finish.
   await db.transaction((trx) => restoreDemotedCallers(trx)).catch((err) => {
     logger.warn(`[recipient-optin] demoted-caller restore sweep failed (${err.code || err.name || 'error'})`);
   });
