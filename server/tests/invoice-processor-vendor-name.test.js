@@ -13,14 +13,14 @@ jest.mock('../models/db', () => {
   const chain = (table) => {
     const filters = {};
     const q = {
-      where: (a) => { if (a && typeof a === 'object') Object.assign(filters, a); return q; },
+      where: (a, b) => { if (a && typeof a === 'object') Object.assign(filters, a); else if (typeof a === 'string' && b !== undefined) filters[a] = b; return q; },
       whereILike: (col, pat) => { filters.ilike = pat; return q; },
       whereIn: (col, vals) => { filters.in = vals; return q; },
       whereRaw: (sql, binds) => { filters.raw = [sql, binds]; return q; },
       join: () => q, whereNot: () => q,
       first: async () => {
         if (table === 'expenses') { mockState.lastDuplicateFilter = { ...filters }; return mockState.duplicate; }
-        if (table === 'expenses as x') return mockState.copy || null;
+        if (table === 'expenses as x') { mockState.copyFilter = { ...filters }; return mockState.copy || null; }
         if (table === 'emails') return mockState.me || null;
         if (table === 'expense_categories') return mockState.categories.find((c) => filters.ilike && c.name.toLowerCase().includes(filters.ilike.replace(/%/g, '').toLowerCase())) || null;
         return null;
@@ -201,4 +201,12 @@ test('a receipt with a parsed PDF skips the subject guard and the notice-copy ch
   extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0018', invoice_date: '2026-01-15', total: 30 });
   await processVendorInvoice({ id: 'e18', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Invoice due: paid in full' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 30 }));
+});
+
+test('the notice-copy check requires the same description, so different invoice numbers never match', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z') };
+  await processVendorInvoice({ id: 'e19', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'Batch Biller', subject: 'Receipt' },
+    { extracted: { invoice_number: 'TEST-0019', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
+  expect(mockState.copyFilter).toEqual(expect.objectContaining({ 'x.description': 'Batch Biller Invoice #TEST-0019 — via email' }));
 });

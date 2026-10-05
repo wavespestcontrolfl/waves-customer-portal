@@ -195,10 +195,11 @@ async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, inv
 const NOT_A_CHARGE_SUBJECT = /\b(unsuccessful|failed|declined|couldn'?t be (charged|recharged|processed)|could not be (charged|processed)|payout|will (be )?renew(ed|s)?|renewal notice|invoice due|payment due|past due|action required)\b/i;
 
 // A copy of the same notice: an expense already linked to an email from the
-// same sender, received in the same second, for the same amount (one
+// same sender, received in the same second, for the same amount AND the same
+// description (same vendor, same invoice number or both without one): one
 // receipt delivered twice, or a vendor's "card charged" notice that mirrors
-// the receipt). Distinct charges are never received in the same second.
-async function findSameNoticeExpense(conn, emailId, amount) {
+// the receipt. Two invoices with different numbers never match.
+async function findSameNoticeExpense(conn, emailId, amount, description) {
   const me = await conn('emails').where({ id: emailId }).first('from_address', 'received_at');
   if (!me?.from_address || !me?.received_at) return null;
   return conn('expenses as x')
@@ -206,6 +207,7 @@ async function findSameNoticeExpense(conn, emailId, amount) {
     .where('e.from_address', me.from_address)
     .where('e.received_at', me.received_at)
     .whereNot('e.id', emailId)
+    .where('x.description', description)
     .whereRaw('x.amount = round(?::numeric, 2)', [String(amount)])
     .first('x.id');
 }
@@ -266,7 +268,7 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
     const outcome = await db.transaction(async (trx) => {
       if (!parsedInvoice) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`expense-notice:${String(email.from_address || '').toLowerCase()}`]);
-        const copy = await findSameNoticeExpense(trx, email.id, amount);
+        const copy = await findSameNoticeExpense(trx, email.id, amount, expenseDescription(vendorName, invoiceNumber));
         if (copy) {
           await trx('emails').where({ id: email.id }).update({
             expense_id: copy.id,
