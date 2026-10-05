@@ -578,6 +578,9 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(await mockPg('activity_log').where({ customer_id: customerId, action: 'service_completed' })).toHaveLength(0);
     expect(triggerNotification.mock.calls.filter(([type]) => type === 'job_complete')).toHaveLength(0);
     expect(Completion.completeScheduledService.mock.calls[0][0].systemQuietCloseout).toBe(true);
+    // No inspection credit offer on an automatic close (owner ruling 2026-10-04).
+    expect(Completion.completeScheduledService.mock.calls[0][0].body.offerInspectionCredit).toBe(false);
+    expect(await mockPg('inspection_credit_offers').where({ customer_id: customerId })).toHaveLength(0);
   });
 
   test('a status that moves between two eligible states after the completion loaded the visit (confirmed → pending, en_route → on_site with an earlier arrival) still closes — the locked status is the transition source', async () => {

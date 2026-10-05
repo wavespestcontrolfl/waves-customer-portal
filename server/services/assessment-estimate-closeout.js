@@ -269,6 +269,11 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
       visitOutcome: 'completed',
       sendCompletionSms: false,
       requestReview: false,
+      // No inspection credit offer (owner ruling 2026-10-04, Codex r2 P1
+      // #5903): the $75 credit is recorded only when a person completes the
+      // assessment by hand. The completion defaults it ON, so it is cleared
+      // explicitly.
+      offerInspectionCredit: false,
       idempotencyKey: key,
       ...(pastDay ? { backfill: true } : {}),
     },
