@@ -44,19 +44,19 @@ import {
 import { useVisitPrepPhotoUrls } from '../../hooks/useVisitPrepPhotoUrls';
 
 // Inside the field workspace (.tech-field, tech-field.css) these resolve to the
-// Waves Admin look; the flag-off page has no --tfx-* and keeps the tech-portal
-// dark palette it is drawn on.
+// Waves Admin look; the fallbacks are the same light values, for a render
+// outside it.
 const DARK = {
-  bg: 'var(--tfx-bg, #0f1923)',
-  card: 'var(--tfx-card, #1e293b)',
-  border: 'var(--tfx-border, #334155)',
-  teal: 'var(--tfx-accent, #0ea5e9)',
-  amber: 'var(--tfx-amber, #f59e0b)',
-  red: 'var(--tfx-red, #ef4444)',
-  text: 'var(--tfx-text, #e2e8f0)',
-  muted: 'var(--tfx-muted, #94a3b8)',
-  onAccent: 'var(--tfx-on-accent, #0b1220)',
-  ok: 'var(--tfx-ok, #10b981)',
+  bg: 'var(--tfx-bg, #fafaf9)',
+  card: 'var(--tfx-card, #ffffff)',
+  border: 'var(--tfx-border, #d6d3d1)',
+  teal: 'var(--tfx-accent, #1c1917)',
+  amber: 'var(--tfx-amber, #854d0e)',
+  red: 'var(--tfx-red, #a32d2d)',
+  text: 'var(--tfx-text, #1c1917)',
+  muted: 'var(--tfx-muted, #57534e)',
+  onAccent: 'var(--tfx-on-accent, #ffffff)',
+  ok: 'var(--tfx-ok, #1c1917)',
 };
 
 const sectionLabelStyle = {
@@ -66,7 +66,7 @@ const sectionLabelStyle = {
   textTransform: 'uppercase',
   letterSpacing: 1,
   margin: '14px 0 6px',
-  fontFamily: "var(--tfx-font, 'Montserrat', sans-serif)",
+  fontFamily: "var(--tfx-font, 'Roboto', system-ui, sans-serif)",
 };
 
 const factRowStyle = { fontSize: 14, color: DARK.text, margin: '3px 0 0' };

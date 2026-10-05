@@ -3187,3 +3187,60 @@ straight on the page (visit brief, visual notes, the three tool pages) read
 palette. `.tf-existing` is no longer a dark box. The 11px labels of the Today
 page stay 14px in the sheets (the portal-brand gate bans smaller text in
 `tech-workflow.css`). Visual only: same data, same actions.
+
+## 2026-10-03 — The old dark Today page is deleted; the `tech-field-workspace` flag is gone
+
+Owner 2026-10-03 (phone screenshots of the navy page inside Waves Admin, "this
+should have been deprecated in favor of the Waves Admin UI"; "ok go"): the
+per-user `tech-field-workspace` flag and its flag-off page are removed.
+`/admin/today` renders the field workspace for every staff login, with no
+flag read (so a failed flag fetch in a dead zone can no longer fall back to
+the old page). On a phone the admin top bar and tab bar always step aside on
+`/admin/today`; the workspace's own Menu tab leads back to the rest of Waves
+Admin. One behavior difference from the deleted page: it listed completed
+visits and reopened a completed pest visit in the recap editor from Project
+Report; the workspace offers no report for a completed visit (its existing
+rule), so that edit is no longer on the Today page. Existing rows in
+`user_feature_flags` for the key are inert.
+
+## 2026-10-04 — The technician can change the four lawn scores until Confirm
+
+Owner 2026-10-04 (phone screenshot of Complete service → Lawn assessment):
+"the lawn assessment portion should be editable by the tech after it
+renders". This replaces the 2026-09-24 ruling that a score the AI read was
+read-only. In `LawnAssessmentCompletionBlock` (the full completion form and
+the lawn Fast Complete sheet share it) Density, Weed control, Color and
+Condition are number fields after Analyze, pre-filled with the saved score,
+and lock to text when the assessment is confirmed. A changed or emptied score
+shows the AI's own read under it ("AI 80"); an emptied field posts null, which
+the server reads as "back to the AI score". The Fungus control and Thatch
+condition tiles are gone (owner: "four only, drop the two tiles"): when the AI
+left one blank, `/admin/lawn-assessment/confirm` writes its "no finding" score
+(Fungus 95, Thatch 85, or the Condition score when that is higher) on the
+save that completes the row, and the run's
+`reconciliation.confirmation.synthetic_sub_scores` names those keys. It is
+never a low Condition: the report and the tips read a low sub-score as
+evidence of disease or thatch, and Condition may be low for drought or
+insects. One more case: when the technician
+enters Condition above a Fungus or Thatch the AI read, that sub-score is
+raised to it on the completing save, so the report and the tips never cite a
+low sub-score against the correction. Neither applies to a sub-score the
+client posted (the standalone page shows those fields), nor to a legacy row
+whose Condition is only the 95 fallback of no stressor signal at all.
+Server rule (`resolveConfirmScores`, and `legacyConfirmFinalScores` for rows
+with no run): posted number, then the saved row value, then the AI read. The
+run's `scores_adjusted` snapshot stays the AI read, so calibration records the
+technician-versus-AI difference. The standalone admin Lawn assessment page
+(`LawnAssessmentPanel`) is unchanged.
+
+## 2026-10-04 — The last navy field pieces take the Waves Admin look
+
+Owner 2026-10-04 ("slice 3", "ok go"): the timecard sign-off card, the Quick
+Move sheet and the Project Report service picker (all in `TechHomePage.jsx`)
+move from the tech-portal navy palette to the admin one: white surface,
+hairline borders, 4px/6px radii, weight 500, 14px text, one ink primary
+button, amber for overtime and a 50%+ rain chance, red only for an error.
+The `--tfx-*` palettes in the visit brief, visual notes and the three tool
+pages keep their tokens but fall back to the same light values (the page
+that needed the navy fallbacks was deleted). Visual only: same data, same
+actions.

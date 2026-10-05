@@ -14,8 +14,7 @@
   --tf-subtle: var(--surface-hover, #f5f5f4);
   /* Tokens for the inline-styled field panels (VisitBriefPanel, VisualNotesPanel,
      the protocol, lawn-diagnostic and social-post tools). Each reads
-     var(--tfx-*, <tech-portal dark value>), so inside the workspace it takes the
-     admin look and the flag-off page, which has no .tech-field, keeps its palette. */
+     var(--tfx-*, <the same light value>). */
   --tfx-bg: #fafaf9;
   --tfx-card: #ffffff;
   --tfx-border: #d6d3d1;
@@ -51,9 +50,6 @@
 .tf-nav a svg { width: 20px; height: 20px; }
 .tf-nav a[aria-current] { color: var(--tf-ink); background: var(--tf-subtle); }
 .tech-field :is(a, button):focus-visible { outline: 2px solid var(--tf-ink); outline-offset: 2px; }
-/* The timecard sign-off card (TechHomePage) is still a dark card inside .tf-existing:
-   a white gap inside the ink ring keeps the ring visible on its dark ground (Codex #5794). */
-.tech-field .tf-existing :is(a, button):focus-visible { box-shadow: 0 0 0 4px #ffffff; }
 .tf-page h1, .tf-page h2, .tf-page h3 { font-family: inherit; color: var(--tf-ink); font-weight: 500; }
 .tf-page h1 { font-size: 22px; line-height: 1.3; letter-spacing: -0.015em; margin: 0; }
 .tf-page h2 { font-size: 18px; line-height: 1.35; letter-spacing: -0.005em; margin: 0; }

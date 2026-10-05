@@ -7,7 +7,7 @@
 // routing; a closed visit stays on the recap editor either way.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
@@ -48,11 +48,11 @@ const row = (id, overrides = {}) => ({
 
 let rows;
 
-function mount(path = '/admin/today/tools', { fieldWorkspace = true } = {}) {
+function mount(path = '/admin/today/tools') {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role: 'technician' }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
     </Route>
@@ -139,10 +139,12 @@ it('switch off: a re-service under the re-service switch opens the sheet without
   expect((await sheetService()).reportFlow).toBe(false);
 });
 
-it('keeps a completed pest visit on the recap editor with the switch on', async () => {
+it('offers no report for a completed pest visit, with the switch on', async () => {
   rows = [row('svc-done', { fastCompleteReportEnabled: true, status: 'completed' })];
-  mount('/admin/today/tools', { fieldWorkspace: false });
-  await openFromTools();
-  expect(await screen.findByText('Existing recap form for svc-done')).toBeInTheDocument();
+  mount();
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/admin/schedule?'), expect.anything()));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  expect(await screen.findByRole('button', { name: /Project Report/ })).toBeDisabled();
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
 });

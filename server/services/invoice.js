@@ -5205,6 +5205,24 @@ async function alertSummaryLinkUndelivered(invoiceId, invoiceNumber, reason) {
   }
 }
 
+// A caller's last check as sendCustomerMessage's provider-boundary hook (preProviderCheck): anything but
+// `true` blocks the send before the provider request — a definite non-send. {} when there is no check.
+// The check is handed what this send is about to deliver: { channel: 'sms'|'app'|'email', to, amount } —
+// the phone the text goes to (null for App, whose devices the pipeline resolves) and the amount printed in
+// the body — so the caller can bind them to what it approved, with no database read.
+function receiptHandoffCheck(beforeProviderHandoff, { to = null, amount = null } = {}) {
+  if (typeof beforeProviderHandoff !== "function") return {};
+  const LEG_CHANNEL = { push: "app", email: "email" };
+  return {
+    preProviderCheck: async ({ channel } = {}) => {
+      const leg = LEG_CHANNEL[channel] || "sms";
+      return (await beforeProviderHandoff({ channel: leg, to: leg === "sms" ? to : null, amount })) === true
+        ? { ok: true }
+        : { ok: false, code: "RECEIPT_HANDOFF_ABORTED", reason: "receipt handoff aborted by the caller" };
+    },
+  };
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -9484,7 +9502,10 @@ const InvoiceService = {
       : "0.00";
   },
 
-  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false, customerInitiated = false } = {}) {
+  // beforeProviderHandoff (optional, async, returns true to proceed): the caller's last check, run through the
+  // messaging pipeline's own provider-boundary hook (sendCustomerMessage preProviderCheck, the last callback before
+  // the Twilio request). Anything but `true` blocks the send: a definite non-send.
+  async sendReceipt(invoiceId, { force = false, recordActivity = true, hasEmailLeg = false, operatorInitiated = false, customerInitiated = false, beforeProviderHandoff } = {}) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
     if (!invoice || invoice.status !== "paid")
       return { sent: false, reason: "not-paid" };
@@ -9560,6 +9581,7 @@ const InvoiceService = {
       // open. Callers assert it only from verified provenance (the
       // receipt queue's persisted flag; Pay-route enqueues).
       ...(customerInitiated ? { customerInitiated: true } : {}),
+      ...receiptHandoffCheck(beforeProviderHandoff, { to: customer.phone, amount }),
       metadata: {
         original_message_type: "receipt",
         billingDeliveryCategory: "payment_receipt",
@@ -9608,6 +9630,11 @@ const InvoiceService = {
       );
       err.code = sendResult.code;
       err.reason = sendResult.reason;
+      // The messaging layer's own verdict (accepted / not_sent / uncertain),
+      // under the name every caller reads it by (classifyDeliveryCertainty):
+      // a provider timeout is PROVIDER_FAILURE + deliveryOutcome 'uncertain',
+      // which the message text alone cannot tell from a definite failure.
+      err.providerOutcome = { deliveryOutcome: sendResult.deliveryOutcome, blocked: sendResult.blocked === true };
       // Send-window hold: carry the window-open time so the receipt queue
       // schedules its retry there instead of burning generic backoff
       // attempts overnight (an after-8PM payment's receipt must go out at
