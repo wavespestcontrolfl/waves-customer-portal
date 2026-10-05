@@ -135,6 +135,11 @@ describe('buildReportAskFacts', () => {
   const facts = buildReportAskFacts({ data: reportData(), nextAppointment, now: NOW });
   const sheet = JSON.stringify(facts);
 
+  test('reads a pg-hydrated DATE as its calendar date', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], serviceDate: new Date(2026, 9, 2) } });
+    expect(facts.service_date).toBe('Friday, October 2, 2026');
+  });
+
   test('carries the visit\'s recorded pet precaution', () => {
     const withPet = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated zones until dry.' } } } });
     expect(withPet.pet_precaution_today).toBe('Keep pets off treated zones until dry.');

@@ -87,12 +87,11 @@ function placeOfApplication(areaValue) {
 }
 
 // ── Small formatters ────────────────────────────────────────────────────
+// Service and appointment dates are DATE columns: read the calendar date
+// pg hydrated (dateOnlyStamp), never an instant converted to Eastern time,
+// which shifts a UTC-midnight value back a day (pre-push audit P1).
 function etDateIso(value) {
-  if (!value) return null;
-  if (typeof value === 'string') return /^\d{4}-\d{2}-\d{2}/.test(value) ? value.slice(0, 10) : null;
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  return require('./time-format').dateOnlyStamp(value) || null;
 }
 
 function longDate(isoDate) {
