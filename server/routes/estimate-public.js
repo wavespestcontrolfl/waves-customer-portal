@@ -11708,7 +11708,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       ? await slotReservation.prepareReservationCommit(capacityHold.id, { estimate: {
         ...estimate, estimate_data: acceptedEstDataForPricing || estimate.estimate_data },
         serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
-        selectedFrequency: acceptedSchedulingFrequencyKey, serviceCadences }) : null;
+        selectedFrequency: acceptedSchedulingFrequencyKey, serviceCadences,
+        // Offer tier (GATE_ESTIMATE_OFFER_TIERS): the prepared capacity must
+        // size the same full-bundle visit the hold and the commit do.
+        offerTier: offerTier ? offerTier.key : null }) : null;
     const txResult = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // the row-lock rule). When this accept will graduate a held slot,
@@ -11926,11 +11929,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // read-then-update gap on the verdict below.
         const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status');
         // Offer tier (GATE_ESTIMATE_OFFER_TIERS): the live member exclusion,
-        // re-judged under the locked estimate row inside the transaction.
+        // re-judged on the customer row LOCKED under the already-locked
+        // estimate row (estimate → customer, the order the opt-out write and
+        // the converter use), so a membership landing mid-accept cannot
+        // slip past the pre-transaction read. Fails closed on a read error.
         if (offerTier && estimate.customer_id) {
           let liveMemberInTrx = true;
-          try { liveMemberInTrx = !!(await isActivePlanCustomer(trx, estimate.customer_id, { strict: true })); }
-          catch (_) { liveMemberInTrx = true; }
+          try {
+            const lockedCustomer = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
+            liveMemberInTrx = !!lockedCustomer && lockedCustomer.active !== false && isMembershipCustomerRow(lockedCustomer);
+          } catch (_) { liveMemberInTrx = true; }
           if (liveMemberInTrx) {
             const err = new Error('offer tiers are not available for this estimate');
             err.status = 409;
