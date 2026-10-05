@@ -4454,6 +4454,12 @@ async function createSelfBooking(payload = {}) {
         const { maybeGroupRow } = require('../services/visit-groups');
         await maybeGroupRow(scheduledRow.id, { database: trx, createdBy: 'seeder' });
       }
+      // Two-treatment package (cockroach / flea / bed bug): visit 2 books with
+      // visit 1 when the row carries the catalog identity (internal callers'
+      // service_id; a label-only self-book names no catalog service and is
+      // left alone) — gate-dark, savepoint-isolated
+      // (package-followup-booking.js).
+      await require('../services/package-followup-booking').ensurePackageFollowUpVisit({ trx, primary: scheduledRow });
 
       // Mark abandoned-booking recovery intents converted ATOMICALLY with the
       // booking (same transaction), so converted_at is visible the instant the

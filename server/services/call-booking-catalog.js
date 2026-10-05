@@ -550,8 +550,14 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
   const raw = String(extracted.follow_up_date_time || '').trim();
   const m = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
   const statedFutureDate = !!(m && isValidCalendarDate(m[1]) && m[1] > parentDate);
-  const mentioned = extracted.follow_up_visit_mentioned === true || statedFutureDate;
-  if (!mentioned) return null;
+  // A two-treatment package (cockroach / flea / bed bug, owner ruling 2026-10-04) owes
+  // visit 2 whether or not the caller brought it up — behind the same gate
+  // the other booking paths use (package-followup-booking.js).
+  const { packageFollowupAutobookLive } = require('../config/feature-gates');
+  const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
+  const packageRow = packageFollowupAutobookLive() && isPackageFollowUpServiceKey(catalogRow?.service_key);
+  const discussed = extracted.follow_up_visit_mentioned === true || statedFutureDate;
+  if (!discussed && !packageRow) return null;
 
   let scheduledDate = null;
   let windowStart = null;
@@ -571,7 +577,14 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
   }
 
   const finalWindowStart = windowStart || parentWindowStart || '09:00';
-  return { scheduledDate, windowStart: isValidWindowTime(finalWindowStart) ? finalWindowStart : '09:00' };
+  return {
+    scheduledDate,
+    windowStart: isValidWindowTime(finalWindowStart) ? finalWindowStart : '09:00',
+    // The plan exists only because the service is a package — nobody on the
+    // call discussed a second visit. The writer skips it while the primary
+    // is still a pending office-review request (office confirm books it).
+    ...(discussed ? {} : { packageOnly: true }),
+  };
 }
 
 // scheduled_date is a pg `date` column → Knex hydrates it as a JS Date at
@@ -595,12 +608,29 @@ function callBookingDateOnly(value) {
 // Callers invoke this best-effort outside their transaction: a failed
 // shift leaves the child where it was, and dispatch confirms follow-up
 // dates with the customer before dispatch anyway.
-const pendingCallFollowUpFilter = (parentServiceId) => ({
-  parent_service_id: parentServiceId,
-  source_action: 'ai_call_pipeline_followup',
-  status: 'pending',
-  customer_confirmed: false,
-});
+// Two child kinds ride a parent: the call pipeline's (pending until the
+// office confirms the time) and the package auto-book's
+// (package-followup-booking.js — booked CONFIRMED by owner ruling
+// 2026-10-04, so its confirmed state still means "spaced from visit 1").
+// Both stop following a parent MOVE once the customer confirmed (or
+// re-picked) the date: that date is now the customer's own.
+const PACKAGE_FOLLOWUP_SOURCE_ACTION = 'package_followup_auto';
+const LINKED_FOLLOWUP_KIND_SQL = "((source_action = ? AND status = 'pending') OR (source_action = ? AND status IN ('pending', 'confirmed')))";
+const applyCallFollowUpFilter = (q, parentServiceId) => q
+  .where({ parent_service_id: parentServiceId, customer_confirmed: false })
+  .whereRaw(LINKED_FOLLOWUP_KIND_SQL, ['ai_call_pipeline_followup', PACKAGE_FOLLOWUP_SOURCE_ACTION]);
+const PACKAGE_CHILD_NOT_MOVED_SQL = '(source_action <> ? OR NOT EXISTS (SELECT 1 FROM reschedule_log rl WHERE rl.scheduled_service_id = scheduled_services.id))';
+// A parent CANCEL is wider for the package child: it is a $0 included
+// treatment of the cancelled package, so it goes with visit 1 even after
+// the customer confirmed it (codex #5896 r1 P1). The call child keeps its
+// pending + unconfirmed rule.
+// 'rescheduled' counts: a customer reschedule request parks the child there
+// until it is rebooked, and it must not be rebooked after its package was
+// cancelled.
+const LINKED_FOLLOWUP_CANCEL_SQL = "((source_action = ? AND status = 'pending' AND customer_confirmed = false) OR (source_action = ? AND status IN ('pending', 'confirmed', 'rescheduled')))";
+const applyCallFollowUpCancelFilter = (q, parentServiceId) => q
+  .where({ parent_service_id: parentServiceId })
+  .whereRaw(LINKED_FOLLOWUP_CANCEL_SQL, ['ai_call_pipeline_followup', PACKAGE_FOLLOWUP_SOURCE_ACTION]);
 
 // The still-pending, never-confirmed call-created children of a parent and
 // the day each lands on after the parent's delta — what the shift writes
@@ -612,8 +642,16 @@ async function planCallFollowUpShift({ conn, parentServiceId, fromDate, toDate }
   const fromStr = callBookingDateOnly(fromDate);
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return [];
-  return conn('scheduled_services')
-    .where(pendingCallFollowUpFilter(parentServiceId))
+  return applyCallFollowUpFilter(conn('scheduled_services'), parentServiceId)
+    // A package visit 2 follows only until it is rescheduled on its own.
+    // The customer can move it from the portal, and that move leaves
+    // customer_confirmed false — a date or time the customer picked is
+    // theirs, and a later parent move must not overwrite it. A
+    // reschedule_log row of its own is the marker (every rebooker move
+    // writes one, a same-day time change included; this hook's own shifts
+    // write none). Booking-time evidence only: the catalog interval is
+    // editable and says nothing about where this child was put.
+    .whereRaw(PACKAGE_CHILD_NOT_MOVED_SQL, [PACKAGE_FOLLOWUP_SOURCE_ACTION])
     .select('id', 'technician_id', 'window_start', 'window_end', 'estimated_duration_minutes', 'recurring_dispatch_due_date',
       conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"),
       conn.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));
@@ -653,7 +691,6 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return 0;
   const noticeRows = [];
-  const filter = pendingCallFollowUpFilter(parentServiceId);
   // Tech-day membership fence + route_order clear (uncapped audit r26 P1):
   // a date shift moves the child between tech-days, so it must hold the
   // same 'slot-reserve' fence every other date/tech writer holds — an
@@ -721,7 +758,8 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
             windowStart: String(k.window_start).slice(0, 5),
             windowEnd: probeEnd,
             excludeServiceIds: [String(k.id)],
-            excludeStatuses: ['completed', 'cancelled'],
+            // Rows that do not occupy the slot (AGENTS.md occupancy rule).
+            excludeStatuses: ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'],
             // The write below CASes on k.technician_id, so the child lands on
             // the destination day with exactly this technician; another
             // technician's overlapping stop is no clash (gate-dark,
@@ -734,9 +772,7 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           continue;
         }
       }
-      const wrote = await trx('scheduled_services')
-        .where({ id: k.id })
-        .where(filter)
+      const wrote = await applyCallFollowUpFilter(trx('scheduled_services').where({ id: k.id }), parentServiceId)
         // CAS on the locked read (knex object form renders null as IS NULL).
         .where({
           technician_id: k.technician_id ?? null,
@@ -780,8 +816,8 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
           const kept = skipped.filter((k) => k.reason !== 'changed' && k.id && /^\d{4}-\d{2}-\d{2}$/.test(String(k.day))).sort((a, b) => String(a.day).localeCompare(String(b.day)))[0];
           await NotificationService.notifyAdmin(
             'schedule_conflict',
-            'Call-booked follow-up visit kept its date',
-            `The primary visit moved, but ${skipped.length} call-booked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay}${k.reason === 'changed' ? ' — changed meanwhile' : (k.reason === 'added' ? ' — added meanwhile' : ' — slot booked')}`).join(', ')}). Re-space them from dispatch.`,
+            'Follow-up visit kept its date',
+            `The primary visit moved, but ${skipped.length} linked follow-up visit(s) kept their date (${skipped.map((k) => `${k.day} → ${k.newDay}${k.reason === 'changed' ? ' — changed meanwhile' : (k.reason === 'added' ? ' — added meanwhile' : ' — slot booked')}`).join(', ')}). Re-space them from dispatch.`,
             // The earliest follow-up proven to still sit on its day (slot booked or added meanwhile).
             { link: kept ? `/admin/dispatch?tab=schedule&date=${kept.day}&appointment=${encodeURIComponent(kept.id)}` : '/admin/dispatch?tab=schedule',
               metadata: { parentServiceId, skipped } },
@@ -831,28 +867,30 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
 // technician cancelling their own booking hears nothing about its follow-up
 // (codex #3887 r10 P2). Labels never come here: job_status_history's
 // transitioned_by is a uuid column.
-async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null }) {
+// packageOnly: the skipped / no-show cascade (job-status.js) — a package
+// visit 2 is treatment 2 of a visit 1 that never happened, so it goes; a
+// call-booked child keeps its office-owned lifecycle there, as before.
+async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null, packageOnly = false }) {
   if (!parentServiceId) return 0;
   const { transitionJobStatus } = require('./job-status');
   const now = new Date();
-  const children = await conn('scheduled_services')
-    .where({
-      parent_service_id: parentServiceId,
-      source_action: 'ai_call_pipeline_followup',
-      status: 'pending',
-      customer_confirmed: false,
-    })
-    .select('id');
+  const childQuery = applyCallFollowUpCancelFilter(conn('scheduled_services'), parentServiceId);
+  if (packageOnly) childQuery.where({ source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION });
+  const children = await childQuery.select('id', 'status', 'source_action');
   let cancelled = 0;
   for (const child of children) {
     try {
       await conn.transaction(async (trx) => {
         await transitionJobStatus({
           jobId: child.id,
-          fromStatus: 'pending',
+          fromStatus: child.status,
           toStatus: 'cancelled',
           transitionedBy: actorId || null,
           notes: `Cancelled with parent call booking ${parentServiceId}`,
+          // A package visit 2 arms reminders, so its own cancel could text the
+          // customer; the parent's cancellation owns that choice (an operator
+          // may have chosen no text), so the child never sends its own.
+          ...(child.source_action === PACKAGE_FOLLOWUP_SOURCE_ACTION ? { notifyCustomer: false } : {}),
           trx,
         });
         await trx('scheduled_services')
@@ -865,7 +903,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
           });
       });
       cancelled += 1;
-      logger.info(`[call-booking] cancelled call-created follow-up ${child.id} with parent ${parentServiceId}`);
+      logger.info(`[call-booking] cancelled linked follow-up ${child.id} with parent ${parentServiceId}`);
     } catch (childErr) {
       logger.error(`[call-booking] call follow-up cancel cascade failed for child ${child.id} of ${parentServiceId}: ${childErr.message}`);
     }
@@ -891,5 +929,7 @@ module.exports = {
   shiftCallFollowUpsForParentMove,
   planCallFollowUpShift,
   cancelCallFollowUpsForParentCancel,
+  applyCallFollowUpFilter,
+  applyCallFollowUpCancelFilter,
   DEFAULT_FOLLOW_UP_INTERVAL_DAYS,
 };

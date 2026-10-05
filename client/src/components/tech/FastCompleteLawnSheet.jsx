@@ -68,7 +68,7 @@ import {
 import { submittedAmount } from '../../lib/measure-units';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton,
-  SavedView, TipSection, VisitNote, customerNameOf, methodLabel, techTipsOf, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  SavedView, TipSection, VisitNote, methodLabel, techTipsOf, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -431,11 +431,13 @@ function useProductRows(ctx, catalog) {
 
 // ── what is missing, and the body ───────────────────────────────────────────
 
-// What is missing, said in plain words above the Complete button.
+// The three reasons that read as the button's own label (owner 2026-10-04).
 export const ADD_PHOTO = 'Add a photo';
 export const ANALYZE_PHOTOS = 'Analyze the photos';
 export const CONFIRM_ASSESSMENT = 'Confirm the assessment';
-export const ADD_PRODUCTS = 'Add the products applied';
+// The full form's own wording for a visit with no product (SchedulePage).
+export const ADD_PRODUCTS = 'Products applied required';
+const LABEL_REASONS = new Set([ADD_PHOTO, ANALYZE_PHOTOS, CONFIRM_ASSESSMENT, ADD_PRODUCTS]);
 
 const unusableMessage = (reason) => (reason === 'property_check_failed' ? PROPERTY_CHECK_MESSAGE : PROPERTY_SCOPE_MESSAGE);
 
@@ -517,37 +519,27 @@ function completionBody({ form, rows, ctx, assessmentId, lawnSqft, propertyAreas
 
 const INERT = { 'aria-hidden': true, inert: '' };
 
-// The sheet's top bar: the title, the customer and service lines, and the address
-// (the shared header's look, without a Full form button), then Details and Close.
-// Details opens the appointment details sheet (price edit, reschedule, cancel), the
-// same one the full form's button opens; it is shown when the parent passes
+// The top bar of the full form's mobile Complete service page (SchedulePage,
+// the sticky bar): a round back arrow, the centred title, and the Details pill.
+// Details opens the appointment details sheet (price edit, reschedule, cancel),
+// the same one the full form's button opens; it is shown when the parent passes
 // onViewDetails.
-function LawnSheetHeader({ titleId, title, service, visit, showDetails, detailsDisabled, onDetails, closeDisabled, onClose }) {
-  const line = visit?.address;
-  const address = line && typeof line === 'object'
-    ? [[line.line1, line.line2].filter(Boolean).join(' '), line.city].filter(Boolean).join(', ')
-    : '';
+function LawnSheetHeader({ titleId, title, showDetails, detailsDisabled, onDetails, backDisabled, onBack }) {
   return (
-    <header className="tech-visit-header">
-      <div>
-        <h2 id={titleId} className="tech-visit-title">{title}</h2>
-        <p className="tech-visit-muted">
-          {customerNameOf(visit, service) || 'Customer'}{service?.serviceType ? ` · ${service.serviceType}` : ''}
-        </p>
-        {address && <p className="tech-visit-muted">{address}</p>}
-      </div>
-      {showDetails && (
-        <Button variant="ghost" className="tech-visit-action" disabled={detailsDisabled} onClick={onDetails}>Details</Button>
-      )}
-      <Button variant="ghost" className="tech-visit-action tech-visit-close" onClick={onClose} disabled={closeDisabled} aria-label="Close">×</Button>
+    <header className="tech-lawn-header">
+      <button type="button" className="tech-lawn-back" aria-label="Back" disabled={backDisabled} onClick={onBack}>←</button>
+      <h2 id={titleId} className="tech-lawn-title">{title}</h2>
+      {showDetails
+        ? <button type="button" className="tech-lawn-details" disabled={detailsDisabled} onClick={onDetails}>Details</button>
+        : <span className="tech-lawn-details-spacer" aria-hidden="true" />}
     </header>
   );
 }
 
-// The customer's contact links under the header: the name (to the customer),
-// directions, call and mail, as the full form's Complete service page has them.
-// The schedule row carries name, address and phone; the email is read from the
-// customer, as the full form does.
+// The customer block under the full form's title: the name as a link to the
+// customer, then address (directions), phone (call) and email (mail), each an
+// underlined link as there. The schedule row carries name, address and phone; the
+// email is read from the customer, as the full form does.
 function CustomerContact({ service, visit, request }) {
   const customerId = service?.customerId || service?.routedCustomerId || null;
   const [email, setEmail] = useState('');
@@ -563,13 +555,13 @@ function CustomerContact({ service, visit, request }) {
   const name = visit?.customerName || service?.customerName || 'Customer';
   const address = service?.fullAddress || service?.address || '';
   return (
-    <div className="tech-visit-contact">
-      <p className="tech-visit-muted">
-        {customerId ? <a href={`/admin/customers?customerId=${encodeURIComponent(customerId)}`}>{name}</a> : name}
-      </p>
-      {address ? <p className="tech-visit-muted"><a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer">{address}</a></p> : null}
-      {service?.customerPhone ? <p className="tech-visit-muted"><a href={`tel:${service.customerPhone}`}>{service.customerPhone}</a></p> : null}
-      {email ? <p className="tech-visit-muted"><a href={`mailto:${email}`} style={{ wordBreak: 'break-word' }}>{email}</a></p> : null}
+    <div className="tech-lawn-contact">
+      {customerId
+        ? <a className="tech-lawn-name" href={`/admin/customers?customerId=${encodeURIComponent(customerId)}`}>{name}</a>
+        : <div className="tech-lawn-name">{name}</div>}
+      {address ? <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer">{address}</a> : null}
+      {service?.customerPhone ? <a href={`tel:${service.customerPhone}`}>{service.customerPhone}</a> : null}
+      {email ? <a href={`mailto:${email}`} style={{ wordBreak: 'break-word' }}>{email}</a> : null}
     </div>
   );
 }
@@ -642,8 +634,8 @@ export default function FastCompleteLawnSheet({ service, request, catalog = [], 
   const locked = submitting || submission.failure !== null;
 
   return (
-    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
-      <LawnSheetHeader titleId={titleId} title={done ? 'Lawn visit complete' : 'Complete lawn visit'} service={service} visit={ctx.visit} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || dictationPending} onDetails={() => onViewDetails?.()} closeDisabled={submitting} onClose={close} />
+    <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
+      <LawnSheetHeader titleId={titleId} title={done ? 'Service complete' : 'Complete service'} showDetails={!done && !!onViewDetails} detailsDisabled={submitting || dictationPending} onDetails={() => onViewDetails?.()} backDisabled={submitting} onBack={close} />
       <SheetBody service={service} request={request} catalog={catalog} ctx={ctx} propertyAreas={propertyAreas} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onOverlay={setOverlay} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
     </FastCompleteFrame>
   );
@@ -816,21 +808,18 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
           <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
           <section className="tech-visit-choice-section">
             <div className="tech-visit-section-head">
-              <h3 className="tech-visit-section-title">Lawn photos</h3>
-              <span className="tech-visit-muted">Photos, Analyze lawn, then confirm</span>
+              <h3 className="tech-visit-section-title">Lawn assessment</h3>
             </div>
-            <div className="tech-visit-light-card">
-              <LawnAssessmentCompletionBlock
-                compact
-                service={blockService}
-                request={request}
-                disabled={locked || dictationPending}
-                onConfirmed={onConfirmed}
-                onReady={onReady}
-                onProgress={setProgress}
-                technicianNotes={form.note}
-              />
-            </div>
+            <LawnAssessmentCompletionBlock
+              compact
+              service={blockService}
+              request={request}
+              disabled={locked || dictationPending}
+              onConfirmed={onConfirmed}
+              onReady={onReady}
+              onProgress={setProgress}
+              technicianNotes={form.note}
+            />
           </section>
           <ProductsSection ctx={ctx} products={products} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} />
           <PropertyServiceAreas
@@ -881,8 +870,9 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
       <CompleteFooter
         submission={submission}
         missingReason={missingReason}
+        reasonInButton={LABEL_REASONS.has(missingReason)}
         warn={!!stockRow}
-        label="Complete lawn visit"
+        label="Complete service"
         onSubmit={submit}
         coverProps={picker.coverProps}
       >
@@ -906,7 +896,6 @@ function ProductsSection({ ctx, products, lawnSqft, locked, other, popover }) {
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Products used</h3>
-        <span className="tech-visit-muted">{rows.some((row) => row.planned) ? 'Planned products are on' : 'Add what you applied'}</span>
       </div>
       {ctx.plannedUnavailable && !rows.some((row) => row.planned) && (
         <p className="tech-visit-muted" role="status">The planned products could not be loaded. Add what you applied.</p>

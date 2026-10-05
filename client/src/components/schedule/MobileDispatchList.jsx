@@ -182,6 +182,11 @@ function DriveLegs({ service }) {
   );
 }
 
+// The word under a card button's icon.
+function ButtonLabel({ children }) {
+  return <span className="block max-w-full truncate leading-tight" style={{ fontSize: 14 }}>{children}</span>;
+}
+
 function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
   const name = String(service.customerName || '').trim();
   const customerMissing = !name;
@@ -232,10 +237,13 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   const hasActions =
     canAssignTechnician || showTreatmentPlan || showProtocol || showAudit || showEnRoute || showNavigate;
 
+  // Icon over a one-word label (owner 2026-10-05), so a new tech can tell
+  // the buttons apart.
   const actionBtnClass =
-    'inline-flex items-center justify-center h-11 flex-1 min-w-0 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
+    'inline-flex flex-col items-center justify-center flex-1 min-w-0 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
   const primaryBtnClass =
-    'inline-flex items-center justify-center h-11 flex-1 min-w-0 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 font-medium';
+    'inline-flex flex-col items-center justify-center flex-1 min-w-0 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 font-medium';
+  const btnStyle = { height: 56, gap: 2 };
 
   return (
     <div
@@ -316,7 +324,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                   type="button"
                   onClick={(e) => { e.stopPropagation(); setShowTechPicker(!showTechPicker); }}
                   className={primaryBtnClass}
-                  style={{ fontSize: 13 }}
+                  style={{ ...btnStyle, fontSize: 14 }}
                   title={service.technicianName
                     ? `${service.technicianName} — tap to reassign`
                     : 'Assign technician'}
@@ -324,7 +332,8 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                     ? `Technician: ${service.technicianName}`
                     : 'Assign technician'}
                 >
-                  {techInitial || 'Assign'}
+                  <span>{techInitial || '+'}</span>
+                  <ButtonLabel>{techInitial ? 'Tech' : 'Assign'}</ButtonLabel>
                 </button>
                 {showTechPicker && (
                   <InlineTechPicker
@@ -343,10 +352,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onTreatmentPlan(service); }}
                 className={actionBtnClass}
+                style={btnStyle}
                 title="Treatment plan"
                 aria-label="Treatment plan"
               >
                 <Leaf size={16} strokeWidth={1.75} />
+                <ButtonLabel>Plan</ButtonLabel>
               </button>
             )}
             {showProtocol && (
@@ -358,10 +369,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                   onProtocol(service);
                 }}
                 className={actionBtnClass}
+                style={btnStyle}
                 title="Protocol"
                 aria-label="Protocol"
               >
                 <BookOpen size={16} strokeWidth={1.75} />
+                <ButtonLabel>Protocol</ButtonLabel>
               </button>
             )}
             {showAudit && (
@@ -369,10 +382,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onViewAudit(service); }}
                 className={actionBtnClass}
+                style={btnStyle}
                 title="View completion audit"
                 aria-label="View completion audit"
               >
                 <ShieldCheck size={16} strokeWidth={1.75} />
+                <ButtonLabel>Audit</ButtonLabel>
               </button>
             )}
             {showEnRoute && (
@@ -380,10 +395,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onEnRoute(service); }}
                 className={actionBtnClass}
+                style={btnStyle}
                 title="Tech En Route"
                 aria-label="Tech En Route"
               >
                 <WavesMark size={16} fill="#009CDE" title="Waves logo" />
+                <ButtonLabel>En route</ButtonLabel>
               </button>
             )}
             {showNavigate && (
@@ -393,10 +410,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 rel="noopener noreferrer"
                 onClick={(e) => e.stopPropagation()}
                 className={primaryBtnClass}
+                style={btnStyle}
                 title="Open in Google Maps"
                 aria-label={`Open ${service.address} in Google Maps`}
               >
                 <MapPin size={16} strokeWidth={1.75} />
+                <ButtonLabel>Map</ButtonLabel>
               </a>
             )}
           </div>
