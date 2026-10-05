@@ -759,9 +759,24 @@ async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory =
 
 // The caller's last check, fail closed: allowed only when it returns exactly true (a throw refuses). No
 // check passed = allowed.
-async function callerHandoffAllows(beforeProviderHandoff, facts) {
+// The facts also carry the customer's payment-receipt opt-out, read here at the boundary (after the
+// rendering and the PDF): the manual email ignores the opt-out, so a caller that approved a send with it
+// disclosed (or absent) binds it like the recipient. null = unreadable (a binding caller refuses on it).
+async function callerHandoffAllows(beforeProviderHandoff, facts, invoice) {
   if (typeof beforeProviderHandoff !== 'function') return true;
-  try { return (await beforeProviderHandoff(facts)) === true; } catch { return false; }
+  try {
+    return (await beforeProviderHandoff({ ...facts, optedOut: await receiptOptedOutNow(invoice) })) === true;
+  } catch { return false; }
+}
+
+// The payment_receipt=false opt-out as it stands now (receiptEmailOptOutState's rule: a payer-billed
+// receipt is never opted out by the homeowner's settings). null when the settings cannot be read.
+async function receiptOptedOutNow(invoice) {
+  if (!invoice || invoice.payer_id) return false;
+  try {
+    const prefs = await db('notification_prefs').where({ customer_id: invoice.customer_id }).first('payment_receipt');
+    return prefs?.payment_receipt === false;
+  } catch { return null; }
 }
 
 // What an email send is about to hand the provider: the recipient and the amount it prints (2 decimals).
@@ -777,13 +792,13 @@ function receiptHandoffFacts(recipient, amountDue, invoice) {
 
 // The caller's last check as an email-library provider handoff (see sendReceiptEmail). undefined when there
 // is no check, or on the routed path (the billing email authority owns that boundary).
-// `facts` is what this send is about to hand the provider ({ channel: 'email', to, amount }, the recipient and
-// the amount the email prints), passed to the check so the caller can bind them to what it approved.
-function callerReceiptHandoff(beforeProviderHandoff, authorityInput, facts) {
+// `facts` is what this send is about to hand the provider ({ channel: 'email', to, amount, paid, optedOut }, the
+// recipient and the amount the email prints, plus the opt-out read at the boundary), passed to the check so the caller can bind them to what it approved.
+function callerReceiptHandoff(beforeProviderHandoff, authorityInput, facts, invoice) {
   if (authorityInput || typeof beforeProviderHandoff !== 'function') return undefined;
   return async (dispatch) => {
     await dispatch(undefined, async () => {
-      if (!(await callerHandoffAllows(beforeProviderHandoff, facts))) {
+      if (!(await callerHandoffAllows(beforeProviderHandoff, facts, invoice))) {
         const refusal = new Error('Receipt email handoff aborted by the caller');
         refusal.providerBoundaryBlocked = true;
         throw refusal;
@@ -954,7 +969,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         categories: ['invoice_receipt'],
         attachments: [pdfAttachment(`receipt-${invoice.invoice_number}.pdf`, pdfBuffer)],
         // (undefined = sendTemplate's default; the authority spread below replaces it on the routed path)
-        withProviderHandoff: callerReceiptHandoff(options.beforeProviderHandoff, authorityInput, handoffFacts),
+        withProviderHandoff: callerReceiptHandoff(options.beforeProviderHandoff, authorityInput, handoffFacts, invoice),
         ...(authorityInput ? {
           withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
             input: authorityInput,
@@ -1006,7 +1021,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 
   // The caller's last check guards this handoff too (same fail-closed rule as
   // callerReceiptHandoff): anything but true is a definite non-send.
-  if (!(await callerHandoffAllows(options.beforeProviderHandoff, handoffFacts))) {
+  if (!(await callerHandoffAllows(options.beforeProviderHandoff, handoffFacts, invoice))) {
     return { ok: false, error: 'Receipt email handoff aborted', code: 'receipt_handoff_aborted' };
   }
 

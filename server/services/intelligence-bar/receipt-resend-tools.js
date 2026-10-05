@@ -231,7 +231,10 @@ function approvedMatcher({ who, via }) {
     if (!sameAmount(facts.amount)) return false;
     switch (facts.channel) {
       // The email (and its PDF) state the paid date; the text states none, so only the email is bound to it.
+      // The opt-out read at the boundary (null = unreadable) must still be the one the card disclosed: the
+      // manual email ignores it, so one set after the last re-check would otherwise send unseen.
       case 'email': return via !== 'sms' && Boolean(who.email) && (facts.paid ?? null) === paidKey(who.invoice)
+        && facts.optedOut === (who.optedOut === true)
         && sameReach({ email: normalizeReceiptEmail(facts.to) });
       case 'sms': return via !== 'email' && !who.payerBilled && Boolean(who.phone) && sameReach({ phone: facts.to });
       case 'app': return via !== 'email' && !who.payerBilled && who.app === true;

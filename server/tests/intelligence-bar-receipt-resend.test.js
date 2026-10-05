@@ -609,7 +609,7 @@ test('a non-admin actor is refused before anything is read', async () => {
 describe('approvedMatcher: what each sender must be about to deliver to match the approved plan (memory only)', () => {
   const who = { email: 'Pat@Example.com', phone: '9415550100', app: true, payerBilled: false, amount: '129.00' };
   const m = (over = {}, via = 'both') => approvedMatcher({ who: { ...who, ...over }, via });
-  const email = (to, amount = '129.00') => ({ channel: 'email', to, amount });
+  const email = (to, amount = '129.00') => ({ channel: 'email', to, amount, optedOut: false });
 
   test('email: the address compares after the card\'s own trim and lower-casing; a different address or amount is refused', () => {
     // The plan holds the already-normalized address (what the card hashed); the sender reports its own spelling.
@@ -641,12 +641,24 @@ describe('approvedMatcher: what each sender must be about to deliver to match th
     expect(plan({ channel: 'app', to: null, amount: '129.00' })).toBe(true);
   });
 
+  test('email is held to the opt-out the card showed, as read at the handoff (unreadable or missing = refused)', () => {
+    const plan = { email: 'pat@example.com' };
+    expect(m(plan)(email('pat@example.com'))).toBe(true);
+    expect(m(plan)({ ...email('pat@example.com'), optedOut: true })).toBe(false);
+    expect(m({ ...plan, optedOut: true })({ ...email('pat@example.com'), optedOut: true })).toBe(true);
+    expect(m({ ...plan, optedOut: true })(email('pat@example.com'))).toBe(false);
+    expect(m(plan)({ ...email('pat@example.com'), optedOut: null })).toBe(false);
+    expect(m(plan)({ channel: 'email', to: 'pat@example.com', amount: '129.00' })).toBe(false);
+    // The text and app legs honor the opt-out themselves, so they are not bound to it.
+    expect(m(plan)({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(true);
+  });
+
   test('amount: formatting does not matter, value does', () => {
     const plan = { email: 'pat@example.com' };
     expect(m(plan)(email('pat@example.com', 129))).toBe(true);
     expect(m(plan)(email('pat@example.com', '129'))).toBe(true);
     expect(m(plan)(email('pat@example.com', '129.01'))).toBe(false);
-    expect(m(plan)({ channel: 'email', to: 'pat@example.com' })).toBe(false);
+    expect(m(plan)({ channel: 'email', to: 'pat@example.com', optedOut: false })).toBe(false);
   });
 
   test('text: the phone must be the approved one; payer-billed and email-only never text', () => {
@@ -679,8 +691,10 @@ describe('approvedMatcher: what each sender must be about to deliver to match th
     await confirm({});
     const { matches } = sendInvoiceReceipt.mock.calls[0][1].expect;
     const paid = PAID.paid_at.getTime();
-    expect(matches({ channel: 'email', to: 'pat@example.com', amount: '129.00', paid })).toBe(true);
-    expect(matches({ channel: 'email', to: 'someone-else@example.com', amount: '129.00', paid })).toBe(false);
+    expect(matches({ channel: 'email', to: 'pat@example.com', amount: '129.00', paid, optedOut: false })).toBe(true);
+    expect(matches({ channel: 'email', to: 'someone-else@example.com', amount: '129.00', paid, optedOut: false })).toBe(false);
+    // An opt-out set after the last re-check, read at the email handoff: refused.
+    expect(matches({ channel: 'email', to: 'pat@example.com', amount: '129.00', paid, optedOut: true })).toBe(false);
     expect(matches({ channel: 'sms', to: CUSTOMER.phone, amount: '129.00' })).toBe(true);
     expect(matches({ channel: 'sms', to: CUSTOMER.phone, amount: '99.00' })).toBe(false);
   });
