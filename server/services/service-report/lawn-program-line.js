@@ -26,6 +26,7 @@
  */
 
 const protocols = require('../../config/protocols.json');
+const featureGates = require('../../config/feature-gates');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -135,6 +136,28 @@ const DEFAULT_LINES = {
   10: L(`In October the program focuses on ${FALL_FEED} and disease control where needed.`, { feed: FALL_FEED, fungicide: 'disease control where needed' }),
   11: L('In November the program focuses on potassium where the lawn needs it and broadleaf weed control when conditions allow.', { potassium: 'potassium where the lawn needs it', broadleaf: 'broadleaf weed control when conditions allow' }),
   12: L('In December the program offers a winter check-in on request.', { winter_touchpoint: 'offers a winter check-in on request' }),
+};
+
+// GATE_LAWN_V13: one universal program for every grass, so one table for all
+// of them (month number -> { line, claims }, same shape as above). The claims
+// are proven against server/config/lawn-protocol-v13.json by
+// server/tests/lawn-v13.test.js.
+const SPOT_DISEASE = 'spot treatment for disease and weeds where needed';
+const V13_BARRIER = 'a pre-emergent weed-barrier application where it fits the property';
+const V13_FALL_BARRIER = 'a pre-emergent weed barrier where it fits the property';
+const PROGRAM_LINES_V13 = {
+  1: L(`In January the program focuses on ${V13_BARRIER} and a micronutrient feeding, plus ${SPOT_DISEASE}.`, { pre_emergent: V13_BARRIER, micros: 'a micronutrient feeding', fungicide: SPOT_DISEASE, broadleaf: SPOT_DISEASE }),
+  2: L('In February the program focuses on a feeding as the lawn greens up, plus spot weed control where needed.', { feed: 'a feeding as the lawn greens up', broadleaf: 'spot weed control where needed' }),
+  3: L(`In March the program focuses on ${V13_BARRIER} and a micronutrient feeding, plus spot treatment for root disease and weeds where needed.`, { pre_emergent: V13_BARRIER, micros: 'a micronutrient feeding', fungicide: 'spot treatment for root disease and weeds where needed', broadleaf: 'spot treatment for root disease and weeds where needed' }),
+  4: L('In April the program focuses on a light feeding, plus spot treatment for root disease and chinch bugs where needed.', { feed: 'a light feeding', fungicide: 'spot treatment for root disease and chinch bugs where needed', insect_spot: 'spot treatment for root disease and chinch bugs where needed' }),
+  5: L('In May the program focuses on an insect treatment where it fits the property, plus spot treatment for chinch bugs, weeds and dry spots where needed.', { insect_treatment: 'an insect treatment where it fits the property', insect_spot: 'spot treatment for chinch bugs, weeds and dry spots where needed', broadleaf: 'spot treatment for chinch bugs, weeds and dry spots where needed', dry_spots: 'spot treatment for chinch bugs, weeds and dry spots where needed' }),
+  6: L(`In June the program focuses on a micronutrient feeding and ${V13_BARRIER}, plus spot treatment for disease and chinch bugs where needed.`, { micros: 'a micronutrient feeding', pre_emergent: V13_BARRIER, fungicide: 'spot treatment for disease and chinch bugs where needed', insect_spot: 'spot treatment for disease and chinch bugs where needed' }),
+  7: L('In July the program focuses on an inspection of the whole lawn, plus spot treatment for caterpillars, leaf spot disease and chinch bugs where needed.', { scouting_visit: 'an inspection of the whole lawn', insect_spot: 'spot treatment for caterpillars, leaf spot disease and chinch bugs where needed', fungicide: 'spot treatment for caterpillars, leaf spot disease and chinch bugs where needed' }),
+  8: L('In August the program focuses on a micronutrient feeding, plus spot treatment for leaf spot disease and caterpillars where needed.', { micros: 'a micronutrient feeding', fungicide: 'spot treatment for leaf spot disease and caterpillars where needed', insect_spot: 'spot treatment for leaf spot disease and caterpillars where needed' }),
+  9: L('In September the program focuses on a micronutrient feeding, plus spot treatment for root disease and caterpillars where needed.', { micros: 'a micronutrient feeding', fungicide: 'spot treatment for root disease and caterpillars where needed', insect_spot: 'spot treatment for root disease and caterpillars where needed' }),
+  10: L(`In October the program focuses on ${FALL_FEED} with ${V13_FALL_BARRIER}, plus spot treatment for large patch, grubs and weeds where needed.`, { feed: FALL_FEED, pre_emergent: V13_FALL_BARRIER, fungicide: 'spot treatment for large patch, grubs and weeds where needed', insect_spot: 'spot treatment for large patch, grubs and weeds where needed', broadleaf: 'spot treatment for large patch, grubs and weeds where needed' }),
+  11: L('In November the program focuses on a feeding, plus spot treatment for large patch and sedge where needed.', { feed: 'a feeding', fungicide: 'spot treatment for large patch and sedge where needed', broadleaf: 'spot treatment for large patch and sedge where needed' }),
+  12: L('In December the program focuses on a light feeding, plus spot treatment for large patch and weeds where needed.', { feed: 'a light feeding', fungicide: 'spot treatment for large patch and weeds where needed', broadleaf: 'spot treatment for large patch and weeds where needed' }),
 };
 
 function grassKeyFor(grassType) {
@@ -269,6 +292,7 @@ function buildProgramLine({ grassType = null, month = null, applications = [], n
   const m = Number(month);
   if (!Number.isInteger(m) || m < 1 || m > 12) return null;
   if (NO_NITROGEN_MONTHS.has(m) && (nitrogenApplied === null ? appliedNitrogen(applications) : nitrogenApplied === true)) return null;
+  if (featureGates.lawnV13Live?.()) return PROGRAM_LINES_V13[m].line;
   const grassKey = grassKeyFor(grassType);
   if (grassKey) {
     if (!protocolMonths(grassKey).has(m)) return null;
@@ -280,6 +304,7 @@ function buildProgramLine({ grassType = null, month = null, applications = [], n
 module.exports = {
   buildProgramLine,
   PROGRAM_LINES,
+  PROGRAM_LINES_V13,
   DEFAULT_LINES,
   QUALIFIERS,
   NO_NITROGEN_MONTHS,

@@ -13,7 +13,7 @@
  * so we do NOT synthesize legacy A/B/C1/C2/D codes here.
  */
 const db = require('./../models/db');
-const protocols = require('../config/protocols.json');
+const { lawnProtocols } = require('./lawn-program');
 
 const GRASS_TYPE_LABELS = {
   st_augustine: 'St. Augustine',
@@ -65,8 +65,9 @@ function irrigationTypeHasSystem(irrigationType) {
 // (st_augustine / bermuda / zoysia / bahia). 'mixed'/'unknown' — and any
 // value not present in protocols.lawn — have no track.
 function resolveTrackKey(trackKey, grassType) {
-  if (trackKey && protocols.lawn && protocols.lawn[trackKey]) return trackKey;
-  if (grassType && protocols.lawn && protocols.lawn[grassType]) return grassType;
+  const lawn = lawnProtocols();
+  if (trackKey && lawn && lawn[trackKey]) return trackKey;
+  if (grassType && lawn && lawn[grassType]) return grassType;
   return null;
 }
 

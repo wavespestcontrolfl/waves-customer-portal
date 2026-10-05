@@ -1117,8 +1117,11 @@ export default function ProtocolReferenceTabV2() {
   const currentVisit =
     trackData?.visits?.find((v) => v.month === currentMonthAbbr) ||
     (isServiceProgram ? trackData?.visits?.[0] : null);
+  // A lawn track whose catalog payload carries its own safety_rules (the v13
+  // program, GATE_LAWN_V13) shows those; every other lawn track keeps the
+  // static list.
   const safetyRules = isLawnTrack
-    ? TRACK_SAFETY_RULES[selectedTrack] || []
+    ? trackData?.safety_rules || TRACK_SAFETY_RULES[selectedTrack] || []
     : trackData?.safety_rules || [];
 
   return (

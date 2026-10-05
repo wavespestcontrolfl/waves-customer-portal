@@ -28,6 +28,7 @@ const {
 } = require('../services/product-costing');
 const { syncPricesToEstimator } = require('../services/price-sync');
 const protocols = require('../config/protocols.json');
+const { lawnProtocols } = require('../services/lawn-program');
 const { validateRule } = require('../services/service-report/lawn-watering-rule');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -779,7 +780,7 @@ function normalizeProtocolText(value) {
 
 function protocolProductReferences(definition) {
   const refs = [];
-  for (const [trackKey, track] of Object.entries(protocols.lawn || {})) {
+  for (const [trackKey, track] of Object.entries(lawnProtocols() || {})) {
     for (const visit of track.visits || []) {
       const text = normalizeProtocolText([visit.primary, visit.secondary, visit.notes].filter(Boolean).join('\n'));
       if (definition.aliases.some((alias) => text.includes(normalizeProtocolText(alias)))) {
@@ -880,7 +881,7 @@ function protocolTemplateCounts() {
   return {
     pest: Math.max(0, (protocols.pest?.visits || []).length - 2),
     termite: (protocols.termite?.visits || []).length,
-    lawn: Object.keys(protocols.lawn || {}).length,
+    lawn: Object.keys(lawnProtocols() || {}).length,
     // Dedicated programs now exist for these — counting keyword hits inside
     // the PEST visit text predates them and returned stale zeros.
     mosquito: (protocols.mosquito?.visits || []).length,

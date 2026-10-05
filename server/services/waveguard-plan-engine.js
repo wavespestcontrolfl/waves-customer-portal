@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const protocols = require('../config/protocols.json');
+const { lawnProtocols } = require('./lawn-program');
 const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
@@ -122,7 +122,7 @@ function productAliases(productOrName) {
   ].filter((alias, index, arr) => alias && alias.length > 5 && arr.indexOf(alias) === index);
 }
 
-function parseProtocolLines(text, role) {
+function parseProtocolLines(text, role, { exactName = false } = {}) {
   if (!text) return [];
   return String(text)
     .split('\n')
@@ -133,6 +133,7 @@ function parseProtocolLines(text, role) {
       role,
       conditional: role !== 'base' || /^if\b/i.test(raw) || /\bif\b/i.test(raw),
       product: null,
+      ...(exactName ? { exactName: true } : {}),
       ...classifyProtocolLine(raw, role),
     }));
 }
@@ -161,12 +162,16 @@ function matchCatalogProduct(line, products) {
       if (!direct && !reverse && !tokenMatch) return null;
       const hasInventoryPrice = Number(product.cost_per_unit || 0) > 0 || Number(product.best_price || 0) > 0;
       const needsPricingPenalty = product.needs_pricing === true ? -75 : 0;
+      // A line that spells a product's whole catalog name (the v13 lawn program,
+      // `exact_catalog_names`) always outranks a product that only shares a
+      // generic word with it ("Insecticide"), whatever either one's price is.
+      const exactNameBonus = line.exactName && normalizedLine.includes(name) ? 300 : 0;
       const npkScore = lineNpk && productNpk
         ? (lineNpk.n === productNpk.n && lineNpk.p === productNpk.p && lineNpk.k === productNpk.k ? 150 : -250)
         : 0;
       return {
         product,
-        score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore,
+        score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore + exactNameBonus,
       };
     })
     .filter(Boolean)
@@ -967,7 +972,7 @@ function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: 
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
     || (recorded || requireKnownGrass ? null : 'st_augustine');
-  const track = trackKey ? protocols.lawn?.[trackKey] : null;
+  const track = trackKey ? lawnProtocols()?.[trackKey] : null;
   const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
   return { trackKey, track, month, visit };
@@ -1406,8 +1411,9 @@ async function buildPlanForService(serviceId, options = {}) {
   const visit = completionDefaultsEnabled && service.lawn_protocol_window_key && !structuredProtocolContext?.window
     ? null : selection.visit;
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
-  const baseLines = parseProtocolLines(visit?.primary, 'base');
-  const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional');
+  const exactName = track?.exact_catalog_names === true;
+  const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
+  const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional', { exactName });
   const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
   const candidateItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,

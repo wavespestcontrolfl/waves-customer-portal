@@ -2,6 +2,8 @@ const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
 const { etParts } = require('../utils/datetime-et');
 const { isDeepStrictEqual } = require('node:util');
+const featureGates = require('../config/feature-gates');
+const { LAWN_V13_VERSION } = require('./lawn-program');
 
 // The checked-in field reference and plan matcher are released with protocol
 // product/rate/gate changes. Portal publication may update DB-owned SOP and
@@ -124,10 +126,20 @@ async function getActiveLawnProtocol(knex = db, filters = {}) {
     const read = savepointRead(knex, () => query);
     return strict ? read : read.catch(() => fallback);
   };
-  const query = knex('lawn_protocols')
-    .where({ status: 'active' })
-    .orderBy('effective_from', 'desc')
-    .orderBy('created_at', 'desc');
+  // GATE_LAWN_V13 on: the staged v13 version outranks the active one for a
+  // visit with no assignment (an assigned visit resolves its own pinned
+  // version in getProtocolWindowContext and never reaches this lookup). Off,
+  // the query is exactly the old one.
+  const v13 = featureGates.lawnV13Live?.() === true;
+  const query = knex('lawn_protocols');
+  if (v13) {
+    query.where(function servingStatus() {
+      this.where({ status: 'active' }).orWhere({ status: 'staged', version: LAWN_V13_VERSION });
+    }).orderByRaw('(version = ?) DESC', [LAWN_V13_VERSION]);
+  } else {
+    query.where({ status: 'active' });
+  }
+  query.orderBy('effective_from', 'desc').orderBy('created_at', 'desc');
 
   if (filters.protocolKey) query.where({ protocol_key: filters.protocolKey });
   if (filters.grassTrack) query.where({ grass_track: filters.grassTrack });

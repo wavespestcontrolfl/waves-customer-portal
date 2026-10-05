@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const protocols = require('../config/protocols.json');
+const { lawnProtocols } = require('./lawn-program');
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const TEMPLATE_VERSION = 'mvp-1';
@@ -222,14 +222,14 @@ function customerProtocolBullets(visit) {
 }
 
 function protocolVisitForMonth(turfType, month) {
-  const track = protocols.lawn?.[turfType];
+  const track = lawnProtocols()?.[turfType];
   if (!track) return null;
   const monthName = MONTHS[Number(month) - 1];
   return (track.visits || []).find((visit) => String(visit.month || '').toLowerCase() === monthName.toLowerCase()) || null;
 }
 
 function protocolTrack(turfType) {
-  return protocols.lawn?.[turfType] || null;
+  return lawnProtocols()?.[turfType] || null;
 }
 
 async function loadApprovedModules(db) {
