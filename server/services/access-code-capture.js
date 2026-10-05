@@ -643,16 +643,19 @@ async function resolveHome(trx, customerId, { life, propertyId, current = null, 
 // any visit. Returns { ok, codes } or a typed refusal.
 async function listForVisit(conn, req, visitId) {
   const { technicianCurrentVisitFilter, isTechnicianRequest } = require('./technician-visit-scope');
-  const q = conn('scheduled_services').where('scheduled_services.id', visitId);
-  technicianCurrentVisitFilter(req, q);
-  // A technician reads codes only around the visit day (yesterday through
-  // tomorrow) and only for a visit still to be done; post-visit paperwork
-  // scope is wider than what a door code needs.
-  if (isTechnicianRequest(req)) {
-    q.whereBetween('scheduled_services.scheduled_date', [etDateString(addETDays(new Date(), -1)), etDateString(addETDays(new Date(), 1))])
-      .whereRaw(`COALESCE(scheduled_services.status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES);
-  }
-  const visit = await q.first('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id');
+  const scoped = () => {
+    const q = conn('scheduled_services').where('scheduled_services.id', visitId);
+    technicianCurrentVisitFilter(req, q);
+    // A technician reads codes only around the visit day (yesterday through
+    // tomorrow) and only for a visit still to be done; post-visit paperwork
+    // scope is wider than what a door code needs.
+    if (isTechnicianRequest(req)) {
+      q.whereBetween('scheduled_services.scheduled_date', [etDateString(addETDays(new Date(), -1)), etDateString(addETDays(new Date(), 1))])
+        .whereRaw(`COALESCE(scheduled_services.status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES);
+    }
+    return q;
+  };
+  const visit = await scoped().first('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id');
   if (!visit) {
     if (isTechnicianRequest(req) && await conn('scheduled_services').where({ id: visitId }).first('id')) return fail(403, 'service_not_assigned');
     return fail(404, 'not_found');
@@ -667,6 +670,12 @@ async function listForVisit(conn, req, visitId) {
   // exactly that visit's home. A code with no home (an older row, a home since
   // deleted) or a visit with no known home shows nothing until the office binds it.
   const sameHome = (r) => !!r.propertyId && !!visitHome && r.propertyId === visitHome;
+  // The visit may have been reassigned or moved to another home while the
+  // codes were read: answer only if it is still in scope with the same home.
+  const again = await scoped().first('scheduled_services.property_id');
+  if (!again || (again.property_id || null) !== (visit.property_id || null)) {
+    return fail(isTechnicianRequest(req) ? 403 : 409, isTechnicianRequest(req) ? 'service_not_assigned' : 'visit_changed');
+  }
   // Only what a stop needs: never the customer's message, its source or who decided.
   return { ok: true, codes: active.filter((r) => r.life === 'standing' || r.scheduledServiceId === visit.id)
     .filter(sameHome)

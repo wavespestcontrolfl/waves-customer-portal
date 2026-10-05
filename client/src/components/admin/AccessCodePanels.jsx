@@ -279,7 +279,7 @@ export function FoundCodeCard({ row, visits, homes = null, onSave, onDismiss, re
         </blockquote>
       )}
       <div className="text-ui-label text-ink-secondary">{sourceLabel(row)}</div>
-      <CodeFields idPrefix={`found-${row.id}`} draft={draft} setDraft={setDraft} choices={choices} busy={busy} homes={homeList} needHome={!row.propertyId} />
+      <CodeFields idPrefix={`found-${row.id}`} draft={draft} setDraft={setDraft} choices={choices} busy={busy} homes={homeList} needHome={!homeList.some((h) => h.id === row.propertyId)} />
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" disabled={busy || !typed} onClick={() => run(() => onSave(row, bodyFromDraft(draft, row)), "Could not save the code")}>
