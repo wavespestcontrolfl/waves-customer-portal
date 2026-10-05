@@ -1541,23 +1541,30 @@ const V13_UNAVAILABLE = {
 
 // product_limits (annual caps, minimum intervals, blackouts) through the one
 // application-limits reader the completion path uses, over the customer's own
-// application history: the hard blocks per SELECTED product id. A failed read fails
-// closed (strict throws; otherwise the product reads as capped).
-async function v13LimitBlocks(knex, service, serviceDate, items, { strict = false } = {}) {
+// application history, for each SELECTED product: the hard blocks per product id
+// (`capped`: no amount) and the warning-level findings (`warnings`: a minimum
+// interval, an approaching cap; the dose stays). A failed read fails closed
+// (strict throws; otherwise the product reads as capped).
+async function v13Limits(knex, service, serviceDate, items, { strict = false } = {}) {
   const limits = require('./application-limits');
   const capped = new Map();
+  const warnings = [];
+  const checked = new Set();
   for (const item of items.filter((candidate) => candidate.selected && candidate.product)) {
     const id = String(item.product.id);
-    if (capped.has(id)) continue;
-    const blocks = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k))
-      .then((result) => result.blocks)
+    if (checked.has(id)) continue;
+    checked.add(id);
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k))
       .catch((err) => {
         if (strict) throw err;
-        return [{ message: `${item.product.name}: application limits could not be read.` }];
+        return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };
       });
-    if (blocks.length) capped.set(id, blocks.map((block) => ({ ...block, productName: item.product.name })));
+    if (result.blocks.length) capped.set(id, result.blocks.map((block) => ({ ...block, productName: item.product.name })));
+    warnings.push(...result.warnings.map((warning) => ({
+      code: 'lawn_v13_limit_warning', severity: 'warning', limitType: warning.type || null, productId: id, productName: item.product.name, message: warning.message,
+    })));
   }
-  return capped;
+  return { capped, warnings };
 }
 
 // Plan notices for the v13 lines: a hard limit is a block per limit (the existing
@@ -1777,7 +1784,8 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
-  const cappedProducts = v13Active ? await v13LimitBlocks(knex, service, serviceDate, candidateItems, { strict }) : new Map();
+  const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict }) : { capped: new Map(), warnings: [] };
+  const cappedProducts = v13Limit.capped;
   const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts) : null);
   // An apply-alone product selected beside any other product holds the mix: the plan
   // blocks and withholds the selection's quantities (as the tank sheet does).
@@ -1846,7 +1854,7 @@ async function buildPlanForService(serviceId, options = {}) {
   if (v13Active) {
     const notices = v13LineNotices(planItems, cappedProducts, new Set(substitutions.keys()));
     blocks.push(...notices.blocks);
-    warnings.push(...notices.warnings);
+    warnings.push(...notices.warnings, ...v13Limit.warnings);
   }
   if (completionDefaultsEnabled && !matchesLawnCompletionProtocol(structuredProtocol, {
     protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version, windowKey: service.lawn_protocol_window_key,

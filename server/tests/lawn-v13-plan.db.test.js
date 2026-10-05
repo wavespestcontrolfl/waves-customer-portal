@@ -390,10 +390,41 @@ describeDb('the v13 plan through PostgreSQL', () => {
         });
       });
 
+      test('a warning-level limit (Celsius inside its minimum interval) shows its own message and does not block or touch the dose', async () => {
+        setGates();
+        const celsius = await knex('products_catalog').where({ name: 'Celsius WG' }).first();
+        const recent = '2026-04-22'; // 20 days before the 2026-05-12 visit
+        await withLimit({ product: celsius, limit: { limit_type: 'min_interval_days', limit_value: 60, severity: 'warning' }, history: [{ application_rate: 0.085, application_date: recent }] }, async (visit) => {
+          const result = await buildPlanForService(visit.id, { db: knex, selectedConditionalProductNames: ['Celsius WG'] });
+          const warning = result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_limit_warning');
+          expect(warning).toMatchObject({ productName: 'Celsius WG', limitType: 'min_interval_days', severity: 'warning' });
+          expect(warning.message).toMatch(/Celsius WG: only 20 days since last app \(min 60\)\./);
+          expect(result.propertyGate.blocks.map((b) => b.code)).not.toContain('lawn_v13_annual_limit');
+          // Celsius is a spot row (no quantity either way); it stays selected and unblocked.
+          const item = lineFor(result, 'Celsius WG');
+          expect(item.selected).toBe(true);
+          expect(item.unavailable).toBeNull();
+          expect(item.mix).toBeNull();
+        });
+      });
+
+      test('a warning-level limit on a whole-lawn row keeps its amount: Tetrino inside its minimum interval still plans 1.835 fl oz', async () => {
+        setGates();
+        const recent = '2026-04-22'; // 20 days before the 2026-05-12 visit
+        await withLimit({ product: tetrino, limit: { limit_type: 'min_interval_days', limit_value: 60, severity: 'warning' }, history: [{ application_rate: 0.367, application_date: recent }] }, async (visit) => {
+          const result = await buildPlanForService(visit.id, { db: knex });
+          expect(result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_limit_warning')).toMatchObject({ productName: 'Tetrino Insecticide', limitType: 'min_interval_days' });
+          expect(result.propertyGate.blocks.map((b) => b.code)).not.toContain('lawn_v13_annual_limit');
+          expect(tetrinoItem(result).mix.amount).toBe(1.835);
+        });
+      });
+
       test('gate off: no application-limit read and no v13 block, whatever product_limits say', async () => {
         setGates({ v13: 'off' });
         await withLimit({ product: tetrino, limit: { limit_type: 'annual_max_apps', limit_value: 1 }, history: [{ application_rate: 0.367 }] }, async (visit) => {
-          expect((await buildPlanForService(visit.id, { db: knex })).propertyGate.blocks.map((b) => b.code)).not.toContain('lawn_v13_annual_limit');
+          const off = await buildPlanForService(visit.id, { db: knex });
+          expect(off.propertyGate.blocks.map((b) => b.code)).not.toContain('lawn_v13_annual_limit');
+          expect(off.propertyGate.warnings.map((w) => w.code)).not.toContain('lawn_v13_limit_warning');
         });
       });
     });
