@@ -435,6 +435,21 @@ postgres('access codes section', () => {
       expect((await trx('customer_access_codes').where({ id: a[0].id }).first()).status).toBe('found');
     });
 
+    test('the same code with new directions replaces the active row; the profile code stays', async () => {
+      const c = await customer();
+      const first = await found(c.id);
+      await access.accept(trx, first.id, {});
+      await text(c.id, 'The gate code is #4821, press 2 first');
+      const read = stub([gateItem({ instructions: 'press 2 first', quote: 'The gate code is #4821, press 2 first' })]);
+      expect(await sweep(read)).toMatchObject({ found: 1 });
+      const second = (await rows(c.id)).find((r) => r.status === 'found');
+      const out = await access.accept(trx, second.id, { adminUserId: ADMIN_ID });
+      expect(out).toMatchObject({ ok: true, row: { status: 'active', instructions: 'press 2 first' } });
+      expect((await trx('customer_access_codes').where({ id: first.id }).first()).status).toBe('retired');
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).neighborhood_gate_code).toBe('#4821');
+      expect((await access.listForCustomer(trx, c.id)).active.map((r) => r.id)).toEqual([second.id]);
+    });
+
     test('writes an audit event that carries no code, quote or instructions', async () => {
       const c = await customer();
       const row = await found(c.id, { code: '#6543', instructions: 'press two' });

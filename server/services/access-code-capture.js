@@ -500,11 +500,28 @@ async function fillEmptyProfileField(trx, customerId, { kind, life, code }) {
   return field;
 }
 
+// The active standing row that already holds this kind and value, if any.
 async function standingTwin(trx, customerId, { kind, life, value_hash: hash }, exceptId = null) {
-  if (life !== 'standing') return false;
+  if (life !== 'standing') return null;
   const q = trx('customer_access_codes').where({ customer_id: customerId, kind, value_hash: hash, status: 'active', life: 'standing' });
   if (exceptId) q.whereNot('id', exceptId);
-  return !!(await q.first('id'));
+  return (await q.forUpdate().first('id', 'instructions')) || null;
+}
+
+// The same code with the same directions is a duplicate. The same code with
+// new directions ("press 2 first") replaces the old row: that one is retired
+// in the same transaction, and the profile field (same code) is left alone.
+async function supersedeOrRefuse(trx, customerId, next, { exceptId = null, adminUserId = null } = {}) {
+  const twin = await standingTwin(trx, customerId, next, exceptId);
+  if (!twin) return null;
+  if (normalizeText(twin.instructions) === normalizeText(next.instructions)) return fail(409, 'duplicate_active');
+  await trx('customer_access_codes').where({ id: twin.id }).update({
+    status: 'retired', decided_by: adminUserId || null, decided_at: trx.fn.now(), updated_at: trx.fn.now(),
+  });
+  await recordAuditEvent({ trx, critical: true, actor_type: 'admin', actor_id: adminUserId || null,
+    action: 'access_code.superseded', resource_type: 'customer_access_codes', resource_id: twin.id,
+    metadata: { customer_id: customerId, kind: next.kind } });
+  return null;
 }
 
 // Audit metadata never carries a code, a quote or instructions.
@@ -529,7 +546,8 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const checked = validateFields(row, { kind, life, code, instructions });
       if (checked.error) return fail(400, checked.error);
       const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
-      if (await standingTwin(trx, row.customer_id, next, row.id)) return fail(409, 'duplicate_active');
+      const refused = await supersedeOrRefuse(trx, row.customer_id, next, { exceptId: row.id, adminUserId });
+      if (refused) return refused;
       const visit = next.life === 'visit'
         ? await visitFor(trx, row.customer_id, { from: row.source_at ? new Date(row.source_at) : now, chosenId }) : { id: null };
       if (visit.error) return fail(400, visit.error);
@@ -613,7 +631,8 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
   const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
   return conn.transaction(async (trx) => {
     if (!(await lockCustomer(trx, customerId))) return fail(404, 'customer_not_found');
-    if (await standingTwin(trx, customerId, next)) return fail(409, 'duplicate_active');
+    const refused = await supersedeOrRefuse(trx, customerId, next, { adminUserId });
+    if (refused) return refused;
     const properties = await trx('customer_properties').where({ customer_id: customerId, active: true }).select('id');
     const visit = next.life === 'visit' ? await visitFor(trx, customerId, { from: now, chosenId }) : { id: null };
     if (visit.error) return fail(400, visit.error);
