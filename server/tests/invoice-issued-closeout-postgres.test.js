@@ -547,6 +547,8 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     }, { raw: (...a) => trx.raw(...a) });
     const out = await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: flaky, today: TODAY });
     expect(out).toMatchObject({ closed: false, reason: 'error', visitId: svc.id, audited: true });
+    // Written through the helper's CRITICAL path: its default swallows a failed insert and would report a row that does not exist.
+    expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ critical: true, metadata: expect.objectContaining({ code: 'error' }) }));
     expect(mockCompleteScheduledService).not.toHaveBeenCalled();
     // A failure with NO durable audit row says so, and the Stripe webhook
     // hands it back for redelivery: the audit write itself failing…

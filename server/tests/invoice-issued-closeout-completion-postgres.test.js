@@ -543,6 +543,28 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(await mockPg('time_entries').where({ id: timerId }).first()).toEqual(before);
   });
 
+  test('a closeout failure whose audit INSERT fails reports audited:false through the real audit helper — never a row that does not exist (pre-push audit P1)', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site' });
+    // time_entries fails (the closeout failure) and audit_log fails (its record).
+    const flaky = Object.assign((table) => {
+      if (table === 'time_entries') throw new Error('time_entries lookup reset');
+      return mockPg(table);
+    }, { raw: (...a) => mockPg.raw(...a) });
+    const real = mockPg;
+    const auditDown = new Proxy(real, { apply: (target, thisArg, args) => { if (args[0] === 'audit_log') throw new Error('audit insert reset'); return target(...args); } });
+    mockPg = auditDown;
+    let out;
+    try {
+      out = await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', actorTechnicianId: f.techId, conn: flaky });
+    } finally { mockPg = real; }
+    expect(out).toMatchObject({ closed: false, reason: 'error', visitId: f.serviceId, audited: false });
+    expect(await mockPg('audit_log').where({ resource_id: f.serviceId })).toHaveLength(0);
+    // With the audit table reachable the same failure IS recorded.
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: f.invoiceId, trigger: 'paid', actorTechnicianId: f.techId, conn: flaky })).toMatchObject({ reason: 'error', audited: true });
+    expect(await mockPg('audit_log').where({ resource_id: f.serviceId, action: 'visit.completion_on_invoice_issued_refused' }).first()).toMatchObject({ metadata: expect.objectContaining({ code: 'error', trigger: 'paid' }) });
+  });
+
   // Owner ruling 2026-10-04. The GPS arrival sets on_site on nearly every
   // worked visit, and the technician often never closes it out: from the gate
   // flip to that day the closeout had refused every arrived visit and closed

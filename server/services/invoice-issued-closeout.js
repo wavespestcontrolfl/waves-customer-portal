@@ -403,6 +403,10 @@ async function auditCloseoutOutcome(run, { closed, visitId, resumed = false, sta
       resource_type: 'scheduled_services',
       resource_id: visitId,
       metadata: { invoiceId: run.invoice?.id || run.invoiceId, trigger: run.trigger, resumed, status, code, ...(error ? { error } : {}) },
+      // critical: the helper's default swallows a failed insert, which would
+      // report a row that does not exist. The retry sweeps act on this row,
+      // so its absence must be visible here (the catch below returns false).
+      critical: true,
     });
     return true;
   } catch (auditErr) {
