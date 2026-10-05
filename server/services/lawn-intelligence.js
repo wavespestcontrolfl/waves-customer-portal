@@ -97,12 +97,16 @@ async function fetchFawnWeather(coordinates) {
 // 2. PHOTO QUALITY ASSESSMENT
 // ══════════════════════════════════════════════════════════════
 
-async function assessPhotoQuality(base64Image, mimeType) {
+// timeoutMs (optional): the caller's remaining wall-clock budget for the whole
+// chain (POST /admin/lawn-assessment/assess hands over what is left of its
+// request window); absent, the dispatcher's own default budget applies.
+async function assessPhotoQuality(base64Image, mimeType, { timeoutMs } = {}) {
   try {
     // VISION first, OpenAI Terra on a miss. A two-leg miss fails open below,
     // exactly as an SDK error did.
     const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
       laneId: 'lawn_quality_gate',
+      ...(timeoutMs ? { timeoutMs } : {}),
       text: 'Evaluate this lawn photo for quality: sharpness (0-100), what percent of the image is lawn (0-100), lighting (0-100), any issues from the allowed list, and whether the photo is usable.',
       images: [{ data: base64Image, mimeType }],
       jsonMode: true,

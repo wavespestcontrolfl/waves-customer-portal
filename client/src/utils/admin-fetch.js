@@ -50,6 +50,18 @@ export function adminLoginUrl({ pathname, search, hash }) {
 // redirectOn401: false hands a 401 back to the caller without navigating
 // (a caller that must first check the answer still belongs to the stored
 // token, e.g. the field workspace's staff check).
+// The message of a non-JSON error body. A plain-text server message is worth
+// showing; an HTML body is a proxy or edge error page (a Cloudflare 524 on a
+// long request) and would paint its whole markup into the UI, so it is dropped
+// and the caller falls back to the status.
+async function plainTextError(r) {
+  const type = r.headers?.get?.('content-type') || '';
+  if (/html/i.test(type)) return '';
+  let text = '';
+  try { text = await r.text(); } catch { /* ignore */ }
+  return /^\s*<(!doctype|html)/i.test(text) ? '' : text;
+}
+
 export async function adminFetch(path, { redirectOn401 = true, ...options } = {}) {
   let attempt = 0;
    
@@ -98,9 +110,9 @@ export async function adminFetch(path, { redirectOn401 = true, ...options } = {}
         serverCode = body?.code;
         serverBody = body;
       } catch {
-        try { serverMsg = await r.text(); } catch { /* ignore */ }
+        serverMsg = await plainTextError(r);
       }
-      const err = new Error(serverMsg || `${r.status} ${r.statusText}`);
+      const err = new Error(serverMsg || `Request failed (${r.status}${r.statusText ? ` ${r.statusText}` : ''})`);
       err.status = r.status;
       if (serverCode) err.code = serverCode;
       if (serverBody && typeof serverBody === 'object') err.details = serverBody;

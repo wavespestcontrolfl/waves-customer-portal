@@ -154,3 +154,52 @@ describe('analyzePhoto — overwatering flag must be explicit', () => {
     expect(mockAnthropicCreate).not.toHaveBeenCalled();
   });
 });
+
+// POST /admin/lawn-assessment/assess hands every photo what is left of its
+// request window (Cloudflare 524s the technician at 100 s). The budget must
+// reach the Gemini fetch as an abort signal, and a photo already out of time
+// skips the Claude fallback instead of starting a fresh 10-minute SDK call.
+describe('analyzePhoto — timeoutMs budget', () => {
+  it('passes the budget to the Gemini fetch as an abort signal', async () => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse(GEMINI_SCORES));
+
+    await analyzePhoto('base64photo', 'image/jpeg', {}, { timeoutMs: 5000 });
+
+    const init = global.fetch.mock.calls[0][1];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(init.signal.aborted).toBe(false);
+  });
+
+  it('runs with no deadline when no budget is given', async () => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse(GEMINI_SCORES));
+
+    await analyzePhoto('base64photo', 'image/jpeg', {});
+
+    expect(global.fetch.mock.calls[0][1].signal).toBeUndefined();
+  });
+
+  it('a Gemini miss that used up the budget returns null without calling Claude', async () => {
+    global.fetch = jest.fn().mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return { ok: false, status: 503, statusText: 'Service Unavailable' };
+    });
+
+    const result = await analyzePhoto('base64photo', 'image/jpeg', {}, { timeoutMs: 1 });
+
+    expect(result).toBeNull();
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+  });
+
+  it('a Gemini miss with budget left falls back to Claude under the same deadline, retries off', async () => {
+    global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 503, statusText: 'Service Unavailable' });
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify(CLAUDE_SCORES) }] });
+
+    const result = await analyzePhoto('base64photo', 'image/jpeg', {}, { timeoutMs: 20000 });
+
+    expect(result.claude).toMatchObject({ turf_density: CLAUDE_SCORES.turf_density });
+    const options = mockAnthropicCreate.mock.calls[0][1];
+    expect(options.maxRetries).toBe(0);
+    expect(options.timeout).toBeGreaterThan(0);
+    expect(options.timeout).toBeLessThanOrEqual(20000);
+  });
+});

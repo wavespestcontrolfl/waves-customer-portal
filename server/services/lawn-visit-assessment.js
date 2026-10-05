@@ -21,7 +21,9 @@ const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 // prompt plus the LIGHT block, and a light read on every photo's quality row, its
 // own prompt version). Off = the prompt, schema, stored run and return shape are
 // exactly what they were.
-async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false, lighting = lawnLightingLive() } = {}) {
+// timeoutMs (optional): the caller's remaining wall-clock budget for both legs
+// together; absent, the dispatcher's default chain budget applies.
+async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false, lighting = lawnLightingLive(), timeoutMs } = {}) {
   const { error, zones } = validateVisitPhotos(photos, { shotList });
   if (error) throw Object.assign(new Error(error), { code: 'INVALID_VISIT_PHOTOS', statusCode: 400 });
   const context = visionContext || {};
@@ -41,6 +43,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
     jsonSchema: prompt.schema,
     maxTokens: MAX_OUTPUT_TOKENS,
     ...(thinkingLevel ? { thinkingLevel } : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
     reasoningEffort: 'medium',
     laneId: 'lawn_visit_assessment',
     promptVersion: prompt.version,
