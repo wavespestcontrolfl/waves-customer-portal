@@ -747,6 +747,7 @@ async function commitCancelSms(input, preview, technicianId) {
     expectedBodyDigest: fresh._version.body_digest,
     expectedCustomerId: fresh.customer_id,
     simpleOnly: true,
+    keepRow: true, // the row stays with status 'canceled' (workflow contract W7), never deleted
   });
   if (result.outcome !== 'ok' || !result.cancelled) {
     // 'forbidden' cannot happen (techRole is always 'admin' here); 'not_found'
