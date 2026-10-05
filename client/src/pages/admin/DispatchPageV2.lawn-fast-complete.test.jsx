@@ -35,6 +35,7 @@ vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
       <button type="button" onClick={onFullForm}>Sheet full form</button>
       <button type="button" onClick={() => onViewDetails()}>Sheet details</button>
       <span>Sheet knows {service.customerId} / {service.fullAddress} / {service.customerPhone}</span>
+      <span>Sheet trace {String(service.traceEligible)}</span>
     </div>
   ),
 }));
@@ -141,9 +142,11 @@ describe('Dispatch completion routing for lawn', () => {
   });
 
   it('the sheet\'s Details pill closes it and opens the appointment details sheet, as the full form\'s does', async () => {
-    mount([visit('svc-lawn-details', { customerId: 'cust-9', address: '100 Example Lane, Bradenton, FL', customerPhone: '+19415550100' })]);
+    mount([visit('svc-lawn-details', { customerId: 'cust-9', address: '100 Example Lane, Bradenton, FL', customerPhone: '+19415550100', traceEligible: false })]);
     fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-details' }));
     expect(await screen.findByText('Sheet knows cust-9 / 100 Example Lane, Bradenton, FL / +19415550100')).toBeInTheDocument();
+    // Codex r1: the schedule's trace eligibility reaches the sheet.
+    expect(screen.getByText('Sheet trace false')).toBeInTheDocument();
     fireEvent.click(await screen.findByRole('button', { name: 'Sheet details' }));
     expect(await screen.findByText('Details sheet for svc-lawn-details')).toBeInTheDocument();
     expect(screen.queryByText(/Lawn sheet for/)).not.toBeInTheDocument();

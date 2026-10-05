@@ -13,8 +13,8 @@ import FastCompleteLawnSheet, { LAWN_CONDITION_OPTIONS, plainRefusalMessage } fr
 import { PROJECT_TYPES } from '../../../../server/services/project-types.js';
 
 vi.mock('./TechTreatmentZoneModal', () => ({
-  default: ({ onClose, onSaved, lawnMode, serviceId }) => (
-    <div role="dialog" aria-label="Tracer" data-lawn={String(!!lawnMode)} data-service={serviceId}>
+  default: ({ onClose, onSaved, lawnMode, serviceId, openVisitOnly }) => (
+    <div role="dialog" aria-label="Tracer" data-lawn={String(!!lawnMode)} data-service={serviceId} data-open-only={String(openVisitOnly === true)}>
       <button type="button" onClick={() => onSaved({ id: 'zone-1' })}>Save trace</button>
       <button type="button" onClick={onClose}>Close tracer</button>
     </div>
@@ -888,6 +888,8 @@ describe('the treatment zone map', () => {
     const tracer = await screen.findByRole('dialog', { name: 'Tracer' });
     expect(tracer.getAttribute('data-lawn')).toBe('true');
     expect(tracer.getAttribute('data-service')).toBe('svc-lawn');
+    // Codex r1: a visit completed elsewhere while the map is open must refuse the save.
+    expect(tracer.getAttribute('data-open-only')).toBe('true');
     expect(document.querySelector('section[role="dialog"][aria-hidden="true"]')).not.toBeNull();
     fireEvent.click(within(tracer).getByRole('button', { name: 'Save trace' }));
     fireEvent.click(within(tracer).getByRole('button', { name: 'Close tracer' }));

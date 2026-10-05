@@ -716,6 +716,9 @@ function LawnFastForm({ service, request, catalog, ctx, submission, locked, dict
       lat={service.lat}
       lng={service.lng}
       lawnMode
+      // A visit completed elsewhere while the map is open must refuse this
+      // save (the row-lock check), as the Fast Complete report flow does.
+      openVisitOnly
       onClose={() => onOverlay(null)}
       onSaved={() => setTraced(true)}
     />,

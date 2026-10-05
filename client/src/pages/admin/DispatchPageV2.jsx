@@ -1956,6 +1956,9 @@ export default function DispatchPageV2({
             fullAddress: typeof lawnFastService.address === "string" ? lawnFastService.address : "",
             customerPhone: lawnFastService.customerPhone || lawnFastService.customer_phone || "",
             timeLabel: serviceWindowLabel(lawnFastService) || "",
+            // Server-computed (GATE_TRACE_ELIGIBILITY): false hides the
+            // treatment-zone row, since the save route would refuse the trace.
+            traceEligible: lawnFastService.traceEligible,
             // Decides whether a zero stock holds Complete (WaveGuard lawn visits may go negative).
             waveguardTier: lawnFastService.waveguardTier || null,
             // The visit the user opened, checked against the live context.
