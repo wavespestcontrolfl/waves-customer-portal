@@ -6528,6 +6528,29 @@ effective post-discount amounts (`annualAfterDiscount`/`visitsPerYear`),
 never the pre-discount list `perTreatment`.
 NOTHING is sent to the customer and no bell rings: one `activity_log` row,
 written ATOMICALLY with the estimate update, is the whole audit surface.
+Good / Better / Best offer tiers (`GATE_ESTIMATE_OFFER_TIERS`, owner
+2026-10-05; STRICT opt-in, off = every response and accept byte-identical):
+an eligible one-time-toggle estimate (`show_one_time_option`, v1 shape,
+recurring pest plus lawn and/or tree & shrub, residential, no opt-out, no
+member evidence, no manual discount) carries `pricing.offerTiers` on `/data`
+— `good` (one-time visit, `oneTimeTotal`), `better` (pest-only plan,
+`usesBundleFrequencies:true` — the bundle's own pest-only ladder) and `best`
+(the full quoted bundle with its OWN `frequencies` + `serviceCadenceCombos`,
+`pestOnly:false`) — plus `pricing.offerTierDefaultKey`. Served only on a
+live accept-active surface, never to a LIVE active member (fail-closed), and
+a tiered payload withholds the `serviceOptOut` block (no remove / add
+rails). `PUT /:token/accept` takes `selectedTier`: absent = today's
+behavior; an unknown value, a value on an estimate with no stored tiers, or
+a tier whose service mode disagrees with `serviceMode` is 400
+`offer_tier_unavailable`; `best` keeps the companion programs the toggle's
+companion exclusion drops (the pest-only list filters and the
+`result.recurring.services` rewrite are skipped), prices off the stored
+`best` ladder / combos, refuses `prepay_annual` (400), and is recorded as
+`estimate_data.customerSelection.offerTier`. `/available-slots` (query),
+`/find-slots` and `/reserve` (body) take `offerTier`; only `best` changes
+the visit profile (every quoted program; part of the slot-cache key), and
+the accept's reservation commit carries the same value.
+
 The same PUT is the priced ADD rail under `GATE_ESTIMATE_SERVICE_ADD`
 (STRICT opt-in, needs the opt-out gate; off = the `/data` `addable` stamp is
 withheld and the write refuses 400 `service_not_addable`): `included:true`

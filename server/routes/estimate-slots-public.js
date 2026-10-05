@@ -71,6 +71,7 @@ const {
   estimateRendersMonthlyBilling,
   verifyEstimateAskToken,
 } = require('./estimate-public');
+const { normalizeSelectedOfferTier } = require('../services/estimate-offer-tiers');
 
 // Termite trenching review-before-booking 409 — mirrors the accept-time gate so a
 // slot hold or Stripe intent is never created for a priced trenching-only quote
@@ -458,6 +459,9 @@ router.get('/:token/available-slots', async (req, res) => {
     if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
       opts.selectedFrequency = req.query.selectedFrequency.trim();
     }
+    // Offer tier (GATE_ESTIMATE_OFFER_TIERS): only 'best' changes the visit
+    // profile (every quoted program); any other value sizes as today.
+    if (normalizeSelectedOfferTier(req.query.offerTier) === 'best') opts.offerTier = 'best';
     // Bundle combo axes arrive JSON-encoded (?serviceCadences={"mosquito":
     // "seasonal9"}): the mosquito tier changes the seasonal filter/horizon
     // while selectedFrequency stays the pest cadence (codex r14 P1).
@@ -626,9 +630,10 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
       && !Array.isArray(req.body.serviceCadences)
       ? req.body.serviceCadences
       : undefined;
+    const findOfferTier = normalizeSelectedOfferTier(req.body?.offerTier) === 'best' ? 'best' : undefined;
     try {
       const result = await findEstimateSlots(estimate.id, {
-        query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences,
+        query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences, offerTier: findOfferTier,
       });
       return res.json(result);
     } catch (svcErr) {
@@ -685,6 +690,9 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     && !Array.isArray(req.body.serviceCadences)) {
     slotOpts.serviceCadences = req.body.serviceCadences;
   }
+  // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a 'best' hold sizes the visit
+  // from every quoted program — the same profile the accept commits.
+  if (normalizeSelectedOfferTier(req.body?.offerTier) === 'best') slotOpts.offerTier = 'best';
 
   try {
     const estimate = await db('estimates')

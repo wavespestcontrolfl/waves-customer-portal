@@ -149,6 +149,7 @@ const {
   savedFloorReplaySignals,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
+const OfferTiers = require('../services/estimate-offer-tiers');
 const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
@@ -10221,6 +10222,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       const raw = req.body?.selectedFrequency;
       return typeof raw === 'string' ? raw.trim() : '';
     })();
+    // Offer tier (GATE_ESTIMATE_OFFER_TIERS): good | better | best. Resolved
+    // against the STORED tiers once the pricing bundle is built below —
+    // never from the body alone.
+    const selectedOfferTierRaw = req.body?.selectedTier;
     // Invoice-mode: admin opted the estimate into legacy auto-invoicing, OR
     // the estimate is a guarantee-only renewal (derived — see
     // resolveEstimateInvoiceMode): no visit to book, so accept creates the
@@ -10419,7 +10424,29 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(409).json({ error: 'existing appointment belongs to a different customer' });
     }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
-    const pricingBundle = await buildPricingBundle(estimateForPricing);
+    const pricingBundleAsOffered = await buildPricingBundle(estimateForPricing);
+    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS, owner 2026-10-05): the
+    // customer's `selectedTier` must name a tier the bundle STORED, and its
+    // service mode must agree with `serviceMode`; anything else is a 400.
+    // 'good' and 'better' are today's one-time / pest-only paths untouched.
+    // 'best' keeps the companion programs the one-time toggle drops
+    // (keepCompanions below) and prices off the tier's own full-bundle
+    // ladder — the bundle view the rest of this handler already understands.
+    // A multi-service plan never prepays (estimate-public combos rule), so
+    // prepay on 'best' is refused up front rather than half-way through.
+    const { tier: offerTier, error: offerTierError } = OfferTiers.resolveSelectedOfferTier(
+      pricingBundleAsOffered,
+      selectedOfferTierRaw,
+      { serviceMode, gateOn: featureGates.estimateOfferTiersLive() },
+    );
+    if (offerTierError) {
+      return res.status(400).json({ error: offerTierError, code: 'offer_tier_unavailable' });
+    }
+    if (offerTier && offerTier.key === 'best' && annualPrepaySelected) {
+      return res.status(400).json({ error: 'annual prepay is not available on the full-bundle option — pick pay_at_visit instead' });
+    }
+    const keepCompanions = OfferTiers.offerTierKeepsCompanions(offerTier);
+    const pricingBundle = OfferTiers.pricingBundleForOfferTier(pricingBundleAsOffered, offerTier);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
     if (quoteRequirement.quoteRequired) {
       const needsManagerApproval = quoteRequirement.reason === 'st_augustine_dethatching';
@@ -10461,7 +10488,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         reason: 'termite_trenching_review',
       });
     }
-    if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
+    if (estimate.show_one_time_option && !keepCompanions && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
       recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
     }
     const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
@@ -11471,7 +11498,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       const acceptedLists = acceptanceServiceLists(acceptedEstDataForPricing);
       recurringSvcList = acceptedLists.recurringSvcList;
       oneTimeList = acceptedLists.oneTimeList;
-      if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
+      if (estimate.show_one_time_option && !keepCompanions && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
         recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
       }
     }
@@ -11831,9 +11858,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // independently — recorded for the receipt/admin; the chosen tiers are
           // already rewritten into the recurring rows for scheduling/billing.
           ...(serviceCadences ? { serviceCadences } : {}),
+          // Offer tier the customer picked (GATE_ESTIMATE_OFFER_TIERS) —
+          // recorded beside the cadence choice for the receipt/admin.
+          ...(offerTier ? { offerTier: offerTier.key } : {}),
           selectedAt: new Date().toISOString(),
         };
-        const persistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData);
+        // A resolved 'best' tier keeps every quoted program: the pest-only
+        // rewrite below is the one-time toggle's companion exclusion.
+        const persistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData)
+          && !keepCompanions;
         if (persistPestOnlyRecurringChoice && Array.isArray(nextEstimateData.result?.recurring?.services)) {
           nextEstimateData.result = {
             ...nextEstimateData.result,
@@ -12653,6 +12686,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
             selectedFrequency: acceptedSchedulingFrequencyKey,
             serviceCadences,
+            // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a 'best' commit sizes
+            // the visit from every quoted program, as the hold did.
+            offerTier: offerTier ? offerTier.key : null,
             // Rung 1 was pre-acquired on this key at the top of this txn —
             // commitReservation re-checks the hold still sits on it.
             preLockedDate: acceptPreLockedDate,
@@ -12725,6 +12761,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
               selectedFrequency: acceptedSchedulingFrequencyKey,
               serviceCadences,
+              offerTier: offerTier ? offerTier.key : null,
               // Rung 1 was pre-acquired on this key at the top of this txn —
               // commitReservation re-checks the hold still sits on it.
               preLockedDate: acceptPreLockedDate,
@@ -24984,6 +25021,42 @@ function serviceCadenceComboKey(selection = {}) {
     .join('|');
 }
 
+// Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS, owner 2026-10-05): the
+// payload fields for an eligible v1-shaped one-time-toggle bundle. Eligibility
+// is the pure predicate in estimate-offer-tiers.js; the 'best' ladder and
+// combos are the SAME shapeFromV1 / buildServiceCadenceCombos calls the
+// non-toggle bundle makes, with pestOnly:false. Manual-discount estimates are
+// excluded: withManualDiscount nets the discount into payload.frequencies
+// only, and a second ladder it never touched could show a different number.
+function buildOfferTierFieldsForV1({ estimate, estData, v1, prefs, pestOnlyChoice, v1FloorOptions, anchorOneTimePrice }) {
+  if (!pestOnlyChoice || !featureGates.estimateOfferTiersLive()) return {};
+  if (normalizeManualDiscountSummary(estData)) return {};
+  const OptOut = require('../services/estimate-service-opt-out');
+  const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
+  const verdict = OfferTiers.offerTierEligibility({
+    gateOn: true,
+    estimate,
+    recurringKeys,
+    optedOutKeys: OptOut.currentlyOptedOutKeys(estData),
+    memberEvidence: OptOut.memberEvidenceInEstimateData(estData) || !!estData?.membershipSnapshot?.isExistingCustomer,
+    oneTimeChoicePrice: anchorOneTimePrice,
+    hasPestLadder: v1.pestTiers.length > 0,
+  });
+  if (!verdict.eligible) return {};
+  const bestFrequencies = [];
+  for (const [v1Label, ladder] of Object.entries(V1_LABEL_TO_LADDER)) {
+    const pestTier = v1.pestTiers.find((t) => t?.label === v1Label) || null;
+    bestFrequencies.push(shapeFromV1(v1, ladder, pestTier, prefs, { pestOnly: false, ...v1FloorOptions }));
+  }
+  const bestServiceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: false, ...v1FloorOptions });
+  return OfferTiers.buildOfferTiers({
+    oneTimeChoicePrice: anchorOneTimePrice,
+    recurringKeys,
+    bestFrequencies,
+    bestServiceCadenceCombos,
+  });
+}
+
 // Precompute every selectable cadence combination for a bundle so the view can
 // look up the authoritative total locally (no per-change round-trip) and the
 // accept handler can resolve the exact same number. Returns null when there is
@@ -28160,8 +28233,16 @@ async function buildPricingBundleInner(estimate) {
     // backing combo pricing is present — the two never desync across snapshot /
     // engine / recompute paths.
     const serviceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: pestOnlyChoice, ...v1FloorOptions });
+    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): on an eligible one-time-toggle
+    // bundle, ALSO price the full-bundle ladder + combos (pestOnly:false, the
+    // very shape a non-toggle bundle serves) for the 'best' tier. Omitted
+    // entirely when ineligible so the payload stays byte-identical.
+    const offerTierFields = buildOfferTierFieldsForV1({
+      estimate, estData, v1, prefs, pestOnlyChoice, v1FloorOptions, anchorOneTimePrice,
+    });
     const payload = stampTreeShrubPalmCount(finalizePricingBundle(withManualDiscount({
       frequencies: finalFreqs,
+      ...offerTierFields,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice,
       // Back-compat: keep `setupFee` populated with the first waivable entry
@@ -29833,6 +29914,21 @@ async function composeEstimateDataPayload(estimate, {
       try { addStampBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
       catch (_) { addStampBlockedByMembership = true; }
     }
+    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): served only on a live,
+    // accept-active customer surface, and never to a LIVE active member
+    // (the member ladder is the office's — same fail-closed verdict as the
+    // add stamp; a lookup error withholds the tiers). The bundle may carry
+    // them (it is cached and send-snapshotted); this projection decides.
+    let offerTiersBlockedByMembership = false;
+    if (Array.isArray(pricingBundle?.offerTiers) && estimate.customer_id) {
+      try { offerTiersBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
+      catch (_) { offerTiersBlockedByMembership = true; }
+    }
+    const offerTiersServed = featureGates.estimateOfferTiersLive()
+      && Array.isArray(pricingBundle?.offerTiers)
+      && !offerTiersBlockedByMembership
+      && !adminDraftPreview
+      && isEstimateAcceptActive(estimate);
 
     const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms')
       && acceptanceTermsApplyTo(estimate);
@@ -29986,6 +30082,11 @@ async function composeEstimateDataPayload(estimate, {
       // more" in three places.
       ...((() => {
         if (!serviceOptOutGateOn()) return {};
+        // A tiered estimate offers its choices through the tier picker: the
+        // remove / add-a-service rails are withheld so the page never shows
+        // two ways to change the same plan (and a 'best' accept keeps every
+        // quoted program, which a removal would contradict).
+        if (offerTiersServed) return {};
         const {
           currentlyOptedOutKeys, serviceOptOutLabel, serviceOptOutBlockedByProposal,
           serviceOptOutTierSelectionActive, serviceOptOutAddableKeys, staffOfferedKeys,
@@ -30277,6 +30378,9 @@ async function composeEstimateDataPayload(estimate, {
       },
       pricing: {
         ...stripInternalMarginFieldsDeep(pricingBundle),
+        // Offer tiers ride the bundle; drop them unless this projection
+        // serves them (undefined keys never reach the JSON).
+        ...(offerTiersServed ? {} : { offerTiers: undefined, offerTierDefaultKey: undefined }),
         // Review-lane enums on PRICED one-time items are pure exposure to
         // the token holder — the client reads them only on quote-required
         // items (quoteRequiredReasonCandidates), so keep them exactly there
