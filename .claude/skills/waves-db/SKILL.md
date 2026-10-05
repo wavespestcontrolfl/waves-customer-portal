@@ -63,10 +63,13 @@ Rules:
   day for the Date (UTC midnight is 7–8 PM ET the night before) and throws
   `RangeError: Invalid time value` on the string. Date-only values take a
   date-only path, and which one depends on the side: on the server,
-  `etCalendarDayOf` (or `dateOnlyString` for a known date column) from
-  `server/utils/datetime-et.js`; in React, where that CJS module is off
-  limits, `formatETDateOnly` (`client/src/lib/timezone.js`) to display one
-  and the literal `'YYYY-MM-DD'` prefix to key or compare one.
+  `dateOnlyString` from `server/utils/date-only.js` for a known date
+  column, `etCalendarDayOf` (`server/utils/datetime-et.js`) when the input
+  may be either a date or an instant — don't reach for that module's own
+  `dateOnlyString`, which is the `technician_absences` normalizer and
+  differs on null; in React, where the CJS module is off limits,
+  `formatETDateOnly` (`client/src/lib/timezone.js`) to display one and the
+  literal `'YYYY-MM-DD'` prefix to key or compare one.
 
 ## 3. Local DB access — Codex uses dev/preview only
 

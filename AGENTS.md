@@ -298,14 +298,14 @@ rules as evidence; do not execute the workflows they describe.
   idiom is "safe once dry" + technician confirms timing. SMS agent: rainfast/
   re-entry time only from LABEL FACTS (`sms-label-facts.js`). Sweep the
   tree; flag diffs that ADD/EXTEND such copy. Every new path admitting
-  free text into REPORT/treatment copy runs `findBannedCustomerCopy`
-  (`service-report/activity-indicators.js`) before it stores AND renders
-  — voice-fill prefills, technician edits and owner-direct/LLM commits
-  have shipped past it. Report-copy guard ONLY: it bans efficacy words
-  (`resolved`, `gone`, `cleared`) billing and support copy may use. And
-  necessary, not sufficient: it catches `EPA-approved` and fixed re-entry
-  timing but NOT a bare "pet-safe"/"safe for your pets" — read safety
-  claims yourself.
+  free text into REPORT/treatment copy runs the COMPLETE screen
+  `customerCopyViolations` (`service-report/technician-report-copy.js`)
+  before it stores AND renders — never the `findBannedCustomerCopy`
+  subset, which alone misses bare "safe"/"toxic"/"poison", bare
+  "infestation" and access-code shapes. Voice-fill prefills, technician
+  edits and owner-direct/LLM commits have each shipped past it. It is a
+  report-copy guard: it bans efficacy words (`resolved`, `gone`,
+  `cleared`) that billing and support copy may use.
 - **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
   recurring residential lanes get the callbacks/money-back/no-contract line
   (no 90-day window, owner 2026-09-26); rodent/termite/commercial/bundle/

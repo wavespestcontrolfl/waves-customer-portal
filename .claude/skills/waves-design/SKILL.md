@@ -116,11 +116,15 @@ Anton / Luckiest Guy / Baloo there. Full decisions:
 ## Hard lines (both systems)
 
 - 14px minimum for readable text (Virginia uses this 8 hours a day).
-  POLICY on customer surfaces: 16px body / 14px label floors — on a
-  customer surface 14px is the LABEL size only, so a body sentence,
-  explanatory paragraph or note at 14px (or a split-the-difference 15px)
-  is a finding even though `check:portal-brand` passes it; new portal and
-  billing cards are where this keeps slipping through. And no raw
+  POLICY on customer surfaces: PRIMARY PROSE paragraphs are 16px
+  (`FS.bodyLg`, owner D1 2026-09-05); `FS.body` 14 stays correct for meta
+  rows, table cells, buttons, eyebrows and fine print — so flag a primary
+  or running-prose paragraph at 14px, and any off-scale size (a
+  split-the-difference 15px is not a token), not every 14px string.
+  `check:portal-brand` only scans `fontSize: 11`/`13` literals, so it
+  passes both; the scale is `docs/design/customer-doc-style-guide.md` +
+  `client/src/theme-doc.js`. New portal and billing cards are where this
+  keeps slipping. And no raw
   emoji in JSX source (including comments — use icon components). The
   mechanical gate (`npm run check:portal-brand`, runs in Railway prebuild
   — one violation kills EVERY build) enforces only a SUBSET: selected
