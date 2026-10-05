@@ -47,7 +47,22 @@ describe('the v13 watering rules', () => {
 
   test('a product whose labeled targets need opposite directions gets no rule (fail closed)', () => {
     for (const { name } of migration.FAIL_CLOSED) expect(ALL.find((item) => item.name === name)).toBeUndefined();
-    expect(migration.FAIL_CLOSED.map((item) => item.name)).toEqual(expect.arrayContaining(['Acelepryn Insecticide', 'Dylox 6.2 G Granular Insecticide']));
+    expect(migration.FAIL_CLOSED.map((item) => item.name)).toEqual(['Acelepryn Insecticide']);
+  });
+
+  test('Acelepryn, left without a rule, resolves to no claim through the real resolver', () => {
+    const { resolveWateringRule } = require('../services/service-report/lawn-watering-rule');
+    const row = { name: 'Acelepryn Insecticide', category: 'insecticide', formulation: 'SC', post_application_watering: null };
+    expect(resolveWateringRule(row)).toBeNull();
+  });
+
+  test('Dylox is told to water in the same day, and a late completion gets no deadline at all', () => {
+    const dylox = { name: 'Dylox 6.2 G Granular Insecticide', ...ALL.find((item) => item.name === 'Dylox 6.2 G Granular Insecticide').rule };
+    const afternoon = buildWateringInstruction({ rules: [dylox], completedAt: new Date('2026-10-14T22:00:00Z') }); // 6 PM ET
+    expect(afternoon.state).toBe('water_in');
+    expect(afternoon.lines[0]).toBe('Water in today’s treatment by 11 PM tonight.');
+    const late = buildWateringInstruction({ rules: [dylox], completedAt: new Date('2026-10-15T03:30:00Z') }); // 11:30 PM ET
+    expect(late.state).toBeNull();
   });
 
   test('no 48-hour runoff advisory is turned into a hold', () => {

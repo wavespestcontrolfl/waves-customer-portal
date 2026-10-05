@@ -64,6 +64,13 @@ const FILL = [
       label_note: 'Label: "watered into the turf soon after application" (no amount). Owner: 0.25 inch within 24 hours.' }),
   },
   {
+    // water_in_same_day: the deadline is also capped at 11 PM ET on the visit's
+    // day, and a later completion gives no instruction (never a next-day one).
+    name: 'Dylox 6.2 G Granular Insecticide',
+    rule: rule({ mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, water_in_same_day: true, source: 'label',
+      label_note: 'Label: the property owner "must water-in the product promptly or within the same day."' }),
+  },
+  {
     name: 'LESCO Nutra-TECH T&O Micronutrient Package',
     rule: rule({ mode: 'none', source: 'label', label_note: 'Label: no watering-in instruction.' }),
   },
@@ -121,10 +128,7 @@ const FILL = [
 // null (no claim), so a visit that logs one gets no watering instruction rather
 // than a wrong one, until rules can vary by target.
 const FAIL_CLOSED = [
-  {
-    name: 'Dylox 6.2 G Granular Insecticide',
-    reason: 'Label: the property owner "must water-in the product promptly or within the same day." A rule holds only a rolling hour window, so a late completion would print a deadline after midnight; needs a same-day deadline in the instruction builder.',
-  },
+
   {
     name: 'Acelepryn Insecticide',
     reason: 'Label: turf caterpillars "delay water (irrigation) or mowing for 24 hours"; white grubs "Irrigate turf immediately after application". Both are prefilled targets.',

@@ -54,9 +54,11 @@
 const { resolveApplicationRate, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
 // ET wall-clock extraction lives in the one shared module; only the deadline
 // rounding below is specific to this writer.
-const { etParts, etDateString } = require('../../utils/datetime-et');
+const { etParts, etDateString, parseETDateTime } = require('../../utils/datetime-et');
 
 const HOUR_MS = 3600000;
+// Latest ET wall time a same-day water-in deadline may print ("11 PM tonight").
+const SAME_DAY_CUTOFF = '23:00';
 
 // Owner table: minutes per zone for a quarter inch. Scaled linearly (rounded
 // to 5) for any other rule depth.
@@ -349,6 +351,14 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
     // reaches it cannot be honoured together with the water-in: no claim, for
     // review, never a manufactured later deadline.
     by = deadlineAfter(at, byHours);
+    // A same-day rule (label: water in "the same day") also caps the deadline
+    // at SAME_DAY_CUTOFF on the completion's ET day. A completion at or after
+    // the cutoff cannot meet it: no claim, never a next-day deadline.
+    if (waterIns.some((r) => r.water_in_same_day === true)) {
+      const cutoff = parseETDateTime(`${etDateString(at)}T${SAME_DAY_CUTOFF}`);
+      if (cutoff.getTime() <= at.getTime()) return out;
+      if (cutoff.getTime() < by.getTime()) by = cutoff;
+    }
     if (effectiveHoldEnd && effectiveHoldEnd.getTime() >= by.getTime()) return out;
     out.minutes = waterInDetail.minutes;
     out.waterInInches = inches;
