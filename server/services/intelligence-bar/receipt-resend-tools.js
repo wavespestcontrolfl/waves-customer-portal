@@ -36,7 +36,7 @@ const { etDateString, formatETTime } = require('../../utils/datetime-et');
 const { receiptRecipients, receiptRecipientsKey, normalizeReceiptEmail, maskEmail, maskPhone } = require('./closeout-repair-tools');
 const { sendInvoiceReceipt } = require('../invoice-receipt-resend');
 const { issuedCloseoutTarget } = require('../invoice-issued-closeout');
-const { expectedEmailSkip } = require('../receipt-delivery-queue');
+const { expectedEmailSkip, receiptEmailOptOutState } = require('../receipt-delivery-queue');
 
 const VIA_LABEL = { email: 'email only', sms: 'text only', both: 'email and text' };
 
@@ -44,7 +44,7 @@ const RECEIPT_RESEND_TOOLS = [
   {
     name: 'resend_receipt',
     description: `Send (or re-send) the paid receipt for ONE invoice to the customer, exactly as the Invoices page "Resend receipt" button does. The first call returns a PREVIEW and sends nothing: the invoice, the amount the receipt states, the paid date, whether a receipt was already sent and when (then the card says plainly it is a RE-SEND), the channels, and who it reaches (masked). The operator approves on the confirmation card; the confirmed run re-checks all of it, refuses if anything changed, and reports email and text separately (sent, not sent with the reason, or unknown when the provider did not answer), the outcome of the visit closeout, and what became of a queued automatic receipt for the invoice (back in the queue and will deliver on its own, held for reconciliation, or none) — say only what those fields report.
-Refused with the reason: a memo with a text-only send, invoice not found, not paid, a receipt for this invoice is being delivered right now, the customer opted out of payment receipts, no recipient on file, amount unverifiable.
+Refused with the reason: a memo with a text-only send, invoice not found, not paid, a receipt for this invoice is being delivered right now, no recipient on file, amount unverifiable, an opted-out customer with no email leg. A customer who opted out of payment receipts is NOT refused by email (a staff resend usually answers their own request): only the email goes, the card says so, and you tell the operator before they confirm.
 Takes invoice_id OR invoice_number (e.g. WPC-2026-0534), exactly one. via is email, sms or both (default both). memo is an optional note that appears in the receipt EMAIL only (the receipt text, the receipt PDF and the receipt page do not carry it), so it needs via email or both: a memo with via sms is refused — only include a memo when the operator gave you the words. The customer is contacted. Admin-only.
 Use for: "resend the receipt for invoice X", "send the paid receipt again", "the customer never got their receipt". To know whether a receipt already went out, read receipt_sent_at from get_invoice_detail / get_customer_invoices; never guess.`,
     input_schema: {
@@ -85,13 +85,17 @@ function reach(who, via) {
   if (via !== 'sms') parts.push(who.email ? `email to ${maskEmail(who.email)}${who.payerBilled ? " (the payer's billing inbox)" : ''}` : 'no email (none on file)');
   if (via !== 'email') {
     const text = who.payerBilled ? 'no text (a payer-billed receipt is never texted)'
+      : who.optedOut ? 'no text (the customer opted out of payment receipts; only the email ignores that)'
       : [who.phone && `text to ${maskPhone(who.phone)}`, who.app && 'a Waves app notification'].filter(Boolean).join(' or ') || 'no text (no phone on file)';
-    parts.push(who.phone || who.app ? `${text}, sent now if the customer's receipt settings allow` : text);
+    parts.push((who.phone || who.app) && !who.payerBilled && !who.optedOut ? `${text}, sent now if the customer's receipt settings allow` : text);
   }
   return parts.join('; ');
 }
 
 const VALID_VIA = ['email', 'sms', 'both'];
+const VIA_BY = { email: ' by email', sms: ' by text', both: '' };
+// Why a non-opted-out receipt cannot go on the chosen channel (both: receiptRecipients already refused nobody).
+const UNREACHABLE = { email: 'no receipt email on file', sms: 'no phone on file', both: 'no recipient on file', payer: 'a payer-billed receipt is never texted' };
 const blocked = (reason, code, invoiceId) => ({ error: reason, code, ...(invoiceId ? { invoice_id: invoiceId } : {}) });
 
 // Eligibility: the invoice, who the receipt reaches, and that the chosen channel has someone to reach.
@@ -110,9 +114,13 @@ async function checkEligibility(input, ownClaimToken) {
   if (who.blocker) {
     return blocked(`A receipt cannot be sent: ${who.blocker}.`, who.blocker === 'invoice not found' ? 'invoice_not_found' : 'resend_blocked', target.id);
   }
-  if (via === 'email' && !who.email) return blocked('A receipt cannot be sent by email: no receipt email on file.', 'resend_blocked', target.id);
-  if (via === 'sms' && (who.payerBilled || !(who.phone || who.app))) {
-    return blocked(`A receipt cannot be sent by text: ${who.payerBilled ? 'a payer-billed receipt is never texted' : 'no phone on file'}.`, 'resend_blocked', target.id);
+  // Who the chosen channels can reach. An opted-out customer is reached by the manual email only:
+  // sendReceipt honors the same opt-out for the text and app legs (receipt_texts_opted_out).
+  const canText = !who.payerBilled && !who.optedOut && Boolean(who.phone || who.app);
+  if (!{ email: Boolean(who.email), sms: canText, both: Boolean(who.email) || canText }[via]) {
+    const why = who.optedOut ? `the customer opted out of payment receipts, so only an email can reach them, and ${via === 'sms' ? 'this send has no email' : 'no receipt email is on file'}`
+      : UNREACHABLE[via === 'email' || !who.payerBilled ? via : 'payer'];
+    return blocked(`A receipt cannot be sent${VIA_BY[via]}: ${why}.`, 'resend_blocked', target.id);
   }
   return { via, memo, who };
 }
@@ -129,16 +137,20 @@ async function probeCloseout(invoice) {
 // The card's optional lines: a queued automatic receipt (disclosed, not pinned: the claim settles
 // it) and the visit closeout (backed by issuedCloseoutTarget and the closeout's quiet posture,
 // runQuietCloseout: backfill, no completion text, report, review ask or charge).
-function optionalCardLines({ memo, queuedJob, closeout }) {
+function optionalCardLines({ memo, queuedJob, closeout, optedOut }) {
   const closeoutLine = closeout?.resuming
     ? `Also finishes a closeout already started for the linked visit — ${closeout.serviceType || 'visit'} on ${closeout.date}: completes its remaining steps, even if the receipt itself does not go out; no completion text, report, review request or charge`
     : `Also completes the linked visit — ${closeout?.serviceType || 'visit'} on ${closeout?.date}: creates its service record, even if the receipt itself does not go out; no completion text, report, review request or charge`;
   return {
     ...(memo ? { memo, memo_note: 'The note appears in the receipt email only; the text receipt does not carry it.' } : {}),
     ...(queuedJob ? {
-      automatic_receipt: 'An automatic receipt is queued for this invoice. If this send does not deliver the email, it goes back in the queue and will try again on its own; a delivered email closes it.',
+      // The queue honors the opt-out (processReceiptDeliveryJob closes the job as receipt_opted_out).
+      automatic_receipt: optedOut
+        ? 'An automatic receipt is queued for this invoice, but the customer opted out of payment receipts, so it will close without sending. Only this send can deliver the receipt.'
+        : 'An automatic receipt is queued for this invoice. If this send does not deliver the email, it goes back in the queue and will try again on its own; a delivered email closes it.',
     } : {}),
     ...(closeout ? { visit_closeout: closeoutLine } : {}),
+    ...(optedOut ? { opted_out: 'This customer opted out of payment receipts. Send only if they asked for this receipt.' } : {}),
   };
 }
 
@@ -157,6 +169,8 @@ function approvedVersion({ invoice, via, who, memo, closeout, sentAt }) {
     amount: who.amount,
     paid: paidKey(invoice),
     recipients_key: receiptRecipientsKey(who),
+    // The opt-out the card disclosed: one set since the card is drift.
+    opted_out: who.optedOut === true,
     memo,
     // The linked visit the closeout would complete (null = none).
     closeout_visit: closeout?.visitId || null,
@@ -192,7 +206,7 @@ async function derivePlan(input, { ownClaimToken = null } = {}) {
       : 'No receipt is recorded as sent yet',
     channels: VIA_LABEL[via],
     recipients: reach(who, via),
-    ...optionalCardLines({ memo, queuedJob, closeout }),
+    ...optionalCardLines({ memo, queuedJob, closeout, optedOut: who.optedOut }),
     _version: approvedVersion({ invoice, via, who, memo, closeout, sentAt }),
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
   };
@@ -219,10 +233,15 @@ function approvedMatcher({ who, via }) {
     if (!sameAmount(facts.amount)) return false;
     switch (facts.channel) {
       // The email (and its PDF) state the paid date; the text states none, so only the email is bound to it.
+      // The opt-out read at the boundary (null = unreadable) must still be the one the card disclosed: the
+      // manual email ignores it, so one set after the last re-check would otherwise send unseen.
       case 'email': return via !== 'sms' && Boolean(who.email) && (facts.paid ?? null) === paidKey(who.invoice)
+        && facts.optedOut === (who.optedOut === true)
         && sameReach({ email: normalizeReceiptEmail(facts.to) });
-      case 'sms': return via !== 'email' && !who.payerBilled && Boolean(who.phone) && sameReach({ phone: facts.to });
-      case 'app': return via !== 'email' && !who.payerBilled && who.app === true;
+      // A card that showed the opt-out promised no text and no app notification: an opt-in landing after
+      // the last re-check must not let either through.
+      case 'sms': return via !== 'email' && !who.payerBilled && !who.optedOut && Boolean(who.phone) && sameReach({ phone: facts.to });
+      case 'app': return via !== 'email' && !who.payerBilled && !who.optedOut && who.app === true;
       default: return false;
     }
   };
@@ -254,11 +273,19 @@ function channelOutcome(requested, result, certainty, { reasons = {}, isExpected
 
 // What the queue will actually do, from the writer's own report of the automatic
 // receipt job (releaseOperatorReceiptClaim) — never a guess.
-function queueNote(queue, { allDelivered }) {
+// optedOut: the customer's payment-receipt opt-out read AFTER the send (it may have changed since the
+// card), true / false, or null when it could not be read.
+function queueNote(queue, { allDelivered, optedOut = false }) {
+  const willClose = 'but the customer opted out of payment receipts, so it will close without sending. Nothing else will send this receipt.';
+  const unknown = "whether it sends depends on the customer's receipt settings, which could not be read just now.";
   switch (queue) {
-    case 'returned_to_queue': return 'The automatic receipt for this invoice is back in the queue and will try again on its own (it can email the customer the receipt), so a manual resend is not needed for that.';
+    case 'returned_to_queue': return optedOut === null ? `The automatic receipt job is back in the queue; ${unknown}`
+      : optedOut ? `The automatic receipt job is back in the queue, ${willClose}`
+        : 'The automatic receipt for this invoice is back in the queue and will try again on its own (it can email the customer the receipt), so a manual resend is not needed for that.';
     case 'held_for_reconciliation': return 'The automatic receipt for this invoice was held, not re-queued: the queue will not send it again. Check whether the customer got the receipt before sending again.';
-    case 'release_failed': return 'The automatic receipt job could not be settled here; the queue recovers it on its own and may email the customer the receipt again.';
+    case 'release_failed': return optedOut === null ? `The automatic receipt job could not be settled here; the queue recovers it on its own, and ${unknown}`
+      : optedOut ? `The automatic receipt job could not be settled here; the queue recovers it on its own, ${willClose}`
+        : 'The automatic receipt job could not be settled here; the queue recovers it on its own and may email the customer the receipt again.';
     case 'none':
     case 'removed': return allDelivered ? null : 'No automatic receipt is waiting in the queue, so nothing else will send this receipt.';
     default: return null; // 'completed' (closed by this send) or not reported
@@ -363,6 +390,18 @@ function callWriter(version, pinned, matches, actionContext) {
   });
 }
 
+// The opt-out the queue will read when it runs the job again — read now, after the send, never the
+// card's (it can change during the send). Only a job the queue will run again needs it.
+async function optedOutAfterSend(queue, invoiceId) {
+  if (!['returned_to_queue', 'release_failed'].includes(queue)) return false;
+  try {
+    const invoice = await db('invoices').where({ id: invoiceId }).first('id', 'customer_id', 'payer_id');
+    if (!invoice) return null;
+    const state = await receiptEmailOptOutState(invoice);
+    return state.prefsLookupFailed ? null : state.receiptKillSwitch === true;
+  } catch { return null; }
+}
+
 async function commit(input, actionContext) {
   const verified = await verifiedPlan(input);
   if (verified.refusal) return verified.refusal;
@@ -387,7 +426,7 @@ async function commit(input, actionContext) {
     ...(visitCloseout ? { visit_closeout: visitCloseout } : {}),
     ...(queue ? { automatic_receipt: queue } : {}),
     ...(lockLost ? { send_lock_lost: lockLost, ...(stampWritten === false ? { receipt_stamp_written: false } : {}), ...(stampBy === 'settlement' ? { receipt_stamp_by: 'settlement' } : {}) } : {}),
-    note: [headline(verdict), lockNote(lockLost, stampWritten, stampBy), queueNote(queue, { allDelivered: delivered && clean })].filter(Boolean).join(' '),
+    note: [headline(verdict), lockNote(lockLost, stampWritten, stampBy), queueNote(queue, { allDelivered: delivered && clean, optedOut: await optedOutAfterSend(queue, version.invoice_id) })].filter(Boolean).join(' '),
   };
 }
 

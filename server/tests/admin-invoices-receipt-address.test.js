@@ -98,6 +98,15 @@ test('PUT on a paid invoice rewrites only its snapshot and audits before/after i
   }));
 }));
 
+test('PUT on a void invoice is refused server-side (409) and writes nothing', () => withServer(async (base) => {
+  rows.invoices[0].status = 'void';
+  const res = await put(base, 'inv-1', CORRECT);
+  expect(res.status).toBe(409);
+  expect((await res.json()).code).toBe('invoice_void');
+  expect(updates).toEqual([]);
+  expect(mockAudit).not.toHaveBeenCalled();
+}));
+
 test('a failed audit write fails the correction (same transaction)', () => withServer(async (base) => {
   mockAudit.mockRejectedValueOnce(new Error('audit down'));
   const res = await put(base, 'inv-1', CORRECT);

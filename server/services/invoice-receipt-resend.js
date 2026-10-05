@@ -62,14 +62,17 @@ const emailDelivery = (result) => (result?.ok ? 'sent' : result?.deliveryOutcome
 // and the closeout and the email leg both take time. The full approved version
 // is not compared here: those steps have legitimately moved the rest (linked
 // visit, job state).
-const LEG_DRIFT = 'recipient or amount changed after approval';
+const LEG_DRIFT = 'recipient, amount or receipt opt-out changed after approval';
 async function legStillApproved(expect, claim, id) {
   try {
     const current = await expect.rederive({ ownClaimToken: claim.token || null });
     return Boolean(current)
       && current.recipients_key === expect.approved.recipients_key
       && current.amount === expect.approved.amount
-      && current.paid === expect.approved.paid;
+      && current.paid === expect.approved.paid
+      // An opt-out set since the card: the manual email ignores receipt preferences, so the operator
+      // must see it on a fresh card first (absent = not opted out).
+      && Boolean(current.opted_out) === Boolean(expect.approved.opted_out);
   } catch (err) {
     logger.warn(`[invoice-receipt-resend] text-leg re-check failed for ${id}: ${err.message}`);
     return false;

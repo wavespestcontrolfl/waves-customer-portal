@@ -832,6 +832,7 @@ const PINNED_DISPLAY_BUILDERS = {
       ...(preview.visit_closeout ? { visit: preview.visit_closeout } : {}),
       // What a queued automatic receipt will do when this send settles it (the card must say it).
       ...(preview.automatic_receipt ? { automatic_receipt: preview.automatic_receipt } : {}),
+      ...(preview.opted_out ? { opted_out: preview.opted_out } : {}),
     }
     : null),
   // The billing writes: the card names the customer, the method or invoice and

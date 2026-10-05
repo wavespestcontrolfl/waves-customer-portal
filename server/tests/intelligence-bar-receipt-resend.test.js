@@ -181,9 +181,47 @@ describe('plain refusals — nothing previewed, nothing sent', () => {
     expect((await run({})).preview).toBe(true);
   });
 
-  test('customer opted out of receipts, or settings unreadable', async () => {
+  test('customer opted out of receipts: not refused, the card says so and the opt-out is pinned', async () => {
     receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
-    expect((await run({})).error).toMatch(/opted out of payment receipts/);
+    const out = await run({});
+    expect(out.preview).toBe(true);
+    expect(out.opted_out).toMatch(/opted out of payment receipts/);
+    expect(out._version.opted_out).toBe(true);
+    // Not opted out: no line, and the pin says so (an opt-out set since the card is drift).
+    const plain = await run({});
+    expect(plain).not.toHaveProperty('opted_out');
+    expect(plain._version.opted_out).toBe(false);
+  });
+
+  test('opted out: the text leg is shown as not going, since only the email ignores the opt-out', async () => {
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
+    const out = await run({ via: 'both' });
+    expect(out.preview).toBe(true);
+    expect(out.recipients).toMatch(/email to /);
+    expect(out.recipients).toMatch(/no text \(the customer opted out of payment receipts/);
+  });
+
+  test('opted out with no email leg: refused (the text and app legs honor the opt-out, so nothing would send)', async () => {
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
+    const textOnly = await run({ via: 'sms' });
+    expect(textOnly.error).toMatch(/opted out of payment receipts, so only an email can reach them, and this send has no email/);
+    expect(textOnly.preview).toBeUndefined();
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
+    resolveReceiptEmailRecipient.mockResolvedValueOnce({ ok: false, error: 'No receipt recipient email' });
+    const noEmail = await run({ via: 'both' });
+    expect(noEmail.error).toMatch(/only an email can reach them, and no receipt email is on file/);
+    expect(sendInvoiceReceipt).not.toHaveBeenCalled();
+  });
+
+  test('opted out with a queued automatic receipt: the card says the queue will not send it', async () => {
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
+    db.mockImplementation(fakeDb({ receipt_delivery_jobs: [{ id: 'job-1', invoice_id: INV, status: 'queued' }] }));
+    const out = await run({});
+    expect(out.automatic_receipt).toMatch(/opted out of payment receipts, so it will close without sending/);
+    expect(out.automatic_receipt).not.toMatch(/try again on its own/);
+  });
+
+  test('receipt settings unreadable: refused', async () => {
     receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: false, prefsLookupFailed: true });
     expect((await run({})).error).toMatch(/receipt settings could not be read/);
   });
@@ -500,6 +538,31 @@ describe('result wording comes only from what the writer reported about the auto
     expect(out.note).not.toMatch(mustNotMatch);
   });
 
+  test.each(['returned_to_queue', 'release_failed'])('an opted-out customer, job %s: said to close without sending, never to email on its own', async (queue) => {
+    receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: true, prefsLookupFailed: false });
+    sendInvoiceReceipt.mockResolvedValue({ ...emailFailed, queue });
+    const out = await confirm({});
+    expect(out.note).toMatch(/opted out of payment receipts, so it will close without sending/);
+    expect(out.note).not.toMatch(/try again on its own|may email the customer/);
+    receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: false, prefsLookupFailed: false });
+  });
+
+  test.each([
+    ['opted back in during the send (card showed the opt-out)', true, { receiptKillSwitch: false, prefsLookupFailed: false }, /back in the queue and will try again on its own/, /close without sending/],
+    ['opted out during the send (card showed none)', false, { receiptKillSwitch: true, prefsLookupFailed: false }, /opted out of payment receipts, so it will close without sending/, /try again on its own/],
+    ['settings unreadable after the send', false, { receiptKillSwitch: false, prefsLookupFailed: true }, /depends on the customer's receipt settings, which could not be read/, /try again on its own|close without sending/],
+  ])('queue wording follows the opt-out read after the send, not the card: %s', async (_label, cardOptedOut, afterSend, mustMatch, mustNotMatch) => {
+    receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: cardOptedOut, prefsLookupFailed: false });
+    sendInvoiceReceipt.mockImplementation(async () => {
+      receiptEmailOptOutState.mockResolvedValue(afterSend);
+      return { ...emailFailed, queue: 'returned_to_queue' };
+    });
+    const out = await confirm({});
+    expect(out.note).toMatch(mustMatch);
+    expect(out.note).not.toMatch(mustNotMatch);
+    receiptEmailOptOutState.mockResolvedValue({ receiptKillSwitch: false, prefsLookupFailed: false });
+  });
+
   test('no result sentence promises "not retried" / "not re-sent" unconditionally', async () => {
     for (const queue of ['returned_to_queue', 'removed', 'none', 'completed', 'held_for_reconciliation', 'release_failed', undefined]) {
       for (const r of [sent, emailFailed, emailFailedTextSent, unknownEmail]) {
@@ -562,7 +625,7 @@ test('a non-admin actor is refused before anything is read', async () => {
 describe('approvedMatcher: what each sender must be about to deliver to match the approved plan (memory only)', () => {
   const who = { email: 'Pat@Example.com', phone: '9415550100', app: true, payerBilled: false, amount: '129.00' };
   const m = (over = {}, via = 'both') => approvedMatcher({ who: { ...who, ...over }, via });
-  const email = (to, amount = '129.00') => ({ channel: 'email', to, amount });
+  const email = (to, amount = '129.00') => ({ channel: 'email', to, amount, optedOut: false });
 
   test('email: the address compares after the card\'s own trim and lower-casing; a different address or amount is refused', () => {
     // The plan holds the already-normalized address (what the card hashed); the sender reports its own spelling.
@@ -594,12 +657,30 @@ describe('approvedMatcher: what each sender must be about to deliver to match th
     expect(plan({ channel: 'app', to: null, amount: '129.00' })).toBe(true);
   });
 
+  test('email is held to the opt-out the card showed, as read at the handoff (unreadable or missing = refused)', () => {
+    const plan = { email: 'pat@example.com' };
+    expect(m(plan)(email('pat@example.com'))).toBe(true);
+    expect(m(plan)({ ...email('pat@example.com'), optedOut: true })).toBe(false);
+    expect(m({ ...plan, optedOut: true })({ ...email('pat@example.com'), optedOut: true })).toBe(true);
+    expect(m({ ...plan, optedOut: true })(email('pat@example.com'))).toBe(false);
+    expect(m(plan)({ ...email('pat@example.com'), optedOut: null })).toBe(false);
+    expect(m(plan)({ channel: 'email', to: 'pat@example.com', amount: '129.00' })).toBe(false);
+    expect(m(plan)({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(true);
+  });
+
+  test('a card that showed the opt-out promised no text or app notification: both refused even after an opt-in', () => {
+    const optedOut = m({ email: 'pat@example.com', optedOut: true });
+    expect(optedOut({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(false);
+    expect(optedOut({ channel: 'app', to: null, amount: '129.00' })).toBe(false);
+    expect(optedOut({ ...email('pat@example.com'), optedOut: true })).toBe(true);
+  });
+
   test('amount: formatting does not matter, value does', () => {
     const plan = { email: 'pat@example.com' };
     expect(m(plan)(email('pat@example.com', 129))).toBe(true);
     expect(m(plan)(email('pat@example.com', '129'))).toBe(true);
     expect(m(plan)(email('pat@example.com', '129.01'))).toBe(false);
-    expect(m(plan)({ channel: 'email', to: 'pat@example.com' })).toBe(false);
+    expect(m(plan)({ channel: 'email', to: 'pat@example.com', optedOut: false })).toBe(false);
   });
 
   test('text: the phone must be the approved one; payer-billed and email-only never text', () => {
@@ -632,8 +713,10 @@ describe('approvedMatcher: what each sender must be about to deliver to match th
     await confirm({});
     const { matches } = sendInvoiceReceipt.mock.calls[0][1].expect;
     const paid = PAID.paid_at.getTime();
-    expect(matches({ channel: 'email', to: 'pat@example.com', amount: '129.00', paid })).toBe(true);
-    expect(matches({ channel: 'email', to: 'someone-else@example.com', amount: '129.00', paid })).toBe(false);
+    expect(matches({ channel: 'email', to: 'pat@example.com', amount: '129.00', paid, optedOut: false })).toBe(true);
+    expect(matches({ channel: 'email', to: 'someone-else@example.com', amount: '129.00', paid, optedOut: false })).toBe(false);
+    // An opt-out set after the last re-check, read at the email handoff: refused.
+    expect(matches({ channel: 'email', to: 'pat@example.com', amount: '129.00', paid, optedOut: true })).toBe(false);
     expect(matches({ channel: 'sms', to: CUSTOMER.phone, amount: '129.00' })).toBe(true);
     expect(matches({ channel: 'sms', to: CUSTOMER.phone, amount: '99.00' })).toBe(false);
   });
