@@ -21,12 +21,10 @@
  * (prod already had it); if none resolves the migration throws, as 130000 does.
  * No other product is new.
  *
- * Idempotent. down(): deletes the Dimension row it inserted. When a completion actual
- * references that row it is kept for the history but switched off (default_in_plan
- * false, no planVisitsPerYear); the 24-0-11 row loses its 12x mark (only while it still
- * holds 12) and the audit row goes either way. up() on a database holding a retained
- * row updates that row back in step instead of skipping the window. Audit row per
- * protocol, action 'v13_april_9x'.
+ * Idempotent. down(): deletes the Dimension row it inserted (kept when a
+ * completion actual references it) and takes planVisitsPerYear back off the
+ * 24-0-11 row only while it still holds 12. Audit row per protocol, action
+ * 'v13_april_9x'.
  */
 
 const staged = require('./20261005120000_lawn_protocol_v13_staged');
@@ -82,45 +80,27 @@ exports.up = async function up(knex) {
   let dimensionId = null;
   for (const [windowId, window] of windows) {
     const f24 = window.rows.find((row) => row.product_name === F24);
-    if (!f24) continue;
-    const existing = window.rows.find((row) => row.product_name === DIMENSION);
-    const f24Gates = asObject(f24.gates);
-    const dimensionGates = { ...f24Gates, [GATE_KEY]: 9 };
-    // Already in place (a second run, or a retained row that is back in step): nothing to do.
-    if (existing && asObject(existing.gates)[GATE_KEY] === 9 && existing.default_in_plan === f24.default_in_plan && f24Gates[GATE_KEY] === 12) continue;
+    if (!f24 || window.rows.some((row) => row.product_name === DIMENSION)) continue;
+    dimensionId = dimensionId || await resolveDimensionId(knex);
+    if (!dimensionId) throw new Error(`lawn v13: no products_catalog row or alias for ${DIMENSION}`);
 
-    let dimensionRowId = existing?.id;
-    if (existing) {
-      // A row kept by down() (a completion actual references it): bring it back in step
-      // with the 24-0-11 row instead of skipping the window.
-      await knex('lawn_protocol_products').where({ id: existing.id }).update({
-        gates: JSON.stringify({ ...asObject(existing.gates), ...dimensionGates }),
-        default_in_plan: f24.default_in_plan,
-        rate_per_1000: f24.rate_per_1000,
-        rate_unit: f24.rate_unit,
-        updated_at: knex.fn.now(),
-      });
-    } else {
-      dimensionId = dimensionId || await resolveDimensionId(knex);
-      if (!dimensionId) throw new Error(`lawn v13: no products_catalog row or alias for ${DIMENSION}`);
-      const [inserted] = await knex('lawn_protocol_products').insert({
-        lawn_protocol_window_id: windowId,
-        product_id: dimensionId,
-        product_name: DIMENSION,
-        role: f24.role,
-        application_mode: f24.application_mode,
-        rate_per_1000: f24.rate_per_1000,
-        rate_unit: f24.rate_unit,
-        carrier_gal_per_1000: f24.carrier_gal_per_1000,
-        default_in_plan: f24.default_in_plan,
-        gates: JSON.stringify(dimensionGates),
-        annual_counter: JSON.stringify({}),
-        mixing: JSON.stringify({}),
-        report_copy: JSON.stringify({ role: f24.role }),
-        sort_order: Math.max(...window.rows.map((row) => Number(row.sort_order) || 0)) + 1,
-      }).returning('id');
-      dimensionRowId = inserted && (inserted.id || inserted);
-    }
+    const f24Gates = asObject(f24.gates);
+    const [inserted] = await knex('lawn_protocol_products').insert({
+      lawn_protocol_window_id: windowId,
+      product_id: dimensionId,
+      product_name: DIMENSION,
+      role: f24.role,
+      application_mode: f24.application_mode,
+      rate_per_1000: f24.rate_per_1000,
+      rate_unit: f24.rate_unit,
+      carrier_gal_per_1000: f24.carrier_gal_per_1000,
+      default_in_plan: f24.default_in_plan,
+      gates: JSON.stringify({ ...f24Gates, [GATE_KEY]: 9 }),
+      annual_counter: JSON.stringify({}),
+      mixing: JSON.stringify({}),
+      report_copy: JSON.stringify({ role: f24.role }),
+      sort_order: Math.max(...window.rows.map((row) => Number(row.sort_order) || 0)) + 1,
+    }).returning('id');
     await knex('lawn_protocol_products').where({ id: f24.id }).update({ gates: JSON.stringify({ ...f24Gates, [GATE_KEY]: 12 }), updated_at: knex.fn.now() });
     await knex('lawn_protocol_audit_log').insert({
       lawn_protocol_id: window.protocolId,
@@ -130,8 +110,8 @@ exports.up = async function up(knex) {
       action: AUDIT_ACTION,
       changed_fields: JSON.stringify(['products', 'gates']),
       before_snapshot: JSON.stringify({ f24RowId: f24.id, f24Gates }),
-      after_snapshot: JSON.stringify({ dimensionRowId }),
-      metadata: JSON.stringify({ migration: '20261006150000_lawn_v13_april_9x_branch', gate: 'GATE_LAWN_V13', reconciledExisting: Boolean(existing) }),
+      after_snapshot: JSON.stringify({ dimensionRowId: inserted && (inserted.id || inserted) }),
+      metadata: JSON.stringify({ migration: '20261006150000_lawn_v13_april_9x_branch', gate: 'GATE_LAWN_V13' }),
     });
   }
 };
@@ -139,30 +119,18 @@ exports.up = async function up(knex) {
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('lawn_protocol_audit_log')) || !(await knex.schema.hasTable('lawn_protocol_products'))) return;
   const logs = await knex('lawn_protocol_audit_log').where({ action: AUDIT_ACTION }).select('id', 'before_snapshot', 'after_snapshot');
-  const hasActuals = await knex.schema.hasTable('lawn_protocol_product_actuals');
   for (const log of logs) {
     const { dimensionRowId } = asObject(log.after_snapshot);
     const { f24RowId } = asObject(log.before_snapshot);
-    // The 24-0-11 row loses its 12x mark either way.
+    if (dimensionRowId && (await knex.schema.hasTable('lawn_protocol_product_actuals'))
+      && await knex('lawn_protocol_product_actuals').where({ protocol_product_id: dimensionRowId }).first('id')) continue;
+    if (dimensionRowId) await knex('lawn_protocol_products').where({ id: dimensionRowId, product_name: DIMENSION }).del();
     const f24 = f24RowId ? await knex('lawn_protocol_products').where({ id: f24RowId }).first('id', 'gates') : null;
     if (f24) {
       const gates = asObject(f24.gates);
       if (gates[GATE_KEY] === 12) {
         delete gates[GATE_KEY];
         await knex('lawn_protocol_products').where({ id: f24RowId }).update({ gates: JSON.stringify(gates) });
-      }
-    }
-    if (dimensionRowId) {
-      const referenced = hasActuals && await knex('lawn_protocol_product_actuals').where({ protocol_product_id: dimensionRowId }).first('id');
-      if (!referenced) {
-        await knex('lawn_protocol_products').where({ id: dimensionRowId, product_name: DIMENSION }).del();
-      } else {
-        // A completion actual references it, so the row stays for that history. It is
-        // switched off so nothing selects it: not a default, and no 9x condition.
-        const row = await knex('lawn_protocol_products').where({ id: dimensionRowId }).first('id', 'gates');
-        const gates = asObject(row?.gates);
-        delete gates[GATE_KEY];
-        await knex('lawn_protocol_products').where({ id: dimensionRowId }).update({ default_in_plan: false, gates: JSON.stringify(gates) });
       }
     }
     await knex('lawn_protocol_audit_log').where({ id: log.id }).del();

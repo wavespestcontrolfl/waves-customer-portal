@@ -12,6 +12,7 @@ const { buildPlanForService, lawnVisitsPerYear } = require('../services/waveguar
 const applicationLimits = require('../services/application-limits');
 const capMigration = require('../models/migrations/20261006140000_lawn_v13_prodiamine_year_cap');
 const aprilMigration = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
+const reconcileMigration = require('../models/migrations/20261006160000_lawn_v13_april_9x_reconcile');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const { randomUUID } = require('crypto');
 
@@ -132,6 +133,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     // The real migrations, run over the fixture catalog and the fixture staged protocol.
     await capMigration.up(knex);
     await aprilMigration.up(knex);
+    await reconcileMigration.up(knex);
 
     const [equipment] = await knex('equipment_systems').insert({ name: 'Fixture rig', system_type: 'skid', tank_capacity_gal: 110, active: true }).returning('*');
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
@@ -189,41 +191,52 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     test('a second up changes nothing; down removes only its rows; up again restores them', async () => {
       const count = async () => Number((await knex('product_limits').where({ match_type: 'active_ingredient' }).count('* as n'))[0].n);
       const aprilRows = async () => Number((await knex('lawn_protocol_products').where({ product_name: DIMENSION }).count('* as n'))[0].n);
-      await capMigration.up(knex); await aprilMigration.up(knex);
+      await capMigration.up(knex); await aprilMigration.up(knex); await reconcileMigration.up(knex);
       expect([await count(), await aprilRows()]).toEqual([3, 1]);
-      await aprilMigration.down(knex); await capMigration.down(knex);
+      await reconcileMigration.down(knex); await aprilMigration.down(knex); await capMigration.down(knex);
       expect([await count(), await aprilRows()]).toEqual([0, 0]);
       expect((await knex('lawn_protocol_products').where({ product_name: F24 }).first()).gates).toEqual({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true });
-      await capMigration.up(knex); await aprilMigration.up(knex);
+      await capMigration.up(knex); await aprilMigration.up(knex); await reconcileMigration.up(knex);
       expect([await count(), await aprilRows()]).toEqual([3, 1]);
     });
 
-    test('down with a completion actual on the Dimension row keeps that row switched off, restores the 24-0-11 gates and drops the audit row; up brings the kept row back without a duplicate', async () => {
+    test('full rollback with a completion actual on the Dimension row (160000 down, then 150000 down): the row stays switched off, the 24-0-11 gates are restored, no audit row is left; up twice puts one row back in step', async () => {
       const rowOf = (name) => knex('lawn_protocol_products').where({ product_name: name });
+      const ownGates = { targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true };
       const [dimension] = await rowOf(DIMENSION);
       const [actual] = await knex('lawn_protocol_product_actuals').insert({
         lawn_protocol_service_completion_id: randomUUID(), protocol_product_id: dimension.id, product_name: DIMENSION,
       }).returning('*');
       try {
+        await reconcileMigration.down(knex);
         await aprilMigration.down(knex);
         const kept = await rowOf(DIMENSION);
         expect(kept).toHaveLength(1);
         expect(kept[0]).toMatchObject({ id: dimension.id, default_in_plan: false });
-        expect(kept[0].gates).toEqual({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true });
-        expect((await rowOf(F24))[0].gates).toEqual({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true });
+        expect(kept[0].gates).toEqual(ownGates);
+        expect((await rowOf(F24))[0].gates).toEqual(ownGates);
         expect(await knex('lawn_protocol_audit_log').where({ action: 'v13_april_9x' })).toHaveLength(0);
 
-        await aprilMigration.up(knex);
-        await aprilMigration.up(knex);
+        await aprilMigration.up(knex); // sees the retained row and leaves the window alone
+        await reconcileMigration.up(knex);
+        await reconcileMigration.up(knex);
         const back = await rowOf(DIMENSION);
         expect(back).toHaveLength(1);
         expect(back[0]).toMatchObject({ id: dimension.id, default_in_plan: true });
-        expect(back[0].gates).toEqual({ targetN: '0.5 lb N/1000', blackoutSensitive: true, northPortBlocked: true, planVisitsPerYear: 9 });
-        expect((await rowOf(F24))[0].gates.planVisitsPerYear).toBe(12);
+        expect(back[0].gates).toEqual({ ...ownGates, planVisitsPerYear: 9 });
+        expect((await rowOf(F24))[0].gates).toEqual({ ...ownGates, planVisitsPerYear: 12 });
         expect(await knex('lawn_protocol_audit_log').where({ action: 'v13_april_9x' })).toHaveLength(1);
       } finally {
         await knex('lawn_protocol_product_actuals').where({ id: actual.id }).del();
       }
+    });
+
+    test('160000 up and down leave an unreferenced window to 150000: nothing changes in step, and down does not delete the row or its audit row', async () => {
+      const before = await knex('lawn_protocol_products').where({ product_name: DIMENSION });
+      await reconcileMigration.up(knex);
+      await reconcileMigration.down(knex);
+      expect(await knex('lawn_protocol_products').where({ product_name: DIMENSION })).toEqual(before);
+      expect(await knex('lawn_protocol_audit_log').where({ action: 'v13_april_9x' })).toHaveLength(1);
     });
 
     test('April rows: the 9x row mirrors the 24-0-11 row and carries its plan; the 24-0-11 row is marked 12x', async () => {
