@@ -362,3 +362,23 @@ describe('park parcel verify flag', () => {
     expect(flags.find((f) => f.field === 'parkParcel')).toBeUndefined();
   });
 });
+
+describe('shared-parcel flag copy: a commercial lookup is a plaza, never a park', () => {
+  const { buildFieldVerifyFlags } = require('../routes/property-lookup-v2')._private;
+  const record = (extra = {}) => ({ squareFootage: null, lotSize: null, propertyType: null, _raw: { multiSitusParcel: { situsCount: 24 } }, ...extra });
+  const flagOf = (rc, ai) => buildFieldVerifyFlags(rc, ai).find((f) => f.field === 'parkParcel');
+
+  test('a commercial read on a 24-address parcel names a multi-tenant commercial property', () => {
+    const flag = flagOf(record({ propertyType: 'Commercial' }), { propertyType: 'COMMERCIAL', isCommercial: true });
+    expect(flag.priority).toBe('HIGH');
+    expect(flag.reason).toContain('one of 24 addresses on a single county parcel');
+    expect(flag.reason).toContain('a plaza or center');
+    expect(flag.reason).not.toMatch(/homes|land-lease|mobile-home/);
+  });
+
+  test('a residential read keeps the park copy, and a roll-confirmed park keeps it even on a commercial read', () => {
+    expect(flagOf(record(), null).reason).toContain('land-lease community');
+    const confirmed = record({ propertyType: 'Commercial', _raw: { multiSitusParcel: { situsCount: 24, parkConfirmed: true } } });
+    expect(flagOf(confirmed, { propertyType: 'COMMERCIAL', isCommercial: true }).reason).toContain('land-lease community');
+  });
+});

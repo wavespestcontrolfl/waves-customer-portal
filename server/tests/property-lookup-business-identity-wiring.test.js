@@ -303,6 +303,14 @@ describe('gate on', () => {
     expect((await run()).enriched.serviceScopeSuggestion).toBeNull();
   });
 
+  test('a county parcel listed under several addresses (a plaza) suggests one space, unless the roll calls it a mobile-home park', async () => {
+    lookupPropertyFromAITrio.mockImplementation(async () => ({ ...noCountyRecord(), _raw: { ...(noCountyRecord()._raw || {}), multiSitusParcel: { situsCount: 24 } } }));
+    expect((await run()).enriched).toMatchObject({ serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: 'suite' });
+    lookupPropertyFromAITrio.mockImplementation(async () => ({ ...noCountyRecord(), _raw: { ...(noCountyRecord()._raw || {}), multiSitusParcel: { situsCount: 24, parkConfirmed: true } } }));
+    expect((await run()).enriched.serviceScopeSuggestion).toBeNull();
+    lookupPropertyFromAITrio.mockImplementation(async () => noCountyRecord());
+  });
+
   test('staff answer "none" (not this business): the gate-off profile, nothing asked, pricing allowed, the listing still shown', async () => {
     const baseline = await gateOffBaseline();
     const p = (await run({ occupancyAnswer: 'none' })).enriched;
