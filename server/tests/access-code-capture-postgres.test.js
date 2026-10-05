@@ -209,6 +209,29 @@ postgres('access codes section', () => {
       expect(list).toEqual([['dismissed', null], ['found', 'press 2 first']]);
     });
 
+    test('a corrected text that changes the code, or drops it, dismisses what it filed', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'The gate code is #4821');
+      expect(await sweep(stub([gateItem()]))).toMatchObject({ found: 1 });
+      await trx('sms_log').where({ id }).update({ message_body: 'The gate code is #9876' });
+      expect(await sweep(stub([gateItem({ code: '#9876', quote: 'The gate code is #9876' })]))).toMatchObject({ found: 1 });
+      expect((await rows(c.id)).map((r) => [r.code, r.status]).sort()).toEqual([['#4821', 'dismissed'], ['#9876', 'found']]);
+      await trx('sms_log').where({ id }).update({ message_body: 'See you Tuesday' });
+      expect(await sweep(stub([]))).toMatchObject({ found: 0 });
+      expect((await rows(c.id)).map((r) => r.status).sort()).toEqual(['dismissed', 'dismissed']);
+    });
+
+    test('a corrected text never touches a row the office already decided', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'The gate code is #4821');
+      await sweep(stub([gateItem()]));
+      const [row] = await rows(c.id);
+      await access.accept(trx, row.id, {});
+      await trx('sms_log').where({ id }).update({ message_body: 'See you Tuesday' });
+      await sweep(stub([]));
+      expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('active');
+    });
+
     test('a house number added during the model call is refused at filing', async () => {
       const c = await customer({ properties: 1 });
       await text(c.id, 'The gate code is #7788');

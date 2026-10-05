@@ -290,6 +290,23 @@ function isLive(r, now = new Date()) {
   return !from || new Date(from) >= addETDays(now, -VISIT_WINDOW_DAYS);
 }
 
+// The text's current words are the only evidence: every row this text filed
+// that the office has not decided yet, and that the latest read no longer
+// supports, is dismissed (a changed code, removed directions, or no access
+// information at all). Decided rows stay as history.
+async function reconcileSource(trx, message, items) {
+  const keep = new Set(items.map((item) => `${item.kind}:${item.value_hash}:${normalizeText(item.instructions)}`));
+  const waiting = await trx('customer_access_codes')
+    .where({ customer_id: message.customer_id, source_type: 'sms', source_id: message.id, status: 'found' })
+    .forUpdate().select('id', 'kind', 'value_hash', 'instructions');
+  const stale = waiting.filter((r) => !keep.has(`${r.kind}:${r.value_hash}:${normalizeText(r.instructions)}`)).map((r) => r.id);
+  if (stale.length) {
+    await trx('customer_access_codes').whereIn('id', stale)
+      .update({ status: 'dismissed', decided_at: trx.fn.now(), updated_at: trx.fn.now() });
+  }
+  return stale.length;
+}
+
 async function fileFoundItems(conn, { message }, items, receipt) {
   return conn.transaction(async (trx) => {
     // The model call ran outside any lock. Before a write: the gate and its
@@ -341,21 +358,9 @@ async function fileFoundItems(conn, { message }, items, receipt) {
           && canonicalLower(prefs[field]) === canonicalLower(item.code));
       });
     }
+    await reconcileSource(trx, message, items);
     let inserted = 0;
     if (toInsert.length) {
-      // A corrected text replaces what its earlier read filed and the office has
-      // not decided yet: the old waiting row of the same kind and code goes.
-      await trx('customer_access_codes')
-        .where({ customer_id: customer.id, source_type: 'sms', source_id: message.id, status: 'found' })
-        .where(function changed() {
-          for (const item of toInsert) {
-            this.orWhere(function same() {
-              this.where({ kind: item.kind, value_hash: item.value_hash })
-                .whereRaw("coalesce(instructions, '') <> ?", [item.instructions || '']);
-            });
-          }
-        })
-        .update({ status: 'dismissed', decided_at: trx.fn.now(), updated_at: trx.fn.now() });
       const rows = await trx('customer_access_codes').insert(toInsert.map((item) => ({
         customer_id: customer.id, property_id: propertyId, kind: item.kind, code: item.code,
         instructions: item.instructions, life: item.life, status: 'found', source_type: 'sms',
@@ -408,7 +413,11 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
           flagged = flagsAccess(message.message_body, { priorAskedForCode: await priorOutboundAskedForCode(conn, message) });
         }
         if (!flagged) {
-          await recordExtractionAttempt({ ...receipt, trx: conn, status: 'no_fields' });
+          // A text corrected so it no longer names a way in drops what it filed.
+          await conn.transaction(async (trx) => {
+            if (await lockCustomer(trx, message.customer_id)) await reconcileSource(trx, message, []);
+            await recordExtractionAttempt({ ...receipt, trx, status: 'no_fields' });
+          });
           tally.skipped += 1;
           continue;
         }
