@@ -1937,22 +1937,49 @@ it('changing visits after a partial-zone edit gives the next visit its own full 
 });
 
 
-it('shared reviewed area drives lawn defaults while a partial visit and manual total stay separate', async () => {
+it.each([
+  ['reviewed', { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' }],
+  ['recorded but not reviewed', { sqft: 4200, source: 'recorded', reviewedAt: null }],
+])('a %s lawn area is the whole-lawn default: no area card, plan amounts derived, a manual total stays separate', async (_label, lawn) => {
   enableDefaults();
-  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
-    lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' }, beds: null, mosquito: null,
-  } };
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: { lawn, beds: null, mosquito: null } };
   mount();
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['12.6', '8.4']));
   expect(screen.queryByLabelText('Area for this visit (sq ft)')).toBeNull();
+  // The technician types nothing: no Property areas card, no Area treated box.
+  expect(screen.queryByLabelText('Area treated today (sq ft)')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Review areas' })).toBeNull();
+  expect(screen.queryByText('Property areas')).toBeNull();
   fireEvent.change(totals()[0], { target: { value: '8' } });
-  fireEvent.change(screen.getByLabelText('Area treated today (sq ft)'), { target: { value: '2000' } });
-  await waitFor(() => expect(totals().map(input => input.value)).toEqual(['8', '4']));
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(submit).toHaveBeenCalledOnce());
-  expect(submit.mock.calls[0][1].propertyServiceArea).toEqual({ propertyId: 'property-a', version: 'a'.repeat(64), kind: 'lawn', treatedSqft: 2000, explicitVisitArea: true });
-  expect(submit.mock.calls[0][1].lawnProtocolCompletion.treatedSqft).toBe(2000);
+  // The property default, not a per-visit entry: no explicitVisitArea.
+  expect(submit.mock.calls[0][1].propertyServiceArea).toEqual({ propertyId: 'property-a', version: 'a'.repeat(64), kind: 'lawn', treatedSqft: 4200 });
+  expect(submit.mock.calls[0][1].lawnProtocolCompletion.treatedSqft).toBe(4200);
   expect(fetch.mock.calls.some(([url, opts]) => url.includes('property-areas') && opts.method === 'PUT')).toBe(false);
+});
+
+it('a restored lawn area the tech typed earlier still wins over the recorded area, stays visible, and can be cleared', async () => {
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
+    lawn: { sqft: 4200, source: 'recorded', reviewedAt: null }, beds: null, mosquito: null,
+  } };
+  localStorage.setItem(`waves_completion_draft_${service.id}`, JSON.stringify({
+    serviceId: service.id, savedAt: Date.now(), notes: 'Fixture notes',
+    selectedProducts: [{ productId: 'test-k', rate: 3, rateUnit: 'fl_oz', totalAmount: 6, amountUnit: 'fl_oz', areaValue: 2000, areaUnit: 'sqft' }],
+    lawnAreaOverride: '2000', lawnAreaOverrideFor: 'property-a|',
+  }));
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)').value).toBe('2000'));
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  expect(submit.mock.calls[0][1].propertyServiceArea).toEqual({ propertyId: 'property-a', version: 'a'.repeat(64), kind: 'lawn', treatedSqft: 2000, explicitVisitArea: true });
+  // Clearing it returns to the whole recorded lawn and the card goes away.
+  fireEvent.click(screen.getByRole('button', { name: 'Use property area' }));
+  await waitFor(() => expect(screen.queryByLabelText('Area treated today (sq ft)')).toBeNull());
+  fireEvent.click(await screen.findByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledTimes(2));
+  expect(submit.mock.calls[1][1].propertyServiceArea).toEqual({ propertyId: 'property-a', version: 'a'.repeat(64), kind: 'lawn', treatedSqft: 4200 });
 });
 
 it('a palm feed added by hand never takes or follows the shared lawn area under lawn defaults', async () => {
@@ -1967,12 +1994,10 @@ it('a palm feed added by hand never takes or follows the shared lawn area under 
   fireEvent.click(screen.getByText(palm.name));
   await waitFor(() => expect(totals()).toHaveLength(3));
   expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe('');
-  fireEvent.change(screen.getByLabelText('Area treated today (sq ft)'), { target: { value: '2000' } });
-  await waitFor(() => expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('2000'));
-  expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe('');
+  expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('4200');
 });
 
-it.each([null, { sqft: 4200, source: 'imagery', reviewedAt: null }, { sqft: 0, source: 'field', reviewedAt: '2026-09-27' }])('a missing, unreviewed or zero shared lawn area clears planner quantities without an invalid request: %j', async lawn => {
+it.each([null, { sqft: 4200, source: 'imagery', reviewedAt: null }, { sqft: 0, source: 'field', reviewedAt: '2026-09-27' }, { sqft: 0, source: 'recorded', reviewedAt: null }])('a missing, estimate-only or zero shared lawn area (no recorded whole lawn) keeps the area card and clears planner quantities without an invalid request: %j', async lawn => {
   enableDefaults();
   propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
     lawn, beds: null, mosquito: null,
