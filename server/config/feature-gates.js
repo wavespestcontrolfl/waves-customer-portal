@@ -35,6 +35,7 @@
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
  *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 25s+, no answer, no voicemail — texts them back from the line they called)
+ *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 25s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -2226,6 +2227,14 @@ const gates = {
   // no claim taken. The sweep still reconciles claims this lane left
   // orphaned while it was on.
   missedCallTextBack: process.env.GATE_MISSED_CALL_TEXT_BACK === 'true',
+  // Widens the text-back lane ONLY (not the bell): a caller who waited 25s+
+  // at the voicemail greeting and hung up without speaking leaves a recording
+  // the processor rejects as no-speech; the voicemail lane does nothing with
+  // it, so the caller got no text. On → that call counts as "no message
+  // left" once the processor has finished with it (a recording still
+  // awaiting transcription never does). Needs GATE_MISSED_CALL_TEXT_BACK.
+  // Off → byte-identical to before.
+  missedCallTextBackEmptyVoicemail: process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
@@ -4429,6 +4438,12 @@ function duplicatesSameNameLive() {
   return process.env.GATE_DUPLICATES_SAME_NAME === 'true';
 }
 
+// GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL — ships DARK, off unless exactly
+// 'true'. Same switch the text-back service reads through isEnabled().
+function missedCallTextBackEmptyVoicemailLive() {
+  return process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true';
+}
+
 // GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT read at CALL time — strict `=== 'true'`,
 // dark. On, the ten-minute sweep (assessment-estimate-closeout.js) completes
 // an open Waves Assessment visit once an estimate has been sent to its
@@ -5680,6 +5695,8 @@ module.exports.lawnLightingLive = lawnLightingLive;
 module.exports.lawnReportPhotoSetLive = lawnReportPhotoSetLive;
 // GATE_LAWN_REPORT_PHOTO_FINDINGS reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportPhotoFindingsLive = lawnReportPhotoFindingsLive;
+// GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL reader, on its own line so gate PRs never conflict.
+module.exports.missedCallTextBackEmptyVoicemailLive = missedCallTextBackEmptyVoicemailLive;
 // GATE_RELAY_UNBOOKED_HANDOFF reader, on its own line so gate PRs never conflict.
 module.exports.relayUnbookedHandoffLive = relayUnbookedHandoffLive;
 // GATE_LAWN_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.
