@@ -1,9 +1,10 @@
-// 2026-10-05: emailed receipts landed as "Unknown Vendor" (334 Anthropic
-// receipts from mail.anthropic.com while the mapping lists anthropic.com),
-// and the same receipt mailed twice became two expenses.
+// 2026-10-05: emailed receipts from a vendor's subdomain landed as
+// "Unknown Vendor" (the mapping lists the company domain), and the same
+// receipt mailed twice became two expenses. All values here are synthetic.
 const mockCreate = jest.fn();
 jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
-jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
+jest.mock('../services/logger', () => mockLogger);
 jest.mock('../services/email/gmail-client', () => ({ getAttachment: jest.fn(async () => Buffer.from('%PDF-1.7 test')) }));
 
 const mockWrites = [];
@@ -41,96 +42,111 @@ const { processVendorInvoice, senderDomainCandidates } = require('../services/em
 
 const extraction = (fields) => mockCreate.mockResolvedValue({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(fields) }] });
 const inserted = () => mockWrites.find(([t, op]) => t === 'expenses' && op === 'insert')?.[2];
+const noPdf = () => mockCreate.mockRejectedValue(new Error('no pdf parse'));
 
 beforeEach(() => {
-  mockWrites.length = 0; mockCreate.mockReset();
-  mockState.vendors = [{ domain: 'anthropic.com', vendor_name: 'Anthropic', expense_category: 'Software & Technology' }];
+  mockWrites.length = 0; mockCreate.mockReset(); Object.values(mockLogger).forEach((f) => f.mockClear());
+  mockState.vendors = [{ domain: 'acme-cloud.example', vendor_name: 'Acme Cloud', expense_category: 'Software & Technology' }];
   mockState.duplicate = null;
+  mockState.lastDuplicateFilter = undefined;
   mockState.categories = [{ id: 'cat-sw', name: 'Software & Technology' }];
 });
 
 test('sender domain candidates drop leading labels only', () => {
-  expect(senderDomainCandidates('invoice+statements@mail.anthropic.com')).toEqual(['mail.anthropic.com', 'anthropic.com']);
-  expect(senderDomainCandidates('x@anthropic.com.evil.example')).toEqual(['anthropic.com.evil.example', 'com.evil.example', 'evil.example']);
+  expect(senderDomainCandidates('billing@mail.acme-cloud.example')).toEqual(['mail.acme-cloud.example', 'acme-cloud.example']);
+  expect(senderDomainCandidates('x@acme-cloud.example.evil.example')).toEqual(['acme-cloud.example.evil.example', 'example.evil.example', 'evil.example']);
   expect(senderDomainCandidates('nobody')).toEqual([]);
 });
 
 test('a receipt from a mapped company subdomain takes the mapped vendor and category', async () => {
-  extraction({ vendor_name: 'Anthropic, PBC', invoice_number: '25WSLCSD-0300', invoice_date: '2026-10-04', total: 10.12 });
-  await processVendorInvoice({ id: 'e1', gmail_id: 'g', from_address: 'invoice+statements@mail.anthropic.com', subject: 'Your receipt' }, { extracted: {} });
-  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Anthropic', category_id: 'cat-sw', amount: 10.12 }));
+  extraction({ vendor_name: 'Acme Cloud, Inc.', invoice_number: 'TEST-0001', invoice_date: '2026-01-15', total: 12.34 });
+  await processVendorInvoice({ id: 'e1', gmail_id: 'g', from_address: 'billing@mail.acme-cloud.example', subject: 'Your receipt' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Acme Cloud', category_id: 'cat-sw', amount: 12.34 }));
+});
+
+test('an old seeded category label is read as the real category', async () => {
+  mockState.vendors = [{ domain: 'acme-cloud.example', vendor_name: 'Acme Cloud', expense_category: 'Software & Services' }];
+  extraction({ invoice_number: 'TEST-0002', invoice_date: '2026-01-15', total: 12.34 });
+  await processVendorInvoice({ id: 'e2', gmail_id: 'g', from_address: 'billing@mail.acme-cloud.example', subject: 'Your receipt' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Acme Cloud', category_id: 'cat-sw' }));
 });
 
 test('a look-alike domain does not take the mapping', async () => {
-  extraction({ vendor_name: 'Anthropic, PBC', invoice_number: 'X1', invoice_date: '2026-10-04', total: 99 });
-  await processVendorInvoice({ id: 'e2', gmail_id: 'g', from_address: 'billing@anthropic.com.evil.example', subject: 'Invoice' }, { extracted: {} });
+  extraction({ vendor_name: 'Acme Cloud, Inc.', invoice_number: 'TEST-0003', invoice_date: '2026-01-15', total: 99 });
+  await processVendorInvoice({ id: 'e3', gmail_id: 'g', from_address: 'billing@acme-cloud.example.evil.example', subject: 'Invoice' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ category_id: null }));
 });
 
-test('an unmapped sender takes the vendor name printed on the invoice, not "Unknown Vendor"', async () => {
-  extraction({ vendor_name: 'RentCast', invoice_number: '2032-6714', invoice_date: '2026-04-27', total: 144 });
-  await processVendorInvoice({ id: 'e3', gmail_id: 'g', from_address: 'receipts@stripe.com', subject: 'Your receipt from RentCast' }, { extracted: {} });
-  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'RentCast', category_id: null }));
+test('an unmapped sender takes the vendor name printed on the invoice', async () => {
+  extraction({ vendor_name: 'Example Data Co', invoice_number: 'TEST-0004', invoice_date: '2026-01-15', total: 45 });
+  await processVendorInvoice({ id: 'e4', gmail_id: 'g', from_address: 'receipts@pay-platform.example', subject: 'Your receipt' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Example Data Co', category_id: null }));
 });
 
-test('a placeholder name on the invoice falls through to the classifier, then to "Unknown Vendor"', async () => {
-  extraction({ vendor_name: 'string', invoice_number: 'A1', invoice_date: '2026-09-01', total: 5 });
-  await processVendorInvoice({ id: 'e4', gmail_id: 'g', from_address: 'a@b.example', subject: 'Invoice' }, { extracted: {} });
+test('a placeholder name on the invoice falls through to "Unknown Vendor"', async () => {
+  extraction({ vendor_name: 'string', invoice_number: 'TEST-0005', invoice_date: '2026-01-15', total: 5 });
+  await processVendorInvoice({ id: 'e5', gmail_id: 'g', from_address: 'a@b.example', subject: 'Invoice' }, { extracted: {} });
   expect(inserted().vendor_name).toBe('Unknown Vendor');
+});
+
+test('an HTML-only receipt from an unmapped sender takes the sender display name', async () => {
+  noPdf();
+  await processVendorInvoice({ id: 'e6', gmail_id: 'g', from_address: 'no-reply@mailer.example', from_name: 'Example Mailer', subject: 'Payment received' },
+    { extracted: { invoice_amount: '19.99', invoice_date: '2026-01-15' } });
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Example Mailer', amount: 19.99 }));
 });
 
 test('the same receipt mailed twice links to the first expense instead of inserting a second', async () => {
   mockState.duplicate = { id: 'exp-earlier' };
-  extraction({ vendor_name: 'Google', invoice_number: '5639331278', invoice_date: '2026-09-01', total: 16.8 });
-  await processVendorInvoice({ id: 'e5', gmail_id: 'g', from_address: 'payments-noreply@google.com', subject: 'Invoice' }, { extracted: {} });
+  extraction({ vendor_name: 'Example Payments', invoice_number: '9000000001', invoice_date: '2026-01-15', total: 11.11 });
+  await processVendorInvoice({ id: 'e7', gmail_id: 'g', from_address: 'p@payments.example', subject: 'Invoice' }, { extracted: {} });
   expect(inserted()).toBeUndefined();
-  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ expense_id: 'exp-earlier', auto_action: 'expense_duplicate:16.8' })]);
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ expense_id: 'exp-earlier', auto_action: 'expense_duplicate:11.11' })]);
 });
 
-test('an unknown vendor is never treated as a duplicate (unrelated senders share the label)', async () => {
-  mockState.duplicate = { id: 'exp-other-vendor' };
-  extraction({ invoice_number: '1001', invoice_date: '2026-09-01', total: 50 });
-  await processVendorInvoice({ id: 'e6', gmail_id: 'g', from_address: 'a@unmapped.example', subject: 'Invoice' }, { extracted: {} });
-  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Unknown Vendor', amount: 50 }));
+test.each([
+  ['the sender display name', { from_name: 'Example Forwarder' }, { invoice_number: 'TEST-0008', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
+  ['the classifier guess', {}, { vendor_name: 'Example Platform', invoice_number: 'TEST-0009', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
+  ['no name at all', {}, { invoice_number: 'TEST-0010', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
+])('a vendor name from %s never drives a duplicate match', async (_label, emailExtra, extracted) => {
+  mockState.duplicate = { id: 'exp-other-merchant' };
+  noPdf();
+  await processVendorInvoice({ id: 'e8', gmail_id: 'g', from_address: 'a@unmapped.example', subject: 'Invoice', ...emailExtra }, { extracted });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 50 }));
+  expect(mockState.lastDuplicateFilter).toBeUndefined();
 });
 
-test('the duplicate lookup compares the whole description, so a longer invoice number never matches', async () => {
-  extraction({ vendor_name: 'Google', invoice_number: '12', invoice_date: '2026-09-01', total: 16.8 });
-  await processVendorInvoice({ id: 'e7', gmail_id: 'g', from_address: 'p@google.com', subject: 'Invoice' }, { extracted: {} });
-  expect(mockState.lastDuplicateFilter).toEqual(expect.objectContaining({ vendor_name: 'Google', expense_date: '2026-09-01', description: 'Google Invoice #12 — via email', raw: ['amount = round(?::numeric, 2)', ['16.8']] }));
-});
-
-test('no duplicate check runs when the description would be clipped', async () => {
-  mockState.duplicate = { id: 'exp-clipped' };
-  extraction({ vendor_name: 'Google', invoice_number: 'N'.repeat(400), invoice_date: '2026-09-01', total: 16.8 });
-  await processVendorInvoice({ id: 'e8', gmail_id: 'g', from_address: 'p@google.com', subject: 'Invoice' }, { extracted: {} });
-  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Google', amount: 16.8 }));
-});
-
-test('an old seeded category label is read as the real category', async () => {
-  mockState.vendors = [{ domain: 'anthropic.com', vendor_name: 'Anthropic', expense_category: 'Software & Services' }];
-  extraction({ invoice_number: '25WSLCSD-0301', invoice_date: '2026-10-04', total: 10.05 });
-  await processVendorInvoice({ id: 'e9', gmail_id: 'g', from_address: 'invoice+statements@mail.anthropic.com', subject: 'Your receipt' }, { extracted: {} });
-  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Anthropic', category_id: 'cat-sw' }));
-});
-
-test('a non-scalar classifier invoice number never drives the duplicate check', async () => {
+test('a non-scalar invoice number never drives the duplicate check', async () => {
   mockState.duplicate = { id: 'exp-object' };
-  mockCreate.mockRejectedValue(new Error('no pdf parse'));
-  await processVendorInvoice({ id: 'e10', gmail_id: 'g', from_address: 'p@google.com', from_name: 'Google Payments', subject: 'Invoice' },
-    { extracted: { invoice_number: { id: 1 }, invoice_amount: '20.00', invoice_date: '2026-09-01' } });
+  extraction({ vendor_name: 'Example Payments', invoice_date: '2026-01-15', total: 20 });
+  await processVendorInvoice({ id: 'e9', gmail_id: 'g', from_address: 'p@payments.example', subject: 'Invoice' },
+    { extracted: { invoice_number: { id: 1 } } });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 20 }));
 });
 
-test('the duplicate lookup compares the amount at the stored cent scale', async () => {
-  extraction({ vendor_name: 'Google', invoice_number: '77', invoice_date: '2026-09-01', total: 16.804 });
-  await processVendorInvoice({ id: 'e11', gmail_id: 'g', from_address: 'p@google.com', subject: 'Invoice' }, { extracted: {} });
-  expect(mockState.lastDuplicateFilter.raw).toEqual(['amount = round(?::numeric, 2)', ['16.804']]);
+test('the duplicate lookup compares the whole description, the date and the amount rounded by Postgres', async () => {
+  extraction({ vendor_name: 'Example Payments', invoice_number: '12', invoice_date: '2026-01-15', total: 16.804 });
+  await processVendorInvoice({ id: 'e10', gmail_id: 'g', from_address: 'p@payments.example', subject: 'Invoice' }, { extracted: {} });
+  expect(mockState.lastDuplicateFilter).toEqual(expect.objectContaining({
+    vendor_name: 'Example Payments', expense_date: '2026-01-15', description: 'Example Payments Invoice #12 — via email',
+    raw: ['amount = round(?::numeric, 2)', ['16.804']],
+  }));
 });
 
-test('an HTML-only receipt from an unmapped sender takes the sender display name', async () => {
-  mockCreate.mockRejectedValue(new Error('no pdf parse'));
-  await processVendorInvoice({ id: 'e12', gmail_id: 'g', from_address: 'no-reply@sendgrid.com', from_name: 'SendGrid', subject: 'Your payment was successful' },
-    { extracted: { invoice_amount: '19.95', invoice_date: '2026-09-07' } });
-  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'SendGrid', amount: 19.95 }));
+test('no duplicate check runs when the vendor name or description would be clipped', async () => {
+  mockState.duplicate = { id: 'exp-clipped' };
+  mockState.vendors = [{ domain: 'acme-cloud.example', vendor_name: 'V'.repeat(250), expense_category: 'Software & Technology' }];
+  extraction({ invoice_number: 'TEST-0011', invoice_date: '2026-01-15', total: 16.8 });
+  await processVendorInvoice({ id: 'e11', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Invoice' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 16.8 }));
+  expect(mockState.lastDuplicateFilter).toBeUndefined();
+});
+
+test('the log lines carry ids, never the vendor name', async () => {
+  noPdf();
+  await processVendorInvoice({ id: 'e13', gmail_id: 'g', from_address: 'a@unmapped.example', from_name: 'Pat Example', subject: 'Receipt' },
+    { extracted: { invoice_amount: '30.00', invoice_date: '2026-01-15' } });
+  const logged = JSON.stringify([...mockLogger.info.mock.calls, ...mockLogger.warn.mock.calls, ...mockLogger.error.mock.calls]);
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Pat Example' }));
+  expect(logged).not.toContain('Pat Example');
 });

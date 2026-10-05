@@ -160,8 +160,14 @@ function scalarInvoiceNumber(n) {
   const s = typeof n === 'string' || (typeof n === 'number' && Number.isFinite(n)) ? String(n).trim() : '';
   return s && s.length <= INVOICE_NUMBER_MAX ? s : null;
 }
-function duplicateKey(vendorName, invoiceNumber) {
-  if (!scalarInvoiceNumber(invoiceNumber) || vendorName === 'Unknown Vendor') return null;
+// Only a name from the domain mapping or printed on the invoice identifies
+// the merchant. A classifier guess or a sender display name can be a
+// platform or a forwarder shared by unrelated merchants, so those never
+// drive a duplicate match.
+const DEDUPE_SOURCES = new Set(['mapping', 'invoice']);
+
+function duplicateKey(vendorName, invoiceNumber, vendorSource) {
+  if (!DEDUPE_SOURCES.has(vendorSource) || !scalarInvoiceNumber(invoiceNumber)) return null;
   if (fullExpenseDescription(vendorName, invoiceNumber).length > 300 || String(vendorName).length > 200) return null;
   return `expense-dup:${String(vendorName).toLowerCase()}:${invoiceNumber}`;
 }
@@ -169,13 +175,100 @@ function duplicateKey(vendorName, invoiceNumber) {
 // The invoice date is part of the identity: a vendor that reuses an invoice
 // number for the same amount on a later date is a new expense, not a copy.
 async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, invoiceDate) {
-  if (!duplicateKey(vendorName, invoiceNumber)) return null;
   return conn('expenses')
     .where({ vendor_name: String(vendorName).slice(0, 200), expense_date: invoiceDate, description: expenseDescription(vendorName, invoiceNumber) })
     // expenses.amount is decimal(12,2): let Postgres round the new amount
     // exactly as the insert will, rather than a float approximation in JS.
     .whereRaw('amount = round(?::numeric, 2)', [String(amount)])
     .first('id');
+}
+
+// Booking phase: the AI category suggestion (outside any transaction), then
+// the duplicate check and the insert under one advisory lock. Logs carry ids
+// only: the vendor name can be a person's display name.
+async function bookExpense(email, { vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate, taxYear, quarter }) {
+  try {
+    const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
+    // ONLY a deterministic vendor-domain mapping auto-sets the tax category.
+    // AI categorization here would run on UNTRUSTED emailed invoice text
+    // (prompt-injectable, and its pick flows straight into the P&L / tax
+    // export), so its result is stored as a SUGGESTION only — the expense
+    // lands UNCATEGORIZED for the operator to confirm via the Expenses tab's
+    // (operator-triggered) auto-categorize. Full deductible amount until then.
+    const categoryRow = await db('expense_categories').whereILike('name', `%${expenseCategory}%`).first();
+
+    let aiSuggestionNote = '';
+    if (!categoryRow) {
+      try {
+        const ai = await autoCategorizeExpense(vendorName, (parsedInvoice ? parsedInvoice.line_items.map(l => (typeof l.description === 'string' ? l.description : '')).filter(Boolean).join('; ') : '') || email.subject, amount);
+        if (ai?.categoryName) aiSuggestionNote = ` AI-suggested category: ${ai.categoryName} (unconfirmed).`;
+      } catch (err) {
+        logger.warn(`[invoice-processor] AI categorization failed for ${email.id}: ${err.message}`);
+      }
+    }
+
+    // Server-owned partial-deduction policy — only for a DETERMINISTIC
+    // (vendor-domain) category match. Uncategorized stays fully deductible
+    // until the operator confirms a category.
+    let deductibleAmount = amount;
+    if (categoryRow?.name) {
+      const partial = categoryDeductibleAmount(categoryRow.name, amount);
+      if (partial !== null) deductibleAmount = partial;
+    }
+
+    // Duplicate check and insert run under one advisory lock per vendor +
+    // invoice number, so two copies of a receipt processed at the same
+    // time cannot both insert. The AI suggestion above stays outside the
+    // transaction: no lock is held across a model call.
+    const key = duplicateKey(vendorName, invoiceNumber, vendorSource);
+    const outcome = await db.transaction(async (trx) => {
+      if (key) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
+        const duplicate = await findDuplicateExpense(trx, vendorName, invoiceNumber, amount, invoiceDate);
+        if (duplicate) {
+          await trx('emails').where({ id: email.id }).update({
+            expense_id: duplicate.id,
+            auto_action: `expense_duplicate:${amount}`,
+            updated_at: new Date(),
+          });
+          return { duplicateOf: duplicate.id };
+        }
+      }
+      const [created] = await trx('expenses').insert({
+        // Column limits (description varchar 300, vendor_name varchar 200): the
+        // vendor name and the classifier's own invoice number are not bounded
+        // upstream, so clip here rather than fail the insert.
+        description: expenseDescription(vendorName, invoiceNumber),
+        amount,
+        tax_deductible_amount: deductibleAmount,
+        category_id: categoryRow?.id || null,
+        vendor_name: String(vendorName).slice(0, 200),
+        expense_date: invoiceDate,
+        tax_year: taxYear,
+        quarter,
+        payment_method: 'invoice',
+        notes: `Auto-imported from email. Subject: "${email.subject}". Pending review.${aiSuggestionNote}`,
+      }).returning('*');
+      await trx('emails').where({ id: email.id }).update({
+        expense_id: created.id,
+        auto_action: `expense_created:${amount}`,
+        updated_at: new Date(),
+      });
+      return { expense: created };
+    });
+
+    if (outcome.duplicateOf) {
+      logger.info(`[invoice-processor] Email ${email.id} is a duplicate of expense ${outcome.duplicateOf}`);
+    } else {
+      logger.info(`[invoice-processor] Expense ${outcome.expense.id} created from email ${email.id}`);
+    }
+  } catch (err) {
+    logger.error(`[invoice-processor] Expense creation failed: ${err.message}`);
+    await db('emails').where({ id: email.id }).update({
+      auto_action: `invoice_detected:${amount}:expense_failed`,
+      updated_at: new Date(),
+    });
+  }
 }
 
 async function processVendorInvoice(email, classification) {
@@ -266,11 +359,12 @@ async function processVendorInvoice(email, classification) {
   // the invoice, else the classifier's, else the sender's display name (an
   // HTML-only receipt has no parsed invoice), else "Unknown Vendor". Only a label:
   // the tax category below still comes from the domain mapping alone.
-  const vendorName = vendor?.vendor_name
-    || nameOrNull(parsedInvoice?.vendor_name)
-    || nameOrNull(classification.extracted?.vendor_name)
-    || nameOrNull(email.from_name)
-    || 'Unknown Vendor';
+  const [vendorName, vendorSource] = [
+    [vendor?.vendor_name, 'mapping'],
+    [nameOrNull(parsedInvoice?.vendor_name), 'invoice'],
+    [nameOrNull(classification.extracted?.vendor_name), 'classifier'],
+    [nameOrNull(email.from_name), 'sender'],
+  ].find(([name]) => name) || ['Unknown Vendor', 'unknown'];
 
   // Create expense record
   // `??`, not `||`: a parsed total of 0 (a zero-total invoice or credit memo)
@@ -290,88 +384,9 @@ async function processVendorInvoice(email, classification) {
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
   if (amount > 0) {
-    try {
-      const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
-      // ONLY a deterministic vendor-domain mapping auto-sets the tax category.
-      // AI categorization here would run on UNTRUSTED emailed invoice text
-      // (prompt-injectable, and its pick flows straight into the P&L / tax
-      // export), so its result is stored as a SUGGESTION only — the expense
-      // lands UNCATEGORIZED for the operator to confirm via the Expenses tab's
-      // (operator-triggered) auto-categorize. Full deductible amount until then.
-      const categoryRow = await db('expense_categories').whereILike('name', `%${expenseCategory}%`).first();
-
-      let aiSuggestionNote = '';
-      if (!categoryRow) {
-        try {
-          const ai = await autoCategorizeExpense(vendorName, (parsedInvoice ? parsedInvoice.line_items.map(l => (typeof l.description === 'string' ? l.description : '')).filter(Boolean).join('; ') : '') || email.subject, amount);
-          if (ai?.categoryName) aiSuggestionNote = ` AI-suggested category: ${ai.categoryName} (unconfirmed).`;
-        } catch (err) {
-          logger.warn(`[invoice-processor] AI categorization failed for ${email.id}: ${err.message}`);
-        }
-      }
-
-      // Server-owned partial-deduction policy — only for a DETERMINISTIC
-      // (vendor-domain) category match. Uncategorized stays fully deductible
-      // until the operator confirms a category.
-      let deductibleAmount = amount;
-      if (categoryRow?.name) {
-        const partial = categoryDeductibleAmount(categoryRow.name, amount);
-        if (partial !== null) deductibleAmount = partial;
-      }
-
-      // Duplicate check and insert run under one advisory lock per vendor +
-      // invoice number, so two copies of a receipt processed at the same
-      // time cannot both insert. The AI suggestion above stays outside the
-      // transaction: no lock is held across a model call.
-      const key = duplicateKey(vendorName, invoiceNumber);
-      const outcome = await db.transaction(async (trx) => {
-        if (key) {
-          await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
-          const duplicate = await findDuplicateExpense(trx, vendorName, invoiceNumber, amount, invoiceDate);
-          if (duplicate) {
-            await trx('emails').where({ id: email.id }).update({
-              expense_id: duplicate.id,
-              auto_action: `expense_duplicate:${amount}`,
-              updated_at: new Date(),
-            });
-            return { duplicateOf: duplicate.id };
-          }
-        }
-        const [created] = await trx('expenses').insert({
-          // Column limits (description varchar 300, vendor_name varchar 200): the
-          // vendor name and the classifier's own invoice number are not bounded
-          // upstream, so clip here rather than fail the insert.
-          description: expenseDescription(vendorName, invoiceNumber),
-          amount,
-          tax_deductible_amount: deductibleAmount,
-          category_id: categoryRow?.id || null,
-          vendor_name: String(vendorName).slice(0, 200),
-          expense_date: invoiceDate,
-          tax_year: taxYear,
-          quarter,
-          payment_method: 'invoice',
-          notes: `Auto-imported from email. Subject: "${email.subject}". Pending review.${aiSuggestionNote}`,
-        }).returning('*');
-        await trx('emails').where({ id: email.id }).update({
-          expense_id: created.id,
-          auto_action: `expense_created:${amount}`,
-          updated_at: new Date(),
-        });
-        return { expense: created };
-      });
-
-      if (outcome.duplicateOf) {
-        logger.info(`[invoice-processor] Duplicate of expense ${outcome.duplicateOf}: ${vendorName} $${amount} (#${invoiceNumber})`);
-      } else {
-        logger.info(`[invoice-processor] Expense created: ${vendorName} $${amount} (#${invoiceNumber || 'N/A'})`);
-      }
-    } catch (err) {
-      logger.error(`[invoice-processor] Expense creation failed: ${err.message}`);
-      await db('emails').where({ id: email.id }).update({
-        auto_action: `invoice_detected:${amount}:expense_failed`,
-        updated_at: new Date(),
-      });
-    }
+    await bookExpense(email, {
+      vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate, taxYear, quarter,
+    });
   } else {
     await db('emails').where({ id: email.id }).update({
       auto_action: 'invoice_detected:no_amount',
