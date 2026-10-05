@@ -245,6 +245,11 @@ describe('validator: rejects', () => {
     expect(problemsOf(c, fertilizerOnly)).toContain('prior_purpose_as_today:grub');
   });
 
+  test('a hedge in another clause does not cover the finding', () => {
+    const a = answer('We are watching chinch bugs, and we found thinning turf in the front yard. Arena 50 WDG went on the front yard.', [['note', 'finding'], ['product']]);
+    expect(problemsOf(a)).toContain('low_confidence_stated_as_fact:thin');
+  });
+
   test('"a few" is a quantity, not a hedge: a low-confidence finding still needs doubt', () => {
     const inputs = { ...FIXTURE, technicianNote: 'Applied Arena to the front and side yards. Also applied LESCO 24-0-11 to the whole yard.' };
     const a = answer('Arena 50 WDG went on the front and side yards. We found a few thin spots in the front yard.', [['note', 'product'], ['finding']]);

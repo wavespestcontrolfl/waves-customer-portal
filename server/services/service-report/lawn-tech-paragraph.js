@@ -564,8 +564,9 @@ function mentionProblem(term, sentence, mention, prov, from, inputs) {
   if (prov.noteStance === 'negated') return `negated_in_note_stated_as_found:${key}`;
   if (prov.noteStance === 'uncertain') return mention.stance === 'uncertain' ? null : `uncertain_stated_as_fact:${key}`;
   if (prov.noteStance === 'affirmed' || prov.findingHigh || prov.progress || prov.fact) return null;
-  if (prov.findingLow) return HEDGE_RE.test(sentence) ? null : `low_confidence_stated_as_fact:${key}`;
-  if (prov.prior) return PRIOR_REF_RE.test(sentence) ? null : `condition_from_prior_only:${key}`;
+  // The hedge, or the last-visit reference, must sit in the term's own clause.
+  if (prov.findingLow) return HEDGE_RE.test(mention.clause) ? null : `low_confidence_stated_as_fact:${key}`;
+  if (prov.prior) return PRIOR_REF_RE.test(mention.clause) ? null : `condition_from_prior_only:${key}`;
   if (prov.purpose || prov.priorPurpose) return `target_stated_as_found:${key}`;
   return `condition_not_in_inputs:${key}`;
 }
