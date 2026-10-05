@@ -1453,6 +1453,11 @@ export default function DispatchPageV2({
           }}
           onEnRoute={handleEnRoute}
           onTreatmentPlan={(svc) => setTreatmentPlanService(svc)}
+          // Open-hour rows book; POST /admin/schedule is admin-only.
+          onCreateSlot={getAdminUser()?.role === "admin" ? ({ date: slotDate, windowStart, techId }) => {
+            setNewApptDefaults({ date: slotDate, windowStart, techId });
+            setShowNewAppt(true);
+          } : undefined}
         />
       )}
       {viewMode === "week" && !isMobile && (
@@ -1791,6 +1796,8 @@ export default function DispatchPageV2({
               }
               onChange={() => fetchSchedule(date)}
               onDateChange={setDate}
+              showOpenHours={getAdminUser()?.role === "admin"}
+              bookingHours={safeData.bookingHours || null}
               onCreateSlot={({ date: slotDate, windowStart, techId }) => {
                 setNewApptDefaults({ date: slotDate, windowStart, techId });
                 setShowNewAppt(true);
@@ -1803,6 +1810,12 @@ export default function DispatchPageV2({
             <MobileDispatchList
               mode="day"
               date={date}
+              bookingHours={safeData.bookingHours || null}
+              // Open-hour rows book; POST /admin/schedule is admin-only.
+              onCreateSlot={getAdminUser()?.role === "admin" ? ({ date: slotDate, windowStart, techId }) => {
+                setNewApptDefaults({ date: slotDate, windowStart, techId });
+                setShowNewAppt(true);
+              } : undefined}
               services={services}
               rainChance={typeof safeData.rainChance === "number" ? safeData.rainChance : null}
               technicians={technicians}

@@ -5729,6 +5729,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
 
         completionTimerEntriesSnapshot = null;
+        let lockedIssuedInvoice = null;
         const persistRecord = async (trx) => {
           // Invoice-issued closeout: the pre-claim check above ran unlocked
           // (pre-push P1). Re-check the issued invoice HERE, locked, in the
@@ -5787,12 +5788,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             const ScheduledInvoiceMint = require('../services/scheduled-invoice-mint');
             await ScheduledInvoiceMint.acquireScheduledInvoiceMintLock(trx, svc.id);
-            const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id');
+            const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id', 'payer_statement_id', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at');
             const InvoiceServiceForIssued = require('../services/invoice');
             if (!issuedNow || InvoiceServiceForIssued.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(issuedNow.status))
               || String(issuedNow.scheduled_service_id) !== String(svc.id)) {
               throw Object.assign(new Error('issued invoice no longer reusable'), { code: 'issued_invoice_not_reusable' });
             }
+            // The LOCKED invoice's own stamps are the prepayment rule's proof
+            // in the locked visit recheck below.
+            lockedIssuedInvoice = issuedNow;
           }
           // Baseline -> customer -> visit matches confirmation. Take this before
           // the existing row locks because linking can change the installed row.
@@ -5900,25 +5904,47 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { isLiveVisitStatus, issuedCloseoutServiceDayEligible } = require('../services/invoice-issued-closeout');
-            if (lockedDay !== serviceDateOnly(svc.scheduled_date)
-              || !issuedCloseoutServiceDayEligible(lockedDay, {
+            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
+            // The prepayment proof, from the invoice row LOCKED above (and its
+            // statement's delivery stamp, for a statement child).
+            const lockedIssuedDay = await issuedDayForInvoice(trx, lockedIssuedInvoice, issuedInvoiceCloseout.trigger);
+            // ONE rule for status and day, re-derived on the LOCKED row — the
+            // same function the wrapper's unlocked resolver used (Codex round
+            // 16 P2 #4131: a NULL status is live in both). An arrived
+            // (on_site) visit closes on a past day or on money received
+            // today; a visit nobody has reached never closes today (owner
+            // ruling 2026-10-04).
+            const lockedRefusal = lockedDay !== serviceDateOnly(svc.scheduled_date)
+              ? 'visit_moved'
+              : issuedCloseoutVisitRefusal(lockedSvcRow?.status, lockedDay, {
                 today: etDateString(),
                 trigger: issuedInvoiceCloseout.trigger,
-              })) {
+                // The prepayment proof (lockedIssuedDay): a
+                // visit nobody arrived at closes only on an invoice settled /
+                // delivered after its day — re-decided here against the
+                // locked visit, so no reschedule between any earlier read
+                // and this lock can complete a prepaid, unworked visit.
+                issuedDay: lockedIssuedDay,
+              });
+            // A refusal of the DAY (moved, now in the future, a day the
+            // trigger does not close, or a day the invoice does not prove)
+            // keeps its own code: the next send / payment re-resolves the
+            // visit on the day it is then on.
+            if (['visit_moved', 'visit_in_future', 'visit_scheduled_today', 'visit_prepaid'].includes(lockedRefusal)) {
               throw Object.assign(new Error('visit rescheduled during the issued-invoice closeout'), { code: 'issued_visit_rescheduled' });
             }
-            // The office-only status set, re-checked on the LOCKED row (pre-push
-            // P1 r9): the wrapper admits pending/confirmed on an unlocked read;
-            // a technician who started the visit in between (en_route /
-            // on_site) owns it — a running timer and a completion of their own
-            // — so the closeout refuses instead of completing over them. Uses
-            // the SAME null-tolerant predicate the resolver does (Codex round
-            // 16 P2 #4131) — a legacy NULL-status visit the resolver had just
-            // admitted used to throw issued_visit_in_progress here on the
-            // string-only check.
-            if (!isLiveVisitStatus(lockedSvcRow?.status)) {
-              throw Object.assign(new Error('visit started by its technician during the issued-invoice closeout'), { code: 'issued_visit_in_progress' });
+            // A refusal of the STATUS (pre-push P1 r9): a technician who set
+            // out for the visit (en_route) between the wrapper's unlocked
+            // read and this lock owns it — the closeout refuses instead of
+            // completing over them.
+            if (lockedRefusal) {
+              throw Object.assign(new Error(`visit state changed during the issued-invoice closeout: ${lockedRefusal}`), { code: 'issued_visit_in_progress' });
+            }
+            // A job timer started on this visit since the wrapper's read: its
+            // technician is working it now, so it stays theirs. The closeout
+            // never ends or re-times a timer (GitHub r1 P1 ×3 #5886).
+            if (await visitJobTimerRunning(trx, svc.id)) {
+              throw Object.assign(new Error('visit job timer running during the issued-invoice closeout'), { code: 'issued_visit_in_progress' });
             }
             // The LOCKED status is the transition source (GitHub r10 P2
             // #4127): pending → confirmed between the unlocked read and this

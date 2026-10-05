@@ -261,6 +261,98 @@ describe('MobileDispatchList tie-proximity display order', () => {
   });
 });
 
+describe('MobileDispatchList open hours', () => {
+  it('places a bookable block on each empty hour and pre-fills New appointment', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    const onCreateSlot = vi.fn();
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[SERVICE, { ...SERVICE, id: 'svc-2', windowStart: '10:00', windowEnd: '11:00' }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onCreateSlot={onCreateSlot}
+      />,
+    );
+    vi.useRealTimers();
+
+    expect(screen.getByText('· 10 open', { exact: false })).toBeInTheDocument();
+    const rows = screen.getAllByRole('button', { name: /^Book open hour/ });
+    expect(rows.map((b) => b.getAttribute('aria-label'))).toEqual([
+      'Book open hour 7–8 AM',
+      'Book open hour 9–10 AM',
+      'Book open hour 11 AM–12 PM',
+      'Book open hour 12–1 PM',
+      'Book open hour 1–2 PM',
+      'Book open hour 2–3 PM',
+      'Book open hour 3–4 PM',
+      'Book open hour 4–5 PM',
+      'Book open hour 5–6 PM',
+      'Book open hour 6–7 PM',
+    ]);
+    // The 9 AM block sits between the 8 AM and 10 AM visits.
+    const nineAm = rows[1];
+    const names = screen.getAllByText('Pat Sample');
+    expect(names[0].compareDocumentPosition(nineAm) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(nineAm.compareDocumentPosition(names[1]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(nineAm);
+    expect(onCreateSlot).toHaveBeenCalledWith({
+      date: '2026-07-15', windowStart: '09:00', windowEnd: '10:00', techId: 'tech-1',
+    });
+  });
+});
+
+describe('MobileDispatchList week open hours', () => {
+  it("judges each week day by that day's own absences", async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-13T10:00:00Z')); // Mon 6:00 AM ET
+    fetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        startDate: '2026-07-13',
+        days: [
+          { date: '2026-07-14', services: [], outTechIds: ['tech-1'] },
+          { date: '2026-07-15', services: [], outTechIds: [] },
+        ],
+      }),
+    });
+    render(
+      <MobileDispatchList
+        mode="week"
+        date="2026-07-14"
+        technicians={[{ id: 'tech-1', name: 'Alex Tech', outToday: false }]}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.getAllByRole('button', { name: /^Book open hour/ })).toHaveLength(12));
+    vi.useRealTimers();
+  });
+});
+
+describe('MobileDispatchList open hours with two techs', () => {
+  it('keeps an hour open while another tech is free, and preselects that tech', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    const onCreateSlot = vi.fn();
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[{ ...SERVICE, technicianId: 'tech-a', windowStart: '09:00', windowEnd: '10:00' }]}
+        technicians={[{ id: 'tech-a', name: 'A Tech' }, { id: 'tech-b', name: 'B Tech' }]}
+        onCreateSlot={onCreateSlot}
+      />,
+    );
+    vi.useRealTimers();
+    fireEvent.click(screen.getByRole('button', { name: 'Book open hour 9–10 AM' }));
+    expect(onCreateSlot).toHaveBeenCalledWith(expect.objectContaining({ windowStart: '09:00', techId: 'tech-b' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Book open hour 10–11 AM' }));
+    expect(onCreateSlot).toHaveBeenLastCalledWith(expect.objectContaining({ windowStart: '10:00', techId: undefined }));
+  });
+});
+
 describe('MobileDispatchList drive legs', () => {
   it('shows the drive in and out of each stop, and nothing for a missing leg', () => {
     render(
@@ -283,5 +375,25 @@ describe('MobileDispatchList drive legs', () => {
     // svc-2's leg out has no coordinates: no chip, never "~0 min".
     expect(screen.queryByText(/~0 min/)).toBeNull();
     expect(screen.getAllByText(/min to next$/)).toHaveLength(1);
+  });
+});
+
+describe('MobileDispatchList open hours with a windowless visit', () => {
+  it('keeps the hourly timeline ahead of a visit with no time', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-07-15T10:00:00Z')); // 6:00 AM ET
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[{ ...SERVICE, id: 'svc-anytime', customerName: 'Anytime Customer', windowStart: null, windowEnd: null }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onCreateSlot={vi.fn()}
+      />,
+    );
+    vi.useRealTimers();
+    const rows = screen.getAllByRole('button', { name: /^Book open hour/ });
+    const anytime = screen.getByText('Anytime Customer');
+    expect(rows[rows.length - 1].compareDocumentPosition(anytime) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 });

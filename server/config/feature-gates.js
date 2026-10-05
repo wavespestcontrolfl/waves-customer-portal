@@ -2047,9 +2047,12 @@ const gates = {
   // (2026-08-05 silent-cancel incident). Fail-closed; owner flips.
   cancelNoticeHook: process.env.GATE_CANCEL_NOTICE_HOOK === 'true',
   // Invoice issued ⇒ visit completed (owner ruling 2026-09-07): an invoice
-  // linked to an open visit that is SENT to the customer or PAID by hand
-  // closes the visit out quietly (no report / text / review ask / charge;
-  // the invoice is reused). Ships DARK; owner flips.
+  // linked to an open visit that is SENT to the customer or PAID (by hand,
+  // or by card / bank through the Stripe webhook) closes the visit out
+  // quietly (no report / text / review ask / charge; the invoice is reused).
+  // Owner ruling 2026-10-04: a past day closes an unstarted or an arrived
+  // (on_site) visit; today only an arrived visit closes, and only on a
+  // payment (issuedCloseoutVisitRefusal). Ships DARK; owner flips.
   invoiceIssuedClosesVisit: process.env.GATE_INVOICE_ISSUED_CLOSES_VISIT === 'true',
   // Per-family plan-rate ledger (owner ruling 2026-08-06): with the gate ON,
   // an accept's customers.monthly_rate becomes the SUM of the customer's

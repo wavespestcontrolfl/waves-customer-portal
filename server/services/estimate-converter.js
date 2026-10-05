@@ -5741,6 +5741,32 @@ const EstimateConverter = {
       logger.warn?.(`[estimate-converter] grass-type persist skipped for customer ${customerId}: ${grassErr.message}`);
     }
 
+    // 1c. The estimate is the source of the customer's treatable lawn size
+    //     (owner ruling 2026-10-04): the size the office confirmed on this
+    //     estimate WINS over a stored value. Same gate as the grass write (an
+    //     estimate with a recurring lawn service), same customer fence, same
+    //     fail-soft contract — a skipped or failed write never breaks
+    //     acceptance. Only a CONFIRMED size on the customer's PRIMARY
+    //     property is written (lawn-size-sync.js decides; an AI/lot estimate
+    //     or another property writes nothing). It reprices no one: it writes
+    //     the size plus an audit row and nothing else.
+    try {
+      const hasRecurringLawn = (Array.isArray(recurringServices) ? recurringServices : [])
+        .some((svc) => recurringServiceKey(svc) === 'lawn_care');
+      if (hasRecurringLawn) {
+        const lawnSize = await require('./lawn-size-sync').applyEstimateLawnSqft(database, {
+          customerId, estimate, estimateData, trigger: 'acceptance',
+        });
+        if (lawnSize.status === 'written') {
+          logger.info?.(`[estimate-converter] lawn size ${lawnSize.before.turf_lawn_sqft ?? 'none'} -> ${lawnSize.sqft} sq ft set from estimate ${estimateId} for customer ${customerId}`);
+        } else if (lawnSize.status === 'skipped' && lawnSize.reason === 'other_property') {
+          logger.info?.(`[estimate-converter] lawn size ${lawnSize.sqft} sq ft NOT written for customer ${customerId}: estimate ${estimateId} is for another property (target property ${lawnSize.targetPropertyId || 'unlinked'}, its property_sqft ${lawnSize.targetPropertySqft ?? 'none'})`);
+        }
+      }
+    } catch (lawnErr) {
+      logger.warn?.(`[estimate-converter] lawn size from estimate skipped for customer ${customerId}: ${lawnErr.message}`);
+    }
+
     // 2. Create scheduled_services for recurring services — but ONLY if
     //    the accept path didn't already create one via slot reservation
     //    (PR B.1). The reservation path commits a scheduled_services row
