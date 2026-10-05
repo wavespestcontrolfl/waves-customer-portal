@@ -328,19 +328,19 @@ async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null })
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
 
 // The prepayment guard, shared by both sweeps, for a visit NOBODY ARRIVED AT.
-// Settled or delivered on or before the visit day, the invoice proves only
-// that money or paper moved; the day passing does not turn that into
-// evidence the visit happened (it may have been rained out and never moved).
-// So no sweep completes such a visit on the strength of:
-//  - a `visit_scheduled_today` row — "settled before anyone went", or
-//  - no audit row at all, unless the invoice / statement was issued on a
-//    LATER ET day than the visit (`issued_after_service_day`): that is no
-//    prepayment, and the ordinary send / payment path closes exactly it.
+// ONE test, on current state only: was the invoice / statement delivered or
+// settled on a LATER ET day than the day the visit is on NOW
+// (`issued_after_service_day`)? If not, the invoice proves only that money
+// or paper moved on or before the visit; the day passing does not turn that
+// into evidence the visit happened (it may have been rained out and never
+// moved), so no sweep completes it — whatever the audit trail says: no row,
+// `visit_scheduled_today`, or a rescheduling race that moved the visit to a
+// day after the invoice (pre-push audit P1 ×3: each audit code handled one
+// at a time left the next one open). If so, it is no prepayment, and the
+// ordinary send / payment path closes exactly that visit.
 // An ARRIVED visit is never a prepayment case: the technician was there.
-function prepaidAndNobodyArrived(last, row, { neverRan }) {
-  if (isArrivedVisitStatus(row.visit_status)) return false;
-  if (neverRan) return !row.issued_after_service_day;
-  return last?.meta?.code === 'visit_scheduled_today';
+function prepaidAndNobodyArrived(row) {
+  return !isArrivedVisitStatus(row.visit_status) && !row.issued_after_service_day;
 }
 
 // `column` settled / delivered on a later ET day than the visit's day.
@@ -367,6 +367,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
   let closed = 0;
   for (const row of rows) {
     if (!row.own_attempt_parked) {
+      if (prepaidAndNobodyArrived(row)) continue;
       let last;
       try {
         last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id, trigger: 'paid' });
@@ -377,7 +378,6 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       // Never ran (the settlement is the only trigger a child gets), or
       // refused for the moment; a real refusal is left alone.
       if (last && !refusedForTheMoment(last)) continue;
-      if (prepaidAndNobodyArrived(last, row, { neverRan: !last })) continue;
     }
     retried += 1;
     const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today });
@@ -411,15 +411,11 @@ const ISSUED_AFTER_SERVICE_DAY_SQL = settledAfterServiceDaySql(ISSUED_AT_SQL);
 //    is the whole rule, so the visit is retried whether or not a closeout ever
 //    ran — never-ran, unaudited and refused-for-the-moment alike.
 //  - UNSTARTED (pending / confirmed / NULL), past day: nobody is known to have
-//    gone. A prepayment whose day simply passed is NOT proof the visit
-//    happened (it may have been rained out and never moved), so this sweep
-//    never completes one on its own. It retries a closeout that RAN on an
-//    eligible day and failed (an audited error, 5xx or under-the-lock race),
-//    and one that never ran when the invoice was delivered / settled on a
-//    LATER day than the visit (GitHub r4 P2): that is no prepayment — the
-//    ordinary send / payment path closes exactly that visit.
-//    `visit_scheduled_today` does not count — that row says "prepaid before
-//    anyone arrived", which is exactly the case to leave to a person.
+//    gone, so the invoice must carry the proof — delivered / settled on a
+//    later ET day than the visit (prepaidAndNobodyArrived). A prepayment
+//    whose day simply passed is left to a person. Past that guard it is
+//    retried when its closeout never ran, or ran and was refused for the
+//    moment.
 // A visit already completed with this closeout's own attempt parked is
 // resumed. A real refusal (grouped, packet-owned, project-backed, en_route)
 // carries a non-transient audit row and is left alone.
@@ -453,6 +449,7 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
   let closed = 0;
   for (const row of rows) {
     if (!row.own_attempt_parked) {
+      if (prepaidAndNobodyArrived(row)) continue;
       let last;
       try {
         last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id });
@@ -461,7 +458,6 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
         continue;
       }
       if (last && !refusedForTheMoment(last)) continue;
-      if (prepaidAndNobodyArrived(last, row, { neverRan: !last })) continue;
     }
     retried += 1;
     const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';

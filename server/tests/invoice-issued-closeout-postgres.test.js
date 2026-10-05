@@ -506,7 +506,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // 10. unstarted TODAY → not a candidate: the settlement is a prepayment until someone arrives or the day passes
     const v10 = await visit({ date: TODAY }); await invoice({ status: 'paid', date: TODAY, payer_statement_id: recent, scheduled_service_id: v10.id });
     // 11. unstarted, the statement settled before anyone arrived (visit_scheduled_today), the day has passed → LEFT ALONE: a prepayment is not proof the visit happened
-    const v11 = await visit(); const i11 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v11.id });
+    const v11 = await visit(); const i11 = await invoice({ status: 'paid', payer_statement_id: sameDaySettled, scheduled_service_id: v11.id });
     await auditRow(v11.id, i11.id, 'visit.completion_on_invoice_issued_refused', 'visit_scheduled_today');
     // 13. ARRIVED, refused before 2026-10-04 with the historical visit_on_site → retried under the rule that now admits it
     const v13 = await visit({ status: 'on_site' }); const i13 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v13.id });
@@ -721,11 +721,15 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // U10. 11:30 PM ET on the visit day is 03:30Z the next day — still the visit day in ET → left alone
     const u10 = await visit(); await paid(u10, { paid_at: new Date('2040-03-04T03:30:00Z') });
     // U2. paid before anyone arrived (visit_scheduled_today), the day has passed → STILL left alone
-    const u2 = await visit(); const iu2 = await paid(u2); await auditRow(u2.id, iu2.id, 'visit_scheduled_today');
+    const u2 = await visit(); const iu2 = await paid(u2, { paid_at: new Date('2040-03-03T15:00:00Z') }); await auditRow(u2.id, iu2.id, 'visit_scheduled_today');
     // U3. a closeout that RAN on an eligible day and failed → retried
-    const u3 = want(await visit(), 'paid'); const iu3 = await paid(u3); await auditRow(u3.id, iu3.id, 'error');
+    const u3 = want(await visit(), 'paid'); const iu3 = await paid(u3, { paid_at: new Date('2040-03-04T15:00:00Z') }); await auditRow(u3.id, iu3.id, 'error');
     // U4. …also for a send
-    const u4 = want(await visit({ status: 'pending' }), 'sent'); const iu4 = await sent(u4); await auditRow(u4.id, iu4.id, 'issued_visit_rescheduled', { trigger: 'sent' });
+    const u4 = want(await visit({ status: 'pending' }), 'sent'); const iu4 = await sent(u4, { sent_at: new Date('2040-03-04T15:00:00Z') }); await auditRow(u4.id, iu4.id, 'issued_visit_rescheduled', { trigger: 'sent' });
+    // U11. a closeout failed (error row), but the invoice was settled ON the visit day → left alone: an error row is not evidence anyone went
+    const u11 = await visit(); const iu11 = await paid(u11, { paid_at: new Date('2040-03-03T15:00:00Z') }); await auditRow(u11.id, iu11.id, 'error');
+    // U12. a rescheduling race (issued_visit_rescheduled) moved the visit to a day AFTER the invoice; that day has passed → left alone: it is a prepayment for the day the visit is on now
+    const u12 = await visit(); const iu12 = await paid(u12, { paid_at: new Date('2040-03-01T15:00:00Z') }); await auditRow(u12.id, iu12.id, 'issued_visit_rescheduled');
     // U5. sent on the visit day, never ran → left alone
     const u5 = await visit(); await sent(u5, { sent_at: new Date('2040-03-03T15:00:00Z') });
     // U6. unstarted TODAY with an error row → not a candidate today
@@ -738,7 +742,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const c2 = await visit({ status: 'completed' }); await paid(c2);
 
     const out = await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 22, retried: 15, closed: 15 });
+    expect(out).toEqual({ candidates: 24, retried: 15, closed: 15 });
     const calls = mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout.trigger]);
     expect(calls.sort()).toEqual(expectRetried.sort());
     // A retry is nobody's action: the system is the actor.
