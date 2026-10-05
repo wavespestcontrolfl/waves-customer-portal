@@ -318,3 +318,16 @@ describe('a phone typed by the customer never resolves to an existing customer',
     expect(res.contradicted).toBeUndefined();
   });
 });
+
+// The accept's account step (ensureCustomerAccount → findAccountByContact) makes its own phone lookup after the
+// matcher. For a typed phone it must refuse a phone match that appeared in between, never attach to it. The accept
+// transaction is too heavy to drive here, so the wiring is pinned at the source (the helper's forceNewAccount
+// behavior is covered by the admin-customers suites).
+describe('a typed phone never joins an existing account at the account step', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'routes', 'estimate-public.js'), 'utf8');
+  it('passes forceNewAccount (and never ignorePhoneMatch) for a typed phone, and parks on PHONE_MATCH_CONFIRM', () => {
+    expect(src).toMatch(/const typedAcceptPhone = phoneTypedByCustomer\(estimate\);\s*\n\s*const account = await ensureCustomerAccount\(trx, \{\s*\n\s*\.\.\.\(typedAcceptPhone \? \{ forceNewAccount: true \} : \{\}\),/);
+    expect(src).not.toMatch(/typedAcceptPhone[^\n]*ignorePhoneMatch/);
+    expect(src).toMatch(/if \(typedAcceptPhone && accountErr\?\.code === 'PHONE_MATCH_CONFIRM'\)[\s\S]{0,900}code: ACCEPT_NEEDS_OFFICE_REVIEW/);
+  });
+});

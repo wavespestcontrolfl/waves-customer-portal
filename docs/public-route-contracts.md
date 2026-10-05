@@ -1624,6 +1624,10 @@ clears `customer_phone_typed`, also when the number is unchanged: the
 office's save is its own word for the phone. A deposit receipt to an
 unlinked estimate treats a typed phone as no phone before acceptance (the
 receipt goes by email).
+At account creation the accept passes `forceNewAccount` for a typed phone
+(never `ignorePhoneMatch`): a customer who acquired the number between the
+matcher and the account step makes `ensureCustomerAccount` fail closed
+(`PHONE_MATCH_CONFIRM`), which the accept turns into the same park.
 `matchAcceptCustomerByPhone` — the one matcher every card and accept
 route reads — treats ANY candidate as a contradiction while the estimate
 still carries that typed number (`phoneTypedByCustomer`): no match, and the

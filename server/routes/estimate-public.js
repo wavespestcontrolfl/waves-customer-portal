@@ -12315,7 +12315,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // the phone-grouping key (same primitive as proposal-win / quick-add).
           // Lazy require: admin-customers is a route module (load-cycle risk).
           const { ensureCustomerAccount } = require('./admin-customers');
+          // A phone the customer typed on the accept card never joins an existing account, even one created
+          // after the matcher above ran: forceNewAccount (without ignorePhoneMatch) mints a fresh account and
+          // fails closed with PHONE_MATCH_CONFIRM when a customer holds the number right now. That is the same
+          // situation the matcher parks, so it gets the same park (nothing commits; the office is told).
+          const typedAcceptPhone = phoneTypedByCustomer(estimate);
           const account = await ensureCustomerAccount(trx, {
+            ...(typedAcceptPhone ? { forceNewAccount: true } : {}),
             // A multi-word first name the page collected stays whole.
             firstName: contactFillFirstName || nameParts[0] || 'New',
             // The accept-card surname verbatim (codex #5102 r3 P2): the
@@ -12324,6 +12330,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             lastName: contactFillLastName || acceptContactSurname || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
             email: newProfileEmail,
+          }).catch(async (accountErr) => {
+            if (typedAcceptPhone && accountErr?.code === 'PHONE_MATCH_CONFIRM') {
+              if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+                droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+              }
+              // The park alert names the customer who holds the number (the helper's match carries only the
+              // account): the same live-customer read the matcher makes, on the transaction's own handle.
+              const holder = (await matchAcceptCustomerByPhone({ customer_phone: estimate.customer_phone, customer_phone_typed: estimate.customer_phone_typed }, trx, { authoritative: true }).catch(() => null));
+              throw Object.assign(new Error(ACCEPT_OFFICE_REVIEW_MESSAGE), {
+                status: 409, isOperational: true, code: ACCEPT_NEEDS_OFFICE_REVIEW,
+                parkedRejectedCustomerId: holder?.rejectedCustomerId || null, parkedEstimate: estimate,
+              });
+            }
+            throw accountErr;
           });
           // Structured address when the free-text snapshot parses ("street,
           // city, ST zip" — the Places shape the builder stores); the legacy
