@@ -121,7 +121,7 @@ const TRIGGER_MAPPINGS = {
   },
   // A customer's first performed visit on a service line. Mapped for the
   // email division's lc.first_visit_pest; produced by
-  // email-template-automation-emitters.js emitPestReportDelivered.
+  // email-template-automation-emitters.js dispatchPestReportDelivered.
   'visit.completed_first': {
     entityType: 'service_record',
     entityIdKeys: ['service_record_id', 'id'],

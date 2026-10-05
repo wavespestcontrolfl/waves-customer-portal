@@ -19,7 +19,7 @@ const db = require('../models/db');
 const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 const AutomationExecutor = require('../services/email-template-automation-executor');
 const {
-  INTENT_MAX_AGE_MS, MAX_INTENT_ATTEMPTS, emitEstimateExpired, emitReviewLinked5Star, emitVisitCompletedFirst, emitServiceReportReady, emitPestReportDelivered, recordAutomationIntent, recordAutomationIntents, sweepMissedLifecycleEvents,
+  INTENT_MAX_AGE_MS, MAX_INTENT_ATTEMPTS, emitEstimateExpired, emitReviewLinked5Star, emitVisitCompletedFirst, emitServiceReportReady, emitPestReportDelivered, recordPestReportDeliveredIntents, dispatchPestReportDelivered, recordAutomationIntent, recordAutomationIntents, sweepMissedLifecycleEvents,
 } = require('../services/email-template-automation-emitters');
 
 beforeEach(() => {
@@ -247,6 +247,47 @@ describe('emitPestReportDelivered (the producer the report delivery queue calls)
   test('never throws into the delivery queue: a failed lookup is logged and swallowed', async () => {
     db.mockImplementation(() => { throw new Error('connection lost'); });
     await expect(emitPestReportDelivered({ serviceRecordId: 'rec-1' })).resolves.toBeNull();
+  });
+
+  test('inside the caller\'s transaction the markers are written through a SAVEPOINT, and nothing is emitted until dispatch', async () => {
+    const inserted = [];
+    const table = (name) => {
+      if (name === 'service_records') return { where: () => ({ first: async () => pestRecord }) };
+      return {
+        insert: (row) => {
+          inserted.push(row.trigger_event_key);
+          return { onConflict: () => ({ ignore: () => ({ returning: async () => [{ id: `marker:${row.trigger_event_key}`, entity_id: row.entity_id }] }) }) };
+        },
+      };
+    };
+    const savepoints = [];
+    const makeTrx = (depth) => Object.assign((name) => table(name), {
+      isTransaction: true,
+      transaction: jest.fn(async (work) => { savepoints.push(depth + 1); return work(makeTrx(depth + 1)); }),
+    });
+    const trx = makeTrx(0);
+    db.mockImplementation((name) => { throw new Error(`the pool must not be used inside the caller's transaction (${name})`); });
+
+    const recorded = await recordPestReportDeliveredIntents(trx, { serviceRecordId: 'rec-1' });
+    expect(recorded).toEqual({
+      serviceRecordId: 'rec-1',
+      customerId: 'cust-1',
+      firstVisitIntentId: 'marker:visit.completed_first',
+      reportReadyIntentId: 'marker:service_report.ready',
+    });
+    expect(trx.transaction).toHaveBeenCalledTimes(1); // the whole step is one savepoint of the caller's transaction
+    expect(inserted).toEqual(['visit.completed_first', 'service_report.ready']);
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+  });
+
+  test('a failure inside the savepoint is swallowed (the sent mark is never rolled back for it), and dispatching nothing is a no-op', async () => {
+    const trx = Object.assign(() => { throw new Error('unused'); }, {
+      isTransaction: true,
+      transaction: jest.fn(async () => { throw new Error('relation "email_template_automation_intents" does not exist'); }),
+    });
+    await expect(recordPestReportDeliveredIntents(trx, { serviceRecordId: 'rec-1' })).resolves.toBeNull();
+    await expect(dispatchPestReportDelivered(null)).resolves.toBeNull();
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
   });
 
   test('the sweep replays a pending marker of either trigger through its own emitter', async () => {

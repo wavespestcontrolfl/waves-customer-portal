@@ -12,9 +12,10 @@
  * customer.churned is intentionally NOT wired here yet — see the PR body for
  * why (deferred to a follow-up PR). visit.completed_first and
  * service_report.ready (the email division's lc.first_visit_pest and
- * lc.why_91_days) are both produced by emitPestReportDelivered below, which
- * the service-report delivery queue calls once a pest visit's report email
- * has been marked sent.
+ * lc.why_91_days) are both produced below
+ * (recordPestReportDeliveredIntents + dispatchPestReportDelivered): the
+ * service-report delivery queue records their intent markers in the
+ * transaction that marks a pest visit's report email sent, and emits after it.
  *
  * codex round 3 on #5154 — STRUCTURAL rewrite of the recovery sweep. Round 2
  * re-derived "missed events" by guessing from entity timestamps
@@ -243,7 +244,7 @@ async function emitReviewLinked5Star({ reviewId, customerId, locationId, starRat
 // (email-division/payload-builders.js) reads the visit itself and re-judges
 // that it really is the customer's first performed, customer-visible pest
 // visit, so a wrong or repeated emit can only produce a skipped run, never a
-// send. Produced by emitPestReportDelivered (below).
+// send. Produced by dispatchPestReportDelivered (below).
 async function emitVisitCompletedFirst({ serviceRecordId, customerId } = {}, intentId = null) {
   if (!serviceRecordId || !customerId) {
     await settleUndispatchable(intentId, 'marker payload has no service record or customer');
@@ -282,47 +283,90 @@ async function emitServiceReportReady({ serviceRecordId, customerId } = {}, inte
   }, intentId);
 }
 
-// THE producer of both visit triggers: called by the service-report delivery
-// queue right after a report email is marked sent. That is the one point where
-// a visit is known to be performed, committed and customer-visible (an
-// incomplete, declined or report-suppressed closeout never delivers a report,
-// and the builders refuse those anyway), and it puts the follow-up behind the
-// report it refers to. Pest records only — both automations are pest-line; the
-// builders still re-judge everything (first visit, second quarterly visit,
-// residential plan), so an extra emit is a skipped run, never a send.
+// THE producer of both visit triggers, in two steps the service-report
+// delivery queue drives around its "report email sent" transition. That is the
+// one point where a visit is known to be performed, committed and
+// customer-visible (an incomplete, declined or report-suppressed closeout never
+// delivers a report, and the builders refuse those anyway), and it puts the
+// follow-up behind the report it refers to. Pest records only — both
+// automations are pest-line; the builders still re-judge everything (first
+// visit, second quarterly visit, residential plan), so an extra emit is a
+// skipped run, never a send.
 //
-// NEVER throws, and with the gate off it reads and writes nothing: no marker
-// accumulates while the catalog is dark (unlike estimate.expired there is no
-// transition transaction to share, and a follow-up is not owed for a report
-// delivered while the feature was off). With the gate on, each trigger gets a
-// durable intent marker first, so a crash or a transient failure between the
-// marker and the emit is replayed by the sweep (retryPendingIntents).
-async function emitPestReportDelivered({ serviceRecordId } = {}) {
-  if (!serviceRecordId) return null;
+//   1. recordPestReportDeliveredIntents(trx, …) — INSIDE the transaction that
+//      marks the delivery sent: one durable intent marker per trigger, so the
+//      sent mark and the owed follow-ups commit together. A sent delivery is
+//      never retried, so a marker written after that commit could be lost for
+//      good by a crash in between (pre-push audit P1).
+//   2. dispatchPestReportDelivered(recorded) — AFTER that commit: the direct
+//      emits, each settling its own marker. A crash or a transient failure here
+//      is replayed by the sweep (retryPendingIntents).
+//
+// Neither step throws. With the gate off step 1 reads and writes nothing: no
+// marker accumulates while the catalog is dark (a follow-up is not owed for a
+// report delivered while the feature was off). Step 1 runs in a SAVEPOINT of
+// the caller's transaction, so its own failure (the lookup, the insert) is a
+// logged loss of the follow-up, never a rolled-back sent mark — the same
+// doctrine as insertIntentRows below: the report delivery is the business
+// transition, this is its bookkeeping.
+function reportFollowUpsEnabled() {
   try {
-    if (!isEnabled('emailTemplateAutomations')) return null;
-    const record = await db('service_records')
+    return Boolean(isEnabled('emailTemplateAutomations'));
+  } catch (_err) {
+    return false;
+  }
+}
+
+async function recordPestReportDeliveredIntents(conn, { serviceRecordId } = {}) {
+  if (!serviceRecordId || !reportFollowUpsEnabled()) return null;
+  const record = async (c) => {
+    const row = await c('service_records')
       .where({ id: serviceRecordId })
       .first('id', 'customer_id', 'service_line', 'service_type');
-    if (!record || !record.customer_id) return null;
+    if (!row || !row.customer_id) return null;
     // Classified EXACTLY as the report builder does (report-data.js).
     const { detectServiceLine } = require('./service-report/service-line-configs');
-    if ((record.service_line || detectServiceLine(record.service_type)) !== 'pest') return null;
-    const ids = { serviceRecordId: record.id, customerId: record.customer_id };
-    const payload = { service_record_id: record.id, customer_id: record.customer_id };
+    if ((row.service_line || detectServiceLine(row.service_type)) !== 'pest') return null;
     const occurredAt = new Date();
-    const marker = (triggerEventKey) => recordAutomationIntent(db, {
-      triggerEventKey, entityType: 'service_record', entityId: record.id, occurredAt, payload,
-    });
-    const firstVisitMarker = await marker('visit.completed_first');
-    const reportReadyMarker = await marker('service_report.ready');
-    const firstVisit = await emitVisitCompletedFirst(ids, firstVisitMarker ? firstVisitMarker.id : null);
-    const reportReady = await emitServiceReportReady(ids, reportReadyMarker ? reportReadyMarker.id : null);
-    return { firstVisit, reportReady };
+    const payload = { service_record_id: row.id, customer_id: row.customer_id };
+    const marker = async (triggerEventKey) => {
+      const rows = await insertIntentRows(c, intentRow({
+        triggerEventKey, entityType: 'service_record', entityId: row.id, occurredAt, payload,
+      }));
+      return (rows && rows[0] && rows[0].id) || null;
+    };
+    return {
+      serviceRecordId: row.id,
+      customerId: row.customer_id,
+      firstVisitIntentId: await marker('visit.completed_first'),
+      reportReadyIntentId: await marker('service_report.ready'),
+    };
+  };
+  try {
+    const target = conn || db;
+    return target.isTransaction ? await target.transaction(record) : await record(target);
   } catch (err) {
-    logger.warn(`[email-template-automation-emitters] report-delivered emit failed for ${serviceRecordId}: ${safeErrorText(err)}`);
+    logger.warn(`[email-template-automation-emitters] report-delivered intents not recorded for ${serviceRecordId}: ${safeErrorText(err)}`);
     return null;
   }
+}
+
+async function dispatchPestReportDelivered(recorded) {
+  if (!recorded || !recorded.serviceRecordId || !recorded.customerId) return null;
+  try {
+    const ids = { serviceRecordId: recorded.serviceRecordId, customerId: recorded.customerId };
+    const firstVisit = await emitVisitCompletedFirst(ids, recorded.firstVisitIntentId || null);
+    const reportReady = await emitServiceReportReady(ids, recorded.reportReadyIntentId || null);
+    return { firstVisit, reportReady };
+  } catch (err) {
+    logger.warn(`[email-template-automation-emitters] report-delivered emit failed for ${recorded.serviceRecordId}: ${safeErrorText(err)}`);
+    return null;
+  }
+}
+
+// Both steps in one call, for a caller with no transition transaction.
+async function emitPestReportDelivered({ serviceRecordId } = {}) {
+  return dispatchPestReportDelivered(await recordPestReportDeliveredIntents(db, { serviceRecordId }));
 }
 
 // Best-effort marker insert, isolated from the caller's transaction (codex
@@ -522,6 +566,9 @@ module.exports = {
   emitVisitCompletedFirst,
   emitServiceReportReady,
   emitPestReportDelivered,
+  reportFollowUpsEnabled,
+  recordPestReportDeliveredIntents,
+  dispatchPestReportDelivered,
   recordAutomationIntent,
   recordAutomationIntents,
   sweepMissedLifecycleEvents,
