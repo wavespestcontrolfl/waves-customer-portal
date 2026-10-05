@@ -62,6 +62,21 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/access-code-capture.js',
+    snippet: "const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_body');",
+    reason: 'sourceStillCurrent: re-locks the ONE inbound text this sweep pass already read, by id, to compare its owner and words; inbound texts are never send reservations.',
+  },
+  {
+    file: 'services/access-code-capture.js',
+    snippet: "const candidates = await conn('sms_log as s')",
+    reason: 'runAccessCodeNet candidate page: inbound texts only (direction inbound), which a send reservation never is.',
+  },
+  {
+    file: 'services/access-code-capture.js',
+    snippet: "const source = await trx('sms_log').where({ id: row.source_id }).forUpdate().first(...SOURCE_COLUMNS);",
+    reason: 'sourceStillSupports: locks the one source text of a found row, by id, and refuses it unless it is still an eligible inbound text.',
+  },
+  {
     file: 'services/rate-review-comms.js',
     snippet: "const log = await trx('sms_log').where({ twilio_sid: sid }).first('customer_id');",
     reason: 'handleSmsDeliveryFailure: keyed by twilio_sid (the failed text Twilio is reporting) and reads only the customer id — a send reservation never has a sid until it is promoted to a real send, so no placeholder can be read as a message.',

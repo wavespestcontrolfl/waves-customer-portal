@@ -41,6 +41,7 @@ const { stalePendingExtractionProposals } = require('./data-hygiene/proposal-sto
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { stringifySmsEvidence } = require('./sms-operational-extractor');
 const { eligibleMessage, loadMessageContext } = require('./sms-operational-actions');
+const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 
 // data_hygiene_source_extractions.extractor_version is varchar(32).
 const VERSION = 'access-net-v1';
@@ -272,7 +273,7 @@ const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'messa
 // Our previous outbound text in the thread: a bare number only answers a
 // question that asked for a code or the gate.
 async function priorOutboundAskedForCode(conn, message) {
-  const prior = await conn('sms_log')
+  const prior = await excludeUnresolvedSendReservations(conn('sms_log'))
     .where({ customer_id: message.customer_id, direction: 'outbound', to_phone: message.from_phone })
     .where('created_at', '<', new Date(message.created_at))
     .where('created_at', '>=', new Date(new Date(message.created_at).getTime() - ASK_WINDOW_HOURS * 3600000))
