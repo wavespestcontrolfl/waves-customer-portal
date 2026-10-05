@@ -3821,8 +3821,14 @@ only `/api/webhooks/lead` / `/api/leads` persist it.
 The returned and lead-stored `enriched` profile is the admin lookup's profile
 MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size
-estimate for an unassessed vacant parcel) — `publicEnrichedProfile` strips it
-on both paths; the response otherwise describes only the requested parcel).
+estimate for an unassessed vacant parcel) and MINUS the staff-only
+`permitBuildingFacts` block (the home's own building permit number, issue/CO
+dates and plan figures behind the admin estimator's new-construction home-size
+estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
+(`storiesSource: 'permit'`) returned to the default (`stories: 1`,
+`storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
+the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of
+it on both paths; the response otherwise describes only the requested parcel).
 Operational `meta.providerStatus` (credential configuration and attempted-provider
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;

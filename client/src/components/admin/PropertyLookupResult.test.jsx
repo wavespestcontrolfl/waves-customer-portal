@@ -94,3 +94,78 @@ describe("PropertyLookupResult — plat-median estimate for an unassessed parcel
     expect(screen.getByRole("button", { name: /Verify home living area: 2,980 sq ft/ })).toBeInTheDocument();
   });
 });
+
+// The home's own Manatee building permit: a stronger estimate than the plat
+// median, exposed by the server beside an EMPTY homeSqFt.
+const PERMIT_FACTS = {
+  conditionedSqft: 2314, underRoofSqft: 3102, stories: 2, bedrooms: 4, bathrooms: 2.5,
+  permitNo: "BLD2503-01234", issuedAt: "2025-03-14T00:00:00.000Z", coIssuedAt: null,
+  sourceLabel: "Manatee building permit BLD2503-01234, issued Mar 2025",
+};
+const PERMIT_PROFILE = { ...VACANT_PROFILE, stories: 2, storiesSource: "permit", permitBuildingFacts: PERMIT_FACTS };
+
+describe("PropertyLookupResult — building-permit estimate for an unassessed parcel", () => {
+  it("shows the permit's conditioned area with its source line, and wins over the median", () => {
+    renderPanel({ profile: PERMIT_PROFILE, form: { homeSqFt: "2314", stories: "2" } });
+    expect(screen.getByText("2,314 sq ft")).toBeInTheDocument();
+    expect(screen.getAllByText("From building permit").length).toBe(2);
+    expect(screen.getByText(
+      "Manatee building permit BLD2503-01234, issued Mar 2025: 2,314 sq ft conditioned, 3,102 under roof, 2 stories — not on the county roll yet; confirm with the customer",
+    )).toBeInTheDocument();
+    expect(screen.queryByText("Estimated from neighbors")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Median of 174/)).not.toBeInTheDocument();
+    expect(screen.queryByText("3,071 sq ft")).not.toBeInTheDocument();
+    expect(screen.queryByText("Not found")).not.toBeInTheDocument();
+  });
+
+  it("shows the permit story count with its own source line, even while the record lists stories as missing", () => {
+    // The record itself has no story count (the server's quality list still
+    // names it); the profile's count is the permit's explicit fallback.
+    const profile = { ...PERMIT_PROFILE, propertyDataQuality: { missingCriticalFields: ["squareFootage", "stories"] } };
+    renderPanel({ profile, form: { homeSqFt: "2314", stories: "2" } });
+    expect(screen.getAllByText("From building permit").length).toBe(2);
+    expect(screen.queryByText("Not found")).not.toBeInTheDocument();
+    expect(screen.getByText("Manatee building permit BLD2503-01234, issued Mar 2025 — confirm with the customer")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
+  });
+
+  it("omits the under-roof and stories parts when the permit lacks them", () => {
+    renderPanel({
+      profile: { ...VACANT_PROFILE, permitBuildingFacts: { ...PERMIT_FACTS, underRoofSqft: null, stories: null } },
+      form: { homeSqFt: "2314" },
+    });
+    expect(screen.getByText(
+      "Manatee building permit BLD2503-01234, issued Mar 2025: 2,314 sq ft conditioned — not on the county roll yet; confirm with the customer",
+    )).toBeInTheDocument();
+    // Stories row is still the defaulted one: no permit label there.
+    expect(screen.getAllByText("From building permit").length).toBe(1);
+  });
+
+  it("offers no one-click verify for the untouched permit prefill, but does once the operator types a size", () => {
+    renderPanel({ profile: PERMIT_PROFILE, form: { homeSqFt: "2314", stories: "2" } });
+    expect(screen.queryByRole("button", { name: /Verify home living area/ })).not.toBeInTheDocument();
+    cleanup();
+    renderPanel({ profile: PERMIT_PROFILE, form: { homeSqFt: "2400", stories: "2", _homeSqFtEdited: true } });
+    expect(screen.getByRole("button", { name: /Verify home living area: 2,400 sq ft/ })).toBeInTheDocument();
+  });
+
+  it("falls back to the median rendering when permit facts are null or absent", () => {
+    for (const permitBuildingFacts of [null, undefined]) {
+      renderPanel({ profile: { ...VACANT_PROFILE, permitBuildingFacts } });
+      expect(screen.getByText("3,071 sq ft")).toBeInTheDocument();
+      expect(screen.getByText("Estimated from neighbors")).toBeInTheDocument();
+      expect(screen.getByText(/Median of 174 assessed homes in this plat \(2,101–3,242 sq ft\)/)).toBeInTheDocument();
+      expect(screen.queryByText("From building permit")).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  it("an unconfirmed address hides the permit estimate", () => {
+    renderPanel({
+      profile: { ...PERMIT_PROFILE, fieldVerifyFlags: [{ field: "address", priority: "HIGH", reason: "house number mismatch" }] },
+      form: { homeSqFt: "" },
+    });
+    expect(screen.queryByText("2,314 sq ft")).not.toBeInTheDocument();
+    expect(screen.getByText("Not found")).toBeInTheDocument();
+  });
+});

@@ -223,6 +223,14 @@ postgres('permit detail collector on PostgreSQL', () => {
     // A pin-less row may rescue a pin miss.
     expect(await findPermitBuildingFacts({ parcelPin: '3333333333', looseKey: '300other34212' }))
       .toMatchObject({ permitNo: 'BLD9805-0006', conditionedSqft: 2600 });
+    // Street check on the address tier: two pin-less rows share a loose key
+    // (same number, first street word and ZIP, different streets); the newer
+    // one is the other street, so the older own-street permit wins.
+    await insert('BLD9805-0007', { parcel_pin: null, address_loose_key: '500oak34212', issued_date: '2026-01-10', address_raw: '500 OAK ST  BRADENTON 34212', ...facts(2100) });
+    await insert('BLD9805-0008', { parcel_pin: null, address_loose_key: '500oak34212', issued_date: '2026-09-10', address_raw: '500 OAK LN  BRADENTON 34212', ...facts(3300) });
+    expect(await findPermitBuildingFacts({ looseKey: '500oak34212', addressMatches: (raw) => raw === '500 OAK ST  BRADENTON 34212' }))
+      .toMatchObject({ permitNo: 'BLD9805-0007', conditionedSqft: 2100, matchedBy: 'address' });
+    expect(await findPermitBuildingFacts({ looseKey: '500oak34212', addressMatches: () => false })).toBeNull();
     // Nothing matches.
     expect(await findPermitBuildingFacts({ parcelPin: '4444444444' })).toBeNull();
     // Fetch date is a plain date.
