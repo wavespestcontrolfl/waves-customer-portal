@@ -1213,6 +1213,8 @@ function ProtocolAddOns({ window, visitType, rows, catalog, locked, onAdd }) {
       {items.map((item) => {
         const onSheet = on.has(String(item.productId).toLowerCase());
         const joined = [
+          // A visit-specific substitution: offered as the substitute, named for the original.
+          item.substituteFor ? `in place of ${item.substituteFor}` : '',
           triggerWords(item.trigger) || ROLE_WORDS[item.role] || '',
           item.tankMixWith ? `tank mix with ${item.tankMixWith}` : '',
           ...gateWords(item.gates),

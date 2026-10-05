@@ -10,11 +10,12 @@ jest.mock('../services/service-completion-profiles', () => ({
 jest.mock('../services/waveguard-plan-engine', () => ({
   buildPlanForService: jest.fn(),
   selectProtocolVisit: jest.fn(() => ({ trackKey: 'st_augustine', track: null, month: 'Oct', visit: null })),
+  getAppointmentSubstitutions: jest.fn(async () => new Map()),
 }));
 jest.mock('../services/lawn-protocol-operating-layer', () => ({ getProtocolWindowContext: jest.fn(async () => null) }));
 
 const { resolveCompletionProfileForScheduledService } = require('../services/service-completion-profiles');
-const { buildPlanForService, selectProtocolVisit } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, selectProtocolVisit, getAppointmentSubstitutions } = require('../services/waveguard-plan-engine');
 const { getProtocolWindowContext } = require('../services/lawn-protocol-operating-layer');
 const { recapVisitIdentityChanged, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('../services/pest-recap');
 const {
@@ -762,7 +763,7 @@ describe('this month\'s protocol window (the sheet\'s add-on row)', () => {
   });
   const catalog = [herbicide, granular, unapproved];
 
-  beforeEach(() => { getProtocolWindowContext.mockReset(); getProtocolWindowContext.mockResolvedValue(null); selectProtocolVisit.mockClear(); });
+  beforeEach(() => { getProtocolWindowContext.mockReset(); getProtocolWindowContext.mockResolvedValue(null); selectProtocolVisit.mockClear(); getAppointmentSubstitutions.mockReset(); getAppointmentSubstitutions.mockResolvedValue(new Map()); });
 
   test('the context carries the window: title, month, and each listed product with the method, a figurable rate, the trigger and the tank mix', async () => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
@@ -773,9 +774,9 @@ describe('this month\'s protocol window (the sheet\'s add-on row)', () => {
       month: 10,
       visitType: 'granular_production_plus_spots',
       products: [
-        { productId: P_GRAN, name: 'Test Feed Granular', role: 'fall_pre_emergent_nutrition', defaultInPlan: true, applicationMethod: 'granular_broadcast', ratePer1000: 4.02, rateUnit: 'lb', trigger: null, tankMixWith: null, gates: { targetN: '0.6 lb N/1000' } },
-        { productId: P_HERB, name: 'Test Weed Spray', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: 0.085, rateUnit: 'oz', trigger: null, tankMixWith: null, gates: { annualCounter: 'celsius_oz_per_1000', stressGate: true } },
-        { productId: P_UN, name: 'Test Unapproved', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'repeat_sedge', tankMixWith: 'Celsius WG', gates: { trigger: 'repeat_sedge', tankMixWith: 'Celsius WG' } },
+        { productId: P_GRAN, name: 'Test Feed Granular', substituteFor: null, role: 'fall_pre_emergent_nutrition', defaultInPlan: true, applicationMethod: 'granular_broadcast', ratePer1000: 4.02, rateUnit: 'lb', trigger: null, tankMixWith: null, gates: { targetN: '0.6 lb N/1000' } },
+        { productId: P_HERB, name: 'Test Weed Spray', substituteFor: null, role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: 0.085, rateUnit: 'oz', trigger: null, tankMixWith: null, gates: { annualCounter: 'celsius_oz_per_1000', stressGate: true } },
+        { productId: P_UN, name: 'Test Unapproved', substituteFor: null, role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'repeat_sedge', tankMixWith: 'Celsius WG', gates: { trigger: 'repeat_sedge', tankMixWith: 'Celsius WG' } },
       ],
     });
     expect(ctx.readFailures).not.toContain('protocol_window');
@@ -783,6 +784,25 @@ describe('this month\'s protocol window (the sheet\'s add-on row)', () => {
     expect(getProtocolWindowContext).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       grassTrack: 'st_augustine', region: 'swfl', windowKey: 'oct_v13_spreader_fall', protocolKey: 'swfl_st_augustine_10_10', protocolVersion: '2026.10-v13', strict: true,
     }));
+  });
+
+  test('the visit\'s product substitutions apply: a substituted window product is offered as its substitute, at the substitution\'s rate, named for the original', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
+    getProtocolWindowContext.mockResolvedValue(window());
+    const substitute = { ...unapproved, default_rate_per_1000: '0.5000', rate_unit: 'fl oz' };
+    getAppointmentSubstitutions.mockResolvedValue(new Map([
+      // Test Weed Spray → Test Unapproved at the substitution's own rate.
+      [P_HERB, { original_product_id: P_HERB, substitute_product_id: P_UN, rate_per_1000: '3.0000', rate_unit: 'fl oz', substitute, original_product_name: 'Test Weed Spray' }],
+      // Test Feed Granular → Test Unapproved with no rate on the substitution: the substitute's catalog rate.
+      [P_GRAN, { original_product_id: P_GRAN, substitute_product_id: P_UN, rate_per_1000: null, rate_unit: null, substitute, original_product_name: 'Test Feed Granular' }],
+    ]));
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: catalog })), technicianId: 'tech-1' });
+    expect(getAppointmentSubstitutions).toHaveBeenCalledWith(expect.anything(), VISIT, null, { strict: true });
+    expect(ctx.protocolWindow.products.map(({ productId, name, substituteFor, ratePer1000, rateUnit, applicationMethod }) => ({ productId, name, substituteFor, ratePer1000, rateUnit, applicationMethod }))).toEqual([
+      { productId: P_UN, name: 'Test Unapproved', substituteFor: 'Test Feed Granular', ratePer1000: 0.5, rateUnit: 'fl_oz', applicationMethod: 'granular_broadcast' },
+      { productId: P_UN, name: 'Test Unapproved', substituteFor: 'Test Weed Spray', ratePer1000: 3, rateUnit: 'fl_oz', applicationMethod: 'spot_treatment' },
+      { productId: P_UN, name: 'Test Unapproved', substituteFor: null, ratePer1000: null, rateUnit: null, applicationMethod: 'spot_treatment' },
+    ]);
   });
 
   test('a broadcast product that is a tank mix (WDG) is a broadcast spray, not a granular broadcast', async () => {

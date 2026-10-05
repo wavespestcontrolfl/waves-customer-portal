@@ -508,7 +508,12 @@ function protocolRate(product) {
  * (or the legacy lawn_type) sets the track, and an UNKNOWN track resolves no
  * window at all (requireKnownGrass; never a guessed St. Augustine recipe
  * offered as one-tap add-ons), an assigned protocol / window on the visit is
- * honored, and the active protocol for the track otherwise. The turf profile
+ * honored, and the active protocol for the track otherwise. The visit's own
+ * product substitutions (lawn_protocol_product_substitutions, the plan
+ * engine's getAppointmentSubstitutions) apply to the window's products as they
+ * do to the plan's: a substituted product is offered as its substitute, at the
+ * substitution's rate (else the substitute's catalog rate), named for the
+ * original (`substituteFor`). The turf profile
  * is customer-owned (one per customer), so with SEVERAL properties on file it
  * may describe another lawn than this visit's: then only a visit with its own
  * protocol assignment resolves a window (the lawn re-service context's rule,
@@ -538,20 +543,28 @@ async function loadProtocolWindow(svc, knex, readFailures) {
       strict: true,
     });
     if (!context?.window) return null;
+    const substitutions = await require('./waveguard-plan-engine').getAppointmentSubstitutions(knex, svc.id, null, { strict: true });
     const listed = (context.products || []).filter((product) => product.product_id);
     const rows = await loadCatalogRows(listed.map((product) => String(product.product_id)), knex);
     const products = listed
-      .filter((product) => rows.has(String(product.product_id)))
       .map((product) => {
-        const row = rows.get(String(product.product_id));
+        const substitution = substitutions.get(String(product.product_id)) || null;
+        const row = substitution ? substitution.substitute : rows.get(String(product.product_id));
+        if (!row) return null;
         const gates = product.gates && typeof product.gates === 'object' ? product.gates : {};
+        // A substituted product's rate: the substitution's, else the substitute's
+        // own catalog rate (the plan engine's rule), never the original's.
+        const rate = substitution
+          ? { ratePer1000: substitution.rate_per_1000 != null ? substitution.rate_per_1000 : row.default_rate_per_1000, rateUnit: substitution.rate_unit || row.rate_unit }
+          : { ratePer1000: product.rate_per_1000, rateUnit: product.rate_unit };
         return {
-          productId: product.product_id,
+          productId: row.id,
           name: row.name,
+          substituteFor: substitution ? (rows.get(String(product.product_id))?.name || substitution.original_product_name || null) : null,
           role: product.role || null,
           defaultInPlan: product.default_in_plan === true,
           applicationMethod: protocolMethod({ applicationMode: product.application_mode }, row),
-          ...protocolRate({ ratePer1000: product.rate_per_1000, rateUnit: product.rate_unit }),
+          ...protocolRate(rate),
           // The protocol's own words for when this product goes down, and
           // EVERY operating gate on the row (spreaderVisitOnly, stressGate,
           // minDistanceFromWaterFt, ...): the sheet reads them all out, so an
@@ -560,7 +573,8 @@ async function loadProtocolWindow(svc, knex, readFailures) {
           tankMixWith: typeof gates.tankMixWith === 'string' ? gates.tankMixWith : null,
           gates,
         };
-      });
+      })
+      .filter(Boolean);
     return {
       title: context.window.title || null,
       month: Number(context.window.month) || null,

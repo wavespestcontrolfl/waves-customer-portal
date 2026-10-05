@@ -775,6 +775,15 @@ describe('products', () => {
     expect(sent.rate).toBeUndefined();
   });
 
+  test('a substituted window product reads "in place of" the original, on the substitute', async () => {
+    const window = WINDOW();
+    window.products = [{ ...window.products[1], productId: P_ART, name: 'Artavia 2 SC', substituteFor: 'Headway G', ratePer1000: 2, rateUnit: 'fl_oz', applicationMethod: 'broadcast_spray' }];
+    await openSheet({ request: makeRequest({ ctx: context({ protocolWindow: window }) }), props: { catalog: [...CATALOG, ARTAVIA] } });
+    expect(within(addons()).getByText('In place of Headway G · Mapped large patch (with Velista) or fall take-all · broadcast spray · 2 fl oz per 1,000 sq ft')).toBeTruthy();
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add Artavia 2 SC' }));
+    expect(within(editorFor('Artavia 2 SC')).getByLabelText('Artavia 2 SC').value).toBe('10');
+  });
+
   test('a list of spot products only is called spot work', async () => {
     const window = WINDOW();
     window.products = window.products.filter((item) => item.productId === P_ART);
