@@ -184,6 +184,38 @@ describe('applyEstimateLawnSqft with allowUnconfirmedWhenEmpty (backfill opt-in)
   });
 });
 
+describe('applyOwnerSetLawnSqft', () => {
+  beforeEach(() => { mockAudit.mockClear(); mockColumn = true; });
+  test('fills an empty size; audit row has trigger owner_set, the reason and no estimate id', async () => {
+    const db = fakeDb({ turf: undefined });
+    const out = await sync.applyOwnerSetLawnSqft(db, { customerId: 'c1', sqft: 1300, reason: 'owner ruling: newest unaccepted estimate' });
+    expect(out).toMatchObject({ status: 'written', sqft: 1300 });
+    expect(db.state.turf.lawn_sqft).toBe(1300);
+    expect(db.state.customers.property_sqft).toBe(1300);
+    expect(mockAudit.mock.calls[0][0]).toMatchObject({ customer_id: 'c1', estimate_id: null, sqft: 1300, trigger: 'owner_set', source: 'owner_set', reason: 'owner ruling: newest unaccepted estimate', trx: db.__trx });
+  });
+  test.each([['turf', { turf: { lawn_sqft: 4000 } }], ['customer', { turf: undefined, customer: { property_sqft: 3000 } }], ['primary', { turf: undefined, primary: { property_sqft: 3000 } }]])('refuses to overwrite a size in the %s', async (_n, setup) => {
+    const db = fakeDb(setup);
+    const out = await sync.applyOwnerSetLawnSqft(db, { customerId: 'c1', sqft: 1300, reason: 'r' });
+    expect(out).toMatchObject({ status: 'skipped', reason: 'has_size' });
+    expect(db.state.writes).toEqual([]);
+    expect(mockAudit).not.toHaveBeenCalled();
+  });
+  test('out of bounds or no reason: nothing happens, not even the fence', async () => {
+    const db = fakeDb({ turf: undefined });
+    expect((await sync.applyOwnerSetLawnSqft(db, { customerId: 'c1', sqft: 499, reason: 'r' })).reason).toBe('out_of_bounds');
+    expect((await sync.applyOwnerSetLawnSqft(db, { customerId: 'c1', sqft: 20001, reason: 'r' })).reason).toBe('out_of_bounds');
+    expect((await sync.applyOwnerSetLawnSqft(db, { customerId: 'c1', sqft: 1300, reason: '  ' })).reason).toBe('reason_required');
+    expect(db.state.writes).toEqual([]);
+  });
+  test('revalidate aborts the write', async () => {
+    const db = fakeDb({ turf: undefined });
+    const out = await sync.applyOwnerSetLawnSqft(db, { customerId: 'c1', sqft: 1300, reason: 'r', revalidate: async () => 'turf none -> 3300' });
+    expect(out).toMatchObject({ status: 'skipped', reason: 'changed_since_read' });
+    expect(db.state.writes).toEqual([]);
+  });
+});
+
 describe('estimateTargetsPrimary', () => {
   const customer = { id: 'c1', ...ADDR };
   const primary = { id: 'p1', ...ADDR };

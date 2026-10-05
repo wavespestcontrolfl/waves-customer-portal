@@ -359,8 +359,35 @@ async function applyEstimateLawnSqft(database, { customerId, estimate, estimateD
   });
 }
 
+/**
+ * An owner-stated size (backfill --set-size): fills an EMPTY size only, never
+ * overwrites one (that is the turf-profile editor's job). Same fence, same
+ * writer and the same 500..20,000 bounds as the guess; the audit row has
+ * trigger `owner_set`, the owner's reason text and no estimate id. `revalidate`
+ * has the same contract as in applyEstimateLawnSqft.
+ */
+async function applyOwnerSetLawnSqft(database, { customerId, sqft, reason, revalidate = null }) {
+  if (!Number.isInteger(sqft) || sqft < GUESS_FLOOR_SQFT || sqft > GUESS_CEILING_SQFT) return { status: 'skipped', reason: 'out_of_bounds', sqft };
+  if (!String(reason || '').trim()) return { status: 'skipped', reason: 'reason_required', sqft };
+  const { withTurfProfileFence } = require('./customer-pricing-ai');
+  return withTurfProfileFence(database, customerId, async (trx) => {
+    if (revalidate) {
+      const stale = await revalidate(trx);
+      if (stale) return { status: 'skipped', reason: 'changed_since_read', detail: stale, sqft };
+    }
+    const written = await writeLawnSqft(trx, customerId, sqft, { onlyIfEmpty: true });
+    if (written.refused) return { status: 'skipped', reason: written.refused, sqft, before: written.before, after: written.after };
+    if (!written.changed) return { status: 'unchanged', sqft, ...written };
+    await require('./audit-log').auditLawnSqftFromEstimate({
+      customer_id: customerId, estimate_id: null, sqft, before: written.before, after: written.after,
+      trigger: 'owner_set', source: 'owner_set', reason: String(reason).trim().slice(0, 300), trx,
+    });
+    return { status: 'written', sqft, ...written };
+  });
+}
+
 module.exports = {
   LAWN_SQFT_MIN, LAWN_SQFT_MAX, CONFIRMED_TURF_BASES, GUESS_FLOOR_SQFT, GUESS_CEILING_SQFT,
   parseEstimateData: parseData, saneLawnSqft, confirmedLawnSqftFromEstimate, unconfirmedLawnGuessFromEstimate, estimateTargetsPrimary,
-  syncLawnSqftMirrors, writeLawnSqft, applyEstimateLawnSqft,
+  syncLawnSqftMirrors, writeLawnSqft, applyEstimateLawnSqft, applyOwnerSetLawnSqft,
 };

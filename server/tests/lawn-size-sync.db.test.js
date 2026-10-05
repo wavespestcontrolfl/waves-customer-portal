@@ -55,7 +55,7 @@ describeDb('lawn size from the estimate (real PostgreSQL)', () => {
     await knex.schema.createTable('customer_turf_profiles', t => { t.uuid('customer_id').primary(); t.integer('lawn_sqft'); t.string('grass_type'); t.boolean('active').defaultTo(true); t.timestamp('updated_at'); });
     await knex.schema.createTable('estimates', t => {
       t.uuid('id').primary(); t.uuid('customer_id'); t.uuid('property_id'); t.string('address'); t.string('status');
-      t.timestamp('accepted_at'); t.jsonb('estimate_data');
+      t.timestamp('accepted_at'); t.timestamp('created_at'); t.jsonb('estimate_data');
     });
     await knex.schema.createTable('audit_log', t => {
       t.increments('id'); t.string('actor_type'); t.uuid('actor_id'); t.string('action'); t.string('resource_type'); t.uuid('resource_id');
@@ -224,6 +224,70 @@ describeDb('lawn size from the estimate (real PostgreSQL)', () => {
     expect(await knex('audit_log').where({ resource_id: customerId })).toHaveLength(0);
   });
 
+  test('no accepted estimate: the newest unaccepted typed 1300 and an older AI size are shown, nothing is written', async () => {
+    await knex('customer_turf_profiles').where({ customer_id: customerId }).update({ lawn_sqft: null });
+    await knex('customers').where({ id: customerId }).update({ property_sqft: null });
+    await knex('customer_properties').where({ id: primary.id }).update({ property_sqft: null });
+    await knex('estimates').insert([
+      estimateRow({ status: 'expired', accepted_at: null, created_at: '2026-03-01T00:00:00Z', estimate_data: lawnData(4793, 'estimatedTurfSf') }),
+      estimateRow({ status: 'expired', accepted_at: null, created_at: '2026-08-01T00:00:00Z', estimate_data: lawnData(1300, 'measuredTurfSf') }),
+    ]);
+    const out = await script.runBackfill({ knex, today: '2026-10-04', apply: true, useUnconfirmedWhenEmpty: true }, { loadLawnCustomers: async () => [{ customer_id: customerId, estimate_ids: [] }] });
+    expect(out.rows[0]).toMatchObject({ class: 'no_accepted_lawn_estimate', unaccepted_confirmed_sqft: 1300, unaccepted_guess_sqft: 4793, unaccepted_estimate_status: 'expired', has_any_size: 'no' });
+    expect(out.applied).toEqual([]);
+    expect((await state()).turf.lawn_sqft).toBeNull();
+  });
+
+  describe('--set-size (owner-stated size)', () => {
+    const emptyOut = async () => {
+      await knex('customer_turf_profiles').where({ customer_id: customerId }).update({ lawn_sqft: null });
+      await knex('customers').where({ id: customerId }).update({ property_sqft: null });
+      await knex('customer_properties').where({ id: primary.id }).update({ property_sqft: null });
+    };
+    const live = async (_h, { only }) => (!only || only === customerId ? [{ customer_id: customerId, estimate_ids: [] }] : []);
+    const set = (sqft, extra = {}, id = customerId) => script.runOwnerSet({ knex, today: '2026-10-04', targets: [{ customerId: id, sqft }], reason: 'owner ruling: use the 1300 typed on his newest estimate', ...extra }, { loadLawnCustomers: live });
+
+    test('fills an empty size in all three places; audit row: owner_set, reason, no estimate id', async () => {
+      await emptyOut();
+      expect(await set(1300, { apply: false })).toEqual([{ customer_id: customerId, sqft: 1300, status: 'would_set', reason: '' }]);
+      expect((await state()).turf.lawn_sqft).toBeNull();
+      expect(await knex('audit_log').where({ resource_id: customerId })).toHaveLength(0);
+      expect((await set(1300, { apply: true }))[0]).toMatchObject({ status: 'written' });
+      const s = await state();
+      expect([s.turf.lawn_sqft, s.customer.property_sqft, s.property.property_sqft]).toEqual([1300, 1300, 1300]);
+      const audit = await knex('audit_log').where({ resource_id: customerId }).first();
+      expect(audit).toMatchObject({ action: 'customer.lawn_sqft.set_from_estimate', actor_type: 'system' });
+      expect(audit.metadata).toMatchObject({ trigger: 'owner_set', source: 'owner_set', estimate_id: null, sqft: 1300, reason: 'owner ruling: use the 1300 typed on his newest estimate',
+        before: { turf_lawn_sqft: null }, after: { turf_lawn_sqft: 1300, primary_property_sqft: 1300, customer_property_sqft: 1300 } });
+    });
+    test('refuses when any size exists (the seeded customer has one), out-of-bounds, and a customer outside the candidate set', async () => {
+      expect((await set(1300, { apply: true }))[0]).toMatchObject({ status: 'refused', reason: 'has_size_in_turf+primary_property+customer_mirror' });
+      await emptyOut();
+      expect((await set(499, { apply: true }))[0]).toMatchObject({ status: 'refused', reason: 'out_of_bounds' });
+      expect((await set(20001, { apply: true }))[0]).toMatchObject({ status: 'refused', reason: 'out_of_bounds' });
+      expect((await set(1300, { apply: true }, randomUUID()))[0]).toMatchObject({ status: 'refused', reason: 'not_a_live_lawn_customer' });
+      expect((await state()).turf.lawn_sqft).toBeNull();
+      expect(await knex('audit_log').where({ resource_id: customerId })).toHaveLength(0);
+    });
+    test('a size that appears between the read and the fence stops the write (under the lock)', async () => {
+      await emptyOut();
+      let firstReadDone; const readDone = new Promise((resolve) => { firstReadDone = resolve; });
+      let reads = 0;
+      const office = await knex.transaction();
+      await office.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+      await office('customers').where({ id: customerId }).forUpdate().first('id');
+      const pending = script.runOwnerSet({ knex, today: '2026-10-04', apply: true, targets: [{ customerId, sqft: 1300 }], reason: 'r' }, {
+        loadLawnCustomers: live,
+        loadRows: async (k, entries) => { const out = await script.loadRowsForTest(k, entries); reads += 1; if (reads === 1) firstReadDone(); return out; },
+      });
+      await readDone;
+      await office('customer_turf_profiles').where({ customer_id: customerId }).update({ lawn_sqft: 3300 });
+      await office.commit();
+      expect((await pending)[0]).toMatchObject({ status: 'skipped_changed_since_read', reason: 'turf none -> 3300' });
+      expect((await state()).turf.lawn_sqft).toBe(3300);
+    });
+  });
+
   describe('--use-unconfirmed-when-empty', () => {
     const aiEstimate = (over = {}) => estimateRow({ estimate_data: lawnData(4793, 'estimatedTurfSf'), ...over });
     const clearSizes = async () => {
@@ -309,7 +373,7 @@ describeDb('mirror-only repair (real PostgreSQL)', () => {
         t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at'); t.jsonb('service_area_measurements');
       });
       await knex.schema.createTable('customer_turf_profiles', t => { t.uuid('customer_id').primary(); t.integer('lawn_sqft'); t.boolean('active').defaultTo(true); t.timestamp('updated_at'); });
-      await knex.schema.createTable('estimates', t => { t.uuid('id').primary(); t.uuid('customer_id'); t.uuid('property_id'); t.string('address'); t.string('status'); t.timestamp('accepted_at'); t.jsonb('estimate_data'); });
+      await knex.schema.createTable('estimates', t => { t.uuid('id').primary(); t.uuid('customer_id'); t.uuid('property_id'); t.string('address'); t.string('status'); t.timestamp('accepted_at'); t.timestamp('created_at'); t.jsonb('estimate_data'); });
       await knex.schema.createTable('audit_log', t => { t.increments('id'); t.string('actor_type'); t.uuid('actor_id'); t.string('action'); t.string('resource_type'); t.uuid('resource_id'); t.jsonb('metadata'); t.string('ip_address'); t.string('user_agent'); });
       const customerId = randomUUID();
       const addr = { address_line1: '100 Fixture Street', city: 'Fixture City', zip: '34201' };

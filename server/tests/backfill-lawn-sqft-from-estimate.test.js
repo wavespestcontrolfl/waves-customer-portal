@@ -120,11 +120,49 @@ describe('unconfirmed guess for a customer with no size at all (--use-unconfirme
   test('an estimate for another property gets no guess class', () => {
     expect(run({ linked: [est('g2', { property_id: 'p9', estimate_data: data(4793, 'estimatedTurfSf') })] }).class).toBe('estimate_for_another_property');
   });
+  test('two linked estimates priced on different unconfirmed sizes are ambiguous with the flag, never written', () => {
+    const a = est('ga', { accepted_at: '2026-01-01T00:00:00Z', estimate_data: data(4000, 'estimatedTurfSf') });
+    const b = est('gb', { accepted_at: '2026-06-01T00:00:00Z', estimate_data: data(5200, 'estimatedTurfSf') });
+    expect(run({ linked: [a, b] })).toMatchObject({ class: 'ambiguous', reason: 'linked_estimates_disagree', candidate_count: 2 });
+    // different basis with the same size is a different guess too
+    const c = est('gc', { estimate_data: data(4000, 'lotFallback') });
+    expect(run({ linked: [a, c] }).class).toBe('ambiguous');
+  });
+  test('two linked estimates with the same unconfirmed guess are not ambiguous; without the flag nothing changes from before', () => {
+    const a = est('ga', { accepted_at: '2026-01-01T00:00:00Z', estimate_data: data(4000, 'estimatedTurfSf') });
+    const b = est('gb', { accepted_at: '2026-06-01T00:00:00Z', estimate_data: data(4000, 'estimatedTurfSf') });
+    expect(run({ linked: [a, b] })).toMatchObject({ class: 'turf_profile_empty_unconfirmed', estimate_id: 'gb' });
+    const d = est('gd', { estimate_data: data(5200, 'estimatedTurfSf') });
+    expect(run({ linked: [a, d] }, false).class).toBe('estimate_has_no_confirmed_size');
+  });
   test('the summary lists customers with no size on file (ids only) with the guess', () => {
     const row = (() => { const { estimate, snapshot, ...r } = run({}, false); return r; })();
     const text = script.summaryText(script.summarize([row]), 1, 'dry run', [row]);
     expect(text).toContain('customers with no lawn size on file (1)');
     expect(text).toContain('c1  estimate_has_no_confirmed_size  guess 4793 (estimatedTurfSf)');
+  });
+});
+
+describe('no_accepted_lawn_estimate: information about unaccepted estimates (never written)', () => {
+  const expired = (id, created, sqft, basis, over = {}) => est(id, { status: 'expired', accepted_at: null, created_at: created, estimate_data: data(sqft, basis), ...over });
+  const run = (unaccepted) => script.classifyCustomer({ customer: customer(), primary: primary(), turf: null, linked: [], accepted: [], unaccepted });
+
+  test('the newest unaccepted estimate carries a typed 1300 and an older one an AI size: both are shown, the class is unchanged', () => {
+    const r = run([expired('old', '2026-03-01T00:00:00Z', 4793, 'estimatedTurfSf'), expired('new', '2026-08-01T00:00:00Z', 1300, 'measuredTurfSf')]);
+    expect(r).toMatchObject({ class: 'no_accepted_lawn_estimate', unaccepted_confirmed_sqft: 1300, unaccepted_guess_sqft: 4793, unaccepted_estimate_status: 'expired' });
+    expect(script.APPLY_CLASSES.has(r.class)).toBe(false);
+  });
+  test('nothing unaccepted, or only another property: the columns stay empty', () => {
+    expect(run([])).toMatchObject({ class: 'no_accepted_lawn_estimate', unaccepted_confirmed_sqft: '', unaccepted_guess_sqft: '', unaccepted_estimate_status: '' });
+    expect(run([expired('x', '2026-08-01T00:00:00Z', 1300, 'measuredTurfSf', { property_id: 'p9' })]).unaccepted_confirmed_sqft).toBe('');
+  });
+  test('other classes never carry the columns', () => {
+    const r = script.classifyCustomer({ customer: customer(), primary: primary(), turf: null, linked: [est('e1')], accepted: [], unaccepted: [expired('x', '2026-08-01T00:00:00Z', 1300, 'measuredTurfSf')] });
+    expect(r.class).toBe('turf_profile_empty');
+    expect(r.unaccepted_confirmed_sqft).toBe('');
+  });
+  test('the CSV has the three columns', () => {
+    expect(script.CSV_COLUMNS).toEqual(expect.arrayContaining(['unaccepted_confirmed_sqft', 'unaccepted_guess_sqft', 'unaccepted_estimate_status']));
   });
 });
 
@@ -316,8 +354,8 @@ describe('guess apply path and the office-edit race', () => {
     for (const [mutate, expected] of [
       [(st) => { st.primary = primary({ property_sqft: 111 }); }, 'primarySqft none -> 111'],
       [(st) => { st.customer = customer({ property_sqft: 222 }); }, 'customerSqft none -> 222'],
-      [(st) => { st.primary = primary({ id: 'p-other' }); }, 'primaryId p1 -> p-other'],
-      [(st) => { st.primary = primary({ address_line1: '5 Elm St' }); st.customer = customer(); }, 'primaryKey'],
+      [(st) => { st.primary = primary({ id: 'p-other' }); }, 'primary_property_changed'],
+      [(st) => { st.primary = primary({ address_line1: '5 Elm St' }); st.customer = customer(); }, 'primary_address_changed'],
     ]) {
       const e1 = est('e1', { customer_id: 'c1' });
       const st = { customer: customer(), primary: primary() };
@@ -330,6 +368,115 @@ describe('guess apply path and the office-edit race', () => {
       expect(out.applied[0].status).toBe('skipped_changed_since_read');
       expect(out.applied[0].reason).toContain(expected);
     }
+  });
+
+  test('an address change is reported by NAME only: no digits, street or unit text in the reason, the log or the CSV', async () => {
+    for (const [mutate, name] of [
+      [(st) => { st.primary = primary({ address_line1: '77 Secret Lane Apt 9', zip: '34999' }); }, 'primary_address_changed'],
+      [(st) => { st.customer = customer({ address_line1: '88 Hidden Way', zip: '34888' }); }, 'customer_address_changed'],
+    ]) {
+      const e1 = est('e1', { customer_id: 'c1' });
+      const st = { customer: customer(), primary: primary() };
+      const deps = {
+        loadLawnCustomers: async () => [{ customer_id: 'c1', estimate_ids: ['e1'] }],
+        loadRows: async () => ({ customers: new Map([['c1', st.customer]]), primaries: new Map([['c1', st.primary]]), turfs: new Map([['c1', { lawn_sqft: 4000 }]]), estimates: new Map([['e1', e1]]), acceptedBy: new Map([['c1', [e1]]]) }),
+      };
+      const apply = jest.fn(async (_k, args) => { mutate(st); const stale = await args.revalidate({}); return { status: 'skipped', reason: 'changed_since_read', detail: stale }; });
+      const logs = [];
+      const out = await script.runBackfill({ knex: {}, today: 't', apply: true, log: (m) => logs.push(m) }, { ...deps, applyEstimateLawnSqft: apply });
+      expect(out.applied[0].reason).toBe(name);
+      const everything = [out.applied[0].reason, ...logs, JSON.stringify(out.applied)].join('\n');
+      expect(everything).not.toMatch(/Secret|Hidden|Lane|Way|Apt|34999|34888|Main|Bradenton|34205/i);
+      expect(out.applied[0].reason).not.toMatch(/\d/);
+    }
+  });
+
+  test('a database error reaches the log and the CSV as a code only', async () => {
+    const e1 = est('e1', { customer_id: 'c1' });
+    const deps = {
+      loadLawnCustomers: async () => [{ customer_id: 'c1', estimate_ids: ['e1'] }],
+      loadRows: async () => ({ customers: new Map([['c1', customer()]]), primaries: new Map([['c1', primary()]]), turfs: new Map([['c1', { lawn_sqft: 4000 }]]), estimates: new Map([['e1', e1]]), acceptedBy: new Map([['c1', [e1]]]) }),
+    };
+    const logs = [];
+    const boom = Object.assign(new Error('duplicate key Key (address)=(100 Main St) already exists'), { code: '23505' });
+    const out = await script.runBackfill({ knex: {}, today: 't', apply: true, log: (m) => logs.push(m) }, { ...deps, applyEstimateLawnSqft: async () => { throw boom; } });
+    expect(out.applied[0]).toMatchObject({ status: 'error', reason: 'error_23505' });
+    expect(logs.join('\n')).not.toMatch(/Main St/);
+  });
+});
+
+describe('--set-size (owner-stated size for an empty customer)', () => {
+  const entry = (id) => ({ customer_id: id, estimate_ids: [] });
+  const world = (over = {}) => {
+    const st = { live: ['c1'], turf: null, customerSqft: null, primarySqft: null, ...over };
+    return {
+      st,
+      deps: {
+        loadLawnCustomers: async (_h, { only }) => st.live.filter((id) => !only || id === only).map(entry),
+        loadRows: async () => ({
+          customers: new Map([['c1', customer({ property_sqft: st.customerSqft })]]), primaries: new Map([['c1', primary({ property_sqft: st.primarySqft })]]),
+          turfs: new Map(st.turf == null ? [] : [['c1', { lawn_sqft: st.turf }]]), estimates: new Map(), acceptedBy: new Map(),
+        }),
+      },
+    };
+  };
+  const run = (deps, targets, extra = {}) => script.runOwnerSet({ knex: { tag: 'db' }, today: 't', targets, reason: 'owner: use 1300', ...extra }, deps);
+
+  test('fills an empty size through the shared writer with the reason', async () => {
+    const { deps } = world();
+    const apply = jest.fn(async (_k, args) => { expect(await args.revalidate({})).toBeNull(); return { status: 'written', sqft: 1300 }; });
+    const out = await run({ ...deps, applyOwnerSetLawnSqft: apply }, [{ customerId: 'c1', sqft: 1300 }], { apply: true });
+    expect(out).toEqual([{ customer_id: 'c1', sqft: 1300, status: 'written', reason: '' }]);
+    expect(apply).toHaveBeenCalledWith({ tag: 'db' }, expect.objectContaining({ customerId: 'c1', sqft: 1300, reason: 'owner: use 1300' }));
+  });
+  test.each([['turf', { turf: 4000 }], ['customer mirror', { customerSqft: 3000 }], ['primary mirror', { primarySqft: 3000 }]])('refuses when the %s already has a size, and says where', async (_n, over) => {
+    const { deps } = world(over);
+    const apply = jest.fn();
+    const out = await run({ ...deps, applyOwnerSetLawnSqft: apply }, [{ customerId: 'c1', sqft: 1300 }], { apply: true });
+    expect(out[0]).toMatchObject({ status: 'refused', reason: expect.stringMatching(/^has_size_in_/) });
+    expect(apply).not.toHaveBeenCalled();
+  });
+  test.each([499, 20001, 0, 1.5])('refuses an out-of-bounds size (%s)', async (sqft) => {
+    const { deps } = world();
+    const apply = jest.fn();
+    expect((await run({ ...deps, applyOwnerSetLawnSqft: apply }, [{ customerId: 'c1', sqft }], { apply: true }))[0]).toMatchObject({ status: 'refused', reason: 'out_of_bounds' });
+    expect(apply).not.toHaveBeenCalled();
+  });
+  test('refuses a customer outside the candidate set', async () => {
+    const { deps } = world();
+    const apply = jest.fn();
+    expect((await run({ ...deps, applyOwnerSetLawnSqft: apply }, [{ customerId: 'other', sqft: 1300 }], { apply: true }))[0]).toMatchObject({ status: 'refused', reason: 'not_a_live_lawn_customer' });
+    expect(apply).not.toHaveBeenCalled();
+  });
+  test('a dry run reports would_set and writes nothing', async () => {
+    const { deps } = world();
+    const apply = jest.fn();
+    expect(await run({ ...deps, applyOwnerSetLawnSqft: apply }, [{ customerId: 'c1', sqft: 1300 }], { apply: false })).toEqual([{ customer_id: 'c1', sqft: 1300, status: 'would_set', reason: '' }]);
+    expect(apply).not.toHaveBeenCalled();
+  });
+  test('a size that appears between the read and the fence stops the write', async () => {
+    const { deps, st } = world();
+    const apply = jest.fn(async (_k, args) => { st.turf = 3300; const stale = await args.revalidate({}); return { status: 'skipped', reason: 'changed_since_read', detail: stale }; });
+    const out = await run({ ...deps, applyOwnerSetLawnSqft: apply }, [{ customerId: 'c1', sqft: 1300 }], { apply: true });
+    expect(out[0]).toMatchObject({ status: 'skipped_changed_since_read', reason: 'turf none -> 3300' });
+  });
+  test('CLI: needs --set-reason, --apply needs the confirmation flag, and it runs on its own', async () => {
+    const env = { DATABASE_URL: 'postgresql://h.example.net:5432/d' };
+    const original = console.log; console.log = jest.fn();
+    try {
+      const id = '11111111-2222-3333-4444-555555555555';
+      await expect(script.main(['--set-size', `${id}=1300`, '--out', '/x'], env, {})).rejects.toThrow('--set-reason');
+      await expect(script.main(['--set-size', `${id}=1300`, '--set-reason', 'r', '--apply', '--out', '/x'], env, {})).rejects.toThrow('--i-am-sure');
+      await expect(script.main(['--set-size', 'nope', '--set-reason', 'r', '--out', '/x'], env, { knexFactory: () => ({ destroy: async () => {} }) })).rejects.toThrow('<customerId>=<sqft>');
+      await expect(script.main(['--set-size', `${id}=1300`, '--set-reason', 'r', '--only', 'x', '--out', '/x'], env, {})).rejects.toThrow('on its own');
+      const runOwnerSet = jest.fn(async () => []);
+      const out = require('path').join(require('os').tmpdir(), `lawn-set-${process.pid}.csv`);
+      const f = jest.fn(() => ({ destroy: async () => {} }));
+      await script.main(['--set-size', `${id}=1300`, '--set-size', `22222222-2222-3333-4444-555555555555=900`, '--set-reason', 'owner ruling', '--out', out], env, { knexFactory: f, runOwnerSet });
+      expect(runOwnerSet.mock.calls[0][0]).toMatchObject({ apply: false, reason: 'owner ruling', targets: [{ customerId: id, sqft: 1300 }, { customerId: '22222222-2222-3333-4444-555555555555', sqft: 900 }] });
+      expect(f.mock.calls[0][0].pool.afterCreate).toEqual(expect.any(Function)); // dry run stays read-only
+      require('fs').rmSync(out, { force: true });
+    } finally { console.log = original; }
   });
 });
 

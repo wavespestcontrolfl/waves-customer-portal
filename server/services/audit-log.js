@@ -501,14 +501,14 @@ async function auditInternalAdminAlertDeliveryIssue({
  * row commit or roll back together. before/after hold the three places the
  * size lives: turf profile, primary property_sqft, customers.property_sqft.
  */
-async function auditLawnSqftFromEstimate({ customer_id, estimate_id, sqft, before, after, trigger, field = null, basis = null, source = null, actor_id = null, trx = null }) {
+async function auditLawnSqftFromEstimate({ customer_id, estimate_id, sqft, before, after, trigger, field = null, basis = null, source = null, reason = null, actor_id = null, trx = null }) {
   return recordAuditEvent({
     actor_type: actor_id ? 'admin' : 'system',
     actor_id,
     action: 'customer.lawn_sqft.set_from_estimate',
     resource_type: 'customer',
     resource_id: customer_id,
-    metadata: { estimate_id, sqft, before, after, trigger, field, basis, source },
+    metadata: { estimate_id, sqft, before, after, trigger, field, basis, source, ...(reason ? { reason } : {}) },
     critical: true,
     trx,
   });

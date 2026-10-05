@@ -19,6 +19,8 @@
 //   --out <file>                       CSV path (required)
 //   --only <customerId>                one customer
 //   --use-unconfirmed-when-empty       opt-in (dry run and --apply): see below
+//   --set-size <customerId>=<sqft>     repeatable; with --set-reason "<text>": an
+//                                      owner-stated size, see below
 //   --limit N                          first N customers (stable order)
 //
 // How a customer is linked to an estimate:
@@ -63,6 +65,16 @@
 // backfill_unconfirmed. ESTIMATE ACCEPTANCE IS NOT CHANGED BY THIS: acceptance
 // still writes confirmed sizes only.
 //
+// --set-size <customerId>=<sqft> --set-reason "<text>" (owner ruling 2026-10-04,
+// a customer whose service started with no accepted estimate): runs INSTEAD of
+// the estimate backfill. Fills an EMPTY size only; a customer with a size
+// anywhere is REFUSED (overwriting is the turf-profile editor's job), as is a
+// size outside 500..20,000 and a customer outside the candidate set (active,
+// live recurring lawn service). A dry run prints "would_set" and writes
+// nothing; --apply needs the confirmation flag. It writes through the same
+// shared writer and fence, re-checks under the lock, and audits trigger
+// owner_set with the reason text and no estimate id.
+//
 // This script has no hard-coded connection: it reads DATABASE_URL only.
 const fs = require('fs');
 const { addressKey } = require('../services/customer-property-address-keys');
@@ -79,6 +91,7 @@ const CSV_COLUMNS = [
   'estimate_accepted_at', 'confirmed_sqft', 'confirmed_field', 'confirmed_basis',
   'turf_lawn_sqft', 'primary_property_sqft', 'customer_property_sqft', 'pct_diff', 'over_20000',
   'guess_sqft', 'guess_basis', 'guess_flag', 'has_any_size',
+  'unaccepted_confirmed_sqft', 'unaccepted_guess_sqft', 'unaccepted_estimate_status',
 ];
 // The estimate tool marks a confirmed size above this for custom-quote review;
 // the CSV flags it so the office can look before --apply.
@@ -86,14 +99,16 @@ const REVIEW_ABOVE_SQFT = 20000;
 
 function parseArgs(argv = []) {
   const out = {};
-  const valued = new Set(['out', 'only', 'limit']);
+  const valued = new Set(['out', 'only', 'limit', 'set-size', 'set-reason']);
+  const repeatable = new Set(['set-size']);
+  const put = (key, value) => { if (repeatable.has(key)) out[key] = [...(out[key] || []), value]; else out[key] = value; };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (!arg.startsWith('--')) continue;
     const eq = arg.indexOf('=');
-    if (eq !== -1) { out[arg.slice(2, eq)] = arg.slice(eq + 1); continue; }
+    if (eq !== -1) { put(arg.slice(2, eq), arg.slice(eq + 1)); continue; }
     const key = arg.slice(2);
-    if (valued.has(key) && argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) { out[key] = argv[i + 1]; i += 1; } else out[key] = true;
+    if (valued.has(key) && argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) { put(key, argv[i + 1]); i += 1; } else out[key] = true;
   }
   return out;
 }
@@ -122,14 +137,60 @@ function pctDiff(estimateSqft, turfSqft) {
   return Math.round(((estimateSqft - turfSqft) / turfSqft) * 1000) / 10;
 }
 
+// What an office edit could change between the first read and the fence.
+function sizeSnapshot({ customer, primary, turf }) {
+  return {
+    turf: num(turf?.lawn_sqft), primarySqft: num(primary?.property_sqft), customerSqft: num(customer.property_sqft),
+    primaryId: primary?.id ?? null, primaryKey: primary ? addressKey(primary) : null, customerKey: addressKey(customer),
+  };
+}
+
+// Same comparison for the estimate path and the owner-set path. Names which
+// identity changed, never its value: an address key is street, unit and ZIP
+// text and must not reach a log or the applied CSV.
+function snapshotChange(fresh, was) {
+  for (const key of ['turf', 'primarySqft', 'customerSqft']) {
+    if (fresh[key] !== was[key]) return `${key} ${was[key] ?? 'none'} -> ${fresh[key] ?? 'none'}`;
+  }
+  if (fresh.primaryId !== was.primaryId) return 'primary_property_changed';
+  if (fresh.primaryKey !== was.primaryKey) return 'primary_address_changed';
+  if (fresh.customerKey !== was.customerKey) return 'customer_address_changed';
+  return null;
+}
+
+/**
+ * Information only, for the owner to decide by hand: what the customer's
+ * NON-accepted lawn estimates for the primary property (newest first) carry.
+ * unaccepted_confirmed_sqft = the newest such estimate with a confirmed size;
+ * unaccepted_guess_sqft = the newest with an AI/lot figure; the status is the
+ * newest such estimate's. Never changes the class and is never written.
+ */
+function unacceptedInfo(unaccepted, customer, primary, includesLawn, sync) {
+  const stamp = (e) => new Date(e.created_at || e.updated_at || 0).getTime();
+  const candidates = (unaccepted || []).filter((e) => e.status !== 'accepted').map((e) => {
+    const data = sync.parseEstimateData(e.estimate_data);
+    return { e, lawn: includesLawn(data), match: sync.estimateTargetsPrimary(e, customer, primary).match, confirmed: sync.confirmedLawnSqftFromEstimate(data), guess: sync.unconfirmedLawnGuessFromEstimate(data) };
+  }).filter((c) => c.lawn && c.match).sort((a, b) => stamp(b.e) - stamp(a.e));
+  if (!candidates.length) return {};
+  const withConfirmed = candidates.find((c) => c.confirmed.sqft !== null);
+  const withGuess = candidates.find((c) => c.guess.sqft !== null);
+  return {
+    unaccepted_confirmed_sqft: withConfirmed ? withConfirmed.confirmed.sqft : '',
+    unaccepted_guess_sqft: withGuess ? withGuess.guess.sqft : '',
+    unaccepted_estimate_status: String(candidates[0].e.status || ''),
+  };
+}
+
 /**
  * Pure classifier. Input is already-loaded rows:
  *   customer, primary (customer_properties primary row or null), turf (profile row or null),
  *   linked   - estimate rows referenced by the live recurring lawn visits (any status)
  *   accepted - the customer's accepted estimates (any property)
+ *   unaccepted - the customer's non-accepted estimates (expired, sent, ...): shown for
+ *              information on no_accepted_lawn_estimate rows only, never written
  * Returns the CSV row object plus `estimate` (the chosen estimate row, if any).
  */
-function classifyCustomer({ customer, primary, turf, linked = [], accepted = [] }, deps = {}) {
+function classifyCustomer({ customer, primary, turf, linked = [], accepted = [], unaccepted = [] }, deps = {}) {
   const sync = deps.lawnSize || require('../services/lawn-size-sync');
   const includesLawn = deps.estimateIncludesRecurringLawn || (() => {
     const converter = require('../services/estimate-converter');
@@ -141,6 +202,7 @@ function classifyCustomer({ customer, primary, turf, linked = [], accepted = [] 
       estimate,
       lawn: estimate.status === 'accepted' && includesLawn(data),
       confirmed: sync.confirmedLawnSqftFromEstimate(data),
+      guess: sync.unconfirmedLawnGuessFromEstimate(data),
       target: sync.estimateTargetsPrimary(estimate, customer, primary),
     };
   };
@@ -151,13 +213,11 @@ function classifyCustomer({ customer, primary, turf, linked = [], accepted = [] 
     turf_lawn_sqft: num(turf?.lawn_sqft) ?? '', primary_property_sqft: num(primary?.property_sqft) ?? '',
     customer_property_sqft: num(customer.property_sqft) ?? '', pct_diff: '', over_20000: '',
     guess_sqft: '', guess_basis: '', guess_flag: '',
+    unaccepted_confirmed_sqft: '', unaccepted_guess_sqft: '', unaccepted_estimate_status: '',
     has_any_size: [turf?.lawn_sqft, primary?.property_sqft, customer.property_sqft].some((v) => Number(v) > 0) ? 'yes' : 'no',
   };
   // What the locked re-read must still see for --apply to write (see changedSinceRead).
-  const snapshot = {
-    turf: num(turf?.lawn_sqft), primarySqft: num(primary?.property_sqft), customerSqft: num(customer.property_sqft),
-    primaryId: primary?.id ?? null, primaryKey: primary ? addressKey(primary) : null, customerKey: addressKey(customer),
-  };
+  const snapshot = sizeSnapshot({ customer, primary, turf });
   const done = (patch, estimate = null) => ({ ...base, ...patch, estimate, snapshot });
 
   const linkedPool = linked.map(evaluate).filter((c) => c.lawn);
@@ -168,11 +228,21 @@ function classifyCustomer({ customer, primary, turf, linked = [], accepted = [] 
     pool = accepted.map(evaluate).filter((c) => c.lawn)
       .sort((a, b) => new Date(b.estimate.accepted_at || 0) - new Date(a.estimate.accepted_at || 0));
   }
-  if (!pool.length) return done({ class: 'no_accepted_lawn_estimate', reason: linked.length ? 'linked_estimate_not_an_accepted_lawn_estimate' : 'none_found' });
+  if (!pool.length) {
+    return done({
+      class: 'no_accepted_lawn_estimate',
+      reason: linked.length ? 'linked_estimate_not_an_accepted_lawn_estimate' : 'none_found',
+      ...unacceptedInfo(unaccepted, customer, primary, includesLawn, sync),
+    });
+  }
 
   let chosen;
   if (via === 'linked') {
-    const sig = (c) => `${c.target.match ? 'primary' : c.target.reason}|${c.confirmed.sqft ?? c.confirmed.reason}`;
+    // With --use-unconfirmed-when-empty two candidates priced on different
+    // UNCONFIRMED sizes must not collapse into one signature (the newest guess
+    // would otherwise be written): each candidate's eligible guess joins it.
+    const guessPart = (c) => (deps.useUnconfirmedWhenEmpty && c.confirmed.sqft === null && c.guess.sqft !== null ? `|${c.guess.sqft}:${c.guess.basis}` : '');
+    const sig = (c) => `${c.target.match ? 'primary' : c.target.reason}|${c.confirmed.sqft ?? c.confirmed.reason}${guessPart(c)}`;
     if (pool.length > 1 && new Set(pool.map(sig)).size > 1) {
       return done({ class: 'ambiguous', reason: 'linked_estimates_disagree', via, candidate_count: pool.length });
     }
@@ -281,6 +351,10 @@ async function loadRows(knex, entries) {
   const acceptedRows = await knex('estimates').whereIn('customer_id', ids).where({ status: 'accepted' })
     .select('id', 'customer_id', 'property_id', 'address', 'status', 'accepted_at', 'estimate_data');
   const estimates = new Map(acceptedRows.map((r) => [r.id, r]));
+  const unacceptedRows = await knex('estimates').whereIn('customer_id', ids).whereNot({ status: 'accepted' })
+    .select('id', 'customer_id', 'property_id', 'address', 'status', 'created_at', 'estimate_data');
+  const unacceptedBy = new Map();
+  for (const r of unacceptedRows) { estimates.set(r.id, r); unacceptedBy.set(r.customer_id, [...(unacceptedBy.get(r.customer_id) || []), r]); }
   const acceptedBy = new Map();
   for (const r of acceptedRows) acceptedBy.set(r.customer_id, [...(acceptedBy.get(r.customer_id) || []), r]);
   // Linked estimates that are not accepted still count as a link (they classify
@@ -290,14 +364,14 @@ async function loadRows(knex, entries) {
     for (const r of await knex('estimates').whereIn('id', linkedIds)
       .select('id', 'customer_id', 'property_id', 'address', 'status', 'accepted_at', 'estimate_data')) estimates.set(r.id, r);
   }
-  return { customers, primaries, turfs, estimates, acceptedBy };
+  return { customers, primaries, turfs, estimates, acceptedBy, unacceptedBy };
 }
 
 function classifyLoaded(customer, entry, loaded, deps) {
   const linked = (entry.estimate_ids || []).map((id) => loaded.estimates.get(id)).filter((e) => e && String(e.customer_id) === String(customer.id));
   return classifyCustomer({
     customer, primary: loaded.primaries.get(customer.id) || null, turf: loaded.turfs.get(customer.id) || null,
-    linked, accepted: loaded.acceptedBy.get(customer.id) || [],
+    linked, accepted: loaded.acceptedBy.get(customer.id) || [], unaccepted: loaded.unacceptedBy?.get(customer.id) || [],
   }, deps);
 }
 
@@ -316,16 +390,19 @@ async function changedSinceRead(handle, { customerId, decided, snapshot, today }
   if (!customer) return 'customer row missing';
   const { snapshot: freshSnap, ...fresh } = classifyLoaded(customer, entry, loaded, deps);
   if (String(fresh.estimate_id) !== String(decided.estimate_id)) return `estimate ${decided.estimate_id} -> ${fresh.estimate_id}`;
+  const moved = snapshotChange(freshSnap, snapshot);
+  if (moved) return moved;
   if (fresh.class !== decided.class) return `class ${decided.class} -> ${fresh.class}`;
   if (String(fresh.confirmed_sqft) !== String(decided.confirmed_sqft)) return `size ${decided.confirmed_sqft} -> ${fresh.confirmed_sqft}`;
   if (String(fresh.guess_sqft) !== String(decided.guess_sqft)) return `guess ${decided.guess_sqft} -> ${fresh.guess_sqft}`;
   // Anything an office edit could have changed since the first read: the sizes
   // this write would replace, and which property the mirrors belong to.
-  for (const key of ['turf', 'primarySqft', 'customerSqft', 'primaryId', 'primaryKey', 'customerKey']) {
-    if (freshSnap[key] !== snapshot[key]) return `${key} ${snapshot[key] ?? 'none'} -> ${freshSnap[key] ?? 'none'}`;
-  }
   return null;
 }
+
+// A database error message can quote row values; only a code goes to the log
+// and the applied CSV.
+const errorLabel = (err) => `error_${err?.code || err?.name || 'unknown'}`;
 
 /**
  * Plan (and with apply:true, execute) the backfill. `deps.applyEstimateLawnSqft`
@@ -363,12 +440,57 @@ async function runBackfill({ knex, today, apply = false, only = null, limit = nu
           before_customer: outcome.before?.customer_property_sqft ?? '', after_customer: outcome.after?.customer_property_sqft ?? '' });
         log(`applied customer=${customer.id} ${row.class} ${changed ? `skipped_changed_since_read (${outcome.detail})` : outcome.status}${outcome.status === 'written' ? ` turf ${outcome.before.turf_lawn_sqft ?? 'none'} -> ${outcome.after.turf_lawn_sqft}` : ''}`);
       } catch (err) {
-        applied.push({ customer_id: customer.id, class: row.class, estimate_id: estimate.id, status: 'error', reason: err.message });
-        log(`ERROR customer=${customer.id}: ${err.message}`);
+        applied.push({ customer_id: customer.id, class: row.class, estimate_id: estimate.id, status: 'error', reason: errorLabel(err) });
+        log(`ERROR customer=${customer.id}: ${errorLabel(err)}`);
       }
     }
   }
   return { rows, applied, counts: summarize(rows) };
+}
+
+/**
+ * --set-size: an owner-stated size for a customer with NO size on file. Runs
+ * INSTEAD of the estimate backfill. Each target must be in the script's own
+ * candidate set (active customer with a live recurring lawn service), must have
+ * no size anywhere, and must be within 500..20,000. Dry run reports "would_set"
+ * and writes nothing. --apply writes through the shared writer (same fence,
+ * same re-check under the lock) with audit trigger owner_set and the reason.
+ */
+async function runOwnerSet({ knex, today, apply = false, targets, reason, log = () => {} }, deps = {}) {
+  const sync = require('../services/lawn-size-sync');
+  const results = [];
+  const record = (customerId, sqft, status, why = '') => { results.push({ customer_id: customerId, sqft, status, reason: why }); log(`set-size customer=${customerId} ${status}${why ? ` (${why})` : ''}`); };
+  for (const { customerId, sqft } of targets) {
+    if (!Number.isInteger(sqft) || sqft < sync.GUESS_FLOOR_SQFT || sqft > sync.GUESS_CEILING_SQFT) { record(customerId, sqft, 'refused', 'out_of_bounds'); continue; }
+    try {
+      const [entry] = await (deps.loadLawnCustomers || loadLawnCustomers)(knex, { today, only: customerId });
+      if (!entry) { record(customerId, sqft, 'refused', 'not_a_live_lawn_customer'); continue; }
+      const loaded = await (deps.loadRows || loadRows)(knex, [entry]);
+      const customer = loaded.customers.get(customerId);
+      if (!customer) { record(customerId, sqft, 'refused', 'not_a_live_lawn_customer'); continue; }
+      const snapshot = sizeSnapshot({ customer, primary: loaded.primaries.get(customerId) || null, turf: loaded.turfs.get(customerId) || null });
+      const places = [['turf', snapshot.turf], ['primary_property', snapshot.primarySqft], ['customer_mirror', snapshot.customerSqft]].filter(([, v]) => v > 0).map(([n]) => n);
+      if (places.length) { record(customerId, sqft, 'refused', `has_size_in_${places.join('+')}`); continue; }
+      if (!apply) { record(customerId, sqft, 'would_set'); continue; }
+      const outcome = await (deps.applyOwnerSetLawnSqft || sync.applyOwnerSetLawnSqft)(knex, {
+        customerId, sqft, reason,
+        revalidate: async (trx) => {
+          const [fresh] = await (deps.loadLawnCustomers || loadLawnCustomers)(trx, { today, only: customerId });
+          if (!fresh) return 'no longer a live recurring lawn customer';
+          const again = await (deps.loadRows || loadRows)(trx, [fresh]);
+          const c = again.customers.get(customerId);
+          if (!c) return 'customer row missing';
+          return snapshotChange(sizeSnapshot({ customer: c, primary: again.primaries.get(customerId) || null, turf: again.turfs.get(customerId) || null }), snapshot);
+        },
+      });
+      if (outcome.reason === 'changed_since_read') record(customerId, sqft, 'skipped_changed_since_read', outcome.detail);
+      else if (outcome.status === 'written') record(customerId, sqft, 'written');
+      else record(customerId, sqft, 'refused', outcome.reason || outcome.status);
+    } catch (err) {
+      record(customerId, sqft, 'error', errorLabel(err));
+    }
+  }
+  return results;
 }
 
 // A dry run opens every session read-only, so even a bug cannot write.
@@ -399,9 +521,30 @@ async function main(argv = process.argv.slice(2), env = process.env, deps = {}) 
   if (apply && args['i-am-sure-this-is-the-intended-database'] !== true) {
     throw new Error('Refusing --apply without --i-am-sure-this-is-the-intended-database (check the host printed above first).');
   }
+  const setSizes = args['set-size'] || [];
+  let targets = null;
+  if (setSizes.length || args['set-reason']) {
+    if (!setSizes.length) throw new Error('--set-reason needs at least one --set-size <customerId>=<sqft>.');
+    const reason = typeof args['set-reason'] === 'string' ? args['set-reason'].trim() : '';
+    if (!reason) throw new Error('--set-size requires --set-reason "<text>".');
+    if (args.only || args.limit || args['use-unconfirmed-when-empty']) throw new Error('--set-size runs on its own: do not combine it with --only, --limit or --use-unconfirmed-when-empty.');
+    targets = setSizes.map((spec) => {
+      const m = /^([0-9a-fA-F-]{8,})=(\d+)$/.exec(String(spec).trim());
+      if (!m) throw new Error('--set-size must look like <customerId>=<sqft>.');
+      return { customerId: m[1], sqft: Number(m[2]) };
+    });
+    if (new Set(targets.map((t) => t.customerId)).size !== targets.length) throw new Error('--set-size names a customer twice.');
+  }
   const knex = buildKnex(url, { readOnly: !apply }, deps.knexFactory);
   try {
     const { etDateString } = require('../utils/datetime-et');
+    if (targets) {
+      const results = await (deps.runOwnerSet || runOwnerSet)({ knex, today: etDateString(), apply, targets, reason: args['set-reason'].trim(), log: (m) => console.log(`[lawn-size-backfill] ${m}`) });
+      const cols = ['customer_id', 'sqft', 'status', 'reason'];
+      fs.writeFileSync(args.out, [cols.join(','), ...results.map((r) => cols.map((c) => csvCell(r[c])).join(','))].join('\n') + '\n');
+      console.log(`[lawn-size-backfill] owner-set ${apply ? 'APPLY' : 'DRY RUN'}: ${JSON.stringify(results.reduce((m, r) => ({ ...m, [r.status]: (m[r.status] || 0) + 1 }), {}))} (details: ${args.out})`);
+      return;
+    }
     const result = await (deps.runBackfill || runBackfill)({
       knex, today: etDateString(), apply, useUnconfirmedWhenEmpty: args['use-unconfirmed-when-empty'] === true, only: typeof args.only === 'string' ? args.only : null, limit,
       log: (m) => console.log(`[lawn-size-backfill] ${m}`),
@@ -426,4 +569,4 @@ if (require.main === module) {
   main().then(() => process.exit(0)).catch((err) => { console.error(`[lawn-size-backfill] ${err.message}`); process.exit(1); });
 }
 
-module.exports = { parseArgs, describeDatabase, classifyCustomer, runBackfill, toCsv, summarize, summaryText, loadLawnCustomers, loadRowsForTest: loadRows, changedSinceRead, buildKnex, UNCONFIRMED_CLASS, CLASSES, APPLY_CLASSES, CSV_COLUMNS, main };
+module.exports = { parseArgs, describeDatabase, classifyCustomer, runBackfill, toCsv, summarize, summaryText, loadLawnCustomers, loadRowsForTest: loadRows, changedSinceRead, runOwnerSet, sizeSnapshot, buildKnex, UNCONFIRMED_CLASS, CLASSES, APPLY_CLASSES, CSV_COLUMNS, main };
