@@ -309,8 +309,10 @@ async function callGeminiVision(base64Image, mimeType, context = {}, deadline = 
  * composite with no divergence flags.
  */
 // timeoutMs (optional): one wall-clock budget shared by the Gemini attempts and
-// the Claude fallback; a photo that runs out returns null like any other miss.
+// the Claude fallback; a photo that runs out returns null like any other miss,
+// and one handed no budget at all (zero or less) is never sent.
 async function analyzePhoto(base64Image, mimeType, context = {}, { timeoutMs } = {}) {
+  if (timeoutMs != null && timeoutMs <= 0) return null;
   const deadline = timeoutMs ? Date.now() + timeoutMs : null;
   const gemini = await callGeminiVision(base64Image, mimeType, context, deadline);
   const claude = gemini || (deadline && Date.now() >= deadline) ? null : await callClaudeVision(base64Image, mimeType, context, deadline);

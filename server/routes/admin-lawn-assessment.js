@@ -493,8 +493,11 @@ const LAWN_ASSESS_AI_BUDGET_MS = 70 * 1000;
 router.post('/assess', async (req, res, next) => {
   try {
     const { customerId, serviceId, photos } = req.body;
+    // What is left of the budget when a call starts; zero or less once it has
+    // run out, which the services read as "skip the call" (a queued photo in
+    // the pool below then takes the manual-scores path instead of a fresh call).
     const aiDeadline = Date.now() + LAWN_ASSESS_AI_BUDGET_MS;
-    const aiTimeoutMs = () => Math.max(1000, aiDeadline - Date.now());
+    const aiTimeoutMs = () => aiDeadline - Date.now();
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
     // GATE_LAWN_VISIT_ASSESSMENT (services/lawn-visit-assessment.js): one
     // multimodal call over every photo of the visit in place of the per-photo

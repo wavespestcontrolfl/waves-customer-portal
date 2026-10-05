@@ -62,3 +62,22 @@ describe('assessPhotoQuality dispatchWithFallback validate hook', () => {
     expect(result.score).toBe(Math.round(80 * 0.4 + 70 * 0.35 + 60 * 0.25));
   });
 });
+
+// POST /admin/lawn-assessment/assess hands each photo what is left of its
+// request budget; a photo queued past the deadline must fail open without a
+// provider call, and one with budget left passes it to the dispatcher.
+describe('assessPhotoQuality caller budget', () => {
+  beforeEach(() => dispatchWithFallback.mockReset());
+
+  test('no budget left fails open with no dispatch', async () => {
+    const result = await assessPhotoQuality('b64', 'image/jpeg', { timeoutMs: 0 });
+    expect(result).toEqual({ passed: true, score: 50, issues: [] });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('budget left reaches the dispatcher as timeoutMs', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { sharpness: 80, lawn_coverage_pct: 80, lighting: 80, usable: true, issues: [] } });
+    await assessPhotoQuality('b64', 'image/jpeg', { timeoutMs: 5000 });
+    expect(dispatchWithFallback.mock.calls[0][1]).toMatchObject({ timeoutMs: 5000 });
+  });
+});

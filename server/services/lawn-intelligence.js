@@ -97,10 +97,16 @@ async function fetchFawnWeather(coordinates) {
 // 2. PHOTO QUALITY ASSESSMENT
 // ══════════════════════════════════════════════════════════════
 
+// A quality read that did not happen (provider miss, or no budget left) fails
+// open: the photo goes on to scoring exactly as an SDK error always did.
+const qualityFailOpen = () => ({ passed: true, score: 50, issues: [] });
+
 // timeoutMs (optional): the caller's remaining wall-clock budget for the whole
 // chain (POST /admin/lawn-assessment/assess hands over what is left of its
-// request window); absent, the dispatcher's own default budget applies.
+// request window); zero or less skips the call outright; absent, the
+// dispatcher's own default budget applies.
 async function assessPhotoQuality(base64Image, mimeType, { timeoutMs } = {}) {
+  if (timeoutMs != null && timeoutMs <= 0) return qualityFailOpen();
   try {
     // VISION first, OpenAI Terra on a miss. A two-leg miss fails open below,
     // exactly as an SDK error did.
@@ -126,7 +132,7 @@ async function assessPhotoQuality(base64Image, mimeType, { timeoutMs } = {}) {
     };
   } catch (err) {
     logger.error(`[lawn-intel] Photo quality check failed: ${err.message}`);
-    return { passed: true, score: 50, issues: [] }; // fail open
+    return qualityFailOpen();
   }
 }
 

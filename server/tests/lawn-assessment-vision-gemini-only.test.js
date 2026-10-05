@@ -178,6 +178,16 @@ describe('analyzePhoto — timeoutMs budget', () => {
     expect(global.fetch.mock.calls[0][1].signal).toBeUndefined();
   });
 
+  it('a photo handed no budget at all is never sent to either provider', async () => {
+    global.fetch = jest.fn();
+
+    const result = await analyzePhoto('base64photo', 'image/jpeg', {}, { timeoutMs: 0 });
+
+    expect(result).toBeNull();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(mockAnthropicCreate).not.toHaveBeenCalled();
+  });
+
   it('a Gemini miss that used up the budget returns null without calling Claude', async () => {
     global.fetch = jest.fn().mockImplementation(async () => {
       await new Promise((resolve) => setTimeout(resolve, 30));

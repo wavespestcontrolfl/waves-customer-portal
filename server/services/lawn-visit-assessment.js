@@ -22,7 +22,8 @@ const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 // own prompt version). Off = the prompt, schema, stored run and return shape are
 // exactly what they were.
 // timeoutMs (optional): the caller's remaining wall-clock budget for both legs
-// together; absent, the dispatcher's default chain budget applies.
+// together (floored at a second: this is the visit's first and only read, so
+// it always runs); absent, the dispatcher's default chain budget applies.
 async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false, lighting = lawnLightingLive(), timeoutMs } = {}) {
   const { error, zones } = validateVisitPhotos(photos, { shotList });
   if (error) throw Object.assign(new Error(error), { code: 'INVALID_VISIT_PHOTOS', statusCode: 400 });
@@ -43,7 +44,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
     jsonSchema: prompt.schema,
     maxTokens: MAX_OUTPUT_TOKENS,
     ...(thinkingLevel ? { thinkingLevel } : {}),
-    ...(timeoutMs ? { timeoutMs } : {}),
+    ...(timeoutMs != null ? { timeoutMs: Math.max(1000, timeoutMs) } : {}),
     reasoningEffort: 'medium',
     laneId: 'lawn_visit_assessment',
     promptVersion: prompt.version,
@@ -81,7 +82,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
     } else {
       ({ json: assessed, referee } = await refereeVisit({
         policy, payload, geminiJson: outcome.json, visit: { photoCount: photos.length, images, context, lighting },
-        deadline: timeoutMs ? started + timeoutMs : null,
+        deadline: timeoutMs != null ? started + Math.max(1000, timeoutMs) : null,
       }));
       // The model-claimed findings after a settled tie-break (pre-normalization,
       // like `raw`), so the eval measures naming discipline on the final answer.
