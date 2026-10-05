@@ -480,9 +480,15 @@ function occurrences(term, text) {
 
 // One stance for a whole text: affirmed beats uncertain beats negated, and an
 // affirmed mention beside a negated one is a conflict, which reads as uncertain.
+// A mention that only states a treatment purpose ("applied Arena to protect
+// against chinch bugs", "treated for grubs") is not a sighting: on its own it
+// reads as 'purpose', which licenses a purpose claim and never found / seen.
 function noteStanceOf(term, note) {
-  const stances = occurrences(term, note).map((o) => o.stance);
-  if (!stances.length) return null;
+  const all = occurrences(term, note);
+  if (!all.length) return null;
+  const sightings = all.filter((o) => o.stance !== 'affirmed' || !PURPOSE_CUE_RE.test(o.clause) || OBSERVED_CUE_RE.test(o.clause));
+  if (!sightings.length) return 'purpose';
+  const stances = sightings.map((o) => o.stance);
   if (stances.includes('affirmed')) return stances.includes('negated') ? 'uncertain' : 'affirmed';
   return stances.includes('uncertain') ? 'uncertain' : 'negated';
 }
@@ -499,7 +505,7 @@ function provenanceOf(term, hay) {
     fact: has(hay.fact),
     // Targets and a product's role license a PURPOSE claim ("to protect against X")
     // and nothing else: never "found", "saw" or "there is".
-    purpose: has(hay.targets) || (!!term.generic && has(hay.role)),
+    purpose: has(hay.targets) || (!!term.generic && has(hay.role)) || noteStanceOf(term, hay.note) === 'purpose',
   };
 }
 
@@ -512,7 +518,7 @@ function mentionProblem(term, sentence, mention, prov, from) {
     return `absence_not_in_record:${key}`;
   }
   const purposeOnly = PURPOSE_CUE_RE.test(mention.clause) && !OBSERVED_CUE_RE.test(mention.clause);
-  if (purposeOnly && prov.purpose) return from.includes('product') ? null : `purpose_without_product_source:${key}`;
+  if (purposeOnly && prov.purpose) return from.includes('product') || (prov.noteStance === 'purpose' && from.includes('note')) ? null : `purpose_without_product_source:${key}`;
   // From here the paragraph says the condition is (or may be) PRESENT.
   // The technician's note wins over every other input: a term the note negates
   // or doubts cannot be stated as found, whatever a finding or fixed line says.

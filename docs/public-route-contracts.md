@@ -2655,7 +2655,7 @@ progress sentence has the same metric (thickness, weeds or stress) and direction
 (better, same, worse, on track), judged clause by clause so a compound comparison
 needs a line for each clause; says a condition is present when the note says it
 was NOT found or only MIGHT be (negation and uncertainty are read around the term;
-a negated term may appear only as negated, an uncertain one only hedged); states a
+a negated term may appear only as negated, an uncertain one only hedged, and a note mention that only states a treatment purpose is not a sighting); states a
 product's target or role as found, seen or present (they license a purpose claim
 only: "to protect against", "to go after"); says the photos confirmed a cause (the
 technician's note wins over the photo read); states a low-confidence photo finding

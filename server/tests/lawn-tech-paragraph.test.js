@@ -257,6 +257,15 @@ describe('validator: negation and uncertainty in the technician note', () => {
     expect(check(sentenceOf('Our technician may have seen some thinning turf near the driveway.', ['note', 'finding']), maybeThin).problems).toEqual([]);
   });
 
+  test('a purpose-only mention in the note is not a sighting', () => {
+    const purpose = noted('Applied Arena to the front and side yards to protect against chinch bugs. Also applied LESCO 24-0-11 to the whole yard.');
+    expect(check(sentenceOf('Our technician found chinch bugs in the trouble spot.', ['note']), purpose).problems).toContain('target_stated_as_found:chinch');
+    expect(check(sentenceOf('We treated the front and side yards to protect against chinch bugs.', ['note']), purpose).problems).toEqual([]);
+    // "treated for X" with a sighting elsewhere in the note still reads as affirmed.
+    const both = noted('Treated for chinch bugs; there are chinch bugs at the trouble spot. Also applied LESCO 24-0-11 to the whole yard.');
+    expect(check(sentenceOf('Our technician found chinch bugs at the trouble spot.', ['note']), both).problems).toEqual([]);
+  });
+
   test('...but a treatment-purpose claim is accepted', () => {
     for (const second of ['We treated the whole lawn to protect against chinch bugs.', 'The treatment is there to go after chinch bugs.']) {
       expect(check(sentenceOf(second, ['product']), NONE).problems).toEqual([]);
