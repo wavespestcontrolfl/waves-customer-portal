@@ -80,12 +80,12 @@ are unchanged; snapshots remain authoritative when the rollout gate is off.
 Ask Waves AI answers (owner 2026-10-05): `POST /api/reports/:token/ask` keeps
 its request (`{ question }`, 500 characters), its reply (`{ answer }`), its
 headers, its limiter and its recorded event (`report_question_asked` with
-`question_length` and `topic` only). `GATE_REPORT_ASK_AI` (dark, off unless Pest reports only (`data.serviceLine === 'pest'`): lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks). On pest reports the AI answers only the rule router's `applied`, `results`, `findings`, `summary`, `next_visit` and `unrouted` topics; `reentry`, `watering` and `next_steps` keep the fixed-rule answer, which states recorded instructions word for word.
+`question_length` and `topic` only). `GATE_REPORT_ASK_AI` (dark, off unless
 exactly `true`, read at call time) changes only who writes `answer`: Claude
 Sonnet 5.5 from a fact sheet of the report (no rates, totals, EPA numbers or
 per-product target pests), screened, with the fixed-rule answer as the reply on
 any model miss
-(`server/services/service-report/report-ask-ai.js`).
+(`server/services/service-report/report-ask-ai.js`). The AI answers Pest reports only (`data.serviceLine === 'pest'`). Lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks). On pest reports the AI answers only the rule router's `applied`, `results`, `findings`, `summary`, `next_visit` and `unrouted` topics. The `reentry`, `watering` and `next_steps` topics keep the fixed-rule answer, which states recorded instructions word for word.
 
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
