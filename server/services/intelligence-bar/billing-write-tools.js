@@ -434,6 +434,10 @@ async function correctInvoiceAddress(input, actionContext = {}) {
     address_before: preview.address_printed_now,
     address_now: shownAddress(done.after),
     note: "Only this invoice's address snapshot changed (an audit row records before and after). Amounts, status, the customer's profile, saved properties and payer bill-to are untouched, and nothing was re-sent to the customer — a copy they already received still shows the old address.",
+    // A paid invoice's receipt can go out again with the corrected address: offer it, never send it here.
+    ...(preview.invoice_status === 'paid' ? {
+      next_step: `Offer the operator to re-send the corrected receipt now (resend_receipt with invoice_id ${preview.invoice_id}); it goes out only on its own confirmation card.`,
+    } : {}),
   };
 }
 

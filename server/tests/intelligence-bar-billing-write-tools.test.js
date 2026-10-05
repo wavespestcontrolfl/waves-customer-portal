@@ -418,7 +418,17 @@ describe('correct_invoice_address', () => {
     });
     expect(res).toMatchObject({ success: true, invoice_number: 'WPC-2099-0001', address_now: { address_line1: '9 New Street Apt 4' }, address_before: { address_line1: '1 Old Street' } });
     expect(res.note).toMatch(/nothing was re-sent to the customer/);
+    // A paid invoice: the bar is told to offer the resend (its own card), never to send it.
+    expect(res.next_step).toMatch(/resend_receipt/);
   });
+  test('an unpaid invoice gets no resend offer: there is no receipt to send', async () => {
+    seed(invoice({ status: 'sent' }));
+    const preview = await prev();
+    const res = await run('correct_invoice_address', { invoice_id: INV, ...NEW }, { confirmed: true, technicianId: 'admin-1', executionPins: { _verified_address_correction: preview } });
+    expect(res.success).toBe(true);
+    expect(res).not.toHaveProperty('next_step');
+  });
+
 
   test('drift (the invoice went void, or its printed address changed) or a missing pin refuses before any write', async () => {
     const preview = await prev();
