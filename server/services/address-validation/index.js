@@ -19,6 +19,7 @@
  *     normalized: { street_line_1, city, state, postal_code } | null,
  *     hasInferred, hasReplaced, hasUnconfirmed,  // booleans
  *     missingComponents,  // Google missingComponentTypes (e.g. ['subpremise']) | []
+ *     usps: { business, residential, poBox },     // Google metadata booleans; null when not returned
  *     providerResponseId,                         // for audit
  *     raw,               // trimmed provider payload (debug; not persisted whole)
  *   }
@@ -87,6 +88,12 @@ async function reverseGeocodeCounty(location, key) {
 // requires inServiceArea === true. Unknown county (null) is NOT good enough —
 // it downgrades to confirm_needed so an unverifiable-area address never
 // auto-routes; out-of-area resolves to OUT_OF_SERVICE_AREA.
+function uspsFlags(result) {
+  const metadata = result ? result.metadata : null;
+  const flag = (v) => (typeof v === 'boolean' ? v : null);
+  return { business: flag(metadata?.business), residential: flag(metadata?.residential), poBox: flag(metadata?.poBox) };
+}
+
 function deriveStatus(result, county) {
   const verdict = result?.verdict || {};
   const address = result?.address || {};
@@ -115,6 +122,10 @@ function deriveStatus(result, county) {
     // in ai_address_validation so triage can name the specific ask instead of
     // a generic "could not be verified".
     missingComponents: Array.isArray(address.missingComponentTypes) ? address.missingComponentTypes : [],
+    // USPS delivery-point flags Google returns as result.metadata (absent
+    // for many addresses: null, never a guess). Display only: no status
+    // above reads them.
+    usps: uspsFlags(result),
   };
 
   // Incompleteness first, so garbage that geocodes to some random out-of-area

@@ -27,13 +27,13 @@ const VACANT_PROFILE = {
   fieldVerifyFlags: [{ field: "vacantParcel", priority: "HIGH", reason: "County roll shows Vacant Residential Platted" }],
 };
 
-function renderPanel({ profile = VACANT_PROFILE, form = {}, verification = {} } = {}) {
+function renderPanel({ profile = VACANT_PROFILE, form = {}, verification = {}, meta = null } = {}) {
   const onVerify = vi.fn();
   render(
     <PropertyLookupResult
       profile={profile}
       form={{ address: "1010 Example Loop, Lakewood Ranch, FL 34211", isCommercial: "NO", homeSqFt: "3071", lotSqFt: "9541", stories: "1", ...form }}
-      meta={{ matchedAddress: "1010 EXAMPLE LOOP, LAKEWOOD RANCH, FL" }}
+      meta={meta || { matchedAddress: "1010 EXAMPLE LOOP, LAKEWOOD RANCH, FL" }}
       refreshing={false}
       onRefresh={vi.fn()}
       onEditAddress={vi.fn()}
@@ -167,5 +167,58 @@ describe("PropertyLookupResult — building-permit estimate for an unassessed pa
     });
     expect(screen.queryByText("2,314 sq ft")).not.toBeInTheDocument();
     expect(screen.getByText("Not found")).toBeInTheDocument();
+  });
+});
+
+describe("PropertyLookupResult — address status line", () => {
+  const meta = (addressStatus) => ({ matchedAddress: "1010 EXAMPLE LOOP, LAKEWOOD RANCH, FL", addressStatus });
+  const flagged = { ...VACANT_PROFILE, fieldVerifyFlags: [{ field: "address", priority: "HIGH", reason: "House number not on the roll" }] };
+
+  it("shows nothing new when the lookup carried no status", () => {
+    renderPanel();
+    expect(screen.queryByText(/Address confirmed|Validation unavailable|needs confirmation/)).not.toBeInTheDocument();
+  });
+
+  it("states the address, the USPS flag and the county roll's answer on one line", () => {
+    renderPanel({ meta: meta({ state: "confirmed", usps: { business: true, residential: false }, countyRoll: "not_found" }) });
+    expect(screen.getByText("Address confirmed · USPS: business · Not on the county roll")).toBeInTheDocument();
+  });
+
+  it("labels each state, and says when Google corrected the entry", () => {
+    renderPanel({ meta: meta({ state: "confirmed", corrected: true, usps: { business: null, residential: true }, countyRoll: "found" }) });
+    expect(screen.getByText("Address confirmed (corrected by Google) · USPS: residential")).toBeInTheDocument();
+    cleanup();
+    renderPanel({ meta: meta({ state: "unit_missing", usps: {}, countyRoll: "found" }) });
+    expect(screen.getByText("Building confirmed, unit missing")).toBeInTheDocument();
+    cleanup();
+    renderPanel({ meta: meta({ state: "unavailable", usps: {}, countyRoll: "found" }) });
+    expect(screen.getByText("Validation unavailable")).toBeInTheDocument();
+    cleanup();
+    renderPanel({ meta: meta({ state: "outside_service_area", usps: {}, countyRoll: "not_found" }) });
+    expect(screen.getByText("Outside the service area · Not on the county roll")).toBeInTheDocument();
+  });
+
+  it("keeps 'could not confirm' for an address that needs confirmation, and names the county roll when the address itself is confirmed", () => {
+    renderPanel({ profile: flagged, form: { address: "1010 Example Loop" }, meta: meta({ state: "needs_confirmation", usps: {}, countyRoll: "not_found" }) });
+    expect(screen.getByText(/We could not confirm this address/)).toBeInTheDocument();
+    cleanup();
+    renderPanel({ profile: flagged, form: { address: "1010 Example Loop" }, meta: meta({ state: "confirmed", usps: {}, countyRoll: "not_found" }) });
+    expect(screen.queryByText(/We could not confirm this address/)).not.toBeInTheDocument();
+    expect(screen.getByText(/The county roll has no record for this house number/)).toBeInTheDocument();
+    cleanup();
+    renderPanel({ profile: flagged, form: { address: "1010 Example Loop" }, meta: meta({ state: "unavailable", usps: {}, countyRoll: "not_found" }) });
+    expect(screen.getByText(/The county roll has no record for this house number/)).toBeInTheDocument();
+    cleanup();
+    renderPanel({ profile: flagged, form: { address: "1010 Example Loop" }, meta: meta({ state: "unit_missing", usps: {}, countyRoll: "not_found" }) });
+    expect(screen.getByText(/The building is confirmed, but no unit was given/)).toBeInTheDocument();
+    cleanup();
+    // A record WAS found but the flag is up (a snapped match): never "no record".
+    renderPanel({ profile: flagged, form: { address: "1010 Example Loop" }, meta: meta({ state: "confirmed", usps: {}, countyRoll: "found" }) });
+    expect(screen.queryByText(/The county roll has no record/)).not.toBeInTheDocument();
+    expect(screen.getByText(/The property record found may be for a different house number/)).toBeInTheDocument();
+    cleanup();
+    // No status at all (gate off): the copy is exactly what it was.
+    renderPanel({ profile: flagged, form: { address: "1010 Example Loop" } });
+    expect(screen.getByText(/We could not confirm this address/)).toBeInTheDocument();
   });
 });

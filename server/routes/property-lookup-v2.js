@@ -1351,8 +1351,20 @@ router.post('/property-lookup', async (req, res) => {
     // office "Suite" address — size the whole property, never the suite.
     // occupancy ('suite' | 'building' | 'none'): staff's answer to "just your space
     // or the whole building?" (GATE_LOOKUP_BUSINESS_IDENTITY); absent unless sent.
+    // Address status line (PR 4, GATE_LOOKUP_ADDRESS_STATUS): asked beside the
+    // lookup, never ahead of it; resolves null while the gate is off and
+    // never rejects.
+    const addressStatusPromise = require('../services/property-lookup/address-status').resolveAddressStatus(address).catch(() => null);
     const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: wholeProperty !== true, ...occupancyOption(req.body?.occupancy) });
     result.meta.providerStatus ||= buildProviderStatus();
+    const addressStatus = await addressStatusPromise;
+    if (addressStatus) {
+      // The county roll's own answer rides beside it, never folded into it:
+      // an address Google confirms can still be missing from the roll.
+      const record = result.propertyRecord;
+      const onRoll = Boolean(record && (record._parcel?.parcelId || record._parcel?.paoParcelId || record._raw?.parcelId || hasCountyEvidence(record)));
+      result.meta.addressStatus = { ...addressStatus, countyRoll: onRoll ? 'found' : 'not_found' };
+    }
     // A whole-property (association) lookup skips the business check. The
     // tool is told so it can ask for a fresh lookup if the business type
     // later stops being an association. Absent while the gate is off.

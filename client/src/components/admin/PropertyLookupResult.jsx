@@ -75,6 +75,55 @@ function permitStoriesSourceLine(facts) {
   return `${facts?.sourceLabel || "Manatee building permit"} — confirm with the customer`;
 }
 
+const ADDRESS_STATUS_LABELS = {
+  confirmed: "Address confirmed",
+  unit_missing: "Building confirmed, unit missing",
+  needs_confirmation: "Address needs confirmation",
+  outside_service_area: "Outside the service area",
+  unavailable: "Validation unavailable",
+};
+
+// One line: what the address itself is (Google Address Validation), then the
+// USPS flag when Google gave one, then the county roll's own answer. Absent
+// (null) when the lookup carried no status: the panel is unchanged.
+function addressStatusLine(status) {
+  const label = status && ADDRESS_STATUS_LABELS[status.state];
+  if (!label) return null;
+  const parts = [status.state === "confirmed" && status.corrected ? `${label} (corrected by Google)` : label];
+  if (status.usps?.business === true) parts.push("USPS: business");
+  else if (status.usps?.residential === true) parts.push("USPS: residential");
+  if (status.countyRoll === "not_found") parts.push("Not on the county roll");
+  return parts.join(" · ");
+}
+
+function statusOf(meta) {
+  return meta ? meta.addressStatus : null;
+}
+
+function AddressStatusLine({ meta }) {
+  const line = addressStatusLine(statusOf(meta));
+  return line ? <p className="mt-1 text-sm text-ink-secondary">{line}</p> : null;
+}
+
+// "Could not confirm" belongs to an address that needs confirmation (or to a
+// lookup with no status, as before). When the address itself is confirmed or
+// validation did not answer, the open question is the county roll's.
+function addressIssueCopy(status) {
+  if (!status || !ADDRESS_STATUS_LABELS[status.state] || status.state === "needs_confirmation" || status.state === "outside_service_area") {
+    return "We could not confirm this address. Check the house number, street suffix, direction, and ZIP before using property measurements.";
+  }
+  // The address flag also goes up when a record WAS found but may belong to
+  // another house number (a snapped match): say "no record" only when the
+  // lookup itself found none.
+  if (status.countyRoll !== "not_found") {
+    return "The property record found may be for a different house number. Check the house number, street suffix, direction, and ZIP before using property measurements.";
+  }
+  if (status.state === "unit_missing") {
+    return "The building is confirmed, but no unit was given and the county roll has no record for this entry. Add the unit or suite, then check the measurements.";
+  }
+  return "The county roll has no record for this house number. Check the house number, street suffix, direction, and ZIP before using property measurements.";
+}
+
 function platMedianSourceLine(median) {
   const count = Number(median?.sampleCount) || 0;
   const min = Number(median?.minSqft) || 0;
@@ -98,9 +147,10 @@ export default function PropertyLookupResult({ profile, form, meta, refreshing, 
         {addressIssue ? form.address : meta?.matchedAddress || form.address}
       </p>
       {checkedAt && <p className="mt-1 text-sm text-ink-secondary">Records retrieved {checkedAt}{meta?.cache === "hit" ? " · Saved lookup" : ""}</p>}
+      <AddressStatusLine meta={meta} />
       {addressIssue && (
         <div className="mt-3 text-sm text-alert-fg">
-          <p>We could not confirm this address. Check the house number, street suffix, direction, and ZIP before using property measurements.</p>
+          <p>{addressIssueCopy(statusOf(meta))}</p>
           <button type="button" className="mt-2 min-h-11 border-0 bg-transparent p-0 text-left underline" onClick={onEditAddress}>Check address</button>
         </div>
       )}

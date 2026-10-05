@@ -124,6 +124,7 @@
  *   GATE_PORTAL_CHAT_EMAIL_CHANGE=true (portal Waves Assistant confirmed email-change hand-off, owner ruling 2026-10-02: a customer who asks to change their email types the new address, the chat reads it back, and once they confirm it the office gets ONE bell with the address on file and the new one; staff make the change. The chat model judges whether the customer confirmed; the server verifies the address is one the customer typed in that chat, and sends only the exact address its own read-back instruction carried in the previous turn and the assistant's reply showed. Nothing writes the customer row and no self-serve email edit exists. Off unless exactly 'true', read at call time via portalChatEmailChangeLive(); needs PORTAL_CHAT_SELF_SERVE live (default on); independent of the other portal chat gates. Off = byte-identical. Sends nothing to a customer.)
  *   GATE_PORTAL_YARD_CALENDAR=true ("Your yard this month" card in the logged-in portal, owner-approved 2026-10-01: the month's lawn, shrub and weed pressure from the species-catalog yard calendar, filtered to the customer's grass and plan lines, plus the same-city weather and household-pest forecast. Off unless exactly 'true', read at call time via portalYardCalendarLive(); off = GET /api/feed/yard answers {available:false} and the existing Local Conditions card renders exactly as before. Sends nothing to a customer.)
  *   GATE_PERMIT_DETAIL_SYNC=true (Manatee permit detail collection, address-match round 2 / R2-A: after the weekly report sync, a slow sequential pass reads each new-home permit's public ACA record page for conditioned and under-roof square footage, stories, bedrooms and bathrooms into construction_permit_records. Off unless exactly 'true', read at call time via permitDetailSyncLive(); independent of GATE_PERMIT_SYNC. Collects only: nothing reads it for a lookup or a price yet, nothing is sent to a customer. Kill switch: unset.)
+ *   GATE_LOOKUP_ADDRESS_STATUS=true (address-match PR 4: the admin estimate tool's property lookup shows one address status line from Google Address Validation, apart from the county roll's own answer: Address confirmed / Building confirmed, unit missing / Address needs confirmation / Outside the service area / Validation unavailable, with the USPS business or residential flag. No scope effect: no measurement, flag, cache row or price changes. One validation call per address per 24 h, 4 s cap, fail-open to unavailable; needs ADDRESS_VALIDATION_ENABLED. Off unless exactly 'true', read at call time via lookupAddressStatusLive(); off = no call and a byte-identical response. Kill switch: unset.)
  *   GATE_LOOKUP_BUSINESS_IDENTITY=true (address-match PR 5: the admin estimate lookup and the estimator engine ask Google Places which operating business sits at the street number and read its type and tenant count, so a storefront with its own street number inside a plaza parcel is no longer priced off the whole building or a satellite guess. Needs GATE_COMMERCIAL_SUITE_SIZING and only runs for the opted-in admin lookup and engine, never a public route. A matched business with part-building evidence is one suite; one with none of that is scope_unresolved, no price until the CSR answers "just your space or the whole building?". Deterministic, no AI reaches a size or price. Off unless exactly 'true', read at call time via lookupBusinessIdentityLive(); off = no Places call and byte-identical output. Kill switch: unset.)
  *   GATE_LOOKUP_PERMIT_FACTS=true (address-match round 2 / R2-B: the property lookup reads the home's own Manatee building permit facts (conditioned and under-roof square footage, stories; collected by GATE_PERMIT_DETAIL_SYNC into construction_permit_records) when the county roll has no building for the address, and the admin estimate tool and the estimator engine prefill home sq ft from them as a sourced estimate above the plat median, always flagged for confirmation and never as a measurement. Off unless exactly 'true', read at call time via lookupPermitFactsLive(); off = no permit read, byte-identical lookup, profile and draft. Kill switch: unset.)
  *   GATE_LLM_COST_TRACKING=true (estimated AI spend: a weekly pull of OpenRouter's public per-token prices into llm_model_prices (never hand-typed), estimated cost per lane on the Agents hub Control center from the call ledger's tokens (needs GATE_LLM_CALL_LEDGER for rows to exist), and a daily 7:40 AM ET check that raises ONE admin item when a lane's spend yesterday is at least LLM_COST_ALERT_MIN_USD (default 5) and LLM_COST_ALERT_MULTIPLIER (default 3) times its average day over the week before; services/llm-cost.js; internal only, no customer sends; ships DARK, read at call time via llmCostTrackingLive(); unset = off, the hub shows no cost and nothing is fetched)
@@ -5459,6 +5460,14 @@ function lookupBusinessIdentityLive() {
   return process.env.GATE_LOOKUP_BUSINESS_IDENTITY === 'true';
 }
 
+// GATE_LOOKUP_ADDRESS_STATUS read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for the admin lookup's address status line
+// (services/property-lookup/address-status.js): off, no Address Validation
+// call is made for a lookup and the route's response is exactly as before.
+function lookupAddressStatusLive() {
+  return process.env.GATE_LOOKUP_ADDRESS_STATUS === 'true';
+}
+
 // GATE_LOOKUP_PERMIT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the permit-facts leg of the property lookup
 // (routes/property-lookup-v2.js: the _permitBuildingFacts stamp and the
@@ -5685,6 +5694,8 @@ module.exports.estimateSentClosesAssessmentLive = estimateSentClosesAssessmentLi
 module.exports.permitDetailSyncLive = permitDetailSyncLive;
 // GATE_LOOKUP_BUSINESS_IDENTITY reader, on its own line so gate PRs never conflict.
 module.exports.lookupBusinessIdentityLive = lookupBusinessIdentityLive;
+// GATE_LOOKUP_ADDRESS_STATUS reader, on its own line so gate PRs never conflict.
+module.exports.lookupAddressStatusLive = lookupAddressStatusLive;
 // GATE_LOOKUP_PERMIT_FACTS reader, on its own line so gate PRs never conflict.
 module.exports.lookupPermitFactsLive = lookupPermitFactsLive;
 // GATE_LAWN_RAINFAST_WATCH reader, on its own line so gate PRs never conflict.
