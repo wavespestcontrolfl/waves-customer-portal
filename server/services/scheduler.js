@@ -124,6 +124,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms } = require('./scheduled-sms-delivery');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
 const { runExclusive, recordMissedTick } = require('../utils/cron-lock');
+const { registerDeployKillRetry, retryDeployKilledJobs } = require('../utils/deploy-kill-retry');
 const { REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 // Required HERE, at scheduler init (= process boot), not lazily inside the
 // cron tick below (codex r3 P1): the module's own MODULE_LOAD_AT — the
@@ -799,8 +800,14 @@ function initScheduledJobs() {
   // update makes concurrent passes harmless. The sweep reads pg_locks and
   // never takes a work lease, and runs at :03/:18/:33/:48 — off every
   // quarter-hour and top-of-hour job boundary (codex P1 on #4103).
-  // Fire-and-forget, fail-soft.
+  // Fire-and-forget, fail-soft. After each settle pass, a job that registered
+  // itself with registerDeployKillRetry (below, next to its cron) and whose
+  // row reads "killed mid-run" is re-run — see utils/deploy-kill-retry.js.
+  // The retry reads job_health, not this pass's result, so a pass that dies
+  // before the retry starts leaves the work for the next pass or instance.
+  // An instance with cron jobs off registers nothing, so it never retries.
   const settleDeadRunning = () => require('../utils/cron-lock').settleDeadRunningJobs()
+    .then(() => retryDeployKilledJobs())
     .catch((err) => logger.warn(`[scheduler] dead-running job_health settle failed: ${err.message}`));
   settleDeadRunning();
   cron.schedule('3,18,33,48 * * * *', settleDeadRunning, { timezone: 'America/New_York' });
@@ -983,6 +990,11 @@ function initScheduledJobs() {
         // shadow decision now (GATE_SMS_SCHEDULING_DECIDE; gate off, no read).
         const replies = await require('./sms-scheduling-decide').sweepUndecidedReplies();
         if (replies.recorded > 0) logger.info(`[sms-offer-ledger-backfill] decided ${replies.recorded} waiting replies`);
+        // A text move whose customer notice never started (the process exited
+        // right after the move committed) is finished here.
+        const effects = await require('./sms-scheduling-act').finishMoveEffects();
+        if (effects.finished > 0) logger.info(`[sms-offer-ledger-backfill] finished ${effects.finished} move notices`);
+        if (effects.error) throw new Error('sms move effects sweep unhealthy');
         if (replies.errors > 0) throw new Error(`sms reply decide sweep unhealthy: errors=${replies.errors} scanned=${replies.scanned}`);
         // A failed scan or write must fail job health, not read as a green tick.
         if (result.errors > 0) throw new Error(`sms offer backfill unhealthy: errors=${result.errors} scanned=${result.scanned}`);
@@ -1310,19 +1322,25 @@ function initScheduledJobs() {
   // sweep — single source of truth; independent of the per-call
   // GATE_CALL_PROPERTY_LOOKUP lane). Real nightly LLM spend — the batch
   // cap is the budget. runExclusive: a deploy overlap must not double-buy
-  // the same batch.
+  // the same batch. Re-run when a deploy kills it mid-run: the retry gets
+  // only the part of the batch the killed run left, and the attempt cooldown
+  // shields rows the killed run already tried.
   // =========================================================================
-  cron.schedule('55 3 * * *', async () => {
+  const runPropertyEnrichBackfill = async ({ afterKill = false } = {}) => {
     try {
-      const res = await runExclusive('property-enrich-backfill', () =>
-        require('./call-property-lookup').sweepUnenrichedProperties());
+      const res = await runExclusive('property-enrich-backfill', () => {
+        const lookup = require('./call-property-lookup');
+        return afterKill ? lookup.sweepUnenrichedPropertiesAfterKill() : lookup.sweepUnenrichedProperties();
+      });
       if (res && !res.skipped) {
         logger.info(`Property-enrich ${res.mode === 'call_time_recovery' ? 'call-time recovery' : 'backfill'}: ${res.enriched}/${res.processed} enriched (${res.cooledDown} cooled, ${res.parked} parked, ${res.failed} failed)`);
       }
     } catch (err) {
       logger.error(`Property-enrich backfill failed: ${err.message}`);
     }
-  }, { timezone: 'America/New_York' });
+  };
+  cron.schedule('55 3 * * *', () => runPropertyEnrichBackfill(), { timezone: 'America/New_York' });
+  registerDeployKillRetry('property-enrich-backfill', () => runPropertyEnrichBackfill({ afterKill: true }));
 
   // =========================================================================
   // DAILY 2:25AM ET — same-stop regroup sweep. Future same-day services at
@@ -4373,6 +4391,27 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Visit access and safety flags, shadow leg (GATE_VISIT_ACCESS_FLAGS=shadow
+  // on top of GATE_TYPED_DECISIONS): today's and tomorrow's open visits, each
+  // asked once per state, so a repeat pass over an unchanged route is database
+  // reads only. Hourly across the booking day so a same-day add or a new
+  // customer text is picked up; :34 is clear of the :19/:49 brief sweep.
+  cron.schedule('34 5-19 * * *', async () => {
+    try {
+      await runExclusive('visit-access-shadow', async () => {
+        const VisitAccess = require('./typed-decisions/visit-access-shadow');
+        // Retention runs whatever the gate says: stored states are dropped on
+        // schedule even after the shadow is switched off.
+        await VisitAccess.pruneVisitAccessStates();
+        if (!require('../config/feature-gates').visitAccessShadowLive()) return;
+        const result = await VisitAccess.runVisitAccessSweep();
+        logger.info(`Visit access shadow done: ${result.recorded} recorded, ${result.unchanged} unchanged, ${result.skipped} skipped, ${result.failed} failed of ${result.considered}`);
+      });
+    } catch (err) {
+      logger.error(`Visit access shadow failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('5 10 * * *', async () => {
     logger.info('Running: pre-visit balance reminders');
     try {
@@ -6364,9 +6403,10 @@ function initScheduledJobs() {
   // Property-lookup parser canary — nightly, one golden parcel per county
   // through the real by-parcel pipeline; alerts when a county PAO layout
   // change silently breaks the scrape-based parsers.
-  // See server/services/property-lookup-canary.js.
+  // See server/services/property-lookup-canary.js. Re-run when a deploy
+  // kills it mid-run, so a busy merge night still gets its health check.
   // =========================================================================
-  cron.schedule('17 4 * * *', async () => {
+  const runPropertyLookupCanaryTick = async () => {
     try {
       const { runPropertyLookupCanary } = require('./property-lookup-canary');
       const result = await runPropertyLookupCanary();
@@ -6376,7 +6416,14 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Property-lookup canary cron failed: ${err.message}`);
     }
-  }, { timezone: 'America/New_York' });
+  };
+  cron.schedule('17 4 * * *', runPropertyLookupCanaryTick, { timezone: 'America/New_York' });
+  // No retry once the killed run wrote its check state: the alert and the
+  // streak counters for the night are already recorded, and a second run
+  // would ring a second bell and count one night twice.
+  registerDeployKillRetry('property-lookup-canary', runPropertyLookupCanaryTick, {
+    shouldRetry: async (row) => !(await require('./property-lookup-canary').canaryStateWrittenSince(row.last_started_at)),
+  });
 
   // =========================================================================
   // WaveGuard inventory forecast — proactive product shortage warning before
@@ -8069,13 +8116,22 @@ function initScheduledJobs() {
           try {
             // A promotion to a street-level hold can land after the candidate scan above: re-read the hold
             // under the visit row lock (the promoter's own lock) right before recording, and skip if held.
-            const guarded = await require('./street-level-hold').runUnlessLiveHold(svc.id, (trx) => missedAppointment.onSkip(svc.id, 'no_show', trx));
-            if (guarded.held) continue;
+            // The same lock re-checks the candidate itself (`scanned`): a visit closed or moved since
+            // the scan is not flagged.
+            const guarded = await require('./street-level-hold').runUnlessLiveHold(svc.id, (trx) => missedAppointment.onSkip(svc.id, 'no_show', trx, { scanned: svc }));
+            if (guarded.held || (guarded.result && guarded.result.action === 'stale_candidate')) continue;
             flagged++;
           } catch (skipErr) {
             logger.error(`Missed appointment onSkip failed for ${svc.id}: ${skipErr.message}`);
           }
         }
+        // An open flagged row whose card insert failed once has no other way back onto the office queue.
+        // Likewise a flagged row whose visit closed or moved while its settlement failed.
+        const repaired = await require('./not-closed-out').reconcileOpenRows();
+        if (repaired.raised || repaired.settled) logger.info(`Missed appointment check: ${repaired.raised} missing queue card(s) raised, ${repaired.settled} flagged row(s) settled from the visit`);
+        // And the repeated-miss outreach task: a failed raise or withdrawal is repaired here.
+        const outreach = await missedAppointment.reconcileOutreach();
+        if (outreach.raised || outreach.withdrawn) logger.info(`Missed appointment check: outreach task(s) ${outreach.raised} raised, ${outreach.withdrawn} withdrawn on repair`);
         logger.info(`Missed appointment check done: ${candidates.length} candidate(s), ${flagged} flagged as no-show`);
       }
       });

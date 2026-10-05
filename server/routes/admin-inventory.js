@@ -3114,7 +3114,7 @@ router.get('/restock-requests/:id/order-evidence', async (req, res, next) => {
 router.get('/restock-requests', async (req, res, next) => {
   try {
     res.json(await require('../services/inventory-restock-queue').listRestockRequests({
-      status: req.query.status || 'open', limit: req.query.limit, showSpend: req.techRole === 'admin', requestId: req.query.requestId,
+      status: req.query.status || 'open', limit: req.query.limit, showSpend: req.techRole === 'admin', officeDetail: req.techRole === 'admin', requestId: req.query.requestId,
     }));
   } catch (err) { next(err); }
 });

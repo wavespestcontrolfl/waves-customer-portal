@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import useIsMobile from "../hooks/useIsMobile";
 import useModalFocus from "../hooks/useModalFocus";
-import { refetchFlags, useFeatureFlag, useFeatureFlagReady } from "../hooks/useFeatureFlag";
+import { refetchFlags, useFeatureFlag } from "../hooks/useFeatureFlag";
 import { trackAdminPageView, markUsageSource } from "../lib/adminUsage";
 import {
   ADMIN_DESKTOP_NAV_SECTIONS,
@@ -238,15 +238,9 @@ export default function AdminLayoutV2() {
   const sidebarVisible = !isMobile || sidebarOpen;
   // On a phone the field workspace (/admin/today) supplies its own header and
   // bottom nav, so the admin shell's mobile top bar and tab bar step aside.
-  // Only while the field workspace actually renders: with the
-  // tech-field-workspace flag off, /admin/today shows the legacy route UI,
-  // which has no navigation of its own, so the admin chrome must stay.
-  // Re-read per verified account: an account switch in another tab refetches
-  // flags, and the chrome must follow the new login's value (pre-push P1).
-  const fieldWorkspaceFlag = useFeatureFlagReady("tech-field-workspace", false, userId);
   // 0 desktop, 1 phone, 2 phone on the field workspace; indexes the padding
   // table and the phone-only chrome.
-  const layout = Number(isMobile) * (1 + Number(fieldWorkspaceFlag.enabled && onField));
+  const layout = Number(isMobile) * (1 + Number(onField));
   const mainPadding = MAIN_PADDING[layout];
   const fieldHold = { onClickCapture: holdWhileFieldBusy, "aria-busy": fieldBusy || undefined };
   // The redirect effect runs after render. Apply its existing role policy to

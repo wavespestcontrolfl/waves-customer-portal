@@ -35,6 +35,7 @@
  */
 
 const { aftercareCustomerTask, normalizeLawnAftercare } = require('./lawn-aftercare');
+const { RAINFAST_WATCH_LINE } = require('./lawn-rainfast-watch');
 const { issueRestatesAftercare } = require('./lawn-report-insights');
 
 // The client's static labels around the lead ("What we applied today", "Your
@@ -185,6 +186,8 @@ function v6CopyOf(copyV6) {
  * @param {object} [extras]
  * @param {{priorDate:string, lines:string[]}|null} [extras.sinceLast] the
  *   "Since your last visit" block (lawn-since-last-copy.js), when its gate is live
+ * @param {{line: string}|null} [extras.rainfastWatch] the live view's rainfast
+ *   breach sentence (lawn-rainfast-watch.js), when GATE_LAWN_RAINFAST_WATCH is live
  * @param {{headline, whatWeDid, whatToExpect, watching}|null} [extras.copyV6] the
  *   v6 copy's fixed-sentence fields (lawn-copy-v6.js), when its gate is live;
  *   each is a string or null (a null headline falls to the snapshot's)
@@ -194,7 +197,7 @@ function v6CopyOf(copyV6) {
  *   whatToExpect?: string, watching?: string } | null}
  *   null when there is no snapshot to lead with.
  */
-function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null } = {}) {
+function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null, rainfastWatch = null } = {}) {
   const snapshot = reportV2 && reportV2.snapshot;
   if (!snapshot || typeof snapshot !== 'object') return null;
   const bannerPresent = bannerHasWateringLines(reportV2.banner);
@@ -226,6 +229,19 @@ function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null } = {}) {
       const text = pick([v6[field]], bannerPresent);
       if (text && countWords(text) <= FIELD_WORD_CAPS[field]) lead[field] = text;
     }
+  }
+  // GATE_LAWN_RAINFAST_WATCH (P31, live view only): the one fixed sentence joins
+  // the Watching line, after the writer's own sentence. Only the exact module
+  // sentence is accepted. It gives no watering advice, so the banner-ownership
+  // wording test (which would reject its "rain") does not apply. The combined
+  // field is held to the Watching word cap too: when the two do not fit, the
+  // rainfast sentence REPLACES the writer's (it is the more specific fact, and
+  // it fits alone). The budget loop below still governs the whole region:
+  // Watching is given up whole when the region runs over.
+  if (rainfastWatch && rainfastWatch.line === RAINFAST_WATCH_LINE
+    && countWords(RAINFAST_WATCH_LINE) <= FIELD_WORD_CAPS.watching) {
+    const combined = lead.watching ? `${lead.watching} ${RAINFAST_WATCH_LINE}` : RAINFAST_WATCH_LINE;
+    lead.watching = countWords(combined) <= FIELD_WORD_CAPS.watching ? combined : RAINFAST_WATCH_LINE;
   }
   for (const field of BUDGET_DROP_ORDER) {
     if (leadWords({ ...reportV2, lead }) <= LEAD_WORD_BUDGET) break;
@@ -261,6 +277,15 @@ function leadWords(reportV2) {
   const parts = [];
   if (banner && Array.isArray(banner.lines)) parts.push(...banner.lines);
   if (banner && banner.mowHold) parts.push(banner.mowHold.line);
+  // GATE_LAWN_WATERING_FORECAST live-view lines (the payload only carries them
+  // on a live render of a water-in; PDF/static strip them before this runs).
+  // The page prints the measured-rain note when it exists, else the forecast
+  // sentence: count the one that will be displayed (LawnWateringBanner).
+  if (banner && banner.state !== 'hold' && banner.state !== 'hold_then_water_in') {
+    const live = banner.observedRain && typeof banner.observedRain.line === 'string' && banner.observedRain.line
+      ? banner.observedRain.line : banner.forecastLine;
+    if (typeof live === 'string' && live) parts.push(live);
+  }
   if (lead) for (const strings of Object.values(LEAD_FIELDS)) parts.push(...strings(lead));
   const dateWords = lead ? nextVisitDateWords(reportV2.snapshot && reportV2.snapshot.nextVisit) : 0;
   const labelWords = lead

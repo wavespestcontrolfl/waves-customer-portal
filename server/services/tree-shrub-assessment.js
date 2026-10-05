@@ -23,11 +23,14 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { anthropicText, geminiText } = require('./llm/call');
+const { anthropicText, geminiText, dispatchWithFallback } = require('./llm/call');
 const {
   TECH_FINDING_LABELS, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive, normalizeTechFindings, editText,
   hideFrozenFindingsInScores, loadFrozenTechFindingsByRecord, withholdScores,
 } = require('./service-report/tree-shrub-tech-findings');
+const {
+  validMonth: validWatchMonth, normalizeWatchSignals, watchListPromptBlock,
+} = require('../config/tree-shrub-watch-list');
 
 // Order-independent content hash of a set of photo data URLs (each hashed, then
 // hashed together) so the review signature can be bound to the EXACT photos scored —
@@ -236,12 +239,13 @@ const VISION_PROMPT = `You are a tree & shrub (landscape ornamental) plant-healt
 
 You flag SIGNALS, never a confirmed diagnosis. Report pest-pressure and disease-like SIGNALS — never assert an "infestation" or a confirmed "disease".
 
-BE SPECIFIC, NOT GENERIC. When the visual pattern points to a recognizable cause, NAME it using "consistent with" language: name the likely pest group (scale, mealybugs, whiteflies, spider mites, thrips, caterpillars, palm aphids), the likely disease (fungal leaf spot such as Pestalotiopsis or Bipolaris, Graphiola false smut, Ganoderma conk, sooty mold, powdery mildew, anthracnose), or the likely SPECIFIC nutrient deficiency by its species-typical pattern:
+BE SPECIFIC, NOT GENERIC. When the visual pattern points to a recognizable cause, NAME it using "consistent with" language: name the likely pest group (scale, mealybugs, whiteflies, spider mites, thrips, caterpillars, palm aphids), the likely disease (fungal leaf spot such as Pestalotiopsis or Bipolaris, Graphiola false smut, sooty mold, powdery mildew, anthracnose), or the likely SPECIFIC nutrient deficiency by its species-typical pattern:
 - Potassium deficiency (the most common SWFL palm deficiency): OLDER fronds yellowing with translucent yellow-orange speckling and necrotic leaflet tips; the palm pulls potassium from old fronds to feed new growth.
 - Magnesium deficiency on palms: broad yellow band along the edges of OLDER fronds with a green center.
 - Manganese deficiency on palms/cycads: frizzled, weak, or yellowing NEW growth.
 - Iron deficiency: interveinal yellowing on NEW growth, common in alkaline soil.
 Note when one issue likely feeds another (nutritional stress opening the door to fungal leaf spot, honeydew from sap-feeders growing sooty mold).
+Diagnosis-only palm problems are NEVER named (owner 2026-10-03): a shelf-like conk at the base of a trunk, a collapsed or dead spear leaf, or a palm declining as a whole is described only by what is visible, with a note that it needs an in-person diagnosis. Do not name any trunk-rot, wilt or phytoplasma disease.
 
 DO NOT FLAG NORMAL PLANT ANATOMY. Many palms carry a natural reddish-brown woolly fuzz (tomentum) on the crownshaft, emerging spear, and leaf bases — dense, uniform, velvety fuzz there is normal anatomy, not scale or pests. Only report scale-like bumps that are hard, shell-like, sticky, or irregularly scattered on leaf and twig surfaces. When unsure, describe it as "worth a touch-check" rather than a pest signal.
 
@@ -354,11 +358,25 @@ function suggestLandscapeCondition(overallScore) {
 // GATE_TS_TECH_FINDINGS_COPY (owner 2026-10-01): photos are ground level, so the
 // read may only describe what a whole-palm or oldest-fronds shot shows. Gate off
 // = VISION_PROMPT exactly as before.
+// The watch list (GATE_TS_WATCH_LIST) is NEVER in this prompt: the main read
+// writes the observations that reach customer copy, so it depends only on the
+// tech-findings gate. Watch signals come from their own call (readWatchSignals).
 function visionPromptText() {
   if (!techFindingsCopyLive()) return VISION_PROMPT;
   const rule = `${PALM_CROWN_PROMPT_RULE} In "observations", never call a palm's crown, spear leaf or newest fronds healthy, fine or normal; if only the crown is in view, say it is not clearly visible.`;
   const marker = 'Return this exact JSON structure';
   return VISION_PROMPT.replace(marker, `${rule}\n\n${marker}`);
+}
+
+// GATE_TS_WATCH_LIST read at call time (strict opt-in, dark by default).
+function watchListLive() {
+  const gates = require('../config/feature-gates');
+  return typeof gates.tsWatchListLive === 'function' && gates.tsWatchListLive() === true;
+}
+// The visit month the watch list applies to: the gate on and a valid 1-12
+// month, else null (every watch-list path then stays off).
+function activeWatchMonth(month) {
+  return watchListLive() ? validWatchMonth(month) : null;
 }
 async function callClaudeVision(base64Image, mimeType) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
@@ -433,6 +451,73 @@ async function callGeminiVision(base64Image, mimeType) {
   return null;
 }
 
+// GATE_TS_WATCH_LIST: the watch-signal read. A SEPARATE, small call with its own
+// prompt, so the list can never steer the main read's scores or the
+// observations that reach customer copy. It asks for the keys and nothing else
+// (no scores, no prose). It rides the shared LLM dispatcher like every other
+// photo lane (MODELS.TEXT_POLICIES.treeShrubWatchSignals: Gemini, OpenAI on a
+// miss; call ledger and cost rows under lane ts_watch_signals), never a raw
+// fetch. Any failure is null ("no read", never a clean []): it can never fail the
+// main read, and the sheet must not show an unavailable read as "nothing
+// flagged". Known keys on the month's list only.
+const WATCH_READ_MAX_OUTPUT_TOKENS = 1024; // a short key list plus Gemini 3.x thinking spend
+// The watch read is optional, so it never holds a finished main read for long:
+// the chain's legs share this budget (timeoutMs, enforced per leg by the chain's
+// own hard deadline) and a second deadline here covers an adapter that ignores both.
+const WATCH_READ_MAX_MS = 20 * 1000;
+const WATCH_READ_GRACE_MS = 1000;
+
+// The normalized keys when the answer has a watch_signals array whose every
+// entry is a string key on this month's list; anything else is null.
+function conformingWatchSignals(json, month) {
+  if (!json || !Array.isArray(json.watch_signals)) return null;
+  const signals = normalizeWatchSignals(json.watch_signals, month);
+  const conforming = json.watch_signals.every((entry) => typeof entry === 'string'
+    && signals.includes(entry.trim().toLowerCase()));
+  return conforming ? signals : null;
+}
+
+async function readWatchSignals(base64Image, mimeType, month) {
+  let timer;
+  try {
+    const deadline = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), WATCH_READ_MAX_MS + WATCH_READ_GRACE_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+    });
+    const outcome = await Promise.race([
+      Promise.resolve().then(() => dispatchWithFallback(MODELS.TEXT_POLICIES.treeShrubWatchSignals, {
+        text: watchListPromptBlock(month),
+        images: [{ data: base64Image, mimeType: mimeType || 'image/jpeg' }],
+        jsonMode: true,
+        maxTokens: WATCH_READ_MAX_OUTPUT_TOKENS,
+        thinkingLevel: 'LOW',
+        reasoningEffort: 'low',
+        timeoutMs: WATCH_READ_MAX_MS,
+        laneId: 'ts_watch_signals',
+      }, {
+        // A nonconforming answer is a failed leg (its ledger row is flipped by the
+        // chain), so the OpenAI stand-in gets its turn.
+        validate: (result) => (conformingWatchSignals(result.json, month) ? null : 'schema_invalid:watch_signals'),
+        reserveFallbackBudget: true,
+        hardDeadline: true,
+      })),
+      deadline,
+    ]);
+    if (!outcome || !outcome.ok) {
+      logger.warn(`Tree-shrub watch-signal read unavailable (${(outcome && outcome.reason) || 'timeout'})`);
+      return null;
+    }
+    const signals = conformingWatchSignals(outcome.json, month);
+    if (!signals) logger.warn('Tree-shrub watch-signal read answered with no usable watch_signals');
+    return signals;
+  } catch (err) {
+    logger.warn(`Tree-shrub watch-signal read failed: ${err.message}`);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // Merge two raw model results: average the 0-100 fields, average the severity
 // indices (rounded), and flag a divergence when the two disagree by 2+ levels.
 function averageScores(claude, gemini) {
@@ -503,14 +588,34 @@ function isCompleteVisionResult(result) {
  * Analyze one photo with Gemini vision — Gemini-only per owner ruling
  * 2026-09-24 (no more Claude+Gemini averaging/fan-out). Claude runs ONLY as a
  * fallback when Gemini returns nothing (empty/error/schema-invalid).
- * @returns {Promise<{claude, gemini, composite, divergenceFlags}|null>}
+ * GATE_TS_WATCH_LIST: an optional third argument { month } (the visit's month,
+ * 1-12, America/New_York) runs the separate watch-signal read in parallel with
+ * the main read and adds a `watchSignals` array (known keys on that month's
+ * list, list order) to the result. The main read is untouched. Gate off, or no
+ * valid month = exactly one call and the result as before.
+ * @returns {Promise<{claude, gemini, composite, divergenceFlags, watchSignals?}|null>}
  */
-async function analyzePhoto(base64Image, mimeType = 'image/jpeg') {
-  const gemini = await callGeminiVision(base64Image, mimeType);
-  const claude = gemini ? null : await callClaudeVision(base64Image, mimeType);
+async function analyzePhoto(base64Image, mimeType = 'image/jpeg', options = {}) {
+  const watchMonth = activeWatchMonth(options && options.month);
+  const mainRead = async () => {
+    const g = await callGeminiVision(base64Image, mimeType);
+    const c = g ? null : await callClaudeVision(base64Image, mimeType);
+    return { gemini: g, claude: c };
+  };
+  if (!watchMonth) {
+    const { gemini, claude } = await mainRead();
+    if (!claude && !gemini) return null;
+    const { composite, divergenceFlags } = averageScores(claude, gemini);
+    return { claude, gemini, composite, divergenceFlags };
+  }
+  // readWatchSignals never rejects, so it cannot fail the main read.
+  const [{ gemini, claude }, watchSignals] = await Promise.all([
+    mainRead(),
+    readWatchSignals(base64Image, mimeType, watchMonth),
+  ]);
   if (!claude && !gemini) return null;
   const { composite, divergenceFlags } = averageScores(claude, gemini);
-  return { claude, gemini, composite, divergenceFlags };
+  return { claude, gemini, composite, divergenceFlags, watchSignals };
 }
 
 // ── Tech-facing findings (exception-based closeout) ─────────────────────────────
@@ -876,16 +981,24 @@ async function storeTreeShrubAssessmentFromReview({
  *
  * @returns {Promise<{ scores, aiSummary, suggestedCustomerAction, findings }|null>}
  */
-async function previewTreeShrubAssessment({ photos = [], loadImage, analyze = analyzePhoto } = {}) {
+async function previewTreeShrubAssessment({
+  photos = [], loadImage, analyze = analyzePhoto, month = null,
+} = {}) {
   if (!Array.isArray(photos) || !photos.length || typeof loadImage !== 'function') return null;
-  const composites = (await Promise.all(photos.map(async (photo) => {
+  // GATE_TS_WATCH_LIST: the visit's month. Off or invalid = analyze is called
+  // with exactly the two arguments it always was.
+  const watchMonth = activeWatchMonth(month);
+  const reads = (await Promise.all(photos.map(async (photo) => {
     try {
       const img = await loadImage(photo);
       if (!img || !img.base64) return null;
-      const result = await analyze(img.base64, img.mimeType || 'image/jpeg');
-      return result && result.composite ? result.composite : null;
+      const result = watchMonth
+        ? await analyze(img.base64, img.mimeType || 'image/jpeg', { month: watchMonth })
+        : await analyze(img.base64, img.mimeType || 'image/jpeg');
+      return result && result.composite ? { composite: result.composite, watchSignals: result.watchSignals } : null;
     } catch { return null; }
   }))).filter(Boolean);
+  const composites = reads.map((read) => read.composite);
   if (!composites.length) return null;
   const mergedRaw = mergePhotoComposites(composites);
   const scores = toCategoryScores(mergedRaw);
@@ -898,6 +1011,14 @@ async function previewTreeShrubAssessment({ photos = [], loadImage, analyze = an
     scoredCount: composites.length,
     photoCount: photos.length,
     ...buildTreeShrubTechFindings({ scores, observations: mergedRaw.observations }),
+    // GATE_TS_WATCH_LIST: the signals any photo showed, in list order. Carried
+    // for the sheet only; no score reads it.
+    ...(watchMonth ? {
+      watchSignals: normalizeWatchSignals(reads.flatMap((read) => read.watchSignals || []), watchMonth),
+      // True only when every scored photo's watch read answered: the sheet
+      // says "flagged nothing" on a complete read alone.
+      watchSignalsComplete: reads.every((read) => Array.isArray(read.watchSignals)),
+    } : {}),
   };
 }
 
@@ -1044,6 +1165,7 @@ async function buildTreeShrubAssessmentReportData(service, serviceLine, knex = d
 
 module.exports = {
   VISION_PROMPT,
+  visionPromptText,
   SEVERITY_DISPLAY,
   VISION_RESULT_SCHEMA,
   SCHEMA_PROMPT_SHAPES,

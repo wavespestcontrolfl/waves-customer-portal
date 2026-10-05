@@ -712,6 +712,124 @@ it("drops an unverifiable recovered agent selection while retaining the editable
 });
 
 
+it("shows the translation of a text in another language and sends the suggested reply as an ordinary staff message", async () => {
+  const owner = "translation-assist-owner";
+  saveDraft(owner, { msgBody: "", fromNumber: line });
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  const translation = { trialId: 7, customerId: "customer-a", language: "Spanish", inboundOriginal: "¿A qué hora vienen el martes?", inboundEnglish: "What time are you coming on Tuesday?", replyEnglish: "Your visit is Tuesday, Oct 6, 1:00 PM - 3:00 PM.", replyTranslated: "Su visita es el martes 6 de oct, 13:00 - 15:00.", heldReason: null };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" }, customerMessages: [{ channel: "sms", contactPhone: "+19415550100", ourEndpointId: line }] }); await tick();
+  expect(screen.getByText("Customer wrote in Spanish")).toBeInTheDocument();
+  expect(screen.getByText("What time are you coming on Tuesday?")).toBeInTheDocument();
+  expect(screen.getByText("Your visit is Tuesday, Oct 6, 1:00 PM - 3:00 PM.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Use Reply" }));
+  expect(screen.getByRole("textbox", { name: "Text message" })).toHaveValue(translation.replyTranslated);
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  // the trial rides along so the server can refuse a reply that went stale after the card was read
+  expect(JSON.parse(request[1].body)).toMatchObject({ body: translation.replyTranslated, messageType: "manual", translationTrialId: 7 });
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("agentDraft");
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("agentDecisionId");
+  expect(screen.queryByTestId("translation-assist")).not.toBeInTheDocument();
+});
+
+it("any edit to the suggested reply detaches its trial: the text is then the staff member's own", async () => {
+  const owner = "translation-edited-owner";
+  const translation = { trialId: 12, customerId: "customer-a", language: "Spanish", inboundEnglish: "Which day?", replyEnglish: "Tuesday.", replyTranslated: "El martes.", heldReason: null };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" }, customerMessages: [{ channel: "sms", contactPhone: "+19415550100", ourEndpointId: line }] }); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Use Reply" }));
+  const field = screen.getByRole("textbox", { name: "Text message" });
+  fireEvent.change(field, { target: { value: "El miércoles." } }); await tick(10);
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ body: "El miércoles." });
+  expect(JSON.parse(request[1].body)).not.toHaveProperty("translationTrialId");
+});
+
+it("Use Reply switches a deferred send back to Now (a suggested reply is never scheduled)", async () => {
+  const owner = "translation-timing-owner";
+  const translation = { trialId: 14, customerId: "customer-a", language: "Spanish", inboundEnglish: "Which day?", replyEnglish: "Tuesday.", replyTranslated: "El martes.", heldReason: null };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  saveDraft(owner, { msgBody: "", fromNumber: line, selectedCustomerId: "customer-a", sendTiming: "tomorrow" });
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  setupWithOwner(owner); await tick();
+  fireEvent.click(screen.getByRole("button", { name: "Use Reply" })); await tick(10);
+  fireEvent.click(screen.getByRole("button", { name: "Send", exact: true })); await tick();
+  expect(fetch.mock.calls.some(([url]) => String(url).endsWith("/communications/schedule-sms"))).toBe(false);
+  const request = fetch.mock.calls.find(([url]) => String(url).endsWith("/communications/sms"));
+  expect(JSON.parse(request[1].body)).toMatchObject({ body: "El martes.", translationTrialId: 14 });
+});
+
+it("offers no Use Reply while an approval draft is loaded (that Send would skip the re-check)", async () => {
+  const owner = "translation-approval-owner";
+  saveDraft(owner, savedApproval);
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  const translation = { trialId: 13, customerId: "customer-a", language: "Spanish", inboundEnglish: "Which day?", replyEnglish: "Tuesday.", replyTranslated: "El martes.", heldReason: null };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner); await tick();
+  expect(screen.getByText("Which day?")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Use Reply" })).not.toBeInTheDocument();
+});
+
+it("drops the suggested reply when its time is up and keeps the translation", async () => {
+  const owner = "translation-expiry-owner";
+  const translation = { trialId: 10, customerId: "customer-a", language: "Spanish", inboundEnglish: "Which day is my visit?", replyEnglish: "Your visit is Tuesday, Oct 6.", replyTranslated: "Su visita es el martes 6 de oct.", heldReason: null, replyExpiresAt: new Date(Date.now() - 1000).toISOString() };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" } }); await tick();
+  await tick(10);
+  expect(screen.getByText("Which day is my visit?")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Use Reply" })).not.toBeInTheDocument();
+  expect(screen.getByText(/No suggested reply\. The suggested reply is out of date\./)).toBeInTheDocument();
+});
+
+it("asks again while the translation of a just-arrived text is still being checked", async () => {
+  const owner = "translation-pending-owner";
+  const ready = { trialId: 11, customerId: "customer-a", language: "Spanish", inboundEnglish: "Can you come Friday?", replyEnglish: null, replyTranslated: null, heldReason: "The reply did not pass every check." };
+  let reads = 0;
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation: ++reads === 1 ? { pending: true, customerId: "customer-a" } : ready }) : originalFetch(url, options));
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" } }); await tick();
+  expect(screen.queryByTestId("translation-assist")).not.toBeInTheDocument();
+  await tick(15000); await tick();
+  expect(screen.getByText("Can you come Friday?")).toBeInTheDocument();
+});
+
+it("a held translation shows the English and the reason, with no reply to use", async () => {
+  const owner = "translation-held-owner";
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  const translation = { trialId: 8, customerId: "customer-a", language: "Portuguese", inboundOriginal: "Quero cancelar meu plano.", inboundEnglish: "I want to cancel my plan.", replyEnglish: null, replyTranslated: null, heldReason: "The translated reply did not read back the same as the English." };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" } }); await tick();
+  expect(screen.getByText("I want to cancel my plan.")).toBeInTheDocument();
+  expect(screen.getByText(/No suggested reply\. The translated reply did not read back/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Use Reply" })).not.toBeInTheDocument();
+});
+
+it("never shows a translation read for a different customer", async () => {
+  const owner = "translation-other-customer-owner";
+  window.history.replaceState({}, "", "/?phone=9415550100");
+  const translation = { trialId: 9, customerId: "someone-else", language: "Spanish", inboundEnglish: "Not this customer's text", replyEnglish: "x", replyTranslated: "y", heldReason: null };
+  const originalFetch = fetch.getMockImplementation();
+  fetch.mockImplementation(async (url, options) => String(url).includes("/communications/agent-draft?")
+    ? response({ draft: null, translation }) : originalFetch(url, options));
+  setupWithOwner(owner, { customer: { id: "customer-a", phone: "+19415550100" } }); await tick();
+  expect(screen.queryByTestId("translation-assist")).not.toBeInTheDocument();
+});
+
 it("discards an Agent Review selection before sending a fresh message", async () => {
   const owner = "discard-agent-draft-owner";
   const selectedAgentDraft = { decisionId: "decision-a", suggestedMessage: "Agent suggestion" };

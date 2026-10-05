@@ -2012,6 +2012,34 @@ describe('runNext dry-run behavior', () => {
   });
 });
 
+describe('"Suggest a post" rows are SERP-profiled (GitHub Codex P1 on ba9bed50fc)', () => {
+  // They share the operator_intercept bucket, but nobody authored their
+  // brief: the router's SERP safety demotions and the gate's SERP check
+  // apply to them, so their brief is composed with the SERP read. Operator
+  // intercepts keep skipping it.
+  test.each([
+    ['a suggestion', { source: 'tech_blog_search', operator_pinned: true, suggested_at: '2026-10-03T12:00:00.000Z' }, false],
+    ['an operator intercept', { operator_pinned: true, intercept_brief: { slug: '/pest-control/orkin-vs-terminix/' } }, true],
+  ])('%s: its brief is composed with the SERP read only when it is no operator intercept', async (_label, signal_metadata, skipSerp) => {
+    const claimedAt = new Date('2026-10-03T13:00:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({
+        id: 'opp_suggest', bucket: 'operator_intercept', action_type: 'new_supporting_blog', page_url: null,
+        service: 'mosquito', city: null, query: 'dengue mosquito symptoms', signal_metadata, claimed_at: claimedAt,
+      }),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      skip: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({ id: 'brief_suggest', action_type: 'do_not_publish', human_review_reason: 'SERP dominated by public-health resources; Waves cannot displace .gov' }),
+    };
+    const runner = loadRunnerWith({ queue, briefBuilder });
+    await runner.runNext();
+    expect(briefBuilder.compose).toHaveBeenCalledWith('opp_suggest', { persist: true, skipSerp });
+  });
+});
+
 describe('protected-page guard', () => {
   test('blocks derived city-service money pages even when opportunity page_url is absent', async () => {
     const claimedAt = new Date('2026-05-28T13:00:00Z');

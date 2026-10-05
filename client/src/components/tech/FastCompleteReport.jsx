@@ -179,7 +179,7 @@ export function PhotoStripSection({ photos, locked, onOpen }) {
 // tells the sheet what holds the report meanwhile: an open description, a
 // change being saved, or a removal waiting for its answer.
 const NOTE_PHOTO_PALETTE = {
-  text: 'var(--tech-text)', muted: 'var(--tech-muted)', border: 'var(--tech-border)', card: 'var(--tech-card)', danger: '#ef4444', onDanger: '#fff',
+  text: 'var(--tech-text)', muted: 'var(--tech-muted)', border: 'var(--tech-border)', card: 'var(--tech-card)', danger: '#a32d2d', onDanger: '#fff',
 };
 const NOTE_PHOTO_ERRORS = {
   photo_caption_banned_copy: 'That description has wording we can’t put on a customer’s report. Describe the photo in other words.',
@@ -337,6 +337,9 @@ function BlogPostOption({ post, pressed = false, locked, onPick }) {
 // links. It goes at the bottom of their report as "From the Waves blog".
 // Optional; the server checks the pick is still live when the visit completes.
 export function BlogPostSection({ search, value, locked, onChange }) {
+  // The search's coverage and "Suggest a post" belong to the office form only
+  // (owner 2026-10-03: the tech screen is going away and new work goes to the
+  // admin UI), so this sheet keeps the plain list it had.
   const { query, setQuery, results, status } = useBlogPostSearch(search);
   return (
     <section className="tech-visit-choice-section" aria-label="Blog post for the customer">

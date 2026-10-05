@@ -127,10 +127,10 @@ async function processVendorInvoice(email, classification) {
         is_invoice: true,
       });
 
-      const parseResponse = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => anthropic.messages.create({
-        model: MODELS.FLAGSHIP,
-        ...anthropicEffortConfig(MODELS.FLAGSHIP),
-        max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 1024),
+      const parseResponse = await ledgerCall('anthropic', MODELS.ROUTINE, () => anthropic.messages.create({
+        model: MODELS.ROUTINE,
+        ...anthropicEffortConfig(MODELS.ROUTINE, MODELS.ROUTINE_EFFORT),
+        max_tokens: anthropicMaxTokens(MODELS.ROUTINE, 1024),
         messages: [{
           role: 'user',
           content: [
@@ -159,8 +159,10 @@ async function processVendorInvoice(email, classification) {
         }],
       }), { laneId: 'invoice_pdf' });
 
-      const rawInvoice = parseClaudeJson(anthropicText(parseResponse));
-      if (!rawInvoice) ledgerCallRejected(parseResponse, 'invalid_json');
+      // A refusal's text is the model's explanation, never invoice data.
+      const refused = parseResponse?.stop_reason === 'refusal';
+      const rawInvoice = refused ? null : parseClaudeJson(anthropicText(parseResponse));
+      if (!rawInvoice) ledgerCallRejected(parseResponse, refused ? 'refusal' : 'invalid_json');
       else {
         const read = readParsedInvoice(rawInvoice);
         if (read.degraded) ledgerCallRejected(parseResponse, 'schema_invalid');

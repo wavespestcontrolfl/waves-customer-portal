@@ -62,6 +62,21 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/rate-review-comms.js',
+    snippet: "const log = await trx('sms_log').where({ twilio_sid: sid }).first('customer_id');",
+    reason: 'handleSmsDeliveryFailure: keyed by twilio_sid (the failed text Twilio is reporting) and reads only the customer id — a send reservation never has a sid until it is promoted to a real send, so no placeholder can be read as a message.',
+  },
+  {
+    file: 'services/contact-report-text.js',
+    snippet: "const existing = await trx('sms_log')",
+    reason: 'queueContactReportTexts: existence check for THIS report\'s own queued or sent contact text (message_type contact_report_ready + its contact_report_key), the one-text-per-contact-per-report dedupe under the customer row lock. A review-ask or reply reservation never carries that message type or key, and a row in any state (in flight included) must count as already queued.',
+  },
+  {
+    file: 'services/sms-scheduling-act.js',
+    snippet: "const newer = await trx('sms_log')",
+    reason: 'buildMoveGuard newer-message fence: an existence check, under the move\'s locks, for ANY row on this phone-and-line conversation after the accepted reply. Nothing is presented as a message. A reply reservation in flight is Waves answering right now, which is exactly when the automatic move must stand down, so hiding reservations would weaken the fence; a placeholder can only refuse a move (staff handle it), never cause one.',
+  },
+  {
     file: 'services/visit-completion-packets.js',
     snippet: "return Boolean(await trx('sms_log').where({ message_type: 'visit_summary', status: 'scheduled' })",
     reason: 'summaryStillToCarryLink: existence check for THIS visit\'s own queued (scheduled) visit-summary row that still carries the invoice link (message_type visit_summary + billing_link metadata + visit_id); no review-ask or reply reservation can match that shape, and the row being asked about is the queued summary itself.',
@@ -475,6 +490,11 @@ const ALLOWLIST = [
     file: 'services/review-request.js',
     snippet: 'const rows = await db("sms_log")',
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
+  },
+  {
+    file: 'services/review-request.js',
+    snippet: 'const accepted = await db("sms_log")',
+    reason: 'the review page\'s batch form of the delivery-evidence lookup above (#5682): status filtered to sent / delivered, which excludes \'sending\' — an unresolved reservation cannot match.',
   },
   {
     file: 'services/sms-additional-properties.js',

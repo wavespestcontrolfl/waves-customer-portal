@@ -255,11 +255,11 @@ jobs:
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/previsit-balance-authority-postgres.test.js
-      - name: Report blog search ranking tests
+      - name: Report blog search ranking and suggestion fence tests
         working-directory: server
         env:
           REPORT_BLOG_SEARCH_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand --no-coverage tests/report-blog-post-postgres.test.js
+        run: npx jest --ci --silent --runInBand --no-coverage tests/report-blog-post-postgres.test.js tests/blog-suggest-claim-fence-postgres.test.js tests/report-blog-suggestion-postgres.test.js
       - name: Customer backend coverage floor
         # A focused, measured threshold for customer-app auth, pricing,
         # autopay, notification, and upload-validation logic. The server-unit
@@ -335,7 +335,8 @@ jobs:
         env:
           RESERVATION_ARRIVAL_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
           RESERVATION_HOLD_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js tests/reservation-hold-grace-postgres.test.js
+          SLOT_PARK_LOCK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js tests/reservation-hold-grace-postgres.test.js tests/slot-park-lock-contention-postgres.test.js
       - name: Staff arrival-window transaction tests
         working-directory: server
         env:

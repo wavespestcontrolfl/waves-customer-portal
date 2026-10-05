@@ -91,7 +91,8 @@ describe('complete-scheduled-service.js — in-lock covered-member mint guard', 
     expect(branchAt).toBeGreaterThan(-1);
     expect(bellAt).toBeGreaterThan(branchAt);
     const branch = source.slice(branchAt, bellAt);
-    expect(branch).toContain('} else {');
+    // (B08: the non-blocking else also skips a dues month covered under the dues lock.)
+    expect(branch).toContain('} else if (!duesCoveredUnderLock) {');
     // Codex r5 P1: never a quiet finalize without the combined invoice.
     expect(branch).toContain('await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, invErr);');
     expect(branch).toContain("code: 'first_application_coverage_changed',");

@@ -3,7 +3,10 @@ const crypto = require('crypto');
 const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
-const { pairBeforeAfterPhotos } = require('../lawn-visit-input');
+const { pairBeforeAfterPhotos, photoZoneLabel } = require('../lawn-visit-input');
+const { SHOT_CAP: LAWN_SHOT_LIST_CAP, carriesShotListMarker } = require('../lawn-photo-shots');
+const { buildLawnPhotoSet } = require('./lawn-photo-set');
+const { buildPhotoFindings, photoFindingsSignatureState } = require('./lawn-photo-findings');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
@@ -17,7 +20,7 @@ const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility
 const { buildIrrigationAdvice } = require('./irrigation-advice');
 const { buildMowingHeightContext } = require('./turf-height');
 const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
-const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor } = require('./lawn-visit-memory');
+const { selectPriorVisit, resolveVisitMemoryForRender, storedVisitMemoryFor, publicSinceLast, hasTreatmentMemory } = require('./lawn-visit-memory');
 const {
   buildLawnProgress, deriveAssessmentConfidence, divergentMetricsFrom, photoQualityForConfidence, scoresFromAssessmentRow,
 } = require('./lawn-progress');
@@ -40,6 +43,7 @@ const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule } = require('./lawn-watering-rule');
 const { buildWateringInstruction, composeBannerLines, normalizeMowHoldDays, isValidMowHold } = require('./lawn-watering-instruction');
+const { frozenForecastLine, attachLiveCloseOut } = require('./lawn-watering-forecast');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -608,6 +612,32 @@ function reportScheduleUnconfirmed({ propertyPrefs, turfProfile, assessment }) {
     turf_irrigation_inches_per_week: turfProfile?.irrigation_inches_per_week ?? null,
     assessment_irrigation_inches_per_week: assessment?.irrigation_inches_per_week ?? null,
   });
+}
+
+// The week-plan card the report renders from the current week's snapshot: ONE
+// builder for the report and the Fast Complete watering preview, so the plan
+// sentence on the banner is decided the same way in both. Returns null when the
+// plan renders no card.
+function buildReportWeekPlan(snapshot, assessmentServiceDate) {
+  // Compare against the runtime Monday's decision saw, never today's prefs.
+  const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
+  // The card credits a REQUIRED watering-in against the plan only when
+  // this visit sits inside the plan week — a reopened older report
+  // loads the current week's snapshot and must not count a treatment
+  // watered in weeks ago as one of this week's runs.
+  // prescribesRun: a hold plan (zero runs) never has a run for a
+  // treatment watering-in to cover — the card keeps treatment-first but
+  // must not claim a nonexistent run was covered (codex gh-r16).
+  // afterTreatment: the plan reduced by a credited watering-in (the card
+  // shows it INSTEAD of the unreduced plan under the credit note).
+  // afterHold (GATE_LAWN_WATERING_RULE): the same plan with a "not before
+  // {holdUntil}" sentence, used while a product watering hold is in
+  // force. The literal token is filled (or the key dropped) by
+  // applyAfterHoldOverlay once the visit's instruction is known.
+  const afterHold = featureGates.lawnWateringRuleLive()
+    ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
+    : null;
+  return rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessmentServiceDate), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}), ...(featureGates.lawnWateringRuleLive() ? { depthInches: snapshot.plan.depthInches ?? null } : {}) } : null;
 }
 
 function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPrefs = null, fawnSnapshot = {}, serviceDate = null, completionRainfallInchesToday = null, completionRainfall7dInches = null, completionEt0Inches = null, completionDailyRain = null, completionRainConfidence = null, completionRainSource = null, scheduleUnconfirmed = false } = {}) {
@@ -2149,6 +2179,13 @@ function stripLiveOnlyScheduleFields(data) {
   delete data.planSummary;
   delete data.nearYou;
   if (data.reportV2?.snapshot?.nextVisit) delete data.reportV2.snapshot.nextVisit;
+  // The watering banner's forecast sentence and rain close-out
+  // (GATE_LAWN_WATERING_FORECAST) are live-view additions: the printed record
+  // keeps only the instruction as written at the visit.
+  if (data.reportV2?.banner && typeof data.reportV2.banner === 'object') {
+    delete data.reportV2.banner.forecastLine;
+    delete data.reportV2.banner.observedRain;
+  }
   // The lawn v6 copy's by-next-visit sentences are schedule content too: a
   // non-live render prints "What to expect" without them (lawn-copy-v6.js
   // staticWhatToExpect). The carrier stays a non-enumerable hand-off.
@@ -2174,6 +2211,27 @@ function stripLiveOnlyReportProductCopy(data) {
     if (app?.product && 'report_copy' in app.product) delete app.product.report_copy;
   });
   return data;
+}
+
+// GATE_LAWN_WATERING_FORECAST, LIVE web view only: when radar-measured (MRMS)
+// rain on whole days inside a frozen water-in window reached the water-in
+// amount, the banner carries observedRain (the close-out line). The caller
+// guards the mode; this reads the FROZEN instruction only (an unfrozen render
+// has no window to measure), never a forecast, and fails open.
+async function attachLawnWateringCloseOut(data, service) {
+  if (!featureGates.lawnWateringForecastLive() || !featureGates.lawnWateringRuleLive()) return data;
+  if (!data?.reportV2?.banner || data.reportV2.banner.state !== 'water_in') return data;
+  const instruction = readFrozenWateringInstruction(parseJsonObject(service?.structured_notes));
+  if (!instruction) return data;
+  const { fetchMrmsDailyRain } = require('../mrms-qpe');
+  return attachLiveCloseOut(data, {
+    instruction,
+    latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+    longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+    fetchMrmsDailyRain,
+    etDayWindow: require('./application-conditions').etDayWindow,
+    etDateString,
+  });
 }
 
 function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {}, interiorOnlyLane = false } = {}) {
@@ -2546,6 +2604,15 @@ async function loadApprovedLawnRecommendationCards({ customerId, snapshotId }, k
     .filter(Boolean);
 }
 
+// Read at call time; a partial feature-gates mock (or a missing export) means off.
+function lawnReportPhotoSetLive() {
+  return typeof featureGates.lawnReportPhotoSetLive === 'function' && featureGates.lawnReportPhotoSetLive();
+}
+// "What the photos showed" needs its own gate AND the photo set's.
+function lawnReportPhotoFindingsLive() {
+  return lawnReportPhotoSetLive() && typeof featureGates.lawnReportPhotoFindingsLive === 'function' && featureGates.lawnReportPhotoFindingsLive();
+}
+
 async function lawnPhotoUrl(photo) {
   if (!photo?.s3_key || String(photo.s3_key).startsWith('pending/') || !PhotoService) return null;
   try {
@@ -2617,7 +2684,11 @@ class PinnedAssessmentUnavailable extends Error {
 // payload and the stock "No additional observations" photoSummary now collapses
 // to null, so the photo strip (web) and the PDF no longer print that sentence.
 // Cached lawn PDFs and renders that carry it must re-key.
-const LAWN_RENDER_STRATEGY = 'p8-lawn-dead-fields-20261001';
+// p9: P16 (owner 2026-10-03): the seasonal-dip diagnosis card prints the
+// approved expectation row's sentence, and the cross-season notes lost their
+// "greens back up / recovers as it warms" promise. Lawn PDFs and renders that
+// carry the old sentences must re-key (lawn only: no fleet-wide PDF bust).
+const LAWN_RENDER_STRATEGY = 'p9-lawn-seasonal-timing-20261003';
 
 // ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
 // pairs the render would use. Reads the record itself, so a partial row from a
@@ -2742,8 +2813,30 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // The by-next-visit sentences are LIVE-VIEW ONLY (stripLiveOnlyScheduleFields),
   // so a PDF never depends on the customer's bookings and needs no key for them.
   if (featureGates.lawnReportCopyV6Live()) irrigationStamp += ':copyv6=1';
+  // The photo shot list (GATE_LAWN_SHOT_LIST) lets the report carry up to 8
+  // photos with zone labels instead of 5, so a PDF cached before a flip must
+  // never be served after it. The stamp rides only while the gate is live.
+  if (featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST')) irrigationStamp += ':shots=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
+  // The lawn report photo set (GATE_LAWN_REPORT_PHOTO_SET) swaps the photo
+  // gallery for a labeled set in shot order, so the same rule: a PDF cached
+  // before a flip is never served after it. The stamp rides only while the gate
+  // is live AND this visit's assessment carries the shot-list marker, the one
+  // case where the payload (and so the document) changes; a legacy visit keeps
+  // its key. An unreadable marker means no stamp.
+  if (lawnReportPhotoSetLive() && carriesShotListMarker(assessment?.photos)) irrigationStamp += ':photoset=1';
+  // "What the photos showed" (P23b) is built from this assessment's reviewed run,
+  // so the key follows the run's reviewed state, and only for a visit that would
+  // print the block (no block = no stamp, so such a visit keeps its key). The
+  // read fails closed: a throw reaches the caller's unique-token catch.
+  if (lawnReportPhotoFindingsLive() && carriesShotListMarker(assessment?.photos) && assessment?.id) {
+    const run = await knex('lawn_assessment_runs')
+      .where({ assessment_id: assessment.id, customer_id: assessment.customer_id })
+      .first('assessment_id', 'customer_id', 'photo_ids', 'reviewed_findings', 'reviewed_at');
+    const findingsState = photoFindingsSignatureState(run, assessment);
+    if (findingsState) irrigationStamp += `:pf=${findingsState}`;
+  }
   const lawnHistory = propertyHistoryEnabled
     ? await require('../lawn-assessment-history').historyForReport(service, { assessment }, knex)
     : null;
@@ -3237,7 +3330,7 @@ async function resolveLawnPhotoAssessmentIds(service, knex = db, options = {}) {
   return ids;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures, photoFindings = false } = {}) {
   if (serviceLine !== 'lawn') return null;
   const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, { pinnedAssessmentId, propertyHistoryEnabled, lawnHistory });
   if (!assessment) return null;
@@ -3256,19 +3349,33 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   const currentScore = formatLawnAssessmentScore(assessment);
   const initialScore = formatLawnAssessmentScore(initialRow);
 
+  // GATE_LAWN_SHOT_LIST (P18): a visit can carry up to 8 photos, and each
+  // payload photo gains its customer-facing zoneLabel. Off = the 5-photo limit
+  // and the payload shape this report has always had.
+  const shotListLive = featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST');
+  // GATE_LAWN_REPORT_PHOTO_SET (P23): a visit captured under the shot list (the
+  // stored marker) can hold up to eight photos, so the set reads with the
+  // eight-photo cap whenever the set gate is live, even if the capture gate
+  // (GATE_LAWN_SHOT_LIST) is off or was rolled back. Any other visit keeps the
+  // limit it always had.
+  const photoSetEligible = lawnReportPhotoSetLive() && carriesShotListMarker(assessment.photos);
+  // A failed photo READ is not an empty photo set: it is counted below (for an
+  // eligible visit only) so no PDF is cached from a view that lost its set.
+  let photoReadFailed = false;
   const latestPhotos = await knex('lawn_assessment_photos')
     .where({ assessment_id: assessment.id, customer_visible: true })
     .orderBy('is_best_photo', 'desc')
     .orderBy('quality_score', 'desc')
     .orderBy('photo_order', 'asc')
-    .limit(5)
+    .limit(shotListLive || photoSetEligible ? LAWN_SHOT_LIST_CAP : 5)
     // read-failure-exempt: gallery photos only; no insight or memory entry reads them
-    .catch(() => []);
+    .catch(() => { photoReadFailed = true; return []; });
   const photos = await Promise.all(latestPhotos.map(async (photo) => ({
     id: photo.id,
     url: await lawnPhotoUrl(photo),
     type: photo.photo_type || 'general',
     zone: photo.zone || null,
+    ...(shotListLive ? { zoneLabel: photoZoneLabel(photo.zone) } : {}),
     isBest: !!photo.is_best_photo,
     qualityScore: photo.quality_score ?? null,
     scores: {
@@ -3281,6 +3388,46 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     observations: photo.observations || '',
     takenAt: photo.taken_at || photo.created_at || null,
   })));
+  // GATE_LAWN_REPORT_PHOTO_SET (P23): a visit captured under the shot list
+  // (the marker stored beside its photos; a visit without it keeps the strip)
+  // shows its photos as a labeled set in shot order. Built from the same
+  // signed URLs as `photos` above, so it is minted fresh on every view and
+  // never stored. No gate, no marker or no resolvable photo = no key at all.
+  // ALL OR NOTHING: if any photo of the set would not sign, the set is not sent
+  // at all (the old strip and gallery rules apply, as with the gate off), and the
+  // count rides out on a non-enumerable `photoSetUnresolved` so the report counts
+  // it as an image-resolution failure and no PDF of this view is cached. A
+  // partial set would hide the one photo whose second signing may succeed in the
+  // gallery copy the document suppresses.
+  const photoSetRows = photoSetEligible
+    ? latestPhotos.map((photo, index) => ({ url: photos[index].url, zone: photo.zone, photoOrder: photo.photo_order }))
+    : [];
+  const photoSetUnresolved = photoSetRows.filter((row) => !row.url).length + (photoSetEligible && photoReadFailed ? 1 : 0);
+  const photoSet = photoSetUnresolved ? [] : buildLawnPhotoSet(photoSetRows);
+  // "What the photos showed" (P23b): the technician-reviewed findings of this
+  // assessment's run with the thumbnails they link to. Opt-in (only the /data and
+  // direct PDF renders read the run; /ask never does), and it exists only where a
+  // photo set exists. A failed run read omits the block and is counted as an
+  // image failure so no PDF of that view is cached; a cited photo that is not in
+  // the set just has no thumbnail, the same on every surface.
+  let photoFindingsList = [];
+  let photoFindingsUnresolved = 0;
+  if (photoFindings && photoSet.length && lawnReportPhotoFindingsLive()) {
+    try {
+      const run = await knex('lawn_assessment_runs')
+        .where({ assessment_id: assessment.id, customer_id: assessment.customer_id })
+        .first('assessment_id', 'customer_id', 'photo_ids', 'reviewed_findings', 'reviewed_at');
+      photoFindingsList = buildPhotoFindings({
+        run,
+        assessment,
+        photoRows: latestPhotos.map((photo, index) => ({ id: photo.id, zone: photo.zone, url: photos[index].url })),
+        photoSet,
+      });
+    // read-failure-exempt: counted into imageResolutionFailures through photoFindingsUnresolved
+    } catch {
+      photoFindingsUnresolved = 1;
+    }
+  }
   // GATE_LAWN_VISIT_MEMORY (P13): the progress engine's score inputs, handed
   // out through the same internal out-param (never the payload). The prior is
   // the property-scoped history row selectPriorVisit chose; confidence is read
@@ -3642,32 +3789,14 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // plan-present key (codex gh-r18).
     if (servicedElsewhere && typeof pinnedWeekPlanAvailableAt === 'string') throw new PinnedWeekPlanUnavailable('premise_diverged');
     if (snapshot?.plan && !servicedElsewhere) {
-      // Compare against the runtime Monday's decision saw, never today's prefs.
-      const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
-      // The card credits a REQUIRED watering-in against the plan only when
-      // this visit sits inside the plan week — a reopened older report
-      // loads the current week's snapshot and must not count a treatment
-      // watered in weeks ago as one of this week's runs.
-      // prescribesRun: a hold plan (zero runs) never has a run for a
-      // treatment watering-in to cover — the card keeps treatment-first but
-      // must not claim a nonexistent run was covered (codex gh-r16).
-      // afterTreatment: the plan reduced by a credited watering-in (the card
-      // shows it INSTEAD of the unreduced plan under the credit note).
-      // afterHold (GATE_LAWN_WATERING_RULE): the same plan with a "not before
-      // {holdUntil}" sentence, used while a product watering hold is in
-      // force. The literal token is filled (or the key dropped) by
-      // applyAfterHoldOverlay once the visit's instruction is known.
-      const afterHold = featureGates.lawnWateringRuleLive()
-        ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
-        : null;
-      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}), ...(featureGates.lawnWateringRuleLive() ? { depthInches: snapshot.plan.depthInches ?? null } : {}) } : null;
+      waterContext.weekPlan = buildReportWeekPlan(snapshot, assessment.service_date);
     }
   }
 
   // The week's rain / ET₀ (water insights) could not be fetched or frozen.
   if (readFailures && weekWeatherUnfrozen) readFailures.add('week_weather');
   const droughtStress = parseJsonObject(assessment.composite_scores).drought_stress;
-  return {
+  const lawnAssessmentPayload = {
     assessmentId: assessment.id,
     serviceRecordId: assessment.service_record_id || null,
     serviceId: assessment.service_id || null,
@@ -3676,6 +3805,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     initialScores: initialScore,
     trend,
     photos,
+    ...(photoSet.length ? { photoSet } : {}),
     beforeAfter,
     recommendations: parseJsonObject(assessment.recommendations),
     observations: singleVoiceObservation(assessment.observations),
@@ -3741,6 +3871,20 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
   };
+  if (photoSetUnresolved) {
+    Object.defineProperty(lawnAssessmentPayload, 'photoSetUnresolved', { value: photoSetUnresolved, enumerable: false });
+  }
+  // The unfiltered block rides the assessment object NON-ENUMERABLY: the report
+  // builder checks it against the page's own category cards before anything
+  // reaches the public payload (reportV2.photoFindings), so a finding a card
+  // contradicts is never exposed through lawnAssessment either.
+  if (photoFindingsList.length) {
+    Object.defineProperty(lawnAssessmentPayload, 'photoFindings', { value: photoFindingsList, enumerable: false });
+  }
+  if (photoFindingsUnresolved) {
+    Object.defineProperty(lawnAssessmentPayload, 'photoFindingsUnresolved', { value: photoFindingsUnresolved, enumerable: false });
+  }
+  return lawnAssessmentPayload;
 }
 
 // GATE_LAWN_WATERING_RULE: the visit's one watering instruction, built from
@@ -3812,6 +3956,13 @@ function applyAfterHoldOverlay(waterContext, instruction) {
   return { ...waterContext, weekPlan: filled ? { ...rest, afterHold: filled } : rest };
 }
 
+// GATE_LAWN_WATERING_FORECAST: the water-in sentence frozen with the instruction,
+// as the banner's extra key (empty when the gate is off or nothing was frozen).
+function bannerForecastExtras(instruction) {
+  const forecastLine = featureGates.lawnWateringForecastLive() ? frozenForecastLine(instruction) : null;
+  return forecastLine ? { forecastLine } : {};
+}
+
 // The banner payload: one server-built object the client, PDF and (later)
 // the completion text all read. expiresAt is when the instruction lapses.
 // The plan-dependent sentence is composed here, from the weekly plan present on
@@ -3845,6 +3996,11 @@ function buildWateringBanner(instruction, weekPlan = null) {
     expiresAt: instruction.state === 'none' ? null : (instruction.expiresAt || null),
     ruleSource: instruction.ruleSource,
     ...(mowHold ? { mowHold } : {}),
+    // GATE_LAWN_WATERING_FORECAST: the sentence frozen with a water-in at
+    // completion (lawn-watering-forecast.js). LIVE VIEW ONLY: it is deleted
+    // from every non-live render by stripLiveOnlyScheduleFields, and it is
+    // never part of `lines`. Gate off = no key.
+    ...bannerForecastExtras(instruction),
   };
 }
 
@@ -4315,7 +4471,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     pinnedWeekPlanAvailableAt: opts.pinnedWeekPlanAvailableAt,
     ...(visitMemoryLive ? { visitMemoryOut } : {}),
     readFailures,
+    // Opt-in: only the renders that print the block read the run (never /ask).
+    photoFindings: opts.lawnPhotoFindings === true,
   });
+  // A photo-set photo that would not sign (the set was withheld, all or nothing):
+  // the document cannot see the photo it lost, so count it where the PDF store
+  // paths already refuse to cache on image-resolution failures.
+  imageResolutionFailures += Number(lawnAssessment?.photoSetUnresolved) || 0;
+  imageResolutionFailures += Number(lawnAssessment?.photoFindingsUnresolved) || 0;
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
   // grounded regen or stored-copy sanitize lands, and nothing shown can be
@@ -5557,6 +5720,8 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         waterSnapshot,
         waterGapHistory,
         mowingTrendFallback,
+        // GATE_LAWN_SHOT_LIST: a visit can carry 8 photos, so the strip does too (6 off).
+        ...(featureGates.gateEnvValue('GATE_LAWN_SHOT_LIST') ? { photoLimit: LAWN_SHOT_LIST_CAP } : {}),
       });
       if (reportV2 && wateringInstruction) {
         const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);
@@ -5585,8 +5750,16 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             // snapshot...) is in readFailures. A frozen entry still replays.
             degraded: readFailures.size > 0,
             knex,
+            // GATE_LAWN_PAIRED_RECHECK (P19b): told once, only for the render that
+            // CREATED the entry, so the paired-photo read runs in the background
+            // after the freeze and never inside this render. Gate off = null.
+            onCreated: typeof featureGates.lawnPairedRecheckLive === 'function' && featureGates.lawnPairedRecheckLive()
+              ? require('../lawn-paired-recheck').scheduleAfterFreeze
+              : null,
           });
-          visitMemorySinceLast = outcome.sinceLast;
+          // A block that exists only to carry the prior's rainfast retreat-check
+          // (P31) is internal: the engine, the copy and the payload see no block.
+          visitMemorySinceLast = hasTreatmentMemory(outcome.sinceLast) ? outcome.sinceLast : undefined;
           if (outcome.unfrozen) lawnAssessment.weekWeatherUncacheable = true;
         } catch {
           lawnAssessment.weekWeatherUncacheable = true;
@@ -5627,7 +5800,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 : 'unknown',
             };
           }
-          lawnProgress = buildLawnProgress({ current, prior: priorForProgress, sinceLast: visitMemorySinceLast || null });
+          lawnProgress = buildLawnProgress({
+            current,
+            prior: priorForProgress,
+            sinceLast: visitMemorySinceLast || null,
+            // P19b kill switch on the READ: gate off = a stored photo_pair recheck is ignored.
+            photoPair: typeof featureGates.lawnPairedRecheckLive === 'function' && featureGates.lawnPairedRecheckLive(),
+          });
         } catch {
           lawnProgress = null;
         }
@@ -5870,7 +6049,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       }
       // Only a built block is attached: no prior (or a prior with no frozen
       // memory) leaves the key off rather than carrying a null.
-      if (reportV2 && visitMemorySinceLast) reportV2.sinceLast = visitMemorySinceLast;
+      // publicSinceLast leaves the paired-photo recheck (engine input, P19b) off the
+      // payload; it hands back the same block when there is none.
+      if (reportV2 && visitMemorySinceLast) reportV2.sinceLast = publicSinceLast(visitMemorySinceLast);
       // P13: the progress block rides the report object but NOT the public
       // payload (non-enumerable: JSON, spread and Object.keys never see it), so
       // no state word reaches a customer before P14's guarded copy does.
@@ -5897,6 +6078,39 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             Object.defineProperty(reportV2, 'sinceLastCopy', { value: sinceLastCopy, enumerable: false, writable: true, configurable: true });
           }
         } catch { /* best-effort: the report renders without the block */ }
+      }
+      // GATE_LAWN_RAINFAST_WATCH (P31), LIVE VIEWS ONLY (the PDF and static
+      // builds never carry it, so their cache key is untouched): once a stated
+      // rainfast interval has ended, measured rain inside it records one
+      // retreat-check on the frozen visit memory and hands one fixed Watching
+      // sentence to the lead, the same non-enumerable way as sinceLastCopy.
+      // Fail closed and best-effort: any miss leaves the report as it was.
+      if (reportV2 && opts.mode === 'live' && opts.lawnRainfastWatch === true && typeof featureGates.lawnRainfastWatchLive === 'function' && featureGates.lawnRainfastWatchLive()) {
+        try {
+          const watch = await require('./lawn-rainfast-watch').resolveRainfastWatch({
+            structuredNotes: service.structured_notes,
+            serviceRecordId: service.id,
+            assessmentId: lawnAssessment.assessmentId,
+            products,
+            // Only the intervals frozen with the visit count; facts the catalog
+            // lookup filled in live are not completion-time evidence.
+            frozenFacts: frozenIdentity?.productFacts || null,
+            completedAt: completionTime,
+            latitude: service.customer_latitude ?? service.latitude ?? service.lat,
+            longitude: service.customer_longitude ?? service.longitude ?? service.lng,
+            // The product list is the verdict's input: when the products or their
+            // catalog facts could not be read cleanly, a stored verdict still
+            // replays but nothing new is judged or written (first writer wins,
+            // so a partial list would be permanent).
+            degraded: !!(productsLoadFailed || products.catalogEnrichmentFailed),
+            knex,
+            fetchForecast: require('./application-conditions').fetchPropertyForecast,
+            fetchQuarterHours: require('./application-conditions').fetchPropertyRainQuarterHours,
+          });
+          if (watch) {
+            Object.defineProperty(reportV2, 'rainfastWatch', { value: watch, enumerable: false, writable: true, configurable: true });
+          }
+        } catch { /* best-effort: the report renders without the sentence */ }
       }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.
@@ -7272,6 +7486,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     // moments load long before this return. Videos are excluded — the
     // document never renders them.
     imageResolutionFailures: imageResolutionFailures
+      // The photo set was built for this visit but did not reach the report
+      // (the V2 build failed soft, or any later step dropped the key): the
+      // document would print the fallback gallery under the set's cache key.
+      + (Array.isArray(lawnAssessment?.photoSet) && lawnAssessment.photoSet.length
+        && !(Array.isArray(reportV2?.photoSet) && reportV2.photoSet.length) ? 1 : 0)
+      + (Array.isArray(lawnAssessment?.photoFindings) && lawnAssessment.photoFindings.length
+        && !Array.isArray(reportV2?.photoFindings) ? 1 : 0)
       + (Array.isArray(approvedVisualMoments) ? approvedVisualMoments : [])
         .filter((m) => m && m.mediaType !== 'video' && !m.mediaUrl).length,
     legacy: {
@@ -7314,6 +7535,7 @@ module.exports = {
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,
   stripLiveOnlyReportProductCopy,
+  attachLawnWateringCloseOut,
   loadNearYouLawnPest,
   lawnScoreDelta,
   singleVoiceObservation,
@@ -7345,6 +7567,7 @@ module.exports = {
   resolveCanonicalLawnRender,
   loadServicePremise,
   reportScheduleUnconfirmed,
+  buildReportWeekPlan,
   freezeLawnWeekWeather,
   frozenWeekMatches,
   storedWeekFor,

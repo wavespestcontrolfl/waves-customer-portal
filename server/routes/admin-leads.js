@@ -735,7 +735,7 @@ router.get('/', async (req, res, next) => {
   try {
     const {
       status, source, source_name, channel, search, sort = 'first_contact_at',
-      order = 'desc', page = 1, limit = 50, start_date, end_date, id,
+      order = 'desc', page = 1, limit = 50, start_date, end_date, id, estimate_attachable,
     } = req.query;
     if (id && Joi.string().uuid().validate(id).error) return res.status(400).json({ error: 'Invalid lead id' });
 
@@ -783,6 +783,19 @@ router.get('/', async (req, res, next) => {
     if (startDt && !isNaN(startDt)) query = query.where('leads.first_contact_at', '>=', startDt);
     if (endDt && !isNaN(endDt)) query = query.where('leads.first_contact_at', '<=', endDt);
     if (search) query.modify(applyLeadSearch, search);
+    // The estimate tool's lookup lists only leads a NEW estimate can attach to:
+    //   - no customer record (a lead that has one is found through that customer);
+    //   - no estimate yet (a save against a lead already linked to an estimate
+    //     is refused by createOrReuseAdminEstimate);
+    //   - a phone or an email (leadMatchesEstimateContact needs one to match).
+    // Filtered here, before LIMIT, so a page of ineligible matches cannot hide
+    // an eligible lead.
+    const attachableOnly = estimate_attachable === '1' || estimate_attachable === 'true';
+    const whereEstimateAttachable = (qb) => qb
+      .whereNull('leads.customer_id')
+      .whereNull('leads.estimate_id')
+      .whereRaw("(NULLIF(TRIM(COALESCE(leads.phone, '')), '') IS NOT NULL OR NULLIF(TRIM(COALESCE(leads.email, '')), '') IS NOT NULL)");
+    if (attachableOnly) query = whereEstimateAttachable(query);
 
     const validSorts = {
       first_contact_at: 'leads.first_contact_at',
@@ -835,6 +848,7 @@ router.get('/', async (req, res, next) => {
       excludeInternal(countQuery);
     }
     if (search) countQuery.modify(applyLeadSearch, search);
+    if (attachableOnly) whereEstimateAttachable(countQuery);
     const { count } = await countQuery.count('* as count').first();
 
     const leads = await query
@@ -2043,8 +2057,8 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
         }
       }
 
-      // ---- SLOT-OVERLAP GUARD, part 2: tech-blind conflict probe exactly as
-      // booking.js createSelfBooking, immediately before the insert — after
+      // ---- SLOT-OVERLAP GUARD, part 2: conflict probe as booking.js
+      // createSelfBooking, immediately before the insert — after
       // the converted-lead guard and DUPLICATE_VISIT dedupe above (see part 1
       // merge note). Runs for first conversions and rebooks alike. A hit is
       // ADVISORY (owner ruling 2026-08-25, same as routes/admin-schedule.js —
@@ -2060,6 +2074,11 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
           // false overlap note — same admin exclusion set every other staff
           // probe uses (one copy: scheduling/window-rules.js).
           excludeStatuses: require('../services/scheduling/window-rules').ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+          // The technician the row is inserted with below (staff-picked, no
+          // offer side): with two technicians, another technician's customer
+          // is not an overlap warning. Gate-dark (occupancy.js header);
+          // unassigned rows still warn.
+          technicianId: technicianId || null,
         });
         if (clash.length) {
           bookingWarnings.push(slotOverlapWarning(occupancyDate));

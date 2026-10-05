@@ -144,6 +144,14 @@ function anthropicThinkingAlwaysOn(model) {
 const DEFAULTS = Object.freeze({
   FLAGSHIP: 'claude-opus-4-8',
   WORKHORSE: 'claude-sonnet-5',
+  // Routine internal lanes that used to ride the flagship (owner 2026-10-04):
+  // staff wiki Q&A, expense categories, vendor invoice PDFs, lead synopsis.
+  // Hero alt text is published on the site, so it stays on VISION. Sonnet 5.5, not Sonnet 5: same list price, and it is in the
+  // thinking floor below, so these lanes' short caps (200 to 2000 tokens)
+  // are not spent on thinking. Roll back with MODEL_ROUTINE=claude-opus-4-8.
+  // Not for Fable / Mythos: the two direct sites treat a refusal as a failed
+  // read, with no second provider.
+  ROUTINE: 'claude-sonnet-5-5',
   FAST: 'claude-sonnet-5',
   VOICE: 'claude-sonnet-5',
   VISION: 'claude-opus-4-8',
@@ -225,6 +233,15 @@ const DEFAULTS = Object.freeze({
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || DEFAULTS.FLAGSHIP;
 const WORKHORSE = process.env.MODEL_WORKHORSE || DEFAULTS.WORKHORSE;
+// Fable / Mythos are refused here, in the registry: two ROUTINE call sites use
+// the SDK directly and have no second provider for a refusal, so a hand-set
+// MODEL_ROUTINE naming one of them falls back to the default.
+const ROUTINE_EXCLUDED_RE = /^claude-(fable|mythos)/;
+const ROUTINE   = (!ROUTINE_EXCLUDED_RE.test(process.env.MODEL_ROUTINE || '') && process.env.MODEL_ROUTINE) || DEFAULTS.ROUTINE;
+// Low effort only while ROUTINE is an always-thinking model (the Sonnet 5.5
+// default). A rollback to MODEL_ROUTINE=claude-opus-4-8 sends no per-lane
+// effort, so those lanes get back the model AND the reasoning they had.
+const ROUTINE_EFFORT = anthropicThinkingAlwaysOn(ROUTINE) ? 'low' : undefined;
 const FAST      = process.env.MODEL_FAST      || DEFAULTS.FAST;
 const VOICE     = process.env.MODEL_VOICE     || DEFAULTS.VOICE;
 // Owner 2026-07-21 (T&S report dry-run): photo scoring drives customer-facing
@@ -520,6 +537,19 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
+  // highStakes with the ROUTINE tier on the Anthropic leg and the same
+  // OpenAI backup: internal, low-risk lanes only
+  // (owner 2026-10-04). Nothing customer-facing belongs here: wiki Q&A uses
+  // routineAnswer for staff sources only (wiki-qa.js) and keeps highStakes
+  // for every customer-facing caller. ROUTINE_EFFORT (low on the Sonnet 5.5
+  // default): staff wiki Q&A is interactive and the rest are short lookups,
+  // so the always-thinking default must not think at the global
+  // MODEL_ANTHROPIC_EFFORT.
+  routineAnswer: Object.freeze({
+    name: 'routineAnswer',
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, ...(ROUTINE_EFFORT ? { effort: ROUTINE_EFFORT } : {}) }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
   adsAdvisor: Object.freeze({
     name: 'adsAdvisor',
     // Daily Google Ads advisor (campaign-advisor.js) — owner ruling
@@ -585,6 +615,19 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
   }),
+  lawnPairedRecheck: Object.freeze({
+    name: 'lawnPairedRecheck',
+    // The paired-photo recheck (services/lawn-paired-recheck.js,
+    // GATE_LAWN_PAIRED_RECHECK, lawn report rebuild P19b; owner ruling
+    // 2026-09-29 round 3b): one multimodal call per visit reads last visit's and
+    // today's same-spot overview photos as pairs and returns a closed
+    // better / same / worse / cannot_tell verdict. Same two legs as
+    // lawnVisitAssessment (the lawn photo lane's models; no Claude leg, no
+    // parallel providers): Gemini answers, OpenAI stands in only when it
+    // returns nothing usable.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
+  }),
   photoIdVision: Object.freeze({
     name: 'photoIdVision',
     // Photo ID (pest-identification.js: website funnel, SMS photo triage,
@@ -614,6 +657,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
   }),
+  treeShrubWatchSignals: Object.freeze({
+    name: 'treeShrubWatchSignals',
+    // The Tree & Shrub Fast Complete watch-signal read (tree-shrub-assessment.js
+    // readWatchSignals, GATE_TS_WATCH_LIST): one small Gemini read of one photo
+    // that returns only watch-list keys, tech-facing, never customer copy. The
+    // same legs as photoIdPlantV2 (the nearest one-read plant photo lane, the
+    // cheapest vision models already named here): Gemini answers; OpenAI stands
+    // in only when Gemini returns nothing usable. No Claude leg.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
+  }),
   plantIdVision: Object.freeze({
     name: 'plantIdVision',
     // Lawn/tree/shrub/palm photo ID (plant-engine.js). Owner ruling
@@ -627,15 +681,6 @@ const TEXT_POLICIES = Object.freeze({
     // behind GATE_PLANT_ID_REFEREE — not part of this two-provider policy.
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
-  }),
-  visitBrief: Object.freeze({
-    name: 'visitBrief',
-    // Per-visit pocket-reference brief (previsit-brief.js) — summarization
-    // over deterministic grounding, not analysis, so it rides the WORKHORSE
-    // tier rather than the WDO brief's deepAnalysis (scope ruling
-    // 2026-08-06: deepAnalysis is overkill per-visit).
-    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: WORKHORSE }),
-    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
   deepAnalysis: Object.freeze({
     name: 'deepAnalysis',
@@ -685,6 +730,9 @@ module.exports = {
   EXTREME,
   FLAGSHIP,
   WORKHORSE,
+  ROUTINE,
+  ROUTINE_EFFORT,
+  ROUTINE_EXCLUDED_RE,
   FAST,
   VOICE,
   VISION,

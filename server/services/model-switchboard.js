@@ -49,12 +49,30 @@ function catalogEntry(id) {
 // model through services/llm/deep.js (the only path that handles Fable's
 // thinking blocks + refusals — catalog entries with requires:'deep'). `lock`
 // removes the picker entirely.
+// What the ROUTINE picker may offer: Anthropic catalog models that read
+// images, minus Fable / Mythos. Two ROUTINE call sites use the SDK directly
+// and have no second provider for a refusal; models.js applies the same
+// exclusion to a hand-set MODEL_ROUTINE.
+// (`|| {}` / the regex default: a narrow config/models stub has neither.)
+const ROUTINE_EXCLUDED_RE = MODELS.ROUTINE_EXCLUDED_RE || /^claude-(fable|mythos)/;
+const ROUTINE_ALLOWED_IDS = Object.freeze(Object.entries(MODEL_CATALOG || {})
+  .filter(([id, m]) => m.provider === 'anthropic' && m.caps.includes('vision') && !ROUTINE_EXCLUDED_RE.test(id))
+  .map(([id]) => id));
+
 const SELECTORS = [
   // General reasoning callers may include images; keep a vision-capable tier.
   { key: 'FLAGSHIP', env: 'MODEL_FLAGSHIP', description: 'Best general reasoning', accepts: { providers: ['anthropic'], cap: 'vision' } },
   { key: 'DEEP', env: 'MODEL_DEEP', description: 'Verifiers, judges, gates (via llm/deep.js)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'EXTREME', env: 'MODEL_EXTREME', description: 'Explicit deep-audit opt-in; never automatic', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'WORKHORSE', env: 'MODEL_WORKHORSE', description: 'Drafting and content', accepts: { providers: ['anthropic'], cap: 'text' } },
+  // deep: true — every call site reads past thinking blocks and floors
+  // max_tokens (llm/call.js#dispatch for the routineAnswer policy;
+  // anthropicMaxTokens + anthropicText at the two direct sites), so the
+  // Sonnet 5.5 default and the models like it are pickable. cap: 'vision' —
+  // vendor invoice PDFs send documents.
+  // catalogOnly + allowedIds: the picker offers catalog models only and never
+  // Fable / Mythos (ROUTINE_ALLOWED_IDS above); models.js refuses those ids too.
+  { key: 'ROUTINE', env: 'MODEL_ROUTINE', description: 'Routine internal lanes moved off the flagship (owner 2026-10-04)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true, catalogOnly: true, allowedIds: ROUTINE_ALLOWED_IDS } },
   { key: 'FAST', env: 'MODEL_FAST', description: 'Claude leg of the fast lanes', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VOICE', env: 'MODEL_VOICE', description: 'Spoken voice relay + Ask Waves fallback', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VISION', env: 'MODEL_VISION', description: 'Claude photo scoring', accepts: { providers: ['anthropic'], cap: 'vision' } },
@@ -141,6 +159,7 @@ const POLICY_SELECTOR = {
   customerCopy: { primary: 'FLAGSHIP', fallback: 'OPENAI_BALANCED' },
   contentDraft: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   highStakes: { primary: 'FLAGSHIP', fallback: 'OPENAI_REPORT_WRITER' },
+  routineAnswer: { primary: 'ROUTINE', fallback: 'OPENAI_REPORT_WRITER' },
   adsAdvisor: { primary: 'ADS_ADVISOR', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
@@ -149,11 +168,12 @@ const POLICY_SELECTOR = {
   estimateVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_ESTIMATE_VISION' },
   photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_LAWN_ASSESSMENT' },
+  lawnPairedRecheck: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_LAWN_ASSESSMENT' },
   photoIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   photoIdPestV2: { primary: 'GEMINI_PHOTO_ID_PEST', fallback: 'OPENAI_FRONTIER' },
   photoIdPlantV2: { primary: 'GEMINI_PHOTO_ID_PLANT', fallback: 'OPENAI_PLANT_ID' },
+  treeShrubWatchSignals: { primary: 'GEMINI_PHOTO_ID_PLANT', fallback: 'OPENAI_PLANT_ID' },
   plantIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_PLANT_ID' },
-  visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   deepAnalysis: { primary: 'DEEP', fallback: 'OPENAI_REPORT_WRITER' },
   imageScreen: { primary: 'OPENAI_IMAGE_SCREEN', fallback: 'VISION' },
   voiceJudge: { primary: 'VOICE_JUDGE', fallback: 'OPENAI_REPORT_WRITER' },
@@ -383,7 +403,7 @@ const LANES = [
   // for one file's two policies.
   L('events_curation', 'Community events curation (scoring)', 'event-curation.js', 'fastText', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback')),
   L('events_editorial', 'Community events normalizing (venue/type cleanup)', 'event-normalizer.js', 'fastText', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
-  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'routine categories on the flagship tier' }),
+  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('routineAnswer', 'primary'), P('routineAnswer', 'fallback'), { note: 'routine categories on the ROUTINE tier (owner 2026-10-04)' }),
 
   // ── Multimodal ──
   // Sequential ladder, not a fan-out (owner ruling 2026-09-26,
@@ -409,7 +429,7 @@ const LANES = [
   // 09-28): identify mode only, and only for an identity lane where Gemini
   // and Sol disagreed. Single leg, no automatic fallback — Fable missing,
   // invalid, or out of budget leaves the escalation result unchanged.
-  L('sms_scheduling_decide', 'SMS scheduling decide (reply to an offer → slot accepted?)', 'sms-scheduling-decide.js', 'reason', R('smsSchedulingDecide'), null, { inbound: true, note: 'GATE_SMS_SCHEDULING_DECIDE, shadow only: records what it would book, books nothing (owner ruling 2026-10-02: one model, Sonnet 5.5)' }),
+  L('sms_scheduling_decide', 'SMS scheduling decide (reply to an offer → slot accepted?)', 'sms-scheduling-decide.js', 'reason', R('smsSchedulingDecide'), null, { inbound: true, note: 'GATE_SMS_SCHEDULING_DECIDE: records what it would do (owner ruling 2026-10-02: one model, Sonnet 5.5); a would-move is carried out by code only when GATE_SMS_SCHEDULING_ACT_MOVE is on' }),
   L('plant_id_referee', 'Plant/tree/shrub/palm photo ID referee (name tie-break)', 'photo-id-v2/plant-engine.js', 'multimodal', R('plantIdReferee'), null, { inbound: true, note: 'GATE_PLANT_ID_REFEREE, dark; Claude Fable 5.1 breaks a Gemini/Sol name disagreement in identify mode only (owner ruling 2026-09-29)' }),
   // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
@@ -419,6 +439,10 @@ const LANES = [
   L('typed_decisions_clef', 'Typed decisions, second provider (shadow)', 'typed-decisions/jev.js', 'fastText', R('typedDecisionClef'), null, { inbound: true, note: 'GATE_TYPED_DECISIONS_CLEF dark' }),
   L('lawn_assess', 'Lawn assessment (customer photo)', 'lawn-assessment.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: T('VISION'), note: `Gemini-only (owner 2026-09-24); Claude is a fallback only when Gemini returns nothing · ${SHARED_GEMINI_PIN}` }),
   L('lawn_visit_assessment', 'Lawn visit assessment', 'lawn-visit-assessment.js', 'multimodal', P('lawnVisitAssessment', 'primary'), P('lawnVisitAssessment', 'fallback'), { inbound: true, note: 'All visit photos in one chain; GATE_LAWN_VISIT_ASSESSMENT; technician review before publication' }),
+  L('lawn_paired_recheck', 'Lawn paired-photo recheck (last visit vs today)', 'lawn-paired-recheck.js', 'multimodal', P('lawnPairedRecheck', 'primary'), P('lawnPairedRecheck', 'fallback'), { inbound: true, note: 'GATE_LAWN_PAIRED_RECHECK, dark; one call per visit after the visit memory freezes; verdict is a closed enum (never customer copy) and a miss writes nothing (owner ruling 2026-09-29 round 3b)' }),
+  // Tree & Shrub Fast Complete watch-signal read (GATE_TS_WATCH_LIST, dark): one small Gemini read per
+  // photo that returns only watch-list keys for the technician's sheet, OpenAI on a Gemini miss.
+  L('ts_watch_signals', 'Tree & shrub watch-list signals (Fast Complete)', 'tree-shrub-assessment.js', 'multimodal', P('treeShrubWatchSignals', 'primary'), P('treeShrubWatchSignals', 'fallback'), { inbound: true, note: 'GATE_TS_WATCH_LIST, dark; keys only, tech-facing, never customer copy; a miss shows the sheet no read' }),
   // The gated name tie-break (owner ruling 2026-09-29): Sol re-reads an unsure
   // or serious Gemini answer, and Fable breaks a Gemini/Sol NAME disagreement
   // (grass type, what a finding is) only. Single leg, no automatic fallback.
@@ -451,7 +475,7 @@ const LANES = [
   // from the hero_alt alt-text pass above (which stays on visionAnalysis).
   L('image_screen', 'Generated image screen', 'content/hero-alt-vision.js', 'multimodal', P('imageScreen', 'primary'), P('imageScreen', 'fallback'), { note: 'blog image text/logo/uniform/van check; Sol first, Claude VISION backs it up' }),
   L('wdo_project_brief', 'WDO project brief + treatment-photo read', 'routes/admin-projects.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'text-only briefs ride contentDraft' }),
-  L('invoice_pdf', 'Vendor invoice PDF processing', 'email/invoice-processor.js', 'multimodal', T('FLAGSHIP'), null, { inbound: true }),
+  L('invoice_pdf', 'Vendor invoice PDF processing', 'email/invoice-processor.js', 'multimodal', T('ROUTINE'), null, { inbound: true }),
   L('contact_dictation', 'Contact dictation decoder', 'contact-dictation.js', 'multimodal', D('GEMINI_CONTACT_DECODER_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true }),
   L('address_recovery', 'Address street recovery', 'address-validation/recovery.js', 'multimodal', D('GEMINI_RECOVERY_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true }),
 
@@ -482,7 +506,6 @@ const LANES = [
   L('blog_draft', 'Blog post drafts', 'content/blog-writer.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
   L('newsletter', 'Newsletter drafts + autopilot rerank', 'newsletter-draft.js, newsletter-autopilot.js, routes/admin-newsletter.js', 'voice', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback'), { note: 'owner ruling 2026-09-27: Opus 5.5 effort max; the admin Compose UI overrides effort to high per-call so an interactive draft cannot hang the request' }),
   L('content_misc', 'Content ideas, scheduler copy, automation emails', 'routes/admin-content-v2.js, content-scheduler.js, routes/admin-automations.js', 'voice', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
-  L('previsit_brief', 'Pre-visit brief', 'previsit-brief.js', 'voice', P('visitBrief', 'primary'), P('visitBrief', 'fallback')),
   // Inbound Sandy calls resolve their own env chain — VOICE_RELAY_INBOUND_MODEL
   // (pinned once per session at conversation construction), else the shared
   // VOICE_RELAY_MODEL, else the VOICE tier. Collections reads VOICE_RELAY_MODEL
@@ -513,7 +536,10 @@ const LANES = [
   L('estimate_assistant', 'Estimate assistant Q&A', 'estimate-assistant.js', 'qa', R('estimateAssistant'), E('ESTIMATE_ASSISTANT_MODEL', T('WORKHORSE'), { live: true }), { inbound: true }),
   L('knowledge_qa', 'Knowledge-base Q&A', 'knowledge-bridge.js', 'qa', R('knowledgeAnswer'), T('FLAGSHIP')),
   L('ask_waves', 'Ask Waves (public chat)', 'ask-waves-intake.js', 'qa', P('askWaves', 'primary'), E('ASK_WAVES_MODEL', P('askWaves', 'fallback'), { live: true }), { inbound: true }),
-  L('wiki_qa', 'Wiki Q&A', 'knowledge/wiki-qa.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
+  // One file, two policies by caller (wiki-qa.js qaLaneFor): customer-facing
+  // and unknown sources stay on highStakes; staff sources ride routineAnswer.
+  L('wiki_qa', 'Wiki Q&A · customer-facing callers', 'knowledge/wiki-qa.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
+  L('wiki_qa_staff', 'Wiki Q&A · staff callers (tech field lookup, admin)', 'knowledge/wiki-qa.js', 'qa', P('routineAnswer', 'primary'), P('routineAnswer', 'fallback')),
   L('wdo_history', 'WDO history lookup', 'property-lookup/wdo-history-lookup.js', 'qa', T('WORKHORSE'), null, { inbound: true }),
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
   L('internal_link_judge', 'Internal-link reader check before auto-merge', 'content/internal-link-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
@@ -532,7 +558,7 @@ const LANES = [
   L('tax_advisor', 'Tax advisor weekly report', 'tax-advisor.js', 'reason', T('FLAGSHIP')),
   L('csr_coach', 'CSR call coaching', 'csr/csr-coach.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('inventory_research', 'Inventory vendor mapping + price research', 'routes/admin-inventory.js', 'reason', T('FLAGSHIP'), null, { note: 'Anthropic web_search tool' }),
-  L('lead_synopsis', 'Lead synopsis from call', 'call-recording-processor.js', 'reason', T('FLAGSHIP'), null, { inbound: true }),
+  L('lead_synopsis', 'Lead synopsis from call', 'call-recording-processor.js', 'reason', T('ROUTINE'), null, { inbound: true }),
   L('call_commitments', 'Call commitments from transcript', 'call-commitments.js', 'reason', T('FLAGSHIP'), null, { inbound: true }),
   L('codex_remediation', 'Content finding auto-fix', 'content/codex-remediation.js', 'reason', T('FLAGSHIP')),
   L('portal_assistant', 'Customer portal assistant', 'ai-assistant/assistant.js', 'reason', T('FLAGSHIP')),
@@ -673,6 +699,8 @@ const LANE_AREA = {
   lawn_assessment_referee: 'photos',
   lawn_assess: 'photos',
   lawn_visit_assessment: 'photos',
+  lawn_paired_recheck: 'photos',
+  ts_watch_signals: 'photos',
   tree_shrub: 'photos',
   treatment_zone: 'photos',
   tech_caption_vision: 'photos',
@@ -703,7 +731,6 @@ const LANE_AREA = {
   project_report: 'reports',
   completion_recap: 'reports',
   lawn_visit_narratives: 'reports',
-  previsit_brief: 'reports',
   visit_voice_facts: 'reports',
   visit_lane_facts: 'reports',
   visit_typed_facts: 'reports',
@@ -762,6 +789,7 @@ const LANE_AREA = {
   chart_builder_sql: 'ib',
   knowledge_qa: 'ib',
   wiki_qa: 'ib',
+  wiki_qa_staff: 'ib',
   kb_audit: 'ib',
   wiki_compiler: 'ib',
   embeddings: 'ib',
@@ -836,6 +864,8 @@ const LANE_DESCRIBE = {
   lawn_assessment_referee: 'Breaks a tie when the two photo models name a different grass or lawn problem (dark)',
   lawn_assess: 'Assesses lawn health from a customer photo',
   lawn_visit_assessment: 'Assesses all lawn visit photos for technician review',
+  lawn_paired_recheck: "Compares last visit's and today's same-spot lawn photos as pairs: better, same or worse (dark)",
+  ts_watch_signals: 'Flags which of this month\'s tree and shrub watch-list items a photo may show, for the technician (dark)',
   tree_shrub: 'Assesses trees and shrubs from a photo',
   treatment_zone: 'Suggests treatment zones on the property map',
   tech_caption_vision: 'Reads a job photo for a caption',
@@ -866,7 +896,6 @@ const LANE_DESCRIBE = {
   project_report: 'Writes the project report',
   completion_recap: 'Writes the short recap the customer gets',
   lawn_visit_narratives: 'Writes lawn and visit summaries',
-  previsit_brief: 'Briefs the tech before a visit',
   visit_voice_facts: 'Reads where the technician treated and the pests they named from their visit note',
   visit_lane_facts: 'Reads a specialty visit\'s places and findings from the technician\'s visit note',
   visit_typed_facts: 'Reads a typed visit\'s findings from the technician\'s visit note',
@@ -924,7 +953,8 @@ const LANE_DESCRIBE = {
   chart_builder_image: 'Chart builder: reads a chart image',
   chart_builder_sql: 'Chart builder: writes the SQL and chart',
   knowledge_qa: 'Answers from the knowledge base',
-  wiki_qa: 'Answers from the wiki',
+  wiki_qa: 'Answers from the wiki for customer-facing assistants',
+  wiki_qa_staff: 'Answers staff questions from the wiki',
   kb_audit: 'Audits the knowledge base nightly',
   wiki_compiler: 'Compiles sources into wiki entries',
   embeddings: 'Indexes knowledge for search',

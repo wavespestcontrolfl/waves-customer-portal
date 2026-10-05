@@ -741,8 +741,14 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
     const prefsMap = {};
     prefsRows.forEach(p => { prefsMap[p.customer_id] = p; });
 
+    // Opt-in aware, like the sender: a contact who has not replied YES yet
+    // resolves to the account holder (recipient-optin.js). An unreadable
+    // opt-in table fails the page rather than naming a held contact.
+    const { optinHeldPhoneKeys } = require('../services/recipient-optin');
+    const heldByCustomer = await optinHeldPhoneKeys(customerIds);
+    const smsRecipient = (c) => getServiceContactSmsRecipient(c, { heldPhoneKeys: heldByCustomer.get(String(c.id)) || null });
     const phones = customers
-      .map(c => getServiceContactSmsRecipient(c).phone || c.phone)
+      .map(c => smsRecipient(c).phone || c.phone)
       .filter(Boolean)
       // messaging_suppression.phone is E.164 — normalize before matching.
       .map(p => toE164(p) || p);
@@ -775,7 +781,7 @@ router.get('/outreach-candidates', requireAdmin, async (req, res, next) => {
         // SMS eligibility is consent-gated; EMAIL eligibility is not (the
         // #2948 artifact covers texting only) — resolve separately so an
         // unstamped contact's email still counts as cadenceable.
-        const contact = getServiceContactSmsRecipient(c);
+        const contact = smsRecipient(c);
         const phone = contact.phone || c.phone || null;
         const email = getServiceContact(c).email || c.email || null;
         const ls = lastSvcMap[c.id];

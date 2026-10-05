@@ -32,7 +32,8 @@ const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
 const { cleanEmail, cleanText } = require('../utils/intake-normalize');
 const { properCase } = require('../utils/name-case');
 const { verifyTurnstileToken } = require('../utils/turnstile');
-const { isHoneypotTripped, resolveSubmitHost } = require('../utils/lead-abuse');
+const { isHoneypotTripped, resolveSubmitHost, isHoldableTokenlessPost } = require('../utils/lead-abuse');
+const { holdUnverifiedLead } = require('../services/lead-unverified-hold');
 const {
   blockIfAutomatedEstimateDuplicate,
   withAutomatedEstimatePhoneLock,
@@ -97,6 +98,24 @@ function applyLeadEstimateAutomationGate(readiness = {}) {
   };
 }
 
+// True when the readiness verdict carries the commercial marker (a structured
+// form flag, an explicit commercial service, or commercial-premises prose —
+// see evaluateLeadEstimateAutomationReadiness). Read off `review`, which the
+// automation gate wrapper leaves intact when the gate is off.
+function leadCommercialSignalFromReadiness(readiness) {
+  return Array.isArray(readiness?.review)
+    && readiness.review.includes('commercial_signal_on_residential_intake');
+}
+
+// Lead-row columns for a commercial verdict. Promote-only: a residential
+// submission returns {} so it can never clear a commercial flag already on an
+// attached call lead.
+function commercialLeadFields(readiness) {
+  return leadCommercialSignalFromReadiness(readiness)
+    ? { is_commercial: true, is_residential: false }
+    : {};
+}
+
 // Enrolls this submission in the local new_lead automation sequence
 // (SendGrid-backed). Runs AFTER leadRecord is resolved (both the call-lead
 // attach branch and the fresh-insert branch) so `leadId` is this
@@ -156,6 +175,111 @@ const leadWebhookPhoneLimiter = rateLimit({
 });
 
 
+// Look up the matching lead_sources record for proper attribution. Shared by
+// the verified path and the unverified hold; null when nothing matches or the
+// lookup fails.
+async function resolveLeadSourceId(leadSource, utmContent) {
+  let leadSourceId = null;
+  try {
+    let sourceRecord = null;
+    // Match by domain first (most specific)
+    if (leadSource.source === 'domain_website' && leadSource.detail) {
+      sourceRecord = await db('lead_sources')
+        .where('domain', leadSource.detail)
+        .where('is_active', true)
+        .first();
+    }
+    // Match by source_type + channel
+    if (!sourceRecord && leadSource.source === 'google_business') {
+      const gbpLocation = findGbpLocationByUtmContent(leadSource.area || utmContent);
+      if (gbpLocation?.googleLocationId) {
+        sourceRecord = await db('lead_sources')
+          .where('source_type', 'gbp')
+          .where('gbp_location_id', gbpLocation.googleLocationId)
+          .where('is_active', true)
+          .first();
+      }
+    }
+    if (!sourceRecord && leadSource.source === 'google_business') {
+      sourceRecord = await db('lead_sources')
+        .where('source_type', 'website_organic')
+        .where('channel', 'google')
+        .where('is_active', true)
+        .first();
+    }
+    if (!sourceRecord && leadSource.source === 'waves_website') {
+      // Prefer the city-specific hub row when the classifier resolved an area
+      // (e.g. a Parrish page → "Website — Parrish (city page)") instead of an
+      // arbitrary .first() over every wavespestcontrol row (which mis-tagged
+      // Parrish leads as Bradenton). Fall back to the generic Main Site row.
+      if (leadSource.area) {
+        sourceRecord = await db('lead_sources')
+          .where('source_type', 'main_site')
+          .where('is_active', true)
+          .whereRaw('name ILIKE ?', [`%${leadSource.area}%`])
+          .first();
+      }
+      if (!sourceRecord) {
+        sourceRecord = await db('lead_sources')
+          .where('domain', 'like', '%wavespestcontrol%')
+          .where('is_active', true)
+          .orderByRaw("(name ILIKE '%Main Site (%') DESC")
+          .first();
+      }
+    }
+    if (!sourceRecord && leadSource.source === 'nextdoor') {
+      sourceRecord = await db('lead_sources')
+        .where('source_type', 'marketplace')
+        .where('channel', 'social_organic')
+        .where('is_active', true)
+        .first();
+    }
+    // AI-assistant referral (seed: 20260928030000_ai_assistant_lead_source).
+    // Without this the leadSource.source==='ai_assistant' bucket never
+    // resolves a lead_source_id — it would carry the correct funnel display
+    // name (SOURCE_NAMES) but lose the admin source badge/filter and trip
+    // the unattributed-leads alert (codex pre-push P1).
+    if (!sourceRecord && leadSource.source === 'ai_assistant') {
+      sourceRecord = await db('lead_sources')
+        .where('source_type', 'ai_assistant')
+        .where('is_active', true)
+        .first();
+    }
+    if (!sourceRecord && leadSource.source === 'facebook') {
+      // Match the Facebook row for the right channel: paid ad clicks
+      // (fbclid/_fbc or utm cpc → channel 'paid') resolve to the paid
+      // call-extension / ads row; organic social (channel 'organic')
+      // resolves to an organic Facebook row. Without the channel filter a
+      // paid call-extension row would also swallow organic social form
+      // leads and mislabel them in lead-source reports.
+      const fbQuery = db('lead_sources')
+        .whereRaw("LOWER(name) LIKE '%facebook%'")
+        .where('is_active', true);
+      if (leadSource.channel) fbQuery.where('channel', leadSource.channel);
+      sourceRecord = await fbQuery.first();
+    }
+    if (!sourceRecord && leadSource.source === 'google_ads') {
+      // Paid Google click (gclid/wbraid/gbraid, or utm google/cpc). Route to
+      // the "Google Ads — Web Form" row so form vs call conversions stay
+      // separable in source ROI. (Before this branch every gclid form lead
+      // was Unattributed.)
+      // Matched by NAME (source_type google_ads is shared with the
+      // call-extension number and the phone-less call-reporting bridge row)
+      // and FAIL CLOSED if absent — every other google_ads row is a call
+      // row, and counting a web form as a call is the contamination this
+      // branch exists to prevent (NULL surfaces via the dashboard's
+      // leads_unattributed_7d alert instead). Deliberately NOT filtered on
+      // is_active (same rationale as lead-source-resolver): a paused
+      // web-form row is still the true channel.
+      sourceRecord = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first();
+    }
+    if (sourceRecord) leadSourceId = sourceRecord.id;
+  } catch (e) {
+    logger.warn(`[lead-webhook] Lead source lookup failed: ${e.message}`);
+  }
+  return leadSourceId;
+}
+
 // POST /api/webhooks/lead — website lead-form submission webhook
 router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res) => {
   // When the form arrived: the delayed lead fallback stands down for any text
@@ -197,6 +321,36 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           `(enforced=${turnstile.enforced}, gate=${isEnabled('leadTurnstile')})`
       );
       if (isEnabled('leadTurnstile') && turnstile.enforced) {
+        // A form whose background check never finished posts with no token.
+        // That is usually a real visitor on a slow phone, so the request is
+        // held for the office instead of dropped: a customer-less lead and a
+        // bell, none of the fan-out below (services/lead-unverified-hold).
+        // Eligibility (utils/lead-abuse isHoldableTokenlessPost): the token
+        // fields are genuinely absent and the browser-set Origin/Referer
+        // names a fleet site. It does not depend on the secret configuration.
+        if (turnstile.reason === 'missing_token' && isEnabled('leadUnverifiedHold')
+          && isHoldableTokenlessPost(req)) {
+          try {
+            const heldIntake = buildLeadWebhookIntake(body);
+            const held = await holdUnverifiedLead({
+              intake: heldIntake,
+              // Same deterministic commercial verdict the verified path
+              // records on its lead row.
+              commercialFields: commercialLeadFields(evaluateLeadEstimateAutomationReadiness({
+                intake: heldIntake,
+                body,
+                serviceInterest: heldIntake.serviceInterest,
+              })),
+              leadSourceId: await resolveLeadSourceId(heldIntake.leadSource, heldIntake.utmContent),
+              reason: turnstile.reason,
+            });
+            if (held.held) return res.status(200).json({ success: true });
+          } catch (holdErr) {
+            // Code only: a knex error message carries the SQL bindings (the
+            // submitted name, phone, address and message).
+            logger.error(`[lead-webhook] unverified hold failed, refusing as before: ${holdErr.code || holdErr.name || 'error'}`);
+          }
+        }
         return res.status(403).json({ error: 'Verification failed. Please try again.' });
       }
     }
@@ -292,105 +446,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     const phoneFormatted = '+1' + phone.slice(-10);
     let estimateAutomationReadiness = null;
 
-    // Look up matching lead_sources record for proper attribution
-    let leadSourceId = null;
-    try {
-      let sourceRecord = null;
-      // Match by domain first (most specific)
-      if (leadSource.source === 'domain_website' && leadSource.detail) {
-        sourceRecord = await db('lead_sources')
-          .where('domain', leadSource.detail)
-          .where('is_active', true)
-          .first();
-      }
-      // Match by source_type + channel
-      if (!sourceRecord && leadSource.source === 'google_business') {
-        const gbpLocation = findGbpLocationByUtmContent(leadSource.area || utmContent);
-        if (gbpLocation?.googleLocationId) {
-          sourceRecord = await db('lead_sources')
-            .where('source_type', 'gbp')
-            .where('gbp_location_id', gbpLocation.googleLocationId)
-            .where('is_active', true)
-            .first();
-        }
-      }
-      if (!sourceRecord && leadSource.source === 'google_business') {
-        sourceRecord = await db('lead_sources')
-          .where('source_type', 'website_organic')
-          .where('channel', 'google')
-          .where('is_active', true)
-          .first();
-      }
-      if (!sourceRecord && leadSource.source === 'waves_website') {
-        // Prefer the city-specific hub row when the classifier resolved an area
-        // (e.g. a Parrish page → "Website — Parrish (city page)") instead of an
-        // arbitrary .first() over every wavespestcontrol row (which mis-tagged
-        // Parrish leads as Bradenton). Fall back to the generic Main Site row.
-        if (leadSource.area) {
-          sourceRecord = await db('lead_sources')
-            .where('source_type', 'main_site')
-            .where('is_active', true)
-            .whereRaw('name ILIKE ?', [`%${leadSource.area}%`])
-            .first();
-        }
-        if (!sourceRecord) {
-          sourceRecord = await db('lead_sources')
-            .where('domain', 'like', '%wavespestcontrol%')
-            .where('is_active', true)
-            .orderByRaw("(name ILIKE '%Main Site (%') DESC")
-            .first();
-        }
-      }
-      if (!sourceRecord && leadSource.source === 'nextdoor') {
-        sourceRecord = await db('lead_sources')
-          .where('source_type', 'marketplace')
-          .where('channel', 'social_organic')
-          .where('is_active', true)
-          .first();
-      }
-      // AI-assistant referral (seed: 20260928030000_ai_assistant_lead_source).
-      // Without this the leadSource.source==='ai_assistant' bucket never
-      // resolves a lead_source_id — it would carry the correct funnel display
-      // name (SOURCE_NAMES) but lose the admin source badge/filter and trip
-      // the unattributed-leads alert (codex pre-push P1).
-      if (!sourceRecord && leadSource.source === 'ai_assistant') {
-        sourceRecord = await db('lead_sources')
-          .where('source_type', 'ai_assistant')
-          .where('is_active', true)
-          .first();
-      }
-      if (!sourceRecord && leadSource.source === 'facebook') {
-        // Match the Facebook row for the right channel: paid ad clicks
-        // (fbclid/_fbc or utm cpc → channel 'paid') resolve to the paid
-        // call-extension / ads row; organic social (channel 'organic')
-        // resolves to an organic Facebook row. Without the channel filter a
-        // paid call-extension row would also swallow organic social form
-        // leads and mislabel them in lead-source reports.
-        const fbQuery = db('lead_sources')
-          .whereRaw("LOWER(name) LIKE '%facebook%'")
-          .where('is_active', true);
-        if (leadSource.channel) fbQuery.where('channel', leadSource.channel);
-        sourceRecord = await fbQuery.first();
-      }
-      if (!sourceRecord && leadSource.source === 'google_ads') {
-        // Paid Google click (gclid/wbraid/gbraid, or utm google/cpc). Route to
-        // the "Google Ads — Web Form" row so form vs call conversions stay
-        // separable in source ROI. (Before this branch every gclid form lead
-        // was Unattributed.)
-        // Matched by NAME (source_type google_ads is shared with the
-        // call-extension number and the phone-less call-reporting bridge row)
-        // and FAIL CLOSED if absent — every other google_ads row is a call
-        // row, and counting a web form as a call is the contamination this
-        // branch exists to prevent (NULL surfaces via the dashboard's
-        // leads_unattributed_7d alert instead). Deliberately NOT filtered on
-        // is_active (same rationale as lead-source-resolver): a paused
-        // web-form row is still the true channel.
-        sourceRecord = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first();
-      }
-      if (sourceRecord) leadSourceId = sourceRecord.id;
-    } catch (e) {
-      logger.warn(`[lead-webhook] Lead source lookup failed: ${e.message}`);
-    }
+    const leadSourceId = await resolveLeadSourceId(leadSource, utmContent);
 
     // Check for existing customer. Archived (soft-deleted) rows keep their
     // phone, so they must not match: an archived customer's submission has to
@@ -577,6 +633,9 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       ...(anonId ? { anon_id: anonId } : {}),
       ...(heardAbout ? { heard_about: heardAbout } : {}),
       ...(heardAboutPrompt ? { heard_about_prompt: heardAboutPrompt } : {}),
+      // A commercial submission attaching to an open call lead promotes that
+      // row too — the call pipeline leaves these columns at their defaults.
+      ...commercialLeadFields(estimateAutomationReadiness),
     });
 
     if (!shouldRunLeadAcquisition({ isNewCustomer, isDuplicateSubmission })) {
@@ -964,6 +1023,11 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       }
 
       if (!leadRecord) {
+        // The readiness gate already decided whether this submission states
+        // or describes a commercial premises; record that verdict on the row
+        // so commercial web demand is countable and the lead's later readers
+        // (call estimator hint, booking-link text) see it. An attached call
+        // lead gets the same columns through buildPrefillAttachFields.
         const [newLead] = await db('leads').insert({
           first_name: firstName, last_name: lastName,
           phone: phoneFormatted, email: email || null,
@@ -989,6 +1053,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           heard_about: heardAbout || null,
           heard_about_prompt: heardAboutPrompt || null,
           is_residential: true,
+          ...commercialLeadFields(estimateAutomationReadiness),
         }).returning('*');
         leadRecord = newLead;
       }
@@ -2128,6 +2193,8 @@ function buildExistingCustomerLeadUpdates({ existing, leadSource }) {
 module.exports = router;
 module.exports.flushPendingLeadFallbacks = flushPendingLeadFallbacks;
 module.exports._test = {
+  leadCommercialSignalFromReadiness,
+  commercialLeadFields,
   buildExistingCustomerLeadUpdates,
   attachVoicemailPrefillLead,
   attachOpenCallLeadByPhone,

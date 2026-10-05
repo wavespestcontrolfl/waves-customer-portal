@@ -46,6 +46,8 @@ jest.mock('../services/scheduling/occupancy', () => ({
   // scheduling-occupancy) stubbed inert here too.
   acquireOccupancyLock: jest.fn().mockResolvedValue(undefined),
   acquireOccupancyLocks: jest.fn().mockResolvedValue(undefined),
+  // The move's CAS pins the technician only while the scoped probe is live.
+  techScopedConfirmActive: jest.fn(() => false),
 }));
 
 const db = require('../models/db');
@@ -404,6 +406,9 @@ describe('live-status reschedule override (allowLive)', () => {
     expect(notifyAssignmentChange).toHaveBeenCalledWith({
       visitId: 'svc-1', fromTechId: 'tech-1', toTechId: 'tech-2', actorId: 'customer_self_serve',
       snapshot: { date: TARGET, windowStart: '09:00', windowEnd: '11:00' },
+      // The old slot rides along: a move off today/tomorrow is still a
+      // today/tomorrow change for the tech who loses it (Codex #5783 P2).
+      previous: { date: BASE, windowStart: '09:00:00', windowEnd: '11:00:00' },
     });
   });
 

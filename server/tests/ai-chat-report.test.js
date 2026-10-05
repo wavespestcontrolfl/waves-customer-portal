@@ -3,6 +3,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+  fn.raw = jest.fn((sql) => sql);
   return fn;
 });
 jest.mock('../services/logger', () => ({
@@ -12,6 +13,21 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/ai-assistant/assistant', () => ({
   processMessage: jest.fn(),
+}));
+const mockBoundedDatabase = jest.fn();
+mockBoundedDatabase.isTransaction = true;
+const mockTurnTransaction = jest.fn(async (_stage, work) => work(mockBoundedDatabase));
+const mockTurn = {
+  requestRowId: 'portal-request-row',
+  transaction: (...args) => mockTurnTransaction(...args),
+};
+const mockPortalTurn = jest.fn(async (args) => ({
+  ...await args.processTurn(mockTurn),
+  requestId: args.requestId,
+}));
+jest.mock('../services/ai-assistant/portal-turn', () => ({
+  portalConversationIdentifier: (identifier, propertyId) => (propertyId ? `property:${propertyId}:${identifier}` : identifier),
+  runPortalTurn: (...args) => mockPortalTurn(...args),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
@@ -61,7 +77,7 @@ async function withServer(fn) {
 // The report route uses the REAL customer authenticate middleware, which
 // looks the customer up in db('customers') — the mock has to serve that
 // chain alongside the report's own tables.
-function mockReportTables({ session, customer } = {}) {
+function mockReportTables({ session, customer, property } = {}) {
   const customersQuery = {
     where: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
@@ -71,8 +87,24 @@ function mockReportTables({ session, customer } = {}) {
   };
   const sessionQuery = {
     where: jest.fn().mockReturnThis(),
+    clone: jest.fn().mockReturnThis(),
+    whereExists: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(session || null),
+  };
+  const messageExistsQuery = {
+    select: jest.fn().mockReturnThis(),
+    from: jest.fn().mockReturnThis(),
+    whereRaw: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+  };
+  sessionQuery.whereExists.mockImplementation((build) => {
+    build.call(messageExistsQuery);
+    return sessionQuery;
+  });
+  const propertyQuery = {
+    where: jest.fn().mockReturnThis(),
+    first: jest.fn().mockResolvedValue(property || null),
   };
   const escalationInsert = jest.fn().mockReturnValue({
     returning: jest.fn().mockResolvedValue([{ id: 'esc-1' }]),
@@ -82,31 +114,36 @@ function mockReportTables({ session, customer } = {}) {
   });
   db.mockImplementation((table) => {
     if (table === 'customers') return customersQuery;
+    if (table === 'customer_properties') return propertyQuery;
     if (table === 'agent_sessions') return sessionQuery;
     if (table === 'ai_escalations') return { insert: escalationInsert };
     if (table === 'operator_inbox_items') return { insert: inboxInsert };
     throw new Error(`Unexpected table ${table}`);
   });
-  return { customersQuery, sessionQuery, escalationInsert, inboxInsert };
+  return {
+    customersQuery, propertyQuery, sessionQuery, messageExistsQuery, escalationInsert, inboxInsert,
+  };
 }
 
-function customerToken(customerId = 'cust-1') {
-  return jwt.sign({ customerId }, process.env.JWT_SECRET);
+function customerToken(customerId = 'cust-1', claims = {}) {
+  return jwt.sign({ customerId, ...claims }, process.env.JWT_SECRET);
 }
 
 describe('POST /ai/chat/report', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.GATE_AI_CONTENT_REPORT;
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
   });
 
   afterAll(() => {
     delete process.env.GATE_AI_CONTENT_REPORT;
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
   });
 
   test('files an ai_escalations row plus an operator-inbox mirror for the admin hub', async () => {
     const { sessionQuery, escalationInsert, inboxInsert } = mockReportTables({
-      session: { id: 'conv-1', customer_id: 'cust-1' },
+      session: { id: 'conv-1', customer_id: 'cust-1', channel: 'portal_chat', channel_identifier: 'chat-123' },
     });
 
     await withServer(async (baseUrl) => {
@@ -123,6 +160,7 @@ describe('POST /ai/chat/report', () => {
         channel_identifier: 'chat-123',
         customer_id: 'cust-1',
       });
+      expect(sessionQuery.orderBy).toHaveBeenCalledWith('created_at', 'desc');
       expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({
         conversation_id: 'conv-1',
         customer_id: 'cust-1',
@@ -142,6 +180,188 @@ describe('POST /ai/chat/report', () => {
     });
   });
 
+  test('a supplied conversation id selects the reported older reply instead of the newer session', async () => {
+    const olderId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const newerId = '22222222-2222-4222-8222-222222222222';
+    const rows = [
+      { id: olderId, customer_id: 'cust-1', channel: 'portal_chat', channel_identifier: 'chat-123', created_at: '2026-10-01' },
+      { id: newerId, customer_id: 'cust-1', channel: 'portal_chat', channel_identifier: 'chat-123', created_at: '2026-10-02' },
+    ];
+    const { sessionQuery, escalationInsert } = mockReportTables();
+    sessionQuery.first.mockImplementation(async () => {
+      const requestedId = sessionQuery.where.mock.calls.at(-1)[0].id;
+      return requestedId ? rows.find((row) => row.id === requestedId) : rows[1];
+    });
+
+    await withServer(async (baseUrl) => {
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` };
+      const selected = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ sessionId: 'chat-123', conversationId: olderId.toUpperCase(), messageContent: 'Older AI reply' }),
+      });
+      expect(selected.status).toBe(200);
+    });
+
+    expect(sessionQuery.where.mock.calls[0][0]).toEqual({
+      id: olderId,
+      channel: 'portal_chat',
+      channel_identifier: 'chat-123',
+      customer_id: 'cust-1',
+    });
+    expect(sessionQuery.clone).not.toHaveBeenCalled();
+    expect(sessionQuery.first).toHaveBeenCalledTimes(1);
+    expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({ conversation_id: olderId }));
+  });
+
+  test('a legacy report links each exact assistant reply even when the newer conversation is inactive', async () => {
+    const customerId = 'legacy-match-cust';
+    const older = {
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', customer_id: customerId,
+      channel: 'portal_chat', channel_identifier: 'chat-123', status: 'active', created_at: '2026-10-01',
+    };
+    const newer = {
+      id: '22222222-2222-4222-8222-222222222222', customer_id: customerId,
+      channel: 'portal_chat', channel_identifier: 'chat-123', status: 'inactive', created_at: '2026-10-02',
+    };
+    const { sessionQuery, messageExistsQuery, escalationInsert } = mockReportTables({
+      customer: { id: customerId, active: true },
+    });
+    let reportedContent = null;
+    messageExistsQuery.where.mockImplementation((predicate) => {
+      reportedContent = predicate['reported_message.content'];
+      return messageExistsQuery;
+    });
+    sessionQuery.first.mockImplementation(async () => (
+      reportedContent === 'Older AI reply' ? older : newer
+    ));
+
+    await withServer(async (baseUrl) => {
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken(customerId)}` };
+      for (const messageContent of ['Older AI reply', 'Newer AI reply']) {
+        const res = await fetch(`${baseUrl}/ai/chat/report`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ sessionId: 'chat-123', messageContent }),
+        });
+        expect(res.status).toBe(200);
+      }
+    });
+
+    expect(messageExistsQuery.whereRaw).toHaveBeenCalledWith(
+      'reported_message.conversation_id = agent_sessions.id',
+    );
+    expect(messageExistsQuery.where).toHaveBeenCalledWith(expect.objectContaining({
+      'reported_message.role': 'assistant',
+    }));
+    expect(escalationInsert.mock.calls.map(([row]) => row.conversation_id)).toEqual([older.id, newer.id]);
+  });
+
+  test('a legacy report falls back to the newest scoped conversation when no assistant content matches', async () => {
+    const customerId = 'legacy-fallback-cust';
+    const newest = {
+      id: '22222222-2222-4222-8222-222222222222', customer_id: customerId,
+      channel: 'portal_chat', channel_identifier: 'chat-123', status: 'inactive', created_at: '2026-10-02',
+    };
+    const { sessionQuery, escalationInsert } = mockReportTables({
+      customer: { id: customerId, active: true },
+    });
+    sessionQuery.first.mockResolvedValueOnce(null).mockResolvedValueOnce(newest);
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken(customerId)}` },
+        body: JSON.stringify({ sessionId: 'chat-123', messageContent: 'Reply absent from history' }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(sessionQuery.clone).toHaveBeenCalledTimes(1);
+    expect(sessionQuery.first).toHaveBeenCalledTimes(2);
+    expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({ conversation_id: newest.id }));
+  });
+
+  test('the authenticated property claim scopes the conversation lookup', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    const { propertyQuery, sessionQuery, escalationInsert } = mockReportTables({
+      customer: { id: 'cust-1', account_id: 'account-1', active: true },
+      property: { id: 'prop-1', customer_id: 'cust-1', active: true },
+      session: {
+        id: 'conv-property-1', customer_id: 'cust-1', channel: 'portal_chat', channel_identifier: 'property:prop-1:shared-session',
+      },
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${customerToken('cust-1', {
+            accountId: 'account-1',
+            propertyId: 'prop-1',
+          })}`,
+        },
+        body: JSON.stringify({
+          sessionId: 'shared-session',
+          propertyId: 'prop-other',
+          messageContent: 'Bad AI reply',
+        }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(propertyQuery.where).toHaveBeenCalledWith({
+      id: 'prop-1',
+      customer_id: 'cust-1',
+      active: true,
+    });
+    expect(sessionQuery.where).toHaveBeenCalledWith({
+      channel: 'portal_chat',
+      channel_identifier: 'property:prop-1:shared-session',
+      customer_id: 'cust-1',
+    });
+    expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({
+      conversation_id: 'conv-property-1',
+      customer_id: 'cust-1',
+    }));
+  });
+
+  test('a supplied conversation from another authenticated property is not linked', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    const conversationId = '33333333-3333-4333-8333-333333333333';
+    const { sessionQuery, escalationInsert } = mockReportTables({
+      customer: { id: 'cust-1', account_id: 'account-1', active: true },
+      property: { id: 'prop-1', customer_id: 'cust-1', active: true },
+      session: {
+        id: conversationId,
+        customer_id: 'cust-1',
+        channel: 'portal_chat',
+        channel_identifier: 'property:prop-other:shared-session',
+      },
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${customerToken('cust-1', { accountId: 'account-1', propertyId: 'prop-1' })}`,
+        },
+        body: JSON.stringify({ sessionId: 'shared-session', conversationId, messageContent: 'Bad AI reply' }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(sessionQuery.where).toHaveBeenCalledWith({
+      id: conversationId,
+      channel: 'portal_chat',
+      channel_identifier: 'property:prop-1:shared-session',
+      customer_id: 'cust-1',
+    });
+    expect(sessionQuery.orderBy).toHaveBeenCalledWith('created_at', 'desc');
+    expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({ conversation_id: null }));
+  });
+
   test('rejects unauthenticated reports outright', async () => {
     const { escalationInsert } = mockReportTables();
 
@@ -156,22 +376,45 @@ describe('POST /ai/chat/report', () => {
     });
   });
 
-  test("never links another customer's conversation to the report", async () => {
-    const { escalationInsert } = mockReportTables({
-      session: { id: 'conv-other', customer_id: 'someone-else' },
+  test("a supplied conversation owned by another customer is not linked or replaced with the latest", async () => {
+    const conversationId = '44444444-4444-4444-8444-444444444444';
+    const { sessionQuery, escalationInsert } = mockReportTables({
+      session: {
+        id: conversationId,
+        customer_id: 'someone-else',
+        channel: 'portal_chat',
+        channel_identifier: 'chat-guessed',
+      },
     });
 
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/ai/chat/report`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
-        body: JSON.stringify({ sessionId: 'chat-guessed', messageContent: 'Bad AI reply' }),
+        body: JSON.stringify({ sessionId: 'chat-guessed', conversationId, messageContent: 'Bad AI reply' }),
       });
       expect(res.status).toBe(200);
       expect(escalationInsert).toHaveBeenCalledWith(expect.objectContaining({
         conversation_id: null,
         customer_id: 'cust-1',
       }));
+    });
+    expect(sessionQuery.clone).not.toHaveBeenCalled();
+    expect(sessionQuery.first).toHaveBeenCalledTimes(1);
+  });
+
+  test('rejects an invalid supplied conversation id without touching the queue', async () => {
+    const { escalationInsert } = mockReportTables();
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat/report`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+        body: JSON.stringify({ sessionId: 'chat-123', conversationId: '../newest', messageContent: 'Bad AI reply' }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Invalid conversationId' });
+      expect(escalationInsert).not.toHaveBeenCalled();
     });
   });
 
@@ -246,13 +489,17 @@ describe('POST /ai/chat/report', () => {
 });
 
 describe('POST /ai/chat canReport flag', () => {
+  const requestId = '11a7ca3e-8392-4e2b-92b0-c3125b3e6c48';
+
   beforeEach(() => {
     jest.clearAllMocks();
     delete process.env.GATE_AI_CONTENT_REPORT;
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
   });
 
   afterAll(() => {
     delete process.env.GATE_AI_CONTENT_REPORT;
+    delete process.env.GATE_APP_PROPERTY_SCOPE;
   });
 
   test('model-generated replies advertise canReport for authenticated customers (gate default on)', async () => {
@@ -263,11 +510,11 @@ describe('POST /ai/chat canReport flag', () => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
-        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123', requestId }),
       });
       const body = await res.json();
       expect(res.status).toBe(200);
-      expect(body).toEqual({ reply: 'Hi there', escalated: false, generated: true, canReport: true });
+      expect(body).toEqual({ reply: 'Hi there', escalated: false, generated: true, requestId, canReport: true });
     });
   });
 
@@ -279,13 +526,30 @@ describe('POST /ai/chat canReport flag', () => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123', requestId }),
       });
       const body = await res.json();
       expect(res.status).toBe(401);
       expect(body).toEqual({ error: 'Authentication required' });
       expect(WavesAssistant.processMessage).not.toHaveBeenCalled();
     });
+  });
+
+  test('rejects a malformed request id before coordinating or invoking the model', async () => {
+    mockReportTables();
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123', requestId: '../repeat' }),
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'Invalid requestId' });
+    });
+
+    expect(mockPortalTurn).not.toHaveBeenCalled();
+    expect(WavesAssistant.processMessage).not.toHaveBeenCalled();
   });
 
   test('uses only the authenticated customer identity, ignoring body customer claims', async () => {
@@ -299,6 +563,7 @@ describe('POST /ai/chat canReport flag', () => {
         body: JSON.stringify({
           message: 'hello',
           sessionId: 'shared-session',
+          requestId,
           customerId: 'victim-customer',
         }),
       });
@@ -313,8 +578,50 @@ describe('POST /ai/chat canReport flag', () => {
       customerPhone: '+19415550100',
       // GATE_PORTAL_CHAT_RESERVICE off: no scope read, the re-service button withheld.
       secondaryProperty: true,
+      turn: mockTurn,
     });
     expect(mockResolveScope).not.toHaveBeenCalled();
+    expect(mockPortalTurn).toHaveBeenCalledWith(expect.objectContaining({
+      requestId,
+      customerId: 'cust-1',
+      propertyId: null,
+      channelIdentifier: 'shared-session',
+    }));
+  });
+
+  test('the authenticated property claim scopes the coordinator and conversation, ignoring body property claims', async () => {
+    process.env.GATE_APP_PROPERTY_SCOPE = 'true';
+    mockReportTables({
+      customer: { id: 'cust-1', active: true, phone: '+19415550100' },
+      property: { id: 'prop-1', customer_id: 'cust-1', active: true },
+    });
+    WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/ai/chat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${customerToken('cust-1', { propertyId: 'prop-1' })}`,
+        },
+        body: JSON.stringify({
+          message: 'hello', sessionId: 'shared-session', requestId, propertyId: 'prop-other',
+        }),
+      });
+      expect(res.status).toBe(200);
+    });
+
+    expect(mockPortalTurn).toHaveBeenCalledWith(expect.objectContaining({
+      requestId,
+      customerId: 'cust-1',
+      propertyId: 'prop-1',
+      channelIdentifier: 'property:prop-1:shared-session',
+    }));
+    expect(WavesAssistant.processMessage).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1',
+      channelIdentifier: 'property:prop-1:shared-session',
+      turn: mockTurn,
+    }));
   });
 
   describe('GATE_PORTAL_CHAT_RESERVICE on: the session property scope decides the re-service button', () => {
@@ -340,6 +647,7 @@ describe('POST /ai/chat canReport flag', () => {
       });
 
       expect(mockResolveScope).not.toHaveBeenCalled();
+      expect(mockTurnTransaction).not.toHaveBeenCalled();
     });
 
     test('the chat\'s master switch off: no scope read (the resolver can write)', async () => {
@@ -357,6 +665,7 @@ describe('POST /ai/chat canReport flag', () => {
       });
 
       expect(mockResolveScope).not.toHaveBeenCalled();
+      expect(mockTurnTransaction).not.toHaveBeenCalled();
       expect(WavesAssistant.processMessage).toHaveBeenCalledWith(expect.objectContaining({ secondaryProperty: true }));
     });
 
@@ -367,7 +676,11 @@ describe('POST /ai/chat canReport flag', () => {
       ['a failed scope read', async () => { throw new Error('db down'); }, true],
     ])('%s', async (_label, scope, secondaryProperty) => {
       mockReportTables({ customer: { id: 'cust-1', active: true, phone: '+19415550100' } });
-      mockResolveScope.mockImplementation(scope);
+      mockResolveScope.mockImplementation(async (...args) => {
+        // The coordinator records its invocation before processTurn begins.
+        expect(mockPortalTurn).toHaveBeenCalledTimes(1);
+        return scope(...args);
+      });
       WavesAssistant.processMessage.mockResolvedValue({ reply: 'Hi there', escalated: false, generated: true });
 
       await withServer(async (baseUrl) => {
@@ -379,8 +692,41 @@ describe('POST /ai/chat canReport flag', () => {
         expect(res.status).toBe(200);
       });
 
-      expect(mockResolveScope).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }));
+      expect(mockTurnTransaction).toHaveBeenCalledWith('portal property scope', expect.any(Function));
+      expect(mockResolveScope).toHaveBeenCalledWith(
+        expect.objectContaining({ customerId: 'cust-1' }),
+        mockBoundedDatabase,
+      );
       expect(WavesAssistant.processMessage).toHaveBeenCalledWith(expect.objectContaining({ secondaryProperty }));
+    });
+
+    test('a cancelled scope transaction never invokes the assistant', async () => {
+      mockReportTables({ customer: { id: 'cust-1', active: true, phone: '+19415550100' } });
+      const cancelled = new Error('query timed out');
+      cancelled.name = 'KnexTimeoutError';
+      mockResolveScope.mockRejectedValue(cancelled);
+      const coordinatorFallback = jest.fn(async (args) => {
+        try {
+          return { ...await args.processTurn(mockTurn), requestId: args.requestId };
+        } catch (err) {
+          expect(err).toBe(cancelled);
+          return { reply: 'Please try again.', generated: false, requestId: args.requestId };
+        }
+      });
+      mockPortalTurn.mockImplementationOnce(coordinatorFallback);
+
+      await withServer(async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/ai/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+          body: JSON.stringify({ message: 'ants are back', sessionId: 'sess-rs' }),
+        });
+        expect(res.status).toBe(200);
+      });
+
+      expect(coordinatorFallback).toHaveBeenCalledTimes(1);
+      expect(mockTurnTransaction).toHaveBeenCalledWith('portal property scope', expect.any(Function));
+      expect(WavesAssistant.processMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -392,7 +738,7 @@ describe('POST /ai/chat canReport flag', () => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
-        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123', requestId }),
       });
       const body = await res.json();
       expect(body.canReport).toBe(false);
@@ -408,7 +754,7 @@ describe('POST /ai/chat canReport flag', () => {
       const res = await fetch(`${baseUrl}/ai/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
-        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123' }),
+        body: JSON.stringify({ message: 'hello', sessionId: 'chat-123', requestId }),
       });
       const body = await res.json();
       expect(body.canReport).toBe(false);

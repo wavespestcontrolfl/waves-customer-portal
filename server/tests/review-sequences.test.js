@@ -4936,6 +4936,12 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
       expect(sent).not.toContain('waiting on me this morning');
       expect(sent).toContain('A quick Google review would help us a lot');
       expect(mock.__state.rows.review_requests[0].template_key).toBe('friendly_ask');
+      // #5682 r6: the review page is told this request carried the fixed text, not the draft
+      const fixed = mock.__state.rows.review_requests[0];
+      expect(mock.__state.rows.review_ask_drafts).toEqual([expect.objectContaining({
+        customer_id: 'tv-5', sequence_id: 'seq-tv5', sequence_step: 1, channel: 'sms',
+        outcome: 'fallback', reason: 'long_link', evidence: JSON.stringify({ requestId: fixed.id }),
+      })]);
     });
 
     test('#5524 pre-push: on a later touch the anchored visit\'s own service type wins over the sequence\'s cached type', async () => {
@@ -7802,6 +7808,66 @@ describe('review-ask holds (GATE_REVIEW_ASK_TECH_VOICE, build plan PR 2)', () =>
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(seqRow(mock)).toMatchObject({ status: 'active', current_step: 2, touches_sent: 1 });
     expect(decisionOf(mock)).toMatchObject({ reason: 'ask_dropped_payment_hold', detail: { step: 1, hold: 'overdue_invoice' } });
+    // ... and the drop is kept for the review page (the next step overwrites the decision)
+    expect(mock.__state.rows.review_ask_drafts).toEqual([expect.objectContaining({ sequence_id: 'seq-hold', sequence_step: 1, outcome: 'held', reason: 'payment_hold_dropped' })]);
+  });
+
+  test('#5682 r8: delivery evidence for many requests is one sms_log read, matched by marker, request and customer', async () => {
+    const at = new Date('2026-10-02T15:04:00Z');
+    const log = (over) => ({ customer_id: 'c-1', direction: 'outbound', status: 'sent', created_at: at, metadata: { review_ask_reservation: true, review_request_id: 'rr-1' }, ...over });
+    const mock = makeMock({ sms_log: [
+      log({ id: 'sms-1' }),
+      log({ id: 'sms-2', metadata: JSON.stringify({ review_request_id: 'rr-2' }) }), // no reservation marker
+      log({ id: 'sms-3', customer_id: 'c-other', metadata: { review_ask_reservation: true, review_request_id: 'rr-3' } }), // another customer's row
+    ] });
+    const tables = [];
+    db.mockImplementation((table) => { tables.push(table); return mock(table); });
+    const found = await ReviewService.reviewAskDeliveryEvidenceFor([
+      { id: 'rr-1', customer_id: 'c-1' }, { id: 'rr-2', customer_id: 'c-1' }, { id: 'rr-3', customer_id: 'c-3' }, { id: null, customer_id: 'c-1' },
+    ]);
+    expect([...found.keys()]).toEqual(['rr-1']);
+    expect(found.get('rr-1')).toMatchObject({ id: 'sms-1', created_at: at });
+    expect(tables).toEqual(['sms_log']);
+    // nothing to look up: no read at all
+    tables.length = 0;
+    expect((await ReviewService.reviewAskDeliveryEvidenceFor([])).size).toBe(0);
+    expect(tables).toEqual([]);
+  });
+
+  test('#5682 r6: the drop is listed only when the step actually advanced, and a history write that fails never blocks the advance', async () => {
+    mockGates.reviewAskTechVoice = true;
+    mockPaymentHold.mockResolvedValue({ reason: 'overdue_invoice', invoiceId: 'inv-9' });
+    const held = { payment_hold_step: 1, payment_hold_since: new Date(Date.now() - 4 * 86400000) };
+    // The cadence stops between the runner's read and its advance: nothing moved, so no drop is listed.
+    const stopped = book(held);
+    db.mockImplementation((table) => {
+      const q = stopped(table);
+      if (table === 'review_sequences') {
+        const update = q.update.bind(q);
+        q.update = (patch) => { if ('current_step' in patch) seqRow(stopped).status = 'stopped'; return update(patch); };
+      }
+      return q;
+    });
+    await ReviewService._runSequenceStep('seq-hold');
+    expect(seqRow(stopped).current_step).toBe(1);
+    expect(stopped.__state.rows.review_ask_drafts || []).toEqual([]);
+    // The history table cannot be written: the step still advances, once, with no row.
+    const blip = book(held);
+    db.mockImplementation((table) => {
+      const q = blip(table);
+      if (table === 'review_ask_drafts') q.insert = () => Promise.reject(new Error('db blip'));
+      return q;
+    });
+    // This suite's passthrough transaction has no rollback; a real one undoes the advance.
+    const passthrough = db.transaction;
+    db.transaction = async (fn) => {
+      const before = { ...seqRow(blip) };
+      try { return await fn(db); } catch (err) { Object.assign(seqRow(blip), before); throw err; }
+    };
+    const out = await ReviewService._runSequenceStep('seq-hold').finally(() => { db.transaction = passthrough; });
+    expect(out).toMatchObject({ stepSkipped: true, reason: 'ask_dropped_payment_hold' });
+    expect(seqRow(blip)).toMatchObject({ status: 'active', current_step: 2 });
+    expect(blip.__state.rows.review_ask_drafts || []).toEqual([]);
   });
 
   test('a step held past its window is dropped even when the bill was paid in between (it would go out late)', async () => {

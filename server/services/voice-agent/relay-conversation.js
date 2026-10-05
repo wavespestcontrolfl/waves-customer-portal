@@ -733,12 +733,16 @@ const PRICE_LINE_CONTEXT = [
   '- If you cannot give a number for what they want, do not leave them empty-handed — but do not',
   '  promise first: say the office can put a written estimate together, get their first and last',
   '  name, email address, and full service street address, and call capture_lead with',
-  '  estimate_requested: true. Only if the tool result says the request is queued may you promise',
+  '  estimate_requested: true. (For a caller a KNOWN CALLER block says is already a customer, do',
+  '  not collect those first: call capture_lead with what they have told you and follow its',
+  '  result.) Only if the tool result says the request is queued may you promise',
   '  it: during office hours that is usually about 15 minutes; if CLOCK DATA says the office is',
   '  closed, say it goes out when the office opens and follow the callback rules. If the tool says',
   '  it could not be queued, or the caller declines to give a missing detail, call capture_lead',
   '  again WITHOUT estimate_requested, do not promise an estimate — say a team member will follow',
-  '  up — and end normally.',
+  '  up — and end normally. The one exception: when the tool result says an estimate already',
+  '  promised on this call is still owed, follow that result instead — the estimate stays',
+  '  promised, and a team member calls back to confirm where to send it.',
 ].join('\n');
 
 function agentDisplayName() {
@@ -768,6 +772,18 @@ function contextPromptAddendum() {
     '  the matched caller about their own account is fine.',
     '- Use get_account_overview and get_service_history for account questions; never answer',
     '  them from memory or guesswork.',
+    '- A caller a KNOWN CALLER block says is already a customer (the block can arrive at the',
+    '  start of the call or partway through) is the exception to gathering a name, address and',
+    '  email: those are already on their account. Do not ask for them unless a tool needs one',
+    '  or its result says one is missing. Open times for such a customer need no address: call',
+    '  get_availability or find_slots without one and the tool uses the property on their',
+    '  account; pass an address only when they say the visit is for a different property. For a',
+    '  written estimate, call capture_lead with estimate_requested first, with what they have',
+    '  told you. Its result says what is missing. ONLY when that result offers it, ask the one',
+    '  question "Should it go to the email and service address on your account?" — on a yes call',
+    '  capture_lead again with use_account_details true; on a no, ask for the ones they want.',
+    '  When the result does not offer it, ask for what is missing. Never read the account\'s',
+    '  details aloud.',
     '- "When is my tech coming?" is get_today_eta. Give the window it returns, and say the',
     '  technician is on the way ONLY when the tool says so. Never invent a tighter ETA, never',
     '  promise a minute-by-minute arrival.',
@@ -2700,6 +2716,9 @@ class RelayConversation {
           duration: (offerContext && offerContext.duration) || null,
           timeOfDay: (offerContext && offerContext.timeOfDay) || 'any',
           expandOpenDays: Boolean(offerContext && offerContext.expandOpenDays),
+          // The account whose property the times were scored at (null = a
+          // location stated on the call): request_booking's fence.
+          ...(offerContext && offerContext.accountCustomerId ? { accountCustomerId: offerContext.accountCustomerId } : {}),
         };
         const existing = this._slotRefsByKey.get(key);
         if (existing) {
@@ -2714,6 +2733,19 @@ class RelayConversation {
         return ref;
       },
       resolveSlotRef: (ref) => this._slotRefs.get(String(ref || '').trim().toUpperCase()) || null,
+      // The caller said the visit is for a DIFFERENT property: times already
+      // offered for the account's own are no longer bookable for it. The refs
+      // stay (a stale ref still resolves, to a refusal) and lose their account
+      // stamp, which request_booking's fence requires; the registry is what a
+      // reconnect carries, so the revocation survives one.
+      revokeAccountSlots: () => {
+        for (const [ref, slot] of this._slotRefs) {
+          if (slot && slot.accountCustomerId) {
+            const { accountCustomerId, ...rest } = slot; // eslint-disable-line no-unused-vars
+            this._slotRefs.set(ref, rest);
+          }
+        }
+      },
       bookingRequested: () => this._bookingRequested,
       markBookingRequested: () => { this._bookingRequested = true; },
       leadId: () => this._leadId,
@@ -2767,6 +2799,7 @@ class RelayConversation {
       markOwnerAlerted: () => { this._ownerAlerted = true; },
       // Promises the tools confirmed to the caller (capture_lead: a queued
       // estimate). Recorded as owed commitments at close.
+      getPromise: (kind) => { const p = this._promises.get(String(kind || '')); return p ? { ...p } : null; },
       notePromise: (kind, verdict = true, extra = {}) => { this._promises.set(String(kind || ''), { verdict: verdict === true, expectation: extra?.expectation || null, at: new Date() }); },
       markReserviceFiled: () => { this._reserviceFiled = true; },
       // ── PR 2A transfer ─────────────────────────────────────────────────
@@ -2798,7 +2831,9 @@ class RelayConversation {
         callerAttested: !!(convo._callerContext && convo._callerContext.attested === true),
         from: this.from || null,
         language: this.language || null,
-        factsCollected: { ...(convo._estimateFields || {}) },
+        // A location part the caller replaced is stored as a marker, not a fact.
+        factsCollected: Object.fromEntries(Object.entries(convo._estimateFields || {})
+          .filter(([, v]) => v !== require('./relay-estimate-details').ESTIMATE_FIELD_REPLACED)),
         tools: this._toolOutcomes.slice(),
         commitments: [...this._promises.entries()].map(([kind, v]) => ({ kind, verdict: v.verdict === true, expectation: v.expectation || null })),
         turnCount: this._userTurns.length,

@@ -23,8 +23,8 @@
 // to the tech's cell, then the customer) and POST /api/tech/line/sms (an
 // inline compose). Without a line the tel:/sms: links stay as they were.
 //
-// Tech portal style rule (CLAUDE.md): inline styles + dark palette,
-// Montserrat headings per-element. No Tailwind, no components/ui.
+// Tech portal style rule (CLAUDE.md): inline styles, no Tailwind, no
+// components/ui.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
@@ -43,25 +43,30 @@ import {
 } from './visitBrief';
 import { useVisitPrepPhotoUrls } from '../../hooks/useVisitPrepPhotoUrls';
 
+// Inside the field workspace (.tech-field, tech-field.css) these resolve to the
+// Waves Admin look; the fallbacks are the same light values, for a render
+// outside it.
 const DARK = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  amber: '#f59e0b',
-  red: '#ef4444',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
+  bg: 'var(--tfx-bg, #fafaf9)',
+  card: 'var(--tfx-card, #ffffff)',
+  border: 'var(--tfx-border, #d6d3d1)',
+  teal: 'var(--tfx-accent, #1c1917)',
+  amber: 'var(--tfx-amber, #854d0e)',
+  red: 'var(--tfx-red, #a32d2d)',
+  text: 'var(--tfx-text, #1c1917)',
+  muted: 'var(--tfx-muted, #57534e)',
+  onAccent: 'var(--tfx-on-accent, #ffffff)',
+  ok: 'var(--tfx-ok, #1c1917)',
 };
 
 const sectionLabelStyle = {
   fontSize: 14,
-  fontWeight: 700,
+  fontWeight: 500,
   color: DARK.muted,
   textTransform: 'uppercase',
   letterSpacing: 1,
   margin: '14px 0 6px',
-  fontFamily: "'Montserrat', sans-serif",
+  fontFamily: "var(--tfx-font, 'Roboto', system-ui, sans-serif)",
 };
 
 const factRowStyle = { fontSize: 14, color: DARK.text, margin: '3px 0 0' };
@@ -89,12 +94,12 @@ function LinkBtn({ href, icon, label, onClick, disabled = false }) {
     flex: 1,
     minHeight: 48,
     padding: '10px 4px',
-    borderRadius: 8,
+    borderRadius: 4,
     border: `1px solid ${DARK.border}`,
     background: 'transparent',
     color: DARK.text,
     fontSize: 14,
-    fontWeight: 600,
+    fontWeight: 500,
     textDecoration: 'none',
     display: 'flex',
     alignItems: 'center',
@@ -257,7 +262,7 @@ function AccessSection({ alerts, access, gate = null }) {
       {codeRows.map(([label, code]) => (
         <p key={label} style={factRowStyle}>
           <span style={{ color: DARK.muted }}>{label}: </span>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>{code}</span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>{code}</span>
         </p>
       ))}
       {noteRows.map(([label, value]) => (
@@ -523,7 +528,7 @@ function QuotedSection({ estimate }) {
         return (
           <p key={i} style={factRowStyle}>
             {line.estimateLabel || line.name || 'Service'}
-            {label ? <span style={{ color: DARK.teal, fontWeight: 600 }}> — {label}</span> : null}
+            {label ? <span style={{ color: DARK.teal, fontWeight: 500 }}> — {label}</span> : null}
           </p>
         );
       })}
@@ -576,7 +581,7 @@ function MemberMoney({ service, estimate, showType }) {
         </p>
       ))}
       {deposit?.payerBilled && (
-        <p style={{ ...factRowStyle, color: DARK.amber, fontWeight: 600 }}>
+        <p style={{ ...factRowStyle, color: DARK.amber, fontWeight: 500 }}>
           Bills to a payer — do not collect from the homeowner.
         </p>
       )}
@@ -589,7 +594,7 @@ function MemberMoney({ service, estimate, showType }) {
         <p style={factRowStyle}>
           Annual prepay plan
           {payment.annualPrepay.coversThisVisit === false ? (
-            <span style={{ color: DARK.amber, fontWeight: 600 }}> — does not cover this visit</span>
+            <span style={{ color: DARK.amber, fontWeight: 500 }}> — does not cover this visit</span>
           ) : null}
         </p>
       )}
@@ -651,7 +656,7 @@ function WdoBriefSection({ brief }) {
     <>
       <SectionLabel>WDO pre-inspection</SectionLabel>
       {brief.risk_score && (
-        <p style={{ ...factRowStyle, fontWeight: 700 }}>
+        <p style={{ ...factRowStyle, fontWeight: 500 }}>
           Risk: {brief.risk_score}
           {brief.risk_reason ? <span style={{ color: DARK.muted, fontWeight: 400 }}> — {brief.risk_reason}</span> : null}
         </p>
@@ -732,13 +737,13 @@ function BriefGuidanceSection({ brief, service, showType }) {
       {priorities.map((p, i) => <p key={`pr${i}`} style={factRowStyle}>• {p}</p>)}
       {watchItems.map((w, i) => <p key={`wi${i}`} style={{ ...factRowStyle, color: DARK.amber }}>• {w}</p>)}
       {lawnUnavailable && (
-        <p style={{ ...factRowStyle, color: DARK.amber, fontWeight: 600 }}>
+        <p style={{ ...factRowStyle, color: DARK.amber, fontWeight: 500 }}>
           ⚠ No protocol product guidance available
           {lawn.reason ? ` (${String(lawn.reason).replace(/_/g, ' ')})` : ''} — confirm the plan before applying products.
         </p>
       )}
       {lawn?.window && (
-        <p style={{ ...factRowStyle, fontWeight: 600 }}>
+        <p style={{ ...factRowStyle, fontWeight: 500 }}>
           {lawn.window.title || 'Protocol window'}
           {lawn.window.goal ? <span style={{ color: DARK.muted, fontWeight: 400 }}> — {lawn.window.goal}</span> : null}
         </p>
@@ -831,7 +836,7 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
   const reportDisabled = !closeoutAvailable
     && (TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status));
   const btn = {
-    minHeight: 48, minWidth: 48, padding: '8px 10px', borderRadius: 6, fontSize: 14, fontWeight: 600,
+    minHeight: 48, minWidth: 48, padding: '8px 10px', borderRadius: 6, fontSize: 14, fontWeight: 500,
     border: `1px solid ${DARK.border}`, background: 'transparent',
     color: DARK.teal, cursor: 'pointer',
   };
@@ -905,7 +910,7 @@ function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
     }
   }
   return (
-    <div data-testid="line-text-compose" style={{ marginTop: 8, padding: 10, borderRadius: 8, border: `1px solid ${DARK.border}`, background: DARK.bg }}>
+    <div data-testid="line-text-compose" style={{ marginTop: 8, padding: 10, borderRadius: 4, border: `1px solid ${DARK.border}`, background: DARK.bg }}>
       <div style={{ ...factMutedStyle, margin: '0 0 6px' }}>Text from your line {line.formatted}</div>
       <textarea
         value={body}
@@ -916,13 +921,13 @@ function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
         style={{ width: '100%', boxSizing: 'border-box', padding: 8, borderRadius: 6, border: `1px solid ${DARK.border}`, background: DARK.card, color: DARK.text, fontSize: 16, resize: 'vertical' }}
       />
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-        <button type="button" onClick={send} disabled={state.busy || !body.trim()} style={{ minHeight: 48, padding: '8px 14px', borderRadius: 8, border: 'none', background: DARK.teal, color: '#0b1220', fontSize: 14, fontWeight: 700, cursor: 'pointer', opacity: state.busy || !body.trim() ? 0.6 : 1 }}>
+        <button type="button" onClick={send} disabled={state.busy || !body.trim()} style={{ minHeight: 48, padding: '8px 14px', borderRadius: 4, border: 'none', background: DARK.teal, color: DARK.onAccent, fontSize: 14, fontWeight: 500, cursor: 'pointer', opacity: state.busy || !body.trim() ? 0.6 : 1 }}>
           {state.busy ? 'Sending…' : 'Send'}
         </button>
-        <button type="button" onClick={onClose} disabled={state.busy} style={{ minHeight: 48, padding: '8px 12px', borderRadius: 8, border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted, fontSize: 14, cursor: 'pointer', opacity: state.busy ? 0.6 : 1 }}>Close</button>
+        <button type="button" onClick={onClose} disabled={state.busy} style={{ minHeight: 48, padding: '8px 12px', borderRadius: 4, border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted, fontSize: 14, cursor: 'pointer', opacity: state.busy ? 0.6 : 1 }}>Close</button>
         <span style={{ ...factMutedStyle, margin: 0, marginLeft: 'auto' }}>{body.length}/{LINE_TEXT_MAX}</span>
       </div>
-      {state.sent && <p role="status" style={{ ...factMutedStyle, color: '#10b981', marginTop: 6 }}>Sent.</p>}
+      {state.sent && <p role="status" style={{ ...factMutedStyle, color: DARK.ok, marginTop: 6 }}>Sent.</p>}
       {state.error && <p role="alert" style={{ ...factMutedStyle, color: DARK.red, marginTop: 6 }}>{state.error}</p>}
     </div>
   );
@@ -1137,7 +1142,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
             onClick={onRetry}
             style={{
               border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted,
-              borderRadius: 6, padding: '6px 10px', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+              borderRadius: 6, padding: '6px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer',
             }}
           >
             Couldn't load estimate & access details — retry

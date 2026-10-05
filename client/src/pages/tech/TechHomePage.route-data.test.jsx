@@ -31,11 +31,11 @@ let scheduleFails;
 let briefStatus;
 let fetchMock;
 
-function mount(path = '/admin/today', { enabled = false, role = 'technician', id = 'tech-fixture' } = {}) {
+function mount(path = '/admin/today', { role = 'technician', id = 'tech-fixture' } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id, name: 'Fixture Technician', role }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
       <Route path="more" element={<TechHomePage section="more" />} />
@@ -71,7 +71,12 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 
-const toggleBrief = () => fireEvent.click(screen.getByRole('button', { name: /Fixture two/ }));
+// The Visit Brief lives in the open visit; every open refetches its details.
+const openBrief = async () => fireEvent.click(await screen.findByRole('button', { name: /Fixture two/ }));
+const reopenBrief = async () => {
+  fireEvent.click(screen.getByRole('button', { name: 'Today' }));
+  await openBrief();
+};
 
 it('shows only assigned rows and shows none while the technician identity is missing', async () => {
   const view = mount();
@@ -79,17 +84,16 @@ it('shows only assigned rows and shows none while the technician identity is mis
   expect(screen.queryByText('Fixture other')).not.toBeInTheDocument();
   view.unmount();
   mount('/admin/today', { id: null });
-  await screen.findByText('No services scheduled today');
+  await screen.findByText('No stops scheduled today');
   expect(screen.queryByRole('button', { name: /Fixture (one|two|other)/ })).not.toBeInTheDocument();
 });
 
 it('preserves access details after partial failure and clears a confirmed removal', async () => {
   mount();
-  await screen.findByRole('button', { name: /Fixture two/ });
-  toggleBrief();
+  await openBrief();
   await screen.findByText('Use the side gate');
   briefStatus = 503;
-  toggleBrief(); toggleBrief();
+  await reopenBrief();
   await screen.findByRole('button', { name: 'Retry details' });
   expect(screen.getByText('Use the side gate')).toBeInTheDocument();
   briefStatus = 404;
@@ -100,8 +104,7 @@ it('preserves access details after partial failure and clears a confirmed remova
 
 it('ignores an older detail response after a newer refresh confirms removal', async () => {
   mount();
-  await screen.findByRole('button', { name: /Fixture two/ });
-  toggleBrief();
+  await openBrief();
   await screen.findByText('Use the side gate');
   const respond = fetchMock.getMockImplementation();
   let release;
@@ -113,10 +116,10 @@ it('ignores an older detail response after a newer refresh confirms removal', as
     }
     return respond(path, options);
   });
-  toggleBrief(); toggleBrief();
+  await reopenBrief();
   await waitFor(() => expect(release).toBeTypeOf('function'));
   briefStatus = 404;
-  toggleBrief(); toggleBrief();
+  await reopenBrief();
   await waitFor(() => expect(screen.queryByText('Use the side gate')).not.toBeInTheDocument());
   await act(async () => { release(); });
   expect(screen.queryByText('Stale gate code')).not.toBeInTheDocument();

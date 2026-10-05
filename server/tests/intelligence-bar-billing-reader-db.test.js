@@ -11,8 +11,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 // ONE reference instant for the whole suite, captured at module load: every relative date is derived from it with the
 // repo's ET calendar-day helper (calendar days, never 24-hour multiples), and nothing below reads the clock again.
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
 const REFERENCE = new Date();
+// The receipt fact the readers state: the ET time receipt_sent_at was stamped, or null.
+const RECEIPT_SENT = `${etDateString(REFERENCE)} ${formatETTime(REFERENCE)} ET`;
 
 const databaseUrl = process.env.IB_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
@@ -51,6 +53,11 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
   const admin = { role: 'admin', context: 'platform', actionContext: { isAdmin: true } };
   const read = (name, input, actionContext = {}) => execute(name, input, { ...admin, actionContext: { isAdmin: true, ...actionContext } });
   const json = (value) => JSON.stringify(value);
+  // Record ids are random UUIDs, and one can hold "4111" by chance (a v4
+  // UUID's third group opens with 4: "…-4111-…", CI 2026-10-03). The PAN
+  // checks read the result with its ids set aside; a card number in free
+  // text is never UUID-shaped.
+  const withoutIds = (text) => text.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>');
   const by = (result, key) => result.invoices.find((i) => i.id === inv[key].id);
 
   async function snapshot() {
@@ -77,7 +84,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     B = await customer(`Orville${run}`, SURNAME);
     H = await customer('Marguerite', `Holdout${run}`);
     // Terminal invoices: paid by a recorded manual payment (linked by the portal's description rule), and void.
-    const paid = await invoice('paid', A, { total: 120, status: 'paid', paid_at: REFERENCE, due_date: day(-30), payment_method: 'check',
+    const paid = await invoice('paid', A, { total: 120, status: 'paid', paid_at: REFERENCE, receipt_sent_at: REFERENCE, due_date: day(-30), payment_method: 'check',
       payment_reference: 'CHK-1001', payment_recorded_by: 'Synthetic Operator', payment_recorded_at: REFERENCE });
     await db('payments').insert({ customer_id: A, payment_date: day(-29), amount: 120, status: 'paid', description: `Invoice ${paid.invoice_number} — check (CHK-1001)` });
     await invoice('voided', A, { total: 77, status: 'void' });
@@ -300,7 +307,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(by(list, 'archived')).toMatchObject({ archived: true, collectible: true, balance_due: 33 });
     expect(by(list, 'failsup')).toMatchObject({ collectible: true, balance_due: 66 });
     // Terminal statuses report the status and no balance.
-    expect(by(list, 'paid')).toMatchObject({ status: 'paid', collectible: false, balance_due: null, needs_reconciliation: false, reason: expect.stringMatching(/already paid/) });
+    expect(by(list, 'paid')).toMatchObject({ status: 'paid', collectible: false, balance_due: null, needs_reconciliation: false, reason: expect.stringMatching(/already paid/), receipt_sent_at: RECEIPT_SENT });
+    // No receipt recorded as sent reads null — the model states it, never guesses.
+    expect(by(list, 'credited')).toMatchObject({ receipt_sent_at: null });
     expect(by(list, 'voided')).toMatchObject({ status: 'void', collectible: false, balance_due: null, reason: expect.stringMatching(/void/) });
     expect(by(list, 'processing')).toMatchObject({ collectible: false, balance_due: null, reason: expect.stringMatching(/already processing/) });
     // The fence's three holds: an unresolved attempt, an ambiguous attempt, an unrecorded charge, a failed row flagged ambiguous.
@@ -513,7 +522,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     for (const [n, number] of masked.entries()) await invoice(`q_card_${n}`, Q, { total: 5, title: `Paid with ${number} thanks` });
     await invoice('q_kept', Q, { total: 5, title: 'Visit 2026-10-02 14:05:10 invoice 12.50 id 12345678-1234-4123-8123-123456789012 ok' });
     const text = json(await read('get_customer_invoices', { customer_id: Q, limit: 50 }));
-    expect(text).not.toMatch(/4111|378282|1234567890123|1234 5678/);
+    expect(withoutIds(text)).not.toMatch(/4111|378282|1234567890123|1234 5678/);
     expect((text.match(/Paid with \[number\] thanks/g) || []).length).toBe(masked.length);
     expect(text).toContain('Visit 2026-10-02 14:05:10 invoice 12.50 id [id] ok');
     expect(text).not.toContain('12345678-1234-4123-8123-123456789012 ok');
@@ -537,7 +546,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
 
   test('invoice detail: the fence decides the balance; recorded payments are informational rows with no received verdict', async () => {
     const paid = await read('get_invoice_detail', { invoice_id: inv.paid.id });
-    expect(paid.invoice).toMatchObject({ status: 'paid', collectible: false, balance_due: null, payment_method: 'check', payment_reference: 'CHK-1001' });
+    expect(paid.invoice).toMatchObject({ status: 'paid', collectible: false, balance_due: null, payment_method: 'check', payment_reference: 'CHK-1001', receipt_sent_at: RECEIPT_SENT });
     expect(paid.recorded_payments).toEqual([expect.objectContaining({ amount: 120, status: 'paid', method: 'check', refunded_amount: 0 })]);
     expect(paid.recorded_payments_note).toMatch(/no verdict/);
     const held = await read('get_invoice_detail', { invoice_id: inv.open.id });
@@ -594,7 +603,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     const detail = await read('get_invoice_detail', { invoice_id: inv.l_leak.id });
     const text = json([list, detail]);
     expect(text).not.toContain('@');
-    expect(text).not.toMatch(/4111/);
+    expect(withoutIds(text)).not.toMatch(/4111/);
     expect(text).toContain('[email]');
     expect(text).toContain('[number]');
     // The fields really were read (so the test proves the scrubber, not an empty projection).
@@ -722,7 +731,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(detail.line_items[1]).toMatchObject({ quantity: 1, unit_price: null, amount: 5 });
     expect(detail.line_items[2]).toMatchObject({ amount: null, is_discount: false });
     expect(detail.line_items[3]).toMatchObject({ quantity: 2, unit_price: 12.5, amount: 25 });
-    expect(json(detail)).not.toMatch(/4111/);
+    expect(withoutIds(json(detail))).not.toMatch(/4111/);
     expect(detail.unknowns.join(' ')).toMatch(/implausible line-item number withheld/);
     expect((await read('get_invoice_detail', { invoice_id: inv.credited.id })).unknowns.join(' ')).not.toMatch(/implausible/);
   });

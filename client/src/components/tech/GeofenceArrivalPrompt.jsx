@@ -42,6 +42,7 @@
  *   timer events also drive mileage. Confirm a stop here doesn't
  *   double-write the mileage record.
  */
+import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 import { formatETDateOnly } from '../../lib/timezone';
@@ -74,11 +75,13 @@ const NUDGE_TYPES = new Set(['tech_open_visit_nudge']);
 // dismiss timer before the tech has opened the stop.
 const PHOTO_TYPES = new Set(['customer_visit_photos']);
 const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES]);
+// Waves Admin look: ink and stone, amber for a warning, red only where the
+// notice is a genuine alert (a cancelled visit, a late arrival check).
 const VISIT_ACCENT = {
-  visit_assigned: '#0ea5e9',
-  visit_rescheduled: '#f59e0b',
-  visit_unassigned: '#94a3b8',
-  visit_cancelled: '#ef4444',
+  visit_assigned: '#1c1917',
+  visit_rescheduled: '#854d0e',
+  visit_unassigned: '#78716c',
+  visit_cancelled: '#a32d2d',
 };
 const VISIT_ICON = {
   visit_assigned: '🗓',
@@ -88,14 +91,15 @@ const VISIT_ICON = {
 };
 
 const COLORS = {
-  bg: '#1e293b',
-  border: '#334155',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
-  teal: '#0ea5e9',
-  green: '#10b981',
-  amber: '#f59e0b',
-  red: '#ef4444',
+  bg: '#ffffff',
+  border: '#e7e5e4',
+  borderStrong: '#d6d3d1',
+  text: '#1c1917',
+  muted: '#57534e',
+  faint: '#78716c',
+  ink: '#1c1917',
+  amber: '#854d0e',
+  red: '#a32d2d',
 };
 
 async function apiPost(path, body) {
@@ -127,7 +131,7 @@ function getPosition() {
   });
 }
 
-export default function GeofenceArrivalPrompt({ onStormReview }) {
+export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleChanges = false }) {
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
 
@@ -136,6 +140,11 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       const { notifications = [] } = await apiGet('/api/tech/notifications');
       const fresh = notifications.filter((n) => !seenIds.current.has(n.id));
       fresh.forEach((n) => seenIds.current.add(n.id));
+      // Automatic geofence mode starts and stops job timers server-side and
+      // only posts these notices: the time clock reloads on them too (Codex #5786).
+      if (fresh.some((n) => n.type === 'geofence_timer_started' || n.type === 'geofence_timer_stopped')) {
+        window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
+      }
       // Visit cards never auto-dismiss, so the server feed is their only
       // source of truth: one the feed no longer lists (tapped "Got it" on
       // the tech's other device, or pushed out of the feed window by a
@@ -179,6 +188,8 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     const otherCards = [];
     const visitCards = [];
     for (const n of active) {
+      // Shown in the page instead (TechScheduleChanges), not floated here.
+      if (inlineScheduleChanges && VISIT_TYPES.has(n.type)) continue;
       if (KEPT_TYPES.has(n.type)) { visitCards.push(n); continue; }
       if (n.type !== 'storm_watch_alert') { otherCards.push(n); continue; }
       const jobKey = n.payload?.job_id || n.id;
@@ -211,7 +222,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       hiddenStormCount: stormAlerts.length - shownStorms.length,
       hiddenVisitCount: visitsRanked.length - shownVisits.length,
     };
-  }, [active]);
+  }, [active, inlineScheduleChanges]);
 
   // Superseded same-stop storm alerts are duplicates of information the tech
   // IS seeing (the newest card for that stop) — mark them read immediately so
@@ -272,6 +283,8 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     try {
       await apiPost(`/api/tech/notifications/${n.id}/confirm-start`, body);
       removeCard(n.id, { silent: true });
+      // The Today page's time clock reloads (TechTimeTrackingCard).
+      window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
     } catch (err) {
       alert('Could not start timer: ' + String(err).slice(0, 140));
     }
@@ -281,6 +294,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     try {
       await apiPost(`/api/tech/notifications/${n.id}/undo-stop`);
       removeCard(n.id, { silent: true });
+      window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
     } catch (err) {
       alert('Undo failed: ' + String(err).slice(0, 140));
     }
@@ -363,7 +377,7 @@ function StormCard({ n, onReview, onDismiss }) {
   return (
     <div style={cardStyle(COLORS.amber)}>
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>⛈️ Storm watch</div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text, marginBottom: 12 }}>
+      <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.text, marginBottom: 12 }}>
         {n.message || `Storms approaching an upcoming stop${p.city ? ` in ${p.city}` : ''}.`}
       </div>
       <div style={{ display: 'flex', gap: 8 }}>
@@ -377,11 +391,11 @@ function StormCard({ n, onReview, onDismiss }) {
 function ReminderCard({ n, onStart, onDismiss }) {
   const p = n.payload || {};
   return (
-    <div style={cardStyle(p.unscheduled ? COLORS.amber : COLORS.teal)}>
+    <div style={cardStyle(p.unscheduled ? COLORS.amber : COLORS.ink)}>
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
         {p.unscheduled ? '⚠️ Unscheduled visit' : '📍 Arrived'}
       </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.text, marginBottom: 4 }}>
         {p.customer_name || 'Customer'}
       </div>
       {p.service_type && (
@@ -404,7 +418,7 @@ function SelectorCard({ n, onPick, onDismiss }) {
   const p = n.payload || {};
   const candidates = p.candidates || [];
   return (
-    <div style={cardStyle(COLORS.teal)}>
+    <div style={cardStyle(COLORS.ink)}>
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>📍 Near multiple customers</div>
       <div style={{ fontSize: 13, color: COLORS.text, marginBottom: 12 }}>
         Pick the one you're at:
@@ -412,13 +426,13 @@ function SelectorCard({ n, onPick, onDismiss }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
         {candidates.map((c, i) => (
           <button key={i} onClick={() => onPick(c)} style={{
-            textAlign: 'left', padding: 12, borderRadius: 8,
-            border: `1px solid ${COLORS.border}`, background: 'transparent',
+            textAlign: 'left', padding: 12, borderRadius: 4,
+            border: `0.5px solid ${COLORS.borderStrong}`, background: 'transparent',
             color: COLORS.text, cursor: 'pointer', fontSize: 13,
           }}>
-            <div style={{ fontWeight: 600 }}>{c.customer_name}</div>
+            <div style={{ fontWeight: 500 }}>{c.customer_name}</div>
             {c.address && <div style={{ color: COLORS.muted, fontSize: 12 }}>{c.address}</div>}
-            {c.service_type && <div style={{ color: COLORS.teal, fontSize: 11, marginTop: 2 }}>{c.service_type}</div>}
+            {c.service_type && <div style={{ color: COLORS.muted, fontSize: 11, marginTop: 2 }}>{c.service_type}</div>}
           </button>
         ))}
       </div>
@@ -447,18 +461,18 @@ function VisitCard({ n, onDismiss }) {
     lines.push(`${verb} ${p.actor}`);
   }
   return (
-    <div style={cardStyle(VISIT_ACCENT[n.type] || COLORS.teal)} data-testid="visit-notice">
+    <div style={cardStyle(VISIT_ACCENT[n.type] || COLORS.ink)} data-testid="visit-notice">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
         {VISIT_ICON[n.type]} {p.headline || 'Schedule change'}
       </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.text, marginBottom: 4 }}>
         {p.customer_name || 'Customer'}
       </div>
       <div style={{ fontSize: 13, color: COLORS.muted, marginBottom: 12, lineHeight: 1.4 }}>
         {lines.filter(Boolean).map((line, i) => (
           typeof line === 'string'
             ? <div key={i}>{line}</div>
-            : <div key={i} style={{ textDecoration: 'line-through', color: '#64748b' }}>{line.text}</div>
+            : <div key={i} style={{ textDecoration: 'line-through', color: COLORS.faint }}>{line.text}</div>
         ))}
       </div>
       <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
@@ -476,9 +490,9 @@ function VisitCard({ n, onDismiss }) {
 function PhotoCard({ n, onDismiss }) {
   const visitDate = formatETDateOnly(n.payload?.scheduled_date, { weekday: 'short', month: 'short', day: 'numeric' }) || null;
   return (
-    <div style={cardStyle(COLORS.teal)} data-testid="photo-notice">
+    <div style={cardStyle(COLORS.ink)} data-testid="photo-notice">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>📷 Photos from a customer</div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text, marginBottom: visitDate ? 4 : 12 }}>
+      <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.text, marginBottom: visitDate ? 4 : 12 }}>
         {n.message || 'A customer sent photos for a visit on your route'}
       </div>
       {visitDate && (
@@ -498,11 +512,11 @@ function TextCard({ n, onDismiss }) {
   const p = n.payload || {};
   const media = Number(p.media_count || 0);
   return (
-    <div style={cardStyle(COLORS.teal)} data-testid="tech-line-text">
+    <div style={cardStyle(COLORS.ink)} data-testid="tech-line-text">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
         💬 {p.headline || 'Text on your line'}
       </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.text, marginBottom: 4 }}>
         {p.customer_name || p.from || 'Unknown sender'}
       </div>
       <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
@@ -545,7 +559,7 @@ function TrackingCard({ n, onDismiss }) {
       {/* Same customer_name/when shape a VisitCard reads — identifies which
           stop this is about (codex P1: a tech with more than one open stop
           can't tell from the bare stage message alone). */}
-      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.text, marginBottom: 4 }}>
         {p.customer_name || 'Customer'}
       </div>
       {p.when && (
@@ -561,11 +575,11 @@ function TrackingCard({ n, onDismiss }) {
 
 function InfoCard({ n, onDismiss }) {
   return (
-    <div style={cardStyle(COLORS.green)}>
+    <div style={cardStyle(COLORS.ink)}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
         <div>
           <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>✅ Timer auto-started</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text }}>{n.message}</div>
+          <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.text }}>{n.message}</div>
         </div>
         <button onClick={onDismiss} style={closeX}>✕</button>
       </div>
@@ -590,22 +604,22 @@ function StopToast({ n, onUndo, onDismiss }) {
 function cardStyle(accent) {
   return {
     background: COLORS.bg,
-    border: `1px solid ${COLORS.border}`,
+    border: `0.5px solid ${COLORS.borderStrong}`,
     borderLeft: `4px solid ${accent}`,
-    borderRadius: 10,
+    borderRadius: 6,
     padding: 14,
-    boxShadow: '0 10px 30px rgba(0,0,0,0.35)',
-    fontFamily: "'DM Sans', sans-serif",
+    boxShadow: '0 10px 30px rgba(28,25,23,0.18)',
+    fontFamily: "'Roboto', system-ui, sans-serif",
   };
 }
 
 const btnPrimary = {
-  flex: 1, padding: '10px 12px', borderRadius: 8, border: 'none',
-  background: COLORS.teal, color: '#fff', fontWeight: 600, fontSize: 14, cursor: 'pointer',
+  flex: 1, padding: '10px 12px', borderRadius: 4, border: 'none',
+  background: COLORS.ink, color: '#fff', fontWeight: 500, fontSize: 14, cursor: 'pointer',
 };
 
 const btnSecondary = {
-  padding: '10px 12px', borderRadius: 8, border: `1px solid ${COLORS.border}`,
+  padding: '10px 12px', borderRadius: 4, border: `0.5px solid ${COLORS.borderStrong}`,
   background: 'transparent', color: COLORS.text, fontWeight: 500, fontSize: 14, cursor: 'pointer',
 };
 

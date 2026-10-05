@@ -201,19 +201,34 @@ function validateEffectiveDate(effectiveDate) {
 // a corrected address can — and because the idempotency key includes the
 // resolved recipient, a corrected address mints a fresh key and sends,
 // while same-address retries keep deduping against the prior attempt.
-async function sendNoticeEmail({ customer, idempotencyKeyBase, vars }) {
+async function sendNoticeEmail({ customer, idempotencyKeyBase, vars, templateKey = 'billing.price_change_notice', categories = ['billing', 'price_change_notice'], sendOptions, recipient: suppliedRecipient = null }) {
   let attempted = false;
   try {
     const EmailTemplateLibrary = require('./email-template-library');
-    const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
-    const [recipient] = getInvoiceEmailRecipients(customer, prefs || {});
+    // A caller that froze its words (the rate review letter) passes the recipient it
+    // already resolved: used unchanged, prefs are not re-read, and the greeting is the
+    // one in vars — so what is delivered is what was frozen.
+    let recipient = suppliedRecipient;
+    if (!recipient) {
+      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+      [recipient] = getInvoiceEmailRecipients(customer, prefs || {});
+    }
     const to = String(recipient?.email || '').trim();
     if (!to || !to.includes('@')) return { sent: false, attempted: false };
     attempted = true;
     const recipientHash = crypto.createHash('sha256').update(to.toLowerCase()).digest('hex').slice(0, 10);
-    const firstName = String(recipient?.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there';
+    const firstName = suppliedRecipient && vars && vars.first_name
+      ? String(vars.first_name)
+      : (String(recipient?.name || customer.first_name || '').trim().split(/\s+/)[0] || 'there');
+    // The caller's provider-handoff fence is told the address this send
+    // resolved, so it can re-judge that exact recipient under its locks.
+    const { withProviderHandoff: callerHandoff, ...libraryOptions } = sendOptions || {};
     const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'billing.price_change_notice',
+      templateKey,
+      // Extra library options a caller pins (the rate review letter: the
+      // reviewed template's content hash and its provider-handoff fence).
+      ...libraryOptions,
+      ...(callerHandoff ? { withProviderHandoff: (dispatch) => callerHandoff(dispatch, { to }) } : {}),
       to,
       recipientType: 'customer',
       recipientId: customer.id,
@@ -222,7 +237,7 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars }) {
       // -stream suppression must not block a customer's advance notice
       // (global bounce suppression still blocks, correctly).
       suppressionGroupKey: 'transactional_required',
-      categories: ['billing', 'price_change_notice'],
+      categories,
       idempotencyKey: `${idempotencyKeyBase}:${recipientHash}`,
       suppressProviderErrorLog: true,
       payload: {
@@ -233,17 +248,37 @@ async function sendNoticeEmail({ customer, idempotencyKeyBase, vars }) {
       },
     });
     if (result?.blocked) return { sent: false, attempted: false };
-    return { sent: !!result?.sent, attempted };
+    // The library's explicit pre-dispatch abort (its handoff failed or refused before any
+    // provider request, e.g. a lock error): a certain non-send, retryable.
+    if (result?.aborted && !result?.sent) return { sent: false, attempted: true, definiteNonSend: true };
+    // The ledger row this send created (the SendGrid event webhook resolves a
+    // bounce to it): callers that must reconcile a later failure persist it.
+    return { sent: !!result?.sent, attempted, ...(result?.message?.id ? { messageId: String(result.message.id) } : {}) };
   } catch (err) {
     logger.error(`[price-change] email failed for customer ${customer.id} (${err?.name || 'Error'})`);
-    return { sent: false, attempted };
+    // The library's own definite-non-send classification (unconfigured, or a
+    // provider status that conclusively rejects the payload) rides along: a
+    // caller that keeps send-once claims can tell a certain non-send from an
+    // ambiguous one. Absent = ambiguous.
+    // The library's pre-dispatch refusals (a changed template, a missing
+    // payload value) never reached the provider either.
+    let definiteNonSend = false;
+    try {
+      const library = require('./email-template-library');
+      definiteNonSend = err?.code === 'SENDGRID_NOT_CONFIGURED' || require('./sendgrid-mail').isDefiniteRejection(err)
+        || (typeof library.isSendRefusal === 'function' && library.isSendRefusal(err));
+    } catch { /* ambiguous */ }
+    return { sent: false, attempted, ...(definiteNonSend ? { definiteNonSend: true } : {}) };
   }
 }
 
 // Same { sent, attempted } contract as the email leg — a phone on file
 // with a template/provider failure is retryable, no phone is not.
-async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorInitiated = false }) {
+async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorInitiated = false, sendOptions, requireAccepted = false }) {
   let attempted = false;
+  // Set once the canonical sender is about to be called: a failure before that
+  // (template missing/inactive, rendering threw) never reached any provider.
+  let reachedSender = false;
   try {
     const { renderSmsTemplate } = require('./sms-template-renderer');
     const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -256,7 +291,11 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
       effective_date: vars.effective_date,
       price_change_url: vars.price_change_url,
     }, { workflow: 'price_change_notice', entity_type: 'customer', entity_id: customer.id });
-    if (!body) return { sent: false, attempted };
+    if (!body) return { sent: false, attempted, definiteNonSend: true };
+    reachedSender = true;
+    // A caller's own metadata keys (the rate review letter's marker for the
+    // locked SMS handoff) ride along without replacing the base metadata.
+    const { metadata: callerMetadata, ...callerOptions } = sendOptions || {};
     const res = await sendCustomerMessage({
       to: phone,
       body,
@@ -275,16 +314,37 @@ async function sendNoticeSms({ customer, vars, actorId, hasEmailLeg, operatorIni
       // moment; without it every SMS-only recipient would be recorded
       // 'unreachable' (see validators/send-window.js).
       ...(operatorInitiated ? { operatorInitiated: true } : {}),
-      metadata: { original_message_type: 'price_change_notice', adminUserId: actorId || undefined },
+      metadata: { original_message_type: 'price_change_notice', adminUserId: actorId || undefined, ...callerMetadata },
+      // A caller's own canonical-sender hooks (the rate review letter: its
+      // preDispatchCheck re-reads notice ownership at the first abort point
+      // and its withSmsHandoff holds the fence through the provider request).
+      ...callerOptions,
     });
     // A policy block (sms_enabled=false, STOP suppression, billing pref)
     // is not a provider failure — rerunning cannot deliver it, so it must
     // not hold the notice in the retryable class forever.
-    if (res.blocked) return { sent: false, attempted: false };
-    return { sent: !!res.sent, attempted };
+    // blockedCode names a caller-hook refusal (the rate review letter's
+    // NOTICE_REPOINTED / RECIPIENT_PHONE_CHANGED) for the caller's own hold.
+    if (res.blocked) return { sent: false, attempted: false, blockedCode: res.code || null };
+    if (requireAccepted) {
+      // Delivery evidence is provider acceptance. deliveryOutcome 'not_sent' is
+      // definitively unsent whatever `sent` says (the SMS gate off, owner
+      // silence, a provider refusal that never took the message); sent:true
+      // with any other non-accepted outcome may still have left (held by the
+      // caller). A bare sent:false keeps the legacy attempted semantics.
+      if (res.deliveryOutcome === 'not_sent') return { sent: false, attempted: false };
+      if (res.sent && res.deliveryOutcome !== 'accepted') return { sent: false, attempted: true };
+    }
+    return { sent: !!res.sent, attempted, ...(res.providerMessageId ? { sid: String(res.providerMessageId) } : {}) };
   } catch (err) {
     logger.error(`[price-change] SMS failed for customer ${customer.id}: ${err.message}`);
-    return { sent: false, attempted };
+    // The carrier accepted the text and a later step threw (the messaging audit write):
+    // the sender tags the error with the outcome it observed. Accepted stays accepted.
+    const observed = err && err.providerOutcome;
+    if (observed && observed.deliveryOutcome === 'accepted') {
+      return { sent: true, attempted: true, ...(observed.providerMessageId ? { sid: String(observed.providerMessageId) } : {}) };
+    }
+    return { sent: false, attempted, ...(attempted && !reachedSender ? { definiteNonSend: true } : {}) };
   }
 }
 
@@ -370,6 +430,13 @@ async function createAndSendBatch({ locationId = null, increase, effectiveDate, 
           return;
         }
         const existing = found.existing;
+        // An annual rate review notice for the same tuple belongs to the
+        // rate review's own sender (its letter, its frozen page): this batch
+        // never claims or stamps it — the customer is already being noticed.
+        if (existing && existing.rate_review_row_id) {
+          summary.alreadyNotified += 1;
+          return;
+        }
         if (existing && ['sent', 'viewed'].includes(existing.status)) {
           summary.alreadyNotified += 1;
           return;
@@ -494,4 +561,8 @@ module.exports = {
   createAndSendBatch,
   formatMoney,
   MIN_NOTICE_DAYS,
+  // The rate review letter (services/rate-review-comms.js) sends through
+  // the same two legs — its own email template, this SMS pointer.
+  sendNoticeEmail,
+  sendNoticeSms,
 };

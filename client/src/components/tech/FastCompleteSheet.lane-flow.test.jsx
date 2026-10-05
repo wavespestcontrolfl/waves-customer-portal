@@ -102,6 +102,11 @@ function addProduct(name, amount, how = null) {
 
 async function generate(note = NOTE) {
   fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: note } });
+  // Generate holds (disabled, its reason in the footer) while the visit's
+  // photos and promises load, and a click before then does nothing: wait for
+  // it to be live (the CI flake of 2026-10-03, reproduced with a slow photos
+  // read).
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
   fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
   await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
 }

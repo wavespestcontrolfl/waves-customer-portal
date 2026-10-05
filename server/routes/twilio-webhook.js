@@ -1598,7 +1598,9 @@ router.post('/sms', async (req, res) => {
     // SMS SCHEDULING DECIDE, SHADOW (GATE_SMS_SCHEDULING_DECIDE, dark): when
     // this phone holds an open offer of picker times (sms_offers), record what
     // the decide step concludes about this reply and what it WOULD have done.
-    // Moves, books and sends nothing. Runs after the reminder reply-1/2 handler
+    // Moves, books and sends nothing unless GATE_SMS_SCHEDULING_ACT_MOVE (dark)
+    // is on, when a would-move is carried out by sms-scheduling-act.js.
+    // Runs after the reminder reply-1/2 handler
     // and the lead-intake veto (both return above when they consume the text),
     // and regardless of the scheduling regex: "Tuesday works" may not match it.
     // `customer` may be null: a reply from another number on the customer's
@@ -1663,6 +1665,7 @@ router.post('/sms', async (req, res) => {
 
 // POST /api/webhooks/twilio/status — delivery status callback
 router.post('/status', async (req, res) => {
+  let rateReviewReconcileFailed = false;
   try {
     const { MessageSid, MessageStatus, ErrorCode, ErrorMessage, From, To } = req.body;
     if (MessageSid && MessageStatus) {
@@ -1689,6 +1692,18 @@ router.post('/status', async (req, res) => {
           to: To,
           link: '/admin/communications',
         });
+
+        // A rate review letter's text pointer that failed: reconcile its notice
+        // (the same undelivered handling as a bounced email). No-op for any
+        // other message; best-effort, off the response path.
+        // Awaited and answered non-2xx on failure: a lost reconciliation would leave
+        // an undelivered notice looking delivered (the apply also re-reads sms_log).
+        try {
+          await require('../services/rate-review-comms').handleSmsDeliveryFailure({ sid: MessageSid, status: MessageStatus, errorCode: ErrorCode }, { strict: true });
+        } catch (e) {
+          rateReviewReconcileFailed = true;
+          logger.error(`[twilio-status] rate review reconciliation failed: ${e.message}`);
+        }
 
         // Error 21610 — the RECIPIENT's carrier-level opt-out verdict for a
         // STOP we never saw inbound (sent to a different number on the
@@ -2090,7 +2105,7 @@ router.post('/status', async (req, res) => {
       link: '/admin/communications',
     });
   }
-  res.sendStatus(200);
+  res.sendStatus(rateReviewReconcileFailed ? 500 : 200);
 });
 
 // Gate check FIRST (codex #3413 r55): with GATE_CONTACT_CORRECTION off —

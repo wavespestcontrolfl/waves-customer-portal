@@ -10,6 +10,9 @@ const {
   draftIdSql,
   draftReplyToMessageIdSql,
 } = require('./sms-response-policy');
+const { personCallBackSql } = require('./staff-contact');
+const { VOICE_RELAY_SANDBOX_SOURCE } = require('./voice-agent/relay-protocol');
+const { POST_CALL_ROW_SOURCES, TERMINAL_CALL_STATUSES } = require('../utils/call-timeline');
 
 // Owner ruling 2026-09-28: the Messages "needs a reply" badge and its
 // Unanswered-filtered inbox only count inbound texts from this instant
@@ -47,6 +50,24 @@ async function loadPendingSmsConversations({
   const eventPeer = phoneIdentitySql(projectedContactPhone);
   const eventEndpoint = phoneIdentitySql(projectedEndpoint);
   const blockedPeer = phoneIdentitySql('b.number');
+  const callPeer = phoneIdentitySql("(CASE WHEN spoken.direction = 'outbound' THEN spoken.to_phone ELSE spoken.from_phone END)");
+  // When the call ended: the stamp /call-status writes from Twilio's own
+  // event time. Nothing else is trusted as an end: a callback card's
+  // customer_leg.ended_at is our receipt time, and a late callback would
+  // move it past texts sent after the hangup. A row without the stamp that
+  // was inserted when the call began gets insert time plus duration, which
+  // is early by the ring time and so only ever leaves a text pending. A row
+  // inserted after the call was over (call-timeline.js) says nothing about
+  // when the call happened, so without the stamp it answers no text. The
+  // pattern has no "?" and no ":word": db.raw reads either as a binding.
+  const postCallRow = `(spoken.metadata->>'source' IN (${[...POST_CALL_ROW_SOURCES].map((source) => `'${source}'`).join(', ')})
+    AND NOT (spoken.metadata->>'source' = 'status_callback'
+      AND COALESCE(spoken.metadata->>'inserted_on_status', '') NOT IN ('', ${[...TERMINAL_CALL_STATUSES].map((status) => `'${status}'`).join(', ')})))`;
+  const callEndedAt = `COALESCE(
+    CASE WHEN spoken.metadata->>'ended_at' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]{8,12}Z$'
+      THEN CAST(spoken.metadata->>'ended_at' AS timestamptz) END,
+    CASE WHEN ${postCallRow} IS NOT TRUE
+      THEN spoken.created_at + make_interval(secs => COALESCE(spoken.duration_seconds, 0)) END)`;
   const customerPeer = phoneIdentitySql('candidate_customer.phone');
   const duplicateCustomerPeer = phoneIdentitySql('duplicate_customer.phone');
   // An uncertain historical STOP must never migrate to a customer's changed
@@ -202,6 +223,30 @@ async function loadPendingSmsConversations({
         AND (os.message_type <> ALL(CAST(:draftReplyTypes AS text[]))
           OR os.draft_reply_to_event_id = os.inbound_id)
         AND os.draft_intent IS DISTINCT FROM 'click_followup'
+    ), spoken_inbound AS MATERIALIZED (
+      -- Owner ruling 2026-10-03: a text is answered once a person at Waves
+      -- has SPOKEN with that number — the customer who texts and then calls
+      -- in must not sit in the needs-reply list. Inbound: a person answered.
+      -- Outbound: the shared staff-contact definition (a staff-placed call
+      -- whose reviewed recording heard a live conversation, not voicemail);
+      -- the row's own status and duration are the staff leg's and prove
+      -- nothing. The call must END after the text arrived: a row is inserted
+      -- when dialing starts, so a text sent while the phone rings, or during
+      -- the conversation, is answered by it.
+      -- Only calls from the day before the oldest candidate text onward are
+      -- read and normalized (a call row is inserted at or after its start,
+      -- and no call runs a day), so the scan is bounded like the SMS scans.
+      SELECT DISTINCT li.id AS inbound_id
+      FROM enriched_inbound li
+      JOIN (
+        SELECT ${callPeer} AS peer, ${callEndedAt} AS ended_at
+        FROM call_log spoken
+        WHERE spoken.created_at > (SELECT MIN(created_at) FROM enriched_inbound) - ${REPLY_LOOKBACK}
+          AND spoken.status = 'completed'
+          AND COALESCE(spoken.source, '') <> '${VOICE_RELAY_SANDBOX_SOURCE}'
+          AND ((spoken.direction = 'inbound' AND spoken.answered_by = 'human')
+            OR (spoken.direction = 'outbound' AND ${personCallBackSql('spoken')}))
+      ) call ON call.peer = li.peer AND call.ended_at > li.created_at
     ), all_stop_events AS MATERIALIZED (
       SELECT ${stopPeer} AS peer,
              CASE WHEN stop_receipt.message_sid IS NOT NULL
@@ -268,6 +313,7 @@ async function loadPendingSmsConversations({
     LEFT JOIN prior_context ON prior_context.id = li.id
     LEFT JOIN answered_inbound answered ON answered.inbound_id = li.id
     LEFT JOIN latest_stop stop ON stop.peer = li.peer
+    LEFT JOIN spoken_inbound spoken ON spoken.inbound_id = li.id
     LEFT JOIN LATERAL (
       SELECT candidate_customer.id, candidate_customer.first_name, candidate_customer.last_name
       FROM customers candidate_customer
@@ -282,6 +328,7 @@ async function loadPendingSmsConversations({
       LIMIT 1
     ) customer_match ON true
     WHERE answered.inbound_id IS NULL
+      AND spoken.inbound_id IS NULL
       AND (stop.stopped_at IS NULL OR stop.stopped_at <= li.created_at)
       AND (CAST(:includeLegacyOnly AS boolean) OR li.source = 'canonical')
   `, {

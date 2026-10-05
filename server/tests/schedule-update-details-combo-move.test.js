@@ -1,0 +1,357 @@
+/**
+ * update-details on a stop shared by two or more services (owner rulings
+ * 2026-10-03): `comboMove` 'together' plans the whole-stop move before any
+ * write, takes the date / window / technician off the body and runs the move
+ * after the edit; 'separate' splits the service first. No comboMove, a row
+ * that is not on a shared stop, or no date / time / technician change leaves
+ * the handler exactly as it was.
+ *
+ * The planner is driven directly with a scripted db and mocked collaborators;
+ * source guards pin where the handler calls it.
+ */
+let mockRow = null;
+jest.mock('../models/db', () => {
+  const db = jest.fn(() => {
+    const chain = {};
+    for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNull', 'orderBy', 'select']) chain[m] = () => chain;
+    chain.first = async () => mockRow;
+    chain.then = (resolve) => Promise.resolve([]).then(resolve);
+    return chain;
+  });
+  db.raw = () => ({});
+  db.fn = { now: () => new Date() };
+  db.transaction = async (cb) => cb(db);
+  db.schema = { hasTable: async () => true, hasColumn: async () => true };
+  return db;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+const mockVisitGroups = {
+  openMembers: jest.fn(),
+  splitChild: jest.fn(),
+  visitSummaryForService: jest.fn(),
+};
+jest.mock('../services/visit-groups', () => ({ ...jest.requireActual('../services/visit-groups'), ...mockVisitGroups }));
+const mockDispatch = { planVisitMoveForStaff: jest.fn(), runPlannedVisitMove: jest.fn() };
+jest.mock('../routes/admin-dispatch', () => mockDispatch);
+
+const fs = require('fs');
+const path = require('path');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const { planComboEditMove, commitComboEditMove, comboEditChanges, comboLengthChange, discloseComboSeparation, assertStillUnsharedForReassign } = require('../routes/admin-schedule')._test;
+
+const TODAY = etDateString();
+const FUTURE = etDateString(addETDays(new Date(), 10));
+const TARGET = etDateString(addETDays(new Date(), 12));
+const ROW = { id: 'svc-a', visit_id: 'v1', scheduled_date: FUTURE, window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60, technician_id: 'tech-1' };
+const SUMMARY = { id: 'v1', memberIds: ['svc-a', 'svc-b'], liveCount: 2, liveMemberIds: ['svc-a', 'svc-b'] };
+const request = (body) => ({ params: { id: 'svc-a' }, body, techRole: 'admin', technicianId: 'staff-1' });
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockRow = { ...ROW };
+  mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }, { id: 'svc-b' }]);
+  mockVisitGroups.visitSummaryForService.mockResolvedValue(SUMMARY);
+  mockVisitGroups.splitChild.mockResolvedValue({});
+  mockDispatch.planVisitMoveForStaff.mockResolvedValue({ plan: { effectiveWindow: '09:00-10:00', rescheduleOptions: {} } });
+  mockDispatch.runPlannedVisitMove.mockResolvedValue({ status: 200, body: { success: true, notificationSent: true } });
+});
+
+describe('when the planner stays out of the way', () => {
+  test('no comboMove, a row off any shared stop, or one live service left: null and nothing is read or written past that', async () => {
+    expect(await planComboEditMove(request({ scheduledDate: TARGET }))).toBe(null);
+    mockRow = { ...ROW, visit_id: null };
+    expect(await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together' }))).toBe(null);
+    mockRow = { ...ROW };
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }]);
+    const req = request({ scheduledDate: TARGET, comboMove: 'separate' });
+    expect(await planComboEditMove(req)).toBe(null);
+    expect(req.body.scheduledDate).toBe(TARGET);
+    expect(mockVisitGroups.splitChild).not.toHaveBeenCalled();
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+  });
+
+  test('a same-slot echo (the form posts the stored date, window and technician) is an ordinary edit', async () => {
+    const req = request({ scheduledDate: FUTURE, windowStart: '09:00', windowEnd: '10:00', technicianId: 'tech-1', notes: 'x', comboMove: 'together' });
+    expect(await planComboEditMove(req)).toBe(null);
+    expect(req.body.windowStart).toBe('09:00');
+  });
+
+  test('no choice + a changed technician on a shared stop is refused (nothing separates unchosen); an echo or an unshared row is not', async () => {
+    await expect(planComboEditMove(request({ technicianId: 'tech-2', notes: 'x' }))).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED' });
+    expect(await planComboEditMove(request({ technicianId: 'tech-1', notes: 'x' }))).toBe(null);
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }]);
+    expect(await planComboEditMove(request({ technicianId: 'tech-2' }))).toBe(null);
+    mockRow = { ...ROW, visit_id: null };
+    expect(await planComboEditMove(request({ technicianId: 'tech-2' }))).toBe(null);
+  });
+
+  test('an unknown choice is a 400', async () => {
+    await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'both' }))).rejects.toMatchObject({ statusCode: 400 });
+  });
+});
+
+describe("comboMove 'together'", () => {
+  test('plans the same staff move against the live stop, strips the move from the edit, and runs it on commit', async () => {
+    const req = request({ scheduledDate: TARGET, windowStart: '11:00', windowEnd: '12:00', technicianId: 'tech-2', assignmentScope: 'this_only', notifyCustomer: true, notes: 'gate code', comboMove: 'together' });
+    const plan = await planComboEditMove(req);
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith({
+      serviceId: 'svc-a',
+      newDate: TARGET,
+      newWindow: { start: '11:00', end: '12:00' },
+      notifyCustomer: true,
+      body: { technicianId: 'tech-2', expectVisit: SUMMARY },
+      actor: { techRole: 'admin', technicianId: 'staff-1' },
+      sourceSurface: 'edit_modal',
+      keepSlot: false,
+    });
+    // The per-row edit keeps the other fields and nothing that moves, reassigns or texts.
+    expect(req.body).toEqual({ notes: 'gate code', comboMove: 'together' });
+    expect(mockDispatch.runPlannedVisitMove).not.toHaveBeenCalled();
+    await plan.commit();
+    expect(mockDispatch.runPlannedVisitMove).toHaveBeenCalledWith(expect.objectContaining({ serviceId: 'svc-a', newDate: TARGET, notifyCustomer: true, actor: { techRole: 'admin', technicianId: 'staff-1' } }));
+  });
+
+  test('a technician-only change reassigns the whole stop on its stored date and window, and texts nobody', async () => {
+    const req = request({ scheduledDate: FUTURE, windowStart: '09:00', windowEnd: '10:00', technicianId: 'tech-2', notifyCustomer: true, comboMove: 'together' });
+    await planComboEditMove(req);
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({
+      newDate: FUTURE, newWindow: undefined, notifyCustomer: false, keepSlot: true,
+      body: { technicianId: 'tech-2', expectVisit: SUMMARY },
+    }));
+  });
+
+  test('a time-only or technician-only move reads the stored date as Postgres returns it (a Date)', async () => {
+    mockRow = { ...ROW, scheduled_date: new Date(`${FUTURE}T00:00:00.000Z`) };
+    await planComboEditMove(request({ windowStart: '11:00', windowEnd: '12:00', comboMove: 'together' }));
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newDate: FUTURE, newWindow: { start: '11:00', end: '12:00' } }));
+  });
+
+  test('a stop with no stored time moves to another date with its empty time fields echoed', async () => {
+    mockRow = { ...ROW, window_start: null, window_end: null };
+    await planComboEditMove(request({ scheduledDate: TARGET, windowStart: '', windowEnd: '', comboMove: 'together' }));
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newDate: TARGET, newWindow: undefined, keepSlot: false }));
+  });
+
+  test('a stop with no stored time takes the start only', async () => {
+    mockRow = { ...ROW, window_start: null, window_end: null };
+    await planComboEditMove(request({ windowStart: '10:00', windowEnd: '11:00', comboMove: 'together' }));
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledWith(expect.objectContaining({ newDate: FUTURE, newWindow: { start: '10:00' } }));
+  });
+
+  test('a same-day window that has already passed is refused before any write: the new time, or the stored one on a technician-only change', async () => {
+    // 00:00 has always passed; 23:59 never has (the test would need to run in the last minute of the day).
+    mockRow = { ...ROW, scheduled_date: TODAY, window_start: '23:58:00', window_end: '23:59:00' };
+    const moved = request({ windowStart: '00:00', windowEnd: '00:01', notes: 'x', comboMove: 'together' });
+    await expect(planComboEditMove(moved)).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', message: 'That time has already passed today for a service on this stop. Pick a later time. Nothing was changed.' });
+    expect(moved.body.windowStart).toBe('00:00');
+    mockRow = { ...ROW, scheduled_date: TODAY, window_start: '00:00:00', window_end: '00:01:00' };
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a', window_start: '00:00:00', window_end: '00:01:00' }, { id: 'svc-b', window_start: '00:01:00', window_end: '00:02:00' }]);
+    await expect(planComboEditMove(request({ technicianId: 'tech-2', comboMove: 'together' }))).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+    // A technician-only change with a service already under way is refused the same way.
+    mockRow = { ...ROW };
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a', status: 'confirmed' }, { id: 'svc-b', status: 'on_site' }]);
+    await expect(planComboEditMove(request({ technicianId: 'tech-2', comboMove: 'together' }))).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', message: expect.stringContaining('already under way') });
+    // A date move to today: the tapped service's window is still ahead, an earlier sibling's has passed.
+    mockRow = { ...ROW, window_start: '23:58:00', window_end: '23:59:00' };
+    mockVisitGroups.openMembers.mockResolvedValue([
+      { id: 'svc-a', scheduled_date: FUTURE, window_start: '23:58:00', window_end: '23:59:00' },
+      { id: 'svc-b', scheduled_date: FUTURE, window_start: '00:00:00', window_end: '00:01:00' },
+    ]);
+    const toToday = request({ scheduledDate: TODAY, notes: 'x', comboMove: 'together' });
+    await expect(planComboEditMove(toToday)).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+    expect(toToday.body.scheduledDate).toBe(TODAY);
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+    // A stop later today is reassigned.
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a', window_start: '23:58:00', window_end: '23:59:00' }, { id: 'svc-b', window_start: '23:58:00', window_end: '23:59:00' }]);
+    mockRow = { ...ROW, scheduled_date: TODAY, window_start: '23:58:00', window_end: '23:59:00' };
+    await planComboEditMove(request({ technicianId: 'tech-2', comboMove: 'together' }));
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledTimes(1);
+  });
+
+  test('every refusal comes before any write: length change, address change, cleared time, and a refused plan', async () => {
+    const stays = async (body, match) => {
+      const req = request(body);
+      const before = { ...body };
+      await expect(planComboEditMove(req)).rejects.toMatchObject(match);
+      expect(req.body).toEqual(before);
+    };
+    await stays({ scheduledDate: TARGET, estimatedDuration: '90', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_LENGTH_CHANGE' });
+    await stays({ scheduledDate: TARGET, windowStart: '09:00', windowEnd: '11:00', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_LENGTH_CHANGE' });
+    await stays({ scheduledDate: TARGET, propertyId: 'p2', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_ADDRESS_CHANGE' });
+    await stays({ windowStart: '', windowEnd: '', comboMove: 'together' }, { statusCode: 422, code: 'INVALID_APPOINTMENT_WINDOW' });
+    // Owner ruling 2026-10-03: two mixes are refused, not half-done.
+    await stays({ scheduledDate: TARGET, technicianId: 'tech-2', assignmentScope: 'following', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_ASSIGNMENT_SCOPE' });
+    await stays({ technicianId: 'tech-2', assignmentScope: 'series', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_ASSIGNMENT_SCOPE' });
+    await stays({ scheduledDate: TARGET, isRecurring: true, spawnRecurringChildren: true, recurringPattern: 'quarterly', comboMove: 'together' }, { statusCode: 422, code: 'COMBO_MAKE_RECURRING' });
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+    mockDispatch.planVisitMoveForStaff.mockResolvedValue({ status: 409, body: { error: 'This stop changed since it was opened.', code: 'VISIT_MEMBERSHIP_CHANGED' } });
+    await stays({ scheduledDate: TARGET, comboMove: 'together' }, { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED', message: 'This stop changed since it was opened. Nothing was changed.' });
+    expect(mockDispatch.runPlannedVisitMove).not.toHaveBeenCalled();
+  });
+});
+
+describe('the stop the operator was shown', () => {
+  test('a stop whose live services differ from the shown ones is refused before anything is saved, for either choice', async () => {
+    const shown = { id: 'v1', memberIds: ['svc-a', 'svc-b'], liveCount: 2, liveMemberIds: ['svc-a', 'svc-b'] };
+    mockVisitGroups.visitSummaryForService.mockResolvedValue({ id: 'v1', memberIds: ['svc-a', 'svc-b', 'svc-c'], liveCount: 3, liveMemberIds: ['svc-a', 'svc-b', 'svc-c'] });
+    for (const comboMove of ['together', 'separate']) {
+      const req = request({ scheduledDate: TARGET, comboMove, comboVisit: shown });
+      await expect(planComboEditMove(req)).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+      expect(req.body.scheduledDate).toBe(TARGET);
+    }
+    // Same count, a different live service.
+    mockVisitGroups.visitSummaryForService.mockResolvedValue({ id: 'v1', memberIds: ['svc-a', 'svc-b', 'svc-c'], liveCount: 2, liveMemberIds: ['svc-a', 'svc-c'] });
+    await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together', comboVisit: shown }))).rejects.toMatchObject({ code: 'VISIT_MEMBERSHIP_CHANGED' });
+    expect(mockVisitGroups.splitChild).not.toHaveBeenCalled();
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+    // Shown as shared, but separated or down to one live service since:
+    // 'together' is refused, never run as a single-row move.
+    mockVisitGroups.visitSummaryForService.mockResolvedValue(SUMMARY);
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }]);
+    await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together', comboVisit: shown }))).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED' });
+    mockRow = { ...ROW, visit_id: null };
+    await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together', comboVisit: shown }))).rejects.toMatchObject({ code: 'VISIT_MEMBERSHIP_CHANGED' });
+    // 'separate' on a row already off its stop is the ordinary edit.
+    expect(await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'separate', comboVisit: shown }))).toBe(null);
+    mockRow = { ...ROW };
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }, { id: 'svc-b' }]);
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+    // The same stop: the move is planned on it.
+    mockVisitGroups.visitSummaryForService.mockResolvedValue(SUMMARY);
+    await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'together', comboVisit: shown }));
+    expect(mockDispatch.planVisitMoveForStaff).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("comboMove 'separate'", () => {
+  test('a length-only change (duration or window end) is split off too', async () => {
+    for (const change of [{ estimatedDuration: '90' }, { windowStart: '09:00', windowEnd: '11:00' }]) {
+      mockVisitGroups.splitChild.mockClear();
+      expect(await planComboEditMove(request({ ...change, comboMove: 'separate' }))).toEqual({ separated: true });
+      expect(mockVisitGroups.splitChild).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  test('splits the service off its stop and leaves the body for the ordinary edit', async () => {
+    const req = request({ scheduledDate: TARGET, notifyCustomer: true, comboMove: 'separate' });
+    expect(await planComboEditMove(req)).toEqual({ separated: true });
+    expect(mockVisitGroups.splitChild).toHaveBeenCalledWith({ visitId: 'v1', scheduledServiceId: 'svc-a', createdBy: 'admin:staff-1' });
+    expect(req.body).toEqual({ scheduledDate: TARGET, notifyCustomer: true, comboMove: 'separate' });
+    expect(mockDispatch.planVisitMoveForStaff).not.toHaveBeenCalled();
+  });
+
+  test('a refused split saves nothing', async () => {
+    mockVisitGroups.splitChild.mockRejectedValue(Object.assign(new Error('frozen'), { code: 'VISIT_SPLIT_REFUSED' }));
+    await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'separate' }))).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_SPLIT_REFUSED', message: 'frozen Nothing was changed.' });
+    mockVisitGroups.splitChild.mockRejectedValue(new Error('row is not a member of this visit'));
+    await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'separate' }))).rejects.toMatchObject({ statusCode: 409, code: 'VISIT_CHANGED_RETRY' });
+    // An unknown failure with the row still on its stop: the split did not commit.
+    mockVisitGroups.splitChild.mockRejectedValue(new Error('connection reset'));
+    await expect(planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'separate' }))).rejects.toThrow('connection reset');
+    // The same failure with the row already off the stop: it did commit, so the save carries on as separated.
+    mockVisitGroups.splitChild.mockImplementation(async () => { mockRow = { ...ROW, visit_id: null }; throw new Error('connection reset'); });
+    expect(await planComboEditMove(request({ scheduledDate: TARGET, comboMove: 'separate' }))).toEqual({ separated: true });
+  });
+});
+
+describe('a split that committed is disclosed on every later refusal', () => {
+  test('any error answer after the split says so, however it is sent; a success answer is untouched', () => {
+    const sent = [];
+    const res = { statusCode: 200, json(payload) { sent.push(payload); return this; }, status(code) { this.statusCode = code; return this; } };
+    discloseComboSeparation(res);
+    res.status(409).json({ error: 'That service is retired.', code: 'RETIRED_SERVICE_NOT_SELLABLE' });
+    expect(sent[0]).toEqual({ error: 'This service was separated from the stop, but the other changes were not saved. That service is retired.', code: 'RETIRED_SERVICE_NOT_SELLABLE', comboSeparated: true });
+    res.status(200).json({ success: true });
+    expect(sent[1]).toEqual({ success: true });
+  });
+});
+
+describe('commitComboEditMove: the move outcome is part of the saved answer', () => {
+  test('moved, partly moved, refused, and unknown', async () => {
+    expect(await commitComboEditMove({ commit: async () => ({ status: 200, body: { success: true, warnings: ['w'] } }) }, 'svc-a'))
+      .toEqual({ success: true, warnings: ['w'], moved: true });
+    expect(await commitComboEditMove({ commit: async () => ({ status: 200, body: { needsAttention: { message: 'part' } } }) }, 'svc-a'))
+      .toMatchObject({ moved: false, needsAttention: { message: 'part' } });
+    expect(await commitComboEditMove({ commit: async () => { throw Object.assign(new Error('past the workday'), { statusCode: 422, code: 'INVALID_APPOINTMENT_WINDOW' }); } }, 'svc-a'))
+      .toEqual({ moved: false, error: 'past the workday', code: 'INVALID_APPOINTMENT_WINDOW' });
+    expect(await commitComboEditMove({ commit: async () => { throw new Error('connection reset'); } }, 'svc-a'))
+      .toEqual({ moved: null, error: 'connection reset' });
+  });
+});
+
+describe('what counts as a change', () => {
+  test('date, start and technician are each compared with the stored row', () => {
+    expect(comboEditChanges({ scheduledDate: FUTURE, windowStart: '09:00', technicianId: 'tech-1' }, ROW)).toMatchObject({ date: false, start: false, technician: false });
+    expect(comboEditChanges({ scheduledDate: TARGET }, ROW)).toMatchObject({ date: true, start: false, technician: false });
+    expect(comboEditChanges({ windowStart: '10:00' }, ROW)).toMatchObject({ start: true });
+    expect(comboEditChanges({ technicianId: '' }, ROW)).toMatchObject({ technician: true });
+    expect(comboEditChanges({ technicianId: null }, { ...ROW, technician_id: null })).toMatchObject({ technician: false });
+    expect(comboLengthChange({ estimatedDuration: '60' }, ROW, { windowStart: '11:00', windowEnd: '12:00' })).toBe(false);
+    expect(comboEditChanges({ estimatedDuration: '90' }, ROW)).toMatchObject({ length: true, date: false, start: false });
+  });
+});
+
+describe('the reassignment is re-checked inside the save transaction', () => {
+  const trxWith = (row) => {
+    const trx = jest.fn(() => {
+      const chain = {};
+      for (const m of ['where', 'forUpdate']) chain[m] = () => chain;
+      chain.first = async () => row;
+      return chain;
+    });
+    return trx;
+  };
+  test('a row that joined a shared stop, or whose stop gained a live service, since the unlocked check is refused; an unchanged row passes', async () => {
+    const retry = { statusCode: 409, code: 'VISIT_CHANGED_RETRY' };
+    // Was ungrouped, now on a visit.
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }]);
+    await expect(assertStillUnsharedForReassign(trxWith({ visit_id: 'v9' }), 'svc-a', null)).rejects.toMatchObject(retry);
+    // Same visit, but it now has two live services.
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }, { id: 'svc-b' }]);
+    await expect(assertStillUnsharedForReassign(trxWith({ visit_id: 'v1' }), 'svc-a', 'v1')).rejects.toMatchObject(retry);
+    // Unchanged: ungrouped, or alone on its visit.
+    await assertStillUnsharedForReassign(trxWith({ visit_id: null }), 'svc-a', null);
+    mockVisitGroups.openMembers.mockResolvedValue([{ id: 'svc-a' }]);
+    await assertStillUnsharedForReassign(trxWith({ visit_id: 'v1' }), 'svc-a', 'v1');
+  });
+});
+
+describe('handler wiring (source guards)', () => {
+  test('the stop lock is taken for a technician change on a row with a visit, and the money preview mirrors the together date strip', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const handler = src.indexOf("router.put('/:id/update-details'");
+    const lock = src.indexOf('if (preReadVisitId || reassignSeenVisitId) {', handler);
+    expect(lock).toBeGreaterThan(handler);
+    expect(src.slice(lock, lock + 200)).toContain('lockStopForRow(trx, req.params.id)');
+    expect(lock).toBeLessThan(src.indexOf('await assertStillUnsharedForReassign(trx, req.params.id, reassignSeenVisitId);', handler));
+    const preview = src.indexOf("router.post('/:id/update-details/preview'");
+    const strip = src.indexOf("if (req.body.comboMove === 'together') scheduledDate = undefined;", preview);
+    expect(strip).toBeGreaterThan(preview);
+    expect(strip).toBeLessThan(src.indexOf('let appointmentDiscountPreset = null;', preview));
+  });
+
+  test('the transaction re-checks membership right before the technician write', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    const handler = src.indexOf("router.put('/:id/update-details'");
+    const guard = src.indexOf('await assertStillUnsharedForReassign(trx, req.params.id, reassignSeenVisitId);', handler);
+    expect(guard).toBeGreaterThan(handler);
+    expect(src.indexOf('const assignment = await assignScheduleJobs({', guard) - guard).toBeLessThan(200);
+  });
+
+  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  const handler = src.indexOf("router.put('/:id/update-details'");
+  test('the combo plan runs before the series planner and before the body is destructured; the move runs after the edit, before the notice', () => {
+    const plan = src.indexOf('const comboMovePlan = await planComboEditMove(req);', handler);
+    const series = src.indexOf('const seriesMovePlan = await planCollectiveEditDateMove(req);', handler);
+    const commit = src.indexOf('await commitComboEditMove(comboMovePlan, req.params.id)', handler);
+    const notice = src.indexOf('// Immediate reschedule text', handler);
+    expect(plan).toBeGreaterThan(handler);
+    expect(series).toBeGreaterThan(plan);
+    expect(src.indexOf('} = req.body;', handler)).toBeGreaterThan(series);
+    expect(commit).toBeGreaterThan(src.indexOf('seriesMove = await seriesMovePlan.commit();', handler));
+    expect(commit).toBeLessThan(notice);
+    expect(src.slice(notice, src.indexOf("router.post('/:id/update-details/preview'", handler))).toContain('...(comboMove ? { comboMove } : {}),');
+    expect(src.slice(plan, series)).toContain('if (comboMovePlan?.separated) discloseComboSeparation(res);');
+  });
+});

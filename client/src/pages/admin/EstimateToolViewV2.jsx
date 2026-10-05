@@ -47,6 +47,9 @@ import {
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 import { EMPTY_PROPERTY_MEASUREMENTS, palmPrefillAllowed, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "../../lib/lookupPrefill";
 import PropertyLookupResult from "../../components/admin/PropertyLookupResult";
+import ScopeQuestionPrompt, { SCOPE_QUESTION } from "../../components/admin/ScopeQuestionPrompt";
+
+const SCOPE_STALE_NOTICE = "The business type changed. Run Property Lookup again before pricing.";
 import { computeProvisionalState, provisionalSummary } from "../../utils/estimateProvisional";
 
 
@@ -467,6 +470,16 @@ function buildTurfRequestProfile(baseProfile, form) {
   // The translator reads `homeSqFt || squareFootage`: a legacy profile's
   // alias must not re-price a cleared Home Sq Ft box (codex r1 P1 #4871).
   delete profile.squareFootage;
+  // Nothing derived from Google Places rides into pricing or the saved
+  // estimate: the listed business and its suggestion are shown on this
+  // screen only, and flags the lookup took from Places stay behind. Staff's
+  // own answer (occupancyAnswer) and the scope fields the server's guard
+  // reads stay.
+  delete profile.businessIdentity;
+  delete profile.serviceScopeSuggestion;
+  if (Array.isArray(profile.fieldVerifyFlags)) {
+    profile.fieldVerifyFlags = profile.fieldVerifyFlags.filter((flag) => flag?.source !== "google_places");
+  }
   // Turf DERIVED from the lookup's lot — the county-prior seed, or a vision
   // read clamped to that parcel — is only as good as that lot. Once the Lot
   // box no longer holds it (cleared or corrected), it must not price
@@ -583,6 +596,20 @@ function linesPricedOnGuessedHomeSize(result) {
 // structure takes it out of unit scope (codex r5 P2 #4862).
 function isUnitScopedForm(form) {
   return !!form?._unitLookup && /^condo/i.test(String(form?.propertyType || ""));
+}
+
+// The server refuses to price a business-identified address whose scope
+// question is still open (409 COMMERCIAL_SCOPE_UNRESOLVED, carrying the
+// question in metadata). Returns the question, or null for any other failure.
+async function scopeUnresolvedQuestion(response) {
+  if (response?.status !== 409) return null;
+  try {
+    const data = await response.clone().json();
+    return data?.code === "COMMERCIAL_SCOPE_UNRESOLVED"
+      ? (data.metadata?.question || SCOPE_QUESTION) : null;
+  } catch {
+    return null;
+  }
 }
 
 async function summarizeEstimateResponseFailure(response, fallbackLabel) {
@@ -1848,6 +1875,37 @@ export default function EstimateToolViewV2({
   const [customerSearch, setCustomerSearch] = useState("");
   const [customerSearchStatus, setCustomerSearchStatus] = useState("idle");
   const [customers, setCustomers] = useState([]);
+  // Open leads with no customer record that match the same search. A lead
+  // (a call, an email inquiry, a held or hand-entered request) is not in the
+  // customers list, so without this the operator could not find the person.
+  const [leadMatches, setLeadMatches] = useState([]);
+  // The lead request has its own status: a failed lead search must not read
+  // as "no leads match".
+  const [leadSearchStatus, setLeadSearchStatus] = useState("idle");
+  // The lead picked from that list, for the "Linked to lead" line.
+  const [linkedLead, setLinkedLead] = useState(null);
+  // The three contact boxes stay closed until asked for (owner 2026-10-04).
+  const [contactOpen, setContactOpen] = useState(false);
+  const contactSummary = [form.customerName, form.customerPhone, form.customerEmail]
+    .map((value) => String(value || "").trim()).filter(Boolean).join(" · ");
+  // Contact provenance: the phone and email the LAST search pick (customer or
+  // lead) put in the form. A field still holding that value belongs to that
+  // person, not to the operator's typing, and it outlives an unlink: the next
+  // pick must clear it, never inherit it. The server links an estimate when
+  // either contact matches, so a mixed contact can reach the wrong person.
+  const pickedContactRef = useRef({ customerPhone: "", customerEmail: "" });
+  // Every draft/context reset (next estimate, leaving edit mode, a loaded
+  // estimate) starts with no pick: a stale one would make the next pick
+  // treat freshly typed contact as another person's.
+  const resetSearchPick = () => {
+    pickedContactRef.current = { customerPhone: "", customerEmail: "" };
+    setLinkedLead(null);
+    // Each estimate starts with the contact boxes closed again.
+    setContactOpen(false);
+  };
+  // `picked` is read BEFORE the new pick overwrites the ref: setForm runs its
+  // updater later, when the ref already holds the new person's values.
+  const typedContact = (f, key, picked) => (f[key] && f[key] !== picked[key] ? f[key] : "");
   const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [sending, setSending] = useState(false);
@@ -2121,6 +2179,7 @@ export default function EstimateToolViewV2({
         savedFormRef.current = JSON.stringify(stale ? restored : seeded);
         setForm(seeded);
         setEnrichedProfile(scopeUnitParcelProfile(d.engineProfile) || null);
+        forgetScopeAnswer();
         setLookupMeta(null);
         setSatelliteData(null);
         setEstimate(d.result && !stale ? { ...d.result, engineRequest: d.engineRequest } : null);
@@ -2166,6 +2225,7 @@ export default function EstimateToolViewV2({
     setEditLoadError(null);
     setForm(buildDefaultEstimateForm());
     setEnrichedProfile(null);
+    forgetScopeAnswer();
     setSatelliteData(null);
     setEstimate(null);
     setSavedId(null);
@@ -2178,6 +2238,7 @@ export default function EstimateToolViewV2({
     setExistingCustomerMatch(null);
     setAddressMatches([]);
     preLinkContactRef.current = null;
+    resetSearchPick();
   }
 
   const previousAddressRef = useRef(form.address);
@@ -2189,6 +2250,7 @@ export default function EstimateToolViewV2({
     lookupSeqRef.current += 1;
     lookupAbortRef.current?.abort();
     setEnrichedProfile(null);
+    forgetScopeAnswer();
     setSatelliteData(null);
     setLookupStatus({ type: "", msg: "" });
     setSatelliteStatus({ type: "", msg: "" });
@@ -2372,31 +2434,66 @@ export default function EstimateToolViewV2({
     }
   }, [form.homeSqFt, form.stories, form._storiesEdited, form.svcTermiteBait, form._suiteSizedLookup, form.isCommercial, form.propertyType, form._suiteStoriesVerified]);
 
+  // Read through a ref so a flag change does not refire a search. Same rule
+  // as canChangeLeadLink below.
+  const canChangeLeadLinkRef = useRef(true);
+  canChangeLeadLinkRef.current = !editMode?.id && !groupAnchorId && !savedId;
+
   useEffect(() => {
     const q = customerSearch.trim();
     setCustomers([]);
+    setLeadMatches([]);
     if (q.length < 2) {
       setCustomerSearchStatus("idle");
+      setLeadSearchStatus("idle");
       return;
     }
     let active = true;
     const controller = new AbortController();
     setCustomerSearchStatus("loading");
-    const timer = setTimeout(async () => {
-      try {
-        const response = await fetch(
-          `/api/admin/customers?search=${encodeURIComponent(q)}`,
-          { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
-        );
-        if (!response.ok) throw new Error("Customer search failed");
-        const data = await response.json();
-        if (active) {
-          setCustomers(data.customers || data || []);
-          setCustomerSearchStatus("done");
+    // Leads are asked for only where a pick can be saved (a new, unsaved draft).
+    const askLeads = canChangeLeadLinkRef.current;
+    setLeadSearchStatus(askLeads ? "loading" : "idle");
+    const timer = setTimeout(() => {
+      // Two independent requests: the customer results never wait for the
+      // lead request, and each reports its own failure.
+      (async () => {
+        try {
+          const response = await fetch(
+            `/api/admin/customers?search=${encodeURIComponent(q)}`,
+            { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
+          );
+          if (!response.ok) throw new Error("Customer search failed");
+          const data = await response.json();
+          if (active) {
+            setCustomers(data.customers || data || []);
+            setCustomerSearchStatus("done");
+          }
+        } catch {
+          if (active) setCustomerSearchStatus("error");
         }
-      } catch {
-        if (active) setCustomerSearchStatus("error");
-      }
+      })();
+      if (!askLeads) return;
+      (async () => {
+        try {
+          // Only leads a new estimate can attach to: no customer record (that
+          // person is found through the customer), no estimate yet, and a
+          // phone or an email (estimate_attachable=1, applied server-side
+          // before the limit).
+          const response = await fetch(
+            `/api/admin/leads?status=open&estimate_attachable=1&limit=8&search=${encodeURIComponent(q)}`,
+            { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal },
+          );
+          if (!response.ok) throw new Error("Lead search failed");
+          const data = await response.json();
+          if (active) {
+            setLeadMatches((data.leads || []).filter((lead) => lead && lead.id && !lead.customer_id));
+            setLeadSearchStatus("done");
+          }
+        } catch {
+          if (active) setLeadSearchStatus("error");
+        }
+      })();
     }, 300);
     return () => {
       active = false;
@@ -2431,37 +2528,56 @@ export default function EstimateToolViewV2({
   // suggestion keeps the address the operator just looked up.
   function applyCustomerLink(c, { adoptAddress }) {
     const name = `${c.firstName || ""} ${c.lastName || ""}`.trim();
+    const previousPick = pickedContactRef.current;
     if (!preLinkContactRef.current) {
-      preLinkContactRef.current = {
-        customerName: form.customerName || "",
-        customerPhone: form.customerPhone || "",
-        customerEmail: form.customerEmail || "",
-        isRecurringCustomer: form.isRecurringCustomer,
-      };
+      // What an unlink restores. After a search-picked lead the fields hold
+      // that lead's contact, not something the operator typed, so the
+      // snapshot is blank: unlinking this customer must not bring it back.
+      preLinkContactRef.current = linkedLead
+        ? { customerName: "", customerPhone: "", customerEmail: "", isRecurringCustomer: form.isRecurringCustomer }
+        : {
+          customerName: form.customerName || "",
+          // Only what the operator typed: a phone or email an earlier pick
+          // left behind (its link since removed) is not restored either.
+          customerPhone: typedContact(form, "customerPhone", previousPick),
+          customerEmail: typedContact(form, "customerEmail", previousPick),
+          isRecurringCustomer: form.isRecurringCustomer,
+        };
     }
     // 'Commercial' is a flat non-member tier — exclude it so a commercial
     // customer doesn't unlock recurring-customer loyalty discounts.
     const hasActivePlan =
       c.tier && c.tier !== "null" && c.tier !== "Commercial" && c.monthlyRate > 0;
+    // A lead picked from this search belongs to someone else than the
+    // customer now chosen: drop that link and its service hint, or the save
+    // would post this customer's contact with the other person's lead id. A
+    // lead that came with the page (Leads → Create Estimate) is kept, as before.
+    const dropSearchLead = !!linkedLead && form.leadId === linkedLead.id;
+    if (dropSearchLead) setLinkedLead(null);
     setForm((f) => ({
       ...f,
+      ...(dropSearchLead && f.leadId === linkedLead.id ? { leadId: "", leadServiceInterest: "" } : {}),
       customerId: c.id || "",
       propertyId: "",
       ...(adoptAddress
         ? { ...(c.address && c.address !== f.address ? clearedPropertyFields() : {}), address: c.address || f.address }
         : {}),
       customerName: name,
-      customerPhone: c.phone || f.customerPhone || "",
-      customerEmail: c.email || f.customerEmail || "",
+      // A value this customer lacks keeps what the operator TYPED, never a
+      // phone or email an earlier pick (a lead or another customer) put there.
+      customerPhone: c.phone || (dropSearchLead ? "" : typedContact(f, "customerPhone", previousPick)),
+      customerEmail: c.email || (dropSearchLead ? "" : typedContact(f, "customerEmail", previousPick)),
       // No plan: the address suggestion resets the loyalty flag (it may have
       // been set for whoever was linked before); the lookup list keeps the
       // operator's own answer, as it always has.
       isRecurringCustomer: hasActivePlan ? "YES" : adoptAddress ? f.isRecurringCustomer : "NO",
     }));
+    pickedContactRef.current = { customerPhone: c.phone || "", customerEmail: c.email || "" };
     setExistingCustomerMatch(c);
     setAddressMatches([]);
     setCustomerSearch("");
     setCustomers([]);
+    setLeadMatches([]);
     // isRecurringCustomer is a pricing input — a preview or saved row priced
     // before the link is stale.
     setEstimate(null);
@@ -2469,10 +2585,74 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
   }
 
+  // Picking a lead from the search fills the same fields the Leads page's
+  // Create Estimate button passes (leadEstimateParams in LeadsTabs.jsx) and
+  // ties the estimate to that lead. No customer is linked: a lead has none.
+  function applyLeadLink(lead) {
+    if (!canChangeLeadLink) return;
+    const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim();
+    const hadSelection = !!(form.customerId || form.leadId || linkedLead || existingCustomerMatch);
+    const previousPick = pickedContactRef.current;
+    setForm((f) => ({
+      ...f,
+      leadId: lead.id,
+      customerId: "",
+      propertyId: "",
+      ...(lead.address && lead.address !== f.address ? clearedPropertyFields() : {}),
+      address: lead.address || f.address,
+      customerName: name || f.customerName || "",
+      // A value the lead does not have keeps what the operator TYPED, and
+      // nothing else: not while another person is selected (hadSelection),
+      // and not a value an earlier pick left behind after its link was
+      // removed (typedContact / pickedContactRef).
+      customerPhone: lead.phone || (hadSelection ? "" : typedContact(f, "customerPhone", previousPick)),
+      customerEmail: lead.email || (hadSelection ? "" : typedContact(f, "customerEmail", previousPick)),
+      leadServiceInterest: lead.service_interest || "",
+      // A lead is not a recurring customer; the loyalty flag may have been set
+      // for whoever was linked before.
+      isRecurringCustomer: "NO",
+    }));
+    preLinkContactRef.current = null;
+    pickedContactRef.current = { customerPhone: lead.phone || "", customerEmail: lead.email || "" };
+    setExistingCustomerMatch(null);
+    setLinkedLead({ id: lead.id, name: name || "(no name)" });
+    setAddressMatches([]);
+    setCustomerSearch("");
+    setCustomers([]);
+    setLeadMatches([]);
+    // isRecurringCustomer is a pricing input — a preview priced before the
+    // link is stale.
+    setEstimate(null);
+    setSavedId(null);
+    setSavedViewUrl(null);
+  }
+
+  // Drops the link and keeps the fields. pickedContactRef is NOT reset: the
+  // phone and email are still that lead's, and the next pick clears them.
+  function unlinkLead() {
+    if (!canChangeLeadLink) return;
+    setLinkedLead(null);
+    setForm((f) => ({ ...f, leadId: "" }));
+  }
+
   // Unlink is offered only where a save can actually honor it: the revise
   // PUT keeps the row's customer_id (codex #3768 r1), and a grouped sibling
   // must share the anchor's customer or the save 400s (codex #3768 r3).
   const canUnlink = !editMode?.id && !groupAnchorId;
+  // A lead can be linked or unlinked only where a save will honor it: a NEW,
+  // ungrouped draft that has not been saved yet. A revise sends leadId null
+  // and keeps the row's own linkage, so on a saved or revised estimate the
+  // lead list is not offered and the link line is read-only.
+  const canChangeLeadLink = canUnlink && !savedId;
+
+  // The contact boxes close whenever the tool turns to another estimate, by
+  // any path: a loaded or saved estimate (editMode id), a multi-property
+  // group's Edit or "Add another property" (group anchor), next estimate.
+  // Keyed on the identity, not on each handler, so a new path cannot miss it.
+  const contactIdentityKey = `${editMode?.id || ""}|${groupAnchorId || ""}`;
+  useEffect(() => {
+    setContactOpen(false);
+  }, [contactIdentityKey]);
 
   // Drops the linked customer but keeps the typed contact fields, so a wrong
   // link (address suggestion, deep link, or a mis-click) is one tap to undo.
@@ -2594,6 +2774,55 @@ export default function EstimateToolViewV2({
   const [satelliteStatus, setSatelliteStatus] = useState({ type: "", msg: "" });
   const [satelliteData, setSatelliteData] = useState(null);
   const [lookupMeta, setLookupMeta] = useState(null);
+  // Business-identity scope question (GATE_LOOKUP_BUSINESS_IDENTITY): the
+  // CSR's answer for ONE address, re-sent on every lookup of it; a server 409
+  // can raise the question on its own.
+  const occupancyRef = useRef({ address: "", answer: "" });
+  const [scopeConflict, setScopeConflict] = useState("");
+  // The remembered answer belongs to ONE lookup profile. Whenever that profile
+  // is dropped or replaced by a saved estimate's (Clear All, a new or another
+  // estimate, a prefill, an address change) the answer goes with it: a loaded
+  // estimate's own saved answer rides its profile and is re-sent from there.
+  function forgetScopeAnswer() {
+    occupancyRef.current = { address: "", answer: "" };
+    setScopePending(null);
+    setScopeConflict("");
+  }
+  const scopeUnresolved = enrichedProfile?.serviceScopeDecision === "scope_unresolved"
+    && !enrichedProfile?.occupancyAnswer;
+  // An answer just clicked is not applied until the lookup it started comes
+  // back carrying it. Until then (in flight, or failed) the profile on screen
+  // is still sized for the OLD scope, so pricing stays blocked.
+  const [scopePending, setScopePending] = useState(null);
+  // A profile with no business verdict at all (a whole-property lookup skips
+  // the business check) has no scope to wait for, so nothing is pending.
+  // "Not this business" leaves no scope decision, so any answer is applied
+  // once the profile carries it back as occupancyAnswer.
+  const hasScopeVerdict = !!(
+    enrichedProfile?.businessIdentity
+    || enrichedProfile?.serviceScopeDecision
+    || enrichedProfile?.occupancyAnswer
+  );
+  const scopeAnswerPending = !!scopePending
+    && scopePending.address === form.address.trim()
+    && hasScopeVerdict
+    && enrichedProfile.occupancyAnswer !== scopePending.answer;
+  // The last lookup ran as a whole-property (HOA / multifamily) job, which
+  // skips the business check, and the business type has since changed to
+  // something else: that profile was never asked suite vs building, so a
+  // fresh lookup is required before pricing.
+  const formIsWholeProperty = ["hoa_common_area", "multifamily"].includes(form.commercialRiskType)
+    || /^(?:hoa|multifamily)/.test(String(form.commercialSubtype || ""));
+  const scopeLookupStale = !!enrichedProfile && !formIsWholeProperty
+    && (lookupMeta?.businessIdentityBypassed === true || enrichedProfile.businessIdentityBypassed === true);
+  const scopeQuestion = scopeUnresolved
+    ? (enrichedProfile.serviceScopeQuestion || SCOPE_QUESTION)
+    : (scopeAnswerPending ? SCOPE_QUESTION : (scopeLookupStale ? SCOPE_STALE_NOTICE : scopeConflict));
+  // A server-raised question belongs to the lookup it came from: a cleared
+  // or re-addressed lookup (no profile) drops it.
+  useEffect(() => {
+    if (!enrichedProfile) setScopeConflict("");
+  }, [enrichedProfile]);
   const [verifySaveState, setVerifySaveState] = useState({});
   const verificationVersionRef = useRef(0);
 
@@ -2861,9 +3090,11 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
+    forgetScopeAnswer();
     setExistingCustomerMatch(null);
     setAddressMatches([]);
     preLinkContactRef.current = null;
+    resetSearchPick();
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     // A fresh lead/customer prefill is a new job — never chain it into a
@@ -3115,6 +3346,7 @@ export default function EstimateToolViewV2({
         : {}),
     }));
     setEnrichedProfile(null);
+    forgetScopeAnswer();
     setSatelliteData(null);
     setSatelliteStatus({ type: "", msg: "" });
     setLookupStatus({ type: "", msg: "" });
@@ -3138,8 +3370,40 @@ export default function EstimateToolViewV2({
     });
   }
 
-  async function doLookup({ refresh = false } = {}) {
+  // The CSR's answer to the scope question: remembered for this address and
+  // sent with the re-run lookup, which returns the decided scope.
+  function answerScope(answer) {
+    // The answer already applied, clicked again: nothing changes, and sizes
+    // staff typed for this scope stay.
+    if (!scopeQuestion && enrichedProfile?.occupancyAnswer === answer) return;
+    occupancyRef.current = { address: form.address.trim(), answer };
+    setScopePending({ address: form.address.trim(), answer });
+    // A different scope is a different property to measure and classify: a
+    // suite's sizes, termite measurements and commercial typing are not the
+    // building's, nor a rejected business's the base property's. The form
+    // gets the same reset a replaced property gets (clearedPropertyFields),
+    // and the re-run lookup fills it for the new scope.
+    setForm((f) => ({
+      ...f,
+      ...clearedPropertyFields(),
+      // Same address, same service property: the link stays.
+      propertyId: f.propertyId,
+      _homeSqFtEdited: false,
+      _lotSqFtEdited: false,
+      _storiesEdited: false,
+    }));
+    void doLookup({ occupancy: answer });
+  }
+
+  async function doLookup({ refresh = false, occupancy } = {}) {
     const address = form.address.trim();
+    if (occupancy) occupancyRef.current = { address, answer: occupancy };
+    // A reopened estimate has the saved answer on its profile and nothing in
+    // the ref: the profile always belongs to the address in the box (an
+    // address change drops it), so its answer is re-sent and not re-asked.
+    const occupancyAnswer = occupancyRef.current.address === address
+      ? occupancyRef.current.answer
+      : (enrichedProfile?.occupancyAnswer || "");
     // Read at click time: a deep link seeds form.customerId with no chip.
     const customerAlreadyLinked = !!(existingCustomerMatch || form.customerId);
     if (!address) {
@@ -3189,6 +3453,8 @@ export default function EstimateToolViewV2({
           ...((["hoa_common_area", "multifamily"].includes(form.commercialRiskType)
             || /^(?:hoa|multifamily)/.test(String(form.commercialSubtype || "")))
             ? { wholeProperty: true } : {}),
+          // The scope answer (server field `occupancy`), only once given.
+          ...(occupancyAnswer ? { occupancy: occupancyAnswer } : {}),
         }),
         signal: lookupController.signal,
       });
@@ -3210,12 +3476,14 @@ export default function EstimateToolViewV2({
       const ep = scopeUnitParcelProfile(data.enriched);
       if (!ep) throw new Error("Property details were not returned. Try refreshing the records.");
       setEnrichedProfile(ep);
+      setScopeConflict("");
       setLookupMeta({
         address,
         matchedAddress: (data.propertyRecord || data.rentcast)?.formattedAddress || null,
         checkedAt: data.meta?.cachedAt || data.meta?.timestamp || new Date().toISOString(),
         cache: data.meta?.cache,
         errors: data.errors || [],
+        businessIdentityBypassed: data.meta?.businessIdentityBypassed === true,
       });
       setVerifySaveState({});
       unitLookupAddressRef.current = ep.unitScopedLookup ? address : "";
@@ -3503,6 +3771,8 @@ export default function EstimateToolViewV2({
   async function doGenerate(overrides = {}) {
     if (editEstimateId && !editMode) return null;
     if (generating) return null;
+    // An open scope question blocks pricing (the server refuses it too).
+    if (scopeQuestion) return null;
     // Snapshot the invalidation version. Inputs stay editable while the
     // calculate call is in flight, so an edit that lands mid-flight must make
     // this generate discard its result (it was priced from pre-edit inputs).
@@ -4037,13 +4307,19 @@ export default function EstimateToolViewV2({
         headers: authHeaders,
         body: JSON.stringify({ profile, selectedServices, options }),
       });
-      if (!r.ok)
+      if (!r.ok) {
+        const openQuestion = await scopeUnresolvedQuestion(r);
+        if (openQuestion) {
+          setScopeConflict(openQuestion);
+          return null;
+        }
         throw new Error(
           await summarizeEstimateResponseFailure(
             r,
             "Estimate calculation failed",
           ),
         );
+      }
       const result = await r.json();
       if (result.error) {
         alert(result.error);
@@ -4215,10 +4491,13 @@ export default function EstimateToolViewV2({
           headers: authHeaders,
           body: JSON.stringify({ ...payload, dryRun: true }),
         });
-        if (!pf.ok)
+        if (!pf.ok) {
+          const openQuestion = await scopeUnresolvedQuestion(pf);
+          if (openQuestion) setScopeConflict(openQuestion);
           throw new Error(
             await summarizeEstimateResponseFailure(pf, "Save failed"),
           );
+        }
         const preflight = await pf.json();
         const preNotice = serverRecomputeNotice(preflight, monthlyTotal, onetimeTotal);
         if (preNotice) {
@@ -4241,10 +4520,13 @@ export default function EstimateToolViewV2({
           body: JSON.stringify(payload),
         },
       );
-      if (!r.ok)
+      if (!r.ok) {
+        const openQuestion = await scopeUnresolvedQuestion(r);
+        if (openQuestion) setScopeConflict(openQuestion);
         throw new Error(
           await summarizeEstimateResponseFailure(r, "Save failed"),
         );
+      }
       const d = await r.json();
       const id = d.id || d.estimateId;
       const viewUrl = estimatePreviewUrlFromSave(d);
@@ -4446,9 +4728,11 @@ export default function EstimateToolViewV2({
     setSavedViewUrl(null);
     setLookupStatus({ type: "", msg: "" });
     setEnrichedProfile(null);
+    forgetScopeAnswer();
     setExistingCustomerMatch(null);
     setAddressMatches([]);
     preLinkContactRef.current = null;
+    resetSearchPick();
     setSatelliteStatus({ type: "", msg: "" });
     setSatelliteData(null);
     setCustomerSearch("");
@@ -4484,6 +4768,7 @@ export default function EstimateToolViewV2({
       savedFormRef.current = JSON.stringify(stale ? restored : seeded);
       setForm(seeded);
       setEnrichedProfile(scopeUnitParcelProfile(source.engineProfile) || null);
+      forgetScopeAnswer();
       setExistingCustomerMatch(source.customer || null);
       if (stale) setSavedId(null);
       setReopenNotice(notice);
@@ -4852,17 +5137,6 @@ export default function EstimateToolViewV2({
           <div className="space-y-6 min-w-0">
             <section tabIndex={-1} id="estimate-customer" className="estimate-workflow-section space-y-4" aria-label="Customer and property">
             <h2 className="text-18 font-medium">Customer & property</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
-              <Field label="Customer name" id="estimate-customerName" className="mb-4">
-                <InputV2 k="customerName" />
-              </Field>
-              <Field label="Phone" id="estimate-customerPhone" className="mb-4">
-                <InputV2 k="customerPhone" type="tel" />
-              </Field>
-              <Field label="Email" className="mb-4 sm:col-span-2" id="estimate-customerEmail">
-                <InputV2 k="customerEmail" type="email" />
-              </Field>
-            </div>
             {/* Customer Lookup */}
             <div>
               {" "}
@@ -4878,11 +5152,12 @@ export default function EstimateToolViewV2({
                 />
               </Field>
               <p id="customer-search-help" className="text-14 text-ink-secondary mb-3">
-                Search by first name, last name, or full name. Phone, email, and address also work.
+                Search by first name, last name, or full name. Phone, email, and address also work.{canChangeLeadLink ? " Leads with no customer record are listed too." : ""}
               </p>
               {customerSearchStatus === "loading" && <p role="status" className="text-14 text-ink-secondary mb-3">Searching customers…</p>}
               {customerSearchStatus === "error" && <p role="alert" className="text-14 text-alert-fg mb-3">Customer search failed. Edit your search to try again.</p>}
-              {customerSearchStatus === "done" && customers.length === 0 && <p role="status" className="text-14 text-ink-secondary mb-3">No customers found. Try a first name, last name, or full name.</p>}
+              {canChangeLeadLink && leadSearchStatus === "error" && <p role="status" className="text-14 text-ink-secondary mb-3">Lead search failed. Customer results are not affected. Edit your search to try again.</p>}
+              {customerSearchStatus === "done" && customers.length === 0 && !(canChangeLeadLink && (leadSearchStatus === "loading" || leadSearchStatus === "error" || leadMatches.length > 0)) && <p role="status" className="text-14 text-ink-secondary mb-3">{canChangeLeadLink ? "No customers or leads found." : "No customers found."} Try a first name, last name, or full name.</p>}
               {customers.length > 0 && (
                 <div className="mb-3 border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
                   {customers.slice(0, 8).map((c) => {
@@ -4909,6 +5184,62 @@ export default function EstimateToolViewV2({
                   })}
                 </div>
               )}
+              {canChangeLeadLink && leadMatches.length > 0 && (
+                <div className="mb-3">
+                  <p className="text-14 text-ink-secondary mb-1">Leads with no customer record</p>
+                  <div className="border-hairline border-zinc-300 rounded-xs bg-white max-h-72 overflow-y-auto">
+                    {leadMatches.slice(0, 8).map((lead) => {
+                      const name = [lead.first_name, lead.last_name].filter(Boolean).join(" ").trim() || "(no name)";
+                      return (
+                        <button data-ui-text-action
+                          key={lead.id}
+                          type="button"
+                          onClick={() => applyLeadLink(lead)}
+                          className="w-full text-left px-3 py-2 border-b-hairline border-zinc-200 last:border-b-0 hover:bg-zinc-50 cursor-pointer"
+                        >
+                          <div className="text-14 text-zinc-900 font-medium">
+                            {name} <span className="font-normal text-ink-secondary">· Lead</span>
+                          </div>
+                          <div className="text-14 text-ink-secondary">
+                            {lead.address || "no address on file"}
+                            {lead.phone ? ` · ${lead.phone}` : ""}
+                            {lead.email ? ` · ${lead.email}` : ""}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+            {/* Contact on the estimate. Owner 2026-10-04: nobody types these to start
+                an estimate, the search fills them. They stay closed behind one line
+                that says who the estimate goes to, and open on request (a person who
+                is in no list yet, or a correction). Kept mounted while closed so a
+                pick, a prefill and a saved draft all still write to them. */}
+            <div>
+              <div className="mb-3 text-14 text-zinc-900 flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0">
+                <span className="min-w-0 max-w-full [overflow-wrap:anywhere]" data-testid="estimate-contact-summary">
+                  {contactSummary
+                    ? <>Estimate goes to: <strong>{contactSummary}</strong></>
+                    : "No one is selected yet."}
+                </span>
+                <button data-ui-text-action type="button" aria-expanded={contactOpen} aria-controls="estimate-contact-fields"
+                  onClick={() => setContactOpen((open) => !open)} className="text-14 underline cursor-pointer max-w-full text-left whitespace-normal">
+                  {contactOpen ? "Hide contact details" : contactSummary ? "Edit contact details" : "Add a person by hand"}
+                </button>
+              </div>
+              <div id="estimate-contact-fields" hidden={!contactOpen} className={contactOpen ? "grid grid-cols-1 sm:grid-cols-2 gap-x-3" : "hidden"}>
+                <Field label="Customer name" id="estimate-customerName" className="mb-4">
+                  <InputV2 k="customerName" />
+                </Field>
+                <Field label="Phone" id="estimate-customerPhone" className="mb-4">
+                  <InputV2 k="customerPhone" type="tel" />
+                </Field>
+                <Field label="Email" className="mb-4 sm:col-span-2" id="estimate-customerEmail">
+                  <InputV2 k="customerEmail" type="email" />
+                </Field>
+              </div>
             </div>
             {/* Property Lookup */}
             <div>
@@ -5048,6 +5379,8 @@ export default function EstimateToolViewV2({
                     }));
                     setLookupStatus({ type: "", msg: "" });
                     setEnrichedProfile(null);
+                    forgetScopeAnswer();
+                    setScopeConflict("");
                     setExistingCustomerMatch(null);
                     setAddressMatches([]);
                     // The customer linkage survives Clear All (customerId is
@@ -5078,6 +5411,16 @@ export default function EstimateToolViewV2({
                   verification={verifySaveState}
                 />
               )}
+              <ScopeQuestionPrompt
+                profile={enrichedProfile}
+                question={scopeQuestion}
+                // Only the answer the server applied reads as chosen; while
+                // the question is open none stands.
+                answer={!scopeQuestion ? (enrichedProfile?.occupancyAnswer || "") : ""}
+                notice={scopeQuestion === SCOPE_STALE_NOTICE ? SCOPE_STALE_NOTICE : ""}
+                busy={lookupStatus.type === "loading"}
+                onAnswer={answerScope}
+              />
               {enrichedProfile?.fieldVerifyFlags?.length > 0 && (
                 <div className="mb-2.5 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs">
                   {enrichedProfile.fieldVerifyFlags.map((flag, i) => (
@@ -5089,6 +5432,19 @@ export default function EstimateToolViewV2({
                     </div>
                   ))}
 
+                </div>
+              )}
+              {linkedLead && form.leadId === linkedLead.id && (
+                <div role="status" className="mb-2.5 px-3 py-2 bg-zinc-50 border-hairline border-zinc-300 rounded-xs text-14 text-zinc-900 flex items-center gap-2">
+                  <span className="flex-1 min-w-0">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-zinc-900 mr-1.5 align-middle" />
+                    Linked to lead: <strong>{linkedLead.name}</strong>
+                  </span>
+                  {canChangeLeadLink && (
+                    <button data-ui-text-action type="button" onClick={unlinkLead} className="text-14 underline cursor-pointer">
+                      Remove link
+                    </button>
+                  )}
                 </div>
               )}
               {existingCustomerMatch && (
@@ -7462,7 +7818,8 @@ export default function EstimateToolViewV2({
               {" "}
               <Button
                 onClick={() => doGenerate()}
-                disabled={generateBusy}
+                disabled={generateBusy || !!scopeQuestion}
+                title={scopeQuestion || undefined}
                 loading={generating}
                 variant="primary"
                 size="md"
@@ -7474,9 +7831,9 @@ export default function EstimateToolViewV2({
                   variant="secondary"
                   size="md"
                   loading={saving}
-                  disabled={generateBusy || saving}
+                  disabled={generateBusy || saving || !!scopeQuestion}
                   onClick={() => doSave()}
-                  title="Update the existing estimate — the customer's link shows the new quote without a resend"
+                  title={scopeQuestion || "Update the existing estimate — the customer's link shows the new quote without a resend"}
                 >
                   {editMode?.status === "sent" || editMode?.status === "viewed" ? "Save changes" : "Save draft"}
                 </Button>
@@ -7497,7 +7854,8 @@ export default function EstimateToolViewV2({
               <Button
                 variant="secondary"
                 size="md"
-                disabled={generateBusy || !savedId}
+                disabled={generateBusy || !savedId || !!scopeQuestion}
+                title={scopeQuestion || undefined}
                 onClick={(event) => { event.currentTarget.focus(); void reviewAndSend(); }}
               >
                 Review and send

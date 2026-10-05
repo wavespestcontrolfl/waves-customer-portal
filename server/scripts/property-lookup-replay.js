@@ -32,6 +32,8 @@
 //   gis_error                    a county query failed/timed out (never a roll verdict)
 //   address_text_miss            the street is not on the roll under the typed spelling
 //   number_not_on_roll           the street exists, the typed house number does not
+//   parent_parcel_kept:<why>     a guard dropped the parcel at the point but kept it as parent-parcel
+//                                context (GATE_LOOKUP_BUSINESS_IDENTITY); ranks ahead of the roll-miss stops
 //   point_parcel_dropped:<why>   a parcel sits at the point but a guard dropped it
 //   no_coordinates               the row stores no lat/lng, so no point query was made: inconclusive
 //                                (the roll audit above still ranks first when it speaks)
@@ -121,7 +123,7 @@ const PAYLOAD_SLACK_SECONDS = 5;
 // Gates the replayed parcel guards read at call time (feature-gates.js
 // condoUnitFolioLive: on only when exactly 'true'). A new gate a guard starts
 // reading belongs here so a run without it is visible.
-const GUARD_GATES = ['GATE_CONDO_UNIT_FOLIO'];
+const GUARD_GATES = ['GATE_CONDO_UNIT_FOLIO', 'GATE_LOOKUP_BUSINESS_IDENTITY', 'GATE_COMMERCIAL_SUITE_SIZING'];
 
 class UsageError extends Error {}
 
@@ -410,6 +412,9 @@ async function pointStep(address, geo, countyHint, deps) {
     address,
     gisPrecision: deps.parcelGisPrecision(geo),
     diag: null,
+    // The parent-parcel decision (GATE_LOOKUP_BUSINESS_IDENTITY) needs the
+    // point; the replay measures the opted-in (admin / engine) lookup.
+    point: { lat: geo.lat, lng: geo.lng },
   });
   // A kept parcel may be a unit parcel resolved out of an aggregate; a dropped
   // one is reported as the parcel the point found.
@@ -417,6 +422,7 @@ async function pointStep(address, geo, countyHint, deps) {
   return {
     status: guarded.parcel ? 'kept' : 'dropped',
     ...(guarded.parcel ? {} : { dropReason: guarded.dropReason || 'unknown' }),
+    ...(guarded.parentParcel ? { parentParcel: true } : {}),
     parcelId: shown.parcelId || null,
     situs: shown.situsAddress || null,
     county: shown.county || null,
@@ -454,6 +460,10 @@ const STOP_RULES = [
   { stop: 'commercial_no_suite_path', when: (r) => parcelFound(r) && r.snapshot.isCommercial === true && r.snapshot.unitScopedLookup !== true },
   { stop: 'matched_now', when: parcelFound },
   { stop: 'gis_error', when: (r) => (r.point.status === 'error' || r.audit.status === 'error') && !pointDropped(r) },
+  // A dropped parcel kept as parent-parcel context is its own stop, ahead of
+  // the roll-miss stops: the storefront it exists for is normally not on the
+  // roll, and would otherwise be counted there and never as a kept parent.
+  { stop: 'parent_parcel_kept', detail: (r) => r.point.dropReason, when: (r) => pointDropped(r) && r.point.parentParcel === true },
   { stop: 'address_text_miss', when: (r) => auditRan(r) && !r.audit.streetExists },
   { stop: 'number_not_on_roll', when: (r) => auditRan(r) && r.audit.streetExists && !r.audit.hasExactMatch },
   { stop: 'point_parcel_dropped', detail: (r) => r.point.dropReason, when: pointDropped },
@@ -591,7 +601,7 @@ function formatSummary(summary) {
 const TSV_COLUMNS = [
   'address', 'lat', 'lng', 'stop', 'parcel_recovered', 'regression', 'stored_status', 'stored_parcel_id', 'county_used',
   'audit_status', 'street_exists', 'exact_number', 'nearest_numbers', 'audit_county',
-  'point_status', 'point_drop_reason', 'point_parcel_id', 'point_situs',
+  'point_status', 'point_drop_reason', 'point_parent_parcel', 'point_parcel_id', 'point_situs',
   'is_commercial', 'commercial_source', 'commercial_subtype', 'unit_scoped', 'category', 'field_verify_flags',
   'stored_audit_street_exists', 'created_at', 'case_name', 'expected', 'expect_ok', 'errors',
 ];
@@ -628,6 +638,7 @@ function resultToTsvRow(r) {
     audit_county: audit.county,
     point_status: point.status,
     point_drop_reason: point.dropReason,
+    point_parent_parcel: point.parentParcel === true ? true : '',
     point_parcel_id: point.parcelId,
     point_situs: point.situs,
     is_commercial: snap.isCommercial === true ? 'true' : snap.isCommercial === false ? 'false' : '',

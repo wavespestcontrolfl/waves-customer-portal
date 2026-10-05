@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
+const { buildReportV1Data, attachLawnWateringCloseOut, stripLiveOnlyScheduleFields, stripLiveOnlyReportProductCopy, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, resolveProjectReportPreviewFields, completedProtocolActionLabels, completedProtocolActionEntries } = require('../services/service-report/report-data');
 const { applyReportIdentitySnapshot } = require('../services/service-report/report-identity-snapshot');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
@@ -509,6 +509,11 @@ async function buildServiceReportV1ResponseData(service, token, {
   // only the /data render shows it, so only it pays for the city-wide
   // lawn-findings read.
   nearYou = false,
+  // OPT-IN likewise for the lawn "What the photos showed" block (lawn photo
+  // set gate): it reads the visit's assessment run. Only the /data render and
+  // the direct PDF route (whose cacheability check reads the same payload) print
+  // or check it; the Q&A endpoint never does, so it never pays.
+  lawnPhotoFindings = false,
   // OPT-IN on the same terms (codex P2 #5137 deferred finding a): only a
   // caller that actually RENDERS the pest expectations block — the /data
   // live render and the direct PDF route — pays for either of the two
@@ -522,6 +527,15 @@ async function buildServiceReportV1ResponseData(service, token, {
   // Defaulting to off means a future caller cannot inherit that cost by
   // accident either.
   pestExpectationsWeather = false,
+  // OPT-IN on the same terms: only the /data live render shows the lawn
+  // watering banner's rain close-out (GATE_LAWN_WATERING_FORECAST), so only it
+  // pays for the radar lookup. Applied for mode === 'live' only.
+  lawnWateringCloseOut = false,
+  // OPT-IN on the same terms: only the /data render shows the lawn Watching
+  // sentence (GATE_LAWN_RAINFAST_WATCH), so only it pays for the weather read
+  // and the memory write. /ask builds the report in mode 'live' purely for
+  // context and must not trigger either. Applied for mode === 'live' only.
+  lawnRainfastWatch = false,
 } = {}) {
   // staffViewer gates internal_only companion sections (combined-service
   // completions): report-data omits them from customer payloads entirely.
@@ -540,6 +554,8 @@ async function buildServiceReportV1ResponseData(service, token, {
     pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt,
     propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, expectationFactsOut, planSummary, upcomingVisitsCard,
     nearYou,
+    lawnPhotoFindings,
+    lawnRainfastWatch,
     // pest week-weather is opt-in (codex P2 round 4, tightened by codex P2
     // #5137 deferred finding a): only a caller that opts into
     // pestExpectationsWeather above — the /data live render and the direct
@@ -553,6 +569,11 @@ async function buildServiceReportV1ResponseData(service, token, {
   // which builds its payload outside this function (audit 2026-07-18 P2 +
   // codex r2).
   if (mode !== 'live') stripLiveOnlyScheduleFields(data);
+  else if (lawnWateringCloseOut) {
+    // Gate read at call time; a partial gates module (route test doubles) reads as off.
+    const gates = require('../config/feature-gates');
+    if (typeof gates.lawnWateringForecastLive === 'function' && gates.lawnWateringForecastLive()) await attachLawnWateringCloseOut(data, service);
+  }
 
   // The tech photo card is LIVE-VIEW ONLY for the same reason (Codex P2 on
   // #2614): the PDF cache key doesn't vary on GATE_REPORT_TECH_PHOTO, so a
@@ -2292,6 +2313,7 @@ router.get('/:token', async (req, res, next) => {
             // it pays for the weather lookups (codex P2 #5137 deferred
             // finding a) — see pestExpectationsWeather's own doc above.
             pestExpectationsWeather: true,
+            lawnPhotoFindings: true,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           apRenderedSignature = applicatorRenderedPdfSignature(data);
@@ -2608,12 +2630,14 @@ router.get('/:token/data', async (req, res, next) => {
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true, lawnPhotoFindings: true,
         // This route renders the pest expectations block on every mode it
         // serves (live/pdf/static/sms_preview), so it pays for the weather
         // lookups (codex P2 #5137 deferred finding a) — see
         // pestExpectationsWeather's own doc above.
         pestExpectationsWeather: true,
+        lawnWateringCloseOut: true,
+        lawnRainfastWatch: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was

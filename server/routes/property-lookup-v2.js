@@ -24,7 +24,22 @@ const { isInServiceAreaBox, zipFromAddressText } = require('../services/service-
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
-const { commercialSuiteSizingLive } = require('../config/feature-gates');
+const { commercialSuiteSizingLive, lookupBusinessIdentityLive } = require('../config/feature-gates');
+const {
+  identifyBusinessAtAddress,
+  timeoutMsFromEnv: businessIdentityTimeoutMs,
+  MIN_TIMEOUT_MS: BUSINESS_IDENTITY_MIN_TIMEOUT_MS,
+} = require('../services/property-lookup/business-identity');
+const {
+  SCOPE: BUSINESS_SCOPE,
+  buildBusinessScopeContext,
+  effectiveSuiteUnitKey,
+  UNAVAILABLE_IDENTITY,
+  profileCarriesBusinessScope,
+  businessIdentified,
+  normalizeOccupancyAnswer,
+  assertScopeAnswered,
+} = require('../services/property-lookup/business-scope');
 const {
   attachFloodZoneToCachedLookup,
   attachPoolPermitsToCachedLookup,
@@ -222,6 +237,78 @@ async function stampLookupAttempt(address, status, reason = null, attemptId) {
 // export, and a keying failure just means "no coalescing".
 const inFlightLookups = new Map();
 
+// Staff's occupancy answer as a lookup option: nothing unless it is one of
+// the three answers (suite / building / none).
+function occupancyOption(value) {
+  const occupancyAnswer = normalizeOccupancyAnswer(value);
+  return occupancyAnswer ? { occupancyAnswer } : {};
+}
+
+// True when the admin lookup skipped the business check because the job is
+// whole-property (association) — only while the gate is live.
+function businessIdentityBypassed(wholeProperty) {
+  return wholeProperty === true && lookupBusinessIdentityLive();
+}
+
+// GATE_LOOKUP_BUSINESS_IDENTITY changes the response (business scope, the
+// question, the commercial typing) and the CSR's answer changes it again, so
+// they join the coalescing key; '' while the leg is off keeps every key as it was.
+function businessIdentityKeySuffix(options) {
+  if (options.commercialSuiteSizing !== true || !lookupBusinessIdentityLive()) return '';
+  return `:business-identity${options.occupancyAnswer ? `:${options.occupancyAnswer}` : ''}`;
+}
+
+// GATE_LOOKUP_BUSINESS_IDENTITY — which operating business is at this
+// address (Google Places). Runs only for the opted-in admin lookup / engine
+// (options.commercialSuiteSizing) with the gate live, and only for a
+// COMMERCIAL lookup or one with no county record. The answer lives for this
+// request only: the Places API policies allow storing a place ID and nothing
+// else, so it is never stamped on the record or the cache row and a cache
+// hit asks again. `budgetMs` is the time the lookup can still spare (null =
+// no deadline); with too little left the leg is skipped. Fail-open: any miss
+// is null and the lookup proceeds exactly as before — except when the CSR
+// already answered the scope question: then a miss is UNAVAILABLE_IDENTITY,
+// which keeps the question open (no price) instead of dropping the answer;
+// so is a reply that no longer finds a business at the number.
+// Never throws.
+async function prepareBusinessIdentity({ record, aiAnalysis, address, lat, lng, options, budgetMs = null }) {
+  if (options.commercialSuiteSizing !== true || !lookupBusinessIdentityLive()) return null;
+  // 'none' (not this business) needs no business to apply to.
+  const answered = options.occupancyAnswer === 'suite' || options.occupancyAnswer === 'building';
+  const miss = answered ? UNAVAILABLE_IDENTITY : null;
+  try {
+    const eligible = detectCategory(record, aiAnalysis) === 'COMMERCIAL' || !hasCountyEvidence(record);
+    if (!eligible || options.cacheOnly === true) return null;
+    if (budgetMs != null && budgetMs < BUSINESS_IDENTITY_MIN_TIMEOUT_MS) return miss;
+    const timeoutMs = budgetMs == null ? undefined : Math.min(budgetMs, businessIdentityTimeoutMs());
+    const identity = await identifyBusinessAtAddress({ address, lat, lng, timeoutMs });
+    // An answer is about a business an earlier lookup found. A reply that
+    // finds none this time (empty, or nobody at the number) cannot carry it
+    // either, so it is the same miss as no reply.
+    return miss && !businessIdentified(identity) ? miss : identity;
+  } catch (err) {
+    logger.warn('[property-lookup] business identity leg failed', { reason: err?.name || 'error' });
+    return miss;
+  }
+}
+
+// Options handed to buildEnrichedProfile: the suite-sizing opt-in as before,
+// plus the identity and the CSR's answer only when an identity arrived (so a
+// gate-off build sees the exact options it always did).
+function profileBuildOptions(options, businessIdentity) {
+  const base = { commercialSuiteSizing: options.commercialSuiteSizing === true };
+  return businessIdentity ? { ...base, businessIdentity, occupancyAnswer: options.occupancyAnswer || null } : base;
+}
+
+// The unit a persisted suite stamp belongs to: the typed unit, else (a
+// business-identified suite) the matched place.
+function suiteUnitKeyForProfile(address, profile) {
+  return effectiveSuiteUnitKey(suiteUnitKey(address), {
+    decision: profile?.serviceScopeDecision || null,
+    unitKey: profile?.businessIdentity?.unitKey || null,
+  });
+}
+
 function lookupCoalesceKey(address, options) {
   if (options.refresh || options.cacheOnly === true || options.persist === false) return null;
   if (typeof cacheAddressKey !== 'function') return null;
@@ -230,7 +317,7 @@ function lookupCoalesceKey(address, options) {
     // Suite sizing changes the response (suite homeSqFt/footprint, stamp),
     // so opt-in and ordinary callers never join each other's run.
     return hash
-      ? `${hash}${options.prioritizeAccuracy ? ':full-analysis' : ''}${options.commercialSuiteSizing === true ? ':suite-sizing' : ''}`
+      ? `${hash}${options.prioritizeAccuracy ? ':full-analysis' : ''}${options.commercialSuiteSizing === true ? ':suite-sizing' : ''}${businessIdentityKeySuffix(options)}`
       : null;
   } catch {
     return null;
@@ -254,9 +341,9 @@ async function performPropertyLookup(address, options = {}) {
   if (existing) {
     const shared = await existing;
     try {
-      return structuredClone(shared);
+      return withoutParentParcelUnlessOptedIn(structuredClone(shared), options);
     } catch {
-      return shared;
+      return withoutParentParcelUnlessOptedIn(shared, options);
     }
   }
   // One id per attempt, shared by every stamp this attempt writes and by the
@@ -279,7 +366,28 @@ async function performPropertyLookup(address, options = {}) {
     // surfacing an unhandled rejection (callers still see the original).
     run.finally(() => inFlightLookups.delete(key)).catch(() => {});
   }
-  return run;
+  return run.then((result) => withoutParentParcelUnlessOptedIn(result, options));
+}
+
+// The parent parcel (address-match PR 6) sits on the shared cached record so
+// every caller's cache row is the same, but only the opted-in callers read
+// it. Everyone else's response carries the record without it — a copy, so
+// the coalesced result other callers share is not touched.
+function withoutParentParcelUnlessOptedIn(result, options) {
+  // Opted in AND the gate live: with the gate off a cached row may still hold
+  // the context, and off means the response is what it was before the gate.
+  if ((options.commercialSuiteSizing === true && lookupBusinessIdentityLive()) || !result) return result;
+  // The same record rides the result under two names (propertyRecord and
+  // the legacy `rentcast` alias); both are replaced.
+  const strip = (record) => {
+    if (!record || typeof record !== 'object' || !('_parentParcel' in record || '_parentParcelChecked' in record)) return record;
+    const { _parentParcel: _dropped, _parentParcelChecked: _marker, ...rest } = record;
+    return rest;
+  };
+  const propertyRecord = strip(result.propertyRecord);
+  const rentcast = result.rentcast === result.propertyRecord ? propertyRecord : strip(result.rentcast);
+  if (propertyRecord === result.propertyRecord && rentcast === result.rentcast) return result;
+  return { ...result, propertyRecord, ...('rentcast' in result ? { rentcast } : {}) };
 }
 
 // A cached stacked-association aggregate that the live path would now
@@ -316,6 +424,23 @@ function cachedAggregateResolvesToOwnUnit(record, address) {
 // of serving unit facts until the 180-day TTL. Pure; cache rows are inputs,
 // never mutated.
 const UNIT_FOLIO_UNAVAILABLE_RETRY_MS = 24 * 60 * 60 * 1000;
+// Both gates of the parent-parcel check (ai-property-lookup.js
+// parentParcelEnabled reads the same two).
+function parentParcelCheckLive() {
+  return lookupBusinessIdentityLive() && commercialSuiteSizingLive();
+}
+
+// A cached row an opted-in caller (admin estimate tool, estimator engine)
+// cannot trust for the parent-parcel context: the gates are on, the roll did
+// not vouch for the address (the only case a parent parcel can exist), and
+// no live lookup has run the check on this row. Rows with county evidence
+// never need it. Ordinary and cache-only callers never re-run for this.
+function cachedParentParcelUnchecked(record, options) {
+  if (options.commercialSuiteSizing !== true || !parentParcelCheckLive() || !record) return false;
+  if (record._parentParcelChecked === true || hasCountyEvidence(record)) return false;
+  return true;
+}
+
 function cachedUnitFolioStale(record, address, now = Date.now()) {
   if (!record) return false;
   const live = typeof condoUnitFolioEnabled === 'function' && condoUnitFolioEnabled();
@@ -359,6 +484,13 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
       // a known-superseded classification must not reach report/portal
       // pricing either (codex P1).
       logger.info('[property-lookup] cached association aggregate superseded by own-unit resolution — treating as a miss');
+      cached = null;
+    }
+    if (cached && !cacheOnly && cachedParentParcelUnchecked(cached.property_record, options)) {
+      // Cached before the parent-parcel check existed or was switched on:
+      // the opted-in caller re-runs live once, and the save at the end
+      // replaces the row with a checked one.
+      logger.info('[property-lookup] cached row predates the parent-parcel check — treating as a miss');
       cached = null;
     }
     if (cached && cachedUnitFolioStale(cached.property_record, address)) {
@@ -569,11 +701,17 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   // internally, so it reports suspected per-leg timeouts through this
   // out-param (observational only — feeds the finalize stamp below).
   const lookupDiag = {};
-  const aiProperty = await lookupPropertyFromAITrio(address, geo, lookupDiag, { prioritizeAccuracy: options.prioritizeAccuracy }).catch((err) => {
+  const aiProperty = await lookupPropertyFromAITrio(address, geo, lookupDiag, { prioritizeAccuracy: options.prioritizeAccuracy, ...(options.commercialSuiteSizing === true ? { commercialSuiteSizing: true } : {}), ...(parentParcelCheckLive() ? { retainParentParcel: true } : {}) }).catch((err) => {
     result.errors.push({ source: 'ai-property', message: err?.message || String(err) });
     return null;
   });
   if (aiProperty) {
+    // This live lookup ran the parent-parcel check (address-match PR 6) to a
+    // definitive answer, whatever it found: the marker tells a later cache
+    // hit the row is not one that predates the check
+    // (cachedParentParcelUnchecked). A point lookup that timed out or failed
+    // examined no parcel, so it leaves no marker and the row is retried.
+    if (parentParcelCheckLive() && lookupDiag.parentParcelCheckRan === true) aiProperty._parentParcelChecked = true;
     result.propertyRecord = aiProperty;
     result.rentcast = aiProperty;
 
@@ -949,7 +1087,14 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
   if (verifiedOverrides?.stories && result.propertyRecord) {
     result.propertyRecord._storiesSource = 'verified';
   }
-  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit, address, { commercialSuiteSizing: options.commercialSuiteSizing === true });
+  // Accuracy-mode lookups have no deadline (like every other leg there); the
+  // rest keep the response margin, so this leg never spends it.
+  const businessIdentity = await prepareBusinessIdentity({
+    record: result.propertyRecord, aiAnalysis: result.aiAnalysis, address, lat, lng, options,
+    budgetMs: options.prioritizeAccuracy
+      ? null : Math.max(0, remainingLookupMs(t0, timing) - timing.responseMarginMs),
+  });
+  result.enriched = buildEnrichedProfile(result.propertyRecord, result.aiAnalysis, lat, lng, result.avm, result.addressAudit, address, profileBuildOptions(options, businessIdentity));
   // Commercial suite sizing (owner ruling 2026-09-25,
   // server/services/commercial-suite-size/): buildEnrichedProfile stays
   // synchronous (it is called directly, unawaited, by dozens of existing
@@ -989,7 +1134,7 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
     // Tagged with the unit it sized: a cached row can be served for another
     // unit of the same record (aggregate rows), and one bay's size must
     // never be reused for its neighbor.
-    result.propertyRecord._commercialSuiteSize = { ...result.enriched.suiteSize, unitKey: suiteUnitKey(address) };
+    result.propertyRecord._commercialSuiteSize = { ...result.enriched.suiteSize, unitKey: suiteUnitKeyForProfile(address, result.enriched) };
   }
 
   // Clean up internal fields before sending to client
@@ -1045,7 +1190,7 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
       // path that must not read as no_parcel (codex r7 P2).
       || record._raw?.parcelId || hasCountyEvidence(record))) {
       status = 'resolved';
-    } else if (record) {
+    } else if (record && record._contextOnly !== true) {
       status = 'no_parcel';
     } else if ((lookupDiag.providerTimeouts || []).length
       || result.errors.some((e) => /timeout|timed out|abort/i.test(String(e.message)))
@@ -1077,7 +1222,10 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
   const lng = row.lng == null ? null : Number(row.lng);
   if (verifiedOverrides?.stories && record) record._storiesSource = 'verified';
 
-  const enriched = buildEnrichedProfile(record, aiAnalysis, lat, lng, null, null, address, { commercialSuiteSizing: options.commercialSuiteSizing === true });
+  const businessIdentity = await prepareBusinessIdentity({
+    record, aiAnalysis, address, lat, lng, options,
+  });
+  const enriched = buildEnrichedProfile(record, aiAnalysis, lat, lng, null, null, address, profileBuildOptions(options, businessIdentity));
   // If the cached property_record already carries a resolved suite size
   // (persisted by a prior fresh lookup — see performPropertyLookupCore),
   // buildEnrichedProfile just reused it synchronously above and
@@ -1107,7 +1255,7 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
   if (options.persist !== false && options.cacheOnly !== true && record
     && PERSISTED_SUITE_SIZE_SOURCES.has(hitSuite?.source)
     && hitSuite.resolvedAt && hitSuite.resolvedAt !== record._commercialSuiteSize?.resolvedAt) {
-    const stamp = { ...hitSuite, unitKey: suiteUnitKey(address) };
+    const stamp = { ...hitSuite, unitKey: suiteUnitKeyForProfile(address, enriched) };
     record._commercialSuiteSize = stamp;
     await attachCommercialSuiteSizeToCachedLookup(address, stamp);
   }
@@ -1178,8 +1326,19 @@ router.post('/property-lookup', async (req, res) => {
     // routes (public-property-lookup.js, public-quote.js) never pass it.
     // wholeProperty: the operator's association (HOA / common-area) job at an
     // office "Suite" address — size the whole property, never the suite.
-    const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: wholeProperty !== true });
+    // occupancy ('suite' | 'building' | 'none'): staff's answer to "just your space
+    // or the whole building?" (GATE_LOOKUP_BUSINESS_IDENTITY); absent unless sent.
+    const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: wholeProperty !== true, ...occupancyOption(req.body?.occupancy) });
     result.meta.providerStatus ||= buildProviderStatus();
+    // A whole-property (association) lookup skips the business check. The
+    // tool is told so it can ask for a fresh lookup if the business type
+    // later stops being an association. Absent while the gate is off.
+    // On the profile too (our own boolean, saved with the estimate), so a
+    // reopened estimate still knows.
+    if (businessIdentityBypassed(wholeProperty)) {
+      result.meta.businessIdentityBypassed = true;
+      if (result.enriched) result.enriched.businessIdentityBypassed = true;
+    }
     res.json(result);
   } catch (err) {
     logger.error(`[property-lookup] ${err.message}`);
@@ -1735,6 +1894,14 @@ function commercialSuiteSizeStampIsFresh(stamp, now = Date.now()) {
 // merge history), the building's total simply can't be checked — trusted
 // by default rather than refusing every record that predates this evidence
 // convention.
+// A tech-verified squareFootage override is on the record.
+function recordSqftIsVerified(rc) {
+  return Number(rc?.squareFootage) > 0 && (
+    rc?._fieldEvidence?.squareFootage?.sourceType === 'verified'
+    || (Array.isArray(rc?._verifiedFields) && rc._verifiedFields.includes('squareFootage'))
+  );
+}
+
 function verifiedSqftLooksSuiteScoped(rc) {
   const verifiedValue = Number(rc?.squareFootage);
   if (!(verifiedValue > 0)) return false;
@@ -1765,6 +1932,97 @@ function verifiedSqftLooksSuiteScoped(rc) {
 function reconcileCommercialSuiteSubtype(subtype, suiteSize) {
   if (!suiteSize || subtype !== 'office_retail') return subtype;
   return suiteSize.source === 'license_seats' ? 'restaurant' : subtype;
+}
+
+// Commercial subpremise: the shared residential predicate deliberately
+// rejects "Space" (mobile-home lots), but plazas and flex complexes use
+// "Space 12" for tenant bays. Accepted here only — independent
+// multi-tenant evidence is still required.
+function addressNamesSuiteUnit(lookupAddress) {
+  return shadowHasSubpremiseSignal({ address: lookupAddress })
+    // "Space 12" / "Spc 12" / "Bay 12": the value must be unit-shaped (a
+    // number, or a lone letter) — "Space Coast Blvd" is a street (Codex
+    // #4840 r12 P2), same grammar suiteAddressParts splits a Bay on.
+    || /(?:^|[\s,])(?:space|spc|bay)\.?\s*#?\s*(?:\d[A-Za-z0-9-]*|[A-Za-z](?:-?\d+)?)(?=$|[\s,])/i.test(String(lookupAddress || ''));
+}
+
+// subpremiseSignal:false on purpose — the shared predicate counts a
+// Suite/Unit suffix as part-building evidence by itself, which would make
+// the suite gate the subpremise signal alone. A freestanding building whose
+// address reads "Ste 100" must keep its county building size; only
+// INDEPENDENT multi-tenant evidence (aggregated parcel, or multi-unit
+// property-type / land-use text like "Community Shopping Centers")
+// corroborates that the suffix names one bay of a larger building.
+function countyPartBuildingEvidenceOf(rc) {
+  return shadowHasPartBuildingEvidence({
+    subpremiseSignal: false,
+    aggregated: rc?._parcel?.aggregated === true,
+    propertyType: rc?.propertyType,
+    landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
+  });
+}
+
+// A non-aggregated commercial CONDO is its own county folio: its
+// squareFootage already measures this unit, not the building — the same
+// per-unit exemption the engine's applyUnitScopeToPropertyFacts applies.
+function isOwnUnitFolioRecord(rc) {
+  return shadowIsCondoRecord({
+    aggregated: rc?._parcel?.aggregated === true,
+    propertyType: rc?.propertyType,
+    landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
+  });
+}
+
+// Does the commercial-suite path apply at all? `businessScope` is the
+// business-identity verdict (GATE_LOOKUP_BUSINESS_IDENTITY): a matched
+// business with a `commercial_suite` decision stands in for BOTH the typed
+// subpremise and the county's part-building evidence; `scope_unresolved`
+// stops the path with `unresolved` (the CSR has not said "just your space or
+// the whole building" — no size is priced); `entire_commercial_building`
+// (the CSR's explicit answer, or a stand-alone building) never reaches the
+// suite path. The own-unit-folio exit outranks all of them. With no
+// businessScope this is the original typed-signal + county-evidence gate.
+function suiteScopeGate(rc, lookupAddress, businessScope) {
+  if (isOwnUnitFolioRecord(rc)) return { proceed: false, unresolved: false };
+  const decision = businessScope?.decision || null;
+  if (decision === BUSINESS_SCOPE.BUILDING) return { proceed: false, unresolved: false };
+  if (decision === BUSINESS_SCOPE.UNRESOLVED) return { proceed: false, unresolved: true };
+  const businessSuite = decision === BUSINESS_SCOPE.SUITE;
+  return {
+    proceed: (addressNamesSuiteUnit(lookupAddress) || businessSuite)
+      && (countyPartBuildingEvidenceOf(rc) || businessSuite),
+    unresolved: false,
+  };
+}
+
+// The business-identity half of a profile build, in one call: the base
+// whole-property verdicts the profile already computes, the identity the
+// lookup attached (options.businessIdentity — only ever present for an
+// opted-in admin lookup or engine call with GATE_LOOKUP_BUSINESS_IDENTITY
+// live), and the typed/county signals the scope decision reads. Inert (no
+// override, no flag, no extra profile key) when no identity arrived.
+function resolveBusinessScopeForProfile(rc, ai, lookupAddress, options) {
+  const baseCategory = detectCategory(rc, ai);
+  const baseSubtype = baseCategory === 'COMMERCIAL' ? resolveCommercialSubtype(rc, ai) : null;
+  const identity = options.commercialSuiteSizing === true ? (options.businessIdentity || null) : null;
+  return buildBusinessScopeContext({
+    identity,
+    baseCategory,
+    baseSubtype,
+    recordPricingType: rc?.propertyType ? normalizePricingPropertyType(rc.propertyType) : null,
+    occupancyAnswer: options.occupancyAnswer || null,
+    scopeSignals: identity ? {
+      typedSubpremise: addressNamesSuiteUnit(lookupAddress),
+      // A parent parcel (address-match PR 6: the point sits well inside a
+      // commercial parcel whose situs is another address) says the business
+      // is one part of a larger property — the same kind of evidence, and
+      // like it only a SUGGESTION for staff.
+      countyPartBuildingEvidence: countyPartBuildingEvidenceOf(rc) || (lookupBusinessIdentityLive() && Boolean(rc?._parentParcel?.parcelId)),
+      countyRecordPresent: hasCountyEvidence(rc),
+      ownUnitFolio: isOwnUnitFolioRecord(rc),
+      association: isAssociationCommercialJob({ commercialSubtype: baseSubtype }),
+    } : {},
+  });
 }
 
 // Commercial suite sizing (owner ruling 2026-09-25,
@@ -1799,37 +2057,13 @@ function resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, optio
   // areas are the job, never one suite (Codex #4840 r14 P1).
   if (isAssociationCommercialJob({ commercialSubtype })) return NOT_APPLIES;
 
-  // Commercial subpremise: the shared residential predicate deliberately
-  // rejects "Space" (mobile-home lots), but plazas and flex complexes use
-  // "Space 12" for tenant bays. Accepted here only — independent
-  // multi-tenant evidence below is still required.
-  const suiteSubpremiseSignal = shadowHasSubpremiseSignal({ address: lookupAddress })
-    // "Space 12" / "Spc 12" / "Bay 12": the value must be unit-shaped (a
-    // number, or a lone letter) — "Space Coast Blvd" is a street (Codex
-    // #4840 r12 P2), same grammar suiteAddressParts splits a Bay on.
-    || /(?:^|[\s,])(?:space|spc|bay)\.?\s*#?\s*(?:\d[A-Za-z0-9-]*|[A-Za-z](?:-?\d+)?)(?=$|[\s,])/i.test(String(lookupAddress || ''));
-  // subpremiseSignal:false on purpose — the shared predicate counts a
-  // Suite/Unit suffix as part-building evidence by itself, which would make
-  // this gate the subpremise signal alone. A freestanding building whose
-  // address reads "Ste 100" must keep its county building size; only
-  // INDEPENDENT multi-tenant evidence (aggregated parcel, or multi-unit
-  // property-type / land-use text like "Community Shopping Centers")
-  // corroborates that the suffix names one bay of a larger building.
-  const suitePartBuildingEvidence = shadowHasPartBuildingEvidence({
-    subpremiseSignal: false,
-    aggregated: rc?._parcel?.aggregated === true,
-    propertyType: rc?.propertyType,
-    landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
-  });
-  // A non-aggregated commercial CONDO is its own county folio: its
-  // squareFootage already measures this unit, not the building — the same
-  // per-unit exemption the engine's applyUnitScopeToPropertyFacts applies.
-  const ownUnitFolio = shadowIsCondoRecord({
-    aggregated: rc?._parcel?.aggregated === true,
-    propertyType: rc?.propertyType,
-    landUseDescription: rc?._parcel?.landUseDescription || rc?._raw?.landUse || null,
-  });
-  if (!suiteSubpremiseSignal || !suitePartBuildingEvidence || ownUnitFolio) return NOT_APPLIES;
+  // The subpremise / part-building / own-folio signals and the business
+  // verdict (GATE_LOOKUP_BUSINESS_IDENTITY) decide whether the suite path
+  // applies at all — see suiteScopeGate. A business-identified suite that
+  // still needs the CSR's answer carries NO size (`unresolved`).
+  const gate = suiteScopeGate(rc, lookupAddress, options.businessScope);
+  if (gate.unresolved) return { ...NOT_APPLIES, applies: true, sizeSource: 'unresolved' };
+  if (!gate.proceed) return NOT_APPLIES;
 
   // A tech-verified sqft on this address (verified overrides never expire
   // and re-apply on every cache hit) is a field measurement of what we
@@ -1840,7 +2074,13 @@ function resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, optio
   // suite measurement.
   const sqftVerifiedRaw = rc?._fieldEvidence?.squareFootage?.sourceType === 'verified'
     || (Array.isArray(rc?._verifiedFields) && rc._verifiedFields.includes('squareFootage'));
-  const sqftVerified = sqftVerifiedRaw && verifiedSqftLooksSuiteScoped(rc);
+  // A suite known only from staff's answer about the listed business (no
+  // unit typed) shares its address with every other tenant at the number,
+  // and a verified size is keyed by address: one tenant's measurement must
+  // not become the next tenant's. There it is never applied; it is surfaced
+  // for reconfirmation like any other distrusted verified size.
+  const businessOnlySuite = options.businessScope?.decision === BUSINESS_SCOPE.SUITE && !suiteUnitKey(lookupAddress);
+  const sqftVerified = sqftVerifiedRaw && !businessOnlySuite && verifiedSqftLooksSuiteScoped(rc);
   // Distrusted (not suite-scoped) — surfaced by the caller as a fieldVerify
   // flag so the operator reconfirms rather than the lookup silently keeping
   // the old figure.
@@ -1871,7 +2111,8 @@ function resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, optio
       distrustedVerifiedSqft,
     };
   }
-  if (stamp && Number(stamp.value) > 0 && stamp.unitKey && stamp.unitKey === suiteUnitKey(lookupAddress)
+  if (stamp && Number(stamp.value) > 0 && stamp.unitKey
+    && stamp.unitKey === effectiveSuiteUnitKey(suiteUnitKey(lookupAddress), options.businessScope)
     && commercialSuiteSizeStampIsFresh(stamp)) {
     return {
       applies: true, sizeSource: 'stamp', resolved: stamp, candidate: null, buildingSqft, distrustedVerifiedSqft,
@@ -1881,7 +2122,13 @@ function resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, optio
     applies: true,
     sizeSource: 'candidate',
     resolved: null,
-    candidate: { address: lookupAddress, buildingSqft, commercialSubtype },
+    candidate: {
+      address: lookupAddress, buildingSqft, commercialSubtype,
+      // A suite staff confirmed from the listed business, with no unit typed:
+      // the listing's own suite and name let the public-record match pick
+      // THIS tenant's license row. Used for this request's match only.
+      ...businessSuiteHints(lookupAddress, options),
+    },
     buildingSqft,
     distrustedVerifiedSqft,
   };
@@ -1970,14 +2217,20 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // rep typing "Apt 204" into the tool still got the whole complex, typed
   // Commercial, manual quote required (2026-09-02: a 358-unit rental
   // complex for a tenant's roach treatment).
-  const wholePropertyCategory = detectCategory(rc, ai);
-  const wholePropertySubtype = wholePropertyCategory === 'COMMERCIAL' ? resolveCommercialSubtype(rc, ai) : null;
+  // GATE_LOOKUP_BUSINESS_IDENTITY: when the lookup attached a business
+  // identity (admin lookup / engine only), a matched business can type a
+  // non-commercial lookup COMMERCIAL and decide suite vs whole building vs
+  // ask-the-CSR. Without an identity this returns the two verdicts below
+  // unchanged and every other field inert.
+  const businessScope = resolveBusinessScopeForProfile(rc, ai, lookupAddress, options);
+  const wholePropertyCategory = businessScope.category;
+  const wholePropertySubtype = businessScope.subtype;
   const residentialUnitLookup = residentialUnitLookupVerdict({
     address: lookupAddress,
     category: wholePropertyCategory,
     commercialSubtype: wholePropertySubtype,
     commercialDetectionSource: wholePropertyCategory === 'COMMERCIAL'
-      ? resolveCommercialDetectionSource(rc, ai) : null,
+      ? businessScope.source(resolveCommercialDetectionSource(rc, ai)) : null,
     structuredCommercialSignal: visionCommercialUseSignal(ai),
     commercialUseSignal: recordCommercialUseSignal(rc),
   });
@@ -2094,7 +2347,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // stays synchronous (dozens of existing unit tests call it directly and
   // un-awaited).
   const commercialSuiteScope = commercialProfile
-    ? resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, options)
+    ? resolveCommercialSuiteScope(rc, lookupAddress, commercialSubtype, { ...options, businessScope })
     : null;
   // Only a CANDIDATE is stashed here; a verified/stamp size is already
   // resolvedCommercialSuiteSize below.
@@ -2124,6 +2377,27 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // the client keys its own stale-field reset off this (unitScopedLookup),
   // the same way it already keys off residentialUnitLookup (primary review
   // of PR #4840 r5 P1).
+  // Staff answered "the whole building" at an address that carries a
+  // verified size. Verified sizes are keyed by address, not by scope, so the
+  // figure may be one space's (verified while the job was "just their
+  // space"). It is never priced as the building: the size is withheld
+  // (blank, like any size the lookup cannot vouch for) and a HIGH flag asks
+  // staff for the building's.
+  const verifiedSizeWithheldForBuilding = (businessScope.decision === BUSINESS_SCOPE.BUILDING && recordSqftIsVerified(rc))
+    ? Number(rc.squareFootage) : null;
+  if (verifiedSizeWithheldForBuilding) {
+    // A story count verified at this address is withheld with the size for
+    // the same reason: one space's count would derive the building's
+    // footprint, perimeter, attic and slab.
+    const storiesVerified = rc._storiesSource === 'verified'
+      || rc._fieldEvidence?.stories?.sourceType === 'verified'
+      || (Array.isArray(rc._verifiedFields) && rc._verifiedFields.includes('stories'));
+    rc = {
+      ...rc,
+      squareFootage: 0,
+      ...(storiesVerified ? { stories: null, _storiesSource: 'default' } : {}),
+    };
+  }
   const commercialSuiteUnitScoped = Boolean(commercialSuiteScope?.applies);
   if (commercialSuiteUnitScoped) {
     // SAME blanking residentialUnitLookup applies below, via the shared
@@ -2322,6 +2596,16 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       priority: 'HIGH',
     });
   }
+  // Business-identity flags (empty unless an identity arrived): the
+  // Places-derived commercial classification and the scope question.
+  fieldVerifyFlags.push(...businessScope.flags);
+  if (verifiedSizeWithheldForBuilding) {
+    fieldVerifyFlags.push({
+      field: 'squareFootage',
+      reason: `A verified size (${verifiedSizeWithheldForBuilding.toLocaleString()} sq ft) is saved for this address, but it may be for one space, not the whole building, so it was not applied (nor a verified story count). Enter the building's square footage and confirm its stories.`,
+      priority: 'HIGH',
+    });
+  }
   if (staleImageryConflict) {
     fieldVerifyFlags.push({
       field: 'estimatedTurfSf',
@@ -2436,7 +2720,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // flag instead of duplicating residentialUnitLookup's reset logic for
     // the commercial case.
     unitScopedLookup: Boolean(unitLookup) || commercialSuiteUnitScoped,
-    commercialDetectionSource: commercialProfile ? resolveCommercialDetectionSource(rc, ai) : null,
+    commercialDetectionSource: commercialProfile ? businessScope.source(resolveCommercialDetectionSource(rc, ai)) : null,
     // On an aggregate, the association total wins over the merge's
     // unitCount (shapeAsPropertyRecord seeds every record with a truthy 1,
     // so a plain fallback chain never reaches the aggregate figure when a
@@ -2483,6 +2767,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // Internal only — never read by a consumer; applyCommercialSuiteSize
     // deletes this before the profile reaches the client.
     _commercialSuiteCandidate: commercialSuiteCandidate,
+    // Admin-only business-identity fields (serviceScopeDecision,
+    // serviceScopeQuestion, businessIdentity); {} unless an identity arrived.
+    ...businessScope.profileFields,
     lotSqFt: rc?.lotSize || 0,
     // Machine-readable twin of the vacantParcel verify flag (vacant roll
     // parcel, no building record — possibly new construction) — consumers
@@ -2919,6 +3206,14 @@ function suiteUnitKey(address) {
 // later cache hit from upgrading to a license size until the row expires.
 const PERSISTED_SUITE_SIZE_SOURCES = new Set(['license_seats']);
 
+// The matched listing's suite and name, as hints for the suite-size match —
+// only for a staff-confirmed business suite at an address with no typed unit.
+function businessSuiteHints(lookupAddress, options) {
+  const matched = options.businessIdentity?.matched;
+  if (options.businessScope?.decision !== BUSINESS_SCOPE.SUITE || !matched || suiteUnitKey(lookupAddress)) return {};
+  return { unitHint: matched.subpremise || null, businessNameHint: matched.name || null };
+}
+
 async function applyCommercialSuiteSize(profile, opts = {}) {
   if (!profile) return profile;
   const candidate = profile._commercialSuiteCandidate;
@@ -2932,15 +3227,24 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
   try {
     const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
     const { suiteAddressParts } = require('../services/commercial-suite-size/address-parts');
+    const parts = suiteAddressParts(candidate.address);
     const suiteSize = await resolveCommercialSuiteSize({
-      address: suiteAddressParts(candidate.address),
+      address: candidate.unitHint && !parts.unit ? { ...parts, unit: candidate.unitHint } : parts,
       phone: null,
       // The point of this lane is discovering the business FROM the
-      // address — no hint is typed in by the operator here.
-      businessNameHint: null,
+      // address — no hint is typed in by the operator here; a
+      // staff-confirmed listing supplies its own name (businessSuiteHints).
+      businessNameHint: candidate.businessNameHint || null,
       commercialRiskType: null,
       commercialSubtype: candidate.commercialSubtype,
     }, opts);
+    // The listing's name was a hint for the match only. Unless a public
+    // record (a license row) vouched for the result, the resolver just echoes
+    // the hint back as businessName — and the suite size is stored, so the
+    // echo is dropped: nothing from Places is saved.
+    if (suiteSize && candidate.businessNameHint && !PERSISTED_SUITE_SIZE_SOURCES.has(suiteSize.source)) {
+      suiteSize.businessName = null;
+    }
     if (suiteSize && Number(suiteSize.value) > 0) {
       profile.homeSqFt = suiteSize.value;
       // The suite's own ground-floor footprint — a single in-line strip/
@@ -4636,6 +4940,21 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
   // association's common areas, which the shared scope classifier rules
   // whole-property even at an office "Suite" address. Either way a fresh
   // lookup is required (Codex #4840 r13 P1s).
+  // A business-identified lookup whose scope question is still open
+  // (GATE_LOOKUP_BUSINESS_IDENTITY, scope_unresolved with no occupancy
+  // answer) is never priced: 409 COMMERCIAL_SCOPE_UNRESOLVED with the
+  // question. Profiles without a business verdict carry no such field.
+  // The gate is the kill switch for pricing too: a profile still carrying a
+  // business scope (an open tab, a saved estimate) after the gate went off
+  // is not priced on it — a fresh lookup is required, as for suite sizing.
+  if (!lookupBusinessIdentityLive() && profileCarriesBusinessScope(p)) {
+    const err = new Error('Business identity is off. Re-run the property lookup before pricing this address.');
+    err.statusCode = 409;
+    err.code = 'BUSINESS_IDENTITY_OFF';
+    err.failClosed = true;
+    throw err;
+  }
+  assertScopeAnswered(p);
   if (p.suiteSize) {
     const associationJob = isAssociationCommercialJob({ commercialRiskType, commercialSubtype });
     if (!commercialSuiteSizingLive() || associationJob) {
@@ -5859,6 +6178,12 @@ module.exports._private = {
   reconcileCommercialSuiteSubtype,
   resolveCommercialSuiteScope,
   buildResultFromCachedLookup,
+  suiteUnitKeyForProfile,
+  occupancyOption,
+  withoutParentParcelUnlessOptedIn,
+  cachedParentParcelUnchecked,
+  businessIdentityBypassed,
+  prepareBusinessIdentity,
   cachedAggregateResolvesToOwnUnit,
   cachedUnitFolioStale,
   subdivisionMedianEstimate,

@@ -327,10 +327,46 @@ function notifyContactInstruction(NotificationService, customer, instruction, op
  * spoken at all. Dedupe: one card per call (notifyAdmin dedupeKey).
  * @returns {Promise<{persisted:boolean, suppressed:boolean}>}
  */
+const ESTIMATE_FIELD_WORDS = { first_name: 'first name', last_name: 'last name', email: 'email', address_line1: 'street address' };
+// A later capture on the same call REWRITES the card: it is the obligation,
+// so it must never keep an email or address the caller has since replaced.
+// `opts.stillMissing` — a later capture changed the details and left the
+// request undeliverable: revise the standing card only (never file a "send
+// it" card for a request that was never complete).
 async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opts = {}) {
   if (!customerId) return { persisted: false, suppressed: false };
   try {
     const NotificationService = require('./notification-service');
+    const fromAccount = Array.isArray(opts.accountDetailsConfirmed) ? opts.accountDetailsConfirmed : [];
+    const dedupeKey = opts.callSid ? `relay-estimate-request:${opts.callSid}` : null;
+    const stillMissing = Array.isArray(opts.stillMissing) ? opts.stillMissing.filter(Boolean) : [];
+    // ⭐ FENCED LIKE EVERY OTHER RELAY WRITE. Because the card is rewritten in
+    // place, a stalled capture from a superseded socket must not land over
+    // the replacement session's corrected email or address: ownership is
+    // re-proven under the call row's lock in the SAME transaction as the
+    // write (claimOwnedElsewhere).
+    if (opts.callSid && opts.sessionKey && !opts.trx) {
+      let superseded = false;
+      const fenced = await db.transaction(async (trx) => {
+        if (await require('./voice-agent/relay-context').claimOwnedElsewhere(trx, opts.callSid, opts.sessionKey)) {
+          superseded = true;
+          return null;
+        }
+        return surfaceEstimateRequestForCustomer(customerId, extracted, { ...opts, trx, throwOnError: true });
+      });
+      if (superseded) {
+        logger.warn(`[voice-agent-lead] estimate request for customer ${customerId} NOT written: another session owns the call`);
+        return { persisted: false, suppressed: false, superseded: true };
+      }
+      return fenced;
+    }
+    if (stillMissing.length) {
+      const standing = dedupeKey
+        ? await (opts.trx || db)('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first('id')
+        : null;
+      if (!standing) return { persisted: false, suppressed: false };
+    }
+    const location = [extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ');
     const who = [extracted.first_name, extracted.last_name].filter(Boolean).map((v) => properCase(String(v).trim())).join(' ') || 'an existing customer';
     const service = extracted.requested_service || extracted.matched_service || null;
     const notif = await NotificationService.notifyAdmin(
@@ -347,10 +383,17 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
         // The details collected ON THIS CALL are the fulfilment details (hook
         // P1): the account's email/address may be stale or a different
         // property. Nothing here mutates the customer — staff decide.
-        extracted.email ? `Email given on the call: ${extracted.email}` : null,
-        extracted.address_line1
-          ? `Service address given on the call: ${[extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ')}`
+        stillMissing.length
+          ? `⚠ The caller then changed the details and the call did not collect everything (still missing: ${stillMissing.map((k) => ESTIMATE_FIELD_WORDS[k] || k).join(', ')}). Confirm with them before sending.`
           : null,
+        // A detail the caller did not say but CONFIRMED ("send it to the ones
+        // on my account") is labelled as that, never as given on the call.
+        extracted.email
+          ? (fromAccount.includes('email') ? `Email on the account (the caller confirmed it on the call): ${extracted.email}` : `Email given on the call: ${extracted.email}`)
+          : null,
+        extracted.address_line1
+          ? `${fromAccount.includes('address') ? 'Service address on the account (the caller confirmed it on the call)' : 'Service address given on the call'}: ${location}`
+          : (stillMissing.length && location ? `Location given on the call: ${location}` : null),
         opts.phone ? `Callback number: ${opts.phone}` : null,
         extracted.call_summary ? `Call summary: ${String(extracted.call_summary).slice(0, 400)}` : null,
       ].filter(Boolean).join('\n'),
@@ -360,7 +403,19 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
         bell: true,
         // notifyAdmin's own dedupe (advisory lock + metadata dedupeKey):
         // one card per call, replays return the existing row.
-        ...(opts.callSid ? { dedupeKey: `relay-estimate-request:${opts.callSid}` } : {}),
+        ...(dedupeKey ? { dedupeKey } : {}),
+        ...(opts.trx && dedupeKey ? { trx: opts.trx } : {}),
+        // A later capture on the same call rewrites the card in place. It
+        // rings again only when what the office must act on changed (where
+        // the estimate goes, what it is for, the number to call) — a ringing
+        // refresh also reopens a card already marked done. A longer summary
+        // stays quiet, and the same details again are not new work.
+        refreshOnDedupe: true,
+        ringOnRefresh: (existing, existingMeta) => Object.entries({
+            email: extracted.email || null, address_line1: extracted.address_line1 || null, city: extracted.city || null,
+            zip: extracted.zip || null, requested_service: service, phone: opts.phone || null,
+          }).some(([k, v]) => ((existingMeta || {})[k] ?? null) !== v)
+          || JSON.stringify((existingMeta || {}).still_missing || []) !== JSON.stringify(stillMissing),
         metadata: {
           // Canonical promised-quote markers (call-recording-processor reads
           // callSid + quote_promised; no_lead = the no-lead lane).
@@ -382,6 +437,9 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
           city: extracted.city || null,
           zip: extracted.zip || null,
           phone: opts.phone || null,
+          // which of the details are the account's own, confirmed by the caller
+          details_from_account: fromAccount,
+          still_missing: stillMissing,
         },
       },
     );
@@ -392,7 +450,11 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
     logger.info(`[voice-agent-lead] estimate request surfaced for existing customer ${customerId}`);
     return { persisted: true, suppressed: false };
   } catch (err) {
-    logger.error(`[voice-agent-lead] estimate request surfacing FAILED for customer ${customerId}: ${err.message}`);
+    // Inside the fence's transaction a swallowed error would leave it aborted.
+    if (opts.throwOnError) throw err;
+    // The code only: a failed card UPDATE's message can carry its bindings
+    // (the caller's name, email and street address).
+    logger.error(`[voice-agent-lead] estimate request surfacing FAILED for customer ${customerId}: ${err.code || err.name || 'error'}`);
     return { persisted: false, suppressed: false };
   }
 }
@@ -1031,4 +1093,5 @@ async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
 module.exports = {
   createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId, contactPreferenceFields,
   sweepUnsurfacedContactInstructions, stampCustomerPreferredLanguage, surfaceEstimateRequestForCustomer,
+  isLeadStage, nameConflicts,
 };

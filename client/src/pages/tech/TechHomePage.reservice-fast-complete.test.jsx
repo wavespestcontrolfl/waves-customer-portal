@@ -6,7 +6,7 @@
 // opens today's ServiceRecapModal, unchanged.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
@@ -48,11 +48,11 @@ const row = (id, overrides = {}) => ({
 let rows;
 let fetchMock;
 
-function mount(path = '/admin/today/tools', { fieldWorkspace = true } = {}) {
+function mount(path = '/admin/today/tools') {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role: 'technician' }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
     </Route>
@@ -98,13 +98,13 @@ it('opens the existing ServiceRecapModal for a non-re-service pest job even when
   expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
 });
 
-it('keeps a completed re-service on the recap editor even with the gate on', async () => {
-  // The legacy workspace lists completed rows; a completed visit is edited
-  // through the recap path, which updates its existing record.
+it('offers no report for a completed re-service, even with the gate on', async () => {
   rows = [row('svc-completed', { reserviceFastCompleteEnabled: true, status: 'completed' })];
-  mount('/admin/today/tools', { fieldWorkspace: false });
-  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  expect(await screen.findByText('Existing recap form for svc-completed')).toBeInTheDocument();
+  mount();
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/admin/schedule?'), expect.anything()));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  expect(await screen.findByRole('button', { name: /Project Report/ })).toBeDisabled();
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
   expect(screen.queryByText(/Fast Complete sheet/)).not.toBeInTheDocument();
 });
 

@@ -208,7 +208,7 @@ function pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMi
 // the picked window joins it so the checker's context is the row the save
 // would write — the save probe passes `changes: updates` the same way, and
 // derives the work span from THAT window, not the stored one (r7 P2).
-async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason }) {
+async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone }) {
   // Summary mode names WHY there is no verdict, so the strip can say
   // "can't check this day" instead of going silent; the three-line hint
   // keeps its no-verdict contract (undefined).
@@ -217,9 +217,21 @@ async function pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, 
   try {
     const fit = await checkArrivalPlacement({
       serviceId, date: from, technicianId, excludeServiceIds,
+      // The staff screens this verdict feeds move a shared stop as a whole,
+      // unless the operator chose to separate this service first
+      // (GATE_COMBO_ROUTE_CHECK; ignored when off or when the visit is alone).
+      unit: !moveAlone, alone: !!moveAlone,
       changes: { ...changes, window_start: pickedWindow.start, window_end: pickedWindow.end },
       windowStart: pickedWindow.start, windowEnd: pickedWindow.end, durationMinutes: spanMin,
     });
+    // A whole visit (unit): the technician must be able to do every service
+    // on it, as the offered hours require. One switched off = no verdict at
+    // all — not a certified fit, and not "doesn't fit the route" either (no
+    // hour would).
+    if (fit.target?.memberServices && (await require('../technician-capabilities')
+      .inactiveCapabilitiesForServices(require('../../models/db'), [technicianId], fit.target.memberServices)).length) {
+      return noVerdict('route_unverified');
+    }
     if (fit.feasible) {
       return {
         start: pickedWindow.start, fits: true, detour_minutes: fit.detourMinutes ?? null,
@@ -282,7 +294,7 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
  */
 async function scorePickedHour({
   rawSlots, from, today, sameDayFloorMin, useArrivalWindows, pickedStart, pickedEnd, spanMin,
-  serviceId, technicianId, excludeServiceIds, excluded, changes, withReason = false,
+  serviceId, technicianId, excludeServiceIds, excluded, changes, withReason = false, moveAlone = false,
 }) {
   const pickedMin = toMin(pickedStart);
   // `withReason` (summary mode): an hour no verdict can cover still gets a
@@ -293,7 +305,7 @@ async function scorePickedHour({
   if (pickedUnscorable({ from, today, sameDayFloorMin, pickedMin, pickedEndMin, useArrivalWindows })) return uncheckable;
   const pickedWindow = { start: pickedStart, end: toHHMM(pickedEndMin) };
   return useArrivalWindows
-    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason })
+    ? pickedByArrivalChecker({ pickedWindow, spanMin, from, serviceId, technicianId, excludeServiceIds, changes, withReason, moveAlone })
     : pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, spanMin, from, excluded, withReason });
 }
 

@@ -192,18 +192,122 @@ describe('computeEditSummary', () => {
     expect(summary.servicesRemoved).toBeUndefined();
   });
 
-  test('admin-builder selectedServices arrays are comparable against engine object maps', () => {
+  test('admin-builder service codes are translated to engine keys before the diff', () => {
     const summary = computeEditSummary({
       baseline: baselineRow(),
       sentRow: sentRow({
         // Admin revise persists the raw /calculate-estimate payload: an
-        // ARRAY of service-key strings, not the engine's object map.
-        estimate_data: { engineRequest: { selectedServices: ['pest', 'mosquito', 'pest'] } },
+        // ARRAY of builder codes (PEST), not the engine's object map (pest).
+        estimate_data: { engineRequest: { profile: {}, selectedServices: ['PEST', 'MOSQUITO', 'PEST'], options: {} } },
       }),
     });
     expect(summary.servicesComparable).toBe(true);
     expect(summary.servicesAdded).toEqual(['mosquito']);
     expect(summary.servicesRemoved).toEqual(['lawn']);
+  });
+
+  test('the same services under builder codes are not a service change', () => {
+    const summary = computeEditSummary({
+      baseline: baselineRow({
+        baseline_estimate_data: { engineInputs: { services: { pest: {}, oneTimePest: {}, rodentBait: {} } } },
+      }),
+      sentRow: sentRow({
+        estimate_data: { engineRequest: { selectedServices: ['RODENT_BAIT', 'OT_PEST', 'PEST'] } },
+      }),
+    });
+    expect(summary.servicesComparable).toBe(true);
+    expect(summary.servicesAdded).toBeUndefined();
+    expect(summary.servicesRemoved).toBeUndefined();
+  });
+
+  test('codes the translator does not know are not comparable, never a false change', () => {
+    const summary = computeEditSummary({
+      baseline: baselineRow(),
+      sentRow: sentRow({ estimate_data: { engineRequest: { selectedServices: ['NOT_A_SERVICE'] } } }),
+    });
+    expect(summary.servicesComparable).toBe(false);
+    expect(summary.servicesAdded).toBeUndefined();
+    expect(summary.servicesRemoved).toBeUndefined();
+  });
+
+  test('engine key aliases are one service on both sides', () => {
+    const summary = computeEditSummary({
+      baseline: baselineRow({
+        baseline_estimate_data: { engineInputs: { services: { termiteBait: {}, palm: {}, preSlabTermidor: {} } } },
+      }),
+      sentRow: sentRow({
+        estimate_data: { engineRequest: { profile: {}, selectedServices: ['TERMITE_BAIT', 'PALM_INJECTION', 'PRESLAB'], options: {} } },
+      }),
+    });
+    expect(summary.servicesComparable).toBe(true);
+    expect(summary.servicesAdded).toBeUndefined();
+    expect(summary.servicesRemoved).toBeUndefined();
+  });
+
+  test('the same property in another format is not an address change', () => {
+    const same = (a, b) => computeEditSummary({
+      baseline: baselineRow({ baseline_fields: { ...baselineRow().baseline_fields, address: a } }),
+      sentRow: sentRow({ address: b }),
+    }).addressChanged;
+    expect(same('123 Main St, Bradenton, FL', '123 Main Street, Bradenton, FL 34205, USA')).toBeUndefined();
+    expect(same('123 East Oak St, Bradenton, FL', '123 E Oak Street, Bradenton, FL 34205')).toBeUndefined();
+    expect(same('123 Main St, Bradenton 34205', '123 Main St, Bradenton, FL 34205, USA')).toBeUndefined();
+    // The builder often stores the street line alone.
+    expect(same('123 Main St, Bradenton, FL 34205', '123 main st')).toBeUndefined();
+    // The same unit in another spelling.
+    expect(same('123 Main St #4, Bradenton, FL', '123 Main St Unit 4, Bradenton, FL 34205')).toBeUndefined();
+    expect(same(null, null)).toBeUndefined();
+    // Another house, street, direction, city or ZIP is a real change.
+    expect(same('123 Main St, Bradenton, FL', '125 Main St, Bradenton, FL')).toBe(true);
+    expect(same('123 Main St, Bradenton, FL', '123 Oak St, Bradenton, FL')).toBe(true);
+    expect(same('123 East Oak St, Bradenton, FL', '123 East Pine St, Bradenton, FL 34205')).toBe(true);
+    expect(same('123 Oak St, Bradenton, FL', '123 Oak Ave, Bradenton, FL')).toBe(true);
+    expect(same('123 Main St, Bradenton, FL', '123 Main St, Sarasota, FL')).toBe(true);
+    expect(same('123 Main St, Bradenton, FL 34205', '123 Main St, Bradenton, FL 34219')).toBe(true);
+    expect(same('123 Main St, Bradenton, FL', '123 Main St, Bradenton, GA')).toBe(true);
+    // A unit added, dropped or changed is a real change.
+    expect(same('123 Main St, Bradenton, FL', '123 Main St Apt 4, Bradenton, FL 34205')).toBe(true);
+    expect(same('123 Main St Apt 4, Bradenton, FL', '123 Main St, Bradenton, FL')).toBe(true);
+    expect(same('123 Main St #4, Bradenton, FL', '123 Main St #5, Bradenton, FL')).toBe(true);
+    expect(same('123 Main St', '123 Main St #1234')).toBe(true);
+    // One side missing.
+    expect(same(null, '123 Main St')).toBe(true);
+  });
+
+  test('the display label counts only when the service keys cannot be compared', () => {
+    const relabeled = { service_interest: 'Pest Control' };
+    expect(computeEditSummary({ baseline: baselineRow(), sentRow: sentRow(relabeled) }).serviceInterestChanged).toBeUndefined();
+    const summary = computeEditSummary({
+      baseline: baselineRow({ baseline_estimate_data: { freeform: true } }),
+      sentRow: sentRow(relabeled),
+    });
+    expect(summary.servicesComparable).toBe(false);
+    expect(summary.serviceInterestChanged).toBe(true);
+  });
+
+  test('totals are compared as stored; the setup fee a builder row carries is recorded beside them', () => {
+    const builderData = (oneTime) => ({ engineRequest: { selectedServices: ['PEST'] }, result: { oneTime } });
+    const summary = computeEditSummary({
+      baseline: baselineRow(),
+      sentRow: sentRow({ onetime_total: '99.00', estimate_data: builderData({ membershipFee: 99, total: 99 }) }),
+    });
+    // Never netted out: whether the draft already owed the fee is not decided here.
+    expect(summary.totalsChanged.onetime_total).toEqual({ from: 0, to: 99 });
+    expect(summary.sentSetupFee).toBe(99);
+    // An engine-shaped sent row carries no builder fee.
+    const engineShape = computeEditSummary({ baseline: baselineRow(), sentRow: sentRow({ onetime_total: '99.00' }) });
+    expect(engineShape.totalsChanged.onetime_total).toEqual({ from: 0, to: 99 });
+    expect(engineShape.sentSetupFee).toBeUndefined();
+    // Both sides builder-saved with the fee: nothing to note.
+    const both = computeEditSummary({
+      baseline: baselineRow({
+        baseline_estimate_data: builderData({ membershipFee: 99, total: 99 }),
+        baseline_fields: { ...baselineRow().baseline_fields, onetime_total: 99 },
+      }),
+      sentRow: sentRow({ onetime_total: '99.00', estimate_data: builderData({ membershipFee: 99, total: 99 }) }),
+    });
+    expect(both.totalsChanged).toBeUndefined();
+    expect(both.sentSetupFee).toBeUndefined();
   });
 });
 

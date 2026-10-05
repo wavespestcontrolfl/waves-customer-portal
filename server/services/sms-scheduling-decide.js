@@ -19,9 +19,10 @@
  *     answered.
  *
  * The model reads; the code decides. Nothing here moves a visit, books, or
- * sends a text — in this slice every row is shadow, so the decide step can be
- * scored against what staff actually did (scripts/sms-scheduling-funnel.js)
- * before any action is switched on. Never throws.
+ * sends a text: every row records what WOULD be done, so the decide step can
+ * be scored against what staff actually did (scripts/sms-scheduling-funnel.js).
+ * A would-move is handed to the move executor (sms-scheduling-act.js) only
+ * when GATE_SMS_SCHEDULING_ACT_MOVE is on. Never throws.
  *
  * PII: never logs message bodies or phone numbers.
  */
@@ -363,7 +364,7 @@ async function loadDecideContext(dbh, phone, inboundSmsLogId) {
       visitsBefore.set(o.scheduled_service_id, await dbh('scheduled_services').where({ id: o.scheduled_service_id }).first(VISIT_COLUMNS));
     }
   }
-  return { offers, thread, visitsBefore };
+  return { offers, thread, visitsBefore, repliedAt: inbound.created_at };
 }
 
 // Phase 2: the model's reading of the reply, against every standing offer.
@@ -449,7 +450,18 @@ async function runShadowDecision({ customer = null, inboundBody, inboundSmsLogId
         portalRequestOpen: fresh.portalRequestOpen, reminderOfferPending: fresh.reminderOfferPending,
       });
     }
-    return await recordDecision(dbh, { offer, inboundSmsLogId, who: facts.who, result, route, decision, verdict, visit: facts.visit });
+    const recorded = await recordDecision(dbh, { offer, inboundSmsLogId, who: facts.who, result, route, decision, verdict, visit: facts.visit });
+    // The move executor (GATE_SMS_SCHEDULING_ACT_MOVE, dark) carries out a
+    // recorded would-move; gate off, the row stays what it WOULD have done.
+    if (recorded.recorded && recorded.outcome === 'would_move') {
+      const act = require('./sms-scheduling-act');
+      if (act.actMoveLive()) {
+        // No `now`: the executor reads the clock itself, after the model's wait.
+        const done = await act.executeMove({ decisionId: recorded.id, offer, slot, visit: facts.visit, inboundSmsLogId, repliedAt: ctx.repliedAt, dbh });
+        return { ...recorded, executed: done.executed === true };
+      }
+    }
+    return recorded;
   } catch (err) {
     // Code only, never the message: a Knex error embeds bound values.
     logger.warn(`[sms-scheduling-decide] not recorded: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
@@ -544,6 +556,9 @@ async function recordDecision(dbh, { offer, inboundSmsLogId, who, result, route,
 
 // The AI assistant line answers its own texts; the webhook skips it too.
 const AI_NUMBER_DIGITS = ['18559260203', '8559260203'];
+// sms_log.message_type of an inbound text no handler consumed, by the kind
+// of Waves line it arrived on (twilio-webhook.js).
+const UNCONSUMED_INBOUND_TYPES = Object.freeze(['inbound', 'domain_lead', 'van_lead']);
 const SWEEP_MIN_AGE_MS = 2 * 60000;
 const SWEEP_LOOKBACK_MS = 48 * 3600000;
 const SWEEP_BATCH = 20;
@@ -578,8 +593,10 @@ async function sweepUndecidedReplies({ now = new Date(), dbh = db, run = runShad
         .where('sl.status', 'received')
         // The webhook decides only texts no other handler consumed: a
         // consumer retypes the row (reschedule_reply, lead_intake,
-        // sms_reaction, opt_out, ...), so only plain inbound texts qualify.
-        .where('sl.message_type', 'inbound')
+        // sms_reaction, opt_out, ...), so only unconsumed texts qualify: the
+        // webhook stores one as 'inbound', or as 'domain_lead' / 'van_lead'
+        // when it arrived on a tracking line (the webhook decides those too).
+        .whereIn('sl.message_type', UNCONSUMED_INBOUND_TYPES)
         .whereRaw("NULLIF(TRIM(sl.message_body), '') IS NOT NULL")
         .where('sl.created_at', '>=', new Date(nowMs - SWEEP_LOOKBACK_MS))
         .where('sl.created_at', '<=', new Date(nowMs - SWEEP_MIN_AGE_MS))

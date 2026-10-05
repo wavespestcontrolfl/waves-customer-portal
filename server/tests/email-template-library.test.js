@@ -522,12 +522,12 @@ describe('email template library rendering', () => {
   });
 
   test.each([
-    ['an ambiguous timeout', 'started', new Error('provider response lost')],
-    ['a definite HTTP rejection', 'rejected', Object.assign(new Error('rate limited'), { status: 429 })],
-    ['a missing provider configuration', 'rejected', Object.assign(new Error('SendGrid not configured'), {
+    ['an ambiguous timeout', 'started', 'uncertain', new Error('provider response lost')],
+    ['a definite HTTP rejection', 'rejected', 'not_sent', Object.assign(new Error('rate limited'), { status: 429 })],
+    ['a missing provider configuration', 'rejected', 'not_sent', Object.assign(new Error('SendGrid not configured'), {
       code: 'SENDGRID_NOT_CONFIGURED',
     })],
-  ])('a fresh direct send records %s as phase %s', async (_label, expectedPhase, providerError) => {
+  ])('a fresh direct send records %s as phase %s', async (_label, expectedPhase, expectedOutcome, providerError) => {
     const queuedMessage = { id: `msg-${expectedPhase}`, status: 'queued', subject_snapshot: 'S' };
     const current = { ...queuedMessage, provider_handoff_phase: 'started' };
     const failure = chain({ returning: [{ id: queuedMessage.id }] });
@@ -549,6 +549,10 @@ describe('email template library rendering', () => {
       to: 'sam@example.com',
       payload: { first_name: 'Sam', estimate_url: 'https://example.com/e', expires_at: 'June 12' },
     })).rejects.toBe(providerError);
+    // The thrown error carries the library's own handoff evidence; callers that report delivery
+    // (the resend-receipt writer) read the outcome from it, not from the message text.
+    expect(providerError.providerHandoffStarted).toBe(true);
+    expect(EmailTemplates.thrownSendDeliveryOutcome(providerError)).toBe(expectedOutcome);
 
     expect(failure.where).toHaveBeenCalledWith(expect.objectContaining({
       id: queuedMessage.id,
@@ -2852,4 +2856,9 @@ describe('preflightTemplateSend (codex P2 on #5154: no-provider pre-dispatch che
 
     expect(result).toEqual(expect.objectContaining({ ok: false, reason: 'template not found', code: 'EMAIL_TEMPLATE_UNAVAILABLE' }));
   });
+});
+
+test('thrownSendDeliveryOutcome: an error that never reached the provider handoff is a definite non-send', () => {
+  expect(EmailTemplates.thrownSendDeliveryOutcome(new Error('template not found'))).toBe('not_sent');
+  expect(EmailTemplates.thrownSendDeliveryOutcome(Object.assign(new Error('x'), { providerHandoffStarted: false }))).toBe('not_sent');
 });

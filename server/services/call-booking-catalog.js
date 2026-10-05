@@ -722,6 +722,11 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
             windowEnd: probeEnd,
             excludeServiceIds: [String(k.id)],
             excludeStatuses: ['completed', 'cancelled'],
+            // The write below CASes on k.technician_id, so the child lands on
+            // the destination day with exactly this technician; another
+            // technician's overlapping stop is no clash (gate-dark,
+            // occupancy.js header), an unassigned one still is.
+            technicianId: k.technician_id || null,
           })
           : [{ unprobed: true }];
         if (clash.length) {
@@ -881,6 +886,7 @@ module.exports = {
   callBookingInvoiceOnComplete,
   callFollowUpBillingShape,
   callBookingDateOnly,
+  followUpProbeEnd,
   sanitizeQuotedCallPrice,
   shiftCallFollowUpsForParentMove,
   planCallFollowUpShift,

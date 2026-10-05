@@ -3,15 +3,21 @@ import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '';
 
+// Inside the field workspace (.tech-field, tech-field.css) these resolve to the
+// Waves Admin look; the fallbacks are the same light values, for a render
+// outside it.
 const DARK = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  green: '#22c55e',
-  red: '#ef4444',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
+  bg: 'var(--tfx-bg, #fafaf9)',
+  card: 'var(--tfx-card, #ffffff)',
+  border: 'var(--tfx-border, #d6d3d1)',
+  teal: 'var(--tfx-accent, #1c1917)',
+  green: 'var(--tfx-ok, #1c1917)',
+  red: 'var(--tfx-red, #a32d2d)',
+  text: 'var(--tfx-text, #1c1917)',
+  muted: 'var(--tfx-muted, #57534e)',
+  onAccent: 'var(--tfx-on-accent, #ffffff)',
+  redTint: 'var(--tfx-red-tint, rgba(163, 45, 45, .1))',
+  greenTint: 'var(--tfx-ok-tint, rgba(28, 25, 23, .06))',
 };
 
 const QUICK_TAGS = [
@@ -216,9 +222,9 @@ export default function VisualNotesPanel({ service }) {
         <div>
           <div style={{
             fontSize: 13,
-            fontWeight: 800,
+            fontWeight: 500,
             color: DARK.text,
-            fontFamily: "'Montserrat', sans-serif",
+            fontFamily: "var(--tfx-font, 'Roboto', system-ui, sans-serif)",
           }}>
             Visual Notes
           </div>
@@ -230,10 +236,10 @@ export default function VisualNotesPanel({ service }) {
           <div style={{
             flex: '0 0 auto',
             border: `1px solid ${DARK.border}`,
-            borderRadius: 999,
+            borderRadius: 4,
             color: DARK.muted,
             fontSize: 11,
-            fontWeight: 700,
+            fontWeight: 500,
             padding: '4px 8px',
           }}>
             {moments.length} saved
@@ -254,12 +260,12 @@ export default function VisualNotesPanel({ service }) {
               }}
               style={{
                 minHeight: 38,
-                borderRadius: 8,
+                borderRadius: 4,
                 border: `1px solid ${DARK.border}`,
                 background: DARK.bg,
                 color: DARK.text,
                 fontSize: 12,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: 'pointer',
                 padding: '8px 10px',
               }}
@@ -272,11 +278,11 @@ export default function VisualNotesPanel({ service }) {
         <div style={{
           background: DARK.bg,
           border: `1px solid ${DARK.border}`,
-          borderRadius: 10,
+          borderRadius: 6,
           padding: 12,
         }}>
           <div style={{ fontSize: 12, color: DARK.muted, marginBottom: 8 }}>
-            Selected: <span style={{ color: DARK.text, fontWeight: 700 }}>{selectedTag.label}</span>
+            Selected: <span style={{ color: DARK.text, fontWeight: 500 }}>{selectedTag.label}</span>
           </div>
           <label style={{ display: 'block', fontSize: 11, color: DARK.muted, marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
             Location area
@@ -289,7 +295,7 @@ export default function VisualNotesPanel({ service }) {
               width: '100%',
               boxSizing: 'border-box',
               padding: '9px 10px',
-              borderRadius: 6,
+              borderRadius: 4,
               border: `1px solid ${DARK.border}`,
               background: DARK.card,
               color: DARK.text,
@@ -313,7 +319,7 @@ export default function VisualNotesPanel({ service }) {
               width: '100%',
               boxSizing: 'border-box',
               padding: '9px 10px',
-              borderRadius: 6,
+              borderRadius: 4,
               border: `1px solid ${DARK.border}`,
               background: DARK.card,
               color: DARK.text,
@@ -330,12 +336,12 @@ export default function VisualNotesPanel({ service }) {
               style={{
                 flex: 1,
                 minHeight: 38,
-                borderRadius: 8,
+                borderRadius: 4,
                 border: `1px solid ${DARK.border}`,
                 background: DARK.card,
                 color: DARK.text,
                 fontSize: 12,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: saving ? 'wait' : 'pointer',
               }}
             >
@@ -348,12 +354,12 @@ export default function VisualNotesPanel({ service }) {
               style={{
                 flex: 1,
                 minHeight: 38,
-                borderRadius: 8,
+                borderRadius: 4,
                 border: `1px solid ${DARK.border}`,
                 background: DARK.card,
                 color: DARK.text,
                 fontSize: 12,
-                fontWeight: 700,
+                fontWeight: 500,
                 cursor: saving ? 'wait' : 'pointer',
               }}
             >
@@ -390,11 +396,11 @@ export default function VisualNotesPanel({ service }) {
                 flex: 1,
                 minHeight: 40,
                 border: 'none',
-                borderRadius: 8,
-                background: saving ? DARK.border : DARK.teal,
-                color: '#fff',
+                borderRadius: 4,
+                background: saving ? DARK.muted : DARK.teal,
+                color: DARK.onAccent,
                 fontSize: 13,
-                fontWeight: 800,
+                fontWeight: 500,
                 cursor: saving ? 'wait' : 'pointer',
               }}
             >
@@ -407,11 +413,11 @@ export default function VisualNotesPanel({ service }) {
               style={{
                 minHeight: 40,
                 border: `1px solid ${DARK.border}`,
-                borderRadius: 8,
+                borderRadius: 4,
                 background: 'transparent',
                 color: DARK.muted,
                 fontSize: 13,
-                fontWeight: 700,
+                fontWeight: 500,
                 padding: '0 14px',
                 cursor: saving ? 'wait' : 'pointer',
               }}
@@ -427,8 +433,8 @@ export default function VisualNotesPanel({ service }) {
           marginTop: 10,
           fontSize: 12,
           padding: '7px 10px',
-          borderRadius: 6,
-          background: error ? `${DARK.red}22` : `${DARK.green}22`,
+          borderRadius: 4,
+          background: error ? DARK.redTint : DARK.greenTint,
           border: `1px solid ${error ? DARK.red : DARK.green}`,
           color: error ? DARK.red : DARK.green,
         }}>
@@ -440,7 +446,7 @@ export default function VisualNotesPanel({ service }) {
         <div style={{
           marginTop: 12,
           border: `1px solid ${DARK.border}`,
-          borderRadius: 10,
+          borderRadius: 6,
           overflow: 'hidden',
           background: DARK.bg,
         }}>
@@ -455,8 +461,8 @@ export default function VisualNotesPanel({ service }) {
             <div style={{
               color: DARK.text,
               fontSize: 12,
-              fontWeight: 800,
-              fontFamily: "'Montserrat', sans-serif",
+              fontWeight: 500,
+              fontFamily: "var(--tfx-font, 'Roboto', system-ui, sans-serif)",
             }}>
               Saved moments
             </div>
@@ -492,7 +498,7 @@ export default function VisualNotesPanel({ service }) {
                       <div style={{
                         color: DARK.text,
                         fontSize: 12,
-                        fontWeight: 750,
+                        fontWeight: 500,
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',
@@ -515,7 +521,7 @@ export default function VisualNotesPanel({ service }) {
                     <div style={{
                       color: DARK.muted,
                       fontSize: 11,
-                      fontWeight: 700,
+                      fontWeight: 500,
                     }}>
                       {statusLabel(moment.visibilityStatus)}
                     </div>
@@ -526,11 +532,11 @@ export default function VisualNotesPanel({ service }) {
                         disabled={deletingId === moment.id}
                         style={{
                           border: `1px solid ${DARK.border}`,
-                          borderRadius: 7,
+                          borderRadius: 4,
                           background: 'transparent',
                           color: DARK.muted,
                           fontSize: 11,
-                          fontWeight: 800,
+                          fontWeight: 500,
                           minHeight: 28,
                           padding: '0 9px',
                           cursor: deletingId === moment.id ? 'wait' : 'pointer',
