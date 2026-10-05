@@ -192,7 +192,7 @@ async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, inv
 // is. These say money did NOT leave the business (a failed or declined
 // payment, a payout received, a renewal reminder, a bill still due), and the
 // classifier still prints an amount for them, so they are never booked.
-const NOT_A_CHARGE_SUBJECT = /\b(unsuccessful|failed|declined|couldn'?t be (charged|recharged|processed)|could not be (charged|processed)|payout|will (be )?renew(ed|s)?|renewal notice|invoice due|payment due|past due|action required)\b/i;
+const NOT_A_CHARGE_SUBJECT = /\b(unsuccessful|not successful|failed|declined|did ?n[o']t go through|(could|can)(not|n't| not) (be )?(process(ed)?|charged?|recharged?|completed?|collect(ed)?)|unable to (process|charge|collect|complete)|problem with your payment|payment (issue|problem)|payout|will (be )?renew(ed|s)?|renewal notice|invoice due|payment due|past due|action required)\b/i;
 
 // A copy of the same notice: an expense already linked to an email from the
 // same sender, received in the same second, for the same amount AND the same
@@ -205,7 +205,8 @@ async function findSameNoticeExpense(conn, emailId, amount, description) {
   return conn('expenses as x')
     .join('emails as e', 'e.expense_id', 'x.id')
     .where('e.from_address', me.from_address)
-    .where('e.received_at', me.received_at)
+    // Same second, not the same instant: Gmail keeps milliseconds.
+    .whereRaw("date_trunc('second', e.received_at) = date_trunc('second', ?::timestamptz)", [me.received_at])
     .whereNot('e.id', emailId)
     .where('x.description', description)
     .whereRaw('x.amount = round(?::numeric, 2)', [String(amount)])
@@ -218,7 +219,7 @@ async function findSameNoticeExpense(conn, emailId, amount, description) {
 // Google). Accept one money figure with an optional $ and USD and thousands
 // commas; anything else is no amount.
 function classifierAmount(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'number') return Number.isFinite(value) && value < 1e10 ? value : null;
   if (typeof value !== 'string') return null;
   const m = value.trim().match(/^(?:USD\s*)?\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?\s*(?:USD)?$/i);
   if (!m) return null;
@@ -266,6 +267,10 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
     // transaction: no lock is held across a model call.
     const key = duplicateKey(vendorName, invoiceNumber, vendorSource, dateFromInvoice);
     const outcome = await db.transaction(async (trx) => {
+      // A reprocessed email (reclassify, replay) that already booked an
+      // expense keeps it: no second row, no orphaned first one.
+      const current = await trx('emails').where({ id: email.id }).forUpdate().first('expense_id');
+      if (current?.expense_id) return { alreadyBooked: current.expense_id };
       // Same clipping guard as duplicateKey: a clipped description is no identity.
       const fullDescriptionFits = fullExpenseDescription(vendorName, invoiceNumber).length <= 300 && String(vendorName).length <= 200;
       if (amountFromClassifier && fullDescriptionFits) {
@@ -315,7 +320,9 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
       return { expense: created };
     });
 
-    if (outcome.duplicateOf) {
+    if (outcome.alreadyBooked) {
+      logger.info(`[invoice-processor] Email ${email.id} already booked expense ${outcome.alreadyBooked}`);
+    } else if (outcome.duplicateOf) {
       logger.info(`[invoice-processor] Email ${email.id} is a duplicate of expense ${outcome.duplicateOf}`);
     } else {
       logger.info(`[invoice-processor] Expense ${outcome.expense.id} created from email ${email.id}`);

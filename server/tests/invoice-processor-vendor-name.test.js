@@ -17,7 +17,7 @@ jest.mock('../models/db', () => {
       whereILike: (col, pat) => { filters.ilike = pat; return q; },
       whereIn: (col, vals) => { filters.in = vals; return q; },
       whereRaw: (sql, binds) => { filters.raw = [sql, binds]; return q; },
-      join: () => q, whereNot: () => q,
+      join: () => q, whereNot: () => q, forUpdate: () => q,
       first: async () => {
         if (table === 'expenses') { mockState.lastDuplicateFilter = { ...filters }; return mockState.duplicate; }
         if (table === 'expenses as x') { mockState.copyFilter = { ...filters }; return mockState.copy || null; }
@@ -174,6 +174,10 @@ test('a receipt with no printed date (today fallback) never drives a duplicate m
 
 test.each([
   '$12.00 payment to Example Co was unsuccessful',
+  'We could not process your payment of $12.00',
+  'Your payment did not go through',
+  'We were unable to charge your card',
+  'There was a problem with your payment',
   'URGENT: Your Example account couldn\'t be recharged',
   'Your $45.00 payout for Example Co is on the way',
   'Your Example subscription will be renewed in 7 days',
@@ -226,4 +230,12 @@ test('a parsed PDF with no total falls back to the classifier amount and keeps t
     { extracted: { invoice_amount: '$12.00' } });
   expect(inserted()).toBeUndefined();
   expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:not_a_charge' })]);
+});
+
+test('a reprocessed email that already booked an expense keeps it and inserts nothing', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), expense_id: 'exp-already' };
+  await processVendorInvoice({ id: 'e22', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' },
+    { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toBeUndefined();
 });
