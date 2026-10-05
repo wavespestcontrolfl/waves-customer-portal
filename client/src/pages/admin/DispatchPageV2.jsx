@@ -2056,13 +2056,13 @@ export default function DispatchPageV2({
               void fetchSchedule(date, { silent: true });
             }
           }}
-          onCompleted={() => {
-            // The sheet sends the response nowhere, so only the bookkeeping
-            // that needs none runs: flip the row to completed, invalidate the
-            // mobile week cache, refetch.
+          onCompleted={(response) => {
+            // Same bookkeeping a CompletionPanel completion runs: flip the
+            // row to completed, invalidate the mobile week cache, stage the
+            // payment handoff for an unpaid invoice, refetch (owner 2026-10-05).
             const service = pestFastService;
             setPestFastService(null);
-            applyCompletionResult(service.id, null, null, service);
+            applyCompletionResult(service.id, response, null, service);
             void fetchSchedule(date, { silent: true });
           }}
           // The sheet's "Full form" button: the long form for this visit.

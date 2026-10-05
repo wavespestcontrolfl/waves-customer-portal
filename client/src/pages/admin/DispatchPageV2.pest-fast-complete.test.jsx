@@ -29,6 +29,9 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({
       <button type="button" onClick={() => onClose()}>Sheet close</button>
       <button type="button" onClick={() => onClose({ refresh: true })}>Sheet close refresh</button>
       <button type="button" onClick={() => onCompleted()}>Sheet completed</button>
+      <button type="button" onClick={() => onCompleted({ invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 85, invoicePaymentActionRequired: true })}>Sheet completed unpaid</button>
+      <button type="button" onClick={() => onCompleted({ invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 85, invoiceStatus: 'paid' })}>Sheet completed paid</button>
+      <button type="button" onClick={() => onCompleted({ invoiceId: null, invoiceTotal: 0 })}>Sheet completed no invoice</button>
       <button type="button" onClick={onFullForm}>Full form</button>
     </div>
   ),
@@ -36,7 +39,9 @@ vi.mock('../../components/tech/FastCompleteSheet', () => ({
 vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ services = [], onEdit }) => <div>
   {services.map((service) => <button key={service.id} aria-label={`Open mobile ${service.id}`} onClick={() => onEdit(service)}>Mobile visit</button>)}
 </div> }));
-vi.mock('../../components/schedule/MobilePaymentSheet', () => ({ default: () => null }));
+vi.mock('../../components/schedule/MobilePaymentSheet', () => ({
+  default: ({ invoiceId, service }) => <div>Payment sheet for {invoiceId} ({service?.id || 'no service'})</div>,
+}));
 vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service }) => <div>Details sheet for {service.id}</div> }));
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
@@ -150,6 +155,22 @@ describe('Dispatch completion routing for regular pest visits', () => {
     await waitFor(() => expect(loads()).toBe(before + 1));
     expect(screen.queryByText(/Pest sheet/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Completion panel/)).not.toBeInTheDocument();
+  });
+
+  it('hands an unpaid invoice to the payment sheet, like a CompletionPanel completion', async () => {
+    mount([visit('svc-pest-unpaid')]);
+    await open('svc-pest-unpaid');
+    fireEvent.click(await screen.findByRole('button', { name: 'Sheet completed unpaid' }));
+    expect(await screen.findByText('Payment sheet for inv-fixture (svc-pest-unpaid)')).toBeInTheDocument();
+    expect(screen.queryByText(/Pest sheet/)).not.toBeInTheDocument();
+  });
+
+  it.each(['Sheet completed paid', 'Sheet completed no invoice', 'Sheet completed'])('does not open the payment sheet for a response with nothing owed (%s)', async (button) => {
+    mount([visit('svc-pest-settled')]);
+    await open('svc-pest-settled');
+    fireEvent.click(await screen.findByRole('button', { name: button }));
+    await waitFor(() => expect(screen.queryByText(/Pest sheet/)).not.toBeInTheDocument());
+    expect(screen.queryByText(/Payment sheet/)).not.toBeInTheDocument();
   });
 
   it('refreshes the day on a close that may have left it stale, and just closes on a plain close', async () => {
