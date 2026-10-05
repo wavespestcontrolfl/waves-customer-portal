@@ -2,7 +2,7 @@
 
 /**
  * Tree & shrub report "From your technician" paragraph (GATE_TS_TECH_PARAGRAPH,
- * owner 2026-10-05): the lawn paragraph's twin.
+ * proposed 2026-10-05, owner go-ahead pending): the lawn paragraph's twin.
  *
  * ONE short paragraph, written ONCE at completion from the technician's spoken
  * note, the products applied, the watch-list items the technician marked Seen,

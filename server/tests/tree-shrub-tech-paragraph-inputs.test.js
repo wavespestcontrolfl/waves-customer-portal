@@ -8,7 +8,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const {
-  gatherTreeShrubTechParagraphInputs, seenWatchLabels, keptPhotoFindings,
+  gatherTreeShrubTechParagraphInputs, keptPhotoFindings,
 } = require('../services/service-report/tree-shrub-tech-paragraph-inputs');
 
 const row = (key, status) => ({ key, status, label: key, score: status === 'tracking' ? null : 60 });
@@ -50,23 +50,6 @@ describe('kept photo findings', () => {
     const out = keptPhotoFindings(DIAGNOSIS, [{ key: 'leaf_color_vigor', action: 'monitor' }]);
     expect(out).toContainEqual({ label: 'off-color leaves', confidence: 'low', source: 'photo' });
     expect(out.map((f) => f.label)).not.toContain('heat or pruning stress');
-  });
-});
-
-describe('seen watch items', () => {
-  test('only Seen items enter, as lowercase labels; not-seen, unknown, refer-only and the conk never do', () => {
-    const items = [
-      { key: 'scale', state: 'seen' },
-      { key: 'whitefly', state: 'not_seen' },
-      { key: 'sooty_mold', state: 'seen' },
-      { key: 'palm_weevil_crown_decline', state: 'seen' },
-      { key: 'declining_palms', state: 'seen' },
-      { key: 'trunk_conk_base', state: 'seen' },
-      { key: 'made_up', state: 'seen' },
-      null,
-    ];
-    expect(seenWatchLabels(items)).toEqual(['scale', 'sooty mold']);
-    expect(seenWatchLabels(undefined)).toEqual([]);
   });
 });
 
@@ -112,14 +95,14 @@ describe('gatherTreeShrubTechParagraphInputs', () => {
     return { knex, calls };
   }
 
-  test('assembles the note, products, seen items, kept findings, headline and the defense list', async () => {
+  test('assembles the note, products, kept findings, headline and the defense list; the watch list is not an input', async () => {
     const { knex } = fakeKnex();
     const out = await gatherTreeShrubTechParagraphInputs({ record: RECORD, data: { reportV2: REPORT }, knex });
     expect(out.technicianNote).toBe(RECORD.technician_notes);
     expect(out.products.map((p) => [p.name, p.kind, p.targets])).toEqual([['Merit 2F', 'insecticide', ['scale', 'whitefly']], ['Palm Gro 8-2-12', 'fertilizer', []]]);
-    // Seen scale (high, seen) + the unreviewed flagged findings; the hidden pest finding is gone; no conk.
+    // The unreviewed flagged findings only: the hidden pest finding is gone, and
+    // the Seen watch items (tech-facing storage only) never enter.
     expect(out.findings).toEqual([
-      { label: 'scale', confidence: 'high', source: 'seen' },
       { label: 'leaf spot signals', confidence: 'low', source: 'photo' },
       { label: 'off-color leaves', confidence: 'low', source: 'photo' },
     ]);
@@ -129,14 +112,14 @@ describe('gatherTreeShrubTechParagraphInputs', () => {
     expect(out.prior).toBeNull();
   });
 
-  test('the last completed visit at this property supplies its products and seen items', async () => {
+  test('the last completed visit at this property supplies its products, never its watch items', async () => {
     const last = {
       id: 'sr-last', service_date: '2026-08-12',
       structured_notes: { treeShrubWatchItems: [{ key: 'whitefly', state: 'seen' }, { key: 'declining_palms', state: 'seen' }] },
     };
     const { knex } = fakeKnex({ last, lastProducts: [{ product_name: 'Safari 20 SG' }, { product_name: null }] });
     const out = await gatherTreeShrubTechParagraphInputs({ record: RECORD, data: { reportV2: REPORT }, knex });
-    expect(out.prior).toMatchObject({ date: '2026-08-12', watched: ['whitefly'] });
+    expect(out.prior).toMatchObject({ date: '2026-08-12', watched: [] });
     expect(out.prior.products.map((p) => p.name)).toEqual(['Safari 20 SG']);
   });
 

@@ -483,7 +483,7 @@ render (gate on or off, every service line) — `report-data.js`'s
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
 
-Tree & Shrub "From your technician" paragraph (owner 2026-10-05, the lawn
+Tree & Shrub "From your technician" paragraph (proposed 2026-10-05, owner go-ahead pending, the lawn
 paragraph's twin; `GATE_TS_TECH_PARAGRAPH` — dark, strict `'true'`, read at call
 time, effective only while `GATE_TS_TECH_FINDINGS_COPY` is also live; off leaves the
 tree/shrub payload, the render, the PDF and its cache signature unchanged, key for

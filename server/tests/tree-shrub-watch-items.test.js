@@ -135,11 +135,6 @@ describe('completion wiring', () => {
           ? fs.readdirSync(full).filter((f) => f.endsWith('.js')).map((f) => path.join(full, f))
           : [full];
       });
-    // The one deliberate reader: the technician's Seen items are an input to the
-    // "From your technician" paragraph (GATE_TS_TECH_PARAGRAPH, owner 2026-10-05).
-    // Refer-only items and the trunk conk are dropped there; nothing else may read the key.
-    const PARAGRAPH_INPUTS = 'tree-shrub-tech-paragraph-inputs.js';
-    const readsKey = readers.filter((file) => fs.readFileSync(file, 'utf8').includes('treeShrubWatchItems'));
-    expect(readsKey.map((file) => path.basename(file))).toEqual([PARAGRAPH_INPUTS]);
+    for (const file of readers) expect(fs.readFileSync(file, 'utf8')).not.toContain('treeShrubWatchItems');
   });
 });

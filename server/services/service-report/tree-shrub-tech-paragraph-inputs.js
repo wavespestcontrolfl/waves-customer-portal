@@ -10,8 +10,8 @@
  * Fail closed: a read that throws propagates, and the caller stores no
  * paragraph. A read that succeeds and finds nothing is an empty input.
  *
- * The technician's decisions govern what the model may see (owner rulings
- * 2026-10-02, 2026-10-05):
+ * The technician's decisions govern what the model may see (owner ruling
+ * 2026-10-02, GATE_TS_TECH_FINDINGS_COPY):
  *  - a photo finding the technician HID is not an input (the report nulls its
  *    score, so its category reads "tracking" and is skipped here);
  *  - a finding the technician REWROTE is not an input either: their own words
@@ -19,16 +19,15 @@
  *    repeats nor contradicts them;
  *  - a CONFIRMED finding enters with high confidence, an unreviewed flagged one
  *    with low confidence (the paragraph must hedge it);
- *  - watch-list items marked Seen enter as the technician's own findings. Items
- *    that are refer-only (palm weevil / crown decline, declining palms, trunk
- *    conk) never enter: the office follows those up, and the customer copy rule
- *    is that they are never named.
+ *  - the seasonal watch list (the frozen watch items) is NOT an
+ *    input: it stays tech-facing storage only (GATE_TS_WATCH_LIST) until the
+ *    owner approves customer wording for a confirmed watch item. A watch item
+ *    the technician wants the customer to hear about goes in the note.
  *
  * What it never passes on: any customer name, an address, a price, the raw photo
  * list, the photo read's free text, the technician's edit text.
  */
 
-const { ITEMS } = require('../../config/tree-shrub-watch-list');
 const { normalizeTechFindings } = require('./tree-shrub-tech-findings');
 const { etCalendarDayOf } = require('../../utils/datetime-et');
 const { normalizeInputs } = require('./tree-shrub-tech-paragraph');
@@ -55,22 +54,6 @@ function parseJsonObject(value) {
 }
 
 /**
- * The items a technician marked Seen, as customer-safe lowercase labels. Pure.
- * Unknown keys, not-seen entries, refer-only items and the conk item drop.
- */
-function seenWatchLabels(watchItems) {
-  const out = [];
-  for (const entry of Array.isArray(watchItems) ? watchItems : []) {
-    if (!entry || entry.state !== 'seen' || !Object.hasOwn(ITEMS, entry.key)) continue;
-    const item = ITEMS[entry.key];
-    if (item.referOnly || entry.key === 'trunk_conk_base') continue;
-    const label = item.label.toLowerCase();
-    if (!out.includes(label)) out.push(label);
-  }
-  return out;
-}
-
-/**
  * The kept photo findings, in the report's order: a finding the technician
  * confirmed (the report prints it as the technician's whatever the photo score),
  * or a flagged diagnosis row nobody reviewed (to be hedged). A hidden or
@@ -92,7 +75,7 @@ function keptPhotoFindings(diagnosis, decisions) {
 
 // The last completed tree & shrub visit at THIS property (an unresolved
 // property proves nothing about which address an earlier visit was at, so it
-// gives no prior): its date, product names and seen items. null when none.
+// gives no prior): its date and product names. null when none.
 async function readLastVisit(record, knex) {
   if (!record.scheduled_service_id || !record.customer_id) return null;
   const sched = await knex('scheduled_services').where({ id: record.scheduled_service_id }).first('property_id');
@@ -108,7 +91,7 @@ async function readLastVisit(record, knex) {
     .orderBy('sr.service_date', 'desc')
     .orderBy('sr.created_at', 'desc')
     .orderBy('sr.id', 'desc')
-    .first('sr.id', 'sr.service_date', 'sr.structured_notes');
+    .first('sr.id', 'sr.service_date');
   if (!last) return null;
   const rows = await knex('service_products')
     .where({ service_record_id: last.id })
@@ -117,7 +100,7 @@ async function readLastVisit(record, knex) {
   return {
     date: etCalendarDayOf(last.service_date),
     products: (rows || []).map((r) => ({ name: r && r.product_name })).filter((p) => p.name),
-    watched: seenWatchLabels(parseJsonObject(last.structured_notes).treeShrubWatchItems),
+    watched: [],
     findings: [],
   };
 }
@@ -135,7 +118,6 @@ async function gatherTreeShrubTechParagraphInputs({ record, data, knex }) {
 
   const structured = parseJsonObject(record.structured_notes);
   const decisions = normalizeTechFindings(structured.treeShrubTechFindings);
-  const seen = seenWatchLabels(structured.treeShrubWatchItems).map((label) => ({ label, confidence: 'high', source: 'seen' }));
   const treatment = reportV2.treatment && typeof reportV2.treatment === 'object' ? reportV2.treatment : {};
   const products = (Array.isArray(treatment.products) ? treatment.products : []).map((p) => ({
     name: p.name,
@@ -151,11 +133,11 @@ async function gatherTreeShrubTechParagraphInputs({ record, data, knex }) {
   return normalizeInputs({
     technicianNote: record.technician_notes,
     products,
-    findings: [...seen, ...keptPhotoFindings(reportV2.diagnosis, decisions)],
+    findings: keptPhotoFindings(reportV2.diagnosis, decisions),
     prior,
     facts: { headline: reportV2.snapshot && reportV2.snapshot.statusHeadline },
     knownProductNames: (catalogRows || []).map((row) => row && row.name),
   });
 }
 
-module.exports = { gatherTreeShrubTechParagraphInputs, seenWatchLabels, keptPhotoFindings };
+module.exports = { gatherTreeShrubTechParagraphInputs, keptPhotoFindings };
