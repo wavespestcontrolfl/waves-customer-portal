@@ -3478,6 +3478,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // job_complete notification — the same two suppressions the
     // issued-invoice closeout gets. In-process callers only; strictly `true`.
     const systemQuietCloseout = completionInput.systemQuietCloseout === true;
+    // "This mode never mints" for both invoice deciders below: the
+    // issued-invoice closeout (its invoice IS the visit's) and a system quiet
+    // closeout (nobody's bill).
+    const neverMints = !!issuedInvoiceCloseout || systemQuietCloseout;
+    const quietCloseoutActivity = !!issuedInvoiceCloseout || systemQuietCloseout;
     const typedFindingsType = issuedInvoiceCloseout ? null : (completionProfile?.findingsType || null);
     const typedIndicator = typedFindingsType
       ? ActivityIndicators.getActivityIndicator(typedFindingsType)
@@ -4813,9 +4818,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // NOT-required — no mint was ever owed for it.
     const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit({
       isBackfillCompletion,
-      // "This mode never mints": the issued-invoice closeout, and a system
-      // quiet closeout.
-      issuedInvoiceCloseout: !!issuedInvoiceCloseout || systemQuietCloseout,
+      issuedInvoiceCloseout: neverMints,
       recapReviewOnly,
       autopayCoversVisit,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
@@ -9911,9 +9914,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Hoisted so the terminal-invoice alert below can re-ask the SAME gate
     // with only the terminal flag cleared (deciding-reason check).
     const completionInvoiceGateInput = {
-      // "This mode never mints": the issued-invoice closeout, and a system
-      // quiet closeout.
-      issuedInvoiceCloseout: !!issuedInvoiceCloseout || systemQuietCloseout,
+      issuedInvoiceCloseout: neverMints,
       recapReviewOnly,
       alreadyPaid,
       prepaidCovered,
@@ -14701,9 +14702,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // activity line and the tech-visible job_complete notification would
     // both attribute it to the visit's assigned technician. The closeout's
     // own audit rows (visit.completed_on_invoice_issued) are its record.
-    // A system quiet closeout likewise (GitHub r1 P2 #5903): its own audit
-    // row is its record.
-    if ((!resumingCommittedCompletion || packetEffects) && !issuedInvoiceCloseout && !systemQuietCloseout) {
+    // A system quiet closeout likewise (GitHub r1 P2 #5903; folded into
+    // `issuedInvoiceCloseout`'s guard via quietCloseoutActivity): its own
+    // audit row is its record.
+    if ((!resumingCommittedCompletion || packetEffects) && !quietCloseoutActivity) {
       try {
         const writeActivity = async (trx = null) => {
           const connection = trx || db;
