@@ -4830,11 +4830,21 @@ function validateOpenLoopAnswer({ reply, factsBlock, intendedActions = null, off
     return { ok: false, violations: ['VISIT STATUS & OPEN LOOPS lists something still owed or a delay: an empty reply is not allowed — address it in one or two sentences'] };
   }
   if (!factsListHandoff(factsBlock)) return { ok: true, violations: [] };
-  const { replyPromisesFollowup } = require('./sms-followup-sla');
+  const { SLA_PHRASES } = require('./sms-followup-sla');
   // any escalation counts for a real-answers draft (sms-followup-sla draftPromisedFollowup)
   const escalated = Array.isArray(intendedActions) && intendedActions.some((a) => a && a.type === 'escalate');
   const violations = [];
-  if (!replyPromisesFollowup(text)) violations.push('WINDOW PASSED / MISSED VISIT is listed: say when they will hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
+  // The timing must be the one THESE facts state, not any phrase from the vocabulary:
+  // "by 9 AM tomorrow morning" under a "within the hour" fact is a wrong promise the
+  // send seam would only reject later as stale. A facts block with no SLA line (an
+  // older frozen block) falls back to any recognized phrase.
+  const lower = text.toLowerCase();
+  const slaLine = (String(factsBlock || '').split('\n').find((l) => l.startsWith('FOLLOW-UP SLA RIGHT NOW:')) || '').toLowerCase();
+  const stated = SLA_PHRASES.filter((p) => slaLine.includes(p.toLowerCase()));
+  const accepted = stated.length ? stated : SLA_PHRASES;
+  const quotesFactTiming = accepted.some((p) => lower.includes(p.toLowerCase()))
+    && !SLA_PHRASES.some((p) => !accepted.includes(p) && lower.includes(p.toLowerCase()));
+  if (!quotesFactTiming) violations.push('WINDOW PASSED / MISSED VISIT is listed: say when they will hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW');
   if (!escalated) violations.push('WINDOW PASSED / MISSED VISIT is listed: add {"type":"escalate","note":"followup_promised"} to intended_actions');
   // the office rebooks a miss: no customer-selectable times beside it (a frozen block may still carry OPEN TIMES)
   if (Array.isArray(offeredTimes) && offeredTimes.length && factsListMissedVisit(factsBlock)) {

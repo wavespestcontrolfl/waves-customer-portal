@@ -994,6 +994,9 @@ function sendSnapshotFor({ draft, context, inboundEnglish }) {
         ...(Array.isArray(techNames) && techNames.length ? { tech_names: techNames } : {}),
         ...(Array.isArray(loopIds) && loopIds.length ? { visit_loop_commitment_ids: loopIds } : {}),
         ...(loopStatus ? { visit_loop_status: loopStatus } : {}),
+        // the escalation a follow-up promise rides on: the send checks read it here
+        // (sms-followup-sla draftPromisedFollowup) to hold a card past its promised time
+        ...(Array.isArray(draft.parsed.intended_actions) && draft.parsed.intended_actions.length ? { intended_actions: draft.parsed.intended_actions } : {}),
       },
     };
   } catch (err) {
@@ -1234,5 +1237,5 @@ module.exports = {
   protectedTokens,
   TRIAL_TABLE,
   PROMPT_VERSION,
-  _test: { withSmsHistory },
+  _test: { withSmsHistory, sendSnapshotFor },
 };

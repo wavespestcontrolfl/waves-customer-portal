@@ -341,6 +341,19 @@ describe('validateOpenLoopAnswer (read from the rendered facts, so the sealed ev
     expect(validateOpenLoopAnswer({ reply: 'ok', factsBlock: `${facts(['- none'])}RECENT SMS THREAD:\n- MISSED VISIT: x\n`, intendedActions: [] }).ok).toBe(true);
   });
 
+  test('the timing must be the one the facts state, not any phrase from the vocabulary (Codex #5839 r3)', () => {
+    const esc = [{ type: 'escalate', note: 'followup_promised' }];
+    const withSla = (phrase) => `${facts(['- MISSED VISIT: x'])}FOLLOW-UP SLA RIGHT NOW: ${phrase}\n`;
+    const f = withSla('within the hour');
+    expect(validateOpenLoopAnswer({ reply: "Sorry we missed you. We'll follow up within the hour.", factsBlock: f, intendedActions: esc }).ok).toBe(true);
+    // a recognized phrase, but not the one in these facts
+    expect(validateOpenLoopAnswer({ reply: "Sorry we missed you. We'll follow up by 9 AM tomorrow morning.", factsBlock: f, intendedActions: esc }))
+      .toMatchObject({ ok: false, violations: [expect.stringContaining('EXACT wording')] });
+    // both phrases in one reply: the wrong one still makes it a wrong promise
+    expect(validateOpenLoopAnswer({ reply: "We'll follow up within the hour, or by 9 AM tomorrow morning.", factsBlock: f, intendedActions: esc }).ok).toBe(false);
+    expect(validateOpenLoopAnswer({ reply: "Sorry we missed you. We'll follow up by 9 AM tomorrow morning.", factsBlock: withSla('by 9 AM tomorrow morning'), intendedActions: esc }).ok).toBe(true);
+  });
+
   test('a real gate-on facts block with an owed promise trips it (frozen-facts eval path)', () => {
     process.env[GATE] = 'true';
     const block = buildFactsBlock({ ...baseContext, visitLoops: { weOwe: [{ id: 'cc-1', kind: 'callback', description: 'Call back', since: '2026-06-09', source: 'call' }] } }, { now: NOW });

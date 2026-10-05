@@ -1267,3 +1267,21 @@ describe('FREE RE-SERVICE is matched at its rendered position, not anywhere', ()
     expect(c.bindings).toEqual([BILLING_DELIMITER, BILLING_DELIMITER, exactStructureRegexSource('optional'), RESERVICE_SECTION_RE.source]);
   });
 });
+
+// Owner 2026-10-04: missed-visit coverage is reported, never a blocker — a real MISSED VISIT case exists only
+// after the office confirms a miss and that customer texts.
+describe('missed-visit coverage is reported, not required', () => {
+  const { _test: { missedVisitCoverage } } = require('../services/sms-sealed-eval');
+  test('a version without the MISSED VISIT scope line reports nothing; one with it reports have / need', () => {
+    expect(missedVisitCoverage('house_voice_v12_real_answers6_cflvp', [])).toBeNull();
+    expect(missedVisitCoverage('house_voice_v11', [{ facts_block: 'x' }])).toBeNull();
+    expect(missedVisitCoverage('house_voice_v12_real_answers7_m', [])).toEqual({ have: 0, need: 3 });
+    // an item outside the version's fact contract never counts, whatever it lists
+    expect(missedVisitCoverage('house_voice_v12_real_answers7_m', [{ facts_block: 'UPCOMING SERVICES:\n- none\nVISIT STATUS & OPEN LOOPS:\n- MISSED VISIT: x\nBILLING:\n' }])).toEqual({ have: 0, need: 3 });
+  });
+  test('createExamRun no longer refuses a run for it', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/sms-sealed-eval.js'), 'utf8');
+    expect(src).not.toContain("err.code = 'SCENARIO_COVERAGE'");
+    expect(src).toContain('missed_visit_coverage: scenarioCoverage');
+  });
+});
