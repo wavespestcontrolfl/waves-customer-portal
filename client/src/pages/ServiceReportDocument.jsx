@@ -1125,19 +1125,9 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
-        {/* Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
-            pestV2.expectations is built server-side (pest-report-v2.js) with
-            forecastHeavyRain always false for this render (mode !== 'live'
-            in reports-public.js) — the NWS forecast piece never reaches a
-            permanent PDF; everything here is already PDF-safe as delivered. */}
-        {pestV2?.expectations?.rain?.lines?.length > 0 && (
-          <div className="doc-keep">
-            <SectionHeader>Rain and your treatment</SectionHeader>
-            {pestV2.expectations.rain.lines.map((line) => (
-              <p key={line} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{line}</p>
-            ))}
-          </div>
-        )}
+        {/* Spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
+            pestV2.expectations is built server-side (pest-report-v2.js) and
+            is already PDF-safe as delivered. */}
         {pestV2?.expectations?.spiders?.expectation && (
           <div className="doc-keep">
             <SectionHeader>{pestV2.expectations.spiders.headline || 'Spiders'}</SectionHeader>

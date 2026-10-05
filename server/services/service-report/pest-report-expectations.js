@@ -2,29 +2,22 @@
  * Pest Report V2 — customer-value "expectations" blocks (owner-approved
  * 2026-09-27, dark behind GATE_PEST_REPORT_EXPECTATIONS).
  *
- * Three deterministic, honest, non-guaranteeing blocks built from data the
- * visit already collected: (1) a rain + treatment line, (2) a spider
- * ("#1 callback") acknowledgment triggered ONLY by a recorded completed
- * eave/web/soffit protocol action (owner ruling 2026-09-28: a
- * spider-targeted product alone does NOT establish eaves were treated —
- * see buildSpiderExpectation), and (3) a short "what to expect" list keyed
- * to an EXPLICIT, closed product-name map (owner ruling 2026-09-28: never
- * inferred from active ingredient / moa_group / category — see
- * PRODUCT_EXPECTATION_CLASS). Pure — no I/O, no DB, no fetch — every fact
- * is handed in by the caller (report-data.js / report-copy-context.js
- * / reports-public.js), matching the existing pest-report-v2.js "thin
- * arranger" pattern. Every synthesized line runs through the shared
- * banned-copy guard (validateCustomerCopy) before it can render.
+ * Two deterministic, honest, non-guaranteeing blocks built from data the
+ * visit already collected: (1) a spider ("#1 callback") acknowledgment
+ * triggered ONLY by a recorded completed eave/web/soffit protocol action
+ * (owner ruling 2026-09-28: a spider-targeted product alone does NOT
+ * establish eaves were treated — see buildSpiderExpectation), and (2) a
+ * short "what to expect" list keyed to an EXPLICIT, closed product-name map
+ * (owner ruling 2026-09-28: never inferred from active ingredient /
+ * moa_group / category — see PRODUCT_EXPECTATION_CLASS). Pure — no I/O, no
+ * DB, no fetch — every fact is handed in by the caller (report-data.js /
+ * report-copy-context.js / reports-public.js), matching the existing
+ * pest-report-v2.js "thin arranger" pattern. Every synthesized line runs
+ * through the shared banned-copy guard (validateCustomerCopy) before it can
+ * render.
  *
- * Data-driven note: as of 2026-09-27 `products_catalog.rainfast_minutes` is
- * NULL for every currently-active pest product, so the rain-fast clause
- * below never fires against real data today — it renders ONLY when the
- * catalog has a sourced rainfast_minutes number for an applied product
- * (owner ruling 2026-09-28, revised: no generic fallback sentence either —
- * "rain-fast once it has dried" is itself an unsupported claim most labels
- * don't make, and some say to avoid rain within a window instead). The
- * branch is exercised by a synthetic-data test (pest-report-expectations.test.js)
- * rather than left as dead code.
+ * The "Rain and your treatment" block was removed for good (owner
+ * 2026-10-05); the rain key is no longer emitted.
  */
 
 const { validateCustomerCopy } = require('./premium-experience');
@@ -73,203 +66,8 @@ function isEaveApplicationArea(value) {
   return applicationAreaChips(value).some((chip) => EAVE_AREA_CHIPS.has(chip));
 }
 
-// SW Florida rainy season (owner framing: "ants spike when the rains come").
-const RAINY_SEASON_MONTHS = new Set([6, 7, 8, 9, 10]); // Jun–Oct
-
-// Product classes that leave a surface residual (the forecast caveat).
-const RESIDUAL_SPRAY_CLASSES = new Set(['non_repellent', 'pyrethroid']);
-
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
-}
-
-// Number(null) and Number('') are 0 — a genuinely unknown rain/rainfast
-// value must not silently become a real zero. Reject the nullish/empty
-// cases before coercing (same guard application-conditions.js and
-// report-copy-context.js use for the same reason).
-function finiteOrNull(value) {
-  if (value == null || value === '') return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-// "30 minutes" / "2 hr" — same shape report-copy-context.js already uses for
-// rainfast minutes in the AI-grounding prompt, reused here for customer copy.
-function formatRainfastMinutes(minutes) {
-  const n = finiteOrNull(minutes);
-  if (n == null || n <= 0) return null;
-  if (n >= 60) {
-    const hours = n / 60;
-    return `${hours % 1 ? hours.toFixed(1) : hours.toFixed(0)} hr`;
-  }
-  return `${n} min`;
-}
-
-function formatInches(value) {
-  const n = finiteOrNull(value);
-  if (n == null) return null;
-  // Trim trailing zeros: 1.20 -> 1.2, 1.00 -> 1, 0.30 -> 0.3.
-  const rounded = Math.round(n * 100) / 100;
-  return String(rounded);
-}
-
-// Minimum rain (inches) required to add the ants-after-rain line, given a
-// resolved rainConfidence and whether the service month is rainy season.
-// Extracted from buildRainExpectation so the two independent decisions (the
-// rain-fact sentence vs. the ants signal) don't compound into one function's
-// branch count.
-function antsRainThresholdInches(rainConfidence, rainySeason) {
-  if (rainConfidence === 'low') return 1; // hedged number — always the higher bar
-  return rainySeason ? 0.5 : 1;
-}
-
-// Rain-fast clause text — owner ruling 2026-09-28 (revised): the clause
-// appears ONLY when the catalog actually has rainfast_minutes for an
-// applied product. There is deliberately NO generic fallback sentence
-// ("...once it has dried.") — that phrasing was itself an unsupported claim:
-// most labels don't state rain-fastness at all, and some instead say to
-// avoid rain within a window after application. With no sourced number,
-// this returns '' — no rain-fast clause of any kind (today, since prod
-// rainfast_minutes is NULL everywhere, that means never). Extracted from
-// buildRainExpectation to keep the two independent decisions (the rain-fact
-// sentence vs. the rain-fast clause) from compounding into one function's
-// branch count.
-//
-// codex P2 2026-09-29 (round 2): when SEVERAL applied products each carry a
-// positive rainfastMinutes, state the LONGEST one — the customer needs to
-// know how long to wait for every applied product to be rain-fast, and a
-// shorter interval from an earlier array entry would understate that
-// (array order is incidental, never a safety ranking).
-function rainfastClauseText(products) {
-  const rainfastValues = products
-    .map((p) => finiteOrNull(p?.rainfastMinutes))
-    .filter((n) => n != null && n > 0);
-  if (!rainfastValues.length) return '';
-  const rainfastLabel = formatRainfastMinutes(Math.max(...rainfastValues));
-  return rainfastLabel ? ` Your treatment is rain-fast about ${rainfastLabel} after it dries, per the label.` : '';
-}
-
-// Forward-looking heavy-rain caveat text — LIVE view only (see
-// buildRainExpectation's forecastHeavyRain param doc). Shared between the
-// "attached to the trailing-week fact" case and the "no settled trailing
-// total to attach it to" case below (codex P2 deferred finding c, #5137) so
-// the two can never drift into different wording for the same signal.
-// Customer wording below is owner-approved 2026-10-01 (review page
-// SBDx87AvuCeuzeYRzqBJjX, v7): technical, no brand names, never "die" /
-// "kill", the source is "our rain tracker".
-const HEAVY_RAIN_FORECAST_CAVEAT = 'Heavy rain soon after an exterior application can wash off part of the residual before it fully binds to the treated surfaces. If activity picks up after a downpour, text us.';
-
-// The opening rain line: the trailing-week fact (+ optional rainfast/forecast
-// clauses) when a settled week is available, OR — when it is not — the live
-// forecast caveat on its own (codex P2 deferred finding c, #5137: a same-day
-// live report with an OPEN trailing-week window has no settled fact to
-// attach the caveat to; settledWeekWeatherForRender, reports-public.js,
-// withholds it from every render, live included). Returns null when there
-// is nothing to say. Extracted so this "what opens the rain block" decision
-// doesn't compound buildRainExpectation's own branch count.
-function buildTrailingWeekRainLine({
-  rainInches, rainConfidence, products, forecastHeavyRain,
-}) {
-  // The caveat is a treatment claim: an inspection- or sweep-only visit (no
-  // recorded application) never gets it, attached or standalone (codex r2
-  // on #5265).
-  // The caveat says a residual can wash off before it binds, so it needs a
-  // residual spray (non-repellent or pyrethroid) recorded outside; a bait or
-  // IGR at an exterior chip forms no surface residual (codex #5523 P2).
-  const treatmentCaveat = forecastHeavyRain && (products || []).some((product) => (
-    RESIDUAL_SPRAY_CLASSES.has(classifyProductExpectation(product)) && hasExteriorApplicationEvidence(product)
-  ));
-  if (rainInches == null) return treatmentCaveat ? HEAVY_RAIN_FORECAST_CAVEAT : null;
-  const inchesText = formatInches(rainInches);
-  let sentence = rainConfidence === 'low'
-    // Low-confidence (city-collective fallback) hedges the number rather
-    // than stating it as an exact property read.
-    ? `Our rain tracker recorded roughly ${inchesText}" of rain in your area over the past 7 days.`
-    : `Our rain tracker recorded about ${inchesText}" of rain at your property over the past 7 days.`;
-  sentence += rainfastClauseText(products);
-  // Forward-looking heavy-rain caveat — LIVE view only (see param doc).
-  // Never a claim that rain can't otherwise affect the treatment beyond the
-  // label facts above.
-  if (treatmentCaveat) sentence += ` ${HEAVY_RAIN_FORECAST_CAVEAT}`;
-  return sentence;
-}
-
-// ── Rain and your treatment ──────────────────────────────────────────────
-// weekWeather: { rainInches, rainConfidence } from application-conditions.js
-//   fetchServiceWeekWeather (7-day trailing window ending on the service date).
-// products: flat [{ rainfastMinutes }] — label rain-fast time, when the
-//   catalog has it (see module header re: current NULL coverage).
-// serviceMonth: 1–12, the visit's calendar month (SWFL rainy-season check).
-// forecastHeavyRain: LIVE VIEW ONLY — true when the property's NWS forecast
-//   (server/services/weather-forecast.js) shows a high chance of rain/storm
-//   in roughly the next 24–72h. Callers must pass false/omit for any
-//   non-live (PDF/static) render — this is the one input that must never
-//   reach a permanent document.
-function buildRainExpectation({
-  weekWeather = null,
-  products = [],
-  serviceMonth = null,
-  forecastHeavyRain = false,
-} = {}) {
-  const rainInches = finiteOrNull(weekWeather?.rainInches);
-  const rainConfidence = weekWeather?.rainConfidence || null;
-  const lines = [];
-
-  const trailingWeekLine = buildTrailingWeekRainLine({
-    rainInches, rainConfidence, products, forecastHeavyRain,
-  });
-  if (trailingWeekLine) lines.push(trailingWeekLine);
-
-  // Ants-after-rain expectation — owner ruling 2026-09-28: NEVER on the
-  // calendar month alone. Requires an actual rain signal: >= 0.5" during
-  // rainy season (Jun–Oct), >= 1" otherwise — and a low-confidence
-  // (city-collective fallback) reading always uses the higher 1" bar,
-  // season or not, since that number is itself hedged. OR the LIVE-only
-  // forecast heavy-rain signal. No rain data and no forecast signal =>
-  // no ants line, regardless of month.
-  const rainySeason = Number.isInteger(serviceMonth) && RAINY_SEASON_MONTHS.has(serviceMonth);
-  const heavyWeek = rainInches != null && rainInches >= antsRainThresholdInches(rainConfidence, rainySeason);
-  if (heavyWeek || forecastHeavyRain) {
-    // codex P1 2026-09-29 (pre-push audit round 2): "moving through the
-    // treated band" is a TREATMENT claim — it must never fire from rain
-    // alone. A sweep-only or inspection-only visit (no applications at all)
-    // and an interior-only application both previously got this exact
-    // wording just because it rained. Require the SAME confirmed
-    // exterior/perimeter application evidence the pyrethroid barrier
-    // sentence requires (hasExteriorApplicationEvidence — explicit,
-    // non-inferred perimeter_spray/broadcast_spray method, or an
-    // applicationArea naming an exterior/perimeter chip) on a product whose
-    // class actually forms a residual band (non_repellent or pyrethroid);
-    // an ant BAIT, a roach gel, or an IGR is not a perimeter band either,
-    // regardless of where it was placed. No such evidence (no applications
-    // at all, interior-only, or unknown method/area) => treatment-neutral
-    // wording — still an honest, useful fact (rain pushes ants indoors
-    // regardless of what was applied), just no claim about a treated band.
-    // report-copy-context.js's grounding path funnels through this same
-    // function with the SAME toExpectationProduct-normalized products, and
-    // structurally has no per-application method/area (deduped by catalog
-    // product, not by application) — it always fails this check and gets
-    // the neutral wording too, so generated copy can never claim more than
-    // the customer-facing card does.
-    // ...AND that band must have been applied FOR ANTS (codex P1 round 4:
-    // `targets` is the tech's own structured tag list) — otherwise the
-    // colony/trail claim is pest-neutral wording only.
-    const perimeterTreatmentEvidence = (products || []).some((product) => {
-      const cls = classifyProductExpectation(product);
-      // The band line describes a non-repellent's 6-foot perimeter band and
-      // ant-to-ant transfer, so a repellent barrier never earns it.
-      return cls === 'non_repellent'
-        && hasPerimeterBandEvidence(product)
-        && hasAntTargetEvidence(product);
-    });
-    lines.push(perimeterTreatmentEvidence
-      ? 'Heavy rain floods ant nests and pushes foragers indoors. Trails over the next few days are foragers crossing the 6-foot perimeter band, picking up the active ingredient and carrying it back to the colony.'
-      : 'Heavy rain floods ant nests and pushes foragers indoors for a few days. If they\'re still coming in after about a week, text us and we\'ll come back out.');
-  }
-
-  if (!lines.length) return null;
-  const safeLines = lines.filter((line) => validateCustomerCopy(line));
-  return safeLines.length ? { lines: safeLines } : null;
 }
 
 // ── Spiders (#1 callback) ────────────────────────────────────────────────
@@ -666,15 +464,14 @@ function whatToExpectClasses({ products = [] } = {}) {
 }
 
 // Canonical product shape for expectations classification
-// ({ name, activeIngredient, category, moaGroup, rainfastMinutes }) — the
+// ({ name, activeIngredient, category, moaGroup }) — the
 // ONE normalizer SHARED by every caller (owner-flagged P1 2026-09-28: the
 // AI-grounding path in report-copy-context.js was building its own product
 // list without `name`, so a name-dependent classification — e.g. roach gel
 // bait, which needs the name to tell it apart from other bait — could come
 // out different for the grounded AI copy than for the customer-facing
 // block). Accepts either the pest-report-v2.js applications shape
-// (`{ product: { name, active_ingredient, category, moa_group,
-// rainfast_minutes } }`, snake_case DB-ish keys) or an already-flat/camelCase
+// (`{ product: { name, active_ingredient, category, moa_group } }`, snake_case DB-ish keys) or an already-flat/camelCase
 // object (report-copy-context.js's `productSafety` entries) — reads
 // whichever keys are present so both call sites funnel through the exact
 // same fields the classifier reads, and can't silently drift apart again.
@@ -695,7 +492,6 @@ function toExpectationProduct(raw = {}) {
     activeIngredient: pickEither(product, 'activeIngredient', 'active_ingredient'),
     category: isPlainObject(product) ? (product.category ?? null) : null,
     moaGroup: pickEither(product, 'moaGroup', 'moa_group'),
-    rainfastMinutes: pickEither(product, 'rainfastMinutes', 'rainfast_minutes'),
     // APPLICATION-level (not product-level) structured fields — report-data.js
     // carries these as siblings of `product` on each application, so they
     // are read off `raw`, never `product`. Present only when `raw` IS an
@@ -714,35 +510,19 @@ function toExpectationProduct(raw = {}) {
   };
 }
 
-// ── Compose all three blocks ─────────────────────────────────────────────
-// Owner 2026-10-04: the "Rain and your treatment" card is off the pest
-// report (live page and PDF). `PEST_RAIN_CARD=true` (read at call time)
-// brings it back as it was; buildRainExpectation itself is unchanged. The
-// card's two weather lookups (the week's rain and the live forecast) and the
-// PDF no-cache signal they raise read this too, so none of them runs for a
-// card that is not built (Codex P1 r2 #5888).
-function pestRainCardOn() {
-  return process.env.PEST_RAIN_CARD === 'true';
-}
+// ── Compose the blocks ─────────────────────────────────────────────
 function buildPestExpectations({
-  weekWeather = null,
   applications = [],
   actionLabels = [],
   actionEntries = [],
-  serviceMonth = null,
-  forecastHeavyRain = false,
 } = {}) {
   const flatProducts = (applications || []).map(toExpectationProduct);
-  const rain = pestRainCardOn()
-    ? buildRainExpectation({ weekWeather, products: flatProducts, serviceMonth, forecastHeavyRain })
-    : null;
   const spiders = buildSpiderExpectation({ actionLabels, actionEntries, applications });
   const whatToExpect = buildWhatToExpect({ products: flatProducts });
-  if (!rain && !spiders && !whatToExpect) return null;
+  if (!spiders && !whatToExpect) return null;
   // Each child key is present only when that block has something to say
   // (codex P0 #5137 r6 — the public contract; never a serialized null).
   return {
-    ...(rain ? { rain } : {}),
     ...(spiders ? { spiders } : {}),
     ...(whatToExpect ? { whatToExpect } : {}),
   };
@@ -750,16 +530,11 @@ function buildPestExpectations({
 
 module.exports = {
   pestReportExpectationsGateOn,
-  pestRainCardOn,
-  RAINY_SEASON_MONTHS,
   classifyProductExpectation,
-  buildRainExpectation,
   buildSpiderExpectation,
   buildWhatToExpect,
   whatToExpectClasses,
   buildPestExpectations,
   toExpectationProduct,
   isExteriorApplicationArea,
-  formatRainfastMinutes,
-  formatInches,
 };

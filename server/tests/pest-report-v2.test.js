@@ -327,8 +327,6 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
       premiumExperience: premium(),
       applications: APPLICATIONS,
       actionLabels: ACTION_LABELS,
-      weekWeather: { rainInches: 2, rainConfidence: null },
-      serviceMonth: 7,
     });
     // codex P0 #5137 r6: the key is ABSENT, never a serialized null — the
     // gate-off payload must be byte-identical to a build without this feature.
@@ -336,17 +334,13 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
     expect(JSON.stringify(out)).not.toContain('expectations');
   });
 
-  // Owner 2026-10-04: the rain card is off the pest report.
-  it('gate on: composes spiders and what-to-expect from the passed-in facts, never rain', () => {
+  it('gate on: composes spiders and what-to-expect from the passed-in facts', () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const out = buildPestReportV2({
       premiumExperience: premium(),
       applications: APPLICATIONS,
       actionLabels: ACTION_LABELS,
-      weekWeather: { rainInches: 2, rainConfidence: null },
-      serviceMonth: 7,
     });
-    expect(out.expectations).not.toHaveProperty('rain');
     expect(out.expectations.spiders.headline).toBe('Spiders');
     expect(out.expectations.whatToExpect.lines[0]).toMatch(/non-repellent/);
   });
@@ -363,11 +357,8 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
       premiumExperience: premium(),
       applications: APPLICATIONS,
       actionLabels: [],
-      weekWeather: null,
-      serviceMonth: 7,
     });
     expect(out.expectations.whatToExpect.lines.length).toBeGreaterThan(0);
-    expect(out.expectations).not.toHaveProperty('rain');
     expect(out.expectations).not.toHaveProperty('spiders');
     expect(Object.keys(out.expectations)).toEqual(['whatToExpect']);
   });
@@ -375,7 +366,7 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
   // codex P2 2026-09-29 round 3: a sparse callback report (suppressDefense,
   // no primary move / metric / AI summary / concern) used to hit the
   // emptiness predicate and return null BEFORE the expectations builder
-  // ever ran — discarding a recorded rain / eave-sweeping / product
+  // ever ran — discarding a recorded eave-sweeping / product
   // expectation exactly where it would have been the section's ONLY
   // content.
   it('sparse callback: expectations alone keeps the section alive (gate on)', () => {
@@ -388,12 +379,9 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
       suppressDefense: true,
       applications: APPLICATIONS,
       actionLabels: ACTION_LABELS,
-      weekWeather: { rainInches: 2, rainConfidence: null },
-      serviceMonth: 7,
     });
     expect(out).not.toBeNull();
     expect(out.expectations).toBeTruthy();
-    expect(out.expectations).not.toHaveProperty('rain');
     // Confirm nothing else kept the shell alive — expectations alone did.
     expect(out.primaryMove).toBeNull();
     expect(out.supportingMetric).toBeFalsy();
@@ -411,25 +399,8 @@ describe('buildPestReportV2 — expectations wiring (GATE_PEST_REPORT_EXPECTATIO
       suppressDefense: true,
       applications: APPLICATIONS,
       actionLabels: ACTION_LABELS,
-      weekWeather: { rainInches: 2, rainConfidence: null },
-      serviceMonth: 7,
     });
     expect(out).toBeNull();
-  });
-
-  it('a rain-only visit carries no expectations block, with or without the live forecast signal', () => {
-    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
-    for (const forecastHeavyRain of [false, true]) {
-      const out = buildPestReportV2({
-        premiumExperience: premium(),
-        applications: [],
-        actionLabels: [],
-        weekWeather: { rainInches: 2, rainConfidence: null },
-        serviceMonth: 7,
-        forecastHeavyRain,
-      });
-      expect(out).not.toHaveProperty('expectations');
-    }
   });
 });
 
@@ -445,23 +416,6 @@ describe('pestReportV2PdfSignature — expectations gate suffix', () => {
       expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex3-noarea1');
     } finally {
       process.env.PEST_REPORT_V2 = ORIGINAL_V2;
-    }
-  });
-
-  it('keys the rain card state too, so a PEST_RAIN_CARD flip re-renders cached PDFs', () => {
-    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
-    const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
-    const ORIGINAL_RAIN = process.env.PEST_RAIN_CARD;
-    delete process.env.PEST_REPORT_V2;
-    try {
-      delete process.env.PEST_RAIN_CARD;
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex3-noarea1');
-      process.env.PEST_RAIN_CARD = 'true';
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex3-rain1-noarea1');
-    } finally {
-      process.env.PEST_REPORT_V2 = ORIGINAL_V2;
-      if (ORIGINAL_RAIN === undefined) delete process.env.PEST_RAIN_CARD;
-      else process.env.PEST_RAIN_CARD = ORIGINAL_RAIN;
     }
   });
 

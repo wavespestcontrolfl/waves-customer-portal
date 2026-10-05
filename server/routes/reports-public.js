@@ -45,7 +45,6 @@ const { verifyAssessmentPin } = require('../services/service-report/assessment-p
 const jwt = require('jsonwebtoken');
 const config = require('../config');
 const { isStaffAccessToken, staffTokenVersionMatches } = require('../middleware/admin-auth');
-const { etDateString, addETDays } = require('../utils/datetime-et');
 
 // internal_only / disabled typed completions (Phase-1b shadow, kill switch)
 // store a report for STAFF review only. These public token routes serve them
@@ -77,124 +76,6 @@ async function fetchSeasonalForecastSafe(zip) {
   } catch {
     return null;
   }
-}
-
-// Pest Report V2 "expectations" blocks (GATE_PEST_REPORT_EXPECTATIONS,
-// dark). Best-effort, fail-soft — a weather hiccup must never block the
-// report. weekWeather is the trailing 7-day rainfall at the property.
-//
-// codex P1 2026-09-29 round 3 (pre-push audit): this used to fetch its own
-// week-weather here, independently of report-data.js's own lawn-style
-// freeze machinery — a SEPARATE preflight fetch from what the browser's
-// own, independent live /data request would resolve. That is exactly the
-// gap the lawn water balance's freeze avoids: the pre-render pass (this
-// route, and pdf-queue.js) and the browser's live fetch are two SEPARATE
-// process invocations, and a preflight racing its own deadline can settle
-// to a different answer than the browser's own fetch does moments later —
-// a successful preflight followed by a browser-side timeout would cache a
-// PDF that disagrees with what the browser actually rendered.
-//
-// Fixed by moving the fetch (and the freeze) into
-// report-data.js's resolvePestWeekWeather /
-// resolvePestWeekWeatherForBuild, called from INSIDE buildReportV1Data —
-// the ONE canonical resolution every caller of buildReportV1Data shares
-// (this route, pdf-queue.js, and the browser's own live /data fetch all
-// call buildReportV1Data). The first successful render freezes the
-// settled week onto service_records.structured_notes.pestWeekWeather
-// (first-writer-wins); every later reader — preflight or live view —
-// replays the SAME persisted value, so there is no separate fetch left to
-// disagree with the render. weekWeather below is read from
-// expectationFactsOut.weekWeather, the server-internal channel
-// buildReportV1Data already populated in the `data = await
-// buildReportV1Data(...)` call above; pestWeekWeatherUncacheable is
-// already on `data` itself (report-data.js attaches it directly, same
-// convention as lawnAssessment.weekWeatherUncacheable) — nothing to
-// recompute here.
-
-// LIVE VIEW ONLY — never called for a PDF/static render (see the call site).
-// True when the NWS forecast (weather-forecast.js — the same source the tech
-// rain-out badges use) shows a STORM/HEAVY-RAIN forecast in roughly the next
-// few forecast periods. Fail-open (false) on any miss; bounded to a short
-// deadline so a slow NWS response never holds up the live report.
-//
-// codex P2 2026-09-29 (round 2): `rainChance` is the probability of ANY
-// measurable precipitation (NWS's probabilityOfPrecipitation), not its
-// intensity — a 70% chance of "Light Rain" is not "heavy rain right after a
-// treatment can reduce it" and must not trigger that caveat on probability
-// alone. getDailyRainOutlookBounded exposes no quantitative precipitation
-// amount to fall back on (only `rainChance` / `shortForecast` — see its own
-// return-shape doc comment), so intensity is read ONLY from the forecast
-// TEXT (storm/thunderstorm/heavy rain), never the bare percentage.
-// codex P1 2026-09-29 round 4: a report reopened weeks after the visit is
-// still a LIVE view (mode === 'live' never expires), so without this floor
-// it would run TODAY's NWS forecast and, on a storm forecast, print "heavy
-// rain right after a treatment can wash it out" against a treatment applied
-// long ago — a caveat about the wrong moment in time. "Recent" = the
-// service date falls within the last 2 ET calendar days (today, yesterday,
-// or the day before) — an ET-calendar-day comparison via the shared
-// etDateString/addETDays helpers, never raw epoch-ms/24h arithmetic (which
-// drifts across a DST transition and is blind to calendar days entirely).
-// `service_date` is a plain calendar day (a Postgres DATE column arrives as
-// a UTC-midnight Date, or an equivalent date-only string) — its UTC
-// calendar fields ARE the intended day (same convention monthFromDate
-// above uses), so it is read directly rather than reinterpreted through
-// etDateString, which would roll a UTC-midnight instant back to the PRIOR
-// ET calendar day.
-function isRecentServiceDate(serviceDateRaw, now = new Date()) {
-  if (!serviceDateRaw) return false;
-  const d = serviceDateRaw instanceof Date ? serviceDateRaw : new Date(serviceDateRaw);
-  if (Number.isNaN(d.getTime())) return false;
-  const svcYmd = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-  const cutoffYmd = etDateString(addETDays(now, -2));
-  return svcYmd >= cutoffYmd;
-}
-
-async function fetchPestRainForecastHeavySafe(service) {
-  // The rain card is the forecast's one reader: off (owner 2026-10-04), no
-  // lookup is made (Codex P1 r2 #5888).
-  if (!require('../services/service-report/pest-report-expectations').pestRainCardOn()) return false;
-  try {
-    const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
-    const lat = service.customer_latitude ?? service.latitude ?? service.lat;
-    const lng = service.customer_longitude ?? service.longitude ?? service.lng;
-    const outlook = await getDailyRainOutlookBounded(lat, lng, { deadlineMs: 1200 });
-    if (!outlook) return false;
-    return Object.values(outlook).slice(0, 3).some((day) => (
-      /storm|thunderstorm|heavy rain/i.test(String(day?.shortForecast || ''))
-    ));
-  } catch {
-    return false;
-  }
-}
-
-// A PDF/static render must never bake an UNSETTLED trailing 7-day window
-// into a permanently cached document (owner ruling 2026-09-28): the window
-// ending on the service date is still accumulating (application-conditions.js's
-// own `windowClosed` — the same open/closed distinction its 30-min vs 6h
-// cache TTL already encodes, and the one the lawn report's weekly water
-// balance keys its own freeze/uncacheable state off). The live page may
-// still show an unsettled reading; a non-live render gets NO weekWeather at
-// all in that case, so the rain block (and its ants-after-rain line) is
-// simply absent rather than freezing a number that later changes — nothing
-// rain-derived reaches the cached bytes, so there is nothing stale to carry
-// forward once the window closes.
-function settledWeekWeatherForRender(weekWeather, mode) {
-  // codex P2 2026-09-28 round 5: the LIVE page no longer shows an open
-  // window either. fetchServiceWeekWeather serves an open window from the
-  // FORECAST endpoint, whose current-day value includes hours that have not
-  // happened yet, so "It's rained about X" (and the ants-after-heavy-rain
-  // line it can trigger) would describe predicted rain as observed. Every
-  // render — live, PDF, static — shows the rain block only once the window
-  // has closed and the reading is a measurement; `mode` is kept for the
-  // call sites' readability and for a future live-only source of measured
-  // so-far precipitation.
-  void mode;
-  return weekWeather?.windowClosed === true ? weekWeather : null;
-}
-
-function monthFromDate(dateStr) {
-  const d = new Date(dateStr);
-  return Number.isNaN(d.getTime()) ? null : d.getUTCMonth() + 1;
 }
 
 async function staffCanViewSuppressed(req) {
@@ -517,19 +398,6 @@ async function buildServiceReportV1ResponseData(service, token, {
   // the direct PDF route (whose cacheability check reads the same payload) print
   // or check it; the Q&A endpoint never does, so it never pays.
   lawnPhotoFindings = false,
-  // OPT-IN on the same terms (codex P2 #5137 deferred finding a): only a
-  // caller that actually RENDERS the pest expectations block — the /data
-  // live render and the direct PDF route — pays for either of the two
-  // external weather lookups that feed it: the pest week-weather resolution
-  // (threaded to buildReportV1Data's own `pestWeekWeather` opt-in below) AND
-  // the live heavy-rain NWS forecast fetched further down in this function.
-  // The Q&A endpoint (/ask) calls this builder purely for report CONTEXT —
-  // answerServiceReportQuestion never reads data.pestReportV2.expectations —
-  // so every customer question was paying up to ~1.2s for the week-weather
-  // lookup plus another ~1.2s for the forecast, for a field it never uses.
-  // Defaulting to off means a future caller cannot inherit that cost by
-  // accident either.
-  pestExpectationsWeather = false,
   // OPT-IN on the same terms: only the /data live render shows the lawn
   // watering banner's rain close-out (GATE_LAWN_WATERING_FORECAST), so only it
   // pays for the radar lookup. Applied for mode === 'live' only.
@@ -559,11 +427,6 @@ async function buildServiceReportV1ResponseData(service, token, {
     nearYou,
     lawnPhotoFindings,
     lawnRainfastWatch,
-    // pest week-weather is opt-in (codex P2 round 4, tightened by codex P2
-    // #5137 deferred finding a): only a caller that opts into
-    // pestExpectationsWeather above — the /data live render and the direct
-    // PDF route — pays for the lookup. /ask never sets it, so it never pays.
-    pestWeekWeather: pestExpectationsWeather,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -674,7 +537,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // Summary (narrative slot), the What-we-found tiles, and the activity
   // gauge, all of which the dashboard would otherwise suppress. The same
   // classifier drives the PDF cache suffix (pest-report-v2.js).
-  const { buildPestReportV2, buildCustomerConcernCard, isCockroachTypedReportType, pestReportExpectationsGateOn } = require('../services/service-report/pest-report-v2');
+  const { buildPestReportV2, buildCustomerConcernCard, isCockroachTypedReportType } = require('../services/service-report/pest-report-v2');
   if (
     process.env.PEST_REPORT_V2 === 'true'
     && data.serviceLine === 'pest'
@@ -683,39 +546,6 @@ async function buildServiceReportV1ResponseData(service, token, {
   ) {
     try {
       const forecast = await fetchSeasonalForecastSafe(service.zip);
-      // Rain/spiders/what-to-expect facts — computed only when the
-      // expectations gate is on, so a dark gate costs nothing extra.
-      // forecastHeavyRain is LIVE VIEW ONLY (never PDF/static — the report's
-      // mutable-content rule): a non-live render always passes false. Also
-      // bounded to a RECENT service (codex P1 2026-09-29 round 4): a report
-      // reopened weeks later is still a live view, and today's forecast has
-      // nothing to do with a treatment from long ago — see
-      // isRecentServiceDate's own comment.
-      const expectationsGateOn = pestReportExpectationsGateOn();
-      // pestExpectationsWeather gates this fetch too (codex P2 #5137
-      // deferred finding a) — the same opt-in that gates the week-weather
-      // resolution above, so /ask never pays for this ~1.2s NWS lookup
-      // either, on top of the mode/recency guards that were already here.
-      const forecastHeavyRain = pestExpectationsWeather && expectationsGateOn && mode === 'live' && isRecentServiceDate(service.service_date)
-        ? await fetchPestRainForecastHeavySafe(service)
-        : false;
-      // codex P1 2026-09-29 round 3: weekWeather is no longer fetched here —
-      // it comes from expectationFactsOut.weekWeather, the SAME
-      // pinned/frozen value report-data.js's buildReportV1Data already
-      // resolved for THIS invocation (via resolvePestWeekWeather /
-      // resolvePestWeekWeatherForBuild, called above in the
-      // `data = await buildReportV1Data(...)` at the top of this function).
-      // See this block's header comment for why a separate preflight fetch
-      // here was the bug.
-      // PDF/static: an unsettled (still-accumulating) week never reaches the
-      // rain block — see settledWeekWeatherForRender. Live keeps whatever
-      // was resolved, settled or not.
-      const weekWeather = settledWeekWeatherForRender(expectationFactsOut.weekWeather ?? null, mode);
-      // pestWeekWeatherUncacheable is already on `data` — report-data.js
-      // attaches it directly (same convention as
-      // lawnAssessment.weekWeatherUncacheable), from the SAME
-      // resolvePestWeekWeather* call that produced weekWeather above, so it
-      // can never disagree with what this render actually used.
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
         pestPressure: data.pestPressure,
@@ -774,9 +604,6 @@ async function buildServiceReportV1ResponseData(service, token, {
         // spider section's residual-evidence check can tell a genuine eave
         // TREATMENT from a sweep.
         actionEntries: completedProtocolActionEntries(service),
-        weekWeather,
-        forecastHeavyRain,
-        serviceMonth: monthFromDate(service.service_date),
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }
@@ -2312,10 +2139,6 @@ router.get('/:token', async (req, res, next) => {
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
             mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt,
             propertyHistoryEnabled, lawnHistory: canonical.lawnHistory, pinnedLawnHistoryIdentity: canonical.lawnHistory?.identity,
-            // This direct PDF route renders the pest expectations block, so
-            // it pays for the weather lookups (codex P2 #5137 deferred
-            // finding a) — see pestExpectationsWeather's own doc above.
-            pestExpectationsWeather: true,
             lawnPhotoFindings: true,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
@@ -2395,13 +2218,6 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] station map basemap transiently unavailable for ${service.id} — not caching this render`);
         } else if (renderedData?.lawnAssessment?.weekWeatherUncacheable) {
           logger.warn(`[reports-public] week weather unfrozen for ${service.id} — not caching this render`);
-        } else if (renderedData?.pestWeekWeatherUncacheable) {
-          // Same rule as the lawn branch above, mirrored for the pest-line
-          // rain block (codex P0 2026-09-28): a still-OPEN 7-day window
-          // must never be baked into the stable '-pex3' PDF key, or later
-          // downloads keep serving the "no rain block" bytes forever even
-          // after the window settles.
-          logger.warn(`[reports-public] pest week weather not cacheable for ${service.id} (${renderedData.pestWeekWeatherPendingReason || 'open_window'}) — not caching this render`);
         } else if (laAfter !== laRenderSignature) {
           logger.warn(`[reports-public] lawn assessment changed during PDF render for ${service.id} — not caching this render`);
         } else if (cardFenceAtRender === null || await reserviceCardRenderFence(service, db) !== cardFenceAtRender) {
@@ -2634,11 +2450,6 @@ router.get('/:token/data', async (req, res, next) => {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
         mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanAvailableAt, pinnedLawnHistoryIdentity, composeOffers: true, planSummary: true, upcomingVisitsCard: true, nearYou: true, lawnPhotoFindings: true,
-        // This route renders the pest expectations block on every mode it
-        // serves (live/pdf/static/sms_preview), so it pays for the weather
-        // lookups (codex P2 #5137 deferred finding a) — see
-        // pestExpectationsWeather's own doc above.
-        pestExpectationsWeather: true,
         lawnWateringCloseOut: true,
         lawnRainfastWatch: true,
       });
@@ -2867,7 +2678,4 @@ module.exports.reportLimiter = reportLimiter;
 module.exports.reportsAskPrivacyHeaders = reportsAskPrivacyHeaders;
 module.exports.storedRevisionMatches = storedRevisionMatches;
 module.exports.suppressedTypedReport = suppressedTypedReport;
-module.exports.settledWeekWeatherForRender = settledWeekWeatherForRender;
 module.exports.buildServiceReportV1ResponseData = buildServiceReportV1ResponseData;
-module.exports.fetchPestRainForecastHeavySafe = fetchPestRainForecastHeavySafe;
-module.exports.isRecentServiceDate = isRecentServiceDate;
