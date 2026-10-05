@@ -141,7 +141,7 @@ describe('buildReportAskFacts', () => {
     expect(facts.customer_concern).toMatch(/cockroach/);
     expect(facts.report_sections).toHaveLength(2);
     expect(facts.weather_during_visit).toBe('about 86°F, wind about 6 mph, no rain in the last 24 hours');
-    expect(facts.pest_pressure).toEqual({ label: 'Low', trend: 'improving' });
+    expect(facts.pest_pressure).toEqual({ label: 'Low', trend: 'improving', score_out_of_5: null, what_it_means: null });
     expect(facts.next_visit).toEqual({ service: 'Quarterly Pest Control', date: 'Tuesday, January 5, 2027', arrival_window: '9 to 11 AM' });
     expect(facts.reentry).toEqual([{ area: 'outside', status: 'dry time has passed' }]);
   });
@@ -168,7 +168,11 @@ describe('buildReportAskFacts', () => {
   test('inside or outside from the chip vocabulary and the Fast Complete chips', () => {
     expect(placeOfApplication('Inside')).toBe('inside');
     expect(placeOfApplication('Outside')).toBe('outside');
-    expect(placeOfApplication('Garage')).toBe('inside');
+    // Garage and entry points sit between the sides: alone they name the
+    // place; beside a room or a perimeter, that decides.
+    expect(placeOfApplication('Garage')).toBe('the garage');
+    expect(placeOfApplication('Perimeter, Garage, Entry points')).toBe('outside');
+    expect(placeOfApplication('Kitchen, Bathrooms, Entry points')).toBe('inside');
     expect(placeOfApplication('Inside, Outside')).toBe('inside and outside');
     expect(placeOfApplication('Foundation perimeter, Kitchen')).toBe('inside and outside');
     expect(placeOfApplication('some free text')).toBe('not recorded');

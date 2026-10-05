@@ -69,12 +69,20 @@ const SCOPE_BY_CHIP = new Map([
   ['garage', 'inside'],
 ]);
 
+// Garage and entry points sit on the line between the two: the shared list
+// files them on one side, but a row that also names a room or a perimeter
+// is decided by that, so "Perimeter, Garage, Entry points" reads outside and
+// "Kitchen, Bathrooms, Entry points" reads inside. Alone they say where.
+const EDGE_CHIPS = new Map([['garage', 'the garage'], ['garage carport', 'the garage'], ['entry points', 'the entry points']]);
 function placeOfApplication(areaValue) {
   const chips = String(areaValue || '').split(',').map(normalizeKey).filter(Boolean);
-  const scopes = new Set(chips.map((chip) => SCOPE_BY_CHIP.get(chip)).filter(Boolean));
+  const sided = chips.filter((chip) => !EDGE_CHIPS.has(chip));
+  const scopes = new Set(sided.map((chip) => SCOPE_BY_CHIP.get(chip)).filter(Boolean));
   if (scopes.has('inside') && scopes.has('outside')) return 'inside and outside';
   if (scopes.has('inside')) return 'inside';
   if (scopes.has('outside')) return 'outside';
+  const edges = [...new Set(chips.map((chip) => EDGE_CHIPS.get(chip)).filter(Boolean))];
+  if (edges.length) return edges.join(' and ');
   return 'not recorded';
 }
 
@@ -132,7 +140,12 @@ function weatherFact(conditions = {}) {
   if (Number.isFinite(Number(temp))) parts.push(`about ${Math.round(Number(temp))}°F`);
   if (Number.isFinite(Number(humidity))) parts.push(`${Math.round(Number(humidity))}% humidity`);
   if (Number.isFinite(Number(wind))) parts.push(`wind about ${Math.round(Number(wind))} mph`);
-  if (Number.isFinite(Number(rain))) parts.push(Number(rain) > 0 ? 'some rain in the last 24 hours' : 'no rain in the last 24 hours');
+  if (Number.isFinite(Number(rain))) {
+    const inches = Number(rain);
+    parts.push(inches <= 0 ? 'no rain in the last 24 hours'
+      : inches < 0.1 ? 'only a trace of rain in the last 24 hours'
+        : 'rain in the last 24 hours');
+  }
   return parts.length ? parts.join(', ') : null;
 }
 
@@ -233,7 +246,12 @@ function buildReportAskFacts({ question = '', data = {}, nextAppointment = null,
     .filter((finding) => finding.title || finding.detail);
 
   const pressure = data.pestPressure && data.pestPressure.label
-    ? { label: cleanText(data.pestPressure.label), trend: cleanText(data.pestPressure.trend) || null }
+    ? {
+      label: cleanText(data.pestPressure.label),
+      trend: cleanText(data.pestPressure.trend) || null,
+      score_out_of_5: Number.isFinite(Number(data.pestPressure.score)) ? Number(data.pestPressure.score) : null,
+      what_it_means: cleanText(data.pestPressure.howCalculated) || null,
+    }
     : null;
 
   const next = nextAppointment && nextAppointment.scheduled_date
