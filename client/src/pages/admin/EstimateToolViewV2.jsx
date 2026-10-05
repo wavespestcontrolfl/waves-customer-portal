@@ -346,6 +346,7 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
 // Only two sizing sources exist (a web-search leg is never a size source —
 // AGENTS.md: an LLM proposes intent, it never picks a price/size field).
 const COMMERCIAL_SUITE_SOURCE_LABELS = {
+  listing_verified_text: "a public listing for this suite",
   license_seats: "state restaurant license",
   verified: "tech-verified measurement",
   suite_type_default: "typical size for this business type",
@@ -360,7 +361,8 @@ function commercialSuiteSizeNote(enrichedProfile) {
     ? ` Building total ${Number(enrichedProfile.suiteBuildingTotalSqFt).toLocaleString()} sq ft.`
     : "";
   const nameNote = suite.businessName ? ` — ${suite.businessName}` : "";
-  return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}`;
+  const linkNote = suite.source === "listing_verified_text" && suite.url ? ` Listing: ${suite.url} — confirm on site.` : "";
+  return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}${linkNote}`;
 }
 
 function adminFetch(path, options = {}) {
@@ -739,6 +741,23 @@ const PROPERTY_FORM_FIELDS = [
 ];
 const SEND_FIELDS = new Set(["scheduleSend", "scheduledAt"]);
 const DELIVERY_OPTION_FIELDS = new Set(["showOneTimeOption", "billByInvoice"]);
+
+// Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS). The calculate result carries
+// offerTiersAvailable: true when the office may offer tiers on this estimate
+// (a pest + lawn residential recurring program). The box turns on by default
+// then; a manual uncheck sets _offerTiersDeclined so a regenerate never
+// re-checks it, and a result that is no longer eligible turns it back off.
+// Pure: returns the SAME object when nothing changes.
+export function nextFormForOfferTiers(form, estimate) {
+  const available = estimate?.offerTiersAvailable === true;
+  if (available && !form.offerTiers && !form._offerTiersDeclined) {
+    return { ...form, offerTiers: true };
+  }
+  if (!available && form.offerTiers) {
+    return { ...form, offerTiers: false };
+  }
+  return form;
+}
 const ONE_TIME_PEST_CHOICE = { floor: 199, multiplier: 2.2 };
 // The four rodent-guarantee eligibility confirmations. They are per-job
 // affirmations (work actually completed for THIS property), so they must reset
@@ -1600,6 +1619,8 @@ export default function EstimateToolViewV2({
     rgNoActivityAfterFinalCheck: false,
     showOneTimeOption: false,
     billByInvoice: false,
+    offerTiers: false,
+    _offerTiersDeclined: false,
   });
 
   function clearedPropertyFields() {
@@ -1941,6 +1962,11 @@ export default function EstimateToolViewV2({
           // silently flip the row's settings.
           showOneTimeOption: !!d.showOneTimeOption,
           billByInvoice: !!d.billByInvoice,
+          // Good / Better / Best: the row's own saved mark (edit-source
+          // offerTiersRequested); an older server answer without the field
+          // falls back to the saved form snapshot.
+          offerTiers: d.offerTiersRequested === true || (d.offerTiersRequested === undefined && !!d.inputs?.offerTiers),
+          _offerTiersDeclined: !!d.inputs?._offerTiersDeclined,
           // Row notes win over the inputs snapshot for the same reason —
           // lead/webhook/automation rows carry notes the builder never wrote,
           // and the revise PUT sends form.notes back verbatim; seeding ""
@@ -2182,7 +2208,12 @@ export default function EstimateToolViewV2({
         forgetScopeAnswer();
         setLookupMeta(null);
         setSatelliteData(null);
-        setEstimate(d.result && !stale ? { ...d.result, engineRequest: d.engineRequest } : null);
+        // The stored result does not carry the server's tier-availability flag
+        // (it is stamped on fresh calculate responses): restore it from the
+        // edit source so the Good / Better / Best checkbox shows on a reopen.
+        setEstimate(d.result && !stale
+          ? { ...d.result, engineRequest: d.engineRequest, ...(d.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
+          : null);
         setSavedId(stale ? null : d.id);
         setReopenNotice(notice);
         setSavedViewUrl(estimatePreviewUrlFromSave(d));
@@ -2373,11 +2404,32 @@ export default function EstimateToolViewV2({
     setForm((f) => {
       // Manual customer-options checkbox — own the flag, don't let
       // toggle()'s auto-clear wipe it on the next service toggle.
-      return { ...f, showOneTimeOption: enabled, _autoOneTimeOwned: false };
+      // The one-time option and Good / Better / Best are never both on:
+      // checking this one unchecks the tiers (and marks them declined so the
+      // regenerate this triggers does not re-check them).
+      return {
+        ...f,
+        showOneTimeOption: enabled,
+        _autoOneTimeOwned: false,
+        ...(enabled && f.offerTiers ? { offerTiers: false, _offerTiersDeclined: true } : {}),
+      };
     });
     setSavedId(null);
     setSavedViewUrl(null);
     setEstimate(null);
+  }, []);
+  // Manual "Offer Good / Better / Best" checkbox. Tiers never change a price,
+  // so the generated estimate stays (the checkbox lives on it); only the saved
+  // state is invalidated, like the other delivery options.
+  const setOfferTiersOption = useCallback((enabled) => {
+    setForm((f) => ({
+      ...f,
+      offerTiers: enabled,
+      _offerTiersDeclined: !enabled,
+      ...(enabled && f.showOneTimeOption ? { showOneTimeOption: false, _autoOneTimeOwned: false } : {}),
+    }));
+    setSavedId(null);
+    setSavedViewUrl(null);
   }, []);
 
   const mosquitoRecommendations = useMemo(
@@ -4402,6 +4454,7 @@ export default function EstimateToolViewV2({
         );
       }
       setEstimate(result);
+      setForm((f) => nextFormForOfferTiers(f, result));
       setSavedId(null);
       setSavedViewUrl(null);
       setPriceRecomputeNotice(null);
@@ -4469,6 +4522,10 @@ export default function EstimateToolViewV2({
         notes: form.notes || "",
         satelliteUrl: satelliteData?.imageUrl || null,
         showOneTimeOption: !!form.showOneTimeOption,
+        // Judged on the estimate being saved (not the `estimate` state): the
+        // generate-then-save path saves a result this render has not stored
+        // yet, and its form has not seen the auto-check either.
+        offerTiers: !!nextFormForOfferTiers(form, E).offerTiers && E?.offerTiersAvailable === true,
         billByInvoice: !!form.billByInvoice,
         // Explicit staff confirmation of a county-roll-flagged address
         // (never inferred from copied data — the server reads only this
@@ -4714,6 +4771,9 @@ export default function EstimateToolViewV2({
       _preslabSqftAuto: false,
       // Guarantee eligibility is per-job; the next property must re-confirm.
       ...Object.fromEntries(PER_JOB_ELIGIBILITY_KEYS.map((k) => [k, false])),
+      // Good / Better / Best is decided per estimate, never carried.
+      offerTiers: false,
+      _offerTiersDeclined: false,
     }));
     // Starting the next customer's quote ends any in-place edit — otherwise
     // Save changes would still PUT the new quote over the estimate that was
@@ -7687,6 +7747,28 @@ export default function EstimateToolViewV2({
                       </span>{" "}
                     </span>{" "}
                   </label>{" "}
+                  {estimate?.offerTiersAvailable === true && (
+                    <label className="ui-choice-label flex items-start gap-2 cursor-pointer text-14 text-zinc-900 select-none mb-2">
+                      <Checkbox
+                        type="checkbox"
+                        checked={form.offerTiers || false}
+                        onChange={(e) => setOfferTiersOption(e.target.checked)}
+                        className="shrink-0"
+                      />
+                      <span>
+                        <span className="font-medium">
+                          Offer Good / Better / Best
+                        </span>
+                        <span className="block text-14 text-ink-secondary">
+                          Customer sees three options on this pest + lawn
+                          estimate: a one-time visit, the pest plan, or both
+                          programs. Picking the pest plan or the one-time visit
+                          removes lawn care from the estimate; they can add it
+                          back.
+                        </span>
+                      </span>
+                    </label>
+                  )}
                   <label className="ui-choice-label flex items-start gap-2 cursor-pointer text-14 text-zinc-900 select-none">
                     {" "}
                     <Checkbox

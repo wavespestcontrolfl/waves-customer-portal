@@ -114,6 +114,9 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
       .whereRaw(`${phoneIdentitySql("CASE WHEN direction = 'inbound' THEN to_phone ELSE from_phone END")} = ?`, [offer.waves_line])
       .where('created_at', '>', repliedAt)
       .whereNot('id', inboundSmsLogId)
+      // A text cancelled before it went out (the bar keeps its row) is neither
+      // the customer writing again nor Waves answering.
+      .whereRaw("COALESCE(status, '') NOT IN ('canceled', 'cancelled')")
       .first('id');
     if (newer) throw guardError('newer_message');
     if (await fences.openPortalRequest(trx, customerId, visitId)) throw guardError('portal_request_open');

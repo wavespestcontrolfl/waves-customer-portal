@@ -157,8 +157,25 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
   });
 
   it('names only the treated zones, not the whole property, for a partial application', () => {
-    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    // Non-pest lines keep the per-product Areas line (owner 2026-10-05: only
+    // the pest report drops treated areas).
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'tree_shrub' }} token="tok123" />);
     expect(screen.getByText('Front perimeter')).toBeInTheDocument();
+  });
+
+  it('prints no per-product Areas or Target line on a pest report', () => {
+    const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(container.textContent).toContain('Alpine WSG');
+    expect(container.textContent).toContain('Active ingredient:');
+    expect(container.textContent).not.toMatch(/Areas:/);
+    expect(container.textContent).not.toMatch(/Target:/);
+    expect(container.textContent).not.toContain('Front perimeter');
+  });
+
+  it('keeps the per-product Target line on a non-pest report', () => {
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'tree_shrub' }} token="tok123" />);
+    expect(container.textContent).toMatch(/Target:\s*German cockroaches/);
+    expect(container.textContent).toMatch(/Areas:/);
   });
 
   it('never publishes a fixed re-entry figure — duration OR computed clock time', () => {
@@ -627,13 +644,14 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
 
   it('keeps a recorded application area when the app has no zones', () => {
     const app = { ...BASE_DATA.applications[0], zone_ids: [], applicationArea: 'Attic and soffit line' };
-    render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="tok123" />);
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'tree_shrub', applications: [app] }} token="tok123" />);
     expect(screen.getByText('Attic and soffit line')).toBeInTheDocument();
   });
 
   it('records serviced areas with reasons, and never the internal description', () => {
     const data = {
       ...BASE_DATA,
+      serviceLine: 'tree_shrub',
       coverageServiceType: 'pest_control',
       serviceCoverage: {
         enabled: true,
@@ -652,6 +670,21 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText(/Exterior perimeter service completed/)).toBeInTheDocument();
     expect(screen.getByText(/Could not access: vehicle parked inside/)).toBeInTheDocument();
     expect(container.textContent).not.toContain('perimeter dbl-rate');
+  });
+
+  it('prints no Areas serviced section on a pest report, even with coverage rows', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceCoverage: {
+        enabled: true,
+        items: [{ id: 'z1', markerLabel: 'A', areaName: 'Front perimeter', status: 'completed', customerDescription: 'Exterior perimeter service completed.' }],
+        summary: { completedCount: 1 },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.queryByText('Areas serviced')).toBeNull();
+    expect(container.textContent).not.toMatch(/Exterior perimeter service completed/);
+    expect(container.textContent).not.toMatch(/1 completed/);
   });
 
   it('honours the Pest Pressure visibility flags the PDF cache key is hashed on', () => {
@@ -1900,12 +1933,11 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
 });
 
 describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPECTATIONS, dark)', () => {
-  it('renders the rain, spider, and what-to-expect blocks when present on pestReportV2.expectations', () => {
+  it('renders the spider and what-to-expect blocks when present on pestReportV2.expectations', () => {
     render(<ServiceReportDocument data={{
       ...BASE_DATA,
       pestReportV2: {
         expectations: {
-          rain: { lines: ['It\'s rained about 1.2" at your property over the past week.'] },
           // whatWeDid is server-fixed wording (never a raw protocol-action
           // label — owner ruling 2026-09-28); this matches the actual
           // server output.
@@ -1919,27 +1951,16 @@ describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPEC
         },
       },
     }} token="tok123" />);
-    expect(screen.getByText('Rain and your treatment')).toBeInTheDocument();
-    expect(screen.getByText(/rained about 1\.2"/)).toBeInTheDocument();
     expect(screen.getByText('Spiders')).toBeInTheDocument();
     expect(screen.getByText(/knocked down webs/)).toBeInTheDocument();
     expect(screen.getByText('What to expect')).toBeInTheDocument();
     expect(screen.getByText(/Non-repellent products/)).toBeInTheDocument();
   });
 
-  it('omits all three blocks when expectations is absent (gate off — the common case today)', () => {
+  it('omits both blocks when expectations is absent (gate off — the common case today)', () => {
     render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
-    expect(screen.queryByText('Rain and your treatment')).toBeNull();
     expect(screen.queryByText('Spiders')).toBeNull();
     expect(screen.queryByText('What to expect')).toBeNull();
-  });
-
-  it('the PDF/static render never carries the live-forecast heavy-rain caveat — server-side, forecastHeavyRain is only ever true for mode==="live" (reports-public.js), so a PDF payload\'s rain.lines can only ever be the trailing-week facts, never this sentence', () => {
-    render(<ServiceReportDocument data={{
-      ...BASE_DATA,
-      pestReportV2: { expectations: { rain: { lines: ['It\'s rained about 0.2" at your property over the past week.'] } } },
-    }} token="tok123" />);
-    expect(screen.queryByText(/Heavy rain right after a treatment/)).toBeNull();
   });
 });
 

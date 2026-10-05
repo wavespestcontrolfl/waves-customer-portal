@@ -164,12 +164,13 @@ export function SheetHeader({ titleId, title, service, visit, done, locked, dict
 
 // What the tech sees once the visit is saved; `children` carries a sheet's
 // own line under the summary (the pest sheet's sent-text result).
-export function SavedView({ service, summary, onCompleted, children }) {
+export function SavedView({ service, summary, notice, onCompleted, children }) {
   return (
     <div className="tech-visit-body">
       <div className="tech-visit-card">
         <p className="tech-visit-muted">{[service?.address, service?.timeLabel].filter(Boolean).join(' · ') || 'This visit'}</p>
         <p>{summary}</p>
+        {notice && <p className="tech-visit-muted tech-visit-status--warn" role="status">{notice}</p>}
         {children}
       </div>
       <div className="tech-visit-actions">
@@ -398,6 +399,7 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
+      {submission.storageWarning && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.storageWarning}</ActionFeedback>}
       {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
@@ -407,12 +409,79 @@ export function CompleteFooter({ submission, missingReason, warn, label, onSubmi
           className="tech-visit-action tech-visit-complete tech-visit-wide"
           onClick={onSubmit}
           loading={submission.submitting}
-          disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
+          disabled={submission.recovering || submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : label}
+          {submission.storageBypassPending ? 'Send anyway' : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : label}
         </Button>
       </div>
     </footer>
+  );
+}
+
+// Nothing on a sheet is editable while it checks for a saved attempt, while
+// a save is in flight, or while an attempt is unresolved or refused for good.
+export function submissionHolds(submission) {
+  return submission.recovering || submission.submitting || submission.failure !== null;
+}
+
+// A refusal the server gave a recovered attempt stays on screen when the
+// visit's live details cannot be shown (loading, unreadable or blocked);
+// once they load, the form's footer carries it (GitHub Codex P2 on #5972).
+export function refusalWithoutContext(submission, ctx) {
+  if (submission.failure !== 'terminal' || !submission.error) return null;
+  if (!(ctx.loading || ctx.loadError || ctx.blockedReason)) return null;
+  return <ActionFeedback error className="tech-visit-feedback tech-visit-loading">{submission.error}</ActionFeedback>;
+}
+
+// A reload may recover a committed request before (or even when) its live
+// context can be read. The retry does not rebuild from that context: this
+// compact view sends only the exact stored body when the tech taps Retry.
+export function RecoveredCompletion({ submission }) {
+  if (submission.prompt) {
+    return (
+      <div className="tech-visit-form-area">
+        <div className="tech-visit-body">
+          <div className={cn('tech-visit-card', 'tech-report-confirm')} role="alertdialog" aria-label="Before this goes out">
+            <p className="tech-visit-section-title">Before this goes out</p>
+            {String(submission.prompt.message || '').split('\n').filter(Boolean).map((line) => (
+              <p key={line} className="tech-visit-muted">{line}</p>
+            ))}
+            {submission.error && <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>}
+            <div className="tech-visit-tile-grid">
+              <Chip label="Go back" disabled={submission.submitting} onClick={submission.dismissPrompt} />
+              <Chip label="Send as is" disabled={submission.submitting} onClick={submission.confirm} />
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+  const canRetry = submission.hasPendingBody() && submission.retryPending;
+  // A request refused for good whose saved copy would not clear keeps it here
+  // to discard, never to retry.
+  const canDiscard = submission.hasPendingBody() && (submission.retryPending || submission.failure === 'terminal');
+  return (
+    <div className="tech-visit-form-area">
+      <div className="tech-visit-body">
+        <ActionFeedback className="tech-visit-feedback">
+          {submission.pendingSummary
+            ? `Saved completion: ${submission.pendingSummary}`
+            : 'An unfinished completion is saved on this device.'}
+        </ActionFeedback>
+      </div>
+      <CompleteFooter
+        submission={submission}
+        label="Retry completion"
+        onSubmit={submission.retry}
+        missingReason={canRetry ? '' : 'Close and reopen this visit to make a new completion.'}
+      >
+        {canDiscard && (
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={submission.discard}>
+            Discard saved retry
+          </Button>
+        )}
+      </CompleteFooter>
+    </div>
   );
 }
 
@@ -547,7 +616,7 @@ function TipOption({ tip, library, pressed, locked, onPick }) {
 // `quiet` (the lawn sheet): no "Search tips" label and no "Pick 1 (optional)"
 // hint; the search box keeps its name as an aria-label and the section keeps the
 // hint as its aria-description. The one-tip limit is unchanged.
-export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, quiet = false }) {
+export function TipSection({ library, tipId, customTip, locked, onPick, onCustom, priorityTipIds, priorityOrdered = false, quiet = false }) {
   const [query, setQuery] = useState('');
   const [showAll, setShowAll] = useState(false);
   const [writing, setWriting] = useState(false);
@@ -559,8 +628,11 @@ export function TipSection({ library, tipId, customTip, locked, onPick, onCustom
   const priority = useMemo(() => {
     if (!priorityTipIds?.length) return [];
     const ids = new Set(priorityTipIds);
-    return allTips.filter((tip) => ids.has(tip.id));
-  }, [allTips, priorityTipIds]);
+    const lifted = allTips.filter((tip) => ids.has(tip.id));
+    // Library order by default (the tree & shrub Seen list); `priorityOrdered`
+    // keeps the caller's own ranking (the lawn sheet's note matches, best first).
+    return priorityOrdered ? lifted.sort((a, b) => priorityTipIds.indexOf(a.id) - priorityTipIds.indexOf(b.id)) : lifted;
+  }, [allTips, priorityTipIds, priorityOrdered]);
   const lifted = !q && priority.length > 0;
   const rest = lifted ? allTips.filter((tip) => !priority.includes(tip)) : allTips;
   const { tips: visible, noMatch } = visibleTips(rest, { query: q, showAll, tipId });

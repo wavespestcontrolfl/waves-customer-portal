@@ -218,6 +218,16 @@ const CHIP_ACTIONS = [
 const CHIP_ACTION_BY_LABEL = Object.fromEntries(
   CHIP_ACTIONS.map((chip) => [chip.label, chip]),
 );
+// The one protocol action a regular pest visit still records (owner
+// 2026-10-05): the "Swept eaves and webs" box. It is the pest protocol's own
+// sweep step (server/config/protocols.json), so the customer report's spider
+// section (buildSpiderExpectation) reads it as a recorded sweep: exterior,
+// no treatment applied.
+export const PEST_SWEEP_ACTION = {
+  label: "Swept eaves, window frames, door frames, and lanai",
+  scope: "exterior",
+  treatmentApplied: false,
+};
 // Completion-panel quick-entry chips are service-aware: pest-line services
 // (pest control, mosquito, termite, rodent) get a pest-focused list, while
 // plant-health services (lawn, tree/shrub) keep the original broad list that
@@ -471,6 +481,53 @@ export function productAreaChoices(areasServiced, currentValue) {
   }
   return choices;
 }
+// The visit's areas on a regular pest visit (owner 2026-10-04): there is no
+// visit-level "Areas treated" field, so the areas sent at completion are the
+// union of the product rows' own areas, in the area list's order. An area
+// that is not on the list (a restored legacy value) follows the list ones,
+// so it still shows and submits instead of vanishing.
+const PRODUCT_ROW_AREAS_SEP = "\u0001";
+export function areasFromProductRows(selectedProducts, orderedAreas) {
+  const used = new Set();
+  const offList = [];
+  for (const row of selectedProducts || []) {
+    for (const area of parseApplicationAreas(row?.applicationArea)) {
+      if (orderedAreas.includes(area)) used.add(area);
+      else if (!offList.includes(area)) offList.push(area);
+    }
+  }
+  return [...orderedAreas.filter((area) => used.has(area)), ...offList];
+}
+// A seeded default product row on a regular pest visit starts on an area
+// (owner 2026-10-05, "prefill areas"): with no row area the report's exterior
+// re-entry line drops off, and a tech would tap Perimeter on nearly every
+// visit. An exterior method starts on "Perimeter"; any other method starts
+// empty (the interior defaults only seed on typed visits such as cockroach,
+// which keep their own area field). The value must sit on the pest area list
+// AND on the exterior side of treatment-area-scopes.json, or it is not
+// offered. Fills an empty area only, and is marked applicationAreaDefault
+// like the lawn prefill: it follows a method change until the tech picks an
+// area (which clears the mark), and a tech's own pick is never replaced.
+const PEST_ROW_DEFAULT_AREAS = {
+  exterior: ["Perimeter"],
+};
+const PEST_ROW_METHOD_SCOPE = {
+  perimeter_spray: "exterior",
+  broadcast_spray: "exterior",
+  granular_broadcast: "exterior",
+};
+export function pestRowDefaultArea(applicationMethod) {
+  const scope = PEST_ROW_METHOD_SCOPE[normalizeApplicationMethod(applicationMethod)];
+  if (!scope) return "";
+  return PEST_ROW_DEFAULT_AREAS[scope]
+    .filter((area) => AREAS_BY_SERVICE.pest.includes(area) && AREA_SCOPES[scope].includes(area))
+    .join(", ");
+}
+export function withPestRowDefaultArea(row) {
+  if (!row || row.applicationArea) return row;
+  const applicationArea = pestRowDefaultArea(row.applicationMethod);
+  return applicationArea ? { ...row, applicationArea, applicationAreaDefault: true } : row;
+}
 function toggleProductAreaValue(currentValue, area, orderedChoices) {
   const selected = parseApplicationAreas(currentValue);
   const next = selected.includes(area)
@@ -478,6 +535,10 @@ function toggleProductAreaValue(currentValue, area, orderedChoices) {
     : orderedChoices.filter((a) => selected.includes(a) || a === area);
   return next.join(", ");
 }
+// A fresh completion opens on "home — spoke with them" (owner 2026-10-04; the
+// Fast Complete sheets' DEFAULT_CUSTOMER_HOME is the same value). The tech
+// changes it only when it was not so.
+const DEFAULT_CUSTOMER_INTERACTION = "tech_home_spoke_with_them";
 const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "tech_home_spoke_with_them", label: "Customer home — spoke with them" },
   { value: "not_home_full_access", label: "Customer not home — full access" },
@@ -12479,7 +12540,7 @@ export function CompletionPanel({
   // footage the trace already measured. Fail-soft — no trace (or gate off)
   // just leaves the field manual.
   const [tracedLinearFt, setTracedLinearFt] = useState(null);
-  const [customerInteraction, setCustomerInteraction] = useState("");
+  const [customerInteraction, setCustomerInteraction] = useState(DEFAULT_CUSTOMER_INTERACTION);
   const [customerConcern, setCustomerConcern] = useState("");
 
   // Bait station map (station-map-v1). Only station-typed completions
@@ -13568,14 +13629,40 @@ export function CompletionPanel({
   // request indefinitely (local audit P1 on #3701).
   const typedAreaKey = typedTreatmentArea?.key || null;
   const typedAreaValue = typedAreaKey ? (findingsValues?.[typedAreaKey] ?? "") : "";
+  // Real treated areas only — the generic status chips ("No issues found" /
+  // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
+  // they aren't areas and don't belong in the treated-areas list.
+  const specialtyCompletion = specialtyCompletionFor(service);
+  // A regular pest visit (owner 2026-10-04): the recurring and one-time
+  // general pest services and pest re-services, the same visits that open on
+  // the house tank mix (isPestDefaultMixVisit). Not a typed form, bed bug
+  // or specialty lane. It takes no Protocol actions field and no visit-level
+  // Areas treated field: the product rows say what went where.
+  const isRegularPestVisit = !isTypedFindings && !isBedBugVisit && !specialtyCompletion
+    && isPestDefaultMixVisit(service);
+  // A string key keeps the memo (an effect dependency downstream) steady
+  // while a product row's other fields change.
+  // `areasServiced` is empty here except for an old draft's ticks waiting
+  // for a product row to carry them (the migration effect below).
+  const productRowAreasKey = isRegularPestVisit
+    ? areasFromProductRows(
+      [...selectedProducts, { applicationArea: areasServiced.join(", ") }],
+      AREAS_BY_SERVICE.pest,
+    ).join(PRODUCT_ROW_AREAS_SEP)
+    : "";
   const completionAreasServiced = useMemo(
-    () => completionAreasForTypedFindings({
-      typedAreaKey,
-      findingsValues: typedAreaKey ? { [typedAreaKey]: typedAreaValue } : null,
-      genericAreas: areasServiced,
-    }),
-    [typedAreaKey, typedAreaValue, areasServiced],
+    () => (isRegularPestVisit
+      ? (productRowAreasKey ? productRowAreasKey.split(PRODUCT_ROW_AREAS_SEP) : [])
+      : completionAreasForTypedFindings({
+        typedAreaKey,
+        findingsValues: typedAreaKey ? { [typedAreaKey]: typedAreaValue } : null,
+        genericAreas: areasServiced,
+      })),
+    [isRegularPestVisit, productRowAreasKey, typedAreaKey, typedAreaValue, areasServiced],
   );
+  // The areas a product row's picker offers: the whole pest list on a regular
+  // pest visit, else only the areas ticked at the visit level.
+  const productAreaPickerChoices = isRegularPestVisit ? AREAS_BY_SERVICE.pest : completionAreasServiced;
   const areasTreatedHidden = treeShrubCloseoutOn
     || typedFindingsOwnAreas
     // Station visits have no meaningful "areas treated" — the station
@@ -13584,6 +13671,10 @@ export function CompletionPanel({
     // records spray evidence gets the picker back (typedFormTakesPlaces,
     // shared with the tech sheet).
     || !typedFormTakesPlaces(service.completionProfile?.findingsType, { sprayed: sprayEvidenceInForm });
+  // The visit-level field is also gone on a regular pest visit, but its areas
+  // live on the product rows there, so this never clears them (unlike
+  // areasTreatedHidden above).
+  const areasTreatedFieldHidden = areasTreatedHidden || isRegularPestVisit;
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the
@@ -13650,6 +13741,32 @@ export function CompletionPanel({
       ));
     }
   }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
+  // A regular pest visit has no visit-level areas either (owner 2026-10-04):
+  // the areas belong on the product rows. A draft saved before the change
+  // carries visit-level ticks, which say where the visit went but not which
+  // product went there, so the ticks no row names go onto ONE row (the
+  // first with no area, else the first), where the technician sees and can
+  // move them: none dropped (Codex P2 r1 #5889), none copied onto every row
+  // (Codex P2 r2). With no product row yet the ticks stay in the hidden
+  // state, still sent by completionAreasServiced, until a row exists.
+  useEffect(() => {
+    if (!isRegularPestVisit || !areasServiced.length) return;
+    const carried = areasFromProductRows([{ applicationArea: areasServiced.join(", ") }], AREAS_BY_SERVICE.pest);
+    if (carried.length) {
+      if (!selectedProducts.some(Boolean)) return;
+      setSelectedProducts((prev) => {
+        const named = new Set(prev.flatMap((p) => (p ? parseApplicationAreas(p.applicationArea) : [])));
+        const missing = carried.filter((area) => !named.has(area));
+        const empty = prev.findIndex((p) => p && !p.applicationArea);
+        const target = empty >= 0 ? empty : prev.findIndex(Boolean);
+        if (!missing.length || target < 0) return prev;
+        return prev.map((p, index) => (index === target
+          ? { ...p, applicationArea: [...parseApplicationAreas(p.applicationArea), ...missing].join(", ") }
+          : p));
+      });
+    }
+    setAreasServiced([]);
+  }, [isRegularPestVisit, areasServiced, selectedProducts]);
   // Default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29):
   // recurring general-pest, one-time pest, and pest re-service completions
   // open with Taurus SC + Atticus Talak 7.9 F + the LESCO 90/10 Nonionic
@@ -13693,7 +13810,9 @@ export function CompletionPanel({
     const rows = pestDefaultMixSelections(products)
       .filter(({ product }) => !protocolCompletionDefaultsRemovedIds.includes(String(product.id)))
       .map(({ product, totalAmount }) => ({
-      ...buildSelectedProduct(product),
+      // A regular pest visit's seeded rows start on their area (owner
+      // 2026-10-05): Perimeter for the exterior mix and its surfactant.
+      ...(isRegularPestVisit ? withPestRowDefaultArea(buildSelectedProduct(product)) : buildSelectedProduct(product)),
       totalAmount,
       totalAmountManual: true,
       // Marked manual so a rate or area edit cannot recompute the house
@@ -13708,7 +13827,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
@@ -13760,12 +13879,15 @@ export function CompletionPanel({
       // A row the tech already removed by hand never comes back, even
       // into a freshly emptied list (a sibling's removal, or the outage
       // clearing effect, both restart from empty).
-      .filter((row) => !protocolCompletionDefaultsRemovedIds.includes(String(row.productId)));
+      .filter((row) => !protocolCompletionDefaultsRemovedIds.includes(String(row.productId)))
+      // On a regular pest visit a seeded row starts on its area (owner
+      // 2026-10-05); every other line keeps its rows as built.
+      .map((row) => (isRegularPestVisit ? withPestRowDefaultArea(row) : row));
     if (!rows.length) return;
     protocolCompletionDefaultsSeededRef.current = true;
     protocolCompletionDefaultsSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
+  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, isRegularPestVisit, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
   // Pre-push audit P1, PR #5049 r1 (cockroach/protocol rows) + Codex r3 P1
   // (pest-mix rows): an inspection_only / customer_declined outcome bills
   // as NOTHING applied (shared/specialty-service-closeouts.js's own
@@ -13921,10 +14043,6 @@ export function CompletionPanel({
     setLawnAssessmentId(assessmentId || null);
     setLawnAssessmentRevision((v) => v + 1);
   };
-  // Real treated areas only — the generic status chips ("No issues found" /
-  // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
-  // they aren't areas and don't belong in the treated-areas list.
-  const specialtyCompletion = specialtyCompletionFor(service);
   // Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): the
   // schedule payload says when Generate first fills this visit's own record
   // (its places and findings) from the notes.
@@ -15153,7 +15271,8 @@ export function CompletionPanel({
       (completionImprovements && isLawn && lawnAreaOverride !== undefined) ||
       lawnRemovedDefaultIds.length > 0 ||
       protocolCompletionDefaultsRemovedIds.length > 0 ||
-      customerInteraction ||
+      // The default is the opening state, not tech input.
+      (customerInteraction && customerInteraction !== DEFAULT_CUSTOMER_INTERACTION) ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
       selectedObservationLabels.length ||
@@ -15689,8 +15808,11 @@ export function CompletionPanel({
         setStationNumberBase(Number(savedDraft.stationNumberBase));
       }
     }
+    // A draft's own answer wins; one saved with none (before the default
+    // existed) opens on the default (owner 2026-10-04).
     setCustomerInteraction(
-      normalizeCustomerInteractionValue(savedDraft.customerInteraction),
+      normalizeCustomerInteractionValue(savedDraft.customerInteraction)
+        || DEFAULT_CUSTOMER_INTERACTION,
     );
     setCustomerConcern(savedDraft.customerConcern || "");
     setSelectedProtocolActionLabels(
@@ -16754,7 +16876,7 @@ export function CompletionPanel({
         applicationMethod: productApplicationMethod(p, serviceTypeForArea),
         applicationArea:
           p.applicationArea ||
-          (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+          (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
         areaValue: p.areaValue ?? null,
         areaUnit: p.areaUnit || null,
         targets: Array.isArray(p.targets) ? p.targets : [],
@@ -17205,6 +17327,13 @@ export function CompletionPanel({
           if (!p.totalAmountManual) next.totalAmount = "";
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
+        // An untouched pest default area follows the method (Codex P2 #5978):
+        // spot treatment never keeps "Perimeter" it did not choose.
+        if (field === "applicationMethod" && isRegularPestVisit && p.applicationAreaDefault) {
+          // The mark stays until the tech edits the area itself, so a method
+          // switched away and back restores "Perimeter" (Codex P2 #5978 r2).
+          next.applicationArea = pestRowDefaultArea(value);
+        }
         // The row the tech typed into owns its gallons from here on, and the
         // first such row owns the tank.
         if (field === "carrierGallons") Object.assign(next, markTankEntry(next, tankOwner));
@@ -18317,7 +18446,7 @@ export function CompletionPanel({
             applicationMethod: productApplicationMethod(p, serviceTypeForArea),
           applicationArea:
             p.applicationArea ||
-            (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+            (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
           areaValue: p.areaValue,
           areaUnit: p.areaUnit,
           targets: Array.isArray(p.targets) ? p.targets : [],
@@ -18450,7 +18579,11 @@ export function CompletionPanel({
             return entries.length ? { termiteStations: entries } : {};
           })()
           : {}),
-        customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
+        // Quick complete hides the question, so its untouched default is not
+        // an answer the tech gave: it goes as before, empty.
+        customerInteraction: quickComplete && customerInteraction === DEFAULT_CUSTOMER_INTERACTION
+          ? ""
+          : normalizeCustomerInteractionValue(customerInteraction),
         protocolActionsCompleted: reportProtocolActions,
         protocolActionScopesCompleted: reportProtocolActionScopes,
         observations: reportObservations,
@@ -18790,11 +18923,15 @@ export function CompletionPanel({
       ? [...protocolActions, ...LAWN_FIELD_ACTIONS]
       : protocolActions;
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
+  // A regular pest visit has no Protocol actions field (owner 2026-10-04):
+  // the product rows say what was done. An action a restored draft already
+  // carries stays selected (its marker line shows in the notes) and submits.
   const hideProtocolActionsField =
-    isLawn &&
-    !protocolActionsLoading &&
-    !protocolActionError &&
-    effectiveProtocolActions.length === 0;
+    isRegularPestVisit ||
+    (isLawn &&
+      !protocolActionsLoading &&
+      !protocolActionError &&
+      effectiveProtocolActions.length === 0);
   const protocolActionSelectOptions = effectiveProtocolActions.map((action, index) => ({
     value: action.id ? String(action.id) : `action-${index}`,
     label: action.label || action.note || action.raw || "Protocol action",
@@ -18886,6 +19023,18 @@ export function CompletionPanel({
       }
       applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
     }
+  }
+  // The "Swept eaves and webs" box on a regular pest visit (owner 2026-10-05).
+  // Ticking it is the same as picking the sweep from the old dropdown
+  // (applyProtocolAction: label, scope, [Protocol] note line); unticking is
+  // the same as the x on its pill (removeSelectedLabel).
+  const pestSweepLabel = activeSelectedLabels(selectedProtocolActionLabels).find(
+    (label) => String(label).trim().toLowerCase() === PEST_SWEEP_ACTION.label.toLowerCase(),
+  );
+  function handlePestSweepChange(checked) {
+    if (generating) return;
+    if (checked) applyProtocolAction(PEST_SWEEP_ACTION);
+    else if (pestSweepLabel) removeSelectedLabel("protocol", pestSweepLabel);
   }
   function handleLawnFindingAdd(text) {
     if (generating || photoAnalyzing || activeSelectedLabels(selectedObservationLabels).includes(text)) return;
@@ -20208,6 +20357,30 @@ export function CompletionPanel({
               );
             })}
             {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
+            {isRegularPestVisit && (
+              <div style={{ marginBottom: 20 }}>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    fontFamily: font,
+                    fontSize: 14,
+                    color: M.ink,
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(pestSweepLabel)}
+                    disabled={generating}
+                    onChange={(e) => handlePestSweepChange(e.target.checked)}
+                    style={{ width: 18, height: 18, accentColor: M.ink }}
+                  />
+                  Swept eaves and webs
+                </label>
+              </div>
+            )}
             {!isTypedFindings && !hideProtocolActionsField && (
               <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
@@ -20987,12 +21160,12 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
                           : null}{" "}
                       </select>{" "}
-                      {completionAreasServiced.length > 0 && (() => {
+                      {productAreaPickerChoices.length > 0 && (() => {
                         const selectedAreas = parseApplicationAreas(
                           sp.applicationArea,
                         );
                         const areaChoices = productAreaChoices(
-                          completionAreasServiced,
+                          productAreaPickerChoices,
                           sp.applicationArea,
                         );
                         return (
@@ -21163,7 +21336,7 @@ export function CompletionPanel({
                 (owner 2026-07-23): the chips are structural-pest rooms/zones;
                 those visits carry their own location semantics (zone trace,
                 trap locations, entry points, station map). */}
-            {!quickComplete && !areasTreatedHidden && (
+            {!quickComplete && !areasTreatedFieldHidden && (
               <Field label="Areas treated">
                 {" "}
                 {/* Owner directive 2026-08-27: every multi-choice control is
@@ -22703,6 +22876,22 @@ export function CompletionPanel({
               );
             })}
             {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
+            {isRegularPestVisit && (
+              <div style={{ marginBottom: 12 }}>
+                <label
+                  style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: D.text, cursor: "pointer" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(pestSweepLabel)}
+                    disabled={generating}
+                    onChange={(e) => handlePestSweepChange(e.target.checked)}
+                    style={{ width: 16, height: 16 }}
+                  />
+                  Swept eaves and webs
+                </label>
+              </div>
+            )}
             {!isTypedFindings && !hideProtocolActionsField && (
             <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
@@ -23428,12 +23617,12 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
                           : null}{" "}
                   </select>{" "}
-                  {completionAreasServiced.length > 0 && (() => {
+                  {productAreaPickerChoices.length > 0 && (() => {
                     const selectedAreas = parseApplicationAreas(
                       sp.applicationArea,
                     );
                     const areaChoices = productAreaChoices(
-                      completionAreasServiced,
+                      productAreaPickerChoices,
                       sp.applicationArea,
                     );
                     return (
@@ -23604,7 +23793,7 @@ export function CompletionPanel({
           {/* Areas Serviced — hidden for Tree & Shrub and rodent lines (owner
               2026-07-23): the chips are structural-pest rooms/zones; those
               visits carry their own location semantics. */}
-          {!quickComplete && !areasTreatedHidden && (
+          {!quickComplete && !areasTreatedFieldHidden && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Areas Treated</label>{" "}

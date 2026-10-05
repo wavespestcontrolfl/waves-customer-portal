@@ -10,7 +10,7 @@ const mockWrites = [];
 jest.mock('../models/db', () => {
   const chain = (table) => {
     const q = {
-      where: () => q, whereILike: () => q, whereIn: () => q, whereRaw: () => q,
+      where: () => q, whereILike: () => q, whereIn: () => q, whereRaw: () => q, forUpdate: () => q,
       first: async () => null,
       update: async (row) => { mockWrites.push([table, 'update', row]); return 1; },
       insert: (row) => { mockWrites.push([table, 'insert', row]); return { returning: async () => [{ id: 'exp-1' }] }; },
@@ -26,7 +26,7 @@ jest.mock('../models/db', () => {
 const { processVendorInvoice } = require('../services/email/invoice-processor');
 
 const EMAIL = { id: 'email-1', gmail_id: 'gm-1', from_address: 'billing@acme.example', subject: 'Credit memo CM-7' };
-const CLASSIFICATION = { extracted: { vendor_name: 'Acme', invoice_amount: '412.50' } };
+const CLASSIFICATION = { extracted: { vendor_name: 'Acme', invoice_amount: '412.50', payment_status: 'paid' } };
 const extraction = (fields) => mockCreate.mockResolvedValue({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(fields) }] });
 
 beforeEach(() => { mockWrites.length = 0; mockCreate.mockReset(); });

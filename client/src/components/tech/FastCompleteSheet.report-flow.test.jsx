@@ -8,6 +8,7 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { IDBFactory } from 'fake-indexeddb';
 
 vi.mock('./TechTreatmentZoneModal', () => ({
   default: ({ onSaved, onClose, expectedPropertyId, openVisitOnly }) => (
@@ -27,6 +28,7 @@ vi.mock('./TechServicePhotosModal', () => ({
 
 import FastCompleteSheet from './FastCompleteSheet';
 import { perimeterFeetOf, reportParts } from './FastCompleteReport';
+import { getFastCompletionAttempt } from '../../lib/completion-resume-store';
 
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -176,14 +178,14 @@ describe('the visit the tech tapped', () => {
 });
 
 describe('the visit step', () => {
-  test('a regular pest visit opens as a service: no pest, where or how taps, customer not home with full access', async () => {
+  test('a regular pest visit opens as a service: no pest, where or how taps, customer home and spoke with them (owner 2026-10-04)', async () => {
     await openSheet(makeRequest());
     expect(screen.getByRole('heading', { name: 'Complete service' })).toBeTruthy();
     for (const gone of ['Ants', 'Outside', 'Inside', 'Spot treatment', 'Perimeter spray', 'Light']) {
       expect(screen.queryByRole('button', { name: gone })).toBeNull();
     }
-    expect(screen.getByRole('button', { name: 'Not home — full access' }).getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByRole('button', { name: 'Home — spoke with them' }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: 'Home — spoke with them' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Not home — full access' }).getAttribute('aria-pressed')).toBe('false');
     expect(screen.getByRole('button', { name: 'Not home — partial access' }).getAttribute('aria-pressed')).toBe('false');
     const tracker = screen.getByRole('group', { name: 'Pest activity' });
     expect(within(tracker).getAllByRole('button').map((button) => button.textContent)).toEqual(['1', '2', '3', '4', '5']);
@@ -257,10 +259,17 @@ describe('the visit step', () => {
 });
 
 describe('generate and read', () => {
+  test('a tech who taps nothing for the customer sends home, spoke with them (owner 2026-10-04)', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    expect(request.bodies('/generate-report')[0]).toMatchObject({ customerInteraction: 'Customer home — spoke with them' });
+  });
+
   test('the report request carries the note and the taps; the note\'s facts are read beside it', async () => {
     const request = makeRequest();
     await openSheet(request);
-    fireEvent.click(screen.getByRole('button', { name: 'Home — spoke with them' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Not home — partial access' }));
     await generate();
     const [payload] = request.bodies('/generate-report');
     // The note is read first, and the report is written from exactly what
@@ -271,7 +280,7 @@ describe('generate and read', () => {
     expect(payload).toMatchObject({
       scheduledServiceId: 'svc-1',
       serviceNotes: NOTE,
-      customerInteraction: 'Customer home — spoke with them',
+      customerInteraction: 'Customer not home — partial access',
       pestActivityRating: 3,
       includeCustomerComms: true,
       technicianName: 'Adam',
@@ -550,7 +559,7 @@ describe('complete and send', () => {
       complete: [{ success: true, completionSmsStatus: 'sent', invoiceId: 'inv-1', invoiceTotal: 95, invoiceStatus: 'sent' }],
     });
     await openSheet(request);
-    fireEvent.click(screen.getByRole('button', { name: 'Home — spoke with them' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Not home — partial access' }));
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
@@ -560,7 +569,7 @@ describe('complete and send', () => {
       technicianNotes: REPORT,
       reportDraftBase: REPORT,
       areasServiced: ['Inside', 'Outside'],
-      customerInteraction: 'tech_home_spoke_with_them',
+      customerInteraction: 'not_home_partial_access',
       clientPestRating: 3,
       sendCompletionSms: true,
       includePayLink: true,
@@ -1008,7 +1017,7 @@ describe('complete and send', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Go back' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     const [first, retried, fresh] = request.bodies('/complete');
     expect(retried.idempotencyKey).toBe(first.idempotencyKey);
@@ -1021,8 +1030,36 @@ describe('complete and send', () => {
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Go back' }));
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
+    expect((await screen.findByRole('button', { name: 'Complete & send' })).disabled).toBe(false);
     expect(request.bodies('/complete')).toHaveLength(1);
+  });
+
+  describe('with this device keeping the attempt', () => {
+    let factory;
+    beforeEach(() => { factory = globalThis.indexedDB; globalThis.indexedDB = new IDBFactory(); });
+    afterEach(() => { globalThis.indexedDB = factory; });
+
+    test('a Go back that cannot discard the saved attempt says so on the heads-up (pre-push P1 on 5f95bc558d)', async () => {
+      const request = makeRequest({ complete: [conflict('report_rules_review', 'Refused words: "safe"'), { success: true }] });
+      render(<FastCompleteSheet service={SERVICE} operatorId="tech-a" request={request} onClose={() => {}} onCompleted={() => {}} />);
+      await screen.findByText(/Taurus SC 4 fl oz/);
+      await generate();
+      fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+      const back = await screen.findByRole('button', { name: 'Go back' });
+      const [sent] = request.bodies('/complete');
+      expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(sent);
+      const store = globalThis.indexedDB;
+      globalThis.indexedDB = undefined;
+      try {
+        fireEvent.click(back);
+        expect(await within(screen.getByRole('alertdialog')).findByText(/Could not discard the saved completion/)).toBeTruthy();
+      } finally { globalThis.indexedDB = store; }
+      expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(sent);
+      fireEvent.click(back);
+      expect((await screen.findByRole('button', { name: 'Complete & send' })).disabled).toBe(false);
+      await waitFor(async () => expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull());
+      expect(request.bodies('/complete')).toHaveLength(1);
+    });
   });
 });
 

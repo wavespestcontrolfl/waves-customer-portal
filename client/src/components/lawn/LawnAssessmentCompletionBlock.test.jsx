@@ -5,7 +5,7 @@
 // fetcher it is given, and no text is set under 14px.
 import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import LawnAssessmentCompletionBlock from './LawnAssessmentCompletionBlock';
 
 afterEach(cleanup);
@@ -57,5 +57,45 @@ describe('LawnAssessmentCompletionBlock', () => {
     expect(screen.getByText('Lawn length')).toBeTruthy();
     // On the lawn sheet it is a row at the end of the photo slot list.
     expect(screen.getByTestId('lawn-shot-list').lastElementChild.getAttribute('data-testid')).toBe('lawn-length-row');
+  });
+
+  it('its handle runs a step only when that step\'s own button could be pressed, and onProgress says which can', async () => {
+    const ref = React.createRef();
+    const onProgress = vi.fn();
+    const request = mount({ ref, compact: true, onProgress });
+    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+    // No photo: Analyze and Confirm are off, so the handle does nothing; Add a photo is on.
+    await waitFor(() => expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ photos: 0, assessed: false, canAddPhoto: true, canAnalyze: false, canConfirm: false })));
+    ref.current.analyze();
+    ref.current.confirm();
+    expect(request.mock.calls.map(([path]) => path)).toEqual(['/admin/lawn-assessment/service/svc-1']);
+    // openPhotoPicker clicks the same hidden input as Add turf photos.
+    const open = vi.spyOn(screen.getByLabelText('Add turf photos'), 'click');
+    ref.current.openPhotoPicker();
+    expect(open).toHaveBeenCalledTimes(1);
+  });
+
+  it('a photo still being read from the untagged picker holds Analyze until the read lands', async () => {
+    // A FileReader that waits for the test to finish it: the read is in flight.
+    const pending = [];
+    class HeldFileReader { readAsDataURL() { pending.push(() => { this.result = 'data:image/jpeg;base64,cGhvdG8='; this.onload({ target: { result: this.result } }); }); } }
+    class FixtureImage { set src(_v) { this.width = 800; this.height = 600; this.onload(); } }
+    vi.stubGlobal('FileReader', HeldFileReader);
+    vi.stubGlobal('Image', FixtureImage);
+    const ref = React.createRef();
+    const onProgress = vi.fn();
+    const request = mount({ ref, compact: true, onProgress });
+    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+    const input = screen.getByLabelText('Add turf photos');
+    const file = new File(['x'], 'a.jpg', { type: 'image/jpeg' });
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => expect(pending).toHaveLength(1));
+    // In flight: Analyze is off for the handle and reported off.
+    ref.current.analyze();
+    expect(request.mock.calls.map(([path]) => path)).toEqual(['/admin/lawn-assessment/service/svc-1']);
+    expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ canAnalyze: false }));
+    await act(async () => { pending[0](); });
+    await waitFor(() => expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ photos: 1, canAnalyze: true })));
+    vi.unstubAllGlobals();
   });
 });

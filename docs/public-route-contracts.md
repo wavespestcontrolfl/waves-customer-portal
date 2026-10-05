@@ -141,12 +141,26 @@ is the pure builder.
 The PDF prints `youToldUs` and `whatWeDid`; its cache key gains `-rcd1` only
 when the card is present.
 
+**Owner 2026-10-05: the `rain` key and the `pestWeekWeatherUncacheable` /
+`pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
+your treatment" card is gone from the pest report (live page and PDF) for good;
+`data.pestReportV2.expectations` carries at most `spiders` and `whatToExpect`,
+and the pest PDF key suffix stays `-pex3`. Already-frozen
+`structured_notes.pestWeekWeather` values are left in place, unread.
+The same day the live page changed two client-only lines from fields it
+already receives: "Today's result" on a routine Pest V2 visit (the
+`applications[].applicationArea` labels, classed by
+`shared/treatment-area-scopes.json`, with `treatmentPerformed === true`; plus the shown `pestPressure`
+label, worded "Pest pressure: …"), and the "Your plan" card (`planSummary` counts as a sentence,
+`planSummary.tier`, the account-wide `nextAppointment` named with its service,
+`reserviceEligible`). The one payload addition is `planSummary.tier`.
+
 Pest Report V2 "expectations" blocks (owner-approved 2026-09-27/28,
 `GATE_PEST_REPORT_EXPECTATIONS` — dark, off unless exactly `'true'`, read at
 call time, no redeploy to flip): on the pest-line service-report payload
 (`/api/reports/:token/data` and the PDF, which share `buildReportV1Data` /
 `reports-public.js`'s pest V2 composition), gate on adds an optional
-`data.pestReportV2.expectations` object with up to three keys — `rain`,
+`data.pestReportV2.expectations` object with up to two keys —
 `spiders`, `whatToExpect` — each present only when that block has something
 to say; gate off, or nothing to say, omits the whole `expectations` key —
 unlike the always-present-but-nullable `defense` / `aiSummary` / `forecast`
@@ -158,74 +172,16 @@ non-null result among the fields that keep the section alive (codex P2
 2026-09-29 round 3): a sparse callback report — `suppressDefense`, with no
 primary move, supporting metric, AI summary, or customer concern — used to
 return `null` (no `pestReportV2` at all) before `expectations` was ever
-computed, silently discarding a recorded rain / eave-sweeping / product
+computed, silently discarding a recorded eave-sweeping / product
 expectation exactly where it would have been the section's ONLY content.
 Such a visit's public payload now carries a minimal `pestReportV2` object
 (status/statusSummary plus `expectations`, every other field null/empty) in
 that case; gate off is unaffected (`expectations` stays `null`, so the
-emptiness predicate is byte-identical to before this fix). `rain: { lines: [string] }`
-— one line stating the trailing 7-day rainfall at the property
-(`application-conditions.js` `fetchServiceWeekWeather`; low-confidence
-city-collective readings are hedged in the wording, never presented as an
-exact number), then an OPTIONAL rain-fast clause ("...rain-fast about N
-after it dries, per the label.") that appears ONLY when
-`products_catalog.rainfast_minutes` is actually set for an applied product —
-NULL for every current pest product as of 2026-09-27, so this clause never
-fires against real data today. When MORE THAN ONE applied product carries a
-positive `rainfast_minutes` (a future catalog state), the clause states the
-LONGEST interval across them (codex P2 2026-09-29 round 2: array order is
-incidental, never a safety ranking — the customer needs the wait time that
-covers every applied product, not whichever happened to sort first). There
-is deliberately NO generic fallback sentence when the catalog has no number
-(revised 2026-09-28): a plain "rain-fast once it has dried" claim is itself
-unsupported — most labels don't state rain-fastness at all, and some
-instead say to avoid rain within a window after application — so with no
-sourced number the clause is simply absent, never a hard-coded or invented
-duration. Then, **live view only**, a forward-looking heavy-rain caveat
-sourced from the NWS forecast (`weather-forecast.js`
-`getDailyRainOutlookBounded`) — read from forecast TEXT only
-(storm/thunderstorm/heavy rain in `shortForecast`; codex P2 2026-09-29
-round 2: `rainChance` alone is the probability of ANY precipitation, not its
-intensity, and `getDailyRainOutlookBounded` exposes no quantitative amount
-to fall back on, so a high chance of light rain must never trigger this
-caveat on the bare percentage) — `reports-public.js` computes that forecast
-signal only when `mode === 'live'` AND the visit's `service_date` is RECENT
-(codex P1 2026-09-29 round 4: within the last 2 ET calendar days —
-`isRecentServiceDate`, an ET-calendar-day comparison via `etDateString`/
-`addETDays`, never 24h epoch-ms arithmetic — today, yesterday, or the day
-before; older never fetches the forecast at all), and always passes `false`
-for the PDF and any other static render or an older live reopen, so the
-PDF/static payload's `rain.lines` can only ever be the trailing-week fact +
-optional rainfast clause, never the forecast sentence, and a customer who
-reopens a weeks-old live report link never gets a heavy-rain caveat dated
-to TODAY's weather framed as being about that old treatment. On a LIVE
-render, the forecast caveat fires INDEPENDENTLY of whether the trailing-week
-total is settled (codex P2 #5137 deferred finding c): a same-day live report
-with an open trailing-week window has no settled weekly rain fact at all
-(`settledWeekWeatherForRender` — see below — passes `weekWeather: null` on
-every render, live included), so the caveat is its own standalone line
-rather than a clause appended to a sentence that, on that render, never
-exists; when a settled trailing-week fact IS present, the caveat still
-appends to that sentence exactly as before, so there is never a redundant
-second line for the same signal. Either way the caveat is a treatment claim,
-so it appears only when the visit recorded at least one application; an
-inspection- or sweep-only visit gets no caveat (codex r2 on #5265). A PDF/static
-render carries the trailing-week fact
-ONLY once that 7-day window has closed (`application-conditions.js` stamps
-each result with `windowClosed`; `reports-public.js`
-`settledWeekWeatherForRender` drops an open, still-accumulating week from
-every non-live render so no mid-window rain total is ever baked into a
-cached document — the rain block is simply absent until the window closes,
-and — codex P2 2026-09-28 round 5 — the LIVE page withholds it too: an open window is served from the forecast endpoint, whose current-day value includes hours that have not happened yet, so no render describes predicted rain as observed); a second line may add an ants-after-rain expectation, but
-ONLY when an actual rain signal clears a threshold (>= 0.5" during SWFL
-rainy season Jun–Oct, >= 1" otherwise; a low-confidence reading always uses
-the higher 1" bar) or the same live-only forecast signal fires — never on
-the calendar month alone, and never when there is no rain data at all. That
-second line's WORDING is itself gated (owner ruling 2026-09-28, revised
-codex P1 2026-09-29 rounds 2–3): "trails ... usually mean the colony
-is moving through the treated band" is a TREATMENT claim and requires the
-SAME confirmed exterior/perimeter application evidence the `whatToExpect`
-pyrethroid barrier sentence below requires (an explicit, non-inferred
+emptiness predicate is byte-identical to before this fix).
+The `whatToExpect`
+pyrethroid barrier sentence is a TREATMENT claim (owner ruling 2026-09-28,
+revised codex P1 2026-09-29 rounds 2–3) and requires confirmed
+exterior/perimeter application evidence (an explicit, non-inferred
 `perimeter_spray`/`broadcast_spray` method, or an `applicationArea` chip
 that the CONTROLLED classification — `shared/treatment-area-scopes.json`,
 the same source `report-data.js`'s own interior/exterior scope reads —
@@ -236,13 +192,8 @@ chip "Interior entry points" too, since it never anchored on the
 "Interior" prefix) on a product whose class is `non_repellent` or
 `pyrethroid` — an ant bait, roach gel, or IGR is never a perimeter band
 either, regardless of where it was placed. An unrecognized or free-text
-area string never qualifies, fail closed. No applications at all
-(inspection/sweep-only visit), an interior-only application, or unknown
-method/area all fall back to a treatment-neutral sentence (rain pushes ants
-indoors; text us if activity persists) that states the same honest
-biological fact without claiming a treatment is responsible. The
-treated-band claim, and the ant/colony-specific non-repellent what-to-expect
-line, additionally require an application the technician TAGGED for ants
+area string never qualifies, fail closed. The
+ant/colony-specific non-repellent what-to-expect line additionally requires an application the technician TAGGED for ants
 (the structured `targets` list, word-bounded match on "ant"/"ants" — codex
 P1 2026-09-28 round 4): a non-repellent applied for roaches only, or the
 auto-seeded pest mix on a visit with no ant target, gets pest-neutral
@@ -257,108 +208,7 @@ predicate feeds the `EXPECTATIONS` grounding section below; that path is
 structurally incapable of proving perimeter evidence (its product list is
 deduped by catalog product, not by application) and so always gets the
 neutral wording, never a stronger claim than the deterministic card itself
-would make with the same missing evidence. The pest week's rain reading is
-**FROZEN AT FIRST RENDER** (codex P0 2026-09-28, refined codex P1
-2026-09-29 rounds 3–4 — the SAME pin the lawn water balance above uses,
-for the identical reason): `report-data.js`'s `resolvePestWeekWeather` /
-`resolvePestWeekWeatherForBuild`, called from INSIDE `buildReportV1Data`
-itself, is the ONE canonical resolution every caller shares — the direct
-PDF route's pre-render pass, `pdf-queue.js`'s pre-render pass, AND the
-browser's own independent live `/data` fetch all call `buildReportV1Data`.
-`pestWeekWeatherPendingReason` (public, top-level, sibling of the boolean)
-says WHY: `open_window` (time-dependent — `pdf-queue.js` defers the job to
-the next ET midnight, reason `pest_week_weather_unsettled`),
-`no_coordinates` (a legacy record the geocoder backstop may still fill —
-also deferred, `pest_week_weather_no_coordinates`), or `unavailable` /
-`unfrozen` (a provider outage, a fetch timeout or a failed freeze — TRANSIENT,
-reason `pest_week_weather_unavailable`, which takes the queue's normal
-5/30/240-minute failure retry ladder instead of waiting for midnight; codex
-P2 2026-09-28 round 5). A record whose completion-time identity snapshot has
-FROZEN `mapCenter` (even as null) can never regain coordinates, so its
-missing coordinates are PERMANENT and cacheable, not pending. Reports the
-Pest V2 composer excludes — cockroach-family typed reports, or
-`PEST_REPORT_V2` off — never resolve weather at all (no fetch, no pin, never
-uncacheable over weather). The lookup is OPT-IN (codex P2 2026-09-28 round 4, `pestWeekWeather: true`
-in `buildReportV1Data`'s options): only the `/data` response builder
-(which also serves the direct PDF route) and `pdf-queue.js` pass it; every
-other caller — e.g. the public `/:token/map.svg` handler, which renders no
-expectations — skips the resolution entirely (no fetch, no pin write, and
-`pestWeekWeatherUncacheable` stays false), so a cold provider outage can
-never hold a request that has no use for the weather. Live requests bound
-the lookup at 1.2 s; PDF pre-renders stay unbounded.
-Inside `reports-public.js`, `buildServiceReportV1ResponseData`'s own
-`pestWeekWeather` param (`pestExpectationsWeather`, mirroring the
-`upcomingVisitsCard`/`nearYou` opt-in pattern) is what threads that value
-down to `buildReportV1Data` above AND gates the separate live heavy-rain NWS
-forecast fetch (`fetchPestRainForecastHeavySafe`, its own ~1.2 s deadline)
-further down the same function — the direct PDF route and the `/data` route
-both pass `pestExpectationsWeather: true`; `POST /:token/ask` (the Q&A
-endpoint) does not (codex P2 2026-09-28 round 4 originally scoped the
-opt-in to `report-data.js` only, which left the WRAPPER passing
-`pestWeekWeather: true` unconditionally for every one of its own callers,
-`/ask` included — codex P2 #5137 deferred finding a). `/ask` calls the
-builder purely for report CONTEXT and `answerServiceReportQuestion` never
-reads `data.pestReportV2.expectations`, so it was paying up to ~1.2 s for
-the week-weather lookup and another ~1.2 s for the forecast on every
-customer question, under the general report limiter, for a field it never
-serves.
-The first successful render freezes the settled week onto
-`service_records.structured_notes.pestWeekWeather` (first-writer-wins, an
-atomic conditional UPDATE guarded on the key's absence — no preceding
-read, exactly like the lawn freeze); every later reader — a pre-render
-preflight OR a live view, in either order — replays the SAME persisted
-value. This is what makes `pestWeekWeatherUncacheable` sound: an earlier
-design fetched the week INDEPENDENTLY in each of the three call sites (a
-preflight racing its own short deadline in one process invocation cannot
-know what the browser's own fetch, in a SEPARATE request, will resolve
-moments later — a successful preflight followed by a browser-side timeout
-would cache a PDF that disagrees with what the browser actually rendered);
-the pin removes that divergence entirely, since there is no longer a
-separate fetch anywhere to disagree with the render.
-`pestWeekWeatherUncacheable` is a public, top-level boolean
-`report-data.js` attaches directly to the object `buildReportV1Data`
-returns (sibling of `pestReportV2`, which is composed later in
-`reports-public.js`'s wrapper — so the marker survives even when
-`pestReportV2` itself composes to nothing), TRUE whenever the gate is on,
-either the visit has NO coordinates yet (codex P2 2026-09-28 round 4:
-that state is PENDING, not permanent — the hourly geocoder backstop fills
-null customer/service-location coordinates, the same `no_coordinates`
-rule the lawn water balance uses — so nothing is fetched but nothing is
-cached either) or a fetch was attempted and the result is not both SETTLED (`windowClosed === true`) AND POPULATED
-(`rainInches != null`) AND successfully FROZEN — an open window, a
-provider outage disguised as a "settled" empty reading
-(`fetchServiceWeekWeather`'s own fallback can legitimately return
-`{ rainInches: null, windowClosed: true }` for a geocoded property when
-every source misses), an unexpected fetch exception, and a freeze write
-that could not be persisted (or read back) are all treated alike — never
-cacheable, since a retry (of the freeze, or simply the window closing) can
-recover any of them and the render only shows "no rain block" because the
-data is missing, not because none exists. The raw provider numbers
-(`rainInches`, `dailyRain`, ...) that feed `expectations.rain` are
-server-internal only, carried from `buildReportV1Data` to the caller
-solely through the same opt-in `expectationFactsOut` out-param
-`moa_group`/`rainfast_minutes` already use — never attached to the object
-the function returns, so nothing beyond the boolean marker and the
-customer-facing `rain.lines` sentence documented above reaches the public
-payload. **LIVE requests only** are additionally bounded to a short
-(~1200ms) deadline on the resolver call — `resolvePestWeekWeatherForBuild`
-— so a slow provider never holds a customer's page load; on a timeout the
-request gets the SAME `{ unavailable: true }` sentinel a fetch exception
-produces, and the underlying resolution keeps running in the background
-(never cancelled) and still freezes the real answer once it settles — the
-timed-out request is never itself the one writing a freeze, so it can
-never persist a wrong or partial answer. A background PDF/static
-pre-render pass (the direct route or `pdf-queue.js`) is not a live UX
-concern and stays UNBOUNDED, matching the lawn water balance's own
-equivalent fetch exactly (no deadline there either). Both PDF
-cache-decision sites (the direct `/:token` route and the queued renderer
-in `pdf-queue.js`) read `pestWeekWeatherUncacheable` straight off the
-object `buildReportV1Data` returns and skip storing under the stable
-`-pex2` key when it is set, so a later render — once the window closes or
-the provider recovers — is what gets cached, not a permanent "no rain
-block" copy. This flag rides the JSON payload the same way
-`lawnAssessment.weekWeatherUncacheable` already does; it is a boolean
-cache-eligibility marker, not visit data.
+would make with the same missing evidence.
 `spiders: { headline, whatWeDid, expectation }` — a fixed,
 non-guaranteeing acknowledgment card whose SOLE trigger (owner ruling
 2026-09-28, revised: a spider-targeted product does NOT by itself establish
@@ -457,24 +307,18 @@ the AI writer's plain variant leaves out label durations ("up to 8
 months") and customer instructions, and the Tekko Pro 6-month
 cockroach-nymph sentence needs a roach target on that application. Never a
 "guaranteed" or "eliminated" claim (screened through the existing
-`validateCustomerCopy` banned-copy guard). The what-to-expect facts (never the rain block, never
-the spider block, never the live forecast clause) also feed an `EXPECTATIONS` section
+`validateCustomerCopy` banned-copy guard). The what-to-expect facts (never the spider block) also feed an `EXPECTATIONS` section
 into the AI report writer's grounding context
 (`report-copy-context.js`'s `buildReportCopyContext`) under the same gate,
 so generated copy never contradicts the deterministic blocks — that
 grounding text is a prompt input, not part of any customer-fetchable
 payload. The grounding carries NO rain or ants-after-rain lines at all
-(codex P1 2026-09-28 round 4): the writer runs at completion, the same day
-as the visit, when the trailing 7-day window is by definition still
-accumulating, so any total would be a partial reading baked permanently
-into saved summary text while the PDF deliberately withholds that same
-number until `windowClosed` — only the product-class what-to-expect lines
+(codex P1 2026-09-28 round 4) — only the product-class what-to-expect lines
 ground the writer; that caller has no per-application method/area data (its product
 list is deduped by catalog product, not by application), so it always
 falls back to the non-barrier pyrethroid wording rather than assuming a
 barrier — the same fail-closed default, never a contradiction with the
-deterministic card. The grounding never resolves weekly weather for the visit (no
-serviced-parcel lookup, no pin read) — rain is a render-time card only. `moa_group` and `rainfast_minutes` (the catalog facts
+deterministic card. `moa_group` and `rainfast_minutes` (the catalog facts
 that drive this classification) are SERVER-INTERNAL ONLY (codex P0
 2026-09-28): they are never present on `data.applications[].product` in any
 render (gate on or off, every service line) — `report-data.js`'s
@@ -565,7 +409,9 @@ unless exactly `true`, read at startup). On, the LIVE service-report payload
 (`/api/reports/:token/data`, the only caller that opts in with
 `planSummary: true`, built with `mode: 'live'`; the `/ask` Q&A build and every
 other build neither read nor carry it) may carry `planSummary: { year, visitsThisYear,
-reservicesThisYear }` for the token's own customer, only when that customer
+reservicesThisYear, tier }` (`tier` added 2026-10-04: the member's CURRENT
+`customers.waveguard_tier` when it is Bronze, Silver, Gold or Platinum, else
+`null`; never the tier frozen on the visit) for the token's own customer, only when that customer
 is an active plan member (`isActivePlanCustomer`, fail-closed to non-member)
 with at least one performed visit this year; anyone else gets no field and no
 plan wording on the page. The plan is account-level, so the counts cover the
@@ -2324,12 +2170,12 @@ For tree/shrub assessments, a technician-hidden photo metric and its influenced
 overall score are `null` in reports and historical trends. Stored review decisions
 also mask legacy healthy substitutions on read; original AI scores remain in the
 internal audit record. Partial assessments retain their scored categories without
-whole-landscape reassurance. Public and queued PDFs share the tree-only `tsreview2`
+whole-landscape reassurance. Public and queued PDFs share the tree-only `tsreview3`
 cache revision so older PDFs cannot retain the substituted scores. Token, access,
 privacy, and rate-limit guards are unchanged.
 Under `GATE_LAWN_PROPERTY_HISTORY`, lawn trends, initial scores and before/after comparisons use the visit property’s confirmed assessments, one installed result per visit, bounded by the report visit date and applicable baseline-reset window. Mowing and water-gap histories use the same proven visit eligibility. Payload keys stay unchanged; `assessmentDate` and trend dates use visit dates, including the seasonal calculation and water-gap history cutoff. Frozen weather remains keyed to the assessment run date. The PDF signature includes the resolved history identity. The existing opaque `asig` may carry a signed `h1.<history fingerprint>.<HMAC>` envelope: the data route verifies it and refuses a changed history or a disabled gate with the existing generic 409 pin refusal. Legacy signatures remain accepted; token, eligibility, privacy and rate-limit guards remain in force.
 Lawn report payload cleanup (lawn report rebuild P6): the `/api/reports/:token/data` lawn `reportV2` no longer carries `snapshot.mainWatch` or the top-level `seasonalNote` (the web hero and PDF never rendered either; `snapshot.seasonalNote`, which the hero renders, and `trends.seasonalNote` are unchanged), and `reportV2.photoSummary` is `null` instead of the stock “No additional observations from the photo review.” placeholder so no empty-evidence sentence prints under the photos or in the PDF. The lawn narrative model no longer writes `mainWatch` or `treatmentSummary`; older frozen payloads and cached narratives that still carry those keys are tolerated (extra keys are ignored). No token, eligibility, privacy or rate-limit change; `LAWN_RENDER_STRATEGY` and `SERVICE_REPORT_PDF_STORAGE_VERSION` bumped so cached renders re-key.
-Lawn result-timing copy (lawn report rebuild P16, owner 2026-10-03): on the `/api/reports/:token/data` lawn `reportV2` (and the PDF and report-email renders that share `buildReportV1Data`) no hand-written lawn copy states an unsourced result timeline. The seasonal dormancy explanation on the color diagnosis card (`diagnosis[].customerExplanation` / `explanation` when `seasonal` is true) now comes from the approved `seasonal_dip` expectation row in `server/config/lawn-expectations.js` ("...often returns as nights warm", no count) instead of "should green back up as it warms"; while the row is not `approved` it falls back to the same sentence without the promise. The cross-season notes (`progressionNote`, `trends.seasonalNote`, and the progress engine's in-process `seasonalLine`) carry the same hedge ("...and color often returns as nights warm" / "...often returns as nights warm") in place of "greens back up" / "recovers as it warms"; all three copy sites ask one shared check (`approvedSeasonalDipRow` in `lawn-seasonality.js`, read at call time), and while the row is not `approved` the notes end at "...in the cooler months." with no returns clause. The gated lawn re-service `expectation` (GATE_RESERVICE_REPORT_COPY, lawn treated outcome) no longer says "two to three weeks" or "after three weeks"; it reads "Lawn treatments take time to show, and how fast depends on the problem and the weather. Contact us if the problem areas are not improving." These apply with or without the lawn gates, so gate-off lawn output changes by those sentences only. `LAWN_RENDER_STRATEGY` is bumped to `p9-lawn-seasonal-timing-20261003` so cached lawn PDFs and renders re-key once (`SERVICE_REPORT_PDF_STORAGE_VERSION` is unchanged: the lawn signature already feeds the PDF key). No token, eligibility, privacy or rate-limit change.
+Lawn result-timing copy (lawn report rebuild P16, owner 2026-10-03): on the `/api/reports/:token/data` lawn `reportV2` (and the PDF and report-email renders that share `buildReportV1Data`) no hand-written lawn copy states an unsourced result timeline. The seasonal dormancy explanation on the color diagnosis card (`diagnosis[].customerExplanation` / `explanation` when `seasonal` is true) now comes from the approved `seasonal_dip` expectation row in `server/config/lawn-expectations.js` ("...often returns as nights warm", no count) instead of "should green back up as it warms"; while the row is not `approved` it falls back to the same sentence without the promise. The cross-season notes (`progressionNote`, `trends.seasonalNote`, and the progress engine's in-process `seasonalLine`) carry the same hedge ("...and color often returns as nights warm" / "...often returns as nights warm") in place of "greens back up" / "recovers as it warms"; all three copy sites ask one shared check (`approvedSeasonalDipRow` in `lawn-seasonality.js`, read at call time), and while the row is not `approved` the notes end at "...in the cooler months." with no returns clause. The gated lawn re-service `expectation` (GATE_RESERVICE_REPORT_COPY, lawn treated outcome) no longer says "two to three weeks" or "after three weeks"; it reads "Lawn treatments take time to show, and how fast depends on the problem and the weather. Contact us if the problem areas are not improving." These apply with or without the lawn gates, so gate-off lawn output changes by those sentences only. `LAWN_RENDER_STRATEGY` was bumped to `p9-lawn-seasonal-timing-20261003` (now `p10-...`, see the lead section) so cached lawn PDFs and renders re-key once (`SERVICE_REPORT_PDF_STORAGE_VERSION` is unchanged: the lawn signature already feeds the PDF key). No token, eligibility, privacy or rate-limit change.
 Confirmed assessment property stamps remain eligible after another property is added, subject to ownership and conflicting visit/address checks; unstamped assessment and ancillary histories still require the live sole-property/no-move fallback. Unresolved property scope retains only the report visit’s installed assessment (or its valid signed pin), without prior-property comparisons. An empty same-day baseline reset excludes confirmations preceding the reset from the active window; reports for those earlier confirmations retain their historical window.
 The lawn assessment payload also carries `droughtStress` (`none`, `minor`,
 `moderate`, `severe`, or `null`) from the linked, tech-confirmed assessment's
@@ -2577,7 +2423,12 @@ optional keys, absent (never `null`) unless there is text: `whatToExpect` (at mo
 products, each row's visible-change sentence and, when the gap to the next lawn
 visit at this property is known, its by-next-visit sentence, printed word for
 word, a sentence that would pass the cap left out whole; every unapproved row
-is skipped) and
+is skipped; the block is then composed once by `composeExpectPieces`
+(`lawn-copy-v6.js`): at most ONE by-next-visit sentence prints, the first
+product's, and a sentence already stated, the same words or words held inside a
+sentence printed before it, is not printed again, every sentence that stays
+verbatim, and the same composition runs when a frozen entry replays, so a copy
+frozen before the rule replays without its repeats) and
 `watching` ("We are also keeping an eye on <topics>." for the watched issues
 after the one the headline names, at most three). The lead's word budget gives
 these fields up, when over 250 words, in the order `why`, `watching`, `applied`,
@@ -2603,7 +2454,18 @@ key. The lawn PDF prints the lead's headline as its "Overall" line (the frozen o
 under this gate, so a later assessment correction cannot make the PDF and the
 live report disagree; without it, the same `statusHeadline`) and `whatToExpect`
 as a "What to expect" line (the insights it already lists cover `watching`),
-and its cache signature carries a `:copyv6=1` stamp while the gate is live. While the gate is live,
+and its cache signature carries a `:copyv6=1` stamp while the gate is live.
+The lawn PDF prints watering only from the reconciled `reportV2` (the `aftercare`
+and customer-action lines the web report prints too): with a lawn `reportV2` it
+prints no "Hold irrigation until ..." line from the raw product-advisory timer
+(`dynamicContext.reentry.irrigationReadyAt`), which the web report never shows;
+a lawn payload with no `reportV2` keeps it. The PDF also leaves out the
+clean-visit finding row ("No lawn issues observed this visit", category
+`no_activity`) whenever the payload carries another finding or a watch or
+needs-attention insight or snapshot, the same condition that raises
+`todays_result_overclaims_clear`; a truly clean visit still prints it.
+`LAWN_RENDER_STRATEGY` is `p10-lawn-report-consistency-20261005` for these
+changes, so cached lawn PDFs re-key once. While the gate is live,
 `snapshot.nextVisit` (the lead's "Next visit" line) is the next lawn booking AT
 THIS REPORT'S PROPERTY (`report-data.js` `lawnNextVisitAtProperty`, the shared
 same-line / same-property scan): a booking at another of the customer's homes is
@@ -6639,45 +6501,28 @@ effective post-discount amounts (`annualAfterDiscount`/`visitsPerYear`),
 never the pre-discount list `perTreatment`.
 NOTHING is sent to the customer and no bell rings: one `activity_log` row,
 written ATOMICALLY with the estimate update, is the whole audit surface.
-Good / Better / Best offer tiers (`GATE_ESTIMATE_OFFER_TIERS`, owner
-2026-10-05; STRICT opt-in, off = every response and accept byte-identical):
-an eligible one-time-toggle estimate (`show_one_time_option`, v1 shape,
-recurring pest plus lawn and/or tree & shrub, residential, no opt-out, no
-member evidence, no manual discount) carries `pricing.offerTiers` on `/data`
-— `good` (one-time visit, `oneTimeTotal`), `better` (pest-only plan,
-`usesBundleFrequencies:true` — the bundle's own pest-only ladder) and `best`
-(the full quoted bundle with its OWN `frequencies` + `serviceCadenceCombos`,
-`pestOnly:false`, `services` as the key list, plus its own contract view for
-the page: `sections` (pricing sections), `combinedRecurring` and
-`waveGuardTier`) — plus `pricing.offerTierDefaultKey`. Served only on a
-live accept-active surface, never to a LIVE active member — judged the way the
-accept resolves the customer: the linked `customer_id`, else the prospective
-phone match (`offerTierMemberBlock`, strict, fail-closed) — and a tiered
-payload withholds the `serviceOptOut` block (no remove / add rails). A send
-snapshot or cached bundle frozen before the gate carries no tier verdict:
-under a live gate it is served with its prices untouched and the live v1
-build's tier fields grafted on (`offerTiersEvaluated` stamps a judged
-bundle so an ineligible estimate is not rebuilt on every read). `PUT /:token/accept` takes `selectedTier`: absent = today's
-behavior; an unknown value, a value on an estimate with no stored tiers, or
-a tier whose service mode disagrees with `serviceMode` is 400
-`offer_tier_unavailable`; `best` keeps the companion programs the toggle's
-companion exclusion drops (the pest-only list filters and the
-`result.recurring.services` rewrite are skipped), prices off the stored
-`best` ladder / combos, refuses `prepay_annual` (400), and is recorded as
-`estimate_data.customerSelection.offerTier`; from then on (accepted or
-price-locked row) `/data` serves the Best tier's own view — ladder, combos and
-summary, picker fields dropped, `pricing.acceptedOfferTier: 'best'` — even
-after the gate is turned off, so the recap keeps what was booked. `/available-slots` (query),
-`/find-slots` and `/reserve` (body) take `offerTier`; only `best` changes
-the visit profile (every quoted program; part of the slot-cache key), and
-only when the live gate is on, the estimate's stored bundle offers that
-tier, and the customer the accept would land on is not a LIVE active member
-(the same `offerTierMemberBlock`, fail-closed on any read error) — the same
-three facts the accept re-checks (before and again inside its transaction,
-409) — and `/reserve` re-judges all three on the LOCKED row inside the
-reservation transaction (409 `offer_tier_unavailable` when the tier is gone or
-the customer became a member), so a hold can never size a visit the accept
-refuses; the accept's reservation commit carries the resolved value.
+Good / Better / Best (`GATE_ESTIMATE_OFFER_TIERS`, STRICT opt-in, needs the
+opt-out gate; off = every response byte-identical) is a VIEW over this rail,
+never a second pricing path. `/data` may carry a top-level `offerTiers`
+block for a row the office marked (`estimate_data.offerTiersRequested`) on a
+live accept-active surface (never a draft preview, never an accepted or
+price-locked row) when THIS rail would allow the move for `lawn_care` (its
+own removable / restore-blocked / proposal / tier-selection resolvers
+decide): `{ state: 'best' | 'pest_only', companionKey, companionLabel, good:
+{ oneTimeTotal } | null, better: { rows, oneTimeTotal, waveGuardTier },
+best: { rows, oneTimeTotal, waveGuardTier } }`, `rows` being
+`{ service, perApplication, visitsPerYear? }`. The figures for the state the
+row is NOT in are this rail's own dry run (a removal in `best`, an add-back
+in `pest_only`), so a tile never shows a price the rail would not persist;
+any refusal or error omits the block. The dry-run response carries
+`perApplication` (the per-line terms the `previewBasis` digest binds) as
+data. The commit sets `show_one_time_option` on a marked row from the lawn
+line: on when lawn is removed (customer, or the staff send-time park) and
+the delivery validator allows the option on the repriced row; always off
+when lawn is added back, with the gate on or off — the one-time option never
+sits on an estimate that carries a companion program. The page's tiles drive
+the existing dry-run → `previewBasis` → commit steps; there is no tier
+parameter on accept, the slot routes or any intent route.
 
 The same PUT is the priced ADD rail under `GATE_ESTIMATE_SERVICE_ADD`
 (STRICT opt-in, needs the opt-out gate; off = the `/data` `addable` stamp is

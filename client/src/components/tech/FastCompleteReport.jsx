@@ -22,14 +22,14 @@ import '../../styles/tech-workflow.css';
 
 // The full form's own three customer choices (its fourth, "Customer had
 // specific concern", stays on the full form). The writer reads the full
-// form's wording; the tiles say it shorter. Owner 2026-10-01: "not home —
-// full access" is picked every time the sheet opens.
+// form's wording; the tiles say it shorter. Owner 2026-10-04 (replaces
+// 2026-10-01): "home — spoke with them" is picked every time the sheet opens.
 export const CUSTOMER_HOME_CHOICES = [
   { value: 'tech_home_spoke_with_them', label: 'Home — spoke with them', writerLabel: 'Customer home — spoke with them' },
   { value: 'not_home_full_access', label: 'Not home — full access', writerLabel: 'Customer not home — full access' },
   { value: 'not_home_partial_access', label: 'Not home — partial access', writerLabel: 'Customer not home — partial access' },
 ];
-export const DEFAULT_CUSTOMER_HOME = 'not_home_full_access';
+export const DEFAULT_CUSTOMER_HOME = 'tech_home_spoke_with_them';
 export const customerHomeWriterLabel = (value) => CUSTOMER_HOME_CHOICES.find((choice) => choice.value === value)?.writerLabel || '';
 
 // The pest activity tracker on the full form's 0–5 scale, 1–5 here (owner
@@ -977,14 +977,17 @@ export function StepFooter({ reason, warn, label, onAction, busy, disabled, cove
 
 // A confirmable completion prompt (the edited-report heads-up, a promise
 // that changed after the report was written): the server's own words, then
-// send as is or go back.
-export function ConfirmPrompt({ prompt, onConfirm, onBack, busy }) {
+// send as is or go back. A Go back that could not discard the attempt saved
+// on this device keeps the prompt open, so its error shows here, as on the
+// recovered-completion view.
+export function ConfirmPrompt({ prompt, error, onConfirm, onBack, busy }) {
   return (
     <div className={cn('tech-visit-card', 'tech-report-confirm')} role="alertdialog" aria-label="Before this goes out">
       <p className="tech-visit-section-title">Before this goes out</p>
       {String(prompt.message || '').split('\n').filter(Boolean).map((line) => (
         <p key={line} className="tech-visit-muted">{line}</p>
       ))}
+      {error && <ActionFeedback error className="tech-visit-feedback">{error}</ActionFeedback>}
       <div className="tech-visit-tile-grid">
         <Chip label="Go back" disabled={busy} onClick={onBack} />
         <Chip label="Send as is" disabled={busy} onClick={onConfirm} />

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
-import { cleanVisitSummary, reserviceCardView } from './ReportViewPage';
+import { cleanVisitSummary, hidesTreatedAreas, reserviceCardView } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
@@ -704,6 +704,9 @@ export default function ServiceReportDocument({ data, token }) {
   // as reportV2.techParagraph. Absent key prints nothing.
   const techParagraph = v2Lead?.techParagraph
     || (data.serviceLine === 'tree_shrub' && typeof v2?.techParagraph === 'string' && v2.techParagraph.trim() ? v2.techParagraph : null);
+  // The lawn V2 payload's reconciled watering lines are the only watering
+  // instruction the report prints (see the Re-entry block below).
+  const lawnV2Watering = data.serviceLine === 'lawn' && Boolean(v2);
 
   const v2StatusLine = (() => {
     if (pestV2?.status?.label) return { label: 'Protection status', value: pestV2.status.label, detail: pestV2.statusSummary };
@@ -868,7 +871,10 @@ export default function ServiceReportDocument({ data, token }) {
   // document was dropping entirely.
   // ⛔ customerDescription ONLY — items also carry internalDescription,
   // which is staff copy and must never egress (same rule as technician_notes).
-  const coverageItems = (data.serviceCoverage?.enabled !== false
+  // A pest report names no treated areas (owner 2026-10-05, same rule as the
+  // web report): no "Areas serviced" section and no per-product areas line.
+  const hideAreas = hidesTreatedAreas(data);
+  const coverageItems = (data.serviceCoverage?.enabled !== false && !hideAreas
     ? (data.serviceCoverage?.items || []) : [])
     .filter((item) => item && item.areaName);
   const coverageSummary = data.serviceCoverage?.summary || null;
@@ -910,8 +916,24 @@ export default function ServiceReportDocument({ data, token }) {
   // A finding that carries structured content (detail or recommendation)
   // came from the findings pipeline; a bare title did not. Fail closed on
   // the bare titles — AGENTS.md: raw technician_notes never egress.
+  // A clean-visit "No ... observed this visit" row is dropped when the payload
+  // carries any finding, watch item or stress pattern. Lawn and tree & shrub
+  // share the reportV2 slot, so every status the V2 builders emit counts except
+  // the clear ones (healthy / strong / stable / good / tracking / unknown):
+  // watch, needs_attention and urgent. Same idea as the server's
+  // todays_result_overclaims_clear reconciliation, plus any other recorded finding.
+  // Only lawn and tree & shrub: their no_activity row speaks for the whole visit.
+  // A pest report's no_activity rows are per zone ("no entry points in the
+  // garage") and stand beside activity elsewhere.
+  const V2_CLEAR_STATUSES = ['healthy', 'strong', 'stable', 'good', 'tracking', 'unknown', ''];
+  const v2IssueStatus = (status) => !V2_CLEAR_STATUSES.includes(String(status || '').toLowerCase());
+  const wholeVisitLine = data.serviceLine === 'lawn' || data.serviceLine === 'tree_shrub';
+  const issueRecorded = wholeVisitLine && ((Array.isArray(data.findings) ? data.findings : []).some((f) => f && f.category !== 'no_activity' && String(f.title || '').trim())
+    || (Array.isArray(v2?.insights) ? v2.insights : []).some((i) => i && v2IssueStatus(i.status))
+    || v2IssueStatus(v2?.snapshot?.status));
   const recordFindings = (Array.isArray(data.findings) ? data.findings : [])
     .filter((finding) => finding && String(finding.title || '').trim())
+    .filter((finding) => !(issueRecorded && finding.category === 'no_activity'))
     .filter((finding) => String(finding.detail || '').trim() || String(finding.recommendation || '').trim());
   // Combined-service visits carry companion sections. internalOnly ones are
   // STAFF-ONLY and must never print — the same rule the web report's print
@@ -1138,19 +1160,9 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
-        {/* Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
-            pestV2.expectations is built server-side (pest-report-v2.js) with
-            forecastHeavyRain always false for this render (mode !== 'live'
-            in reports-public.js) — the NWS forecast piece never reaches a
-            permanent PDF; everything here is already PDF-safe as delivered. */}
-        {pestV2?.expectations?.rain?.lines?.length > 0 && (
-          <div className="doc-keep">
-            <SectionHeader>Rain and your treatment</SectionHeader>
-            {pestV2.expectations.rain.lines.map((line) => (
-              <p key={line} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{line}</p>
-            ))}
-          </div>
-        )}
+        {/* Spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
+            pestV2.expectations is built server-side (pest-report-v2.js) and
+            is already PDF-safe as delivered. */}
         {pestV2?.expectations?.spiders?.expectation && (
           <div className="doc-keep">
             <SectionHeader>{pestV2.expectations.spiders.headline || 'Spiders'}</SectionHeader>
@@ -1339,7 +1351,10 @@ export default function ServiceReportDocument({ data, token }) {
             {sanitizeReentryCopy(reentry?.petAdvisory || (hasActualTreatment ? data.advisory?.pet_advisory : null)) && (
               <Bullet>{sanitizeReentryCopy(reentry?.petAdvisory || data.advisory?.pet_advisory)}</Bullet>
             )}
-            {reentry?.irrigationReadyAt && (
+            {/* A lawn report with the V2 payload gets its watering from the reconciled
+                banner / aftercare / lead (the web report prints no hold line from
+                this raw product-advisory timer), so it is withheld here too. */}
+            {reentry?.irrigationReadyAt && !lawnV2Watering && (
               <Bullet>Hold irrigation until {fmtTime(reentry.irrigationReadyAt)} on {fmtDayLabel(reentry.irrigationReadyAt)}.</Bullet>
             )}
             {hasActualTreatment && sanitizeReentryCopy(data.reportV2?.aftercare?.reentry) && (
@@ -1410,10 +1425,16 @@ export default function ServiceReportDocument({ data, token }) {
                           <div style={{ fontSize: 10.5, color: MUTED, lineHeight: 1.5 }}>
                             {product.active_ingredient && <div><strong style={{ color: INK, fontWeight: 600 }}>Active ingredient:</strong> {product.active_ingredient}</div>}
                             {app.methodLabel && <div><strong style={{ color: INK, fontWeight: 600 }}>Method:</strong> {app.methodLabel}</div>}
-                            {Array.isArray(app.targets) && app.targets.length > 0 && (
+                            {/* A pest product prints no per-product Target (the
+                                label line on the web card replaces the
+                                three-pest list) and no Areas line (owner
+                                2026-10-05). Other lines keep both. */}
+                            {!hideAreas && Array.isArray(app.targets) && app.targets.length > 0 && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Target:</strong> {app.targets.join(', ')}</div>
                             )}
-                            <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones, data.serviceLine)}</div>
+                            {!hideAreas && (
+                              <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones, data.serviceLine)}</div>
+                            )}
                             {(product.precaution_summary || product.reentry_summary) && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
                             )}

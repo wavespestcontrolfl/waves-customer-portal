@@ -14,7 +14,6 @@ import {
   PestStatusHero,
   PestPrimaryMove,
   PestCustomerConcern,
-  PestRainExpectation,
   PestSpiderExpectation,
   PestWhatToExpect,
 } from './PestReportV2';
@@ -50,10 +49,9 @@ export default function PestReportV2Section({ data, token = null, mode = 'live',
       {/* Bug files, seasonal outlook, and the WaveGuard receipt were removed from
           the composed section (owner 2026-07-09) — the components remain exported
           from PestReportV2 for any future re-mount. */}
-      {/* Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark) —
+      {/* Spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark) —
           data.expectations is absent whenever the gate is off or the visit has
-          no relevant facts, so these three render nothing by default. */}
-      {data.expectations?.rain ? <PestRainExpectation rain={data.expectations.rain} /> : null}
+          no relevant facts, so these render nothing by default. */}
       {data.expectations?.spiders ? <PestSpiderExpectation spiders={data.expectations.spiders} /> : null}
       {data.expectations?.whatToExpect && !reportSectionsShown ? <PestWhatToExpect whatToExpect={data.expectations.whatToExpect} /> : null}
     </div>

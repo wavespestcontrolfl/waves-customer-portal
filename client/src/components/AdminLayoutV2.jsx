@@ -100,13 +100,11 @@ function UnreadSrText({ count }) {
   return <span className="sr-only">, {count} conversation{count === 1 ? "" : "s"} needing a reply</span>;
 }
 
-// Main-area padding by layout (see `layout` in the component): the field
-// workspace supplies its own header and bottom nav, so it is edge to edge.
-const MOBILE_SHELL = 1;
+// Main-area padding: desktop, then phone (below the fixed top bar, above the
+// fixed tab bar). /admin/today uses the same chrome as every other page.
 const MAIN_PADDING = [
   { top: 24, bottom: 24, x: 28 },
   { top: "calc(52px + env(safe-area-inset-top) + 16px)", bottom: "calc(56px + env(safe-area-inset-bottom) + 16px)", x: 16 },
-  { top: 0, bottom: 0, x: 0 },
 ];
 
 export default function AdminLayoutV2() {
@@ -140,7 +138,7 @@ export default function AdminLayoutV2() {
   }, [fieldBusy]);
   // Staff-session state machine (verify, offline pass, cross-tab sign-in,
   // 401 handling): see useStaffSession.
-  const { user, userId, authStatus, sessionReady, onField } = useStaffSession();
+  const { user, userId, authStatus, sessionReady } = useStaffSession();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const menuTriggerRef = useRef(null);
   // Mobile drawer: focus moves in on open, Tab is trapped, Escape closes,
@@ -236,12 +234,9 @@ export default function AdminLayoutV2() {
   const openPageFinder = useCallback(() => { if (fieldBusy) return; paletteRef.current?.openNavigation(); }, [fieldBusy]);
 
   const sidebarVisible = !isMobile || sidebarOpen;
-  // On a phone the field workspace (/admin/today) supplies its own header and
-  // bottom nav, so the admin shell's mobile top bar and tab bar step aside.
-  // 0 desktop, 1 phone, 2 phone on the field workspace; indexes the padding
-  // table and the phone-only chrome.
-  const layout = Number(isMobile) * (1 + Number(onField));
-  const mainPadding = MAIN_PADDING[layout];
+  // /admin/today keeps the admin top bar and tab bar on a phone, like every
+  // other page (owner 2026-10-05); the navigation hold below covers them.
+  const mainPadding = MAIN_PADDING[Number(isMobile)];
   const fieldHold = { onClickCapture: holdWhileFieldBusy, "aria-busy": fieldBusy || undefined };
   // The redirect effect runs after render. Apply its existing role policy to
   // the outlet too, so a restricted child's effects cannot run for one frame.
@@ -268,8 +263,9 @@ export default function AdminLayoutV2() {
     >
       <a href="#admin-main" className="admin-skip-link">Skip to content</a>
       {/* Mobile top bar — only visible below breakpoint */}
-      {layout === MOBILE_SHELL && (
+      {isMobile && (
         <div
+          {...fieldHold}
           style={{
             position: "fixed",
             top: "var(--vv-offset-top, 0px)",
@@ -707,7 +703,7 @@ export default function AdminLayoutV2() {
       </main>
 
       {/* Mobile bottom tab bar */}
-      {layout === MOBILE_SHELL && (
+      {isMobile && (
         <nav
           aria-label="Primary"
           className="admin-mobile-tabbar"

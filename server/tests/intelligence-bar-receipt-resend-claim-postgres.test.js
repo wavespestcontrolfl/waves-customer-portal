@@ -423,7 +423,7 @@ postgres('resend_receipt on real PostgreSQL: the writer\'s final check and the a
       mockCloseOut.mockImplementationOnce(async () => { await nineMinutesIn(); return { closed: false, reason: 'gate_off' }; }); // rendering used most of the window
       const seen = {};
       mockSendReceiptEmail.mockImplementation(async (_id, opts) => {
-        seen.allowed = await opts.beforeProviderHandoff({ channel: 'email', to: `${customerId}@example.invalid`, amount: '117.00', paid: PAID_AT.getTime() });
+        seen.allowed = await opts.beforeProviderHandoff({ channel: 'email', to: `${customerId}@example.invalid`, amount: '117.00', paid: PAID_AT.getTime(), optedOut: false });
         seen.lockedAgeMs = Date.now() - new Date((await job()).locked_at).getTime();
         // The request is in flight; part of the window passes and the drain's stale recovery runs.
         await db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ locked_at: db.raw("now() - interval '3 minutes'") });

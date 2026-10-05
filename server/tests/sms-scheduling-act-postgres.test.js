@@ -87,6 +87,14 @@ describeOrSkip('sms scheduling move guard on PostgreSQL', () => {
     expect(offer.closed_at).not.toBeNull();
   }));
 
+  test('a staff text cancelled before it went out (the bar keeps its row as canceled) is not a newer message', () => inTrx(async (trx) => {
+    const { customerId, decisionId, guard } = await seed(trx);
+    await trx('sms_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: '+19415550199', to_phone: PHONE,
+      message_body: 'Let me check Wednesday for you', status: 'canceled', created_at: new Date('2040-03-01T14:59:50Z'), message_type: 'manual' });
+    await guard({ trx });
+    expect((await trx('sms_offer_decisions').where({ id: decisionId }).first()).execution_status).toBe('moved');
+  }));
+
   test('each fence refuses and writes nothing', async () => {
     const cases = {
       // An Edit appointment save: no move is logged, only the row differs.

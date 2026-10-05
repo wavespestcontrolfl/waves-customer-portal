@@ -1,237 +1,254 @@
 // @vitest-environment jsdom
-// Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): on a tiered /data payload
-// the plan picker replaces the [Recurring | One-time] toggle, Best swaps in the
-// full-bundle sections, Good is the one-time visit, and only Best sends
-// `offerTier` on the slot reads. An untiered estimate keeps the old toggle.
+// Good / Better / Best on a pest + lawn estimate: the picker is a view over
+// the service opt-out rail. These tests pin the page wiring — the picker
+// replaces the one-time toggle, a tile move runs the rail's dry run and then
+// its commit (bound to the dry run's previewBasis), and a payload without an
+// offerTiers block renders exactly as before.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import WavesShell from '../components/brand/WavesShell';
-import { setGlassDefault } from '../lib/estimate-glass-copy';
-import EstimateViewPage, { carryPestCadenceAcrossTiers, estimateAddServiceOffer, offerTierSuppressKeys, pricingViewForOfferTier } from './EstimateViewPage';
-import pageSource from './EstimateViewPage.jsx?raw';
+import EstimateViewPage, { selectedOfferTierKey } from './EstimateViewPage';
 
-const routerState = vi.hoisted(() => ({ token: 'tiered-token' }));
-vi.mock('react-router-dom', () => ({ useParams: () => ({ token: routerState.token }) }));
+vi.mock('react-router-dom', () => ({ useParams: () => ({ token: 'offer-tiers-token' }) }));
 vi.mock('../lib/stripeLoader', () => ({ loadStripeSdk: vi.fn(async () => null) }));
 
-afterEach(() => {
-  cleanup();
-  window.history.replaceState({}, '', '/');
-  setGlassDefault(false);
-  vi.unstubAllGlobals();
+const frequency = (key, annual) => ({
+  key, label: 'Quarterly', monthly: Math.round(annual / 12), annual,
+  included: [{ key: 'service', label: 'Recurring service' }], addOns: [],
 });
 
-const pestRow = { service: 'pest_control', label: 'Pest Control (Quarterly)', perTreatment: 107, displayPrice: 96.3, visitsPerYear: 4 };
-const lawnRow = { service: 'lawn_care', label: 'Lawn Care', perTreatment: 77, displayPrice: 69.3, visitsPerYear: 9 };
+const section = (key, label, isPest, overrides = {}) => ({
+  key, label, isRecurring: true, isPest, frequencies: [frequency('quarterly', 600)], copy: { priceWording: {} }, ...overrides,
+});
 
-const pestOnlyFrequency = {
-  key: 'quarterly', label: 'Quarterly', monthly: 32.1, annual: 385.2, perVisit: 107,
-  perServiceTreatments: [pestRow], included: [{ key: 'service', label: 'Recurring service' }], addOns: [],
-};
-const bestPestFrequency = {
-  key: 'quarterly', label: 'Quarterly', monthly: 32.1, annual: 385.2, perVisit: 107,
-  included: [{ key: 'service', label: 'Recurring service' }], addOns: [],
-};
-const lawnFrequency = {
-  key: 'enhanced', label: 'Enhanced lawn program', monthly: 51.98, annual: 623.76,
-  included: [{ key: 'service', label: 'Lawn visits' }], addOns: [],
-};
-const bestFrequency = {
-  key: 'quarterly', label: 'Quarterly', monthly: 84.08, annual: 1008.96, perVisit: 107,
-  perServiceTreatments: [pestRow, lawnRow], included: [{ key: 'service', label: 'Recurring service' }], addOns: [],
-};
-
-const bestSections = [
-  {
-    key: 'pest_control', label: 'Pest Control', isRecurring: true, isPest: true,
-    defaultFrequencyKey: 'quarterly', frequencies: [bestPestFrequency], copy: { priceWording: {} },
+const TIERS_BEST = {
+  state: 'best',
+  companionKey: 'lawn_care',
+  companionLabel: 'Lawn Care',
+  good: { oneTimeTotal: 149 },
+  better: { rows: [{ service: 'pest_control', perApplication: 114 }], oneTimeTotal: 99, waveGuardTier: 'Bronze' },
+  best: {
+    rows: [
+      { service: 'pest_control', perApplication: 96.3, visitsPerYear: 4 },
+      { service: 'lawn_care', perApplication: 69.3, visitsPerYear: 9 },
+    ],
+    oneTimeTotal: 0,
+    waveGuardTier: 'Silver',
   },
-  {
-    key: 'lawn_care', label: 'Lawn Care', isRecurring: true, isPest: false,
-    defaultFrequencyKey: 'enhanced', frequencies: [lawnFrequency], copy: { priceWording: {} },
-  },
-];
+};
 
-function tieredPayload({ tiers = true } = {}) {
+function bestPayload({ offerTiers = TIERS_BEST, showOneTimeOption = false } = {}) {
   return {
-    glassDefault: false,
+    ...(offerTiers ? { offerTiers } : {}),
     estimate: {
-      customerFirstName: 'Casey',
-      address: '1 Tiered Way',
-      serviceCategory: 'pest_control',
-      acceptance: { mode: 'standard_slot_pick' },
-      defaultServiceMode: 'recurring',
-      isOneTimeOnly: false,
-      showOneTimeOption: true,
-      billByInvoice: false,
-      membership: null,
-      intelligence: null,
-      acceptedServiceMode: null,
-      acceptedFrequencyKey: null,
-      askToken: 'ask-token',
+      customerFirstName: 'Rita', address: '12 Oak Lane', serviceCategory: 'pest_control',
+      acceptance: { mode: 'standard_slot_pick' }, defaultServiceMode: 'recurring',
+      isOneTimeOnly: false, showOneTimeOption, billByInvoice: false,
     },
     pricing: {
-      // The bundle's own view is PEST-ONLY (what Better shows).
-      frequencies: [pestOnlyFrequency],
-      services: [{
-        key: 'pest_control', label: 'Pest Control', isRecurring: true, isPest: true,
-        defaultFrequencyKey: 'quarterly', frequencies: [pestOnlyFrequency], copy: { priceWording: {} },
-      }],
-      anchorOneTimePrice: 264,
-      oneTimeBreakdown: { total: 264, items: [{ service: 'one_time_pest', label: 'One-Time Pest Control', amount: 264, kind: 'charge' }] },
-      askChips: [],
-      defaultServiceMode: 'recurring',
-      renderFlags: {},
-      ...(tiers ? {
-        offerTierDefaultKey: 'better',
-        offerTiers: [
-          { key: 'good', label: 'One-time visit', serviceMode: 'one_time', services: ['one_time_pest'], oneTimeTotal: 264 },
-          { key: 'better', label: 'Pest control plan', serviceMode: 'recurring', services: ['pest_control'], usesBundleFrequencies: true },
-          {
-            key: 'best',
-            label: 'Pest control + companion plan',
-            serviceMode: 'recurring',
-            services: ['pest_control', 'lawn_care'],
-            sections: bestSections,
-            frequencies: [bestFrequency],
-            combinedRecurring: { waveGuardTier: 'silver', waveGuardTierLabel: 'Silver', waveGuardDiscountPct: 0.1, monthlySubtotal: 84.08 },
-            waveGuardTier: 'Silver',
-          },
-        ],
-      } : {}),
+      services: [
+        section('pest_control', 'Pest Control', true, { removable: true }),
+        section('lawn_care', 'Lawn Care', false, { removable: true }),
+      ],
+      askChips: [], defaultServiceMode: 'recurring', renderFlags: {},
+      ...(showOneTimeOption ? { anchorOneTimePrice: 149 } : {}),
     },
+    serviceOptOut: { removedKeys: [], removedLabels: [] },
     cta: { canAccept: true, terminalState: null, quoteRequired: false, reviewBeforeBooking: false },
   };
 }
 
-function stubFetch(payload) {
-  const calls = [];
-  vi.stubGlobal('fetch', vi.fn(async (url, init) => {
-    const href = String(url);
-    calls.push({ url: href, init });
-    if (href.includes('/available-slots')) return { ok: true, status: 200, json: async () => ({ primary: [], expander: [] }) };
-    if (href.includes('/data')) return { ok: true, status: 200, json: async () => payload };
-    return { ok: true, status: 200, json: async () => ({}) };
-  }));
-  return calls;
+function pestOnlyPayload() {
+  const base = bestPayload({
+    offerTiers: { ...TIERS_BEST, state: 'pest_only' },
+    showOneTimeOption: true,
+  });
+  return {
+    ...base,
+    pricing: { ...base.pricing, services: [section('pest_control', 'Pest Control', true)] },
+    serviceOptOut: { removedKeys: ['lawn_care'], removedLabels: ['Lawn Care'] },
+  };
 }
 
-const mount = () => render(<WavesShell><EstimateViewPage /></WavesShell>);
-const slotCalls = (calls) => calls.filter((c) => c.url.includes('/available-slots'));
-const lastSlotQuery = (calls) => new URL(slotCalls(calls).at(-1).url, 'http://x').searchParams;
+const json = (body, ok = true, status = 200) => ({ ok, status, json: async () => body });
 
-describe('EstimateViewPage Good / Better / Best', () => {
-  it('shows the plan picker instead of the one-time toggle, with Better selected', async () => {
-    stubFetch(tieredPayload());
-    mount();
-    await screen.findByRole('radiogroup', { name: 'Choose your plan' });
-    const [good, better, best] = screen.getAllByRole('radio');
-    expect(better).toHaveAttribute('aria-checked', 'true');
-    expect(good).toHaveTextContent('$264.00');
-    expect(best).toHaveTextContent('$96.30 + $69.30');
-    expect(screen.queryByRole('button', { name: 'Recurring Pest Control' })).not.toBeInTheDocument();
+const DRY_QUOTE = {
+  dryRun: true,
+  previewBasis: 'basis-from-the-dry-run',
+  previous: { onetimeTotal: 0 },
+  next: { onetimeTotal: 99, waveGuardTier: 'Bronze' },
+  disclosures: [
+    { code: 'waveguard_tier_change', message: 'Dropping Lawn Care moves your WaveGuard tier from Silver to Bronze.' },
+  ],
+};
+
+function mountWith({ dataPayloads, putResponder } = {}) {
+  const queue = [...dataPayloads];
+  const fetchMock = vi.fn(async (url, opts = {}) => {
+    const u = String(url);
+    if (opts.method === 'PUT' && /service-opt-out/.test(u)) return putResponder(JSON.parse(opts.body));
+    if (/\/data(\?|$)/.test(u)) return json(queue.length > 1 ? queue.shift() : queue[0]);
+    return json({});
+  });
+  vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => {}, removeItem: () => {} });
+  vi.stubGlobal('fetch', fetchMock);
+  Element.prototype.scrollIntoView = vi.fn();
+  window.scrollTo = vi.fn();
+  render(<EstimateViewPage />);
+  return fetchMock;
+}
+
+const optOutCalls = (fetchMock) => fetchMock.mock.calls
+  .filter(([, opts]) => opts?.method === 'PUT')
+  .map(([url, opts]) => ({ url: String(url), body: JSON.parse(opts.body) }));
+
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+describe('selectedOfferTierKey', () => {
+  it('is null without a block', () => {
+    expect(selectedOfferTierKey(null, 'recurring')).toBeNull();
+    expect(selectedOfferTierKey(undefined, 'one_time')).toBeNull();
+  });
+  it('is best whenever the block is in the best state, whatever the mode', () => {
+    expect(selectedOfferTierKey({ state: 'best' }, 'recurring')).toBe('best');
+    expect(selectedOfferTierKey({ state: 'best' }, 'one_time')).toBe('best');
+  });
+  it('is better or good on a pest-only row by the page mode', () => {
+    expect(selectedOfferTierKey({ state: 'pest_only' }, 'recurring')).toBe('better');
+    expect(selectedOfferTierKey({ state: 'pest_only' }, 'one_time')).toBe('good');
+  });
+});
+
+describe('EstimateViewPage with offer tiers', () => {
+  it('renders the picker and not the one-time toggle', async () => {
+    mountWith({ dataPayloads: [bestPayload({ showOneTimeOption: true })], putResponder: () => json({}) });
+    await screen.findByRole('radiogroup', { name: 'Plan options' });
+    expect(screen.getAllByRole('radio')).toHaveLength(3);
+    expect(screen.getByRole('radio', { name: /Pest \+ lawn care/ })).toHaveAttribute('aria-checked', 'true');
     expect(screen.queryByRole('button', { name: 'One-Time Pest Control' })).not.toBeInTheDocument();
-    // Better is the pest-only view: no lawn section.
-    expect(screen.queryByText(/Lawn Care by Waves/)).not.toBeInTheDocument();
-    expect(screen.queryByText('One-time services')).not.toBeInTheDocument();
   });
 
-  it('choosing Best shows the lawn section and its slot reads carry offerTier=best; going back to Better drops it', async () => {
-    const calls = stubFetch(tieredPayload());
-    mount();
-    await screen.findByRole('radiogroup', { name: 'Choose your plan' });
-    await waitFor(() => expect(slotCalls(calls).length).toBeGreaterThan(0));
-    // Better: the visit profile is today's.
-    expect(lastSlotQuery(calls).get('offerTier')).toBeNull();
-
-    fireEvent.click(screen.getAllByRole('radio')[2]);
-    await waitFor(() => expect(screen.getByText(/Lawn Care by Waves/)).toBeInTheDocument());
-    // The one-time breakdown is the ALTERNATE (Good) price, never an extra on top of the plan.
-    expect(screen.queryByText('One-time services')).not.toBeInTheDocument();
-    expect(screen.getAllByRole('radio')[2]).toHaveAttribute('aria-checked', 'true');
-    await waitFor(() => expect(lastSlotQuery(calls).get('offerTier')).toBe('best'));
-    expect(lastSlotQuery(calls).get('serviceMode')).toBe('recurring');
-
-    fireEvent.click(screen.getAllByRole('radio')[1]);
-    await waitFor(() => expect(screen.queryByText(/Lawn Care by Waves/)).not.toBeInTheDocument());
-    await waitFor(() => expect(lastSlotQuery(calls).get('offerTier')).toBeNull());
+  it('does not offer the companion its own remove control while the picker owns it', async () => {
+    mountWith({ dataPayloads: [bestPayload()], putResponder: () => json({}) });
+    await screen.findByRole('radiogroup', { name: 'Plan options' });
+    expect(screen.queryByRole('button', { name: "I don't want Lawn Care" })).not.toBeInTheDocument();
+    // Every other service keeps its control.
+    expect(screen.getByRole('button', { name: "I don't want Pest Control" })).toBeInTheDocument();
   });
 
-  it('choosing Good switches to the one-time price card and one-time slot reads (no offerTier)', async () => {
-    const calls = stubFetch(tieredPayload());
-    mount();
-    await screen.findByRole('radiogroup', { name: 'Choose your plan' });
-    fireEvent.click(screen.getAllByRole('radio')[0]);
-    await waitFor(() => expect(screen.getAllByRole('radio')[0]).toHaveAttribute('aria-checked', 'true'));
-    await waitFor(() => expect(lastSlotQuery(calls).get('serviceMode')).toBe('one_time'));
-    expect(lastSlotQuery(calls).get('offerTier')).toBeNull();
-    // The plan section is gone; the one-time price card stands in for it.
-    await waitFor(() => expect(screen.queryByText(/Pest Protection by Waves/)).not.toBeInTheDocument());
-    expect(screen.getAllByText(/\$264\.00/).length).toBeGreaterThan(1);
+  it('Better in the best state runs the rail dry run, shows its disclosures, then commits with its previewBasis', async () => {
+    const reloaded = pestOnlyPayload();
+    const fetchMock = mountWith({
+      dataPayloads: [bestPayload(), reloaded],
+      putResponder: (body) => (body.dryRun ? json(DRY_QUOTE) : json({ ok: true })),
+    });
+    await screen.findByRole('radiogroup', { name: 'Plan options' });
+
+    fireEvent.click(screen.getByRole('radio', { name: /Pest control plan/ }));
+    expect(await screen.findByText('Switch to Pest control plan?')).toBeInTheDocument();
+    expect(screen.getByText(/moves your WaveGuard tier from Silver to Bronze/)).toBeInTheDocument();
+    expect(optOutCalls(fetchMock)).toEqual([
+      expect.objectContaining({ body: { serviceKey: 'lawn_care', included: false, dryRun: true } }),
+    ]);
+    expect(optOutCalls(fetchMock)[0].url).toMatch(/\/estimates\/offer-tiers-token\/service-opt-out$/);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Switch my plan' }));
+    await waitFor(() => expect(optOutCalls(fetchMock)).toHaveLength(2));
+    expect(optOutCalls(fetchMock)[1].body).toEqual({
+      serviceKey: 'lawn_care', included: false, previewBasis: 'basis-from-the-dry-run',
+    });
+    // The reload lands the pest-only state: Better is now the selected tile.
+    await waitFor(() => expect(screen.getByRole('radio', { name: /Pest control plan/ })).toHaveAttribute('aria-checked', 'true'));
+    expect(screen.queryByText('Switch to Pest control plan?')).not.toBeInTheDocument();
   });
 
-  it('without offerTiers the page renders the old toggle and no picker (regression guard)', async () => {
-    stubFetch(tieredPayload({ tiers: false }));
-    mount();
-    await screen.findByRole('button', { name: 'Recurring Pest Control' });
-    expect(screen.getByRole('button', { name: 'One-Time Pest Control' })).toBeInTheDocument();
-    expect(screen.queryByRole('radiogroup')).not.toBeInTheDocument();
+  it('Good in the best state lands on the one-time mode after the rail reload', async () => {
+    const fetchMock = mountWith({
+      dataPayloads: [bestPayload(), pestOnlyPayload()],
+      putResponder: (body) => (body.dryRun ? json(DRY_QUOTE) : json({ ok: true })),
+    });
+    await screen.findByRole('radiogroup', { name: 'Plan options' });
+    fireEvent.click(screen.getByRole('radio', { name: /One-time visit/ }));
+    await screen.findByText('Switch to One-time visit?');
+    fireEvent.click(screen.getByRole('button', { name: 'Switch my plan' }));
+    await waitFor(() => expect(screen.getByRole('radio', { name: /One-time visit/ })).toHaveAttribute('aria-checked', 'true'));
+    expect(optOutCalls(fetchMock)[1].body.previewBasis).toBe('basis-from-the-dry-run');
   });
 
-  it('the Best view swaps sections, ladder and combined summary; every other tier reads the bundle as served', () => {
-    const { pricing } = tieredPayload();
-    expect(pricingViewForOfferTier(pricing, 'better')).toBe(pricing);
-    expect(pricingViewForOfferTier(pricing, 'good')).toBe(pricing);
-    const best = pricingViewForOfferTier(pricing, 'best');
-    expect(best.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
-    expect(best.frequencies).toBe(pricing.offerTiers[2].frequencies);
-    expect(best.combinedRecurring.monthlySubtotal).toBe(84.08);
-    expect(best.waveGuardTier).toBe('Silver');
-    expect(best.serviceCadenceCombos).toBeUndefined();
-    // An untiered payload is returned untouched.
-    const plain = tieredPayload({ tiers: false }).pricing;
-    expect(pricingViewForOfferTier(plain, 'best')).toBe(plain);
+  it('Keep what I have closes the confirm without writing', async () => {
+    const fetchMock = mountWith({
+      dataPayloads: [bestPayload()],
+      putResponder: () => json(DRY_QUOTE),
+    });
+    await screen.findByRole('radiogroup', { name: 'Plan options' });
+    fireEvent.click(screen.getByRole('radio', { name: /Pest control plan/ }));
+    await screen.findByText('Switch to Pest control plan?');
+    fireEvent.click(screen.getByRole('button', { name: 'Keep what I have' }));
+    await waitFor(() => expect(screen.queryByText('Switch to Pest control plan?')).not.toBeInTheDocument());
+    expect(optOutCalls(fetchMock)).toHaveLength(1);
+    expect(screen.getByRole('radio', { name: /Pest \+ lawn care/ })).toHaveAttribute('aria-checked', 'true');
   });
 
-  // The accept and reserve handlers are far too heavy to drive from a mount,
-  // so their wiring is pinned from source like the sibling accept pins.
-  it('sends the tier on the accept and Best on the reserve, and never offers prepay on Best', () => {
-    expect(pageSource).toMatch(/selectedTier: tiered \? offerTierKey : undefined,/);
-    // A refused tier leaves review and reloads (accept 400 / 409, reserve 409):
-    // retrying from review would resend the same tier forever.
-    expect(pageSource.match(/body\.code === 'offer_tier_unavailable'/g)).toHaveLength(2);
-    expect(pageSource).toMatch(/That plan option is no longer available\. We refreshed your estimate/);
-    expect(pageSource).toMatch(/if \(serviceModeForAttempt !== 'one_time' && bestOfferActive\) \{\s*reservePayload\.offerTier = 'best';/);
-    expect(pageSource).toMatch(/offerTier=\{bestOfferActive && serviceMode !== 'one_time' \? 'best' : null\}/);
-    expect(pageSource).toMatch(/const annualPrepayEligibleEffective = \(\(\) => \{\s*\/\/ [^\n]*\n\s*if \(bestOfferActive\) return false;/);
+  it('Good <-> Better on a pest-only row is only the one-time mode: no rail call', async () => {
+    const fetchMock = mountWith({ dataPayloads: [pestOnlyPayload()], putResponder: () => json({}) });
+    await screen.findByRole('radiogroup', { name: 'Plan options' });
+    expect(screen.getByRole('radio', { name: /Pest control plan/ })).toHaveAttribute('aria-checked', 'true');
+    fireEvent.click(screen.getByRole('radio', { name: /One-time visit/ }));
+    await waitFor(() => expect(screen.getByRole('radio', { name: /One-time visit/ })).toHaveAttribute('aria-checked', 'true'));
+    fireEvent.click(screen.getByRole('radio', { name: /Pest control plan/ }));
+    await waitFor(() => expect(screen.getByRole('radio', { name: /Pest control plan/ })).toHaveAttribute('aria-checked', 'true'));
+    expect(optOutCalls(fetchMock)).toHaveLength(0);
   });
 
-  it('carries the chosen pest cadence across a tier switch even though the pest section changes key', () => {
-    const ladder = [{ key: 'quarterly' }, { key: 'monthly' }];
-    const bestServices = [{ key: 'pest_control', frequencies: ladder }, { key: 'lawn_care', frequencies: [{ key: 'enhanced' }] }];
-    const betterServices = [{ key: 'bundle', frequencies: ladder }];
-    // Better (bundle: monthly) -> Best: the pest_control section takes monthly.
-    expect(carryPestCadenceAcrossTiers(bestServices, { pest_control: 'quarterly', lawn_care: 'enhanced' }, 'monthly'))
-      .toEqual({ pest_control: 'monthly', lawn_care: 'enhanced' });
-    // Best -> Better: the bundle section takes it back.
-    expect(carryPestCadenceAcrossTiers(betterServices, { bundle: 'quarterly' }, 'monthly')).toEqual({ bundle: 'monthly' });
-    // A cadence the new section does not offer, or none chosen, leaves the defaults.
-    const defaults = { bundle: 'quarterly' };
-    expect(carryPestCadenceAcrossTiers(betterServices, defaults, 'bi_monthly')).toBe(defaults);
-    expect(carryPestCadenceAcrossTiers(betterServices, defaults, null)).toBe(defaults);
+  it('Best on a pest-only row runs the rail restore preview and commit', async () => {
+    const fetchMock = mountWith({
+      dataPayloads: [pestOnlyPayload(), bestPayload()],
+      putResponder: (body) => (body.dryRun
+        ? json({ ...DRY_QUOTE, disclosures: [{ code: 'restored_per_application', message: 'Lawn Care comes back at $69.30 per application.' }] })
+        : json({ ok: true })),
+    });
+    await screen.findByRole('radiogroup', { name: 'Plan options' });
+    // The page's own "add it back" card is the picker's job now.
+    expect(screen.queryByText('Lawn Care removed')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add it back' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('radio', { name: /Pest \+ lawn care/ }));
+    await screen.findByText('Switch to Pest + lawn care?');
+    expect(screen.getByText(/comes back at \$69\.30 per application/)).toBeInTheDocument();
+    expect(optOutCalls(fetchMock)[0].body).toEqual({ serviceKey: 'lawn_care', included: true, dryRun: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Switch my plan' }));
+    await waitFor(() => expect(optOutCalls(fetchMock)).toHaveLength(2));
+    expect(optOutCalls(fetchMock)[1].body).toEqual({
+      serviceKey: 'lawn_care', included: true, previewBasis: 'basis-from-the-dry-run',
+    });
+    await waitFor(() => expect(screen.getByRole('radio', { name: /Pest \+ lawn care/ })).toHaveAttribute('aria-checked', 'true'));
   });
 
-  it('never upsells a program an offered tier already carries', () => {
-    const { pricing } = tieredPayload();
-    const suppress = offerTierSuppressKeys(pricing, ['mosquito']);
-    expect(suppress).toEqual(expect.arrayContaining(['mosquito', 'pest_control', 'lawn_care', 'one_time_pest']));
-    // On Better the page's sections are pest-only; without the suppress list
-    // the cross-sell would offer "Add Lawn Care" beside a Best tier that has it.
-    const pestOnly = [{ key: 'pest_control', label: 'Pest Control', isRecurring: true, isPest: true, frequencies: [{ key: 'quarterly' }] }];
-    expect(estimateAddServiceOffer(pestOnly, 'recurring', null, [])?.serviceKey).toBe('lawn_care');
-    expect(estimateAddServiceOffer(pestOnly, 'recurring', null, suppress)?.serviceKey).not.toBe('lawn_care');
-    expect(offerTierSuppressKeys({ frequencies: [] }, undefined)).toEqual([]);
+  it('shows the rail error and clears the pending move when the dry run fails', async () => {
+    mountWith({
+      dataPayloads: [bestPayload()],
+      putResponder: () => json({ error: 'service_not_removable' }, false, 409),
+    });
+    await screen.findByRole('radiogroup', { name: 'Plan options' });
+    fireEvent.click(screen.getByRole('radio', { name: /Pest control plan/ }));
+    await screen.findByText(/can't be removed online/);
+    expect(screen.queryByRole('button', { name: 'Switch my plan' })).not.toBeInTheDocument();
+    for (const radio of within(screen.getByRole('radiogroup', { name: 'Plan options' })).getAllByRole('radio')) {
+      expect(radio).not.toBeDisabled();
+    }
+  });
+});
+
+describe('EstimateViewPage without offer tiers (regression guard)', () => {
+  it('renders the one-time toggle and no picker exactly as before', async () => {
+    mountWith({
+      dataPayloads: [bestPayload({ offerTiers: null, showOneTimeOption: true })],
+      putResponder: () => json({}),
+    });
+    await screen.findByRole('button', { name: 'One-Time Pest Control' });
+    expect(screen.queryByRole('radiogroup', { name: 'Plan options' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Choose your plan')).not.toBeInTheDocument();
+    // The companion keeps its own removal control.
+    expect(screen.getByRole('button', { name: "I don't want Lawn Care" })).toBeInTheDocument();
   });
 });
