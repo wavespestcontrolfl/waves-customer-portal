@@ -508,7 +508,11 @@ function protocolRate(product) {
  * (or the legacy lawn_type) sets the track, and an UNKNOWN track resolves no
  * window at all (requireKnownGrass; never a guessed St. Augustine recipe
  * offered as one-tap add-ons), an assigned protocol / window on the visit is
- * honored, and the active protocol for the track otherwise. Every lawn visit type gets it: a
+ * honored, and the active protocol for the track otherwise. The turf profile
+ * is customer-owned (one per customer), so with SEVERAL properties on file it
+ * may describe another lawn than this visit's: then only a visit with its own
+ * protocol assignment resolves a window (the lawn re-service context's rule,
+ * customerHasSeveralProperties). Every lawn visit type gets it: a
  * one-time visit has no plan, so the window's defaults are add-ons there too
  * (`defaultInPlan` says which; the sheet decides). Only products with a catalog
  * row are listed (the sheet builds its row from the catalog). A failed read is
@@ -522,6 +526,8 @@ async function loadProtocolWindow(svc, knex, readFailures) {
     const { getProtocolWindowContext } = require('./lawn-protocol-operating-layer');
     const { trackKey } = selectProtocolVisit(profile, serviceDate, svc.lawn_type, { requireKnownGrass: true });
     if (!trackKey) return null;
+    const { customerHasSeveralProperties } = require('./lawn-reservice-fast-context');
+    if (!svc.lawn_protocol_key && await customerHasSeveralProperties(svc, knex)) return null;
     const context = await getProtocolWindowContext(knex, {
       serviceDate,
       grassTrack: trackKey,

@@ -55,7 +55,7 @@ function fakeKnex(tables) {
   const knex = jest.fn((table) => {
     const data = tables[table];
     const chain = {};
-    for (const m of ['where', 'whereIn', 'whereNot', 'leftJoin', 'join', 'orderBy', 'select']) chain[m] = () => chain;
+    for (const m of ['where', 'whereIn', 'whereNot', 'leftJoin', 'join', 'orderBy', 'select', 'count']) chain[m] = () => chain;
     chain.first = async () => {
       if (data instanceof Error) throw data;
       return Array.isArray(data) ? data[0] : data;
@@ -814,6 +814,21 @@ describe('this month\'s protocol window (the sheet\'s add-on row)', () => {
     expect(getProtocolWindowContext).not.toHaveBeenCalled();
     expect(ctx.readFailures).not.toContain('protocol_window');
     expect(selectProtocolVisit).toHaveBeenCalledWith(undefined, expect.any(Date), undefined, { requireKnownGrass: true });
+  });
+
+  test('a customer with several properties and no protocol assignment on the visit gets no window (the turf profile may be another lawn\'s); an assigned visit does', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
+    getProtocolWindowContext.mockResolvedValue(window());
+    const several = { customer_properties: { n: 2 }, products_catalog: catalog };
+    const unassigned = await buildLawnFastContext(VISIT, { knex: fakeKnex({ ...tables(several), scheduled_services: visit() }), technicianId: 'tech-1' });
+    expect(unassigned.protocolWindow).toBeNull();
+    expect(getProtocolWindowContext).not.toHaveBeenCalled();
+    expect(unassigned.readFailures).not.toContain('protocol_window');
+    const assigned = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables(several)), technicianId: 'tech-1' });
+    expect(assigned.protocolWindow.products).toHaveLength(3);
+    // One property on file: the profile is this lawn's.
+    const one = await buildLawnFastContext(VISIT, { knex: fakeKnex({ ...tables({ customer_properties: { n: 1 }, products_catalog: catalog }), scheduled_services: visit() }), technicianId: 'tech-1' });
+    expect(one.protocolWindow.products).toHaveLength(3);
   });
 
   test('a failed window read is advisory: null, protocol_window in readFailures, the sheet still opens', async () => {

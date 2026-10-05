@@ -464,7 +464,9 @@ function figuringRate(row) {
   const rate = Number(source?.rate);
   const rateUnit = String(source?.rateUnit || '').trim();
   if (!(rate > 0) || !rateUnit || isPerBasisUnit(rateUnit) || isMlUnit(rateUnit)) return null;
-  return { rate, base: rateUnit.split('/')[0].trim().toLowerCase() };
+  // The base in the record's own spelling ("fl oz" and "fl_oz" are one unit;
+  // shared/rate-units.json spells it fl_oz), so the figured rate is sendable.
+  return { rate, base: rateUnit.split('/')[0].trim().toLowerCase().replace(/\s+/g, '_') };
 }
 
 // The area a row is figured on: the one it submits for a sqft method; a
@@ -1193,11 +1195,14 @@ function ProtocolAddOns({ window, visitType, rows, catalog, locked, onAdd }) {
   if (!items.length) return null;
   const on = new Set(rows.map((row) => String(row.productId).toLowerCase()));
   const month = window.month ? MONTH_NAMES[window.month - 1] : null;
+  // "Spot work" only when every offered product is spot work: a list that
+  // carries a plan default or a broadcast product is not described as spots.
+  const spotsOnly = items.every((item) => !item.defaultInPlan && item.applicationMethod === 'spot_treatment');
   return (
     <div className="tech-protocol-addons" role="group" aria-labelledby={titleId}>
       <div className="tech-protocol-addons-head">
         <h4 id={titleId} className="tech-protocol-addons-title">{month ? `Also in ${month}’s protocol` : 'Also in this month’s protocol'}</h4>
-        <p className="tech-visit-muted">Spot work for this visit. Tap what you applied.</p>
+        <p className="tech-visit-muted">{spotsOnly ? 'Spot work for this visit. Tap what you applied.' : 'Tap what you applied.'}</p>
       </div>
       {items.map((item) => {
         const onSheet = on.has(String(item.productId).toLowerCase());

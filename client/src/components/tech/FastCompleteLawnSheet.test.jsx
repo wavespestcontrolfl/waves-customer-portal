@@ -749,7 +749,8 @@ describe('products', () => {
   test('a recurring visit offers the window\'s opt-in products, not its plan default, each with its words, method and rate; the planned ones read On the sheet', async () => {
     await openSheet({ request: makeRequest({ ctx: context({ protocolWindow: WINDOW() }) }), props: { catalog: [...CATALOG, ARTAVIA] } });
     const row = addons();
-    expect(within(row).getByText('Spot work for this visit. Tap what you applied.')).toBeTruthy();
+    // Iron Plus is a broadcast product in this window, so the list is not called spot work.
+    expect(within(row).getByText('Tap what you applied.')).toBeTruthy();
     expect(within(row).queryByText('Green Granules')).toBeNull();
     expect(within(row).queryByText('Ghost')).toBeNull();
     expect(within(row).getByText('Mapped large patch (with Velista) or fall take-all · spot treatment')).toBeTruthy();
@@ -772,6 +773,22 @@ describe('products', () => {
     const sent = completeCalls()[0].body.products.find((p) => p.productId === P_ART);
     expect(sent).toMatchObject({ applicationMethod: 'spot_treatment' });
     expect(sent.rate).toBeUndefined();
+  });
+
+  test('a list of spot products only is called spot work', async () => {
+    const window = WINDOW();
+    window.products = window.products.filter((item) => item.productId === P_ART);
+    await openSheet({ request: makeRequest({ ctx: context({ protocolWindow: window }) }), props: { catalog: [...CATALOG, ARTAVIA] } });
+    expect(within(addons()).getByText('Spot work for this visit. Tap what you applied.')).toBeTruthy();
+  });
+
+  test('a catalog rate unit spelled with a space ("fl oz/1000sf") still figures, and the rate rides the record as fl_oz', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: [{ ...CATALOG[0], default_rate_per_1000: 2, default_unit: 'fl oz/1000sf' }] } });
+    await addProductByName('Talak 7.9%');
+    expect(within(editorFor('Talak 7.9%')).getByLabelText('Talak 7.9%').value).toBe('10');
+    await analyze();
+    await submit();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ totalAmount: 10, amountUnit: 'fl_oz', rate: 2, rateUnit: 'fl_oz' });
   });
 
   test('a one-time visit offers every window product, the plan default included, and a protocol rate figures the amount on the lawn', async () => {
