@@ -17,8 +17,10 @@ const draftFrom = result => Object.fromEntries(Object.keys(AREA_LABELS).map(key 
 
 /** Shared property editor. The parent owns this visit's coverage and product
  * actuals; only an explicit reviewed-area save writes the property. */
+// `request` (the lawn Fast Complete sheet passes its own): the fetcher the reads
+// and saves go through; the admin fetch by default.
 export default function PropertyServiceAreas({ serviceId, serviceLine, customerId, propertyId,
-  visitArea, onVisitAreaChange, onMeasurements, onUnavailable, refreshToken, disabled = false }) {
+  visitArea, onVisitAreaChange, onMeasurements, onUnavailable, refreshToken, disabled = false, request = adminFetch }) {
   const endpoint = serviceId ? `/admin/schedule/${serviceId}/property-areas`
     : customerId && propertyId ? `/admin/customers/${customerId}/properties/${propertyId}/areas` : null;
   const activeKey = SERVICE_AREAS[serviceLine];
@@ -51,7 +53,7 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     setData(null); setError(''); setOpen(false); setBusy(false); setMessage(''); setStale(false);
     current.current.onMeasurements?.(null);
     if (!endpoint || (serviceId && !activeKey)) return undefined;
-    adminFetch(endpoint).then(result => {
+    request(endpoint).then(result => {
       if (!alive || generation !== epoch.current) return;
       if (!result?.enabled) { current.current.onUnavailable?.({ failed: false }); return; }
       accept(result);
@@ -78,7 +80,7 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     const startedFor = endpoint;
     const generation = epoch.current;
     try {
-      const result = await adminFetch(`${endpoint}/lookup`, { method: 'POST', body: '{}' });
+      const result = await request(`${endpoint}/lookup`, { method: 'POST', body: '{}' });
       if (current.current.endpoint !== startedFor || generation !== epoch.current) return;
       accept(result);
       setMessage('Property estimates updated. Reviewed measurements were kept.');
@@ -103,7 +105,7 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     const startedFor = endpoint;
     const generation = epoch.current;
     try {
-      const result = await adminFetch(endpoint, { method: 'PUT', body: JSON.stringify({ areas, version: data.version }) });
+      const result = await request(endpoint, { method: 'PUT', body: JSON.stringify({ areas, version: data.version }) });
       if (current.current.endpoint !== startedFor || generation !== epoch.current) return;
       accept(result); setOpen(false);
       setMessage('Reviewed property areas saved for future visits.');
@@ -120,7 +122,7 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     const startedFor = endpoint;
     const generation = epoch.current;
     try {
-      const result = await adminFetch(endpoint);
+      const result = await request(endpoint);
       if (current.current.endpoint !== startedFor || generation !== epoch.current) return;
       accept(result);
       let notice = '';

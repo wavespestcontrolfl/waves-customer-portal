@@ -98,6 +98,36 @@ else
   echo "==> 3/5  Native iOS project already exists — skipping cap add."
 fi
 
+# Xcode 27 builds only for iOS 15 and later; the Capacitor 7 template says
+# 14.0, and every target (App + Pods) then fails to build. Raise the floor in
+# the Podfile (Pods targets) and the App project before sync runs pod install.
+IOS_MIN="15.0"
+# Only a floor below 15 is raised; a higher one is kept.
+sed -i '' -E "s/^platform :ios, '([0-9]|1[0-4])(\.[0-9]+)*'/platform :ios, '${IOS_MIN}'/" ios/App/Podfile
+sed -i '' -E "s/IPHONEOS_DEPLOYMENT_TARGET = 1[0-4]\.[0-9]+;/IPHONEOS_DEPLOYMENT_TARGET = ${IOS_MIN};/g" ios/App/App.xcodeproj/project.pbxproj
+# Each generated Pods target takes its floor from its podspec (Capacitor's
+# says 14.0), not from the Podfile platform, and the template's
+# assertDeploymentTarget only lifts targets below 14.0. Raise every Pods
+# build configuration in post_install too (inserted once, marked).
+if ! grep -q 'waves: iOS floor' ios/App/Podfile; then
+  IOS_MIN="$IOS_MIN" ruby -e '
+    path = "ios/App/Podfile"
+    src = File.read(path)
+    floor = ENV.fetch("IOS_MIN")
+    hook = "  # waves: iOS floor (scripts/mobile/bootstrap-ios.sh): Xcode 27 builds only for iOS #{floor}+.\n" \
+           "  installer.pods_project.targets.each do |t|\n" \
+           "    t.build_configurations.each do |c|\n" \
+           "      c.build_settings[\"IPHONEOS_DEPLOYMENT_TARGET\"] = \"#{floor}\" if c.build_settings[\"IPHONEOS_DEPLOYMENT_TARGET\"].to_f < #{floor}\n" \
+           "    end\n" \
+           "  end\n"
+    out = src.sub(/^(post_install do \|installer\|\n(?:.*assertDeploymentTarget.*\n)?)/) { $1 + hook }
+    # An older or customized Podfile with no post_install: add a whole one.
+    out = src.rstrip + "\n\npost_install do |installer|\n" + hook + "end\n" if out == src
+    File.write(path, out)
+  '
+fi
+echo "==> iOS deployment target set to ${IOS_MIN} (Xcode 27 minimum) ✓"
+
 echo "==> 4/5  Syncing web + plugins into the iOS project…"
 npx cap sync ios
 
@@ -190,6 +220,31 @@ else
   echo "==> PrivacyInfo.xcprivacy already present ✓"
 fi
 
+# The privacy manifest only counts when it is in the App target's resources;
+# App Review rejects a build without it. Attach it with the xcodeproj gem that
+# Homebrew's CocoaPods ships (idempotent). Without that gem, say so and leave
+# the manual Xcode step below.
+# `|| true`: a CocoaPods installed with `gem install` has no Homebrew wrapper,
+# and under `set -o pipefail` a grep with no match would end the bootstrap.
+POD_GEM_HOME="$(grep -o 'GEM_HOME="[^"]*"' "$(readlink -f "$(command -v pod)")" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
+if [ -n "$POD_GEM_HOME" ] && (cd ios/App && GEM_HOME="$POD_GEM_HOME" ruby -e '
+  require "xcodeproj"
+  project = Xcodeproj::Project.open("App.xcodeproj")
+  target = project.targets.find { |t| t.name == "App" } or abort("no App target")
+  group = project.main_group.find_subpath("App", false) or abort("no App group")
+  # Reuse a reference an earlier manual Add Files left (maybe without target
+  # membership); membership is checked on its own.
+  ref = group.files.find { |f| f.path == "PrivacyInfo.xcprivacy" } || group.new_reference("PrivacyInfo.xcprivacy")
+  phase = target.resources_build_phase
+  phase.add_file_reference(ref, true) unless phase.files_references.include?(ref)
+  project.save
+'); then
+  PRIVACY_ATTACHED=1
+  echo "==> PrivacyInfo.xcprivacy is in the App target ✓"
+else
+  echo "==> WARN: could not attach PrivacyInfo.xcprivacy automatically — add it to the App target in Xcode (step below)."
+fi
+
 # Universal links: portal.wavespestcontrol.com URLs open the installed app
 # directly. Needs (a) this Associated Domains entitlement in the binary and
 # (b) the server serving /.well-known/apple-app-site-association
@@ -227,10 +282,14 @@ python3 "$ROOT/scripts/mobile/ios_push.py" configure "$ROOT/client/ios/App" --ba
 
 echo
 echo "==> 5/5  Manual steps in Xcode (opening now):"
-cat <<'NOTES'
-   • If PrivacyInfo.xcprivacy is new this run: File → Add Files to "App"…
+if [ "${PRIVACY_ATTACHED:-0}" != "1" ]; then
+  cat <<'NOTES'
+   • PrivacyInfo.xcprivacy is not in the App target yet: File → Add Files to "App"…
      → select App/PrivacyInfo.xcprivacy → check "App" target membership
      (required for the Filesystem plugin's file-timestamp declaration).
+NOTES
+fi
+cat <<'NOTES'
    • Signing & Capabilities → select your Team (bundle id: com.wavespestcontrol.portal)
    • Push Notifications is configured by this script. Automatic signing must
      use a profile with Push Notifications enabled for this App ID.

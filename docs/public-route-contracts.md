@@ -1509,7 +1509,7 @@ grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
 Missing-contact capture (owner ruling 2026-09-27). GET
-`/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email }` —
+`/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email, phone }` —
 booleans only — while the estimate is accept-active (never on
 accepted/declined/expired/off-surface estimates or the PDF render pass).
 `lastName` is true when the estimate's `customer_name` has fewer than two
@@ -1576,6 +1576,85 @@ accept-active estimate with a contact gap always gets the React view: the
 `/estimate/` mount skips the legacy renderer and the GrowthBook holdback, and
 the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
 because of these fields.
+
+Accept-card phone capture (owner 2026-10-04, `GATE_ESTIMATE_ACCEPT_PHONE`,
+default on). `contactGaps` also carries `phone` — true only when the estimate
+has no linked customer AND no usable phone (fewer than 10 digits); always
+false with the gate off. A phone is the identity the card routes and the
+accept decide on (`/recurring-card-intent` and `/card-hold-intent` refuse a
+phone-less unlinked estimate before any card is captured; the accept creates
+the customer from the estimate's phone), so it is saved by a write of its
+own, ahead of both: `PUT /api/estimates/:token/contact-phone` with
+`{ contactPhone }` (rate-limited 5/hour per client + token; 404 with the
+gate off, for an unknown or call-side-blocked token; the accept-inactive
+answer for a terminal / expired / off-surface estimate). Responses: `200
+{ saved: true }` — the number, normalized to E.164 (`+1XXXXXXXXXX`; a
+10-digit NANP number, an 11-digit one with a leading 1 accepted), was written
+to `estimates.customer_phone` by a guarded update (still unlinked, still
+phone-less); `200 { saved: false, alreadyOnFile: true }` — the estimate
+already has a phone or a linked customer (the field is ignored entirely, not
+even validated) or a concurrent writer closed the gap first; `400
+CONTACT_PHONE_INVALID` — nothing usable was sent; `409
+CUSTOMER_CONTACT_REQUIRED` with the standing "call the Waves office" copy —
+the number already belongs to ANY live customer: NOTHING is written, and one
+Estimates bell (deduped per estimate) gives the office the typed number. A
+typed phone proves nothing about who typed it, so it never attaches the
+estimate, a saved card or a hold to an existing account, at the save or
+later. The save writes its provenance in the same statement
+(`estimates.customer_phone_typed`, migration
+`20261004230000_estimates_customer_phone_typed.js` — a column, never a key
+in `estimate_data`, because `/preferences`, `/select-tier` and `/bond`
+rewrite that whole blob from a pre-read snapshot) and advances `updated_at`,
+and the UPDATE carries the same eligibility predicates as those writes
+(status, `price_locked_at`, `archived_at`, expiry, the linkage / delivery /
+re-price / address markers, and the pre-read's `updated_at`), so a decline,
+archive, expiry or off-surface marker that lands after the pre-read refuses
+it (zero rows → the generic zero-row answer, 404 or 409 "no longer active").
+A matched number is refused only after the same guarded predicate is
+re-read (an estimate that stopped being open during the lookup gets the
+zero-row answer, never the bell or the 409). The matcher loads
+`customer_phone_typed` itself when a caller passed a projection without it
+(the slot routes' `ESTIMATE_PARK_COLUMNS` also carries it), so no reader can
+mistake a typed phone for the office's.
+The save runs in one transaction with the estimate row and the linked call
+row locked, revalidating call linkage (`staleCallLinkageReason`, as the
+decline does): a correction that lands after the pre-check answers the
+generic 404. A staff save of the estimate (`admin-estimate-persistence`)
+clears `customer_phone_typed`, also when the number is unchanged: the
+office's save is its own word for the phone. A deposit receipt to an
+unlinked estimate treats a typed phone as no phone before acceptance (the
+receipt goes by email).
+At account creation the accept passes `forceNewAccount` for a typed phone
+(never `ignorePhoneMatch`): a customer who acquired the number between the
+matcher and the account step makes `ensureCustomerAccount` fail closed
+(`PHONE_MATCH_CONFIRM`), which the accept turns into the same park.
+`matchAcceptCustomerByPhone` — the one matcher every card and accept
+route reads — treats ANY candidate as a contradiction while the estimate
+still carries that typed number (`phoneTypedByCustomer`): no match, and the
+standing B18 park answers it (`ACCEPT_NEEDS_OFFICE_REVIEW`, nothing created,
+no card captured, the office told). So a customer who acquires the number
+after the save is not reused either. A phone the office later puts on the
+estimate differs from `customer_phone_typed` and is trusted as before. A diff that lets a
+typed phone resolve to an existing customer, or that writes it when it
+matches one, is a P0. `contactPhonePreGuard` (mounted on
+`/api/estimates` in `server/index.js` BEFORE the global `/api/` limiter, like
+`mapImagePreGuard`) stamps `Cache-Control: no-cache, no-store,
+must-revalidate`, `Pragma: no-cache` and `Referrer-Policy: no-referrer` on
+EVERY response of this route — the malformed-token 404, the global and the
+route limiter's 429s and the handler's answers — and answers the gate-off
+404 there, so a dark route never reads as a 429. The 200/409 difference tells a token
+holder whether a number is a customer's; that is bounded by design (a
+non-customer number is saved and closes the gap, a customer number rings the
+office, and the limiter caps attempts). The page keeps the card step and the
+Accept button locked while `contactGaps.phone` is true and reloads `/data`
+after a save. No message is sent because of this write, and no AUTOMATED text
+goes to a typed phone before the estimate is accepted
+(`typedPhoneBlocksPreAcceptSms`: the follow-up cron and the extension reply
+skip their SMS half; email is unaffected; a staff-initiated send is the
+office's own act). After the accept the number is the customer's record and
+the accept's confirmation text goes to it, as for any estimate phone. The
+office bell for a matched number is one row per estimate, refreshed without
+re-ringing when a different number is typed.
 
 Pay-after-first-visit flag (owner ruling 2026-09-30, `GATE_PAY_AFTER_FIRST_VISIT`,
 dark). GET `/api/estimates/:token/data` carries `recurringCardPolicy.payAfterFirstVisit:

@@ -2885,6 +2885,19 @@ function InternalReviewBar() {
   );
 }
 
+// Phones show the tools as one row of short labels (owner pick B,
+// 2026-10-03) so the greeting and Today's result fit the first screen.
+// The full label stays the accessible name everywhere: on phones it is
+// visually hidden, not removed, and the short label is aria-hidden.
+function ToolLabel({ full, short }) {
+  return (
+    <>
+      <span className="report-action-label-full">{full}</span>
+      <span className="report-action-label-short" aria-hidden="true">{short}</span>
+    </>
+  );
+}
+
 function ReportActionBar({ pdfUrl, token, onShare, fileName = 'Waves-Service-Report.pdf' }) {
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef(null);
@@ -2921,13 +2934,13 @@ function ReportActionBar({ pdfUrl, token, onShare, fileName = 'Waves-Service-Rep
                 }
               }}
               style={actionButtonStyle('primary')}
-            ><Download size={16} /> Download PDF</a>
-          : <button data-glass-accent="" type="button" disabled style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }}><Download size={16} /> Download PDF</button>}
-        <button data-glass-accent="" type="button" onClick={handleShare} style={actionButtonStyle('primary')}><Share2 size={16} /> {copied ? 'Link copied' : 'Share'}</button>
+            ><Download size={16} /> <ToolLabel full="Download PDF" short="PDF" /></a>
+          : <button data-glass-accent="" type="button" disabled style={{ ...actionButtonStyle('primary'), opacity: 0.45, cursor: 'not-allowed' }}><Download size={16} /> <ToolLabel full="Download PDF" short="PDF" /></button>}
+        <button data-glass-accent="" type="button" onClick={handleShare} style={actionButtonStyle('primary')}><Share2 size={16} /> {copied ? <ToolLabel full="Link copied" short="Copied" /> : 'Share'}</button>
         {/* window.print() is a no-op in the Capacitor webview — hide the
             button there; the Download PDF share sheet carries Print on iOS. */}
         {isNativeApp() ? null : <button data-glass-accent="" type="button" onClick={() => window.print()} style={actionButtonStyle('primary')}><Printer size={16} /> Print</button>}
-        <a data-glass-accent="" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> Portal Login</a>
+        <a data-glass-accent="" href="/login" style={actionButtonStyle('primary')}><Lock size={16} /> <ToolLabel full="Portal Login" short="Login" /></a>
       </div>
     </section>
   );
@@ -3120,9 +3133,11 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
-  // 57 = the wrap's sticky `top`. While pinned on a phone the bar collapses
-  // to the slim ask row (owner screenshot 2026-07-29: the two-row bar hid a
-  // third of the screen while scrolling).
+  // On phones the card starts as the slim ask row — label, input, Ask —
+  // and opens to the heading and example questions once the customer taps
+  // into it (owner pick B, 2026-10-03). It stays open after that: closing
+  // on blur would pull the questions away mid-tap. Desktop ignores this.
+  const [opened, setOpened] = useState(false);
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
@@ -3159,7 +3174,13 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
   // Estimate = the template (owner 2026-09-03): the bar is the estimate's
   // Ask Waves card — eyebrow, heading, intro, input + Ask, stacked questions.
   return (
-    <section data-glass="card" className="waves-ask-card" aria-label="Waves AI — ask about this report">
+    <section
+      data-glass="card"
+      className="waves-ask-card"
+      data-report-ask-slim={opened || answer ? undefined : ''}
+      onFocus={() => setOpened(true)}
+      aria-label="Waves AI — ask about this report"
+    >
       <div data-gt="eyebrow" className="section-eyebrow waves-ask-eyebrow">Ask Waves</div>
       <h2 className="waves-ask-title">Questions about today&apos;s service? Ask anything</h2>
       <p className="waves-ask-intro">What was applied, when you can go back in, what to watch for, or your next visit — straight answers in seconds.</p>
@@ -6339,6 +6360,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .report-action-buttons > span {
           width: 100%;
         }
+        .report-action-label-short { display: none; }
         .service-report-hero {
           padding: 8px 0 0;
         }
@@ -9025,6 +9047,38 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .report-action-buttons { grid-template-columns: 1fr 1fr; gap: 10px; }
           .report-action-buttons > a,
           .report-action-buttons > button { padding-left: 10px; padding-right: 10px; }
+          /* Owner pick B (2026-10-03): on phones the tools are one row of
+             short labels — PDF / Share / Print / Login — so the greeting
+             and Today's result fit the first screen. Column
+             auto-flow keeps the row full when Print is hidden in the app.
+             The .report-action-bar prefix outranks the 374px single-column
+             rule; !important beats the buttons' inline docButton sizing. The
+             tools keep the 44px touch floor; the bar's padding gives it back. */
+          .report-action-bar[aria-label="Report tools"] { padding: 6px 8px; }
+          .report-action-bar .report-action-buttons {
+            grid-template-columns: none;
+            grid-auto-flow: column;
+            grid-auto-columns: minmax(0, 1fr);
+            gap: 6px;
+            margin-top: 0;
+          }
+          .report-action-bar .report-action-buttons > a,
+          .report-action-bar .report-action-buttons > button {
+            min-height: 44px !important;
+            padding: 0 4px !important;
+            font-size: 14px !important;
+          }
+          .report-action-bar .report-action-buttons svg { display: none; }
+          .report-action-label-full {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            margin: -1px;
+            overflow: hidden;
+            clip: rect(0 0 0 0);
+            white-space: nowrap;
+          }
+          .report-action-label-short { display: inline; }
           .service-status-main,
           .readiness-card-header { flex-direction: column; }
           .sr-pressure { justify-self: stretch; }

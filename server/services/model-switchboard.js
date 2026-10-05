@@ -403,7 +403,7 @@ const LANES = [
   // for one file's two policies.
   L('events_curation', 'Community events curation (scoring)', 'event-curation.js', 'fastText', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback')),
   L('events_editorial', 'Community events normalizing (venue/type cleanup)', 'event-normalizer.js', 'fastText', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
-  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('routineAnswer', 'primary'), P('routineAnswer', 'fallback'), { note: 'routine categories on the ROUTINE tier (owner 2026-10-04)' }),
+  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'flagship: Sonnet 5.5 filed equipment as Depreciation in the 2026-10-04 bake-off (owner kept it on Opus)' }),
 
   // ── Multimodal ──
   // Sequential ladder, not a fan-out (owner ruling 2026-09-26,
