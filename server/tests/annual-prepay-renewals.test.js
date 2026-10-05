@@ -7964,6 +7964,9 @@ describe('stamp-time price check for every mint (GATE_PREPAY_MINT_PRICE_HOLD) â€
     const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
 
     expect(result.stampedCount).toBe(4);
+    // The read ran in its own savepoint, so its failure cannot poison the
+    // caller's transaction.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
   });
 
   test('true: a failed read of the mint prices fails closed (nothing is stamped)', async () => {

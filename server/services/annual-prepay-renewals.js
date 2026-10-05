@@ -2762,10 +2762,14 @@ async function holdPriceDriftedRows(term, rows, conn, { skipRow = null, includeC
     // record proves the visit had a price when the term was created.
     let byVisit;
     try {
-      byVisit = await mintVisitPriceCents(term, conn);
-    } catch (err) {
       // Shadow only observes: a failed read must not stop a stamp that
-      // would run with the gate off. Under `true` it fails closed.
+      // would run with the gate off, so it runs in its own savepoint (a
+      // failed statement poisons a PostgreSQL transaction; a catch alone
+      // does not restore it). Under `true` it fails closed.
+      byVisit = mintMode === 'shadow'
+        ? await conn.transaction((sp) => mintVisitPriceCents(term, sp))
+        : await mintVisitPriceCents(term, conn);
+    } catch (err) {
       if (mintMode !== 'shadow') throw err;
       logger.warn(`[annual-prepay] shadow: mint visit prices unreadable for term ${term.id}: ${err.message}`);
       return none;
