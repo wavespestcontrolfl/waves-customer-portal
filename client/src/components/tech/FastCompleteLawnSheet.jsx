@@ -88,8 +88,8 @@ import {
 import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
-  AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
-  SavedView, TipSection, VisitNote, methodChoicesOf, methodLabel, techTipsOf, unitLabel, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
+  SavedView, TipSection, VisitNote, methodChoicesOf, methodLabel, rateUnitForRecord, techTipsOf, unitLabel, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -321,11 +321,13 @@ function plannedSeed(planned, own) {
   return { dimension, ...seededAmount(amount, measureUnit(planned.amountUnit, dimension)) };
 }
 
-// The plan's own rate (ratePer1000 in rateUnit), only in a unit /complete
-// accepts; null when the plan carries none.
-const plannedRate = (planned) => (planned && Number(planned.ratePer1000) > 0 && isSendableRateUnit(planned.rateUnit)
-  ? { rate: Number(planned.ratePer1000), unit: String(planned.rateUnit).trim() }
-  : null);
+// The plan's own rate (ratePer1000 in rateUnit), in the record's spelling of
+// a unit /complete accepts ("fl oz" is sent as fl_oz); null when the plan
+// carries none, or one the record refuses (mL, percent_solution).
+function plannedRate(planned) {
+  const unit = planned && Number(planned.ratePer1000) > 0 ? rateUnitForRecord(planned.rateUnit) : null;
+  return unit ? { rate: Number(planned.ratePer1000), unit } : null;
+}
 
 // A row for a catalog product. `planned` carries the plan's amount, unit and
 // method; `protocol` (an entry of the month's window, see ProtocolAddOns) its
@@ -469,7 +471,8 @@ function figuringRate(row) {
   if (!(rate > 0) || !rateUnit || isPerBasisUnit(rateUnit) || isMlUnit(rateUnit)) return null;
   // The base in the record's own spelling ("fl oz" and "fl_oz" are one unit;
   // shared/rate-units.json spells it fl_oz), so the figured rate is sendable.
-  return { rate, base: rateUnit.split('/')[0].trim().toLowerCase().replace(/\s+/g, '_') };
+  const base = rateUnit.split('/')[0].trim().toLowerCase().replace(/\s+/g, '_');
+  return { rate, base };
 }
 
 // The area a row is figured on: the one it submits for a sqft method; a
@@ -502,7 +505,7 @@ function derivedAmount(row, lawnSqft) {
     amount,
     unit: shown.unit,
     // The rate on the record, in its base unit (the plan's own shape).
-    rate: isSendableRateUnit(base) ? { rate, unit: base } : null,
+    rate: rateUnitForRecord(base) ? { rate, unit: rateUnitForRecord(base) } : null,
     note: `${rate} ${unitLabel(base)} per 1,000 sq ft × ${area.toLocaleString('en-US')} sq ft`,
   };
 }

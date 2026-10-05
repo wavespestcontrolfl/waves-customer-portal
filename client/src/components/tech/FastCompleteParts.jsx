@@ -43,6 +43,17 @@ export const methodLabel = (value) => {
 // server refuse the whole visit.
 const SENDABLE_RATE_UNITS = new Set(RATE_UNITS.filter((unit) => !isMlUnit(unit)));
 export const isSendableRateUnit = (unit) => SENDABLE_RATE_UNITS.has(String(unit || '').trim().toLowerCase());
+/**
+ * A rate unit as the record spells it, or null when /complete would refuse
+ * it: the catalog and the plan engine spell a unit with spaces ("fl oz",
+ * "Fl Oz") where shared/rate-units.json spells it fl_oz, and the server's own
+ * normalizer reads both as one unit; a rate sent in the record's spelling is
+ * the same rate, in a form the limit checks can sum.
+ */
+export const rateUnitForRecord = (unit) => {
+  const spelled = String(unit || '').trim().toLowerCase().replace(/\s+/g, '_');
+  return SENDABLE_RATE_UNITS.has(spelled) ? spelled : null;
+};
 
 // A catalog row with the stock on hand a fresh read has for it.
 export function withFreshStock(product, fresh) {

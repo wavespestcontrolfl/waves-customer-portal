@@ -1498,6 +1498,11 @@ describe('application rate on the product rows', () => {
     noRateKeys();
   });
 
+  test.each([['fl oz', 'fl_oz'], ['Fl Oz', 'fl_oz'], ['oz/1000sf', 'oz/1000sf']])('a plan rate in %s is sent in the record\'s spelling, %s', async (rateUnit, sent) => {
+    await run(planned({ rateUnit }));
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ rate: 1.07, rateUnit: sent });
+  });
+
   test.each(['ml', 'percent_solution'])('a plan rate in %s (a unit /complete does not accept) is not sent', async (rateUnit) => {
     await run(planned({ rateUnit }));
     noRateKeys();
