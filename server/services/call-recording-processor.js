@@ -17726,6 +17726,10 @@ const CallRecordingProcessor = {
                   const packageFollowUp = require('../config/feature-gates').packageFollowupAutobookLive()
                     && require('./package-followup-booking').isPackageFollowUpServiceKey(callBookingCatalogRow?.service_key)
                     && !isPendingOutboundReviewBooking(primaryRow);
+                  // …and a visit 2 nobody discussed is not written at all
+                  // until then: a pending child still arms reminders through
+                  // the sweep, for a treatment the office has not approved.
+                  if (callFollowUpPlan.packageOnly && isPendingOutboundReviewBooking(primaryRow)) return null;
                   const primaryActualDate = callBookingDateOnly(primaryRow.scheduled_date);
                   if (primaryActualDate && primaryActualDate !== scheduledDate) {
                     fuPlan = resolveCallFollowUpPlan({

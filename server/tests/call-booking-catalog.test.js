@@ -877,7 +877,13 @@ describe('resolveCallFollowUpPlan', () => {
         parentDate: '2026-07-02',
         parentWindowStart: '08:00',
       });
-      expect(plan).toEqual({ scheduledDate: '2026-07-16', windowStart: '08:00' });
+      // packageOnly: nobody discussed it — the writer skips it while the
+      // primary is still a pending office-review request.
+      expect(plan).toEqual({ scheduledDate: '2026-07-16', windowStart: '08:00', packageOnly: true });
+      // A discussed follow-up on the same row is an ordinary plan.
+      expect(resolveCallFollowUpPlan({
+        extracted: { follow_up_visit_mentioned: true }, catalogRow: roach, parentDate: '2026-07-02', parentWindowStart: '08:00',
+      })).toEqual({ scheduledDate: '2026-07-16', windowStart: '08:00' });
     });
 
     test('gate on: a non-package row still needs the mention', () => {

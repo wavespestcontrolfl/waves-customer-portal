@@ -556,8 +556,8 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
   const { packageFollowupAutobookLive } = require('../config/feature-gates');
   const { isPackageFollowUpServiceKey } = require('./package-followup-booking');
   const packageRow = packageFollowupAutobookLive() && isPackageFollowUpServiceKey(catalogRow?.service_key);
-  const mentioned = extracted.follow_up_visit_mentioned === true || statedFutureDate || packageRow;
-  if (!mentioned) return null;
+  const discussed = extracted.follow_up_visit_mentioned === true || statedFutureDate;
+  if (!discussed && !packageRow) return null;
 
   let scheduledDate = null;
   let windowStart = null;
@@ -577,7 +577,14 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
   }
 
   const finalWindowStart = windowStart || parentWindowStart || '09:00';
-  return { scheduledDate, windowStart: isValidWindowTime(finalWindowStart) ? finalWindowStart : '09:00' };
+  return {
+    scheduledDate,
+    windowStart: isValidWindowTime(finalWindowStart) ? finalWindowStart : '09:00',
+    // The plan exists only because the service is a package — nobody on the
+    // call discussed a second visit. The writer skips it while the primary
+    // is still a pending office-review request (office confirm books it).
+    ...(discussed ? {} : { packageOnly: true }),
+  };
 }
 
 // scheduled_date is a pg `date` column → Knex hydrates it as a JS Date at
