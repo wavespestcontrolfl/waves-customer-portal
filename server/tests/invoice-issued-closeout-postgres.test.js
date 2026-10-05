@@ -588,6 +588,32 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect((await trx('time_entries').where({ id: currentTimer }).first()).status).toBe('active');
   });
 
+  test('Undo cannot restore a stopped job timer onto a COMPLETED visit; on an open visit it still restores (the restore side of the startJob guard)', async () => {
+    const timeTracking = require('../services/time-tracking');
+    const techId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Fixture Tech' });
+    await trx('time_entries').insert({ id: randomUUID(), technician_id: techId, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(Date.now() - 3600000) });
+    const stoppedTimer = async (jobId) => {
+      const id = randomUUID();
+      await trx('time_entries').insert({ id, technician_id: techId, entry_type: 'job', status: 'completed', clock_in: new Date(Date.now() - 900000), clock_out: new Date(Date.now() - 30000), duration_minutes: 14.5, job_id: jobId });
+      return id;
+    };
+    // Geofence stop, then the payment completed the visit, then Undo.
+    const done = await visit({ status: 'completed', technician_id: techId });
+    const doneTimer = await stoppedTimer(done.id);
+    const before = await trx('time_entries').where({ id: doneTimer }).first();
+    await expect(timeTracking.reopenStoppedEntry(techId, doneTimer)).rejects.toMatchObject({ statusCode: 409 });
+    expect(await trx('time_entries').where({ id: doneTimer }).first()).toEqual(before);
+    // The other sequence: Undo first on a still-open visit restores the timer, and the closeout then refuses the running timer.
+    await trx('time_entries').where({ id: doneTimer }).del();
+    const open = await visit({ status: 'on_site', technician_id: techId, date: '2040-03-02' });
+    const openTimer = await stoppedTimer(open.id);
+    expect(await timeTracking.reopenStoppedEntry(techId, openTimer)).toMatchObject({ id: openTimer, status: 'active' });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: (await invoice({ scheduled_service_id: open.id, date: '2040-03-02', status: 'paid' })).id, trigger: 'paid', conn: trx, today: TODAY }))
+      .toMatchObject({ closed: false, reason: 'visit_timer_running' });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+  });
+
   test('a failed timer lookup is audited as an error against the visit, so the paid-invoice sweep can retry it (pre-push audit P1)', async () => {
     const svc = await visit({ status: 'on_site' });
     const inv = await invoice({ scheduled_service_id: svc.id, status: 'paid', paid_at: new Date() });

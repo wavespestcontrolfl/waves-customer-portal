@@ -512,6 +512,32 @@ async function reopenStoppedEntryInTransaction(trx, technicianId, entryId) {
     throw staffTimeHttpError(409, `Another ${stopped.entry_type} timer is already active.`);
   }
 
+  // A completed visit takes no job timer back either (GitHub r2 P1 #5886,
+  // the restore side of startJob's guard): after a geofence stop the office
+  // can complete the visit (the invoice-issued closeout, which only refuses
+  // a RUNNING timer), and Undo would then restart a timer on it. The visit
+  // row is locked here, so this and the completion — which checks for a
+  // running timer while holding the same row lock — cannot both win.
+  // Lock order: this takes the visit row AFTER a time_entries row; startJob
+  // and the time-on-site correction's timer sync take them the other way
+  // round. So the visit lock is NOWAIT: this path never waits while holding
+  // an entry lock, which is what a deadlock needs. A visit row that is busy
+  // (a completion, a correction) answers 409 and the technician taps again.
+  if (stopped.entry_type === 'job' && stopped.job_id) {
+    let visit;
+    try {
+      visit = await trx('scheduled_services').where({ id: stopped.job_id }).forUpdate().noWait().first('id', 'status');
+    } catch (err) {
+      if (err && err.code === '55P03') {
+        throw staffTimeHttpError(409, 'This visit is being updated; retry in a moment.');
+      }
+      throw err;
+    }
+    if (visit && visit.status === 'completed') {
+      throw staffTimeHttpError(409, 'This visit is already completed; its timer cannot be restored.');
+    }
+  }
+
   const [reopened] = await trx('time_entries')
     .where({ id: entryId, technician_id: technicianId, status: 'completed' })
     .update({
