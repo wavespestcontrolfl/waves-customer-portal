@@ -8518,8 +8518,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 16px;
           line-height: 1.5;
         }
-        /* One 320-wide viewBox drawn at its own size and centered, so the
-           10px axis and value labels stay 10px on a phone (owner 2026-10-05). */
+        /* One 320-wide viewBox drawn at its own size and centered (owner
+           2026-10-05); its labels keep the 14px customer floor. */
         .pressure-trend-chart {
           display: block;
           width: 100%;
@@ -8564,21 +8564,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-weight: 700;
           pointer-events: none;
         }
-        .pressure-trend-chart .chart-label,
-        .pressure-trend-chart .pressure-value-label {
-          font-size: 10px;
-        }
-        /* The SVG scales with the card: under ~320px of card width 10 units
-           would draw below 10px, so narrow phones get larger units (Codex P2
-           #5888). */
-        @media (max-width: 400px) {
-          .pressure-trend-chart .chart-label,
-          .pressure-trend-chart .pressure-value-label { font-size: 12px; }
-        }
-        @media (max-width: 360px) {
-          .pressure-trend-chart .chart-label,
-          .pressure-trend-chart .pressure-value-label { font-size: 13px; }
-        }
+        /* Labels keep the 14px customer floor (owner 2026-10-05, "keep 14px"). */
         .neighborhood-pressure-line {
           stroke: var(--report-muted);
           stroke-width: 1;
