@@ -71,6 +71,7 @@ import { clearStaffDeviceData, getAdminAuthToken, getAdminDisplayName, getAdminU
 import { etDateString } from '../../lib/timezone';
 import { resolveSpecialtyServiceKey } from '../../lib/service-completion-presets';
 import { STATION_TYPE_PROGRAM } from '../../lib/typed-findings-rules';
+import { isFastCompleteReportEligible, isPestControlService } from '../../lib/pest-fast-complete';
 import { ROUTE_FETCH_TIMEOUT_MS, loadRouteSnapshot, saveRouteSnapshot, savedRouteNotice, formatSnapshotTime } from './routeSnapshot';
 import VisitBriefPanel from './VisitBriefPanel';
 import { recordlessVisitNeedsCloseout, shortAddress } from './visitBrief';
@@ -97,13 +98,6 @@ const FIELD = {
 
 const API = import.meta.env.VITE_API_URL || '';
 
-// Pest control services get the lightweight ServiceRecapModal instead of
-// the heavy CreateProjectModal. completionProfile.category is the
-// services-table backed signal (the schedule API attaches it).
-function isPestControlService(service) {
-  return service?.completionProfile?.category === 'pest_control';
-}
-
 // Fast Complete (PR C, GATE_RESERVICE_FAST_COMPLETE): a pest re-service
 // (free between-visit callback, completionProfile.serviceKey ===
 // 'pest_re_service') opens the one-screen FastCompleteSheet instead of the
@@ -120,27 +114,8 @@ function isReserviceFastCompleteEligible(service) {
     && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
 }
 
-// Fast Complete report flow (GATE_FAST_COMPLETE_REPORT, owner "ok go"
-// 2026-10-01): with `fastCompleteReportEnabled` on the schedule row, every
-// open untyped pest visit, a re-service or a regular visit, opens the
-// one-screen sheet in its report flow (talk, generate the AI report, read
-// it, trace, send; billed and texted as the full form). Off, pest visits
-// route exactly as before.
-function isFastCompleteReportEligible(service) {
-  return service?.fastCompleteReportEnabled === true
-    && isPestControlService(service)
-    // The report flow traces a perimeter: a visit traced as an outline (a
-    // yard treatment such as tick control, under trace eligibility) keeps its
-    // existing path, whose tracer draws that outline (codex local r15).
-    && service?.traceVariant !== 'outline'
-    // A linked-project lookup that failed is not "no project": the visit
-    // keeps its existing path (a lane visit filed under pest control would
-    // otherwise fall through to here and complete on its own record).
-    && service?.linkedProjectLookupFailed !== true
-    // A closed visit stays on the recap editor, which updates the existing
-    // record (/complete would answer service_already_completed).
-    && !TERMINAL_SERVICE_STATUSES.has(String(service?.status || ''));
-}
+// Fast Complete report flow (GATE_FAST_COMPLETE_REPORT): isFastCompleteReportEligible
+// lives in lib/pest-fast-complete.js, shared with admin Dispatch (owner 2026-10-05).
 
 // Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): a specialty
 // visit whose lane the reader reads (bed bug, fire ant, tick, bee & wasp,
