@@ -254,7 +254,9 @@ function buildReportAskFacts({ question = '', data = {}, nextAppointment = null,
     }))
     .filter((finding) => finding.title || finding.detail);
 
-  const pressure = data.pestPressure && data.pestPressure.label
+  // Every pressure reading the rule answer (answerTrend) reads: the labeled
+  // gauge, the trend summary and the bare index (pre-push audit P1).
+  const labeled = data.pestPressure && data.pestPressure.label
     ? {
       label: cleanText(data.pestPressure.label),
       trend: cleanText(data.pestPressure.trend) || null,
@@ -262,6 +264,13 @@ function buildReportAskFacts({ question = '', data = {}, nextAppointment = null,
       what_it_means: cleanText(data.pestPressure.howCalculated) || null,
     }
     : null;
+  const trendSummary = clip(data.dynamicContext?.pressureTrend?.customerSummary, 300) || null;
+  const bareIndex = Number.isFinite(Number(data.pressureIndex)) ? Number(data.pressureIndex) : null;
+  const pressure = labeled
+    ? { ...labeled, trend_summary: trendSummary }
+    : (trendSummary || bareIndex !== null
+      ? { label: null, trend: null, score_out_of_5: bareIndex, what_it_means: null, trend_summary: trendSummary }
+      : null);
 
   const next = nextAppointment && nextAppointment.scheduled_date
     ? {

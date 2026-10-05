@@ -135,6 +135,11 @@ describe('buildReportAskFacts', () => {
   const facts = buildReportAskFacts({ data: reportData(), nextAppointment, now: NOW });
   const sheet = JSON.stringify(facts);
 
+  test('carries the pressure trend summary and bare index when there is no labeled gauge', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], pressureIndex: 2.4, dynamicContext: { pressureTrend: { customerSummary: 'Pressure is down from your last visit.' } } } });
+    expect(facts.pest_pressure).toEqual({ label: null, trend: null, score_out_of_5: 2.4, what_it_means: null, trend_summary: 'Pressure is down from your last visit.' });
+  });
+
   test('reads a pg-hydrated DATE as its calendar date', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], serviceDate: new Date(2026, 9, 2) } });
     expect(facts.service_date).toBe('Friday, October 2, 2026');
@@ -160,7 +165,7 @@ describe('buildReportAskFacts', () => {
     expect(facts.customer_concern).toMatch(/cockroach/);
     expect(facts.report_sections).toHaveLength(2);
     expect(facts.weather_during_visit).toBe('about 86°F, wind about 6 mph, no rain in the last 24 hours');
-    expect(facts.pest_pressure).toEqual({ label: 'Low', trend: 'improving', score_out_of_5: null, what_it_means: null });
+    expect(facts.pest_pressure).toEqual({ label: 'Low', trend: 'improving', score_out_of_5: null, what_it_means: null, trend_summary: null });
     expect(facts.next_visit).toEqual({ service: 'Quarterly Pest Control', date: 'Tuesday, January 5, 2027', arrival_window: '9 to 11 AM' });
     expect(facts.reentry).toEqual([{ area: 'outside', status: 'dry time has passed' }]);
   });
