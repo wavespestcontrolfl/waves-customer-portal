@@ -219,7 +219,16 @@ function digitsToRefuse(message, properties) {
 }
 
 const URL_RE = /https?:\/\/[^\s<>"']+/gi;
-const trimLink = (u) => u.replace(/[.,;:!?)\]]+$/, '');
+// Sentence punctuation after a link is not part of it; a trailing ! or a
+// closing bracket the link itself opened is (signed tokens can end in them).
+const trimLink = (u) => {
+  let link = u.replace(/[.,;:?]+$/, '');
+  const unbalanced = (open, close) => (link.split(close).length - 1) > (link.split(open).length - 1);
+  while ((link.endsWith(')') && unbalanced('(', ')')) || (link.endsWith(']') && unbalanced('[', ']'))) {
+    link = link.slice(0, -1).replace(/[.,;:?]+$/, '');
+  }
+  return link;
+};
 function linksAreWhole(instructions, bodyText) {
   const links = (instructions.match(URL_RE) || []).map(trimLink);
   if (!links.length) return true;
@@ -1056,10 +1065,11 @@ async function listForVisit(conn, req, visitId) {
 // home in the neighborhood, of a live customer other than the visit's, from a
 // text the same customer still owns. Identical directions collapse to one row.
 // The projection carries no id of the other customer, name, quote or address.
-const NEIGHBOR_PASS_LIMIT = 20;
 async function neighborPasses(conn, customerId, hoodId) {
   const rows = await conn('customer_access_codes as a')
     .join('customer_properties as p', 'p.id', 'a.property_id')
+    // a neighborhood switched off shows its credentials nowhere
+    .join('neighborhoods as n', 'n.id', 'p.neighborhood_id').where('n.active', true)
     .join('customers as c', 'c.id', 'a.customer_id')
     .where({ 'a.status': 'active', 'a.kind': 'pass', 'a.life': 'standing', 'p.active': true, 'p.neighborhood_id': hoodId })
     .whereNot('a.customer_id', customerId).whereNull('c.deleted_at')
@@ -1073,7 +1083,6 @@ async function neighborPasses(conn, customerId, hoodId) {
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({ id: r.id, kind: 'pass', code: null, instructions: r.instructions, life: 'standing', scheduledServiceId: null, shared: true });
-    if (out.length >= NEIGHBOR_PASS_LIMIT) break;
   }
   return out;
 }

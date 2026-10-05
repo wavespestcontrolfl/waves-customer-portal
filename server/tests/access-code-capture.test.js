@@ -210,6 +210,12 @@ describe('verifyItems', () => {
     expect(verify([item({ code: 'WAV', quote: 'The gate code is WAVE' })], 'The gate code is WAVE')).toEqual([]);
   });
 
+  test('a pass link that ends in ! or a bracket it opened is kept whole when grounding', () => {
+    const body = 'Pass: https://example.com/p/(abc)!';
+    expect(verify([item({ kind: 'pass', code: null, instructions: 'https://example.com/p/(abc)!', quote: body })], body)).toHaveLength(1);
+    expect(verify([item({ kind: 'pass', code: null, instructions: 'https://example.com/p/(abc)', quote: body })], body)).toEqual([]);
+  });
+
   test('instructions-only items hash the trimmed instructions', () => {
     const kept = verify([item({ kind: 'pass', code: null, instructions: ' Press 5 for Waves ', quote: 'press 5' })], 'at the box press 5 for Waves');
     expect(kept[0].value_hash).toBe(valueHash(null, 'Press 5 for Waves'));

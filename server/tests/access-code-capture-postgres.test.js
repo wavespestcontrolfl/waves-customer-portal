@@ -1985,6 +1985,22 @@ postgres('access codes section', () => {
     const addPass = (c, extra = {}) => call('POST', '/', { customerId: c.id, kind: 'pass', life: 'standing', instructions: `View your pass: ${LINK}`, ...extra });
     const directoryRows = () => trx('neighborhood_access');
 
+    test('a switched-off neighborhood shares no pass, and more than twenty passes all come back', async () => {
+      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
+      const neighbor = await customer({ house: '4460' });
+      const hoodId = await hood();
+      await inHood(neighbor, hoodId);
+      for (let i = 0; i < 22; i += 1) {
+        const owner = await customer({ house: String(5000 + i) });
+        await inHood(owner, hoodId);
+        expect((await addPass(owner, { instructions: `View your pass: ${LINK}?p=${i}` })).status).toBe(200);
+      }
+      const atNeighbor = await visitAtHome(neighbor);
+      expect((await readVisit(atNeighbor)).codes).toHaveLength(22);
+      await trx('neighborhoods').where({ id: hoodId }).update({ active: false });
+      expect((await readVisit(atNeighbor)).codes).toEqual([]);
+    });
+
     test('a pass is shared with the neighbors at read time, never copied into the directory', async () => {
       process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
       const owner = await customer();
