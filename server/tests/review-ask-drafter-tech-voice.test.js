@@ -469,55 +469,42 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const tech = new Set(['adam']);
     expect(isGreetingOnlySentence("Kevin, it's Adam.", names, tech)).toBe(true);
     expect(isGreetingOnlySentence("Hi Kevin, it's Adam.", names, tech)).toBe(true);
-    // "Adam here." is the same introduction in shorthand; the name must be the technician's
-    expect(isGreetingOnlySentence('Kevin, Adam here.', names, tech)).toBe(true);
-    expect(isGreetingOnlySentence('Adam here.', names, tech)).toBe(true);
-    expect(isGreetingOnlySentence('Kevin here.', names, tech)).toBe(false);
-    expect(isGreetingOnlySentence('Adam is here.', names, tech)).toBe(false);
-    expect(isGreetingOnlySentence('Adam here with the new deck.', names, tech)).toBe(false);
+    expect(isGreetingOnlySentence('Kevin, Adam here.', names, tech)).toBe(false);
     // the introduction must still name the technician, and nothing else may ride along
     expect(isGreetingOnlySentence("Adam, it's Kevin.", names, tech)).toBe(false);
     expect(isGreetingOnlySentence("Kevin, I'm here.", names, tech)).toBe(false);
     expect(isGreetingOnlySentence("Kevin, it's Adam with the new deck.", names, tech)).toBe(false);
   });
 
-  test('#5893 r2: "Adam here." is the technician speaking for the first-pass check too', () => {
-    const { notTechVoice } = Drafter.__private;
-    expect(notTechVoice('Adam here. Good catching up in person. A Google review would help: {review_url}', 'Adam')).toBe(false);
-    expect(notTechVoice('Good catching up in person. A Google review would help: {review_url}', 'Adam')).toBe(true);
-    expect(notTechVoice('Adam is here. A Google review would help: {review_url}', 'Adam')).toBe(true);
-  });
-
-  test('replay 10-04: a checker quote counts by the record runs it copies, whatever frames them', () => {
+  test('replay 10-04: a checker quote counts by the record words it copies; only one frame around an exact copy is taken off', () => {
     const { recordWordsOf } = Drafter.__private;
     const norm = (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-    const record = norm('SERVICE REPORT FOR THIS VISIT:\n- Recap: We nourished your turf, and spot-treated areas showing lawn fungus along with weeds.\n- Conversation with the customer: The customer was not home, so I missed them.\n- [customer, 2026-10-01 11:11 ET] I get back in town this Saturday.\n- Kids were playing by the pool.');
+    const record = norm('SERVICE REPORT FOR THIS VISIT:\n- Recap: We treated 3 mounds by the pool, and spot-treated areas showing lawn fungus.\n- Conversation with the customer: The customer was not home, so I missed them.\n- [customer, 2026-10-01 11:11 ET] I get back in town this Saturday.\n- Kids were playing by the pool.');
     // word for word as given, as before (two words included)
-    expect(recordWordsOf('so I missed them', record)).toEqual(['so i missed them']);
-    expect(recordWordsOf('lawn fungus', record)).toEqual(['lawn fungus']);
+    expect(recordWordsOf('so I missed them', record)).toBe('so i missed them');
+    expect(recordWordsOf('lawn fungus', record)).toBe('lawn fungus');
     // a record line that itself holds quotation marks is still the whole evidence
     const said = norm('- Recap: The customer said "thanks" after we treated the ants.');
-    expect(recordWordsOf('The customer said "thanks" after we treated the ants.', said)).toEqual(['the customer said thanks after we treated the ants']);
-    // the production checker's framing: a label and quotation marks, a timestamp, runs joined by "..."
-    expect(recordWordsOf('Visit report: "The customer was not home, so I missed them."', record)).toEqual(['the customer was not home so i missed them']);
-    expect(recordWordsOf('Text from the customer: "I get back in town this Saturday."', record)).toEqual(['i get back in town this saturday']);
-    // each run is kept on its own (the timing check finds each one's record line)
-    expect(recordWordsOf('Service Report for This Visit: ... We nourished your turf ...', record)).toEqual(['service report for this visit', 'we nourished your turf']);
-    expect(recordWordsOf('[customer, 2026-10-01 11:11 ET] ... back in town this Saturday', record)).toEqual(['customer 2026 10 01 11 11 et', 'back in town this saturday']);
-    // a restored subject may go, only that kind of word, when four or more still match in a row
-    expect(recordWordsOf('We spot-treated areas showing lawn fungus along with weeds.', record)).toEqual(['spot treated areas showing lawn fungus along with weeds']);
-    expect(recordWordsOf('We missed them', record)).toBeNull();
-    // #5893 r1: a changed first word is part of the claim, never dropped
+    expect(recordWordsOf('The customer said "thanks" after we treated the ants.', said)).toBe('the customer said thanks after we treated the ants');
+    // the production checker's frame: a label, then the exact copy in quotation marks
+    expect(recordWordsOf('Visit report: "The customer was not home, so I missed them."', record)).toBe('the customer was not home so i missed them');
+    expect(recordWordsOf('Text from the customer: "I get back in town this Saturday."', record)).toBe('i get back in town this saturday');
+    // a timestamp that is itself in the record line is an exact match, stamp and all
+    expect(recordWordsOf('[2026-10-01 11:11 ET] "I get back in town this Saturday."', record)).toBe('2026 10 01 11 11 et i get back in town this saturday');
+    expect(recordWordsOf('SERVICE REPORT FOR THIS VISIT: \u201cWe treated 3 mounds by the pool\u201d', record)).toBe('we treated 3 mounds by the pool');
+    // #5893 r1-r3: nothing in the copy is skipped, joined or dropped
+    expect(recordWordsOf('Visit report: "We treated 2 mounds by the pool"', record)).toBeNull();
+    expect(recordWordsOf('We treated ... 2 ... mounds by the pool', record)).toBeNull();
+    expect(recordWordsOf('We treated ... mounds by the pool', record)).toBeNull();
     expect(recordWordsOf('Puppies were playing by the pool', record)).toBeNull();
-    // #5893 r1: nothing inside the copy is skipped, nested quotation marks included
+    expect(recordWordsOf('We spot-treated areas showing lawn fungus.', record)).toBeNull();
     const kittens = norm('- Recap: The customer said "new kittens" were arriving Saturday.');
     expect(recordWordsOf('Visit report: "The customer said "new puppies" were arriving Saturday."', kittens)).toBeNull();
-    expect(recordWordsOf('Visit report: "The customer said "new kittens" were arriving Saturday."', kittens)).toEqual(['the customer said new kittens were arriving saturday']);
-    // never a paraphrase, a run that is not in the record, or framing around under three copied words
+    expect(recordWordsOf('Visit report: "The customer said "new kittens" were arriving Saturday."', kittens)).toBe('the customer said new kittens were arriving saturday');
+    // never a paraphrase, or a frame around under three copied words
     expect(recordWordsOf('The customer was away, so the tech missed them', record)).toBeNull();
-    expect(recordWordsOf('We nourished your turf ... and treated the new nursery', record)).toBeNull();
     expect(recordWordsOf('Visit report: "the puppies were adorable"', record)).toBeNull();
-    expect(recordWordsOf('Heading: "your turf"', record)).toBeNull();
+    expect(recordWordsOf('Heading: "lawn fungus"', record)).toBeNull();
     expect(recordWordsOf('', record)).toBeNull();
   });
 
@@ -530,7 +517,11 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(covered('Good talking with you in person today.', 'I talked with them in person; we spoke during the visit.')).toBe(true);
     // an opinion of how it went is a claim, never a no-claim word
     expect(covered('Glad your visit went great.', 'we spoke during the visit')).toBe(false);
-    expect(covered('Cockroaches were my focus on this quarterly visit.', 'We focused on ants, spiders, and cockroaches')).toBe(true);
+    expect(covered('Cockroaches were my focus on this visit.', 'We focused on ants, spiders, and cockroaches')).toBe(true);
+    // #5893 r2 / r3: how often the service comes is a fact and must be in the quotes, whatever else matches
+    expect(covered('Cockroaches were my focus on this quarterly visit.', 'We focused on ants, spiders, and cockroaches')).toBe(false);
+    expect(covered('I completed your monthly service today.', 'We completed your quarterly pest service today')).toBe(false);
+    expect(covered('I completed your quarterly service today.', 'We completed your quarterly pest service today')).toBe(true);
     expect(covered("Thanks for letting me know you're out of town.", 'I am out of town but you can do the outside')).toBe(true);
     // #5893 r1: a clause of nothing but no-claim words is not waved through
     expect(covered('Glad you came.', 'so I missed them at the house')).toBe(false);
@@ -555,24 +546,6 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
       record.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
     expect(verdict(['Visit report: "The customer was not home, so I missed them."'])).toBeNull();
     expect(verdict(['The customer missed the visit'])).toBe('unsupported_sentence');
-    // #5893 r1: runs joined by "..." are timed one by one against their own record lines
-    const dated = 'Today: 2026-10-05.\n- [customer, 2026-10-05 09:00 ET] I keep seeing ants by the door';
-    jest.useFakeTimers({ now: new Date('2026-10-05T18:00:00Z'), doNotFake: ['nextTick', 'setImmediate'] });
-    try {
-      expect(sentenceVerdictReject(
-        { sentence: 'You mentioned ants by the door today.', ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ['[customer, 2026-10-05 09:00 ET] ... ants by the door'] },
-        'You mentioned ants by the door today.', { names, techNames: names, recordLines: dated.split('\n'), visitDay: '2026-10-05' },
-        dated.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim())).toBeNull();
-      // #5893 r2: the same words in an older message are not taken for the cited one
-      const twice = `Today: 2026-10-05.\n- [customer, 2026-09-20 09:00 ET] ants by the door\n- [customer, 2026-10-05 09:00 ET] ants by the door`;
-      const today = (quotes) => sentenceVerdictReject(
-        { sentence: 'You mentioned ants by the door today.', ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes },
-        'You mentioned ants by the door today.', { names, techNames: names, recordLines: twice.split('\n'), visitDay: '2026-10-05' },
-        twice.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
-      expect(today(['[customer, 2026-10-05 09:00 ET] ... ants by the door'])).toBeNull();
-      expect(today(['[customer, 2026-09-20 09:00 ET] ... ants by the door'])).toBe('timing_unsupported');
-    } finally { jest.useRealTimers(); }
-    expect(verdict([])).toBe('unsupported_sentence');
   });
 
   test('replay 10-03: the writer is told which places a detail may come from, and a refused draft is told the rule it broke', () => {

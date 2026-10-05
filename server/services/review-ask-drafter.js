@@ -942,11 +942,7 @@ const FIRST_PERSON_RE = /\b(?:i|i'm|i've|i'd|me|my|mine)\b/i;
 function notTechVoice(body, techName) {
   if (OFFICE_NARRATION_RE.test(body) || COMPANY_NARRATION_RE.test(body)) return true;
   const names = (String(techName || "").match(/[A-Za-z'-]+/g) || []).filter((n) => n.length > 1);
-  // "Adam here." introduces too (the fact check's INTRO_RE accepts it).
-  const introduces = names.some((n) => {
-    const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`\\b(?:it'?s|this is)\\s+${esc}\\b|\\b${esc}\\s+here\\b`, "i").test(body);
-  });
+  const introduces = names.some((n) => new RegExp(`\\b(?:it'?s|this is)\\s+${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(body));
   // The first person must narrate the visit, not only the review request
   // ("A Google review would help me" alone does not make it the tech's voice).
   const narration = String(body).split(/(?<=[.!?])\s+/).filter((sent) => !isAskOnlySentence(sent, new Set())).join(" ");
@@ -1081,9 +1077,7 @@ const ASK_STEMS = new Set([...ASK_WORDS].map(termStem).filter(Boolean));
 const SELF_INTRO_WORDS = new Set(["it's", "its", "it", "is", "this", "i'm", "i", "am", "here"]);
 // An introduction is exactly "(Hi,) It's / This is / I'm <tech name> (here)."
 // — "Adam is here." claims presence and is not one.
-// "Adam here." is the same introduction in texting shorthand; "Adam is
-// here." still claims presence and is not one.
-const INTRO_RE = /^(?:(?:hi|hey|hello)\b[\s,!]*)?(?:(?:it's|its|this is|i'm|i am)\s+([a-z'-]+)(?:\s+here)?|([a-z'-]+)\s+here)\s*[.!]?$/i;
+const INTRO_RE = /^(?:(?:hi|hey|hello)\b[\s,!]*)?(?:it's|its|this is|i'm|i am)\s+([a-z'-]+)(?:\s+here)?\s*[.!]?$/i;
 function isGreetingOnlySentence(sentence, names, techNames = names) {
   const words = String(sentence).toLowerCase().match(/[a-z']+/g) || [];
   if (!words.length || !words.every((w) => GREETING_WORDS.has(w) || names.has(w))) return false;
@@ -1094,7 +1088,7 @@ function isGreetingOnlySentence(sentence, names, techNames = names) {
   const lead = /^(?:(?:hi|hey|hello)\s+)?([a-z'-]+)\s*[,!]\s*/i.exec(String(sentence).trim());
   const greeted = lead && names.has(lead[1].toLowerCase()) && !techNames.has(lead[1].toLowerCase());
   const intro = INTRO_RE.exec(String(sentence).trim().slice(greeted ? lead[0].length : 0));
-  return !!intro && (String(intro[1] || intro[2]).toLowerCase().match(/[a-z']+/g) || []).every((w) => techNames.has(w));
+  return !!intro && (String(intro[1]).toLowerCase().match(/[a-z']+/g) || []).every((w) => techNames.has(w));
 }
 
 // dispatchWithFallback returns a copy of the winning leg's result, but the
@@ -1115,6 +1109,9 @@ function legCapture() {
 // against "so I missed them").
 const NO_CLAIM_STEMS = new Set(`sorry glad know knew let letting went going ahead make made
   came come took take said say done visit service treatment appointment`.split(/\s+/).map(termStem).filter(Boolean));
+// How often the service comes is a fact about the account: like a pest or a
+// place, it must be in the quotes whatever else the clause shares with them.
+const CADENCE_STEMS = new Set(`quarterly monthly weekly yearly annual annually`.split(/\s+/).map(termStem).filter(Boolean));
 const isFiller = (w, nameStems) => isStop(w) || nameStems.has(w) || GREETING_STEMS.has(w) || ASK_STEMS.has(w) || TIME_STEMS.has(w);
 
 function quoteSharesContent(sentence, quote, names) {
@@ -1129,7 +1126,7 @@ function quoteSharesContent(sentence, quote, names) {
   // about ants. (Full coverage would refuse honest paraphrase: "I flagged
   // moisture" against the report's "moisture under the sink"; the checker
   // judges meaning, this is the floor under it.)
-  if (words.some((w) => GROUNDED_TERMS.has(w) && !quoteWords.has(w))) return false;
+  if (words.some((w) => (GROUNDED_TERMS.has(w) || CADENCE_STEMS.has(w)) && !quoteWords.has(w))) return false;
   const shared = words.filter((w) => quoteWords.has(w)).length;
   // The rule as it was: at least half of the content words are in the quotes.
   if (shared >= 1 && shared * 2 >= words.length) return true;
@@ -1142,38 +1139,21 @@ function quoteSharesContent(sentence, quote, names) {
   return backed >= 1 && backed * 2 >= claims.length;
 }
 
-// The record words a checker quote copies, as a list of runs, or null when it
-// copies none. The checker is asked for the exact words and usually gives
-// them; the production checker also frames them: a short label in front with
-// the copy inside one pair of quotation marks (Visit report: "..."), or runs
-// joined by "...". Every run must be in the record word for word and one must
-// be three words or more (a bare heading proves nothing). Nothing inside the
-// copy is skipped: quotation marks nested in it are part of what must match.
-const RESTORED_LEAD = new Set(["we", "i", "you", "they", "it", "and", "the"]);
+// The record words a checker quote copies, or null when it copies none. The
+// checker is asked for the exact words and usually gives them. The production
+// checker also frames them: a short label, then the copy inside one pair of
+// quotation marks (Visit report: "..."). Only that frame is taken off; the
+// copy itself, from the first opening mark to the last closing one, must be
+// in the record word for word and be three words or more. Nothing inside it
+// is skipped, joined or dropped.
 function recordWordsOf(quote, normRecord) {
   const raw = String(quote || "").trim();
-  // Word for word as given (the usual case, and a record line that itself
-  // holds quotation marks): the whole quote is the evidence, as before.
+  // Word for word as given: the whole quote is the evidence, as before.
   const whole = normalizeForMatch(raw);
-  if (whole.length >= 3 && normRecord.includes(whole)) return [whole];
-  // One outer frame only: a label with no quotation mark in it, then the copy
-  // from the first opening mark to the last closing one.
+  if (whole.length >= 3 && normRecord.includes(whole)) return whole;
   const framed = /^[^"\u201c\u201d]{0,80}[:\]]\s*["\u201c]([\s\S]+)["\u201d]\s*$/.exec(raw);
-  const runs = (framed ? framed[1] : raw).split(/\.{3,}|\u2026/).map(normalizeForMatch).filter((r) => r.length >= 3);
-  if (!runs.length) return null;
-  const kept = [];
-  for (const run of runs) {
-    // The checker sometimes restores a subject the record line left out ("We
-    // spot-treated ..." for "... and spot-treated ..."): that one word may be
-    // dropped, only when it is such a word and four or more still match in a
-    // row. Any other first word is part of the claim and must match.
-    const [lead, ...tail] = run.split(" ");
-    const match = normRecord.includes(run) ? run
-      : (RESTORED_LEAD.has(lead) && tail.length >= 4 && normRecord.includes(tail.join(" ")) ? tail.join(" ") : null);
-    if (!match) return null;
-    kept.push(match);
-  }
-  return kept.some((run) => run.split(" ").length >= 3) ? kept : null;
+  const copy = framed ? normalizeForMatch(framed[1]) : "";
+  return copy.split(" ").length >= 3 && normRecord.includes(copy) ? copy : null;
 }
 
 // One checker verdict against the sentence it names. Returns a reject reason
@@ -1300,25 +1280,16 @@ function sentenceVerdictReject(j, sentence, { names, techNames, recordLines = []
   if (j.greeting_only) return isGreetingOnlySentence(sentence, names, techNames) ? null : "fact_check_bad_answer";
   const cited = Array.isArray(j.quotes) ? j.quotes.filter((q) => typeof q === "string") : [];
   if (!j.supported || !cited.length) return "unsupported_sentence";
-  // Each quote is reduced to the record runs it copies (recordWordsOf); a
-  // quote with none is not evidence. Coverage and timing below read those
-  // runs only, each on its own, never the checker's framing.
-  const copied = cited.map((q) => recordWordsOf(q, normRecord));
-  if (copied.some((q) => !q)) return "unsupported_sentence";
-  const quotes = copied.flat();
-  // For timing, a quote of several runs stands for the ONE record line that
-  // holds all of them (its timestamp and its words together), so a repeat of
-  // the same words in an older message is never taken for it.
-  const normLines = recordLines.map(normalizeForMatch);
-  const timed = copied.flatMap((runs) => {
-    const line = runs.length > 1 ? normLines.find((l) => runs.every((run) => l.includes(run))) : null;
-    return line ? [line] : runs;
-  });
+  // Each quote is reduced to the record words it copies (recordWordsOf); a
+  // quote that copies none is not evidence. Coverage and timing below read
+  // those words only, never the checker's framing.
+  const quotes = cited.map((q) => recordWordsOf(q, normRecord));
+  if (quotes.some((q) => !q)) return "unsupported_sentence";
   // Every clause must be backed: each one shares a content word (not filler,
   // not a name) with a cited quote, so "ants and your new baby" cannot ride
   // on a quote about the ants alone.
   if (!sentenceClauses(sentence, names).every((clause) => quoteSharesContent(clause, quotes.join(" "), names))) return "unsupported_sentence";
-  return timingUnsupported(sentence, timed, recordLines, visitDay) ? "timing_unsupported" : null;
+  return timingUnsupported(sentence, quotes, recordLines, visitDay) ? "timing_unsupported" : null;
 }
 
 // A sentence's clauses, for per-claim evidence. Clauses with no content words
