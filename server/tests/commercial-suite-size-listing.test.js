@@ -42,6 +42,10 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: from 1,350 SF', a)).toEqual([]);
     expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: approx. 1,350 SF', a)).toEqual([]);
     expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: 1&nbsp;350 SF', a)).toEqual([1350]);
+    expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: 1 350 SF', a)).toEqual([]);
+    expect(P.extractSuiteSizes('14617 SR 70 E Suite 103 350 SF', a)).toEqual([350]);
+    expect(P.extractSuiteSizes('14617 SR 70 E Suite 103 estimated 1,350 SF', a)).toEqual([]);
+    expect(P.extractSuiteSizes('14617 SR 70 E Suite 103 est. 1,350 SF', a)).toEqual([]);
     expect(P.extractSuiteSizes('14619 SR 70 E Suite 103: 1,350 SF', a)).toEqual([]);
     expect(P.extractSuiteSizes('14617 SR 70 E Bradenton plaza 1,350 SF available', a)).toEqual([]);
     expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: 90 SF', a)).toEqual([]);

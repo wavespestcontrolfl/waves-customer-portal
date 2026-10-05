@@ -65,8 +65,9 @@ const SIZE_RE = /(\d{1,3}(?:,\d{3})+|\d{3,6})(\s*(?:\+\/-|±|\+))?\s*(?:sf|sq\.?
 // estimate, not the suite's area.
 // The same qualifiers right after the figure: "1,350 SF (approx.)",
 // "1,350 SF +/-", "1,350 SF minimum", "1,350 SF or more".
+const SPLIT_GROUP_BEFORE_RE = /(?<!(?:suites?|ste\.?|units?|bays?|spaces?|#)\s*#?\s*)\b\d{1,3}\s$/i;
 const BOUND_AFTER_RE = /^\s*[(\[]?\s*(?:\+\/-|±|~|approx\.?|approximately|approximate|est\.?|estimated|minimum|maximum|min\b|max\b|or\s+(?:more|less)|and\s+up|more\s+or\s+less)/i;
-const BOUND_BEFORE_RE = /\b(?:up\s+to|from|starting\s+at|as\s+low\s+as|as\s+much\s+as|minimum|maximum|min|max|approximately|approx\.?|about|around|roughly|nearly|over|under|less\s+than|more\s+than)\s*$|[~±]\s*$/i;
+const BOUND_BEFORE_RE = /\b(?:up\s+to|from|starting\s+at|as\s+low\s+as|as\s+much\s+as|minimum|maximum|min|max|approximately|approx\.?|estimated|est\.?|about|around|roughly|nearly|over|under|less\s+than|more\s+than)\s*$|[~±]\s*$/i;
 // "1,200 - 2,400 SF", "1,200–2,400 SF", "1,200 to 2,400 sq ft": a range.
 // "Suite 103 — 1,350 SF" is not: the figure before the dash is the suite.
 const RANGE_BEFORE_RE = /(\d{1,3}(?:,\d{3})+|\d{3,6})\s*(?:-|–|—|to)\s*$/i;
@@ -243,6 +244,10 @@ function extractSuiteSizes(text, anchors) {
     const value = Number(m[1].replace(/,/g, ''));
     if (!(value >= MIN_SUITE_SQFT && value <= MAX_SUITE_SQFT)) continue;
     if (m[2]) continue; // "1,350 ± SF": an estimate
+    // "1 350 SF": a thousands group split by a plain or thin space would
+    // read as 350. A bare three-digit figure right after another short
+    // number is refused, unless that number is the suite ("Suite 103 350 SF").
+    if (/^\d{3}$/.test(m[1]) && SPLIT_GROUP_BEFORE_RE.test(t.slice(Math.max(0, m.index - 24), m.index))) continue;
     if (!figureIsPlain(t, m.index, m[0].length)) continue;
     const addressAt = nearestAnchor(t, numberPositions, m.index, anchors, ADDRESS_REACH);
     if (addressAt < 0) continue;
