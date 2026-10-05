@@ -286,6 +286,8 @@ const ACCESS_KIND_LABELS = {
 
 function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
   const [rows, setRows] = useState([]);
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const visitKey = visitIds.join(',');
   useEffect(() => {
     // A new stop never shows the previous stop's codes while its own load.
@@ -293,20 +295,39 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
     if (!request || !customerId) return undefined;
     let cancelled = false;
     const ids = visitKey ? visitKey.split(',') : [];
+    setFailed(false);
+    // Off (404) or not this technician's visit (403) hides the block; any
+    // other failure says so, so a technician never takes "no codes" for an
+    // outage and can try again.
     Promise.all(ids.map((id) => request(`/admin/access-codes/visits/${encodeURIComponent(id)}`)
       .then((data) => (Array.isArray(data?.accessCodes) ? data.accessCodes : []))
-      .catch(() => [])))
+      .catch((err) => {
+        if (err && (err.status === 404 || err.status === 403)) return [];
+        throw err;
+      })))
       .then((lists) => {
         if (cancelled) return;
         const seen = new Set();
         setRows(lists.flat().filter((r) => (seen.has(r.id) ? false : seen.add(r.id))));
-      });
+      })
+      .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
-  }, [request, customerId, visitKey]);
+  }, [request, customerId, visitKey, attempt]);
   const ids = visitKey ? visitKey.split(',') : [];
   const shown = new Set(shownCodes.map((c) => String(c).trim().toLowerCase()));
   const mine = rows.filter((r) => (r.life === 'standing' || ids.includes(r.scheduledServiceId))
     && !(r.code && !r.instructions && shown.has(String(r.code).trim().toLowerCase())));
+  if (failed) {
+    return (
+      <>
+        <SectionLabel>Access codes</SectionLabel>
+        <p role="alert" style={factRowStyle}>
+          Could not load this stop's access codes.{' '}
+          <button type="button" onClick={() => setAttempt((n) => n + 1)}>Try again</button>
+        </p>
+      </>
+    );
+  }
   if (!mine.length) return null;
   return (
     <>

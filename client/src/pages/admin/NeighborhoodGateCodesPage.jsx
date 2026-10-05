@@ -169,7 +169,7 @@ function EntryRow({ entry, busyKey, editing, formError, onAction, onEdit, onCanc
 // owner (the page) reads the first page to learn whether the section is on.
 const FOUND_PAGE_SIZE = 50;
 
-function FoundInMessages({ items, total, loading, error, visitsByCustomer, onNeedVisits, onRetry, onMore, onSave, onDismiss }) {
+function FoundInMessages({ items, total, loading, error, onRetry, onMore, onSave, onDismiss }) {
   return (
     <div>
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
@@ -188,8 +188,7 @@ function FoundInMessages({ items, total, loading, error, visitsByCustomer, onNee
           <FoundCodeCard
             key={row.id}
             row={row}
-            visits={visitsByCustomer[row.customerId] || []}
-            onNeedVisits={onNeedVisits}
+            visits={row.visitChoices || []}
             onSave={onSave}
             onDismiss={onDismiss}
             renderHeading={(r) => (
@@ -235,7 +234,6 @@ export default function NeighborhoodGateCodesPage() {
   // tab exists only when the access codes section answers (404 = off).
   const [tab, setTab] = useState("neighborhoods");
   const [found, setFound] = useState({ available: false, items: [], total: 0, loading: false, error: "" });
-  const [visitsByCustomer, setVisitsByCustomer] = useState({});
   const foundSeq = useRef(0);
   const loadFound = useCallback(async ({ offset = 0 } = {}) => {
     const seq = ++foundSeq.current;
@@ -254,20 +252,6 @@ export default function NeighborhoodGateCodesPage() {
       if (seq !== foundSeq.current) return;
       if (err.status === 404 || err.status === 403) setFound({ available: false, items: [], total: 0, loading: false, error: "" });
       else setFound((f) => ({ ...f, loading: false, error: err.message || "Could not load found codes" }));
-    }
-  }, []);
-
-  // The customer's upcoming visits for the visit picker (the customer record
-  // the Customer 360 page reads), fetched once per customer on demand.
-  const askedVisits = useRef(new Set());
-  const needVisits = useCallback(async (customerId) => {
-    if (!customerId || askedVisits.current.has(customerId)) return;
-    askedVisits.current.add(customerId);
-    try {
-      const data = await api(`/admin/customers/${encodeURIComponent(customerId)}`);
-      setVisitsByCustomer((m) => ({ ...m, [customerId]: Array.isArray(data?.upcomingScheduled) ? data.upcomingScheduled : [] }));
-    } catch {
-      askedVisits.current.delete(customerId);
     }
   }, []);
 
@@ -397,8 +381,6 @@ export default function NeighborhoodGateCodesPage() {
           total={found.total}
           loading={found.loading}
           error={found.error}
-          visitsByCustomer={visitsByCustomer}
-          onNeedVisits={needVisits}
           onRetry={() => loadFound()}
           onMore={() => loadFound({ offset: found.items.length })}
           onSave={(row, body) => foundDecision(`/${row.id}/accept`, body)}

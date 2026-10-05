@@ -16,6 +16,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 
 | Method | Path | Router |
 |---|---|---|
+| GET | `/api/admin/access-codes/visits/:visitId` | admin-access-codes |
 | POST | `/api/admin/auth/change-password` | admin-auth |
 | GET | `/api/admin/auth/me` | admin-auth |
 | GET | `/api/admin/call-recordings/blocked` | admin-call-recordings |
@@ -337,7 +338,6 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 
 | Method | Path | Router |
 |---|---|---|
-| GET | `/api/admin/access-codes/visits/:visitId` | admin-access-codes |
 | GET | `/api/admin/assessment-analytics/tech-context/:customerId` | admin-assessment-analytics |
 | POST | `/api/admin/communications/call` | admin-communications |
 | GET | `/api/admin/communications/collections-voice-status` | admin-communications |

@@ -193,6 +193,7 @@ const FOUND_ROW = {
   id: "f1", customerId: "cust-1", customerName: "Pat Sample", kind: "door", code: "9876", instructions: null,
   life: "standing", scheduledServiceId: null, scheduledDate: null, status: "found", sourceType: "sms",
   sourceQuote: "Door code is 9876", sourceAt: "2026-10-03T15:00:00.000Z",
+  visitChoices: [{ id: "v1", scheduled_date: "2026-10-08", service_type: "Pest control", status: "confirmed" }],
 };
 
 function foundRoutes(over = {}) {
@@ -233,13 +234,15 @@ it("lists found codes with the customer linked, the client sentence and the code
   expect(JSON.parse(post[1].body)).toEqual({ kind: "door", life: "standing", code: "9876", instructions: null });
 });
 
-it("Dismiss posts dismiss, and a one-visit code loads that customer's visits for the picker", async () => {
+it("Dismiss posts dismiss, and a one-visit code offers the visits that came with the list", async () => {
   rawAdminFetch.mockImplementation(foundRoutes());
   renderPage();
   fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
   await screen.findByText("Door code is 9876");
   fireEvent.click(screen.getByRole("button", { name: "This visit only" }));
   expect(await screen.findByRole("option", { name: "Thu, Oct 8 · Pest control" })).toBeInTheDocument();
+  // The choices come with the found list: no customer record is loaded per card.
+  expect(rawAdminFetch.mock.calls.some(([p]) => String(p).startsWith("/admin/customers/"))).toBe(false);
   fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
   await waitFor(() => expect(rawAdminFetch.mock.calls.some(([p]) => p === "/admin/access-codes/f1/dismiss")).toBe(true));
 });

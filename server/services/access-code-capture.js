@@ -605,13 +605,15 @@ async function listForVisit(conn, req, visitId) {
   const { technicianCurrentVisitFilter, isTechnicianRequest } = require('./technician-visit-scope');
   const q = conn('scheduled_services').where('scheduled_services.id', visitId);
   technicianCurrentVisitFilter(req, q);
-  const visit = await q.first('scheduled_services.id', 'scheduled_services.customer_id');
+  const visit = await q.first('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id');
   if (!visit) {
     if (isTechnicianRequest(req) && await conn('scheduled_services').where({ id: visitId }).first('id')) return fail(403, 'service_not_assigned');
     return fail(404, 'not_found');
   }
   const { active } = await listForCustomer(conn, visit.customer_id);
-  return { ok: true, codes: active.filter((r) => r.life === 'standing' || r.scheduledServiceId === visit.id) };
+  // A code tied to one home is shown only at a visit to that home.
+  const sameHome = (r) => !r.propertyId || !visit.property_id || r.propertyId === visit.property_id;
+  return { ok: true, codes: active.filter((r) => (r.life === 'standing' && sameHome(r)) || r.scheduledServiceId === visit.id) };
 }
 
 async function listFound(conn, { limit = 50, offset = 0 } = {}) {
@@ -627,12 +629,27 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
   const rows = await base()
     .select('a.*', 'c.first_name', 'c.last_name', 'c.company_name')
     .orderBy('a.created_at', 'desc').orderBy('a.id').limit(limit).offset(offset);
+  // The visit picker's choices for every row on the page, in one query: the
+  // customer's live visits from today through 14 days after the code was sent.
+  const today = etDateString(new Date());
+  const customerIds = [...new Set(rows.map((r) => r.customer_id).filter(Boolean))];
+  const visits = customerIds.length ? await conn('scheduled_services').whereIn('customer_id', customerIds)
+    .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
+    .where('scheduled_date', '>=', today)
+    .where('scheduled_date', '<=', etDateString(addETDays(new Date(), VISIT_WINDOW_DAYS)))
+    .select('id', 'customer_id', conn.raw('scheduled_date::text AS scheduled_date'), 'status', 'service_type')
+    .orderBy('scheduled_date').orderBy('id') : [];
   return {
     total: Number(count),
-    items: rows.map((r) => ({
-      ...serialize(r),
-      customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || r.company_name || null,
-    })),
+    items: rows.map((r) => {
+      const last = etDateString(addETDays(new Date(r.source_at || r.created_at), VISIT_WINDOW_DAYS));
+      return {
+        ...serialize(r),
+        customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || r.company_name || null,
+        visitChoices: visits.filter((v) => v.customer_id === r.customer_id && v.scheduled_date <= last)
+          .map((v) => ({ id: v.id, scheduled_date: v.scheduled_date, status: v.status, service_type: v.service_type })),
+      };
+    }),
   };
 }
 

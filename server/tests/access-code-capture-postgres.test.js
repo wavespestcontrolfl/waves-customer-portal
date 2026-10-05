@@ -1032,6 +1032,29 @@ postgres('access codes section', () => {
       return id;
     };
 
+    test('a standing code tied to one home is not shown at a visit to another home', async () => {
+      const c = await customer({ properties: 2 });
+      const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const atB = await visit(c.id, day(1));
+      await trx('scheduled_services').where({ id: atB }).update({ property_id: b.id });
+      const row = await found(c.id, { kind: 'door', code: '2468' });
+      await access.accept(trx, row.id, {});
+      await trx('customer_access_codes').where({ id: row.id }).update({ property_id: a.id });
+      const wide = await found(c.id, { kind: 'garage', code: '1357' });
+      await access.accept(trx, wide.id, {});
+      const out = await access.listForVisit(trx, { techRole: 'admin' }, atB);
+      expect(out.codes.map((r) => r.code)).toEqual(['1357']);
+    });
+
+    test('the found list carries each row\'s visit choices', async () => {
+      const c = await customer();
+      const soon = await visit(c.id, etDateString(addETDays(new Date(), 2)));
+      await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      await trx('customer_access_codes').where({ customer_id: c.id }).update({ source_at: new Date() });
+      const { items } = await access.listFound(trx, {});
+      expect(items.find((r) => r.customerId === c.id).visitChoices.map((v) => v.id)).toEqual([soon]);
+    });
+
     test('a technician reads the codes of a visit assigned to them, and only those', async () => {
       const c = await customer();
       const techId = await tech();

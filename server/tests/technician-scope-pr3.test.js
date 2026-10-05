@@ -145,3 +145,11 @@ describe('standardOrderFor (codex #5733 r3)', () => {
     expect(await standardOrderFor('p-1', { dbh: fakeDb(PRODUCT, rows) })).toEqual({ name: 'Fixture Product', unavailable: true });
   });
 });
+
+test('access codes: a technician reads one assigned visit\'s codes and nothing else (owner 2026-10-05)', () => {
+  expect(technicianMayReach('GET', '/api/admin/access-codes/visits/00000000-0000-4000-8000-000000000001')).toBe(true);
+  expect(technicianMayReach('POST', '/api/admin/access-codes/visits/00000000-0000-4000-8000-000000000001')).toBe(false);
+  expect(technicianMayReach('GET', '/api/admin/access-codes')).toBe(false);
+  expect(technicianMayReach('GET', '/api/admin/access-codes/found')).toBe(false);
+  expect(technicianMayReach('POST', '/api/admin/access-codes/00000000-0000-4000-8000-000000000001/accept')).toBe(false);
+});

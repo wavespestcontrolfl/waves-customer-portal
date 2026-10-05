@@ -62,6 +62,15 @@ describe('VisitBriefPanel access codes', () => {
     resolveSecond({ accessCodes: [] });
   });
 
+  it('says so, with a retry, when the read fails for another reason', async () => {
+    let calls = 0;
+    const request = vi.fn(() => { calls += 1; return calls === 1 ? Promise.reject(Object.assign(new Error('timeout'), { status: 504 })) : Promise.resolve({ accessCodes: [code()] }); });
+    renderPanel(request);
+    expect(await screen.findByRole('alert')).toHaveTextContent("Could not load this stop's access codes");
+    screen.getByRole('button', { name: 'Try again' }).click();
+    expect(await screen.findByText('1234')).toBeInTheDocument();
+  });
+
   it('does not ask without a request function', () => {
     render(<VisitBriefPanel stop={stop} detail={{ status: 'ready', byService: {} }} />);
     expect(screen.queryByText('Access codes')).toBeNull();
