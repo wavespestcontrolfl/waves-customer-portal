@@ -76,6 +76,10 @@ describe('flagsAccess', () => {
     // Not a bare 3-6 digit number even after a question.
     expect(flagsAccess('48', { priorAskedForCode: true })).toBe(false);
     expect(flagsAccess('4821567', { priorAskedForCode: true })).toBe(false);
+    // One short token with a digit in it is a reply too; a plain word is not.
+    expect(flagsAccess('A12B', { priorAskedForCode: true })).toBe(true);
+    expect(flagsAccess('A12B')).toBe(false);
+    expect(flagsAccess('okay', { priorAskedForCode: true })).toBe(false);
     expect(flagsAccess('about 4821', { priorAskedForCode: true })).toBe(false);
   });
 
@@ -111,9 +115,12 @@ describe('verifyItems', () => {
 
   test('keeps a pass with no code and short instructions', () => {
     const body = 'I set up a visitor pass for you, check your email';
-    const kept = verify([item({ kind: 'pass', code: null, instructions: 'Visitor pass is in the email', quote: 'I set up a visitor pass for you' })], body);
+    const kept = verify([item({ kind: 'pass', code: null, instructions: 'visitor pass for you, check your email', quote: 'I set up a visitor pass for you' })], body);
     expect(kept).toHaveLength(1);
-    expect(kept[0]).toMatchObject({ kind: 'pass', code: null, instructions: 'Visitor pass is in the email' });
+    expect(kept[0]).toMatchObject({ kind: 'pass', code: null, instructions: 'visitor pass for you, check your email' });
+    // Directions the customer did not write are dropped, with or without a grounded code.
+    expect(verify([item({ kind: 'pass', code: null, instructions: 'Visitor pass is in the email', quote: 'I set up a visitor pass for you' })], body)).toEqual([]);
+    expect(verify([item({ instructions: 'press 9 first', quote: 'The gate code is #4821' })], 'The gate code is #4821')).toEqual([]);
   });
 
   test.each([
@@ -175,8 +182,14 @@ describe('verifyItems', () => {
     expect(verify([item({ kind: 'door', quote: 'Door code is #4821, thanks.' })], body)).toHaveLength(1);
   });
 
+  test('keeps the code formats storage supports: letters only, inner spaces', () => {
+    expect(verify([item({ code: 'WAVE', quote: 'The gate code is WAVE' })], 'The gate code is WAVE')).toHaveLength(1);
+    expect(verify([item({ code: '12 34', quote: 'The gate code is 12 34' })], 'The gate code is 12 34')).toHaveLength(1);
+    expect(verify([item({ code: 'WAV', quote: 'The gate code is WAVE' })], 'The gate code is WAVE')).toEqual([]);
+  });
+
   test('instructions-only items hash the trimmed instructions', () => {
-    const kept = verify([item({ kind: 'call_box', code: null, instructions: ' Press 5 for Waves ', quote: 'press 5' })], 'at the box press 5');
+    const kept = verify([item({ kind: 'call_box', code: null, instructions: ' Press 5 for Waves ', quote: 'press 5' })], 'at the box press 5 for Waves');
     expect(kept[0].value_hash).toBe(valueHash(null, 'Press 5 for Waves'));
   });
 

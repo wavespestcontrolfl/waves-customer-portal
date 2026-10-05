@@ -59,7 +59,7 @@ const VISIT_WINDOW_DAYS = 14;
 const BATCH = 30;
 const HISTORY_FOR_MODEL = 6;
 // A visit that is not coming (or already came) no longer carries its code.
-const ENDED_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
+const ENDED_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const enabled = () => gateEnvValue('GATE_ACCESS_CODES_SECTION');
@@ -71,6 +71,9 @@ const CREDENTIAL_WORDS = /\b(?:codes?|pass\s?codes?|passwords?|pins?|combos?|com
 const DEVICE_WORDS = /\b(?:clickers?|remotes?|openers?|fobs?|transponders?|qr|(?:visitor|guest|gate) pass(?:es)?)\b/i;
 const KEY_SYMBOLS = /(?<![A-Za-z0-9])[#*]\d{3,6}(?!\d)|(?<![A-Za-z0-9#*])\d{3,6}[#*]|\b(?:press|pound|star|dial)\b/i;
 const BARE_NUMBER = /^\s*[#*]?\s*\d{3,6}\s*[#*]?\s*$/;
+// A reply to our own code question that is one short token with a digit in it
+// ("4821", "#4821", "A12B"); only read when we just asked.
+const BARE_CREDENTIAL = /^\s*[#*]?\s*(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{3,6}\s*[#*]?\s*[.!]?\s*$/;
 const KEY_LOCATION = /\bkey(?:\s+is|['’]s)\s+(?:hidden\s+)?under\b|\bspare\s+keys?\b|\bhide\s+a\s+key\b|\bleft\s+it\s+unlocked\b|\bleft\s+the\s+(?:door|gate)s?\s+(?:unlocked|open)\b/i;
 // What our own question must have said for a bare number to be the answer.
 const ASKED_FOR_CODE = /\b(?:codes?|pass\s?codes?|passwords?|pins?|combos?|combinations?|gates?)\b/i;
@@ -82,7 +85,7 @@ function flagsAccess(text, { priorAskedForCode = false } = {}) {
   if (!body.trim()) return false;
   if (THING_WORDS.test(body) || CREDENTIAL_WORDS.test(body) || DEVICE_WORDS.test(body)
     || KEY_SYMBOLS.test(body) || KEY_LOCATION.test(body)) return true;
-  return priorAskedForCode === true && BARE_NUMBER.test(body);
+  return priorAskedForCode === true && BARE_CREDENTIAL.test(body);
 }
 
 const askedForCode = (text) => ASKED_FOR_CODE.test(String(text || ''));
@@ -104,8 +107,10 @@ const digitsOf = (s) => String(s || '').replace(/\D/g, '');
 const tail10 = (s) => digitsOf(s).slice(-10);
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// The model's code shape: short, optional # or * at either end, one digit at least.
-const MODEL_CODE_SHAPE = /^[#*]?[A-Za-z0-9-]{1,12}[#*]?$/;
+// The model's code shape is the one storage and the staff path accept: up to
+// MAX_CODE characters, letters or digits ("WAVE", "12 34", "A5-B"), optional
+// # or * at either end.
+const MODEL_CODE_SHAPE = /^[#*]?[A-Za-z0-9](?:[A-Za-z0-9 -]*[A-Za-z0-9])?[#*]?$/;
 
 // A code counts as quoted only as a whole token: the characters around it may
 // not be token characters, so "1234" is not found inside "#1234" or "12345".
@@ -134,8 +139,11 @@ function verifyItem(item, bodyText, { refuse, phones }) {
   const code = typeof item.code === 'string' && item.code.trim() ? item.code.trim() : null;
   const instructions = typeof item.instructions === 'string' && item.instructions.trim() ? item.instructions.trim() : null;
   if (instructions && instructions.length > MAX_INSTRUCTIONS) return null;
+  // Directions are the customer's own words too: they must stand in the text,
+  // so a grounded code never carries invented steps into a one-tap save.
+  if (instructions && !bodyText.toLowerCase().includes(normalizeText(instructions).toLowerCase())) return null;
   if (code) {
-    if (!MODEL_CODE_SHAPE.test(code) || !/\d/.test(code) || !codeIsWholeTokenIn(code, quote)) return null;
+    if (code.length > MAX_CODE || !MODEL_CODE_SHAPE.test(code) || !codeIsWholeTokenIn(code, quote)) return null;
     const digits = digitsOf(code);
     if (refuse.has(digits)) return null;
     // A phone number is never a code, with or without its country prefix: ten
@@ -212,7 +220,7 @@ The CURRENT message was sent on ${formatETDay(new Date(message.created_at))}, ${
 
 An item is a code or a way in that a technician needs to reach the property or the door: kind is one of neighborhood_gate (the community gate), property_gate (this property's own gate), door, lockbox, garage, call_box, pass (a visitor, guest or gate pass, QR code or app pass), other.
 - quote: copied word for word from the CURRENT message, the shortest span that holds the whole item. Never from a prior message.
-- code: the code alone, keeping its # or * symbols, with no words around it. A visitor pass, QR code or app pass has code null and short instructions (how to get or show it). Otherwise instructions is a short note only when the message adds something a technician must know ("press 2 then the code"), else null.
+- code: the code alone, keeping its # or * symbols, with no words around it. A visitor pass, QR code or app pass has code null and instructions. instructions is always a span copied word for word from the CURRENT message (the customer's own words for how to get in or how to show the pass), never a summary; it is null when the message adds nothing a technician must know beyond the code.
 - life: visit for "today", "for this job", "tomorrow only", a one-day code, or a door code for a one-time job at the job site. Otherwise standing.
 - Never report a code the customer calls old, wrong, changed, expired, not working or unsure, and never a code that only appears in a question ("is the gate code 1234?").
 - If the kind is unclear, use other. Never guess a code. Never copy a house number, ZIP code or phone number as a code.
@@ -250,6 +258,8 @@ async function priorOutboundAskedForCode(conn, message) {
   const prior = await conn('sms_log')
     .where({ customer_id: message.customer_id, direction: 'outbound', to_phone: message.from_phone })
     .where('created_at', '<', new Date(message.created_at))
+    // Only a text that reached the customer can have asked them anything.
+    .whereIn('status', ['sent', 'delivered'])
     .whereNotNull('message_body')
     .orderBy('created_at', 'desc').orderBy('id', 'desc')
     .first('message_body');
@@ -359,7 +369,7 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
         }
         let flagged = flagsAccess(message.message_body);
         // Only a bare number needs the thread: it counts when we just asked for a code.
-        if (!flagged && BARE_NUMBER.test(message.message_body)) {
+        if (!flagged && BARE_CREDENTIAL.test(message.message_body)) {
           flagged = flagsAccess(message.message_body, { priorAskedForCode: await priorOutboundAskedForCode(conn, message) });
         }
         if (!flagged) {
@@ -380,6 +390,9 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
         logger.warn(`[access-codes] capture failed for sms_log ${message.id} (${err.code || err.name || 'error'})`);
       }
     }
+    // A pass with failures is a degraded job: the cron lock records the throw
+    // in job health, and the tally rides on the error for the log line.
+    if (tally.failed) throw Object.assign(new Error('access_code_net_failures'), { code: 'ACCESS_NET_FAILURES', tally });
     return tally;
   });
 }
@@ -483,16 +496,18 @@ async function lockCustomer(trx, customerId) {
 // leaves the live list VISIT_WINDOW_DAYS after it was sent. Returns { id } or
 // { error }.
 async function visitFor(trx, customerId, { from, chosenId }) {
+  // A named visit obeys the same window as the automatic check, so a "today
+  // only" code cannot be parked on an appointment months away.
   const live = () => trx('scheduled_services').where({ customer_id: customerId })
-    .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES);
+    .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
+    .whereBetween('scheduled_date', [etDateString(from), etDateString(addETDays(from, VISIT_WINDOW_DAYS))]);
   if (chosenId !== undefined && chosenId !== null) {
     if (!UUID_RE.test(String(chosenId))) return { error: 'invalid_visit' };
-    const chosen = await live().where({ id: chosenId }).first('id');
-    return chosen ? { id: chosen.id } : { error: 'invalid_visit' };
+    const chosen = await live().where({ id: chosenId }).first('id', 'property_id');
+    return chosen ? { id: chosen.id, propertyId: chosen.property_id || null } : { error: 'invalid_visit' };
   }
-  const candidate = await live()
-    .whereBetween('scheduled_date', [etDateString(from), etDateString(addETDays(from, VISIT_WINDOW_DAYS))]).first('id');
-  return candidate ? { error: 'visit_required' } : { id: null };
+  const candidate = await live().first('id');
+  return candidate ? { error: 'visit_required' } : { id: null, propertyId: null };
 }
 
 // A standing code fills its profile field only while that field is empty
@@ -568,6 +583,8 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const [updated] = await trx('customer_access_codes').where({ id }).update({
         kind: next.kind, life: next.life, code: next.code, instructions: next.instructions, value_hash: next.value_hash,
         scheduled_service_id: scheduledServiceId, status: 'active', decided_by: adminUserId || null,
+        // The named visit says which home the code is for.
+        ...(visit.propertyId ? { property_id: visit.propertyId } : {}),
         decided_at: trx.fn.now(), updated_at: trx.fn.now(),
       }).returning('*');
       await audit(trx, adminUserId, 'access_code.accepted', id, {
@@ -650,7 +667,7 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
     const scheduledServiceId = visit.id;
     const profileField = await fillEmptyProfileField(trx, customerId, next);
     const [row] = await trx('customer_access_codes').insert({
-      customer_id: customerId, property_id: properties.length === 1 ? properties[0].id : null,
+      customer_id: customerId, property_id: visit.propertyId || (properties.length === 1 ? properties[0].id : null),
       kind: next.kind, code: next.code, instructions: next.instructions, life: next.life,
       scheduled_service_id: scheduledServiceId, status: 'active', source_type: 'staff', source_at: trx.fn.now(),
       value_hash: next.value_hash, decided_by: adminUserId || null, decided_at: trx.fn.now(),

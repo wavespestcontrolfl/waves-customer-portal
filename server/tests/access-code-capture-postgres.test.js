@@ -57,11 +57,11 @@ postgres('access codes section', () => {
     if (prefs) await trx('property_preferences').insert({ customer_id: id, ...prefs });
     return { id, propertyIds };
   };
-  const text = async (customerId, body, { at = '2040-03-10T15:00:00Z', direction = 'inbound', to = OUR_NUMBER, from = '+19415550142' } = {}) => {
+  const text = async (customerId, body, { at = '2040-03-10T15:00:00Z', direction = 'inbound', to = OUR_NUMBER, from = '+19415550142', status = null } = {}) => {
     const id = randomUUID();
     await trx('sms_log').insert({
       id, customer_id: customerId, direction, from_phone: direction === 'inbound' ? from : to,
-      to_phone: direction === 'inbound' ? to : from, message_body: body, created_at: new Date(at), status: direction === 'inbound' ? 'received' : 'sent',
+      to_phone: direction === 'inbound' ? to : from, message_body: body, created_at: new Date(at), status: status || (direction === 'inbound' ? 'received' : 'sent'),
       message_type: direction === 'inbound' ? 'inbound' : 'manual',
     });
     return id;
@@ -209,6 +209,15 @@ postgres('access codes section', () => {
       expect((await receipts(messageId))[0]).toMatchObject({ status: 'no_fields' });
     });
 
+    test('a code question that never reached the customer does not make a bare number a reply', async () => {
+      const c = await customer();
+      await text(c.id, 'What is the gate code?', { at: '2040-03-10T14:00:00Z', direction: 'outbound', status: 'failed' });
+      await text(c.id, '4821');
+      const read = stub([gateItem({ code: '4821', quote: '4821' })]);
+      expect(await sweep(read)).toMatchObject({ read: 0, found: 0 });
+      expect(read).not.toHaveBeenCalled();
+    });
+
     test('a bare number is read only after our last text asked for a code', async () => {
       const asked = await customer();
       await text(asked.id, 'What is the gate code?', { at: '2040-03-10T14:50:00Z', direction: 'outbound' });
@@ -333,7 +342,8 @@ postgres('access codes section', () => {
       const c = await customer();
       const messageId = await text(c.id, 'The gate code is #4821');
       const read = jest.fn(async () => { throw Object.assign(new Error('provider said #4821'), { code: 'ECONN' }); });
-      expect(await sweep(read)).toMatchObject({ read: 1, found: 0, failed: 1 });
+      // A pass with a failure throws, so the cron lock records a failed run in job health.
+      await expect(sweep(read)).rejects.toMatchObject({ code: 'ACCESS_NET_FAILURES', tally: { read: 1, found: 0, failed: 1 } });
       expect((await receipts(messageId))[0]).toMatchObject({ status: 'failed', attempt_count: 1 });
       expect(await rows(c.id)).toEqual([]);
       const logged = JSON.stringify([...logger.warn.mock.calls, ...logger.error.mock.calls]);
@@ -341,8 +351,8 @@ postgres('access codes section', () => {
       expect(logged).not.toContain('4821');
       expect(logged).not.toContain('gate code');
       // The next pass retries it (failed is not terminal), up to the retry cap.
-      expect(await sweep(read)).toMatchObject({ scanned: 1, failed: 1 });
-      expect(await sweep(read)).toMatchObject({ scanned: 1, failed: 1 });
+      await expect(sweep(read)).rejects.toMatchObject({ tally: { scanned: 1, failed: 1 } });
+      await expect(sweep(read)).rejects.toMatchObject({ tally: { scanned: 1, failed: 1 } });
       expect((await receipts(messageId))[0].status).toBe('failed_max_retries');
       expect(await sweep(read)).toMatchObject({ scanned: 0 });
     });
@@ -516,6 +526,27 @@ postgres('access codes section', () => {
       await trx('scheduled_services').where({ id: next }).update({ status: 'cancelled' });
       const list = await access.listForCustomer(trx, c.id);
       expect(list.active.map((r) => r.id)).toEqual([standing.id]);
+    });
+
+    test('a rescheduled visit counts as ended, and a named visit must sit inside the window', async () => {
+      const c = await customer();
+      const moved = await visit(c.id, day(2), 'rescheduled');
+      const far = await visit(c.id, day(40));
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      expect(await access.accept(trx, row.id, { scheduledServiceId: moved, now: NOW })).toMatchObject({ ok: false, code: 'invalid_visit' });
+      expect(await access.accept(trx, row.id, { scheduledServiceId: far, now: NOW })).toMatchObject({ ok: false, code: 'invalid_visit' });
+      expect((await access.accept(trx, row.id, { now: NOW })).row.scheduledServiceId).toBeNull();
+    });
+
+    test('a named visit gives the code its property', async () => {
+      const c = await customer({ properties: 2 });
+      const next = await visit(c.id, day(2));
+      const [home] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      await trx('scheduled_services').where({ id: next }).update({ property_id: home.id });
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      expect(row.property_id).toBeNull();
+      await access.accept(trx, row.id, { scheduledServiceId: next, now: NOW });
+      expect((await trx('customer_access_codes').where({ id: row.id }).first()).property_id).toBe(home.id);
     });
 
     test('the office must name the visit while the customer has a live one in the window; it is never guessed', async () => {

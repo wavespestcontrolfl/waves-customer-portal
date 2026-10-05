@@ -2173,7 +2173,7 @@ function initScheduledJobs() {
         throw Object.assign(new Error(`tick skipped: ${result.reason || 'no_connection'}`), { code: 'TICK_SKIPPED' });
       }
     } catch (err) {
-      logger.error(`[access-codes] sweep tick failed (${err.code || err.name || 'error'})`);
+      logger.error(`[access-codes] sweep tick failed (${err.code || err.name || 'error'})${err.tally ? ` ${JSON.stringify(err.tally)}` : ''}`);
     }
   }, { timezone: 'America/New_York' });
 
