@@ -3607,6 +3607,18 @@ async function rescheduleAppointment(input, actionContext = {}) {
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
   }
+  // Keep a linked follow-up (a call-booked or package visit 2) spaced from
+  // its parent — the same hook the Schedule page and the rebooker run;
+  // best-effort after commit (a failed shift leaves the child where it was,
+  // and the helper no-ops when the date did not change).
+  try {
+    await require('../call-booking-catalog').shiftCallFollowUpsForParentMove({
+      conn: db, parentServiceId: appt.id, fromDate: observedDate, toDate: dateStr,
+      noticeActorId: actionContext.technicianId || null,
+    });
+  } catch (err) {
+    logger.error(`[intelligence-bar] linked follow-up shift failed for ${appt.id}: ${err.message}`);
+  }
   // Tech-facing notice (tech-visit-notifications.js): this writer moves the
   // row itself, so it tells the holder itself. Post-commit, best-effort,
   // never awaited; the operator's own move stays silent.

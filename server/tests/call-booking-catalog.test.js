@@ -1701,11 +1701,13 @@ describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade
     const { conn, log } = fakeConn({ children: [{ id: 'child-1', status: 'pending' }, { id: 'child-2', status: 'confirmed' }] });
     const cancelled = await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent' });
     expect(cancelled).toBe(2);
-    // Narrow filter: the parent's never-customer-confirmed linked children
-    // (AI-call child while pending; package auto-book child pending or confirmed).
-    expect(log.selectWhere).toEqual({ parent_service_id: 'svc-parent', customer_confirmed: false });
+    // Cancel filter: the AI-call child while pending and never customer-
+    // confirmed; the package child pending or confirmed EVEN after the
+    // customer confirmed it — a $0 included visit 2 must not outlive its
+    // cancelled package (codex #5896 r1 P1).
+    expect(log.selectWhere).toEqual({ parent_service_id: 'svc-parent' });
     expect(log.selectWhereRaw).toEqual({
-      sql: "((source_action = ? AND status = 'pending') OR (source_action = ? AND status IN ('pending', 'confirmed')))",
+      sql: "((source_action = ? AND status = 'pending' AND customer_confirmed = false) OR (source_action = ? AND status IN ('pending', 'confirmed')))",
       bindings: ['ai_call_pipeline_followup', 'package_followup_auto'],
     });
     expect(transitionJobStatus).toHaveBeenCalledTimes(2);

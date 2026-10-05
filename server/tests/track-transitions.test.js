@@ -1099,12 +1099,12 @@ describe('future-scheduled-date stale-attempt guard', () => {
 
     expect(result.ok).toBe(true);
     expect(result.state).toBe('cancelled');
-    // Narrow filter: the parent's never-customer-confirmed linked children
-    // (call-pipeline child while pending; package auto-book child pending or
-    // confirmed) — call-booking-catalog applyCallFollowUpFilter.
-    expect(childrenSelect.where).toHaveBeenCalledWith({ parent_service_id: 'job-1', customer_confirmed: false });
+    // Cancel filter: the call-pipeline child while pending and never
+    // customer-confirmed; the package child pending or confirmed whatever
+    // the customer did — call-booking-catalog applyCallFollowUpCancelFilter.
+    expect(childrenSelect.where).toHaveBeenCalledWith({ parent_service_id: 'job-1' });
     expect(childrenSelect.whereRaw).toHaveBeenCalledWith(
-      "((source_action = ? AND status = 'pending') OR (source_action = ? AND status IN ('pending', 'confirmed')))",
+      "((source_action = ? AND status = 'pending' AND customer_confirmed = false) OR (source_action = ? AND status IN ('pending', 'confirmed')))",
       ['ai_call_pipeline_followup', 'package_followup_auto'],
     );
     // Status goes through the sole canonical writer (audit row + broadcast)

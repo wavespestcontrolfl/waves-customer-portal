@@ -17512,8 +17512,8 @@ const CallRecordingProcessor = {
               }
               // Follow-up visit plan — when the call specifically discussed
               // a second/follow-up treatment (transcript-driven), or the
-              // booked service is a two-treatment package (cockroach / flea;
-              // GATE_PACKAGE_FOLLOWUP_AUTOBOOK, owner ruling 2026-10-04);
+              // booked service is a two-treatment package (cockroach / flea /
+              // bed bug; GATE_PACKAGE_FOLLOWUP_AUTOBOOK, owner ruling 2026-10-04);
               // date from the transcript when agreed, else parent date + the
               // service's catalog interval (default 14 days). Never for a
               // covered re-service (codex #3222 r2): the re-service IS the
@@ -17660,6 +17660,14 @@ const CallRecordingProcessor = {
                 // dispatch. No confirmation SMS and no reminder registration
                 // for this row — customer comms go out for the initial
                 // visit only (owner directive).
+                // EXCEPT a two-treatment package under
+                // GATE_PACKAGE_FOLLOWUP_AUTOBOOK (owner ruling 2026-10-04:
+                // "visit two should be same time, we don't want to confirm,
+                // they get reminders, they can reschedule"): that child is
+                // written CONFIRMED with the package source_action — the
+                // customer sees it and can move it, the reminder self-heal
+                // sweep arms its 72h/24h reminders (never a confirmation
+                // text), and the parent move/cancel hooks carry it.
                 // Called on the fresh-insert path AND both reuse paths (marker/
                 // slot match, idempotency-key conflict) so a retry whose first
                 // attempt lost the savepointed follow-up insert — or a
@@ -17712,6 +17720,12 @@ const CallRecordingProcessor = {
                   // date re-validates against it; a plan that no longer
                   // resolves fails closed to no child — dispatch books by hand).
                   let fuPlan = callFollowUpPlan;
+                  // A pending office-review primary is not a booking yet: its
+                  // package child books at office confirm (job-status.js), so
+                  // this writer keeps the pending shape for it.
+                  const packageFollowUp = require('../config/feature-gates').packageFollowupAutobookLive()
+                    && require('./package-followup-booking').isPackageFollowUpServiceKey(callBookingCatalogRow?.service_key)
+                    && !isPendingOutboundReviewBooking(primaryRow);
                   const primaryActualDate = callBookingDateOnly(primaryRow.scheduled_date);
                   if (primaryActualDate && primaryActualDate !== scheduledDate) {
                     fuPlan = resolveCallFollowUpPlan({
@@ -17789,8 +17803,9 @@ const CallRecordingProcessor = {
                           service_type: serviceType,
                           service_id: callBookingCatalogRow?.id || null,
                           parent_service_id: primaryRow.id,
-                          status: 'pending',
+                          status: packageFollowUp ? 'confirmed' : 'pending',
                           customer_confirmed: false,
+                          ...(packageFollowUp ? { confirmed_at: new Date() } : {}),
                           // Billing shape rides the price: a priced package
                           // total covers both treatments → $0 "included" child
                           // (same no-charge shape as the completion-CTA flow:
@@ -17818,12 +17833,16 @@ const CallRecordingProcessor = {
                             priceInfo.price != null ? 'Included in the package price on the initial visit.' : null,
                           ].filter(Boolean).join(' '),
                           internal_notes: [
-                            'Booked from phone call — confirm exact time with the customer before dispatch.',
+                            packageFollowUp
+                              ? 'Treatment 2 of a two-treatment package, booked from the phone call at the same time as visit 1. The customer gets reminders and can reschedule.'
+                              : 'Booked from phone call — confirm exact time with the customer before dispatch.',
                             `Call SID: ${callSid}.`,
                           ].join(' '),
                           booking_source: 'phone_call',
                           source_call_log_id: call.id,
-                          source_action: 'ai_call_pipeline_followup',
+                          source_action: packageFollowUp
+                            ? require('./package-followup-booking').PACKAGE_FOLLOWUP_SOURCE_ACTION
+                            : 'ai_call_pipeline_followup',
                           idempotency_key: computeAppointmentIdempotencyKey({
                             callLogId: call.id,
                             schedulingStatus: 'follow_up',
@@ -19840,9 +19859,11 @@ const CallRecordingProcessor = {
               }
               }
               if (followUpCreated) {
-                // Intentionally NO registerScheduleSideEffects here: the
-                // follow-up is pending and must not message the customer.
-                logger.info(`[call-proc] Follow-up visit created: ${followUpCreated.id} on ${followUpCreated.scheduled_date} (parent ${svc.id}); pending, no customer comms until confirmed`);
+                // Intentionally NO registerScheduleSideEffects here: a
+                // pending follow-up must not message the customer, and a
+                // confirmed package visit 2 gets no confirmation text — the
+                // reminder self-heal sweep arms its reminders.
+                logger.info(`[call-proc] Follow-up visit created: ${followUpCreated.id} on ${followUpCreated.scheduled_date} (parent ${svc.id}); ${followUpCreated.status === 'confirmed' ? 'confirmed package visit 2, reminders arm through the sweep' : 'pending, no customer comms until confirmed'}`);
               }
 
             } else if (!appointmentResult) {

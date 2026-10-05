@@ -1433,6 +1433,24 @@ async function moveStopsToDay(input, actionContext = {}) {
   }
   for (const c of classified) movedIds.add(c.s.id);
 
+  // Keep each moved stop's linked follow-up (a call-booked or package
+  // visit 2) spaced from it — the same hook the Schedule page and the
+  // rebooker run; best-effort after commit, no-op when the date did not change.
+  // A parent whose visit 2 is in this same batch is skipped: the operator
+  // placed that child by hand, and a second shift would move it again.
+  const parentsMovedWithChild = new Set(classified.map((c) => c.s.parent_service_id).filter(Boolean).map(String));
+  for (const c of classified) {
+    if (parentsMovedWithChild.has(String(c.s.id))) continue;
+    try {
+      await require('../call-booking-catalog').shiftCallFollowUpsForParentMove({
+        conn: db, parentServiceId: c.s.id, fromDate: c.observedDate, toDate: dateStr,
+        noticeActorId: actionContext.technicianId || null,
+      });
+    } catch (err) {
+      logger.error(`[intelligence-bar] linked follow-up shift failed for ${c.s.id}: ${err.message}`);
+    }
+  }
+
   // Tech-facing notices (tech-visit-notifications.js): this writer changes
   // scheduled_date itself, so it tells the holder itself. Post-commit,
   // best-effort, NOT awaited; the operator's own move stays silent.

@@ -972,6 +972,12 @@ class AvailabilityEngine {
       // inert until linkage stamps it; explicit so every booking path
       // answers the stamping audit).
       await require('./visit-groups').maybeGroupRow(scheduledRow.id, { database: trx, createdBy: 'seeder' });
+      // Two-treatment package (cockroach / flea / bed bug): visit 2 books
+      // with visit 1. This row carries only the estimate's service label, so
+      // the helper resolves it on an exact catalog-name match — gate-dark,
+      // savepoint-isolated, no-op for every other service
+      // (package-followup-booking.js).
+      await require('./package-followup-booking').ensurePackageFollowUpVisit({ trx, primary: scheduledRow });
 
       // Inspection credit: this is a REAL customer booking (AI assistant /
       // confirmed call path), so record durable evidence in-transaction —

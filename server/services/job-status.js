@@ -527,6 +527,26 @@ async function transitionJobStatus({
       }
     }
 
+    // Two-treatment package (cockroach / flea / bed bug): an office-review
+    // booking (voice agent, outbound callback) becomes a real booking at
+    // office confirm, so visit 2 books HERE, not at the pending request —
+    // gate-dark, savepoint-isolated, idempotent, no-op for every other
+    // service and source (package-followup-booking.js).
+    if (String(toStatus || '') === 'confirmed') {
+      try {
+        const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('./call-booking-source-actions');
+        const { packageFollowupAutobookLive } = require('../config/feature-gates');
+        if (packageFollowupAutobookLive()) {
+          const primary = await t('scheduled_services').where({ id: jobId }).first();
+          if (primary && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(primary.source_action)) {
+            await require('./package-followup-booking').ensurePackageFollowUpVisit({ trx: t, primary });
+          }
+        }
+      } catch (packageErr) {
+        logger.warn(`[job-status] package visit 2 failed for ${jobId}: ${packageErr.message}`);
+      }
+    }
+
     // Consultation-outcomes: a no-showed Waves Assessment visit closes its
     // outcome as lost/no_show (no-op for every other visit and for one
     // already recorded lost/won). Savepoint-isolated (waves-db §5b) — an

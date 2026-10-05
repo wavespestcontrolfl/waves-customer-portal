@@ -2,7 +2,9 @@
  * Package follow-up auto-booking — visit 2 of a two-treatment package is put
  * on the schedule the moment visit 1 is booked (owner ruling 2026-10-04:
  * "flea treatment and cockroach treatment should be by default two
- * treatments, two weeks apart"; status confirmed; no weekend roll).
+ * treatments, two weeks apart"; status confirmed; no weekend roll; bed bug
+ * added the same day: "visit two should be same time, we don't want to
+ * confirm, they get reminders, they can reschedule").
  *
  * Before this, the second treatment only reached the calendar through the
  * Dispatch closeout card (completion-followup-booking.js) or a phone call
@@ -11,13 +13,21 @@
  * create, estimate acceptance (public + one-tap), public self-book, the
  * Intelligence Bar, the Leads page — booked visit 1 alone.
  *
+ * Office-review bookings (the voice agent's and the outbound-callback
+ * pipeline's pending rows) get visit 2 when the office CONFIRMS visit 1
+ * (job-status.js): a pending request is not a booking yet. The call
+ * pipeline writes its own child (it carries the call's linkage and number
+ * hold) in this same confirmed shape — see ensureCallFollowUpVisit.
+ *
  * One helper, called by each primary writer INSIDE its own transaction,
  * right after the primary row exists:
  *   ensurePackageFollowUpVisit({ trx, primary, cols? })
  * It is a no-op (returns null) unless ALL of:
  *   - GATE_PACKAGE_FOLLOWUP_AUTOBOOK is exactly 'true' (call-time read);
  *   - the primary resolves to a package catalog row (service_id, else
- *     service_key_snapshot) whose service_key is in PACKAGE_FOLLOWUP_SERVICE_KEYS;
+ *     service_key_snapshot, else — for a row with neither — an exact name
+ *     match on one live package row) whose service_key is in
+ *     PACKAGE_FOLLOWUP_SERVICE_KEYS;
  *   - the primary is a real customer visit: customer_id set, a calendar
  *     date, not recurring, not a callback, not itself an included
  *     follow-up, not terminal, not a slot hold (reservation_expires_at).
@@ -52,7 +62,9 @@
  * taking a second date key mid-transaction would invert the
  * scheduling/occupancy.js ORDERING CONTRACT). A clash still books — owner
  * ruling 2026-08-25, staff-side saves never block on conflicts — and rings
- * a Schedule needs-you card so the office re-spaces it.
+ * a Schedule needs-you card so the office re-spaces it. The probe runs in
+ * its own savepoint (a failed probe statement must not abort the child's);
+ * the card is raised only after the caller's outermost commit.
  *
  * Reminders: NOT registered here (customer comms never ride a booking
  * helper — booking contract header). The reminder self-heal sweep
@@ -69,10 +81,9 @@ const { createScheduledService } = require('./booking/create-scheduled-service')
 const { FOLLOWUP_CHILD_INACTIVE_STATUSES } = require('./typed-followup-obligation');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
-// Owner scope 2026-10-04: cockroach and flea. bed_bug_treatment is the other
-// two-treatment package (typed-followup-obligation TWO_TREATMENT_PACKAGE_KEYS)
-// and joins here only on a further ruling.
-const PACKAGE_FOLLOWUP_SERVICE_KEYS = Object.freeze(['cockroach_control', 'flea_tick']);
+// Owner scope 2026-10-04: cockroach, flea and bed bug — the same set as
+// typed-followup-obligation TWO_TREATMENT_PACKAGE_KEYS.
+const PACKAGE_FOLLOWUP_SERVICE_KEYS = Object.freeze(['cockroach_control', 'flea_tick', 'bed_bug_treatment']);
 // scheduled_services.source_action is varchar(30).
 const PACKAGE_FOLLOWUP_SOURCE_ACTION = 'package_followup_auto';
 const DEFAULT_PACKAGE_FOLLOWUP_DAYS = 14;
@@ -109,7 +120,10 @@ function packageFollowUpDate(primaryDate, intervalDays) {
 
 // The catalog row the primary was sold as: service_id first (completion
 // resolution trusts it before any label), then the durable key snapshot.
-// Never the display name. Null when neither names a live package row.
+// A row with NEITHER (the availability confirm path writes only the
+// estimate's service label) resolves on an exact, case-insensitive name
+// match to exactly one live package row — never a fuzzy label read.
+// Null when nothing names a live package row.
 async function resolvePackageCatalogRow(trx, primary) {
   const cols = ['id', 'service_key', 'name', 'category', 'follow_up_interval_days', 'default_duration_minutes'];
   if (primary.service_id) {
@@ -117,9 +131,16 @@ async function resolvePackageCatalogRow(trx, primary) {
     return byId && isPackageFollowUpServiceKey(byId.service_key) ? byId : null;
   }
   const key = String(primary.service_key_snapshot || '').trim();
-  if (!key || !isPackageFollowUpServiceKey(key)) return null;
-  const byKey = await trx('services').where({ service_key: key, is_active: true }).whereRaw('is_archived IS NOT TRUE').select(cols);
-  return byKey.length === 1 ? byKey[0] : null;
+  if (key) {
+    if (!isPackageFollowUpServiceKey(key)) return null;
+    const byKey = await trx('services').where({ service_key: key, is_active: true }).whereRaw('is_archived IS NOT TRUE').select(cols);
+    return byKey.length === 1 ? byKey[0] : null;
+  }
+  const label = String(primary.service_type || '').trim().toLowerCase();
+  if (!label) return null;
+  const byName = await trx('services').whereIn('service_key', PACKAGE_FOLLOWUP_SERVICE_KEYS)
+    .where({ is_active: true }).whereRaw('is_archived IS NOT TRUE').whereRaw('lower(trim(name)) = ?', [label]).select(cols);
+  return byName.length === 1 ? byName[0] : null;
 }
 
 function primaryEligible(primary) {
@@ -141,29 +162,33 @@ async function liveChildOf(trx, primaryId) {
 }
 
 // Advisory, lock-free, tech-scoped: the office hears about a clash on a
-// Schedule needs-you card; the booking is never blocked.
-async function warnOnOverlap(trx, { child, customerId }) {
+// Schedule needs-you card; the booking is never blocked. The probe reads
+// through its OWN savepoint so a failed statement rolls back only itself
+// (a caught error would otherwise leave the child's savepoint aborted and
+// lose the insert). The card waits for the caller's outermost commit: a
+// later rollback must not leave a card pointing at a visit that never was.
+async function warnOnOverlap(trx, { child, customerId, outerTrx }) {
   const start = hhmm(child.window_start);
   const end = hhmm(child.window_end);
   if (!start || !end) return;
   let clash = [];
   try {
     const { findConflictingVisits } = require('./scheduling/occupancy');
-    clash = await findConflictingVisits({
-      db: trx,
+    clash = await trx.transaction((probeSp) => findConflictingVisits({
+      db: probeSp,
       date: child.scheduled_date,
       windowStart: start,
       windowEnd: end,
       excludeServiceIds: [String(child.id)],
       excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
       technicianId: child.technician_id || null,
-    });
+    }));
   } catch (err) {
     logger.warn(`[package-followup] overlap probe failed for child ${child.id} (booked unprobed): ${err.message}`);
     return;
   }
   if (!clash.length) return;
-  try {
+  const raise = async () => {
     const { raiseAdminAlert } = require('./admin-alert-compose');
     await raiseAdminAlert('schedule_conflict', {
       area: 'Schedule',
@@ -175,9 +200,16 @@ async function warnOnOverlap(trx, { child, customerId }) {
       doneWhen: 'followup_respaced',
       link: `/admin/dispatch?tab=schedule&date=${child.scheduled_date}&appointment=${encodeURIComponent(child.id)}`,
     }, { dedupeKey: `package_followup_overlap:${child.id}`, metadata: { customer_id: customerId, scheduled_service_id: child.id, parent_service_id: child.parent_service_id } });
-  } catch (err) {
-    logger.error(`[package-followup] overlap card failed for child ${child.id}: ${err.message}`);
+  };
+  const onFail = (err) => logger.error(`[package-followup] overlap card failed for child ${child.id}: ${err.message}`);
+  const { commitPromiseOf } = require('../utils/trx-commit-promise');
+  const committed = commitPromiseOf(outerTrx) || commitPromiseOf(trx);
+  if (committed) {
+    // A rolled-back booking has nothing to flag.
+    committed.then(() => raise().catch(onFail), () => {});
+    return;
   }
+  await raise().catch(onFail);
 }
 
 function buildChildInsert(primary, catalogRow, cols, { date, technicianId, now }) {
@@ -303,13 +335,14 @@ async function bookInSavepoint(sp, outerTrx, primary, cols) {
       trx: outerTrx,
     });
   }
-  await warnOnOverlap(sp, { child: { ...child, scheduled_date: date }, customerId: primary.customer_id });
+  await warnOnOverlap(sp, { child: { ...child, scheduled_date: date }, customerId: primary.customer_id, outerTrx });
   logger.info(`[package-followup] visit 2 ${child.id} booked for ${date} from ${catalogRow.service_key} visit ${primary.id}`);
   return child;
 }
 
 module.exports = {
   ensurePackageFollowUpVisit,
+  warnOnOverlap,
   isPackageFollowUpServiceKey,
   packageFollowUpDate,
   buildChildInsert,

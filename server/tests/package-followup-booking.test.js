@@ -1,8 +1,9 @@
 /**
  * package-followup-booking — visit 2 of a two-treatment package (cockroach /
- * flea) booked with visit 1 (owner ruling 2026-10-04). Pins: the gate is
- * the only switch; only package catalog rows qualify (by service_id, else
- * key snapshot — never a label); the child shape (14 days exactly, no
+ * flea / bed bug) booked with visit 1 (owner rulings 2026-10-04). Pins: the
+ * gate is the only switch; only package catalog rows qualify (by service_id,
+ * else key snapshot, else an exact name match for a row with neither); the
+ * child shape (14 days exactly, no
  * weekend roll, confirmed, $0 included, both link columns, package source
  * marker, inherited tech/window/address); idempotency on a live child; the
  * savepoint posture (a failed child never fails the primary); the
@@ -32,6 +33,7 @@ const {
 
 const ROACH = { id: 'svc-roach', service_key: 'cockroach_control', name: 'Cockroach Treatment Service', category: 'pest_control', follow_up_interval_days: 14, default_duration_minutes: 60 };
 const FLEA = { id: 'svc-flea', service_key: 'flea_tick', name: 'Flea Elimination Package', category: 'specialty', follow_up_interval_days: null, default_duration_minutes: 90 };
+const BEDBUG = { id: 'svc-bedbug', service_key: 'bed_bug_treatment', name: 'Bed Bug Treatment', category: 'specialty', follow_up_interval_days: 14, default_duration_minutes: 120 };
 const PEST = { id: 'svc-pest', service_key: 'pest_general_quarterly', name: 'General Pest Control (Quarterly)', category: 'pest_control', follow_up_interval_days: null };
 const COLS = Object.fromEntries(['followup_source_service_id', 'followup_included', 'parent_service_id', 'source_action', 'service_id', 'service_key_snapshot',
   'service_category_snapshot', 'payer_id', 'property_id', 'lat', 'lng', 'service_address_line1', 'service_address_city', 'zone', 'time_window', 'window_display',
@@ -47,13 +49,14 @@ const PRIMARY = {
 // Table-routed fake transaction: services (catalog lookups by id / key),
 // scheduled_services (live-child lookup + columnInfo). trx.transaction runs
 // the savepoint body on the same fake.
-function fakeTrx({ catalog = [ROACH, FLEA, PEST], existingChild = null, columnInfo = COLS } = {}) {
+function fakeTrx({ catalog = [ROACH, FLEA, BEDBUG, PEST], existingChild = null, columnInfo = COLS } = {}) {
   const log = { lookups: [] };
   const trx = (table) => {
-    let whereArg = null; let notIn = null;
+    let whereArg = null; let notIn = null; let keyIn = null; let nameEq = null;
     const chain = {
-      where: (arg) => { whereArg = arg; return chain; },
-      whereRaw: () => chain,
+      where: (arg) => { whereArg = { ...(whereArg || {}), ...arg }; return chain; },
+      whereIn: (col, vals) => { keyIn = vals; return chain; },
+      whereRaw: (sql, bindings) => { if (/lower\(trim\(name\)\)/.test(sql)) [nameEq] = bindings; return chain; },
       whereNotIn: (col, vals) => { notIn = { col, vals }; return chain; },
       first: async () => {
         log.lookups.push({ table, where: whereArg, notIn });
@@ -63,6 +66,7 @@ function fakeTrx({ catalog = [ROACH, FLEA, PEST], existingChild = null, columnIn
       },
       select: async () => {
         log.lookups.push({ table, where: whereArg });
+        if (table === 'services' && keyIn) return catalog.filter((r) => keyIn.includes(r.service_key) && r.name.trim().toLowerCase() === nameEq);
         if (table === 'services') return catalog.filter((r) => r.service_key === whereArg.service_key);
         return [];
       },
@@ -89,9 +93,10 @@ afterAll(() => {
 });
 
 describe('scope + date math', () => {
-  test('owner scope is cockroach and flea only (bed bug waits on a ruling)', () => {
-    expect([...PACKAGE_FOLLOWUP_SERVICE_KEYS]).toEqual(['cockroach_control', 'flea_tick']);
-    expect(isPackageFollowUpServiceKey('bed_bug_treatment')).toBe(false);
+  test('owner scope is cockroach, flea and bed bug — the two-treatment package set', () => {
+    expect([...PACKAGE_FOLLOWUP_SERVICE_KEYS]).toEqual(['cockroach_control', 'flea_tick', 'bed_bug_treatment']);
+    expect([...PACKAGE_FOLLOWUP_SERVICE_KEYS].sort()).toEqual([...require('../services/typed-followup-obligation').TWO_TREATMENT_PACKAGE_KEYS].sort());
+    expect(isPackageFollowUpServiceKey('pest_general_quarterly')).toBe(false);
     expect(isPackageFollowUpServiceKey(undefined)).toBe(false);
   });
 
@@ -174,11 +179,21 @@ describe('ensurePackageFollowUpVisit', () => {
     expect(insertData).toMatchObject({ scheduled_date: '2026-10-19', service_id: 'svc-flea', service_key_snapshot: 'flea_tick', estimated_duration_minutes: 90 });
   });
 
-  test('a non-package catalog row is a no-op — and the label is never consulted', async () => {
+  test('a non-package catalog row is a no-op — a stamped identity always beats the label', async () => {
     const { trx } = fakeTrx();
     expect(await ensurePackageFollowUpVisit({ trx, primary: { ...PRIMARY, service_id: 'svc-pest' }, cols: COLS })).toBeNull();
-    expect(await ensurePackageFollowUpVisit({ trx, primary: { ...PRIMARY, service_id: null, service_key_snapshot: null, service_type: 'Cockroach Treatment Service' }, cols: COLS })).toBeNull();
+    expect(await ensurePackageFollowUpVisit({ trx, primary: { ...PRIMARY, service_id: null, service_key_snapshot: 'pest_general_quarterly' }, cols: COLS })).toBeNull();
     expect(createScheduledService).not.toHaveBeenCalled();
+  });
+
+  test('a row with no catalog identity (availability confirm path) resolves on an exact name match only', async () => {
+    const { trx } = fakeTrx();
+    const bare = { ...PRIMARY, service_id: null, service_key_snapshot: null };
+    expect(await ensurePackageFollowUpVisit({ trx, primary: { ...bare, service_type: 'Roach problem in kitchen' }, cols: COLS })).toBeNull();
+    expect(await ensurePackageFollowUpVisit({ trx, primary: { ...bare, service_type: 'General Pest Control' }, cols: COLS })).toBeNull();
+    expect(createScheduledService).not.toHaveBeenCalled();
+    await ensurePackageFollowUpVisit({ trx, primary: { ...bare, service_type: '  bed bug treatment ' }, cols: COLS });
+    expect(createScheduledService.mock.calls[0][0].insertData).toMatchObject({ service_id: 'svc-bedbug', service_key_snapshot: 'bed_bug_treatment', scheduled_date: '2026-10-19' });
   });
 
   test('idempotent: a live child linked by followup_source_service_id is returned, not duplicated', async () => {
@@ -228,6 +243,39 @@ describe('ensurePackageFollowUpVisit', () => {
       area: 'Schedule', severity: 'needs-you', who: 'person', subject: { type: 'visit', id: 'child-1' }, doneWhen: 'followup_respaced',
       link: '/admin/dispatch?tab=schedule&date=2026-10-19&appointment=child-1',
     }), expect.objectContaining({ dedupeKey: 'package_followup_overlap:child-1' }));
+  });
+
+  test('the overlap card waits for the outermost commit and is dropped on rollback (codex #5896 r1 P2)', async () => {
+    findConflictingVisits.mockResolvedValue([{ id: 'other-stop' }]);
+    let commit; let rollback;
+    const committed = fakeTrx();
+    committed.trx.executionPromise = new Promise((resolve) => { commit = resolve; });
+    await ensurePackageFollowUpVisit({ trx: committed.trx, primary: PRIMARY, cols: COLS });
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+    commit();
+    await new Promise((r) => setImmediate(r));
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+
+    raiseAdminAlert.mockClear();
+    const rolledBack = fakeTrx();
+    rolledBack.trx.executionPromise = new Promise((_resolve, reject) => { rollback = reject; });
+    await ensurePackageFollowUpVisit({ trx: rolledBack.trx, primary: PRIMARY, cols: COLS });
+    rollback(new Error('outer rollback'));
+    await new Promise((r) => setImmediate(r));
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
+  test('a failed overlap probe rolls back only its own savepoint: the child still books (codex #5896 r1 P1)', async () => {
+    findConflictingVisits.mockRejectedValueOnce(new Error('probe statement failed'));
+    const { trx } = fakeTrx();
+    let savepoints = 0;
+    const inner = trx.transaction;
+    trx.transaction = async (fn) => { savepoints += 1; return inner(fn); };
+    const child = await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS });
+    expect(child.id).toBe('child-1');
+    // One savepoint for the child, a second one confining the probe.
+    expect(savepoints).toBe(2);
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   test('a failed child write never fails the primary: logged, null, savepoint rolled back', async () => {

@@ -550,7 +550,7 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
   const raw = String(extracted.follow_up_date_time || '').trim();
   const m = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
   const statedFutureDate = !!(m && isValidCalendarDate(m[1]) && m[1] > parentDate);
-  // A two-treatment package (cockroach / flea, owner ruling 2026-10-04) owes
+  // A two-treatment package (cockroach / flea / bed bug, owner ruling 2026-10-04) owes
   // visit 2 whether or not the caller brought it up — behind the same gate
   // the other booking paths use (package-followup-booking.js).
   const { packageFollowupAutobookLive } = require('../config/feature-gates');
@@ -605,12 +605,21 @@ function callBookingDateOnly(value) {
 // office confirms the time) and the package auto-book's
 // (package-followup-booking.js — booked CONFIRMED by owner ruling
 // 2026-10-04, so its confirmed state still means "spaced from visit 1").
-// Both stop following the parent once the CUSTOMER confirmed the date.
+// Both stop following a parent MOVE once the customer confirmed (or
+// re-picked) the date: that date is now the customer's own.
 const PACKAGE_FOLLOWUP_SOURCE_ACTION = 'package_followup_auto';
 const LINKED_FOLLOWUP_KIND_SQL = "((source_action = ? AND status = 'pending') OR (source_action = ? AND status IN ('pending', 'confirmed')))";
 const applyCallFollowUpFilter = (q, parentServiceId) => q
   .where({ parent_service_id: parentServiceId, customer_confirmed: false })
   .whereRaw(LINKED_FOLLOWUP_KIND_SQL, ['ai_call_pipeline_followup', PACKAGE_FOLLOWUP_SOURCE_ACTION]);
+// A parent CANCEL is wider for the package child: it is a $0 included
+// treatment of the cancelled package, so it goes with visit 1 even after
+// the customer confirmed it (codex #5896 r1 P1). The call child keeps its
+// pending + unconfirmed rule.
+const LINKED_FOLLOWUP_CANCEL_SQL = "((source_action = ? AND status = 'pending' AND customer_confirmed = false) OR (source_action = ? AND status IN ('pending', 'confirmed')))";
+const applyCallFollowUpCancelFilter = (q, parentServiceId) => q
+  .where({ parent_service_id: parentServiceId })
+  .whereRaw(LINKED_FOLLOWUP_CANCEL_SQL, ['ai_call_pipeline_followup', PACKAGE_FOLLOWUP_SOURCE_ACTION]);
 
 // The still-pending, never-confirmed call-created children of a parent and
 // the day each lands on after the parent's delta — what the shift writes
@@ -841,7 +850,7 @@ async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actor
   if (!parentServiceId) return 0;
   const { transitionJobStatus } = require('./job-status');
   const now = new Date();
-  const children = await applyCallFollowUpFilter(conn('scheduled_services'), parentServiceId)
+  const children = await applyCallFollowUpCancelFilter(conn('scheduled_services'), parentServiceId)
     .select('id', 'status');
   let cancelled = 0;
   for (const child of children) {
@@ -892,5 +901,6 @@ module.exports = {
   planCallFollowUpShift,
   cancelCallFollowUpsForParentCancel,
   applyCallFollowUpFilter,
+  applyCallFollowUpCancelFilter,
   DEFAULT_FOLLOW_UP_INTERVAL_DAYS,
 };
