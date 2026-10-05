@@ -113,7 +113,7 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
       logger.warn(`[commercial-suite-size] listing leg errored: ${err.message}`);
     }
   }
-  const listingResult = (license) => ({
+  const listingResult = (license, licenseChecked = false) => ({
     value: listing.value,
     source: SOURCES.LISTING_VERIFIED_TEXT,
     confidence: 'medium',
@@ -122,6 +122,10 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
     // listing itself never does.
     businessType: license ? 'restaurant_food' : null,
     ...(license ? { licenseBacked: true, seats: license.seats, licenseEvidence: license.evidence } : {}),
+    // Whether the license leg actually ANSWERED for this suite. false = it
+    // was skipped or failed (budget, outage): the stamp is kept short so a
+    // later lookup asks again instead of pinning "no license" for 90 days.
+    licenseChecked: Boolean(license) || licenseChecked,
     evidence: listing.evidence,
     url: listing.url,
     listingFetchedAt: listing.fetchedAt,
@@ -137,7 +141,7 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
         ? { ...opts, timeoutMs: Math.min(DBPR_DEFAULT_TIMEOUT_MS, dbprRemaining) }
         : opts;
       const dbpr = await resolveViaDbprLicense({ address, phone, businessNameHint }, dbprOpts);
-      if (listing) return listingResult(dbpr && (Number(dbpr.value) > 0 || dbpr.businessName) ? dbpr : null);
+      if (listing) return listingResult(dbpr && (Number(dbpr.value) > 0 || dbpr.businessName) ? dbpr : null, true);
       if (dbpr) {
         businessName = businessName || dbpr.businessName || null;
         if (Number(dbpr.value) > 0) {

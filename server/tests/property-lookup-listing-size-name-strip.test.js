@@ -93,6 +93,10 @@ test('a license-backed listing stamp ages on the license\'s 30 days, a plain lis
   expect(commercialSuiteSizeStampIsFresh({ ...base, licenseBacked: true, resolvedAt: at(20) })).toBe(true);
   expect(commercialSuiteSizeStampIsFresh({ ...base, licenseBacked: true, resolvedAt: at(31) })).toBe(false);
   expect(commercialSuiteSizeStampIsFresh({ ...base, resolvedAt: at(31) })).toBe(true);
+  // The license leg never answered: asked again the next day.
+  expect(commercialSuiteSizeStampIsFresh({ ...base, licenseChecked: false, resolvedAt: at(0.5) })).toBe(true);
+  expect(commercialSuiteSizeStampIsFresh({ ...base, licenseChecked: false, resolvedAt: at(2) })).toBe(false);
+  expect(commercialSuiteSizeStampIsFresh({ ...base, licenseChecked: true, resolvedAt: at(31) })).toBe(true);
 });
 
 test('a unit known only from the Places listing never starts the listing leg; a typed suite does', async () => {

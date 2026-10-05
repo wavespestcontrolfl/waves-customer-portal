@@ -1996,9 +1996,12 @@ function commercialSuiteSizeStampIsFresh(stamp, now = Date.now()) {
   // A license-backed listing stamp carries the DBPR classification too
   // (restaurant subtype, cadence): it ages on the LICENSE's 30 days, so a
   // closed restaurant never keeps restaurant pricing for the listing's 90.
-  const maxAge = stamp.licenseBacked === true
-    ? Math.min(SUITE_SIZE_STAMP_MAX_AGE_MS[stamp.source] || Infinity, SUITE_SIZE_STAMP_MAX_AGE_MS.license_seats)
-    : SUITE_SIZE_STAMP_MAX_AGE_MS[stamp.source];
+  // A listing stamp whose license leg never answered (skipped or failed) is
+  // good for one day only: the next day's lookup asks DBPR again rather than
+  // pinning "no license" for the listing's 90.
+  let maxAge = SUITE_SIZE_STAMP_MAX_AGE_MS[stamp.source];
+  if (stamp.licenseBacked === true) maxAge = Math.min(maxAge || Infinity, SUITE_SIZE_STAMP_MAX_AGE_MS.license_seats);
+  else if (stamp.source === 'listing_verified_text' && stamp.licenseChecked === false) maxAge = DAY_MS;
   if (!maxAge) return true;
   const resolvedAt = Date.parse(stamp.resolvedAt);
   if (!Number.isFinite(resolvedAt)) return false;
@@ -3440,6 +3443,7 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
         // license at the suite classified it as a restaurant.
         ...(suiteSize.url ? { url: suiteSize.url } : {}),
         ...(suiteSize.licenseBacked ? { licenseBacked: true } : {}),
+        ...(typeof suiteSize.licenseChecked === 'boolean' ? { licenseChecked: suiteSize.licenseChecked } : {}),
         // When this was resolved, so a persisted stamp can be aged out
         // (see commercialSuiteSizeStampIsFresh) rather than trusted forever.
         resolvedAt: new Date().toISOString(),

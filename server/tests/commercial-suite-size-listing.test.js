@@ -37,6 +37,8 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('14617 SR 70 E Suite 103 1,200 sq ft to 2,400 sq ft', a)).toEqual([]);
     expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: 1,200 SF TO 2,400 SF', a)).toEqual([]);
     expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: 1,200 SF To 2,400 SF', a)).toEqual([]);
+    expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: between 1,200 and 2,400 SF', a)).toEqual([]);
+    expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: between 1,200 SF and 2,400 SF', a)).toEqual([]);
     // A bound or an estimate is not the area; a split digit group is not a figure.
     expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: up to 2,400 SF', a)).toEqual([]);
     expect(P.extractSuiteSizes('14617 SR 70 E Suite 103: from 1,350 SF', a)).toEqual([]);
@@ -86,6 +88,12 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Bradenton FL, Suite 103 — 2,000 SF', c)).toEqual([2000]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Lakewood Ranch FL 34202, Suite 103 — 2,000 SF', z)).toEqual([2000]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Suite 103 — 2,000 SF', z)).toEqual([2000]);
+    // Another state named after a place is never this address.
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Atlanta GA, Suite 103 — 2,000 SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Mobile, AL 36602 Suite 103 — 2,000 SF', c)).toEqual([]);
+    // A bare hash with a space, and a suite named far away in the title and again beside the figure.
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy # 103 — 1,350 SF', c)).toEqual([1350]);
+    expect(P.extractSuiteSizes(`4400 Test Commons Pkwy Suite 103 ${'retail for lease in a great location '.repeat(3)}Suite 103 1,350 SF`, c)).toEqual([1350]);
     // A bare five-digit figure is a size, not a ZIP; this number on another street in between is another address.
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 12000 SF', z)).toEqual([12000]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy. 4400 Other Street Suite 103 2,000 SF', c)).toEqual([]);
@@ -160,6 +168,10 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.settleSizes([{ value: 1350, url: 'a' }, { value: 1400, url: 'b' }])).toEqual({ value: 1350, url: 'a', count: 2 });
     expect(P.settleSizes([{ value: 1350, url: 'a' }, { value: 2000, url: 'b' }])).toEqual({ conflict: 2 });
     expect(P.settleSizes([])).toBeNull();
+    // Agreement is with the whole group, whatever the order.
+    expect(P.settleSizes([{ value: 1100, url: 'a' }, { value: 1000, url: 'b' }, { value: 1210, url: 'c' }])).toEqual({ conflict: 2 });
+    expect(P.settleSizes([{ value: 1000, url: 'b' }, { value: 1210, url: 'c' }, { value: 1100, url: 'a' }]).conflict).toBeGreaterThan(1);
+    expect(P.settleSizes([{ value: 1300, url: 'a' }, { value: 1350, url: 'b' }, { value: 1400, url: 'c' }])).toMatchObject({ value: 1300, count: 3 });
   });
   test('queries quote the street number and the suite, leave the street spelling open, and target the listing sites first', () => {
     const q = P.buildQueries(a);
@@ -222,6 +234,10 @@ describe('the production address parser\'s unit form', () => {
     expect(P.addressAnchors(suiteAddressParts('4400 Test Commons Pkwy #12B, Bradenton, FL 34202')).unit).toBe('12B');
     const b = P.addressAnchors(suiteAddressParts('4400 Test Commons Pkwy Unit B, Bradenton, FL 34202'));
     expect(b.unit).toBe('B');
+    // The query keeps the designator the operator typed.
+    expect(P.buildQueries(b)[0]).toContain('"unit B"');
+    expect(P.buildQueries(P.addressAnchors({ street: '4400 Test Commons Pkwy', unit: 'Bay 4', city: 'Bradenton' }))[0]).toContain('"bay 4"');
+    expect(P.buildQueries(P.addressAnchors({ street: '4400 Test Commons Pkwy', unit: '#12', city: 'Bradenton' }))[0]).toContain('"suite 12"');
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Unit B — 1,100 SF', b)).toEqual([1100]);
   });
 

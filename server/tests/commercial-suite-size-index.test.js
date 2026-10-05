@@ -32,7 +32,15 @@ describe('resolveCommercialSuiteSize — listing rung (PR 5b) sits above the lic
     const result = await resolveCommercialSuiteSize({ address: ADDRESS, businessNameHint: 'Hint Co' });
     expect(result).toMatchObject({ value: 1350, source: SOURCES.LISTING_VERIFIED_TEXT, businessName: 'Hint Co', businessType: null });
     expect(result.licenseBacked).toBeUndefined();
+    expect(result.licenseChecked).toBe(true); // DBPR answered: no license at this suite
     expect(resolveViaWebSearch).not.toHaveBeenCalled();
+  });
+
+  test('a listing size whose license leg failed or was skipped says so (licenseChecked false)', async () => {
+    resolveViaListing.mockResolvedValueOnce({ value: 1350, source: 'listing_verified_text', confidence: 'medium', url: 'https://www.loopnet.com/x', evidence: [] });
+    resolveViaDbprLicense.mockRejectedValueOnce(new Error('dbpr down'));
+    const failed = await resolveCommercialSuiteSize({ address: ADDRESS });
+    expect(failed).toMatchObject({ value: 1350, source: SOURCES.LISTING_VERIFIED_TEXT, licenseChecked: false });
   });
 
   test('the cache-hit path (skipWebSearch) and skipListing never call the listing leg', async () => {

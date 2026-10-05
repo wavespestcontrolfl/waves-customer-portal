@@ -65,6 +65,9 @@ const SIZE_RE = /(\d{1,3}(?:,\d{3})+|\d{3,6})(\s*(?:\+\/-|±|\+))?\s*(?:sf|sq\.?
 // estimate, not the suite's area.
 // The same qualifiers right after the figure: "1,350 SF (approx.)",
 // "1,350 SF +/-", "1,350 SF minimum", "1,350 SF or more".
+// "between 1,200 and 2,400 SF", "between 1,200 SF and 2,400 SF": both
+// endpoints are a range.
+const BETWEEN_BEFORE_RE = /\bbetween\b[^.;|]{0,40}$/i;
 const SPLIT_GROUP_BEFORE_RE = /(?<!(?:suites?|ste\.?|units?|bays?|spaces?|#)\s*#?\s*)\b\d{1,3}\s$/i;
 const BOUND_AFTER_RE = /^\s*[(\[]?\s*(?:\+\/-|±|~|approx\.?|approximately|approximate|est\.?|estimated|minimum|maximum|min\b|max\b|or\s+(?:more|less)|and\s+up|more\s+or\s+less)/i;
 const BOUND_BEFORE_RE = /\b(?:up\s+to|from|starting\s+at|as\s+low\s+as|as\s+much\s+as|minimum|maximum|min|max|approximately|approx\.?|estimated|est\.?|about|around|roughly|nearly|over|under|less\s+than|more\s+than)\s*$|[~±]\s*$/i;
@@ -145,6 +148,16 @@ function normalizeUnitValue(raw) {
   return /^[A-Z0-9][A-Z0-9/&+–—-]*$/.test(value) ? value : null;
 }
 
+function unitDesignatorWord(raw) {
+  const m = String(raw || '').trim().match(/^(units?|bays?|spaces?|spc\.?|apt\.?|apartment)\b/i);
+  if (!m) return 'suite';
+  const w = m[1].toLowerCase().replace(/\.$/, '');
+  if (w.startsWith('unit')) return 'unit';
+  if (w.startsWith('bay')) return 'bay';
+  if (w.startsWith('sp')) return 'space';
+  return 'apt';
+}
+
 // Street number + first street word off the suite address parts.
 function addressAnchors(address = {}) {
   const street = String(address.street || '').trim();
@@ -166,6 +179,7 @@ function addressAnchors(address = {}) {
   // the value alone, in the same form unitMentions yields (a combined typed
   // unit keeps its separators, so it only ever matches the same combination).
   const unit = normalizeUnitValue(address.unit);
+  const unitWord = unitDesignatorWord(address.unit);
   // The typed street as the county roll spells it ("SR 70 E", "TEST
   // COMMONS PKWY"), leading/trailing directions dropped: every remaining
   // word must follow the number on the text, in order.
@@ -180,7 +194,7 @@ function addressAnchors(address = {}) {
   const streetDirections = new Set(streetWords.filter((w) => DIRECTION_RE.test(w)));
   streetWords = streetWords.filter((w) => !DIRECTION_RE.test(w));
   const zip = (String(address.zip || '').match(/\d{5}/) || [null])[0];
-  return { number, streetLine, streetWord, streetWords, streetDirections, unit, city: String(address.city || '').trim() || null, zip };
+  return { number, streetLine, streetWord, streetWords, streetDirections, unit, unitWord, city: String(address.city || '').trim() || null, zip };
 }
 
 // Every suite/unit mention on the text: "Suite 103", "Ste. 103", "Unit B",
@@ -194,7 +208,7 @@ function addressAnchors(address = {}) {
 // combined; "Ste 103, 14617 FL-70 E" is a suite then a house number).
 // A continuation is never a size figure: "Suite 103 - 1,350 SF" is suite
 // 103 and its size, "Suite 103-104" a combined suite.
-const UNIT_MENTION_RE = /(?:\b(?:suites?|ste\.?|units?|bays?|spaces?)\s*#?\s*|#)([A-Za-z]?\d{1,5}[A-Za-z]?|[A-Za-z])\b((?:\s*(?:\/|&|-|–|—|\+|and|to|,(?=\s*#?\s*(?:[A-Za-z]?\d{1,5}[A-Za-z]?|[A-Za-z])\b(?!\s+[a-z]{2,})))\s*#?\s*(?:[A-Za-z]?\d{1,5}[A-Za-z]?|[A-Za-z])\b(?!,\d)(?!\s*(?:sf|sq|square|sqft)\b))*)/gi;
+const UNIT_MENTION_RE = /(?:\b(?:suites?|ste\.?|units?|bays?|spaces?)\s*#?\s*|#\s*)([A-Za-z]?\d{1,5}[A-Za-z]?|[A-Za-z])\b((?:\s*(?:\/|&|-|–|—|\+|and|to|,(?=\s*#?\s*(?:[A-Za-z]?\d{1,5}[A-Za-z]?|[A-Za-z])\b(?!\s+[a-z]{2,})))\s*#?\s*(?:[A-Za-z]?\d{1,5}[A-Za-z]?|[A-Za-z])\b(?!,\d)(?!\s*(?:sf|sq|square|sqft)\b))*)/gi;
 function unitMentions(text) {
   const out = [];
   let m;
@@ -286,6 +300,7 @@ function figureIsPlain(t, idx, len) {
     || /^\s*(?:-|–|—|to)\s*\d/i.test(after)) return false;
   if (TOTAL_BEFORE_RE.test(t.slice(Math.max(0, idx - 48), idx))) return false;
   if (BOUND_BEFORE_RE.test(t.slice(Math.max(0, idx - 20), idx))) return false;
+  if (BETWEEN_BEFORE_RE.test(t.slice(Math.max(0, idx - 44), idx))) return false;
   if (CONTEXT_BEFORE_RE.test(t.slice(Math.max(0, idx - 20), idx))) return false;
   if (BOUND_AFTER_RE.test(t.slice(idx + len, idx + len + 24))) return false;
   if (TOTAL_AFTER_WORDS_RE.test(nounPhraseAfter(t.slice(idx + len, idx + len + 120)))) return false;
@@ -328,7 +343,12 @@ function zipAgrees(t, addressAt, idx, blockEnd, anchors) {
 }
 
 const CITY_BEFORE_STATE_RE = /\b([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,2})\s*,?\s+(?:FL|Florida)\b/g;
+// A span that names another US state after a place name ("Atlanta GA",
+// "Mobile, AL") is not this address, typed city or not. Upper-case
+// abbreviations only, so "in", "or", "me" in prose never read as states.
+const OTHER_STATE_RE = /\b[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+)?\s*,?\s+(?:AL|AK|AZ|AR|CA|CO|CT|DE|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b(?=\s*(?:\d{5}|[,.;|)]|$|\s+(?:Suite|Ste|Unit|Bay|Space|#)))/;
 function cityAgrees(span, city) {
+  if (OTHER_STATE_RE.test(span)) return false;
   const typed = String(city || '').trim().toLowerCase();
   if (!typed) return true;
   CITY_BEFORE_STATE_RE.lastIndex = 0;
@@ -346,8 +366,9 @@ function blockOwnsFigure(block, idx, wanted) {
   const mentions = unitMentions(block.text);
   const units = [...new Set(mentions.map((u) => u.unit))];
   if (units.length !== 1 || units[0] !== wanted) return false;
-  const mention = mentions.find((u) => u.unit === wanted);
-  return Math.abs((block.start + mention.index) - idx) <= UNIT_REACH;
+  // Any mention of the suite within reach (a title may name it far from
+  // the figure and the description again right beside it).
+  return mentions.some((u) => u.unit === wanted && Math.abs((block.start + u.index) - idx) <= UNIT_REACH);
 }
 
 function sameSize(a, b) {
@@ -361,9 +382,12 @@ function sameSize(a, b) {
 function settleSizes(hits) {
   if (!hits.length) return null;
   const groups = [];
+  // A figure joins a group only when it agrees with EVERY member (min and
+  // max), so three listings at 1,000 / 1,100 / 1,210 are a conflict whatever
+  // order they arrive in.
   for (const hit of hits) {
-    const g = groups.find((grp) => sameSize(grp.value, hit.value));
-    if (g) g.hits.push(hit); else groups.push({ value: hit.value, hits: [hit] });
+    const g = groups.find((grp) => sameSize(grp.min, hit.value) && sameSize(grp.max, hit.value));
+    if (g) { g.hits.push(hit); g.min = Math.min(g.min, hit.value); g.max = Math.max(g.max, hit.value); } else groups.push({ value: hit.value, min: hit.value, max: hit.value, hits: [hit] });
   }
   if (groups.length !== 1) return { conflict: groups.length };
   return { value: groups[0].value, url: groups[0].hits[0].url, count: groups[0].hits.length };
@@ -373,7 +397,9 @@ function buildQueries(anchors) {
   // The number is exact; the street is left unquoted so Google matches the
   // spelling a listing used ("SR 70", "State Road 70", "FL-70").
   const addr = `"${anchors.number}" ${anchors.streetLine}`;
-  const unit = anchors.unit ? ` "suite ${anchors.unit}"` : '';
+  // The designator the operator typed ("Unit B", "Bay 4"; "#12" and "Ste"
+  // read as "suite"), so Google returns listings indexed under it.
+  const unit = anchors.unit ? ` "${anchors.unitWord || 'suite'} ${anchors.unit}"` : '';
   const city = anchors.city ? ` ${anchors.city}` : '';
   return [
     `${addr}${unit}${city} FL site:loopnet.com`,
