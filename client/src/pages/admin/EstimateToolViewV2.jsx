@@ -1960,10 +1960,10 @@ export default function EstimateToolViewV2({
           // silently flip the row's settings.
           showOneTimeOption: !!d.showOneTimeOption,
           billByInvoice: !!d.billByInvoice,
-          // Good / Better / Best: the edit-source payload does not carry the
-          // row's offerTiersRequested marker, so the choice comes back from
-          // the saved form snapshot (the same form this save serialized).
-          offerTiers: !!d.inputs?.offerTiers,
+          // Good / Better / Best: the row's own saved mark (edit-source
+          // offerTiersRequested); an older server answer without the field
+          // falls back to the saved form snapshot.
+          offerTiers: d.offerTiersRequested === true || (d.offerTiersRequested === undefined && !!d.inputs?.offerTiers),
           _offerTiersDeclined: !!d.inputs?._offerTiersDeclined,
           // Row notes win over the inputs snapshot for the same reason —
           // lead/webhook/automation rows carry notes the builder never wrote,
@@ -2206,7 +2206,12 @@ export default function EstimateToolViewV2({
         forgetScopeAnswer();
         setLookupMeta(null);
         setSatelliteData(null);
-        setEstimate(d.result && !stale ? { ...d.result, engineRequest: d.engineRequest } : null);
+        // The stored result does not carry the server's tier-availability flag
+        // (it is stamped on fresh calculate responses): restore it from the
+        // edit source so the Good / Better / Best checkbox shows on a reopen.
+        setEstimate(d.result && !stale
+          ? { ...d.result, engineRequest: d.engineRequest, ...(d.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
+          : null);
         setSavedId(stale ? null : d.id);
         setReopenNotice(notice);
         setSavedViewUrl(estimatePreviewUrlFromSave(d));

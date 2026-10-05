@@ -6604,6 +6604,29 @@ effective post-discount amounts (`annualAfterDiscount`/`visitsPerYear`),
 never the pre-discount list `perTreatment`.
 NOTHING is sent to the customer and no bell rings: one `activity_log` row,
 written ATOMICALLY with the estimate update, is the whole audit surface.
+Good / Better / Best (`GATE_ESTIMATE_OFFER_TIERS`, STRICT opt-in, needs the
+opt-out gate; off = every response byte-identical) is a VIEW over this rail,
+never a second pricing path. `/data` may carry a top-level `offerTiers`
+block for a row the office marked (`estimate_data.offerTiersRequested`) on a
+live accept-active surface (never a draft preview, never an accepted or
+price-locked row) when THIS rail would allow the move for `lawn_care` (its
+own removable / restore-blocked / proposal / tier-selection resolvers
+decide): `{ state: 'best' | 'pest_only', companionKey, companionLabel, good:
+{ oneTimeTotal } | null, better: { rows, oneTimeTotal, waveGuardTier },
+best: { rows, oneTimeTotal, waveGuardTier } }`, `rows` being
+`{ service, perApplication, visitsPerYear? }`. The figures for the state the
+row is NOT in are this rail's own dry run (a removal in `best`, an add-back
+in `pest_only`), so a tile never shows a price the rail would not persist;
+any refusal or error omits the block. The dry-run response carries
+`perApplication` (the per-line terms the `previewBasis` digest binds) as
+data. The commit sets `show_one_time_option` on a marked row from the lawn
+line: on when lawn is removed (customer, or the staff send-time park) and
+the delivery validator allows the option on the repriced row; always off
+when lawn is added back, with the gate on or off — the one-time option never
+sits on an estimate that carries a companion program. The page's tiles drive
+the existing dry-run → `previewBasis` → commit steps; there is no tier
+parameter on accept, the slot routes or any intent route.
+
 The same PUT is the priced ADD rail under `GATE_ESTIMATE_SERVICE_ADD`
 (STRICT opt-in, needs the opt-out gate; off = the `/data` `addable` stamp is
 withheld and the write refuses 400 `service_not_addable`): `included:true`

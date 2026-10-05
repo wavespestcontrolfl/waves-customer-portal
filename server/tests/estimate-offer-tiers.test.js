@@ -71,12 +71,17 @@ describe('the one-time option follows the lawn line on a marked row', () => {
     expect(OfferTiers.oneTimeOptionUpdateForMixChange({ ...base, mode: 'restore', gateOn: false })).toEqual({ show_one_time_option: false });
   });
 
-  test('untouched: an unmarked row, another service, a staff action, a priced add', () => {
+  test('the staff send-time park ("lead with one service") gets the same treatment, and its failed-send restore turns the option off', () => {
+    expect(OfferTiers.oneTimeOptionUpdateForMixChange({ ...base, actor: 'staff', mode: 'remove', gateOn: true, validate: allow })).toEqual({ show_one_time_option: true });
+    expect(OfferTiers.oneTimeOptionUpdateForMixChange({ ...base, actor: 'staff', mode: 'restore', gateOn: false })).toEqual({ show_one_time_option: false });
+    expect(OfferTiers.oneTimeOptionUpdateForMixChange({ ...base, actor: 'system', mode: 'remove', gateOn: true, validate: allow })).toEqual({});
+  });
+
+  test('untouched: an unmarked row, another service, a priced add', () => {
     const unmarked = pestLawnData({ offerTiersRequested: undefined });
     expect(OfferTiers.oneTimeOptionUpdateForMixChange({ ...base, estData: unmarked, mode: 'remove', gateOn: true, validate: allow })).toEqual({});
     expect(OfferTiers.oneTimeOptionUpdateForMixChange({ ...base, estData: unmarked, mode: 'restore', gateOn: true })).toEqual({});
     expect(OfferTiers.oneTimeOptionUpdateForMixChange({ ...base, serviceKey: 'mosquito', mode: 'remove', gateOn: true, validate: allow })).toEqual({});
-    expect(OfferTiers.oneTimeOptionUpdateForMixChange({ ...base, actor: 'staff', mode: 'remove', gateOn: true, validate: allow })).toEqual({});
     expect(OfferTiers.oneTimeOptionUpdateForMixChange({ ...base, mode: 'add', gateOn: true, validate: allow })).toEqual({});
   });
 

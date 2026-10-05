@@ -1246,6 +1246,19 @@ router.get('/:id/edit-source', async (req, res, next) => {
       notes: estimate.notes,
       serviceInterest: estimate.service_interest,
       showOneTimeOption: !!estimate.show_one_time_option,
+      // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): the saved tier mark
+      // and whether the stored result may carry one, so a reopened estimate
+      // shows its checkbox and a revise keeps the mark without a regenerate.
+      offerTiersRequested: estData?.offerTiersRequested === true,
+      offerTiersAvailable: (() => {
+        try {
+          const OfferTiers = require('../services/estimate-offer-tiers');
+          const { isCommercialEstimateData } = require('../services/estimate-delivery-options');
+          return OfferTiers.offerTiersSaveEligibility({
+            estData, commercial: isCommercialEstimateData(estData),
+          }).eligible === true;
+        } catch (_) { return false; }
+      })(),
       billByInvoice: !!estimate.bill_by_invoice,
       satelliteUrl: estimate.satellite_url,
       propertyId: estimate.property_id || null,

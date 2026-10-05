@@ -79,7 +79,9 @@ function offerTiersSaveEligibility({ gateOn = offerTiersGateLive(), estData = {}
  *  - lawn removed → the row is pest-only, where the option is valid: turn it
  *    on, when the gate is on and the delivery validator allows it on the
  *    repriced row;
- *  - lawn added back → turn it off, gate or no gate. The option must never
+ *  - lawn added back (the customer's add-back, or the send path's
+ *    compensation after a failed send) → turn it off, gate or no gate. The
+ *    option must never
  *    sit on an estimate that carries a companion program, because the
  *    one-time toggle drops companions at accept.
  * Returns the column patch for the rail's guarded UPDATE ({} = leave as is).
@@ -87,7 +89,11 @@ function offerTiersSaveEligibility({ gateOn = offerTiersGateLive(), estData = {}
 function oneTimeOptionUpdateForMixChange({
   actor, serviceKey, mode, estData, next = {}, gateOn = offerTiersGateLive(), validate,
 } = {}) {
-  if (actor !== 'customer' || serviceKey !== COMPANION_KEY || !offerTiersRequested(estData)) return {};
+  // Customer moves AND the staff send-time park ("lead with one service",
+  // GATE_ESTIMATE_LEAD_SERVICE_SEND, live): a marked pest + lawn estimate
+  // whose lawn is parked at send arrives pest-only — Better preselected, Best
+  // one tap away — and the one-time option must be on for Good to work.
+  if (!['customer', 'staff'].includes(actor) || serviceKey !== COMPANION_KEY || !offerTiersRequested(estData)) return {};
   if (mode === 'restore') return { show_one_time_option: false };
   if (mode !== 'remove' || !gateOn) return {};
   const validateOption = typeof validate === 'function'
