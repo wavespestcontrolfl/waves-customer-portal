@@ -1,8 +1,8 @@
 // client/src/components/lawn/LawnAssessmentCompletionBlock.jsx
 //
 // The lawn photo, analyze and confirm step of a lawn completion: the shot list
-// (or the three legacy slots), Analyze lawn, the four scores, the evidence
-// review (LawnVisitReview) and Confirm assessment, with the optional mowing
+// (or the three legacy slots), Analyze lawn, the four scores and Confirm
+// assessment (the evidence review is not shown here), with the optional mowing
 // height reading. Moved out of pages/admin/SchedulePage.jsx unchanged so the
 // full completion form and the lawn Fast Complete sheet share ONE
 // implementation. Two differences from the code as it stood in SchedulePage:
@@ -11,7 +11,7 @@
 // nothing smaller on a new file).
 import React, { useEffect, useRef, useState } from "react";
 import lawnScores from '@lawn-scores';
-import LawnVisitReview, { createVisitReview, visitReviewPayload } from "./LawnVisitReview";
+import { createVisitReview, visitReviewPayload } from "./LawnVisitReview";
 import { SHOTS as LAWN_SHOTS, SHOT_CAP as LAWN_SHOT_CAP, addPhotos as addLawnPhotos, assignShotZone, describeAddResult, planFileReads, shotIsFull, shotListHint } from "../../lib/lawn-photo-shots";
 
 // The admin palette values the block uses (same values as SchedulePage's D).
@@ -68,6 +68,25 @@ function lawnScoreColor(value) {
   if (n >= 75) return D.green;
   if (n >= 50) return D.amber;
   return D.red;
+}
+
+// A - or + beside a score: the block's own control look (white, hairline border,
+// 8px radius) at the 44px touch size.
+function stepButtonStyle(off) {
+  return {
+    flexShrink: 0,
+    width: 44,
+    height: 44,
+    padding: 0,
+    borderRadius: 8,
+    border: `1px solid ${D.border}`,
+    background: D.white,
+    color: D.heading,
+    fontSize: 18,
+    lineHeight: 1,
+    cursor: off ? "not-allowed" : "pointer",
+    opacity: off ? 0.55 : 1,
+  };
 }
 
 function resizeLawnAssessmentImage(dataUrl, maxEdge = 1600, quality = 0.85) {
@@ -470,6 +489,52 @@ export default function LawnAssessmentCompletionBlock({
     }
   }
 
+  // The - and + buttons beside a score (owner 2026-10-05): one step per tap,
+  // clamped 0 to 100, and a held press repeats. A step counts as typed, so it
+  // posts like a typed number. From a blank score a step starts at the AI read
+  // (0 when it left none).
+  function stepScore(key, delta) {
+    setTypedKeys((prev) => new Set(prev).add(key));
+    setTechScores((prev) => {
+      if (!prev) return prev;
+      const current = Number(prev[key]);
+      const base = prev[key] != null && prev[key] !== "" && Number.isFinite(current)
+        ? current
+        : lawnScores.lawnScoreValue(result?.aiScores?.[key]) ?? 0;
+      return { ...prev, [key]: Math.max(0, Math.min(100, Math.round(base) + delta)) };
+    });
+  }
+  const holdRef = useRef({ timer: null, repeated: false });
+  function stopHold() {
+    clearTimeout(holdRef.current.timer);
+    clearInterval(holdRef.current.timer);
+    holdRef.current.timer = null;
+  }
+  useEffect(() => stopHold, []);
+  // Handlers for a step button: a tap (or Enter/Space) steps once; holding the
+  // press steps again every 120ms after a short pause, and the click that ends
+  // a hold does not step a second time.
+  function holdToRepeat(key, delta) {
+    return {
+      onClick: () => {
+        if (holdRef.current.repeated) { holdRef.current.repeated = false; return; }
+        stepScore(key, delta);
+      },
+      onPointerDown: () => {
+        stopHold();
+        holdRef.current.repeated = false;
+        holdRef.current.timer = setTimeout(() => {
+          holdRef.current.repeated = true;
+          stepScore(key, delta);
+          holdRef.current.timer = setInterval(() => stepScore(key, delta), 120);
+        }, 450);
+      },
+      onPointerUp: stopHold,
+      onPointerLeave: stopHold,
+      onPointerCancel: stopHold,
+    };
+  }
+
   const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
   const hasResult = !!result?.assessment?.id;
   const confirmed = !!confirmedId;
@@ -673,7 +738,7 @@ export default function LawnAssessmentCompletionBlock({
       )}
       {hasResult && (
         <>
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6 }}>
             {LAWN_ASSESSMENT_METRICS.map((metric) => {
               const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
               // The AI's own read, from result.aiScores (the run's immutable
@@ -698,31 +763,53 @@ export default function LawnAssessmentCompletionBlock({
                       {value == null ? "—" : `${value}/100`}
                     </div>
                   ) : (
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      max={100}
-                      value={techScores?.[metric.key] ?? ""}
-                      disabled={disabled || confirming}
-                      aria-label={`${metric.label} score`}
-                      placeholder="0-100"
-                      onChange={(e) => fillScore(metric.key, e.target.value)}
-                      style={{
-                        width: "100%",
-                        height: 36,
-                        padding: "0 4px",
-                        borderRadius: 6,
-                        border: `1px solid ${D.border}`,
-                        background: D.white,
-                        color: value == null ? D.heading : lawnScoreColor(value),
-                        // 16px keeps iOS Safari from zooming the page on focus.
-                        fontSize: 16,
-                        fontWeight: 500,
-                        textAlign: "center",
-                        boxSizing: "border-box",
-                      }}
-                    />
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <button
+                        type="button"
+                        aria-label={`Lower ${metric.label} score`}
+                        disabled={disabled || confirming}
+                        style={stepButtonStyle(disabled || confirming)}
+                        {...holdToRepeat(metric.key, -1)}
+                      >
+                        {"\u2212"}
+                      </button>
+                      <input
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        max={100}
+                        value={techScores?.[metric.key] ?? ""}
+                        disabled={disabled || confirming}
+                        aria-label={`${metric.label} score`}
+                        placeholder="0-100"
+                        onChange={(e) => fillScore(metric.key, e.target.value)}
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          height: 36,
+                          padding: "0 4px",
+                          borderRadius: 6,
+                          border: `1px solid ${D.border}`,
+                          background: D.white,
+                          color: value == null ? D.heading : lawnScoreColor(value),
+                          // 16px keeps iOS Safari from zooming the page on focus.
+                          fontSize: 16,
+                          fontWeight: 500,
+                          textAlign: "center",
+                          boxSizing: "border-box",
+                          MozAppearance: "textfield",
+                        }}
+                      />
+                      <button
+                        type="button"
+                        aria-label={`Raise ${metric.label} score`}
+                        disabled={disabled || confirming}
+                        style={stepButtonStyle(disabled || confirming)}
+                        {...holdToRepeat(metric.key, 1)}
+                      >
+                        +
+                      </button>
+                    </div>
                   )}
                   <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
                   {!confirmed && aiValue != null && aiValue !== value && (
@@ -732,12 +819,12 @@ export default function LawnAssessmentCompletionBlock({
               );
             })}
           </div>
-          <LawnVisitReview
-            visitAssessment={result.visitAssessment}
-            value={visitReview}
-            onChange={setVisitReview}
-            disabled={disabled || confirming || analyzing || confirmed}
-          />
+          {/* The evidence review (photo quality, observation, photo findings,
+              technician details) is not shown while completing a visit (owner
+              2026-10-04: the technician takes photos, the AI reads them, the
+              report is built). Confirm still sends the default review, which
+              keeps every finding, so the report and tip ranking are unchanged.
+              The office can still edit a review on the Lawn assessment page. */}
           <div style={{ display: "flex", gap: 8 }}>
             {confirmed ? (
               <div
