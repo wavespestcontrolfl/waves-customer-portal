@@ -908,6 +908,16 @@ postgres('access codes section', () => {
       expect((await trx('customer_access_codes').where({ id: keep.id }).first()).status).toBe('retired');
     });
 
+    test('a text reclassified as not readable clears what it filed', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'The gate code is #4821');
+      await sweep(stub([gateItem()]));
+      expect(await rows(c.id)).toHaveLength(1);
+      await trx('sms_log').where({ id }).update({ message_type: 'opt_out' });
+      await sweep(stub([gateItem()]));
+      expect(await rows(c.id)).toEqual([]);
+    });
+
     test('a refused accept leaves the active twin untouched', async () => {
       const winner = await customer();
       const loser = await customer();

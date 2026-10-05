@@ -35,8 +35,14 @@ const { hashExtractionSource, recordExtractionAttempt, TERMINAL_STATUSES } = req
 
 // A receipt is for one text's words AS ONE CUSTOMER'S evidence: a text moved to
 // another customer (a merge, or a merge undone) is read again for its new owner.
-const sourceHash = (message) => hashExtractionSource(`${message.customer_id || ''}:${message.message_body || ''}`);
-const SOURCE_HASH_SQL = "encode(sha256(convert_to(coalesce(s.customer_id::text, '') || ':' || coalesce(s.message_body, ''), 'UTF8')), 'hex')";
+// It also covers what decides whether the text is read at all (direction, type,
+// the number it reached): a text reclassified as an opt-out or a reaction, or
+// moved to an excluded number, is read again, and the ineligible path then
+// clears what it filed.
+const sourceHash = (message) => hashExtractionSource([message.customer_id, message.direction, message.message_type,
+  message.to_phone, message.message_body].map((v) => v || '').join(':'));
+const SOURCE_HASH_SQL = "encode(sha256(convert_to(concat_ws(':', coalesce(s.customer_id::text, ''), coalesce(s.direction, ''), "
+  + "coalesce(s.message_type, ''), coalesce(s.to_phone, ''), coalesce(s.message_body, '')), 'UTF8')), 'hex')";
 const { stalePendingExtractionProposals } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { stringifySmsEvidence } = require('./sms-operational-extractor');
@@ -301,7 +307,8 @@ function isLive(r, now = new Date()) {
   if (r.status === 'found' && r.scheduled_service_id) return true;
   if (r.scheduled_service_id) return !ENDED_VISIT_STATUSES.includes(r.service_status || 'pending');
   const from = r.source_at || r.created_at;
-  return !from || new Date(from) >= addETDays(now, -VISIT_WINDOW_DAYS);
+  // Fourteen days of wall-clock time from the moment the customer sent it.
+  return !from || new Date(from).getTime() >= new Date(now).getTime() - VISIT_WINDOW_DAYS * 86400000;
 }
 
 // The text's current words are the only evidence for the rows it filed that
@@ -339,7 +346,7 @@ async function sourceStillCurrent(trx, message, receipt) {
   const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
   if (!enabled() || !since || new Date(message.created_at) < since) return false;
   if (!(await lockCustomer(trx, message.customer_id))) return false;
-  const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_body');
+  const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'message_body');
   return !!live && live.customer_id === message.customer_id && live.direction === 'inbound'
     && sourceHash(live) === receipt.source_hash;
 }
@@ -562,7 +569,7 @@ async function sourceStillSupports(trx, row) {
   // code, directions and life are what the current text says.
   const read = await trx('data_hygiene_source_extractions')
     .where({ source_type: 'message', source_id: row.source_id, extractor_version: VERSION, status: 'ok' })
-    .where('source_hash', sourceHash({ customer_id: source.customer_id, message_body: source.message_body }))
+    .where('source_hash', sourceHash(source))
     // and no later read of other words: the newest read is the one that counts.
     .whereNotExists(function laterRead() {
       this.select(1).from('data_hygiene_source_extractions as y')
@@ -597,7 +604,7 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
     // A one-visit code older than its window is no longer a candidate.
     .where(function current() {
       this.where('a.life', 'standing')
-        .orWhereRaw('COALESCE(a.source_at, a.created_at) >= ?', [addETDays(new Date(), -VISIT_WINDOW_DAYS)]);
+        .orWhereRaw('COALESCE(a.source_at, a.created_at) >= ?', [new Date(Date.now() - VISIT_WINDOW_DAYS * 86400000)]);
     });
   const [{ count }] = await base().count({ count: '*' });
   const rows = await base()

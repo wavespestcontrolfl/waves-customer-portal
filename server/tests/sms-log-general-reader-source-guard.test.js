@@ -63,7 +63,7 @@ const WINDOW_SPAN = 15;
 const ALLOWLIST = [
   {
     file: 'services/access-code-capture.js',
-    snippet: "const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_body');",
+    snippet: "const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'message_body');",
     reason: 'sourceStillCurrent: re-locks the ONE inbound text this sweep pass already read, by id, to compare its owner and words; inbound texts are never send reservations.',
   },
   {
