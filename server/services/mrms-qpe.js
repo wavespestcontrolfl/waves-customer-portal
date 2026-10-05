@@ -111,9 +111,11 @@ function retryWindow({ start, end }, cell, attempt) {
   return back > 0 ? { start: shiftYmd(start, -shift), end } : { start, end: shiftYmd(end, shift) };
 }
 
-// One request per attempt, each under its own timeout. Returns the rows read
-// at this property's cell, or null (unreachable, or another cell every time).
-async function fetchOwnCellRows({ lat, lon, segment, cell, controller }) {
+// One request per attempt, each under its own timeout: a slow request ends
+// only itself, never another year's request in flight. `signal` is the
+// caller's cancellation and ends every attempt. Returns the rows read at this
+// property's cell, or null (unreachable, or another cell every time).
+async function fetchOwnCellRows({ lat, lon, segment, cell, signal }) {
   const tried = new Set();
   for (let attempt = 0; attempt <= 2; attempt += 1) {
     const window = attempt === 0 ? segment : retryWindow(segment, cell, attempt);
@@ -122,6 +124,12 @@ async function fetchOwnCellRows({ lat, lon, segment, cell, controller }) {
     if (!window || tried.has(key)) break;
     tried.add(key);
     const url = `${IEMRE_BASE}/${key}/${lat.toFixed(4)}/${lon.toFixed(4)}/json`;
+    const controller = new AbortController();
+    const onCallerAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', onCallerAbort, { once: true });
+    }
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
       const response = await fetch(url, { signal: controller.signal });
@@ -130,6 +138,7 @@ async function fetchOwnCellRows({ lat, lon, segment, cell, controller }) {
       if (responseCellMatches(payload, cell) !== false) return Array.isArray(payload?.data) ? payload.data : null;
     } finally {
       clearTimeout(timeout);
+      if (signal) signal.removeEventListener('abort', onCallerAbort);
     }
   }
   logger.warn('[mrms-qpe] relay answered with another cell on every attempt; no MRMS value');
@@ -147,20 +156,12 @@ async function fetchMrmsDailyRain({ latitude, longitude, start, end, signal } = 
   const lat = Number(latitude);
   const lon = Number(longitude);
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || !start || !end) return null;
-  const controller = new AbortController();
-  // Optional caller cancellation (a caller with its own shorter deadline).
-  // Absent = exactly the timeout-only behavior every other caller has.
-  const onCallerAbort = () => controller.abort();
-  if (signal) {
-    if (signal.aborted) controller.abort();
-    else signal.addEventListener('abort', onCallerAbort, { once: true });
-  }
   try {
     if (!(end >= start)) return null;
     const cell = expectedMrmsCell(lat, lon);
     // A year whose request fails leaves its days as gaps; the other year's
     // observations still stand.
-    const perYear = await Promise.all(yearSegments(start, end).map((segment) => fetchOwnCellRows({ lat, lon, segment, cell, controller })
+    const perYear = await Promise.all(yearSegments(start, end).map((segment) => fetchOwnCellRows({ lat, lon, segment, cell, signal })
       .catch((err) => { logger.warn(`[mrms-qpe] fetch failed: ${err.message}`); return null; })));
     const rows = perYear.flatMap((part) => part || []);
     if (!rows.length) return null;
@@ -189,8 +190,6 @@ async function fetchMrmsDailyRain({ latitude, longitude, start, end, signal } = 
   } catch (err) {
     logger.warn(`[mrms-qpe] fetch failed: ${err.message}`);
     return null;
-  } finally {
-    if (signal) signal.removeEventListener('abort', onCallerAbort);
   }
 }
 

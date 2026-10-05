@@ -286,6 +286,29 @@ describe('fetchMrmsDailyRain payload handling', () => {
     expect(out).toEqual({ days: [{ date: '2026-12-31', inches: 0.4 }, { date: '2027-01-01', inches: null }], complete: false });
   });
 
+  test("one year's timeout does not cancel the other year's re-request in flight", async () => {
+    jest.useFakeTimers();
+    try {
+      const later = (ms, body, signal) => new Promise((resolve, reject) => {
+        const t = setTimeout(() => resolve({ ok: true, json: async () => body }), ms);
+        signal.addEventListener('abort', () => { clearTimeout(t); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); });
+      });
+      global.fetch = jest.fn((url, { signal }) => {
+        // 2027 never answers: only its own 6 s timeout ends it.
+        if (url.includes('/2027-01-01/')) return later(600000, {}, signal);
+        // 2026: a neighbor's response at 4 s, then the re-request answers at 7 s.
+        return url.includes('/2026-12-31/2026-12-31/')
+          ? later(4000, { ...NEIGHBOR_CELL, data: [{ date: '2026-12-31', mrms_precip_in: 0.9 }] }, signal)
+          : later(3000, { ...HOME_CELL, data: [{ date: '2026-12-31', mrms_precip_in: 0.4 }] }, signal);
+      });
+      const pending = fetchMrmsDailyRain({ ...HOME, start: '2026-12-31', end: '2027-01-01' });
+      await jest.advanceTimersByTimeAsync(8000);
+      expect(await pending).toEqual({ days: [{ date: '2026-12-31', inches: 0.4 }, { date: '2027-01-01', inches: null }], complete: false });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('the matching cell is taken on the first request; a cell-edge coordinate accepts either side', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
