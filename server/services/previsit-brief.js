@@ -404,7 +404,7 @@ async function loadLawnWindowGuidance(dbh, svc) {
     // read as "no guidance" — an emptied lawn block changes the grounding
     // hash and would overwrite a valid cached brief (runSweep counts the
     // visit failed and the prior brief survives).
-    const query = { serviceDate, strict: true };
+    const query = { serviceDate, strict: true, planning: true };
     if (assignedWindowKey) {
       query.windowKey = assignedWindowKey;
       // Resolve the assigned protocol row (key + version, newest match —

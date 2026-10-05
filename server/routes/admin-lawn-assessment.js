@@ -28,6 +28,7 @@ const { seasonAwareAdjustment } = require('../services/service-report/lawn-seaso
 const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
 const { loadCustomerGrassContext } = require('../services/lawn-grass-context');
 const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
+const { visitProtocolQuery } = require('../services/lawn-program');
 
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
@@ -727,9 +728,11 @@ router.post('/assess', async (req, res, next) => {
       // Honor the window the office linked on the appointment (catch-up / rescheduled
       // / manually-assigned visits): a keyed window overrides the date-derived one so
       // the model sees the products the tech is actually expected to apply.
-      const assignedWindowKey = scheduledService?.lawn_protocol_window_key || null;
+      // The visit's own assignment rides with it (key and version too, not just the
+      // window key), so a visit pinned to an older protocol version gets ITS
+      // context, never a newer version's window by key collision.
       const protoCtx = track
-        ? await getProtocolWindowContext(db, { serviceDate: visitDate, grassTrack: track, windowKey: assignedWindowKey })
+        ? await getProtocolWindowContext(db, visitProtocolQuery({ serviceDate: visitDate, grassTrack: track, scheduledService }))
         : null;
       const structured = protoCtx ? summarizeProtocolContext(protoCtx) : null;
       // Only claim products we're CERTAIN were applied: default-in-plan AND

@@ -4179,6 +4179,13 @@ const gates = {
   // report build read GATE_LAWN_TECH_PARAGRAPH at call time via
   // lawnTechParagraphLive().
   lawnTechParagraph: gateEnvValue('GATE_LAWN_TECH_PARAGRAPH'),
+  // Lawn protocol v13 (owner 2026-10-05): one universal lawn program for every
+  // grass, loaded beside the old program. Ships DARK: off unless exactly
+  // 'true'. This entry is for logGateStatus only: every lawn recipe reader
+  // (server/services/lawn-program.js) and the structured protocol lookup
+  // (lawn-protocol-operating-layer.js) read GATE_LAWN_V13 at call time via
+  // lawnV13Live(), so unsetting it is the kill switch (no redeploy).
+  lawnV13: process.env.GATE_LAWN_V13 === 'true',
 
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
@@ -5572,6 +5579,15 @@ function lawnTechParagraphLive() {
   return gateEnvValue('GATE_LAWN_TECH_PARAGRAPH') && lawnReportLeadLive();
 }
 
+// GATE_LAWN_V13 read at CALL time — strict `'true'` only, so an unset variable
+// is the kill switch. The one reader for the v13 lawn program: lawn-program.js
+// hands every recipe reader the v13 program instead of protocols.json `lawn`,
+// and getActiveLawnProtocol resolves the staged v13 protocol version for a
+// visit with no assignment. Off = every output is byte-identical to before.
+function lawnV13Live() {
+  return process.env.GATE_LAWN_V13 === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -5768,3 +5784,5 @@ module.exports.onSiteCallerDemoteLive = onSiteCallerDemoteLive;
 module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 // GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
+// GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
+module.exports.lawnV13Live = lawnV13Live;
