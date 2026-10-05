@@ -262,9 +262,22 @@ function buildRainExpectation({
         && hasPerimeterBandEvidence(product)
         && hasAntTargetEvidence(product);
     });
-    lines.push(perimeterTreatmentEvidence
-      ? 'Heavy rain floods ant nests and pushes foragers indoors. Trails over the next few days are foragers crossing the 6-foot perimeter band, picking up the active ingredient and carrying it back to the colony.'
-      : 'Heavy rain floods ant nests and pushes foragers indoors for a few days. If they\'re still coming in after about a week, text us and we\'ll come back out.');
+    // Fired by the live forecast alone (no heavy week measured), the rain
+    // is still to come, so the line says so: it never reads as though heavy
+    // rain already fell beside a light measured week (owner report review
+    // 2026-10-03: "heavy rain" right under 0.38"). The forecast signal is
+    // NWS text naming storms or heavy rain in the next 3 days
+    // (reports-public.js fetchPestRainForecastHeavySafe).
+    const forecastOnly = !heavyWeek;
+    if (perimeterTreatmentEvidence) {
+      lines.push(forecastOnly
+        ? 'Storms or heavy rain are in the forecast for the next few days. Heavy rain floods ant nests and pushes foragers indoors; trails after a downpour are foragers crossing the 6-foot perimeter band, picking up the active ingredient and carrying it back to the colony.'
+        : 'Heavy rain floods ant nests and pushes foragers indoors. Trails over the next few days are foragers crossing the 6-foot perimeter band, picking up the active ingredient and carrying it back to the colony.');
+    } else {
+      lines.push(forecastOnly
+        ? 'Storms or heavy rain are in the forecast for the next few days. Heavy rain floods ant nests and pushes foragers indoors for a few days. If they\'re still coming in about a week after a downpour, text us and we\'ll come back out.'
+        : 'Heavy rain floods ant nests and pushes foragers indoors for a few days. If they\'re still coming in after about a week, text us and we\'ll come back out.');
+    }
   }
 
   if (!lines.length) return null;
