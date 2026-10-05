@@ -191,6 +191,16 @@ postgres('access codes section', () => {
       await staffInsert();
     });
 
+    test('a text corrected after its receipt is read again', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'See you Tuesday');
+      const read = stub([gateItem()]);
+      expect(await sweep(read)).toMatchObject({ scanned: 1, read: 0 });
+      expect(await sweep(read)).toMatchObject({ scanned: 0 });
+      await trx('sms_log').where({ id }).update({ message_body: 'The gate code is #4821' });
+      expect(await sweep(read)).toMatchObject({ scanned: 1, read: 1, found: 1 });
+    });
+
     test('respects the SINCE instant and skips older texts', async () => {
       const c = await customer();
       await text(c.id, 'The gate code is #4821', { at: '2039-12-31T23:59:00Z' });
@@ -662,6 +672,17 @@ postgres('access codes section', () => {
       expect((await profile(c.id)).garage_code).toBeNull();
       const second = await found(c.id, { kind: 'garage', code: '1357' });
       await access.accept(trx, second.id, {});
+      expect((await profile(c.id)).garage_code).toBe('1357');
+    });
+
+    test('retire hands the profile field to another active code of the same kind', async () => {
+      const c = await customer();
+      const first = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, first.id, {});
+      const second = await found(c.id, { kind: 'garage', code: '1357' });
+      await access.accept(trx, second.id, {});
+      expect((await profile(c.id)).garage_code).toBe('2468');
+      expect(await access.retire(trx, first.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: true, clearedField: 'garage_code', promoted: true });
       expect((await profile(c.id)).garage_code).toBe('1357');
     });
 

@@ -355,6 +355,9 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
       .whereNotExists(function completedAttempt() {
         this.select(1).from('data_hygiene_source_extractions as x').whereRaw('x.source_id = s.id')
           .where({ 'x.source_type': 'message', 'x.extractor_version': VERSION })
+          // A receipt is for the words it read (hashExtractionSource = sha256
+          // hex of the body): a corrected text is read again.
+          .whereRaw("x.source_hash = encode(sha256(convert_to(coalesce(s.message_body, ''), 'UTF8')), 'hex')")
           .whereIn('x.status', TERMINAL_STATUSES);
       })
       .orderBy('s.created_at').orderBy('s.id').limit(BATCH)
@@ -636,21 +639,29 @@ async function retire(conn, id, { adminUserId = null } = {}) {
     if (!row) return fail(404, 'not_found');
     if (row.status !== 'active') return fail(409, 'not_active');
     let clearedField = null;
+    let promoted = false;
     const field = PROFILE_FIELD[row.kind];
     if (row.life === 'standing' && field && row.code) {
       const prefs = await trx('property_preferences').where({ customer_id: row.customer_id }).forUpdate().first('id', field);
       if (prefs && canonicalLower(prefs[field]) === canonicalLower(row.code)) {
-        await trx('property_preferences').where({ id: prefs.id }).update({ [field]: null, updated_at: trx.fn.now() });
+        // Another active standing code of this kind takes the field over (the
+        // newest one), so profile readers never lose a code the customer still has.
+        const heir = await trx('customer_access_codes')
+          .where({ customer_id: row.customer_id, kind: row.kind, status: 'active', life: 'standing' })
+          .whereNot('id', row.id).whereNotNull('code')
+          .orderBy('decided_at', 'desc').orderBy('created_at', 'desc').orderBy('id').first('code');
+        await trx('property_preferences').where({ id: prefs.id }).update({ [field]: heir ? heir.code : null, updated_at: trx.fn.now() });
         clearedField = field;
+        promoted = !!heir;
       }
     }
     const [updated] = await trx('customer_access_codes').where({ id }).update({
       status: 'retired', decided_by: adminUserId || null, decided_at: trx.fn.now(), updated_at: trx.fn.now(),
     }).returning('*');
     await audit(trx, adminUserId, 'access_code.retired', id, {
-      customer_id: row.customer_id, kind: row.kind, life: row.life, profile_field_cleared: clearedField,
+      customer_id: row.customer_id, kind: row.kind, life: row.life, profile_field_cleared: clearedField, profile_field_promoted: promoted,
     });
-    return { ok: true, row: serialize(updated), clearedField };
+    return { ok: true, row: serialize(updated), clearedField, promoted };
   });
 }
 
