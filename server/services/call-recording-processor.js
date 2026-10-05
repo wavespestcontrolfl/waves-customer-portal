@@ -20516,14 +20516,6 @@ const CallRecordingProcessor = {
                           .first()
                           .catch(() => null);
                         if (recentDup) continue;
-                        // The on-site follow-up's replay (recipient-optin: this
-                        // contact answered YES while this booking was still
-                        // processing) already texted this visit's confirmation
-                        // to this phone: its body differs, so the content
-                        // dedupe above cannot see it.
-                        if (await require('./appointment-reminders').confirmationLoggedForVisitPhone({
-                          scheduledServiceId, phone: contact.phone, entryPoint: 'recipient_optin_confirmed_replay', sinceMs: 10 * 60 * 1000,
-                        }).catch(() => false)) continue;
                         if (!(await claimStillOwned())) return false;
                         // One sender at a time for this phone + visit: the
                         // replay in flight owns the text ('busy'); otherwise
@@ -20533,6 +20525,17 @@ const CallRecordingProcessor = {
                         const releaseFollowUpClaim = () => (followUpClaim === 'claimed'
                           ? require('./recipient-optin').releaseFanOutFollowUpClaim(customerId, contact.phone, scheduledServiceId)
                           : null);
+                        // Read AFTER the claim settles: the follow-up's replay
+                        // (this contact answered YES while this booking was
+                        // still processing) may already have texted this
+                        // visit's confirmation to this phone. Its body differs,
+                        // so the content dedupe above cannot see it.
+                        if (await require('./appointment-reminders').confirmationLoggedForVisitPhone({
+                          scheduledServiceId, phone: contact.phone, entryPoint: 'recipient_optin_confirmed_replay', sinceMs: 10 * 60 * 1000,
+                        }).catch(() => false)) {
+                          await releaseFollowUpClaim();
+                          continue;
+                        }
                         const contactResult = await sendCustomerMessage({
                           to: contact.phone,
                           body: contactBody,

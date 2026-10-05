@@ -405,7 +405,12 @@ async function rearmOnSiteFollowUp(customerId, phoneKey, visitId) {
   try {
     const armed = await db('recipient_optin')
       .where({ customer_id: customerId, phone_key: phoneKey, status: 'confirmed' })
-      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null, followup_claimed_at: null });
+      // Idempotent for a reprocess: a row already armed on this visit is left
+      // as it is. An in-flight claim is never cleared here (a second worker
+      // could then send beside it); an older visit's worker finishes bound to
+      // its own visit_id and cannot touch this one.
+      .whereRaw('NOT (visit_id IS NOT DISTINCT FROM ? AND followup_done_at IS NULL)', [visitId])
+      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null });
     return armed ? 'armed' : 'skipped';
   } catch (err) {
     logger.warn(`[recipient-optin] booking-time follow-up re-arm failed (${err.code || err.name || 'error'})`);

@@ -375,7 +375,7 @@ describe('rearmOnSiteFollowUp: a phone that already said YES gets no new ask at 
     // Nothing runs inline: the caller still gets this call's own confirmation first.
     expect(state.prefs).toEqual([]);
     expect(sendReplay).not.toHaveBeenCalled();
-    expect(state.optin[0]).toMatchObject({ visit_id: 'v2', followup_done_at: null, followup_claimed_at: null });
+    expect(state.optin[0]).toMatchObject({ visit_id: 'v2', followup_done_at: null });
     // The 14-day cap runs from the re-arm, not from the 60-day-old YES.
     expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 1 });
     expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
@@ -434,6 +434,11 @@ describe('one sender at a time: the call fan-out takes the replay\'s row claim',
   test('wiring: the fan-out skips a busy contact, holds the claim across its send and releases it', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
     expect(src).toContain("claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);\n                        if (followUpClaim === 'busy') continue;");
+    // The replay check runs AFTER the claim settles (a replay that finished in between is seen).
+    expect(src.indexOf("entryPoint: 'recipient_optin_confirmed_replay'")).toBeGreaterThan(src.indexOf('claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId)'));
+    // Re-arming is idempotent per visit and never clears an in-flight claim.
+    const optinSrc = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
+    expect(optinSrc).toContain(".whereRaw('NOT (visit_id IS NOT DISTINCT FROM ? AND followup_done_at IS NULL)', [visitId])\n      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null });");
     expect(src).toContain('}).finally(releaseFollowUpClaim);');
     expect(src).toContain('scheduled_service_id: scheduledServiceId,\n                          },\n                        }).finally(releaseFollowUpClaim);');
   });
