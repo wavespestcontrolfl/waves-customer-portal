@@ -59,7 +59,9 @@ const SELECTORS = [
   // max_tokens (llm/call.js#dispatch for the two routine* policies;
   // anthropicMaxTokens + anthropicText at the two direct sites), so the
   // Sonnet 5.5 default and the models like it are pickable. cap: 'vision' —
-  // hero alt text and vendor invoice PDFs send images / documents.
+  // hero alt text and vendor invoice PDFs send images / documents. Fable /
+  // Mythos stay a deliberate non-choice: the direct sites treat a refusal
+  // as a failed read (null synopsis, rejected invoice), with no second provider.
   { key: 'ROUTINE', env: 'MODEL_ROUTINE', description: 'Routine internal lanes moved off the flagship (owner 2026-10-04)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
   { key: 'FAST', env: 'MODEL_FAST', description: 'Claude leg of the fast lanes', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VOICE', env: 'MODEL_VOICE', description: 'Spoken voice relay + Ask Waves fallback', accepts: { providers: ['anthropic'], cap: 'text' } },
@@ -525,7 +527,10 @@ const LANES = [
   L('estimate_assistant', 'Estimate assistant Q&A', 'estimate-assistant.js', 'qa', R('estimateAssistant'), E('ESTIMATE_ASSISTANT_MODEL', T('WORKHORSE'), { live: true }), { inbound: true }),
   L('knowledge_qa', 'Knowledge-base Q&A', 'knowledge-bridge.js', 'qa', R('knowledgeAnswer'), T('FLAGSHIP')),
   L('ask_waves', 'Ask Waves (public chat)', 'ask-waves-intake.js', 'qa', P('askWaves', 'primary'), E('ASK_WAVES_MODEL', P('askWaves', 'fallback'), { live: true }), { inbound: true }),
-  L('wiki_qa', 'Wiki Q&A', 'knowledge/wiki-qa.js', 'qa', P('routineAnswer', 'primary'), P('routineAnswer', 'fallback')),
+  // One file, two policies by caller (wiki-qa.js qaLaneFor): customer-facing
+  // and unknown sources stay on highStakes; staff sources ride routineAnswer.
+  L('wiki_qa', 'Wiki Q&A · customer-facing callers', 'knowledge/wiki-qa.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
+  L('wiki_qa_staff', 'Wiki Q&A · staff callers (tech field lookup, admin)', 'knowledge/wiki-qa.js', 'qa', P('routineAnswer', 'primary'), P('routineAnswer', 'fallback')),
   L('wdo_history', 'WDO history lookup', 'property-lookup/wdo-history-lookup.js', 'qa', T('WORKHORSE'), null, { inbound: true }),
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
   L('internal_link_judge', 'Internal-link reader check before auto-merge', 'content/internal-link-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
@@ -775,6 +780,7 @@ const LANE_AREA = {
   chart_builder_sql: 'ib',
   knowledge_qa: 'ib',
   wiki_qa: 'ib',
+  wiki_qa_staff: 'ib',
   kb_audit: 'ib',
   wiki_compiler: 'ib',
   embeddings: 'ib',
@@ -938,7 +944,8 @@ const LANE_DESCRIBE = {
   chart_builder_image: 'Chart builder: reads a chart image',
   chart_builder_sql: 'Chart builder: writes the SQL and chart',
   knowledge_qa: 'Answers from the knowledge base',
-  wiki_qa: 'Answers from the wiki',
+  wiki_qa: 'Answers from the wiki for customer-facing assistants',
+  wiki_qa_staff: 'Answers staff questions from the wiki',
   kb_audit: 'Audits the knowledge base nightly',
   wiki_compiler: 'Compiles sources into wiki entries',
   embeddings: 'Indexes knowledge for search',

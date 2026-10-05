@@ -149,6 +149,8 @@ const DEFAULTS = Object.freeze({
   // alt text. Sonnet 5.5, not Sonnet 5: same list price, and it is in the
   // thinking floor below, so these lanes' short caps (200 to 2000 tokens)
   // are not spent on thinking. Roll back with MODEL_ROUTINE=claude-opus-4-8.
+  // Not for Fable / Mythos: the two direct sites treat a refusal as a failed
+  // read, with no second provider.
   ROUTINE: 'claude-sonnet-5-5',
   FAST: 'claude-sonnet-5',
   VOICE: 'claude-sonnet-5',
@@ -232,6 +234,10 @@ const DEFAULTS = Object.freeze({
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || DEFAULTS.FLAGSHIP;
 const WORKHORSE = process.env.MODEL_WORKHORSE || DEFAULTS.WORKHORSE;
 const ROUTINE   = process.env.MODEL_ROUTINE   || DEFAULTS.ROUTINE;
+// Low effort only while ROUTINE is an always-thinking model (the Sonnet 5.5
+// default). A rollback to MODEL_ROUTINE=claude-opus-4-8 sends no per-lane
+// effort, so those lanes get back the model AND the reasoning they had.
+const ROUTINE_EFFORT = anthropicThinkingAlwaysOn(ROUTINE) ? 'low' : undefined;
 const FAST      = process.env.MODEL_FAST      || DEFAULTS.FAST;
 const VOICE     = process.env.MODEL_VOICE     || DEFAULTS.VOICE;
 // Owner 2026-07-21 (T&S report dry-run): photo scoring drives customer-facing
@@ -529,17 +535,20 @@ const TEXT_POLICIES = Object.freeze({
   }),
   // highStakes / visionAnalysis with the ROUTINE tier on the Anthropic leg
   // and the same OpenAI backup each had before: internal, low-risk lanes only
-  // (owner 2026-10-04). Nothing customer-facing belongs here. effort 'low':
-  // wiki Q&A is interactive and the rest are short lookups, so the
-  // always-thinking default must not think at the global MODEL_ANTHROPIC_EFFORT.
+  // (owner 2026-10-04). Nothing customer-facing belongs here: wiki Q&A uses
+  // routineAnswer for staff sources only (wiki-qa.js) and keeps highStakes
+  // for every customer-facing caller. ROUTINE_EFFORT (low on the Sonnet 5.5
+  // default): staff wiki Q&A is interactive and the rest are short lookups,
+  // so the always-thinking default must not think at the global
+  // MODEL_ANTHROPIC_EFFORT.
   routineAnswer: Object.freeze({
     name: 'routineAnswer',
-    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, effort: 'low' }),
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, ...(ROUTINE_EFFORT ? { effort: ROUTINE_EFFORT } : {}) }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
   routineVision: Object.freeze({
     name: 'routineVision',
-    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, effort: 'low' }),
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, ...(ROUTINE_EFFORT ? { effort: ROUTINE_EFFORT } : {}) }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
   adsAdvisor: Object.freeze({
@@ -723,6 +732,7 @@ module.exports = {
   FLAGSHIP,
   WORKHORSE,
   ROUTINE,
+  ROUTINE_EFFORT,
   FAST,
   VOICE,
   VISION,

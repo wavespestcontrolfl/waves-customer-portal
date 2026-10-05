@@ -8486,7 +8486,7 @@ async function generateLeadSynopsis(transcription) {
     // enough.
     const response = await ledgerCall('anthropic', MODELS.ROUTINE, () => client.messages.create({
       model: MODELS.ROUTINE,
-      ...anthropicEffortConfig(MODELS.ROUTINE, 'low'),
+      ...anthropicEffortConfig(MODELS.ROUTINE, MODELS.ROUTINE_EFFORT),
       max_tokens: anthropicMaxTokens(MODELS.ROUTINE, 1200),
       messages: [{
         role: 'user',
@@ -8535,6 +8535,11 @@ Use markdown headers (##) for sections. Use bullet points. Keep the entire outpu
       // need a second one inside it.
     }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction, maxRetries: 0 }), { laneId: 'lead_synopsis' });
 
+    // A refusal's text is the model's explanation, never a synopsis.
+    if (response?.stop_reason === 'refusal') {
+      logger.warn('[call-proc] Synopsis generation refused by the model');
+      return null;
+    }
     // First TEXT block — a thinking block leads the content on Opus 5.5.
     return anthropicText(response).trim() || null;
   } catch (err) {

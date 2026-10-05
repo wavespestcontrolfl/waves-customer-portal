@@ -540,11 +540,16 @@ describe('model-switchboard', () => {
     // routine* policies go through llm/call.js and the two direct sites
     // (invoice PDFs, lead synopsis) floor max_tokens and read the first text block.
     expect(deepSafe).toEqual(['ADS_ADVISOR', 'DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE', 'ROUTINE', 'SMS_SCHEDULING_DECIDE']);
-    expect(MODELS.TEXT_POLICIES.routineAnswer.primary).toEqual({ provider: 'anthropic', model: MODELS.ROUTINE, effort: 'low' });
-    expect(MODELS.TEXT_POLICIES.routineVision.primary).toEqual({ provider: 'anthropic', model: MODELS.ROUTINE, effort: 'low' });
-    for (const id of ['wiki_qa', 'expense_categorize', 'hero_alt', 'invoice_pdf', 'lead_synopsis']) {
+    // Low effort rides the always-thinking default only; an Opus 4.8 rollback sends none.
+    expect(MODELS.ROUTINE_EFFORT).toBe(MODELS.anthropicThinkingAlwaysOn(MODELS.ROUTINE) ? 'low' : undefined);
+    const routineLeg = { provider: 'anthropic', model: MODELS.ROUTINE, ...(MODELS.ROUTINE_EFFORT ? { effort: MODELS.ROUTINE_EFFORT } : {}) };
+    expect(MODELS.TEXT_POLICIES.routineAnswer.primary).toEqual(routineLeg);
+    expect(MODELS.TEXT_POLICIES.routineVision.primary).toEqual(routineLeg);
+    for (const id of ['wiki_qa_staff', 'expense_categorize', 'hero_alt', 'invoice_pdf', 'lead_synopsis']) {
       expect(lanes.find((l) => l.id === id).primary.selector).toBe('ROUTINE');
     }
+    // Customer-facing wiki answers stay on the flagship policy.
+    expect(lanes.find((l) => l.id === 'wiki_qa').primary.selector).toBe('FLAGSHIP');
     expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');
     expect(lanes.find((l) => l.id === 'newsletter').primary.accepts.deep).toBe(true);
     expect(lanes.find((l) => l.id === 'events_curation').primary.accepts.deep).toBe(true);
