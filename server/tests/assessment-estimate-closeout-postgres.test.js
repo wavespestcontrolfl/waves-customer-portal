@@ -525,7 +525,10 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     await closeAssessmentsWithSentEstimates({ conn: mockPg });
     expect((await row(correctedVisit)).status).toBe('on_site');
     expect(await mockPg('service_records').where({ scheduled_service_id: correctedVisit })).toHaveLength(0);
-    // …and so is a customer reassignment, even though the new customer has a sent estimate of their own.
+    expect(await audits(correctedVisit, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_changed' }) })]);
+  });
+
+  test('a customer reassignment between the completion\'s load and its lock is refused, even though the new customer has a handed-off estimate of their own', async () => {
     const from = await customer();
     const to = await customer();
     const reassigned = await visit(from);
@@ -534,12 +537,10 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     mockRace.beforeClaim = async () => {
       await mockPg('scheduled_services').where({ id: reassigned }).update({ customer_id: to });
     };
-    await closeAssessmentsWithSentEstimates({ conn: mockPg });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
     expect((await row(reassigned)).status).toBe('on_site');
     expect(await mockPg('service_records').where({ scheduled_service_id: reassigned })).toHaveLength(0);
-    for (const id of [correctedVisit, reassigned]) {
-      expect(await audits(id, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_changed' }) })]);
-    }
+    expect(await audits(reassigned, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_changed' }) })]);
   });
 
   test('ONE estimate closes ONE assessment: the newest one on or before the estimate — an older one still open behind it stays open, whether the newer is open or already completed', async () => {
