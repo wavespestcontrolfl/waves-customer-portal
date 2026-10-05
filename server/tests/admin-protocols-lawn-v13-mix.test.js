@@ -23,6 +23,7 @@ const NUTRA = 'LESCO Nutra-TECH T&O Micronutrient Package';
 const STONEWALL = 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
 const TETRINO = 'Tetrino Insecticide';
+const DIMENSION = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
 const CATALOG = [
   { id: 'nt', name: NUTRA, aliases: [], default_rate_per_1000: 12, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'stw', name: STONEWALL, aliases: [], default_rate_per_1000: null, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
@@ -31,6 +32,7 @@ const CATALOG = [
   { id: 'cel', name: 'Celsius WG', aliases: [], default_rate_per_1000: 0.085, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
   { id: 'nis', name: 'LESCO 90/10 Nonionic Surfactant', aliases: [], default_rate_per_1000: 0.25, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'f24', name: F24, aliases: [], analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
+  { id: 'dim', name: DIMENSION, aliases: [], analysis_n: 18, analysis_k: 10, default_rate_per_1000: 2.78, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
 ];
 const V13_SUMMARY = {
   version: LAWN_V13_VERSION,
@@ -38,6 +40,7 @@ const V13_SUMMARY = {
     { productId: 'nt', ratePer1000: 6, rateUnit: 'fl oz', gates: {} },
     { productId: 'stw', ratePer1000: 0.5, rateUnit: 'fl oz', gates: {} },
     { productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
+    { productId: 'dim', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
     { productId: 'are', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { trigger: 'chinch_20_to_25_per_sqft' } },
     { productId: 'cel', applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz', gates: { annualCounter: 'celsius_oz_per_1000' } },
     { productId: 'nis', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { concentration: '0.25% v/v', tankMixWith: 'Celsius WG' } },
@@ -97,6 +100,26 @@ test('a lb_n month derives from the N target: April 24-0-11 is 2.083 lb per 1,00
   const body = await lawnMix({ month: '4' });
   expect(itemFor(body, F24).jobMix).toMatchObject({ rateSource: 'target_n_analysis', amountUnit: 'lb' });
   expect(itemFor(body, F24).jobMix.ratePer1000).toBeCloseTo(2.0833, 3);
+});
+
+test('April on a 9x plan (?visitsPerYear=9): Dimension 18-0-10 at 2.778 lb per 1,000 (0.5 lb N), no 24-0-11, no cadence warning', async () => {
+  const body = await lawnMix({ month: '4', visitsPerYear: '9' });
+  expect(body.selectedItems.map((item) => item.product.name)).toEqual([DIMENSION]);
+  expect(itemFor(body, DIMENSION).jobMix).toMatchObject({ rateSource: 'target_n_analysis', amountUnit: 'lb' });
+  expect(itemFor(body, DIMENSION).jobMix.ratePer1000).toBeCloseTo(2.7778, 3);
+  expect(itemFor(body, F24)).toBeUndefined();
+  expect(body.warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
+});
+
+test('April on a 12x plan keeps the 24-0-11; with no plan given it keeps it too and warns, naming the 9x product', async () => {
+  const twelve = await lawnMix({ month: '4', visitsPerYear: '12' });
+  expect(twelve.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+  expect(twelve.warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
+  const unknown = await lawnMix({ month: '4' });
+  expect(unknown.selectedItems.map((item) => item.product.name)).toEqual([F24]);
+  expect(unknown.warnings.find((w) => w.code === 'lawn_v13_plan_cadence_unknown').message).toContain(DIMENSION);
+  // Months with one step never ask.
+  expect((await lawnMix({ month: '1' })).warnings.map((w) => w.code)).not.toContain('lawn_v13_plan_cadence_unknown');
 });
 
 test('gate off: no structured read, the catalog rate answers for the old program', async () => {

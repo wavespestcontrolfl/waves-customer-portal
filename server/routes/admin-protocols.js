@@ -35,7 +35,7 @@ const {
   protocolReferenceSyncIssues,
   lockDraftProtocol,
 } = require('../services/lawn-protocol-operating-layer');
-const { lawnProtocols } = require('../services/lawn-program');
+const { lawnProtocols, visitForCadence, unknownCadenceWarning } = require('../services/lawn-program');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -961,8 +961,11 @@ router.get('/lawn-mix', async (req, res, next) => {
     if (!track) return res.status(404).json({ error: 'Lawn protocol track not found' });
 
     const month = monthAbbr(req.query.month);
-    const visit = track.visits?.find((v) => v.month === month);
-    if (!visit) return res.status(404).json({ error: 'Protocol visit not found for month' });
+    const recipeVisit = track.visits?.find((v) => v.month === month);
+    if (!recipeVisit) return res.status(404).json({ error: 'Protocol visit not found for month' });
+    // A step that depends on the plan's applications a year (v13 April, 9x): the sheet
+    // takes ?visitsPerYear=9|12, the plan's own choice; none keeps the 12x step and warns.
+    const { visit, unknownCadence } = visitForCadence(recipeVisit, Number(req.query.visitsPerYear) > 0 ? Number(req.query.visitsPerYear) : null);
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
@@ -1077,6 +1080,7 @@ router.get('/lawn-mix', async (req, res, next) => {
 
     // Required v13 gate notes on the selected items are warnings, as in the plan.
     warnings.push(...v13SelectedGateWarnings(selectedItems));
+    if (unknownCadence && v13Active) warnings.push(unknownCadenceWarning(unknownCadence));
 
     const seesPricing = viewerSeesPricing(req);
     const payload = {

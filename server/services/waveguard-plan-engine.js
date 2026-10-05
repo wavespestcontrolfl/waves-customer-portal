@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const { lawnProtocols, LAWN_V13_VERSION } = require('./lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
 const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -1123,6 +1123,23 @@ function findNutrientProductsMissingConversions(items) {
   });
 }
 
+// The applications a year (6, 9 or 12) of the lawn plan this visit belongs to, or
+// null when neither source states one. The catalog service the visit is booked
+// under comes first (its key and name are the authoritative cadence text), then
+// the visit's own service name, both through the one resolver the plan sync uses.
+// The resolver's catch-all ("Lawn Care Program", quarterly) is not a stated plan.
+async function lawnVisitsPerYear(knex, service) {
+  const { resolveLawnCareRecurringPlan } = require('./self-booking-plan-sync');
+  const catalog = service.service_id
+    ? await savepointRead(knex, (k) => k('services').where({ id: service.service_id }).first('service_key', 'name')).catch(() => null)
+    : null;
+  for (const text of [catalog && `${catalog.service_key} ${catalog.name}`, service.service_type]) {
+    const plan = text ? resolveLawnCareRecurringPlan(text) : null;
+    if (plan && plan.planKey !== 'lawn_care' && Number(plan.visitsPerYear) > 0) return Number(plan.visitsPerYear);
+  }
+  return null;
+}
+
 function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: assignedMonth, requireKnownGrass } = {}) {
   const profileRecorded = [profile?.track_key, profile?.grass_type]
     .some((value) => String(value || '').trim());
@@ -1544,8 +1561,11 @@ const V13_UNAVAILABLE = {
 // application history, for each SELECTED product: the hard blocks per product id
 // (`capped`: no amount) and the warning-level findings (`warnings`: a minimum
 // interval, an approaching cap; the dose stays). A failed read fails closed
-// (strict throws; otherwise the product reads as capped).
-async function v13Limits(knex, service, serviceDate, items, { strict = false } = {}) {
+// (strict throws; otherwise the product reads as capped). The line's own staged
+// rate is the application being planned, so a yearly cap shared across
+// formulations (prodiamine) counts it with the season's earlier applications; the
+// visit's own earlier ledger rows are left out so a re-plan never counts it twice.
+async function v13Limits(knex, service, serviceDate, items, { strict = false, rows = new Map() } = {}) {
   const limits = require('./application-limits');
   const capped = new Map();
   const warnings = [];
@@ -1554,7 +1574,9 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false } =
     const id = String(item.product.id);
     if (checked.has(id)) continue;
     checked.add(id);
-    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k))
+    const row = rows.get(id);
+    const proposed = Number(row?.ratePer1000) > 0 ? { ratePer1000: Number(row.ratePer1000), unit: row.rateUnit } : null;
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id }))
       .catch((err) => {
         if (strict) throw err;
         return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };
@@ -1731,8 +1753,12 @@ async function buildPlanForService(serviceId, options = {}) {
       requireKnownGrass: true, month: structuredProtocolContext?.window?.month,
     }) : calendarProtocol;
   const { trackKey, track, month } = selection;
-  const visit = completionDefaultsEnabled && service.lawn_protocol_window_key && !structuredProtocolContext?.window
+  const recipeVisit = completionDefaultsEnabled && service.lawn_protocol_window_key && !structuredProtocolContext?.window
     ? null : selection.visit;
+  // A visit whose step depends on the plan's cadence (v13 April: the 9x plan takes
+  // Dimension 18-0-10 where every other plan takes 24-0-11) reads the cadence
+  // from the booked service; unknown keeps the 12x step and warns.
+  const { visit, unknownCadence } = visitForCadence(recipeVisit, recipeVisit?.cadenceVariants ? await lawnVisitsPerYear(knex, service) : null);
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const exactName = track?.exact_catalog_names === true;
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
@@ -1784,7 +1810,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
-  const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict }) : { capped: new Map(), warnings: [] };
+  const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows }) : { capped: new Map(), warnings: [] };
   const cappedProducts = v13Limit.capped;
   const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts) : null);
   // An apply-alone product selected beside any other product holds the mix: the plan
@@ -1850,6 +1876,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // clear is a visible warning; an apply-alone product selected beside any other
   // product holds the mix.
   warnings.push(...v13SelectedGateWarnings(plannedItems));
+  if (unknownCadence && v13Active) warnings.push(unknownCadenceWarning(unknownCadence));
   blocks.push(...applyAloneBlocks);
   if (v13Active) {
     const notices = v13LineNotices(planItems, cappedProducts, new Set(substitutions.keys()));

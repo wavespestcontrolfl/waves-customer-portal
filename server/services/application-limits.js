@@ -1,8 +1,61 @@
 const db = require('../models/db');
 const { etParts, etCalendarDayOf } = require('../utils/datetime-et');
+const { convertInventoryQuantity } = require('./inventory-units');
+
+// annual_max_rate rows with match_type 'active_ingredient' are one yearly cap on an
+// active ingredient shared by every product that carries it (prodiamine: 65 WDG,
+// Stonewall 4FL, the Stonewall granulars). Each product has its own row, whose
+// limit_value is the label cap written in THAT product's rate unit per 1,000 sq ft
+// (limit_unit 'lb/1000sf/year', 'fl oz/1000sf/year'), so the products add up as
+// shares of one cap with no unit conversion between formulations.
+const AI_CAP = 'active_ingredient';
+const AI_CAP_APPROACHING = 0.75;
+
+const pct = (share) => Math.round(share * 1000) / 10;
+const capUnitOf = (limitUnit) => String(limitUnit || '').split('/')[0].trim();
+// A recorded rate is per 1,000 sq ft in its own unit; ONLY that basis converts here
+// ('fl oz/gal' and 'per acre' units are other bases and read as unsized).
+function rateInUnit(amount, unit, toUnit) {
+  const n = Number(amount);
+  const raw = String(unit || '').trim();
+  if (!(n > 0) || !raw || !toUnit) return null;
+  const stripped = raw.replace(/\s*\/\s*1000\s*(sf|sq\.?\s*ft)?$/i, '');
+  if (stripped.includes('/')) return null;
+  return convertInventoryQuantity(n, stripped, toUnit);
+}
+
+// One ledger row as a share of its own product's cap (see AI_CAP): its recorded
+// rate, else its quantity over the treated area, else the product's standard rate
+// (flagged estimated). null when the row has no cap row or cannot be sized at all.
+function capShare(row) {
+  const cap = Number(row.limit_value);
+  const unit = capUnitOf(row.limit_unit);
+  if (!(cap > 0) || !unit) return null;
+  const area = Number(row.area_treated_sqft);
+  let rate = rateInUnit(row.application_rate, row.rate_unit, unit);
+  if (rate == null && area > 0) rate = rateInUnit(Number(row.quantity_applied) / (area / 1000), row.quantity_unit, unit);
+  if (rate != null) return { share: rate / cap, estimated: false };
+  rate = rateInUnit(row.default_rate_per_1000, row.catalog_rate_unit, unit);
+  return rate == null ? null : { share: rate / cap, estimated: true };
+}
+
+// What could not be counted exactly, for the end of a cap message.
+function sizingNote(unsized, estimated) {
+  const notes = [
+    unsized ? `${unsized} earlier application${unsized === 1 ? '' : 's'} could not be sized and ${unsized === 1 ? 'was' : 'were'} not counted` : null,
+    estimated ? `${estimated} sized at the product's standard rate` : null,
+  ].filter(Boolean);
+  return notes.length ? ` (${notes.join('; ')})` : '';
+}
 
 class ApplicationLimitChecker {
-  async checkLimits(customerId, productId, proposedDate = new Date(), database = db) {
+  // opts.proposed ({ ratePer1000, unit }) is the application being planned: a yearly
+  // cap shared across formulations counts it with the season's earlier ones. A
+  // caller that reads AFTER the application was ledgered (completion, the compliance
+  // page) passes none, so the application is never counted twice.
+  // opts.excludeScheduledServiceId leaves that visit's own ledger rows out of the
+  // shared cap, for a plan rebuilt after the visit completed.
+  async checkLimits(customerId, productId, proposedDate = new Date(), database = db, opts = {}) {
     const product = await database('products_catalog').where({ id: productId }).first();
     if (!product) return { allowed: true, warnings: [], blocks: [] };
 
@@ -38,7 +91,7 @@ class ApplicationLimitChecker {
     const allLimits = [...productLimits, ...moaLimits, ...nitrogenLimits];
 
     for (const limit of allLimits) {
-      const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product, database);
+      const check = await this.evaluateLimit(limit, history, moaHistory, proposedDate, product, database, { customerId, yearStart, ...opts });
 
       if (check.violated) {
         const entry = { type: limit.limit_type, message: check.message, description: limit.description, current: check.current, max: check.max };
@@ -56,7 +109,7 @@ class ApplicationLimitChecker {
     return results;
   }
 
-  async evaluateLimit(limit, history, moaHistory, proposedDate, product, database = db) {
+  async evaluateLimit(limit, history, moaHistory, proposedDate, product, database = db, ctx = {}) {
     // product_limits.limit_value is a pg decimal — node-pg returns it as a
     // STRING ('14.0000'); coerce once so `< minDays + 7` etc. stay numeric.
     const limitValue = limit.limit_value == null ? null : Number(limit.limit_value);
@@ -87,6 +140,7 @@ class ApplicationLimitChecker {
       }
 
       case 'annual_max_rate': {
+        if (limit.match_type === AI_CAP) return this.evaluateActiveIngredientCap(limit, product, ctx, database);
         const totalApplied = history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || 0), 0);
         const maxRate = limitValue;
         if (totalApplied >= maxRate * 0.95) return { violated: true, message: `${product.name}: cumulative ${totalApplied.toFixed(3)} ${limit.limit_unit} approaching/exceeding max ${maxRate}.`, current: totalApplied, max: maxRate };
@@ -145,6 +199,63 @@ class ApplicationLimitChecker {
 
       default: return { violated: false };
     }
+  }
+
+  // The season's applications of every product that shares this limit's active
+  // ingredient, each as a share of its own product's cap, plus the application
+  // being planned. An application that cannot be sized from its recorded rate or
+  // quantity counts at its product's standard rate; one with no cap row for its
+  // product is named, never counted as nothing.
+  async evaluateActiveIngredientCap(limit, product, ctx, database = db) {
+    const key = String(limit.match_value || '').trim();
+    const like = `${key.replace(/[\\%_]/g, '\\$&')}%`;
+    const query = database('property_application_history as pah')
+      .leftJoin('products_catalog as pc', 'pah.product_id', 'pc.id')
+      .leftJoin('product_limits as pl', function joinCapRow() {
+        this.on('pl.product_id', 'pah.product_id')
+          .andOnVal('pl.match_type', AI_CAP).andOnVal('pl.match_value', key).andOnVal('pl.limit_type', 'annual_max_rate');
+      })
+      .where('pah.customer_id', ctx.customerId)
+      .where('pah.application_date', '>=', ctx.yearStart)
+      .whereNull('pah.retracted_at')
+      .where(function sharesIngredient() {
+        this.whereRaw('pc.active_ingredient ILIKE ?', [like]).orWhereRaw('pah.active_ingredient ILIKE ?', [like]);
+      })
+      .select('pah.application_rate', 'pah.rate_unit', 'pah.quantity_applied', 'pah.quantity_unit', 'pah.area_treated_sqft',
+        'pl.limit_value', 'pl.limit_unit', 'pc.default_rate_per_1000', 'pc.rate_unit as catalog_rate_unit');
+    if (ctx.excludeScheduledServiceId) {
+      query.where(function notThisVisit() {
+        this.whereNull('pah.service_record_id')
+          .orWhereNotIn('pah.service_record_id', database('service_records').where({ scheduled_service_id: ctx.excludeScheduledServiceId }).select('id'));
+      });
+    }
+    const history = await query;
+
+    let used = 0;
+    let unsized = 0;
+    let estimated = 0;
+    for (const row of history) {
+      const sized = capShare(row);
+      if (!sized) { unsized += 1; continue; }
+      used += sized.share;
+      if (sized.estimated) estimated += 1;
+    }
+
+    const proposed = ctx.proposed
+      ? rateInUnit(ctx.proposed.ratePer1000, ctx.proposed.unit, capUnitOf(limit.limit_unit)) / Number(limit.limit_value)
+      : 0;
+    const adds = Number.isFinite(proposed) && proposed > 0 ? proposed : 0;
+    const total = used + adds;
+    const detail = sizingNote(unsized, estimated);
+    const label = `${product.name}: ${key} across all products this year is ${pct(used)}% of the yearly label cap`;
+    const withThis = adds ? `; this application brings it to ${pct(total)}%` : '';
+    if (used >= 1 || total > 1 + 1e-9) {
+      return { violated: true, message: `${label}${withThis} — ${used >= 1 ? 'LIMIT REACHED' : 'THIS APPLICATION WOULD EXCEED IT'}${detail}.`, current: pct(used), max: 100 };
+    }
+    if (used >= AI_CAP_APPROACHING || unsized) {
+      return { approaching: true, message: `${label}${withThis}${detail}.`, current: pct(used), max: 100 };
+    }
+    return { violated: false, current: pct(used), max: 100 };
   }
 
   async getPropertyComplianceStatus(customerId) {
