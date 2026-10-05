@@ -1077,19 +1077,35 @@ jest.setTimeout(30000);
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'not_missed' });
     });
 
-    test('gate on: a rejection that lands late opens the send slot when it lands', async () => {
+    test('gate on: a rejection first seen late opens the send slot when the lane sees it, and stamps it once', async () => {
       gates(true);
       // Call ended ~39 minutes ago; the rejection landed 5 minutes ago. A
       // no-recording call this old is long past its slot.
       const row = rejected(40, 5);
       await database('call_log').insert(row);
       expect(await sweepMissedCallTextBacks()).toEqual({ sent: 1, offered: 1 });
-      expect((await stored(row)).metadata.missed_call_text_outcome).toBe('sent');
+      const after = await stored(row);
+      expect(after.metadata.missed_call_text_outcome).toBe('sent');
+      expect(after.metadata.missed_call_text_empty_voicemail_seen_at).toBe(new Date(NOW).toISOString());
     });
 
-    test('gate on: a rejection that landed over 30 minutes ago has missed its slot', async () => {
+    test('gate on: a later update to the row never reopens a slot that already closed', async () => {
       gates(true);
-      const row = rejected(60, 40);
+      // First seen 40 minutes ago (slot closed 10 minutes ago); the row was
+      // touched again a minute ago by a late status callback.
+      const seenAt = new Date(NOW - 40 * 60 * 1000).toISOString();
+      const row = rejected(60, 1, { metadata: { missed_call_text_empty_voicemail_seen_at: seenAt } });
+      await database('call_log').insert(row);
+      expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 1 });
+      const after = await stored(row);
+      expect(after.metadata.missed_call_text_outcome).toBe('skipped:too_old');
+      expect(after.metadata.missed_call_text_empty_voicemail_seen_at).toBe(seenAt);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: a call first seen empty over an hour after the voicemail grace is past the cap', async () => {
+      gates(true);
+      const row = rejected(150, 100);
       await database('call_log').insert(row);
       expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 1 });
       expect((await stored(row)).metadata.missed_call_text_outcome).toBe('skipped:too_old');

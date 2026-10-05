@@ -362,26 +362,36 @@ describe('empty voicemail (GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL)', () => {
     expect(textBackCoreEligible(call({ duration_seconds: 10 }), OPTS)).toBe(false);
   });
 
-  test('send slot: opens when the rejection lands, not at the 5-minute grace', () => {
+  const seen = (ms, extra = {}) => emptyVoicemailCall({ updated_at: new Date(IN_WINDOW + 40 * 1000), metadata: { missed_call_text_empty_voicemail_seen_at: new Date(ms).toISOString() }, ...extra });
+
+  test('send slot: opens when the lane first saw the finished verdict, not at the 5-minute grace', () => {
     const MIN = 60 * 1000;
-    // Call ended 11:00 ET (created + 40s duration); the processor rejects it at 11:12.
-    const landed = IN_WINDOW + 12 * MIN;
-    const row = emptyVoicemailCall({ updated_at: new Date(landed) });
-    expect(sendSlotDeadline(row)).toBe(landed + SEND_SLOT_MS);
-    // Textable 25 minutes after landing (a no-recording call's slot would be long closed)...
-    expect(tooOldToText(row, landed + 25 * MIN)).toBe(false);
+    // Call ended 11:00 ET (created + 40s duration); first seen empty at 11:12.
+    const sawAt = IN_WINDOW + 12 * MIN;
+    const row = seen(sawAt);
+    expect(sendSlotDeadline(row)).toBe(sawAt + SEND_SLOT_MS);
+    // Textable 25 minutes after the sighting (a no-recording call's slot would be long closed)...
+    expect(tooOldToText(row, sawAt + 25 * MIN)).toBe(false);
     // ...and not after the slot closes.
-    expect(tooOldToText(row, landed + 31 * MIN)).toBe(true);
+    expect(tooOldToText(row, sawAt + 31 * MIN)).toBe(true);
   });
 
-  test('send slot: a rejection that lands inside the grace keeps the normal slot', () => {
-    const row = emptyVoicemailCall({ updated_at: new Date(IN_WINDOW + 60 * 1000) });
-    expect(sendSlotDeadline(row)).toBe(IN_WINDOW + 40 * 1000 + VOICEMAIL_GRACE_MS + SEND_SLOT_MS);
+  test('send slot: a later updated_at (late status callback) never reopens the slot', () => {
+    const MIN = 60 * 1000;
+    const sawAt = IN_WINDOW + 10 * MIN;
+    const quiet = seen(sawAt, { updated_at: new Date(IN_WINDOW + 10 * MIN) });
+    const touched = seen(sawAt, { updated_at: new Date(IN_WINDOW + 50 * MIN) });
+    expect(sendSlotDeadline(touched)).toBe(sendSlotDeadline(quiet));
+    expect(tooOldToText(touched, IN_WINDOW + 45 * MIN)).toBe(true);
   });
 
-  test('send slot: a very late rejection cannot slide the slot out by hours', () => {
-    const row = emptyVoicemailCall({ updated_at: new Date(IN_WINDOW + 5 * 60 * 60 * 1000) });
-    expect(sendSlotDeadline(row)).toBe(IN_WINDOW + 40 * 1000 + VOICEMAIL_GRACE_MS + EMPTY_VOICEMAIL_LANDING_MS + SEND_SLOT_MS);
+  test('send slot: seen inside the grace keeps the normal slot; no stamp yet gets the plain slot', () => {
+    expect(sendSlotDeadline(seen(IN_WINDOW + 60 * 1000))).toBe(IN_WINDOW + 40 * 1000 + VOICEMAIL_GRACE_MS + SEND_SLOT_MS);
+    expect(sendSlotDeadline(emptyVoicemailCall({ updated_at: new Date(IN_WINDOW + 20 * 60 * 1000) }))).toBe(IN_WINDOW + 40 * 1000 + VOICEMAIL_GRACE_MS + SEND_SLOT_MS);
+  });
+
+  test('send slot: a very late sighting cannot slide the slot out by hours', () => {
+    expect(sendSlotDeadline(seen(IN_WINDOW + 5 * 60 * 60 * 1000))).toBe(IN_WINDOW + 40 * 1000 + VOICEMAIL_GRACE_MS + EMPTY_VOICEMAIL_LANDING_MS + SEND_SLOT_MS);
   });
 
   test('send slot: a call with no recording is unchanged by the empty-voicemail rule', () => {

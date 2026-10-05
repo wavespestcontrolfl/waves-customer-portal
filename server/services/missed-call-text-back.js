@@ -67,8 +67,9 @@
  * lane does nothing with it, so with the gate on that call counts as "no
  * message left" here — every other rule above still applies. A recording
  * still awaiting transcription never counts. The rejection lands minutes
- * after the call, so the call's send slot opens when it lands (see
- * sendSlotDeadline); the 2-minute sweep is what picks it up.
+ * after the call, so the call's send slot opens when this lane first sees the
+ * finished verdict (stamped once in metadata, see sendSlotDeadline); the
+ * 2-minute sweep is what picks it up.
  *
  * Timing: every call gets one send slot (SEND_SLOT_MS) from the first
  * moment it may be texted — right after the voicemail-landing grace, any
@@ -144,11 +145,11 @@ const SEND_SLOT_MS = 30 * 60 * 1000;
 // an hour); this cap is pure backstop headroom for a stalled sweep or a
 // backlog, not a scheduled wait.
 const MAX_CALL_AGE_MS = 16 * 60 * 60 * 1000;
-// An empty-voicemail call's send slot opens when the processor rejects the
-// recording (transcription is async, minutes after the call). A rejection
-// that lands later than this after the voicemail grace is treated as landing
-// then, so a stalled processor never produces an hours-late "sorry we missed
-// your call".
+// An empty-voicemail call's send slot opens when this lane first sees the
+// processor's finished no-speech verdict (transcription is async, minutes
+// after the call). A sighting later than this after the voicemail grace is
+// treated as happening then, so a stalled processor or sweep never produces
+// an hours-late "sorry we missed your call".
 const EMPTY_VOICEMAIL_LANDING_MS = 60 * 60 * 1000;
 // SQL pre-filter twin of isEmptyVoicemailRecording's marker-only case: the
 // whole transcript is one or more [VOICEMAIL]/[NO SPEECH] markers and
@@ -260,16 +261,37 @@ function sendSlotDeadline(row) {
   const graceClears = terminalAt + VOICEMAIL_GRACE_MS;
   if (isEmptyVoicemailRecording(row)) {
     // The call may be texted only once the processor has rejected its
-    // recording, and the rejection write stamps updated_at — so the slot
-    // opens at the later of the grace and that landing, bounded so a late
-    // landing cannot slide the slot out by hours.
-    const landedAt = new Date(row.updated_at).getTime();
-    const opensAt = Number.isFinite(landedAt)
-      ? Math.min(Math.max(graceClears, landedAt), graceClears + EMPTY_VOICEMAIL_LANDING_MS)
+    // recording. The row carries no immutable completion time (updated_at
+    // moves with every later status callback), so this lane stamps the first
+    // moment it SAW the finished empty recording (stampEmptyVoicemailSeen,
+    // written once, never moved) — the slot opens at the later of the grace
+    // and that stamp, bounded so a late sighting cannot slide the slot out
+    // by hours. No stamp yet → the plain grace-based slot.
+    const seenAt = new Date(parseMeta(row.metadata).missed_call_text_empty_voicemail_seen_at).getTime();
+    const opensAt = Number.isFinite(seenAt)
+      ? Math.min(Math.max(graceClears, seenAt), graceClears + EMPTY_VOICEMAIL_LANDING_MS)
       : graceClears;
     return opensAt + SEND_SLOT_MS;
   }
   return graceClears + SEND_SLOT_MS;
+}
+
+// Stamp, once and never moved, the first time this lane sees a call's
+// recording finished and speech-less (the slot's opening time, see
+// sendSlotDeadline). Returns the row with the stamp in its metadata.
+async function stampEmptyVoicemailSeen(row) {
+  const key = 'missed_call_text_empty_voicemail_seen_at';
+  if (parseMeta(row.metadata)[key]) return row;
+  try {
+    await db('call_log').where({ id: row.id })
+      .whereRaw("COALESCE(metadata->>'missed_call_text_empty_voicemail_seen_at', '') = ''")
+      .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('missed_call_text_empty_voicemail_seen_at', ?::text)", [new Date(Date.now()).toISOString()]) });
+    const current = await db('call_log').where({ id: row.id }).first('metadata');
+    return { ...row, metadata: { ...parseMeta(row.metadata), ...parseMeta(current && current.metadata) } };
+  } catch (e) {
+    logger.warn(`[missed-call-text-back] empty-voicemail stamp failed for call ${String(row.twilio_call_sid).slice(-6)}: ${e.code || e.name || 'db_error'}`);
+    return row;
+  }
 }
 
 /** Bounded catch-up, exported for tests: past the send slot, or past the overall age belt. */
@@ -761,14 +783,15 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
  * the post-call hook and the durable sweep so the two paths can never
  * diverge. Returns { outcome: 'sent' | 'pending' | 'skipped' | 'error', reason? }.
  */
-async function attemptForRow(row, now = Date.now()) {
+async function attemptForRow(inputRow, now = Date.now()) {
+  let row = inputRow;
   if (!row || !row.twilio_call_sid) return { outcome: 'skipped', reason: 'no_sid' };
   const emptyVoicemail = emptyVoicemailOn();
   if (!textBackCoreEligible(row, { emptyVoicemail })) return { outcome: 'skipped', reason: 'not_missed' };
   // True only for a call eligible BECAUSE its recording held no speech.
   const viaEmptyVoicemail = emptyVoicemail && isEmptyVoicemailRecording(row);
-  const meta = parseMeta(row.metadata);
-  if (meta.missed_call_text_settled_at) return { outcome: 'skipped', reason: 'already_settled' };
+  if (parseMeta(row.metadata).missed_call_text_settled_at) return { outcome: 'skipped', reason: 'already_settled' };
+  if (viaEmptyVoicemail) row = await stampEmptyVoicemailSeen(row);
 
   const settle = async (outcome) => {
     try {
@@ -935,6 +958,7 @@ module.exports = {
   _private: {
     textBackCoreEligible,
     emptyVoicemailOn,
+    stampEmptyVoicemailSeen,
     EMPTY_VOICEMAIL_LANDING_MS,
     callEndedAt,
     sendSlotDeadline,
