@@ -27,11 +27,11 @@ Timings from the scripted run (median 7 ms to the first tool result, 29 ms to a 
 | W4 Second property labeled rental | 9 | 1 | 0 |
 | W5 Book one service | 6 | 4 | 0 |
 | W6 Move an appointment, then notify | 3 | 2 | 5 |
-| W7 Draft, revise, send an SMS | 6 | 3 | 1 |
+| W7 Draft, revise, send an SMS | 7 | 2 | 1 |
 | W8 Lawn estimate, change cadence | 7 | 2 | 1 |
 | W9 What they owe | 3 | 1 | 6 |
 | W10 Record stock that arrived | 3 | 7 | 0 |
-| **Total** | **65** | **22** | **13** |
+| **Total** | **66** | **21** | **13** |
 
 **Not runnable** means the manifest says the case's target behavior needs a capability that does not exist on this branch: its `requires` array names a gap key from `CAPABILITY_GAPS` (`server/tests/fixtures/ib-workflows/execution-matrix.js`). It is never counted as a pass or a fail, and the case is still probed with the nearest existing tools so the report shows what the path does today. The reason recorded for each case is the gap key itself: `invoice_payment_reader` 6 (W9, PR 3a, `#5586`), `reschedule_notice_send` 5 (W6, PR 3c), `series_reschedule_writer` 1 (W6-dev-06, also needs the notice), `secondary_number_customer_link` 1 (W7-dev-03), `estimate_measurement_selector` 1 (W8-dev-05). When a gap lands, add its key to `BUILT_GAPS` in `server/tests/helpers/ib-workflow-capability.js`; its cases are scored from then on and the snapshot diff shows what changed.
 
@@ -54,10 +54,11 @@ Ten of the 24 failing cases fail only because the operator's own wording does no
 | `tool_result` `intent_not_linkable_to_customer` | W9-dev-03 | The processor reader returns intents by amount; no customer reader exposes the processor customer id, so an intent cannot be tied to a customer. | PR 3a (W9 reader). |
 | `tool_result` `missing_unit_not_clarified`, `side_effect` `stock_changed_without_a_unit` | W10-dev-06 | "Received 2 of the Talak." with no unit: once the product is established (control wording; the natural wording only reaches `product_target_not_established`), `adjust_stock` executes directly under owner-direct and adds 2 of the product's own unit (fl oz) instead of asking which unit. The case used to pass because the unestablished product refused first. | PR 2 series (unit required before an owner-direct stock write). Not yet a named slice; recommend one. |
 | `tool_result` `half_hour_refusal_not_specific`, `commercial_refusal_not_specific`, `sent_quote_refusal_not_specific` | W5-dev-03, W5-dev-06, W8-dev-07 | Where the contract says the tool refuses (a :30 start, a commercial account, a sent quote), the tool offers a card instead of a refusal, so there is no specific refusal to assert. | PR 3b (W5) and the estimate slice (W8-dev-07). |
-| `read_back` `queued_text_not_canceled` (with `side_effect` `guard_outbound_row_added`: the outbound row count fell) | W7-dev-04 | Cancelling a staff-scheduled text deletes its `sms_log` row; the contract keeps the row with status canceled so the thread still shows what was cancelled. The case used to pass because it accepted a missing row. | PR 2a (cancel keeps a canceled row). Not yet a named slice; recommend one. |
 | Probes behind the missing W9 reader: `failed_card_attempt_not_readable`, `recorded_payment_not_readable`, `remaining_balance_wrong` (150 reported, 50 owed), `payment_and_credit_not_named_by_type`, `dispute_hold_not_readable`, `payment_method_not_readable` | W9-dev-02, 04, 05, 06, 09 | The nearest existing readers cannot state what the contract needs. The balance reader ignores a partial card payment. | PR 3a. |
 | Probe: `series_partially_moved` | W6-dev-06 | A series move that cannot be done in one operation can leave only some visits moved. | PR 3c. |
 | Probes: `no_card_for_secondary_number`, `card_does_not_name_the_number`, `sent_to_wrong_number` | W7-dev-03 | A text to the household member's number is refused with `target_relationship_mismatch`: the sender clears the customer link when the number is not the customer's primary phone. | W7 follow-up (secondary contact numbers). |
+
+Fixed: W7-dev-04 (`read_back` `queued_text_not_canceled`). The bar's `cancel_queued_message` now passes `keepRow` to the shared writer (`scheduled-sms-cancel.js`), so the staff-scheduled text keeps its `sms_log` row with status `canceled`; the admin inbox's DELETE route is unchanged and still deletes an ordinary row.
 
 Fixed since the first run (2026-10-05): the schedule view takes a `customer_id`, so a brief reads one customer's visits and no longer carries another account's id, name and phone into the model's context (W2-dev-01, W2-dev-02; the brief script passes the id the lookup returned). Inside a customer-scoped task the id is combined with the task's read scope, never a replacement for it. The schedule view's `time_window` now carries the customer's arrival window (the start plus 120 minutes, `arrivalWindowRange`), not the start alone and not the stored scheduling block end (W2-dev-05).
 
