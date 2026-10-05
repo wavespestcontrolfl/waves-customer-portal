@@ -53,6 +53,7 @@ const MESSAGES = {
   visit_required: 'Choose the visit this code is for',
   expired: 'This one-visit code is more than 14 days old',
   source_moved: 'The text this code came from now belongs to another customer',
+  source_changed: 'The text this code came from has changed; it will be read again',
   invalid_body: 'The request body must be a JSON object',
 };
 

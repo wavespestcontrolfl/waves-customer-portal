@@ -182,6 +182,15 @@ describe('verifyItems', () => {
     expect(verify([item({ kind: 'door', quote: 'Door code is #4821, thanks.' })], body)).toHaveLength(1);
   });
 
+  test('the same code with different directions in one text keeps both', () => {
+    const body = 'Front gate code is 4821 press 1, rear gate code is 4821 press 2';
+    const kept = verify([
+      item({ kind: 'property_gate', code: '4821', instructions: 'press 1', quote: 'Front gate code is 4821 press 1' }),
+      item({ kind: 'property_gate', code: '4821', instructions: 'press 2', quote: 'rear gate code is 4821 press 2' }),
+    ], body);
+    expect(kept).toHaveLength(2);
+  });
+
   test('a cropped quote cannot strip a symbol or shorten the code', () => {
     const body = 'The gate code is #4821';
     expect(verify([item({ code: '4821', quote: '4821' })], body)).toEqual([]);

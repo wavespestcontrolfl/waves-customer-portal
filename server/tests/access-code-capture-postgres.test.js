@@ -811,6 +811,16 @@ postgres('access codes section', () => {
       expect((await trx('property_preferences').where({ customer_id: winner.id }).first()).garage_code).toBeNull();
     });
 
+    test('a text changed after filing cannot be accepted from a stale page', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'The gate code is #4821');
+      await sweep(stub([gateItem()]));
+      const [row] = await rows(c.id);
+      await trx('sms_log').where({ id }).update({ message_body: 'See you Tuesday' });
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, status: 409, code: 'source_changed' });
+      expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('found');
+    });
+
     test('a refused accept leaves the active twin untouched', async () => {
       const winner = await customer();
       const loser = await customer();

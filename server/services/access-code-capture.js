@@ -184,7 +184,7 @@ function verifyItems(items, message, { properties = [] } = {}) {
   for (const item of Array.isArray(items) ? items : []) {
     const verified = verifyItem(item, bodyText, refusals);
     if (!verified) continue;
-    const key = `${verified.kind}:${verified.value_hash}`;
+    const key = `${verified.kind}:${verified.value_hash}:${normalizeText(verified.instructions).toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
     kept.push(verified);
@@ -538,6 +538,17 @@ async function sourceStillOwned(trx, row) {
   const source = await trx('sms_log').where({ id: row.source_id }).first('customer_id');
   return !source || source.customer_id === row.customer_id;
 }
+
+// At an office accept the text must still say what the row quotes: a text
+// corrected after the sweep filed it (and before the next pass) cannot be
+// saved from a stale review page. The text row is locked until commit.
+async function sourceStillSupports(trx, row) {
+  if (row.source_type !== 'sms' || !row.source_id) return true;
+  const source = await trx('sms_log').where({ id: row.source_id }).forUpdate().first('customer_id', 'message_body');
+  if (!source) return true;
+  return source.customer_id === row.customer_id
+    && normalizeText(source.message_body).includes(normalizeText(row.source_quote));
+}
 const OWNED_SOURCE_SQL = `(a.source_type <> 'sms' OR a.source_id IS NULL OR NOT EXISTS (
   SELECT 1 FROM sms_log src WHERE src.id = a.source_id AND src.customer_id IS DISTINCT FROM a.customer_id))`;
 
@@ -623,7 +634,8 @@ async function visitFor(trx, customerId, { from, chosenId }) {
     .whereBetween('scheduled_date', [etDateString(from), etDateString(addETDays(from, VISIT_WINDOW_DAYS))]);
   if (chosenId !== undefined && chosenId !== null) {
     if (!UUID_RE.test(String(chosenId))) return { error: 'invalid_visit' };
-    const chosen = await live().where({ id: chosenId }).first('id', 'property_id');
+    // Locked, so the visit cannot end or move before this code commits.
+    const chosen = await live().where({ id: chosenId }).forUpdate().first('id', 'property_id');
     return chosen ? { id: chosen.id, propertyId: chosen.property_id || null } : { error: 'invalid_visit' };
   }
   const candidate = await live().first('id');
@@ -710,6 +722,7 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (checked.error) return fail(400, checked.error);
       const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
       if (!(await sourceStillOwned(trx, row))) return fail(409, 'source_moved');
+      if (!(await sourceStillSupports(trx, row))) return fail(409, 'source_changed');
       const refused = await supersedeOrRefuse(trx, row.customer_id, next, { exceptId: row.id, adminUserId });
       if (refused) return refused;
       // A one-visit candidate lives 14 days from the day it was sent; one past
