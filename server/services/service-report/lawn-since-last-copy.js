@@ -134,19 +134,31 @@ function overallLine(progress) {
 }
 
 function metricLines(progress) {
-  const byMetric = new Map();
+  // The slots are chosen from each item's LEGACY state (what the engine said before
+  // GATE_LAWN_LIGHTING; the same as `state` when the gate is off), exactly as they
+  // always were; only then is a line replaced by, or withheld for, the state the
+  // light rules gave. So the gate can remove or soften a sentence but never lets
+  // a line that was cut for room into the payload.
+  const held = (map, metric, state) => {
+    if (!STATE_PRECEDENCE.includes(state)) return;
+    const prior = map.get(metric);
+    if (prior == null || STATE_PRECEDENCE.indexOf(state) < STATE_PRECEDENCE.indexOf(prior)) map.set(metric, state);
+  };
+  const legacy = new Map();
+  const actual = new Map();
   for (const item of Array.isArray(progress?.items) ? progress.items : []) {
     if (!item || item.kind !== 'applied' || item.approved !== true) continue;
     if (!Object.prototype.hasOwnProperty.call(METRIC_SENTENCE, item.metric)) continue;
-    if (!STATE_PRECEDENCE.includes(item.state)) continue;
-    const held = byMetric.get(item.metric);
-    if (held == null || STATE_PRECEDENCE.indexOf(item.state) < STATE_PRECEDENCE.indexOf(held)) byMetric.set(item.metric, item.state);
+    held(legacy, item.metric, item.legacyState ?? item.state);
+    held(actual, item.metric, item.state);
   }
-  return [...byMetric.entries()]
-    .map(([metric, state]) => ({ text: METRIC_SENTENCE[metric][state] || null, state }))
-    .filter((line) => line.text)
-    .sort((a, b) => LINE_PRIORITY.indexOf(a.state) - LINE_PRIORITY.indexOf(b.state))
-    .slice(0, MAX_METRIC_LINES);
+  return [...legacy.entries()]
+    .map(([metric, legacyState]) => ({ metric, legacyState }))
+    .filter((slot) => METRIC_SENTENCE[slot.metric][slot.legacyState])
+    .sort((a, b) => LINE_PRIORITY.indexOf(a.legacyState) - LINE_PRIORITY.indexOf(b.legacyState))
+    .slice(0, MAX_METRIC_LINES)
+    .map(({ metric }) => ({ text: METRIC_SENTENCE[metric][actual.get(metric)] || null, state: actual.get(metric) }))
+    .filter((line) => line.text);
 }
 
 function watchLine(sinceLast, insights, bannerPresent) {

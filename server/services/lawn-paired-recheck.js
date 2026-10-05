@@ -376,7 +376,7 @@ async function loadPhotoLights({ knex, assessmentId, priorAssessmentId }) {
     .whereIn('assessment_id', [assessmentId, priorAssessmentId])
     .select('assessment_id', 'photo_ids', 'photo_quality');
   const byPhotoId = new Map();
-  for (const run of runs) for (const entry of lighting.photoLightsFromRun(run)) byPhotoId.set(entry.photoId, entry.light);
+  for (const run of runs) for (const entry of lighting.photoLightsFromRun(run)) if (entry.photoId != null) byPhotoId.set(entry.photoId, entry.light);
   return byPhotoId;
 }
 

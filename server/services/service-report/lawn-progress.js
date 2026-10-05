@@ -296,10 +296,13 @@ function colorLightBlock(metric, gates) {
   return metric === 'color_health' && gates.color != null && !gates.color.comparable;
 }
 
-// GATE_LAWN_LIGHTING: in compatible light, a would-be "behind" from a color move
-// smaller than the dead band is no change.
+// GATE_LAWN_LIGHTING: in compatible light, a color move smaller than the dead band
+// is no change: a would-be "behind", and a cool-season "seasonal" (a 70 -> 70
+// score is not a seasonal color change), both read holding steady. Runs BEFORE
+// the seasonal rule.
 function smallColorMove(metric, gates, state, scoreDelta) {
-  return metric === 'color_health' && gates.color != null && state === 'behind' && scoreDelta > -gates.color.band;
+  return metric === 'color_health' && gates.color != null && Math.abs(scoreDelta) < gates.color.band
+    && (state === 'behind' || gates.seasonChange);
 }
 
 function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
@@ -318,19 +321,26 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
     // GATE_LAWN_LIGHTING: no color claim across unknown or different light.
     state = 'unclear';
     gate = gates.color.reason;
-  } else if (metric === 'color_health' && gates.seasonChange) {
-    state = 'seasonal';
-    gate = 'seasonal';
   } else if (smallColorMove(metric, gates, state, scoreDelta)) {
     // GATE_LAWN_LIGHTING: a small color move is no change, even in compatible light.
     state = 'holding_steady';
     gate = 'color_dead_band';
+  } else if (metric === 'color_health' && gates.seasonChange) {
+    state = 'seasonal';
+    gate = 'seasonal';
   } else if (state === 'behind' && (row.transient || row.judgedByAbsence || row.behindEligible === false)) {
     // judgeProgress already withholds behind from rows with no window; this is
     // the invariant stated where a regression would be seen.
     state = 'holding_steady';
   }
 
+  // GATE_LAWN_LIGHTING: the state this item would have WITHOUT the light rules, so
+  // the copy can pick its sentence slots exactly as gate-off would and only then
+  // withhold a line (the gate may remove a sentence, never promote another into
+  // its slot). Present only where the light rules changed the state.
+  const legacyState = gates.color && metric === 'color_health'
+    ? itemForMetric({ row, metric, days, cur, prior, gates: { ...gates, color: undefined }, band }).state
+    : state;
   return {
     kind: 'applied',
     rowId: row.id,
@@ -339,6 +349,7 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
     approved: Boolean(row.approved),
     metric,
     state,
+    ...(legacyState !== state ? { legacyState } : {}),
     gate,
     rawVerdict,
     basis: { daysSinceApplication: Number.isFinite(days) ? days : null, scoreDelta, band },

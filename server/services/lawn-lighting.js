@@ -94,7 +94,8 @@ function colorComparability(currentLight, priorLight) {
  * The per-photo light of one stored run: [{ photoId, photo, quality, light }].
  * `run.photo_ids` is index-aligned with the prompt's 1-based photo numbers (a
  * gap is null), and each `photo_quality` row names its photo number. A row with
- * no stored read (every run before the gate) is `unknown`.
+ * no stored read (every run before the gate) is `unknown`; a position with no
+ * stored photo id or no quality row is `missing`.
  */
 function photoLightsFromRun(run) {
   const parse = (value) => {
@@ -103,13 +104,24 @@ function photoLightsFromRun(run) {
     try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
   };
   const ids = parse(run?.photo_ids);
-  const out = [];
+  const rows = new Map();
   for (const row of parse(run?.photo_quality)) {
     const number = Number(row?.photo);
-    if (!Number.isInteger(number) || number < 1) continue;
+    if (Number.isInteger(number) && number >= 1) rows.set(number, row);
+  }
+  const out = [];
+  const positions = Math.max(ids.length, ...rows.keys(), 0);
+  for (let number = 1; number <= positions; number += 1) {
     const photoId = ids[number - 1];
-    if (photoId == null) continue;
-    out.push({ photoId: String(photoId), photo: number, quality: row?.quality || null, light: effectiveLight(row) });
+    const row = rows.get(number);
+    // A prompt position with no stored photo row (its insert failed at /assess) or
+    // no quality read has no known light or shot: it is `missing`, and any missing
+    // position makes the visit's light unknown.
+    if (photoId == null || !row) {
+      out.push({ photoId: photoId == null ? null : String(photoId), photo: number, quality: row?.quality || null, light: 'unknown', missing: true });
+    } else {
+      out.push({ photoId: String(photoId), photo: number, quality: row.quality || null, light: effectiveLight(row) });
+    }
   }
   return out;
 }
@@ -122,6 +134,7 @@ function photoLightsFromRun(run) {
  * count: a close-up in shade must not void a sunny overview. A shade photo in
  * different light from the front photo makes the visit mixed, because it moves
  * the color score too.
+ *   - any prompt position with no stored photo row -> unknown
  *   - no such photo, or any of them unknown       -> unknown
  *   - all the same                                -> that light
  *   - all overcast / open shade                   -> overcast (open_shade if none is overcast)
@@ -130,6 +143,9 @@ function photoLightsFromRun(run) {
  * @param {Array<{light:string, quality?:string, zone?:string|null}>} photos
  */
 function visitLightFromPhotos(photos) {
+  // A prompt position whose photo row or read is missing could be any shot in any
+  // light, so the visit's light cannot be known.
+  if ((Array.isArray(photos) ? photos : []).some((p) => p && p.missing === true)) return 'unknown';
   const overview = (Array.isArray(photos) ? photos : [])
     .filter((p) => p && USABLE_QUALITY.has(p.quality) && shotList.areaWeight(p.zone) > 0);
   if (!overview.length) return 'unknown';
@@ -160,7 +176,7 @@ async function loadVisitLights(knex, assessmentIds, { customerId = null } = {}) 
     .select('id', 'assessment_id', 'zone');
   const zoneById = new Map(photoRows.map((row) => [String(row.id), row.zone || null]));
   for (const run of runs) {
-    const photos = photoLightsFromRun(run).map((p) => ({ ...p, zone: zoneById.get(p.photoId) ?? null }));
+    const photos = photoLightsFromRun(run).map((p) => ({ ...p, zone: p.photoId == null ? null : (zoneById.get(p.photoId) ?? null) }));
     lights.set(String(run.assessment_id), visitLightFromPhotos(photos));
   }
   return lights;

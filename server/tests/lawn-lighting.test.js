@@ -62,7 +62,7 @@ describe('a photo\'s light read', () => {
     expect(lighting.effectiveLight(null)).toBe('unknown');
   });
 
-  test('photoLightsFromRun: finds each photo by the run\'s index-aligned photo_ids, skips a gap, reads old rows as unknown', () => {
+  test('photoLightsFromRun: finds each photo by the run\'s index-aligned photo_ids, flags a gap as missing, reads old rows as unknown', () => {
     const run = {
       photo_ids: ['p1', null, 'p3'],
       photo_quality: [
@@ -73,8 +73,12 @@ describe('a photo\'s light read', () => {
     };
     expect(lighting.photoLightsFromRun(run)).toEqual([
       { photoId: 'p1', photo: 1, quality: 'adequate', light: 'full_sun' },
+      { photoId: null, photo: 2, quality: 'adequate', light: 'unknown', missing: true },
       { photoId: 'p3', photo: 3, quality: 'limited', light: 'unknown' },
     ]);
+    // a stored photo id with no quality row has no read either
+    expect(lighting.photoLightsFromRun({ photo_ids: ['a', 'b'], photo_quality: [{ photo: 1, quality: 'adequate', lighting: 'full_sun', hard_shadows: 'no' }] }))
+      .toEqual([{ photoId: 'a', photo: 1, quality: 'adequate', light: 'full_sun' }, { photoId: 'b', photo: 2, quality: null, light: 'unknown', missing: true }]);
     // jsonb may arrive as text; garbage reads as nothing
     expect(lighting.photoLightsFromRun({ photo_ids: JSON.stringify(['a']), photo_quality: JSON.stringify([{ photo: 1, quality: 'adequate', lighting: 'overcast', hard_shadows: 'no' }]) }))
       .toEqual([{ photoId: 'a', photo: 1, quality: 'adequate', light: 'overcast' }]);
@@ -101,6 +105,11 @@ describe('a visit\'s one light', () => {
       const counts = lighting.visitLightFromPhotos([p('full_sun', 'front'), p('overcast', shot.key)]) !== 'full_sun';
       expect(counts).toBe(shot.areaWeight > 0);
     }
+  });
+
+  test('a prompt position with no stored photo row (its insert failed) makes the visit unknown, whatever the other photos say', () => {
+    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), { photoId: null, photo: 2, quality: 'adequate', light: 'unknown', missing: true }])).toBe('unknown');
+    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), { photoId: null, photo: 2, quality: null, light: 'unknown', missing: true }])).toBe('unknown');
   });
 
   test('no usable overview photo, or any overview photo with no read, is unknown', () => {
@@ -159,6 +168,18 @@ describe('loadVisitLights', () => {
     expect(Object.fromEntries(lights)).toEqual({ A: 'overcast', B: 'unknown', C: 'unknown' });
     expect(log.filter((entry) => typeof entry === 'string')).toEqual(['lawn_assessment_runs', 'lawn_assessment_photos']);
     expect(log.filter((entry) => typeof entry === 'object')).toEqual([{ customer_id: 'cust-1' }, { customer_id: 'cust-1' }]);
+  });
+
+  test('end to end: a sunny front plus a shade photo whose row failed to save reads unknown, not full_sun', async () => {
+    const gapRuns = [{
+      assessment_id: 'G', photo_ids: ['g1', null],
+      photo_quality: [
+        { photo: 1, quality: 'adequate', issue: '', lighting: 'full_sun', hard_shadows: 'no' },
+        { photo: 2, quality: 'adequate', issue: '', lighting: 'overcast', hard_shadows: 'no' },
+      ],
+    }];
+    const { knex } = fakeKnex({ runs: gapRuns, photos: [{ id: 'g1', assessment_id: 'G', zone: 'front' }] });
+    expect(Object.fromEntries(await lighting.loadVisitLights(knex, ['G']))).toEqual({ G: 'unknown' });
   });
 
   test('no ids reads nothing; no run at all reads no photos', async () => {

@@ -121,6 +121,60 @@ describe('a small color move is no change, even in compatible light', () => {
   });
 });
 
+describe('a small color move across a cool-season boundary is holding steady, never "seasonal"', () => {
+  const season = { priorSeason: 'peak', curSeason: 'dormant', days: 120 };
+  test('gate on, compatible light: 70 -> 70 and any move under the band read holding steady; a real move is still seasonal', () => {
+    for (const color of [-7, -1, 0, 1, 7]) {
+      expect(colorItem(compare({ ...season, guard: SUN, cur: { color_health: 70 + color } }))).toMatchObject({ state: 'holding_steady', gate: 'color_dead_band' });
+    }
+    expect(colorItem(compare({ ...season, guard: SUN, cur: { color_health: 62 } })).state).toBe('seasonal');
+    expect(colorItem(compare({ ...season, guard: SUN, cur: { color_health: 78 } })).state).toBe('seasonal');
+  });
+
+  test('GATE OFF (unchanged here, reported separately): the same 70 -> 70 still reads seasonal', () => {
+    expect(colorItem(compare({ ...season, cur: { color_health: 70 } })).state).toBe('seasonal');
+  });
+});
+
+describe('the gate only ever removes a sentence: the two metric slots are chosen as gate-off would choose them', () => {
+  // weeds behind, color behind and stress on track all qualify; two slots, priority behind first
+  const threeMetrics = (guard) => buildLawnProgress({
+    current: { date: addDays(PRIOR_DATE, 30), season: 'peak', scores: scoresOf(), confidence: 'moderate' },
+    prior: { date: PRIOR_DATE, season: 'peak', scores: scoresOf() },
+    sinceLast: { priorDate: PRIOR_DATE, applied: [{ name: 'Celsius WG' }], checks: [], issues: ['dry_spot', 'chinch'] },
+    ...(guard === undefined ? {} : { colorGuard: guard }),
+  });
+  const lines = (progress) => (buildSinceLastCopy({ sinceLast: { priorDate: PRIOR_DATE, applied: [{ kind: 'herbicide' }], checks: [] }, progress })?.lines || []);
+
+  test('gate off: weeds and color fill the slots, the stress line is cut for room', () => {
+    const out = lines(threeMetrics());
+    expect(out).toContain(METRIC_SENTENCE.weed_suppression.behind);
+    expect(out).toContain(METRIC_SENTENCE.color_health.behind);
+    expect(out).not.toContain(METRIC_SENTENCE.stress_damage.on_track);
+  });
+
+  test('gate on, light unknown: the color line goes and NOTHING takes its slot (the cut stress line stays cut)', () => {
+    const out = lines(threeMetrics(NO_READ));
+    expect(out).toContain(METRIC_SENTENCE.weed_suppression.behind);
+    for (const sentence of Object.values(METRIC_SENTENCE.color_health)) expect(out).not.toContain(sentence);
+    for (const sentence of Object.values(METRIC_SENTENCE.stress_damage)) expect(out).not.toContain(sentence);
+    expect(out.filter((line) => /Weed|Color|Thickness|repair|stressed/.test(line))).toHaveLength(1);
+  });
+
+  test('gate on, compatible light and a flat score: the color slot stays and reads holding steady', () => {
+    const out = lines(threeMetrics(SUN));
+    expect(out).toContain(METRIC_SENTENCE.color_health.holding_steady);
+    expect(out).not.toContain(METRIC_SENTENCE.stress_damage.on_track);
+  });
+
+  test('the items carry the legacy state only where the light rules changed it', () => {
+    const items = threeMetrics(NO_READ).items;
+    expect(items.find((i) => i.metric === 'color_health')).toMatchObject({ state: 'unclear', legacyState: 'behind' });
+    expect(items.filter((i) => i.metric !== 'color_health').every((i) => !('legacyState' in i))).toBe(true);
+    expect(threeMetrics().items.every((i) => !('legacyState' in i))).toBe(true);
+  });
+});
+
 describe('the overall direction is decided without color', () => {
   const overall = (input) => compare(input).overall;
 

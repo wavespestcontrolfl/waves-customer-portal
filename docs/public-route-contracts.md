@@ -2632,7 +2632,8 @@ Compatible light: full sun with full sun; overcast and open shade with each othe
 mixed sun and shade, low light and unknown are never compatible. A visit's light
 comes from its usable photos whose shot has positive color weight in
 `shared/lawn-photo-shots.json` (front, back, side, untagged, and the half-weight
-shade and hot-edge shots; detail shots do not count); a mix is mixed light.
+shade and hot-edge shots; detail shots do not count); a mix is mixed light. Any prompt position with no stored photo row (its insert failed) or no
+light read makes the visit's light unknown.
 
 Every code path that reads the gate (`lawnLightingLive()` in
 `server/config/feature-gates.js`; nothing else reads `GATE_LAWN_LIGHTING`):
@@ -2658,7 +2659,10 @@ Every code path that reads the gate (`lawnLightingLive()` in
    seasonal.", "It is too early to judge the color response.") are spoken only
    when both visits have a stored, compatible light, and a color move under 8
    points (`COLOR_NO_CHANGE_POINTS`, the category band) is "holding steady", never
-   "behind". The overall sentence ("Your overall lawn score is up / down since
+   "behind" and never "mostly seasonal" (the dead band runs before the cool-season
+   rule). The two per-treatment slots are chosen exactly as with the gate off, and
+   only then is a color line replaced or withheld, so the gate never lets a
+   sentence into the block that was not already in it. The overall sentence ("Your overall lawn score is up / down since
    then." / "...holding steady.") is decided by thickness, weeds and stress damage,
    never by color alone: when only color moved the printed score, or the printed
    score and the no-color blend disagree, there is no overall sentence. For every
