@@ -142,11 +142,43 @@ test('May Tetrino with Arena selected beside it: the plan engine\'s apply-alone 
   expect(body.mixingOrder).toEqual([]);
 });
 
-test('gate off: no gate notes, no blocks, the mixing order is built as before', async () => {
+test('gate off: no v13 field on any item, no blocks, the mixing order is built as before', async () => {
   delete process.env.GATE_LAWN_V13;
   const body = await lawnMix({ month: '5', track: 'st_augustine' });
   expect(body.blocks).toEqual([]);
-  expect(body.items.every((i) => i.gates === null && i.gateNotes.length === 0)).toBe(true);
+  for (const item of body.items) {
+    for (const field of ['gates', 'gateNotes', 'spot', 'unavailable']) expect(field in item).toBe(false);
+  }
+});
+
+test('an unlinked v13 line (matched product, no staged row) gets no quantity and says why, never the catalog default', async () => {
+  operatingLayer.summarizeProtocolContext.mockReturnValue({ ...V13_SUMMARY, products: V13_SUMMARY.products.filter((row) => row.productId !== 'nt') });
+  const body = await lawnMix({ month: '1' });
+  const item = itemFor(body, NUTRA);
+  expect([item.jobMix, item.plannedMix, item.fullTankMix, item.plannedFullTankMix]).toEqual([null, null, null, null]);
+  expect(item.unavailable.reason).toMatch(/No protocol row is linked/);
+});
+
+test('/completion-actions with the gate on: products carry no amounts (January Nutra-TECH is never the catalog 12, Arena has none); the plan is the single source', async () => {
+  const completionActions = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
+  const call = async (query) => {
+    const res = { json: jest.fn(), status: jest.fn() };
+    res.status.mockReturnValue(res);
+    await completionActions({ query: { serviceType: 'Lawn Care', track: 'bermuda', ...query } }, res, jest.fn());
+    return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
+  };
+  const body = await call({ month: '1' });
+  const nutra = body.actions.find((a) => a.product?.name === NUTRA);
+  expect(nutra.product).toMatchObject({ defaultRatePer1000: null, defaultRate: null, maxLabelRatePer1000: null });
+  expect(body.note).toMatch(/amounts from the visit plan/);
+  expect(JSON.stringify(body.actions)).not.toMatch(/"defaultRatePer1000":\s*[1-9]/);
+  const may = await call({ month: '5' });
+  expect(may.actions.find((a) => a.product?.name === 'Arena 50 WDG').product.defaultRatePer1000).toBeNull();
+  // Gate off: the catalog default answers as before.
+  delete process.env.GATE_LAWN_V13;
+  const off = await call({ month: '1', track: 'st_augustine' });
+  expect('note' in off).toBe(false);
+  expect(off.actions.some((a) => a.product && a.product.defaultRatePer1000 != null)).toBe(true);
 });
 
 test('spot rows get no quantity anywhere on the sheet: no job, planned or full-tank amount, a label-rate reference and the note', async () => {

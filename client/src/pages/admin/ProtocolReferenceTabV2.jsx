@@ -555,6 +555,11 @@ export function ProtocolMixCard({
                 <Badge tone="neutral">Surfactant Required</Badge>
               )}
             </div>
+            {item.unavailable && (
+              <div className="text-11 text-alert-fg leading-normal mt-1">
+                {item.unavailable.reason}
+              </div>
+            )}
             {item.spot && (
               <div className="text-11 text-ink-secondary leading-normal mt-1">
                 {item.spot.reference ? `${item.spot.reference}. ` : ""}

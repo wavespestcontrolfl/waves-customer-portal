@@ -34,7 +34,7 @@ describeDb('the v13 plan through PostgreSQL', () => {
     for (const table of ['technicians', 'products_catalog', 'product_aliases', 'lawn_protocol_product_substitutions',
       'equipment_systems', 'equipment_calibrations', 'municipality_ordinances', 'property_nutrient_ledger',
       'service_products', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_gates',
-      'lawn_protocol_service_completions', 'lawn_protocol_product_actuals']) {
+      'lawn_protocol_service_completions', 'lawn_protocol_product_actuals', 'product_limits', 'property_application_history']) {
       await knex.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [owned.schema, table, table]);
       const columns = await knex(table).columnInfo();
       if (String(columns.id?.defaultValue || '').includes('nextval(')) {
@@ -211,13 +211,12 @@ describeDb('the v13 plan through PostgreSQL', () => {
       expect(JSON.stringify(result.mixCalculator.nutrientProjection)).not.toMatch(/"amount":\s*[1-9]/);
     });
 
-    test('gate off: the plan item carries no v13 gates or notes, and nothing is warned', async () => {
+    test('gate off: the plan items carry no v13 field, and nothing is warned', async () => {
       setGates({ v13: 'off' });
       const result = await plan(await plannedVisit());
       expect(result.propertyGate.warnings.some((w) => w.code === 'lawn_v13_product_gate')).toBe(false);
       for (const item of [...result.protocol.base, ...result.protocol.conditional]) {
-        expect(item.gates).toBeNull();
-        expect(item.gateNotes).toEqual([]);
+        expect('gates' in item || 'gateNotes' in item || 'spot' in item || 'unavailable' in item).toBe(false);
       }
     });
   });
@@ -308,5 +307,106 @@ describeDb('the v13 plan through PostgreSQL', () => {
       await knex('products_catalog').where({ id: acelepryn.id }).del();
       await knex('products_catalog').where({ id: tetrino.id }).update({ active: true });
     }
+  });
+
+  describe('one decision per v13 line', () => {
+    const lineFor = (result, name) => result.mixCalculator.items.find((i) => i.product?.name === name);
+
+    test('a saved substitution is ignored: the line keeps its protocol product, rate and gates, and the plan says so', async () => {
+      setGates();
+      const visit = await plannedVisit();
+      const [substitute] = await knex('products_catalog').insert({ name: 'Substitute Insecticide', category: 'insecticide', default_rate_per_1000: 2, rate_unit: 'fl oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'fl oz', active: true }).returning('*');
+      await knex('lawn_protocol_product_substitutions').insert({ scheduled_service_id: visit.id, original_product_id: tetrino.id, substitute_product_id: substitute.id, rate_per_1000: 2, rate_unit: 'fl oz', reason: 'out of stock' });
+      try {
+        const result = await buildPlanForService(visit.id, { db: knex });
+        const tet = tetrinoItem(result);
+        expect(tet.substitution).toBeNull();
+        expect(tet.product.name).toBe('Tetrino Insecticide');
+        expect(tet.mix).toMatchObject({ rateSource: 'protocol_rate', amount: 1.835 });
+        expect(tet.gates).toMatchObject({ applyAlone: true });
+        expect(result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_substitution_ignored')).toMatchObject({ productName: 'Tetrino Insecticide', message: 'Substitution not applied: v13 line keeps its protocol product.' });
+        expect(result.mixCalculator.items.some((i) => i.product?.name === 'Substitute Insecticide')).toBe(false);
+      } finally {
+        await knex('lawn_protocol_product_substitutions').where({ scheduled_service_id: visit.id }).del();
+        await knex('products_catalog').where({ id: substitute.id }).del();
+      }
+    });
+
+    test.each([['no product link', null], ['a link to a different catalog product', 'arena']])('an unlinked line (%s) is unavailable: no amount, never the catalog default, a plan warning', async (_label, link) => {
+      setGates();
+      const stagedRow = await knex('lawn_protocol_products as p').join('lawn_protocol_windows as w', 'p.lawn_protocol_window_id', 'w.id')
+        .join('lawn_protocols as l', 'w.lawn_protocol_id', 'l.id').where({ 'l.version': LAWN_V13_VERSION, 'p.product_name': 'Tetrino Insecticide' }).first('p.id', 'p.product_id');
+      const arena = await knex('products_catalog').where({ name: 'Arena 50 WDG' }).first();
+      await knex('lawn_protocol_products').where({ id: stagedRow.id }).update({ product_id: link === 'arena' ? arena.id : null });
+      try {
+        const result = await plan(await plannedVisit());
+        const tet = tetrinoItem(result);
+        expect(tet.mix).toBeNull();
+        expect(tet.unavailable.reason).toMatch(/No protocol row is linked/);
+        expect(result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_line_unlinked')).toMatchObject({ productName: 'Tetrino Insecticide' });
+        expect(JSON.stringify(result.mixCalculator.items.map((i) => i.mix))).not.toMatch(/"amount":\s*[1-9]/);
+      } finally {
+        await knex('lawn_protocol_products').where({ id: stagedRow.id }).update({ product_id: stagedRow.product_id });
+      }
+    });
+
+    describe('application limits (product_limits over the customer\'s own history)', () => {
+      async function withLimit({ product, limit, history }, run) {
+        const visit = await plannedVisit();
+        const [limitRow] = await knex('product_limits').insert({ product_id: product.id, severity: 'hard_block', ...limit }).returning('*');
+        const rows = await knex('property_application_history').insert(history.map((h) => ({ customer_id: visit.customer_id, product_id: product.id, application_date: '2026-03-01', ...h }))).returning('*');
+        try { return await run(visit); } finally {
+          await knex('property_application_history').whereIn('id', rows.map((r) => r.id)).del();
+          await knex('product_limits').where({ id: limitRow.id }).del();
+        }
+      }
+
+      test('Celsius at its yearly cap: the selection is blocked with the existing message and carries no amount', async () => {
+        setGates();
+        const celsius = await knex('products_catalog').where({ name: 'Celsius WG' }).first();
+        await withLimit({ product: celsius, limit: { limit_type: 'annual_max_rate', limit_value: 0.17, limit_unit: 'oz' }, history: [{ application_rate: 0.1 }, { application_rate: 0.08 }] }, async (visit) => {
+          const result = await buildPlanForService(visit.id, { db: knex, selectedConditionalProductNames: ['Celsius WG'] });
+          const block = result.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit');
+          expect(block).toMatchObject({ productName: 'Celsius WG' });
+          expect(block.message).toMatch(/Celsius WG: cumulative .* oz approaching\/exceeding max 0\.17\./);
+          expect(result.status).toBe('blocked');
+          const item = lineFor(result, 'Celsius WG');
+          expect(item.mix).toBeNull();
+          expect(item.unavailable.reason).toMatch(/application limit/);
+        });
+      });
+
+      test('a whole-lawn row at an annual application cap computes nothing; unselected, the same product is not blocked', async () => {
+        setGates();
+        await withLimit({ product: tetrino, limit: { limit_type: 'annual_max_apps', limit_value: 1 }, history: [{ application_rate: 0.367 }] }, async (visit) => {
+          const result = await buildPlanForService(visit.id, { db: knex });
+          expect(result.propertyGate.blocks.find((b) => b.code === 'lawn_v13_annual_limit').message).toMatch(/1\/1 applications this year — LIMIT REACHED/);
+          expect(tetrinoItem(result).mix).toBeNull();
+        });
+        const celsius = await knex('products_catalog').where({ name: 'Celsius WG' }).first();
+        await withLimit({ product: celsius, limit: { limit_type: 'annual_max_apps', limit_value: 1 }, history: [{ application_rate: 0.1 }] }, async (visit) => {
+          const result = await buildPlanForService(visit.id, { db: knex });
+          expect(result.propertyGate.blocks.map((b) => b.code)).not.toContain('lawn_v13_annual_limit');
+        });
+      });
+
+      test('gate off: no application-limit read and no v13 block, whatever product_limits say', async () => {
+        setGates({ v13: 'off' });
+        await withLimit({ product: tetrino, limit: { limit_type: 'annual_max_apps', limit_value: 1 }, history: [{ application_rate: 0.367 }] }, async (visit) => {
+          expect((await buildPlanForService(visit.id, { db: knex })).propertyGate.blocks.map((b) => b.code)).not.toContain('lawn_v13_annual_limit');
+        });
+      });
+    });
+
+    test('gate off: no v13 field on any item, the item payload is the old one (key snapshot)', async () => {
+      setGates({ v13: 'off' });
+      const result = await plan(await plannedVisit());
+      const OLD_KEYS = ['areaFactorBroadcast', 'areaFactorClean', 'areaFactorDefault', 'areaFactorHeavy', 'branch', 'branchGroupId', 'conditionFlag', 'conditional', 'matched', 'mix', 'product', 'raw', 'role', 'scope', 'selected', 'selectionReason', 'substitution'];
+      const items = [...result.protocol.base, ...result.protocol.conditional];
+      expect(items.length).toBeGreaterThan(0);
+      for (const item of items) expect(Object.keys(item).sort()).toEqual(OLD_KEYS);
+      expect(result.propertyGate.warnings.some((w) => /^lawn_v13_/.test(w.code))).toBe(false);
+      expect(result.propertyGate.blocks.some((b) => /^lawn_v13_/.test(b.code))).toBe(false);
+    });
   });
 });

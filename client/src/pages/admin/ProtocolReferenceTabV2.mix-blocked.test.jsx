@@ -51,3 +51,9 @@ it("a spot row shows its label rate and the note beside the product, with no qua
   renderCard(plan());
   expect(screen.getAllByText(/Label rate 0\.29 oz per 1,000 sq ft\. Spot: enter the area treated and the amount used\./).length).toBeGreaterThan(0);
 });
+
+it("an unavailable line says why beside the product, with no quantity", () => {
+  const unlinked = { ...TETRINO, unavailable: { reason: "No protocol row is linked to this product, so no amount is planned. Enter the actual work." } };
+  renderCard(plan({ items: [unlinked], selectedItems: [unlinked] }));
+  expect(screen.getAllByText(/No protocol row is linked to this product/).length).toBeGreaterThan(0);
+});

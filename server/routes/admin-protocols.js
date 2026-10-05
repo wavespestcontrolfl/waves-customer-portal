@@ -15,7 +15,7 @@ const {
   loadV13RowsForMonth,
   v13RateOptions,
   v13ItemFields,
-  v13RowCalculates,
+  v13LineState,
   planLineFields,
   v13SelectedGateWarnings,
   v13SelectionBlocks,
@@ -156,6 +156,10 @@ function serializeProtocolProduct(product) {
     maxLabelRatePer1000: product.max_label_rate_per_1000 != null ? Number(product.max_label_rate_per_1000) : null,
   };
 }
+
+// A product's catalog rates, cleared where the v13 program supplies the amount.
+const lawnV13On = () => featureGates.lawnV13Live?.() === true;
+const NO_PRODUCT_RATES = { defaultRatePer1000: null, defaultRate: null, maxLabelRatePer1000: null };
 
 function parsePositiveNumber(value) {
   if (value === '' || value == null) return null;
@@ -1004,19 +1008,20 @@ router.get('/lawn-mix', async (req, res, next) => {
     // An apply-alone product selected beside another product is a block: judged
     // first, so the sheet withholds every quantity of the selected products and
     // offers no combined mixing order (the plan does the same).
+    const v13Active = lawnV13On();
     const blocks = v13SelectionBlocks(resolvedLines, (line) => v13Rows.get(String(line.product.id)), gateContext);
     const items = resolvedLines.map((line) => {
       const { product, selected } = line;
-      const v13Row = product ? v13Rows.get(String(product.id)) : null;
-      // A spot or label-rate v13 row (Arena, Celsius, the surfactant, Dylox ...) gets
-      // no quantity at all: the same chokepoint the plan uses (v13RowCalculates).
-      const canMix = Boolean(product && carrier && (!v13Row || v13RowCalculates(v13Row)) && !(blocks.length && selected));
+      // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get
+      // no quantity at all); the sheet has no visit, so no application limits.
+      const v13Line = v13Active && product ? v13LineState(product, v13Rows) : null;
+      const canMix = Boolean(product && carrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
-        product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Row),
+        product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),
       });
       // A sunny-turf-only row (Tetrino) narrows the whole-lawn line; the sheet has
       // no turf profile, so it takes the half the plan's own default assumes.
-      const sizedLine = v13Row?.gates?.sunnyTurfOnly ? { ...line, sunnyTurfOnly: true } : line;
+      const sizedLine = v13Line?.row?.gates?.sunnyTurfOnly ? { ...line, sunnyTurfOnly: true } : line;
       const areaFactor = effectiveAreaFactor(sizedLine, areaContext);
       // plannedMix mirrors jobMix for unselected conditionals: the mix a tech
       // would put down if the line's trigger fired (rescue threshold met,
@@ -1034,7 +1039,8 @@ router.get('/lawn-mix', async (req, res, next) => {
       const [fullTankMix, plannedFullTankMix] = tankCoverageSqft ? mixPair(tankCoverageSqft) : [null, null];
       return {
         ...planLineFields(line),
-        ...v13ItemFields(v13Row, gateContext, product),
+        // Gate off: no v13 field at all.
+        ...(v13Active ? v13ItemFields(v13Line, gateContext, product) : {}),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render
@@ -1182,6 +1188,14 @@ router.get('/completion-actions', async (req, res, next) => {
       programKey,
       visit,
     });
+    // GATE_LAWN_V13: this fallback never sizes a lawn product from the catalog defaults
+    // (January Nutra-TECH is 6 fl oz in the v13 program, not the catalog's 12; spot
+    // products have no amount). Amounts come from the visit plan's completion defaults,
+    // the single source; the actions carry products with no rates.
+    const noRates = (action) => (action.product ? { ...action, product: { ...action.product, ...NO_PRODUCT_RATES } } : action);
+    const v13Extra = programKey === 'lawn' && lawnV13On()
+      ? { actions: actions.map(noRates), note: 'The v13 program takes its amounts from the visit plan; these actions list products with no amounts.' }
+      : {};
 
     res.json(protocolCatalogForViewer(req, {
       serviceType,
@@ -1195,6 +1209,7 @@ router.get('/completion-actions', async (req, res, next) => {
         objective: visit.notes,
       },
       actions,
+      ...v13Extra,
     }));
   } catch (err) { next(err); }
 });

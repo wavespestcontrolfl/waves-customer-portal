@@ -406,6 +406,24 @@ describe('plan engine reads the matched v13 protocol row', () => {
     });
   });
 
+  describe('v13LineState: one decision per v13 line', () => {
+    const tet = { id: 't' };
+    const rows = new Map([['t', { applicationMode: 'broadcast', ratePer1000: 0.367, rateUnit: 'fl oz' }], ['a', { applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate' }]]);
+    test('unlinked, capped, spot and calculate, in that order of precedence', () => {
+      expect(engine.v13LineState({ id: 'x' }, rows).state).toBe('unavailable');
+      expect(engine.v13LineState({ id: 'x' }, rows, new Set(['x'])).state).toBe('unavailable'); // no row beats a cap: nothing to size
+      expect(engine.v13LineState(tet, rows, new Set(['t'])).state).toBe('capped');
+      expect(engine.v13LineState({ id: 'a' }, rows).state).toBe('spot');
+      expect(engine.v13LineState({ id: 'a' }, rows, new Set(['a'])).state).toBe('capped'); // a capped spot row says so
+      expect(engine.v13LineState(tet, rows).state).toBe('calculate');
+    });
+    test('the item fields name why a line is unavailable, and carry nothing for a calculating row', () => {
+      expect(engine.v13ItemFields({ row: null, state: 'unavailable' }, {}, tet).unavailable.reason).toMatch(/No protocol row is linked/);
+      expect(engine.v13ItemFields({ row: rows.get('t'), state: 'capped' }, {}, tet).unavailable.reason).toMatch(/application limit/);
+      expect(engine.v13ItemFields({ row: rows.get('t'), state: 'calculate' }, {}, tet)).toMatchObject({ spot: null, unavailable: null });
+    });
+  });
+
   describe('which v13 rows compute a quantity (v13RowCalculates)', () => {
     test('only a whole-lawn row that states a rate or a nutrient target', () => {
       const calc = (row) => engine.v13RowCalculates(row);
@@ -423,7 +441,7 @@ describe('plan engine reads the matched v13 protocol row', () => {
       }
     });
     test('the reference text puts a concentration first, then the row rate, the label range, the catalog default', () => {
-      const ref = (row, product) => engine.v13ItemFields({ applicationMode: 'spot', gates: {}, ...row }, {}, product).spot.reference;
+      const ref = (row, product) => engine.v13ItemFields({ row: { applicationMode: 'spot', gates: {}, ...row }, state: 'spot' }, {}, product).spot.reference;
       expect(ref({ ratePer1000: null, gates: { concentration: '0.25% v/v' } }, { default_rate_per_1000: 0.25, rate_unit: 'fl oz' })).toBe('Label concentration 0.25% v/v');
       expect(ref({ ratePer1000: 0.085, rateUnit: 'oz' }, {})).toBe('Label rate 0.085 oz per 1,000 sq ft');
       expect(ref({ ratePer1000: null, gates: { rateRange: '0.046-0.092 fl oz/1000' } }, { default_rate_per_1000: 0.05, rate_unit: 'fl oz' })).toBe('Label rate 0.046-0.092 fl oz/1000');
