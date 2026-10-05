@@ -556,6 +556,13 @@ async function sourceStillSupports(trx, row) {
   const read = await trx('data_hygiene_source_extractions')
     .where({ source_type: 'message', source_id: row.source_id, extractor_version: VERSION, status: 'ok' })
     .where('source_hash', sourceHash({ customer_id: source.customer_id, message_body: source.message_body }))
+    // and no later read of other words: the newest read is the one that counts.
+    .whereNotExists(function laterRead() {
+      this.select(1).from('data_hygiene_source_extractions as y')
+        .whereRaw('y.source_id = data_hygiene_source_extractions.source_id AND y.source_type = data_hygiene_source_extractions.source_type')
+        .whereRaw('y.extractor_version = data_hygiene_source_extractions.extractor_version')
+        .whereRaw('y.source_hash <> data_hygiene_source_extractions.source_hash AND y.last_attempted_at > data_hygiene_source_extractions.last_attempted_at');
+    })
     .first('id');
   return !!read;
 }

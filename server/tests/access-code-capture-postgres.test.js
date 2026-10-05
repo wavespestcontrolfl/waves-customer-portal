@@ -830,6 +830,18 @@ postgres('access codes section', () => {
       expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, code: 'source_changed' });
     });
 
+    test('an accept needs the NEWEST read: words restored to an older read do not count', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'The gate code is #1111');
+      await sweep(stub([gateItem({ code: '#1111', quote: 'The gate code is #1111' })]));
+      await trx('data_hygiene_source_extractions').update({ last_attempted_at: trx.raw("last_attempted_at - interval '1 minute'") });
+      await trx('sms_log').where({ id }).update({ message_body: 'The gate code is #2222' });
+      await sweep(stub([gateItem({ code: '#2222', quote: 'The gate code is #2222' })]));
+      const row = (await rows(c.id)).find((r) => r.code === '#2222');
+      await trx('sms_log').where({ id }).update({ message_body: 'The gate code is #1111' });
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, code: 'source_changed' });
+    });
+
     test('the same one-visit code for the same visit is a duplicate; for another visit it is not', async () => {
       const c = await customer();
       const one = await visit(c.id, day(1));
