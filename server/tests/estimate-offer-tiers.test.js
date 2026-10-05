@@ -482,4 +482,22 @@ describe('tier carrier (office asks for tiers with the one-time option on a pest
     await expect(offerTierCarrierSuppressedForRow('boom', () => { throw new Error('db'); })).resolves.toBe(false);
     await expect(offerTierCarrierSuppressedForRow(null)).resolves.toBe(false);
   });
+
+  test('a carrier sent while it could not serve tiers stays the full bundle it was sent as, even after the gate turns on', async () => {
+    // Frozen while the gate was off: the snapshot is the FULL bundle, no tiers.
+    delete process.env[GATE];
+    const sentDark = carrier({ id: 'carrier-sent-dark' });
+    const fullBundle = JSON.parse(JSON.stringify(await buildPricingBundle(sentDark, { monthlyBilled: false })));
+    expect(fullBundle.offerTiers).toBeUndefined();
+    const q = fullBundle.frequencies.find((f) => f.key === 'quarterly');
+    const estimate = carrier({ id: 'carrier-sent-dark-2', monthly_total: q.monthly, annual_total: q.annual });
+    estimate.estimate_data.sendSnapshot = { pricingBundle: fullBundle };
+    process.env[GATE] = 'true';
+    expect(shouldPersistPestOnlyRecurringChoice(estimate, estimate.estimate_data)).toBe(false);
+    await expect(suppressOfferTierCarrierIfNeeded(estimate, estimate.estimate_data)).resolves.toBe(true);
+    const served = await buildPricingBundle(estimate, { monthlyBilled: false });
+    expect(served.snapshotHit).toBe(true);
+    expect(served.offerTiers).toBeUndefined();
+    expect(served.frequencies.find((f) => f.key === 'quarterly').monthly).toBeCloseTo(84.08, 2);
+  });
 });

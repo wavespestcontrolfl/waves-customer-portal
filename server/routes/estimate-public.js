@@ -20936,10 +20936,7 @@ function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {
   // served by stored facts; otherwise it books the full bundle (see
   // suppressOfferTierCarrierIfNeeded — this sync check covers callers that
   // read the raw row, such as the reservation's own estimate read).
-  if (OfferTiers.offerTiersRequested(estData)
-    && !(offerTiersGateOn() && OfferTiers.storedOfferTierEligibility({
-      gateOn: true, estData, category: estimate.category || 'RESIDENTIAL', source: estimate.source || '',
-    }).eligible === true)) return false;
+  if (OfferTiers.offerTiersRequested(estData) && !offerTierCarrierServesByStoredFacts(estimate, estData)) return false;
   return oneTimePestChoiceAmountForEstimate(estimate, estData) > 0;
 }
 
@@ -28074,6 +28071,23 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
     : addMissingBilledPerApplicationFlags(bundle);
 }
 
+// Whether a tier carrier row can serve tiers, from STORED facts alone: the
+// live gate, the stored eligibility, and — when the quote was already sent —
+// a frozen send snapshot that itself carries the tiers. A carrier sent while
+// it could not serve tiers froze the FULL bundle as the customer's promise;
+// turning the gate on later must not graft tiers onto that snapshot (its
+// ladder is the full bundle, and "Better" would read it as the pest plan) —
+// such a quote stays the ordinary full bundle it was sent as.
+function offerTierCarrierServesByStoredFacts(estimate, estData) {
+  if (!offerTiersGateOn()) return false;
+  if (OfferTiers.storedOfferTierEligibility({
+    gateOn: true, estData, category: estimate?.category || 'RESIDENTIAL', source: estimate?.source || '',
+  }).eligible !== true) return false;
+  const frozen = estData?.sendSnapshot?.pricingBundle;
+  if (frozen && Array.isArray(frozen.frequencies) && !Array.isArray(frozen.offerTiers)) return false;
+  return true;
+}
+
 // The tier CARRIER fallback (estimate-offer-tiers.js offerTiersRequested): a
 // pest + companion row carries the one-time option only to ask for Good /
 // Better / Best. When this request cannot serve tiers — gate off, a live
@@ -28087,10 +28101,7 @@ async function suppressOfferTierCarrierIfNeeded(estimate, estData, database = db
   if (!estimate || !(estimate.show_one_time_option || estimate.showOneTimeOption)) return false;
   if (!OfferTiers.offerTiersRequested(estData)) return false;
   if (estimate.status === 'accepted' || estimate.price_locked_at) return false;
-  let serve = offerTiersGateOn()
-    && OfferTiers.storedOfferTierEligibility({
-      gateOn: true, estData, category: estimate.category || 'RESIDENTIAL', source: estimate.source || '',
-    }).eligible === true;
+  let serve = offerTierCarrierServesByStoredFacts(estimate, estData);
   if (serve && await offerTierMemberBlock(estimate, database)) serve = false;
   if (serve) return false;
   estimate.show_one_time_option = false;
@@ -28253,7 +28264,9 @@ async function buildPricingBundleInner(estimate, { liveOnly = false } = {}) {
   ) {
     // Offer tiers: graft the live tier verdict onto a pre-gate snapshot
     // (prices untouched — see offerTiersVerdictMissing).
-    const offerTierGraft = offerTiersVerdictMissing(snapshotBundle, estimate)
+    // Never onto a tier carrier's snapshot: a carrier frozen without tiers
+    // is the full bundle (see offerTierCarrierServesByStoredFacts).
+    const offerTierGraft = offerTiersVerdictMissing(snapshotBundle, estimate) && !OfferTiers.offerTiersRequested(estData)
       ? offerTierFieldsFrom(await buildPricingBundleInner(estimate, { liveOnly: true }))
       : {};
     // Chokepoint stamp AFTER finalizePricingBundle (Codex r5 P0 on #4789):
@@ -28308,9 +28321,7 @@ async function buildPricingBundleInner(estimate, { liveOnly = false } = {}) {
     // build; otherwise it is an ordinary full bundle (defence in depth behind
     // suppressOfferTierCarrierIfNeeded).
     const carrierTiersBuild = !OfferTiers.offerTiersRequested(estData)
-      || (offerTiersGateOn() && OfferTiers.storedOfferTierEligibility({
-        gateOn: true, estData, category: estimate.category || 'RESIDENTIAL', source: estimate.source || '',
-      }).eligible === true);
+      || offerTierCarrierServesByStoredFacts(estimate, estData);
     const pestOnlyChoice = !!estimate.show_one_time_option && v1.pestTiers.length > 0 && carrierTiersBuild;
     // v1 shapes cannot carry an operator floor breach today (the operator
     // adjustment channel persists engine-shaped drafts only), so this path

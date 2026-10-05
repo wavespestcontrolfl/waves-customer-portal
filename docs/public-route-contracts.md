@@ -6607,8 +6607,10 @@ written ATOMICALLY with the estimate update, is the whole audit surface.
 Tier carrier rows (`estimate_data.offerTiersRequested`, stamped by the
 estimate tool's save when the one-time option rides a pest + companion
 estimate under the gate): whenever such a row cannot serve tiers for a
-request — gate off, a LIVE active member (linked or phone-matched), or
-stored facts that no longer qualify — the HTML page, `/data` and
+request — gate off, a LIVE active member (linked or phone-matched),
+stored facts that no longer qualify, or a send snapshot frozen WITHOUT
+tiers (the quote was sent as the full bundle; a later gate flip never
+grafts tiers onto that frozen promise) — the HTML page, `/data` and
 `PUT /:token/accept` treat `show_one_time_option` as OFF for that request
 (`suppressOfferTierCarrierIfNeeded`): the payload carries
 `showOneTimeOption:false` and the ordinary full-bundle pricing (a frozen
