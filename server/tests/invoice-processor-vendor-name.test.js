@@ -83,3 +83,10 @@ test('the same receipt mailed twice links to the first expense instead of insert
   expect(inserted()).toBeUndefined();
   expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ expense_id: 'exp-earlier', auto_action: 'expense_duplicate:16.8' })]);
 });
+
+test('an unknown vendor is never treated as a duplicate (unrelated senders share the label)', async () => {
+  mockState.duplicate = { id: 'exp-other-vendor' };
+  extraction({ invoice_number: '1001', invoice_date: '2026-09-01', total: 50 });
+  await processVendorInvoice({ id: 'e6', gmail_id: 'g', from_address: 'a@unmapped.example', subject: 'Invoice' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Unknown Vendor', amount: 50 }));
+});

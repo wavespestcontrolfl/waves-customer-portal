@@ -123,9 +123,10 @@ function nameOrNull(v) {
 
 // Same vendor + invoice number + amount already booked: the same receipt
 // mailed twice (two inboxes, a forward, a re-send). Without an invoice
-// number there is nothing safe to match on, so no row is a duplicate.
+// number, or with no known vendor ("Unknown Vendor" groups unrelated
+// senders), there is nothing safe to match on, so no row is a duplicate.
 async function findDuplicateExpense(vendorName, invoiceNumber, amount) {
-  if (!invoiceNumber) return null;
+  if (!invoiceNumber || vendorName === 'Unknown Vendor') return null;
   return db('expenses')
     .where({ vendor_name: String(vendorName).slice(0, 200), amount })
     .where('description', 'like', `%Invoice #${String(invoiceNumber).replace(/[%_\\]/g, '\\$&')} %`)
