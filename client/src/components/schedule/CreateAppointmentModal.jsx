@@ -38,6 +38,7 @@ import SlotConflictNotice from './SlotConflictNotice';
 import CallBookingConflictNotice from './CallBookingConflictNotice';
 import { useSlotConflicts } from './useSlotConflicts';
 import BestTimeHint, { detourPhrase } from './BestTimeHint';
+import HourTechCompare from './HourTechCompare';
 import AvailabilityStrip, { stripCoversRouteWarning } from './AvailabilityStrip';
 import { useBestTimes } from './useBestTimes';
 import { etDateString } from '../../lib/timezone';
@@ -3969,7 +3970,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const bestTimesTarget = bookingPropertyTarget(selectedBookingProperty);
   // Under GATE_RESCHEDULE_AVAILABILITY the same search answers the
   // availability strip (days around the chosen date) instead.
-  const { bestTimes, picked, bestInRange, availability } = useBestTimes({
+  const { bestTimes, picked, pickedByTech, bestInRange, availability } = useBestTimes({
     summary: true,
     date: apptDate ? String(apptDate).split('T')[0] : null,
     customerId: selectedCustomer?.id,
@@ -3986,6 +3987,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // scored one — a cost for a route the booking will not use. Chips stay:
     // picking one adopts its technician (Codex #4120 r5 P2).
     pickedStart: techMode === 'choose' && techId ? windowStart : undefined,
+    // Auto mode: price the typed hour on every technician's route instead,
+    // so the operator can see who adds the least drive and pick them.
+    compareTechsAt: techMode === 'choose' ? undefined : windowStart,
     rangeFrom: etDateString(),
   });
 
@@ -6410,6 +6414,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                 setTechId(slot.technicianId);
                 appliedSuggestionRef.current = true;
               }
+            }}
+            style={{ marginBottom: 10 }}
+          />
+          <HourTechCompare
+            rows={pickedByTech}
+            onPick={(row) => {
+              // The drive was priced on this technician's route: picking
+              // the row books them, as the hint chips do.
+              setTechMode('choose');
+              setTechId(row.technicianId);
+              appliedSuggestionRef.current = true;
             }}
             style={{ marginBottom: 10 }}
           />
