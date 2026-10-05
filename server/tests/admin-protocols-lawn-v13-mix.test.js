@@ -22,9 +22,11 @@ const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const NUTRA = 'LESCO Nutra-TECH T&O Micronutrient Package';
 const STONEWALL = 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide';
 const F24 = 'LESCO 24-0-11 with PolyPlus OPTI';
+const TETRINO = 'Tetrino Insecticide';
 const CATALOG = [
   { id: 'nt', name: NUTRA, aliases: [], default_rate_per_1000: 12, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'stw', name: STONEWALL, aliases: [], default_rate_per_1000: null, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
+  { id: 'tet', name: TETRINO, aliases: [], default_rate_per_1000: 0.367, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'f24', name: F24, aliases: [], analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
 ];
 const V13_SUMMARY = {
@@ -33,6 +35,7 @@ const V13_SUMMARY = {
     { productId: 'nt', ratePer1000: 6, rateUnit: 'fl oz', gates: {} },
     { productId: 'stw', ratePer1000: 0.5, rateUnit: 'fl oz', gates: {} },
     { productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
+    { productId: 'tet', ratePer1000: 0.367, rateUnit: 'fl oz', gates: { sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true } },
   ],
 };
 
@@ -106,4 +109,11 @@ test('gate on with no staged v13 protocol: 409, never a sheet priced at catalog 
   expect(next).not.toHaveBeenCalled();
   expect(res.status).toHaveBeenCalledWith(409);
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'lawn_v13_protocol_missing' }));
+});
+
+test('May Tetrino is sunny-turf-only: 10,000 sq ft with no turf profile is the half, 1.835 fl oz, not 3.67', async () => {
+  const body = await lawnMix({ month: '5' });
+  expect(itemFor(body, TETRINO).jobMix).toMatchObject({ ratePer1000: 0.367, rateSource: 'protocol_rate', amount: 1.835 });
+  // A row without the flag is whole-lawn: January Nutra-TECH is still the full 60.
+  expect(itemFor(await lawnMix({ month: '1' }), NUTRA).jobMix.amount).toBe(60);
 });

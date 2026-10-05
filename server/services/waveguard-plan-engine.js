@@ -481,12 +481,14 @@ function v13ProtocolRows(structuredProtocol) {
   return new Map((structuredProtocol.products || []).filter((row) => row.productId).map((row) => [String(row.productId), row]));
 }
 
-// GATE_LAWN_V13: a visit with no pinned version plans from the staged v13
-// protocol or not at all. Without it (migration not run, or the track had no
-// active baseline) the v13 recipe would pair with another version's windows,
-// gates and catalog-default rates, so the plan is blocked.
-function lawnV13ProtocolMissing({ trackKey, service, structuredProtocol }) {
-  return featureGates.lawnV13Live?.() === true && Boolean(trackKey) && !service?.lawn_protocol_version
+// GATE_LAWN_V13: every lawn visit plans from the staged v13 protocol or not at
+// all. The recipe lines come from lawnProtocols() for the whole portal, so any
+// other structured protocol (the staged row missing because the migration did not
+// run or the track had no active baseline, or a visit pinned to an older version)
+// would pair v13 products and catalog-default rates with another version's windows
+// and gates. The plan withholds its calculated products and blocks instead.
+function lawnV13ProtocolMissing({ trackKey, structuredProtocol }) {
+  return featureGates.lawnV13Live?.() === true && Boolean(trackKey)
     && structuredProtocol?.version !== LAWN_V13_VERSION;
 }
 
@@ -1394,6 +1396,7 @@ async function buildPlanForService(serviceId, options = {}) {
   const knex = options.db || db;
   const now = options.now || new Date();
   const completionDefaultsEnabled = options.completionDefaultsEnabled ?? lawnCompletionDefaultsEnabled();
+  const lawnV13On = featureGates.lawnV13Live?.() === true;
   const billingModeColumnExists = typeof options.billingModeColumnExists === 'boolean'
     ? options.billingModeColumnExists
     : await customerBillingModeColumnExists(knex);
@@ -1452,12 +1455,18 @@ async function buildPlanForService(serviceId, options = {}) {
   const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
   const calendarProtocol = selectProtocolVisit(profile, serviceDate, service.lawn_type, { requireKnownGrass: completionDefaultsEnabled });
+  // GATE_LAWN_V13 resolves the visit's pinned assignment whatever the completion-
+  // default gates say: a pinned older visit must be seen as pinned, never as
+  // unpinned (which would resolve the staged v13 version for it).
   const structuredProtocolContext = (calendarProtocol.trackKey || !completionDefaultsEnabled) ? await getProtocolWindowContext(knex, {
     serviceDate,
     grassTrack: calendarProtocol.trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
     ...(completionDefaultsEnabled ? {
       strict: true, windowKey: service.lawn_protocol_window_key,
+      protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version,
+    } : lawnV13On ? {
+      windowKey: service.lawn_protocol_window_key,
       protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version,
     } : {}),
   }).catch((err) => { if (strict) throw err; return null; }) : null;
@@ -1588,7 +1597,10 @@ async function buildPlanForService(serviceId, options = {}) {
   // catalog rate. Keep its stored protocol visible, but offer no calculated
   // products when the old recipe cannot be reproduced from the current inputs.
   const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems);
-  if (archivedRecipeUnavailable) planItems.length = 0;
+  // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
+  // either (the block below says why), never amounts from catalog defaults.
+  const v13ProtocolMissing = lawnV13ProtocolMissing({ trackKey, structuredProtocol });
+  if (archivedRecipeUnavailable || v13ProtocolMissing) planItems.length = 0;
   const plannedItems = planItems.filter((item) => item.selected);
   const materialCostSummary = summarizeMaterialCost(plannedItems);
 
@@ -1611,8 +1623,8 @@ async function buildPlanForService(serviceId, options = {}) {
   if (completionContext && !completionContext.propertyMatchesProfile) {
     blocks.push({ code: 'lawn_property_unresolved', severity: 'block', message: 'The saved turf profile does not prove this service property; suggested amounts are unavailable.' });
   }
-  if (lawnV13ProtocolMissing({ trackKey, service, structuredProtocol })) {
-    blocks.push({ code: 'lawn_v13_protocol_missing', severity: 'block', message: `The staged ${LAWN_V13_VERSION} lawn protocol is missing for this track; suggested amounts are unavailable.` });
+  if (v13ProtocolMissing) {
+    blocks.push({ code: 'lawn_v13_protocol_missing', severity: 'block', message: `This visit has no staged ${LAWN_V13_VERSION} lawn protocol (not loaded for this track, or the visit is pinned to an older version); suggested amounts are unavailable. Enter the actual work.` });
   }
   if (completionDefaultsEnabled && !matchesLawnCompletionProtocol(structuredProtocol, {
     protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version, windowKey: service.lawn_protocol_window_key,

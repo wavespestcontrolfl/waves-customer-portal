@@ -959,7 +959,8 @@ router.get('/lawn-mix', async (req, res, next) => {
     const items = resolvedLines.map((line) => {
       const product = line.product;
       const selected = line.selected;
-      const rateOptions = v13RateOptions(product ? v13Rows.get(String(product.id)) : null);
+      const v13Row = product ? v13Rows.get(String(product.id)) : null;
+      const rateOptions = v13RateOptions(v13Row);
       const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
       const areaContext = {
         plan: req.query.plan,
@@ -969,7 +970,10 @@ router.get('/lawn-mix', async (req, res, next) => {
         includePremiumOnly: req.query.includePremiumOnly === 'true',
         isFirstYear: req.query.isFirstYear == null ? undefined : req.query.isFirstYear !== 'false',
       };
-      const areaFactor = effectiveAreaFactor(line, areaContext);
+      // A sunny-turf-only row (Tetrino) narrows the whole-lawn line; the sheet has
+      // no turf profile, so it takes the half the plan's own default assumes.
+      const sizedLine = v13Row?.gates?.sunnyTurfOnly ? { ...line, sunnyTurfOnly: true } : line;
+      const areaFactor = effectiveAreaFactor(sizedLine, areaContext);
       const jobMix = selected && product && carrier
         ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...rateOptions })
         : null;
@@ -980,7 +984,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       // selected-only — it alone feeds the material-cost summary.
       const plannedAreaFactor = selected
         ? areaFactor
-        : effectiveAreaFactor({ ...line, selected: true }, { ...areaContext, includePremiumOnly: true });
+        : effectiveAreaFactor({ ...sizedLine, selected: true }, { ...areaContext, includePremiumOnly: true });
       const plannedMix = jobMix || (product && carrier && plannedAreaFactor > 0
         ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor: plannedAreaFactor, ...nutrientTargets, ...rateOptions })
         : null);

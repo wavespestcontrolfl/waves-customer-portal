@@ -68,7 +68,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // Label review remains owner-only under STAFF_INVENTORY_REQUEST above.
 // Opening a product validates any active EPA source; only explicit extract calls AI.
-const { gateEnvValue } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+
+const { gateEnvValue } = featureGates;
 const labelReview = require('../services/product-label-review');
 const labelExtractLimiter = require('express-rate-limit')({
   windowMs: 10 * 60 * 1000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false,
@@ -774,6 +776,39 @@ const LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   { key: 'moisture_manager', label: 'Moisture Manager', aliases: ['Moisture Manager'], type: 'wetting_agent', category: 'wetting agent' },
 ];
 
+// The same readiness list for the v13 lawn program (GATE_LAWN_V13): every product
+// the recipe names, by its exact catalog name. The legacy aliases cannot be reused:
+// 'Dylox', 'Dismiss', 'Dispatch' and 'LESCO 24-0-11' would match v13's other
+// products by substring and read the wrong catalog row.
+const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
+  ['v13_nutra_tech', 'LESCO Nutra-TECH T&O Micronutrient Package', 'fertilizer', 'micronutrient support'],
+  ['v13_stonewall_4fl', 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
+  ['v13_stonewall_15_0_15', 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer', 'pesticide', 'pre-emergent herbicide with fertilizer'],
+  ['v13_dimension_2ew', 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
+  ['v13_dimension_18_0_10', 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', 'pesticide', 'pre-emergent herbicide with fertilizer'],
+  ['v13_lesco_24_0_11', 'LESCO 24-0-11 with PolyPlus OPTI', 'fertilizer', 'fertilizer'],
+  ['v13_tetrino', 'Tetrino Insecticide', 'pesticide', 'insecticide'],
+  ['v13_arena', 'Arena 50 WDG', 'pesticide', 'insecticide'],
+  ['v13_talak', 'Atticus Talak 7.9 F', 'pesticide', 'insecticide'],
+  ['v13_acelepryn', 'Acelepryn Insecticide', 'pesticide', 'insecticide'],
+  ['v13_dylox_6_2_g', 'Dylox 6.2 G Granular Insecticide', 'pesticide', 'insecticide'],
+  ['v13_artavia', 'Artavia 2 SC (Azoxy)', 'pesticide', 'fungicide'],
+  ['v13_velista', 'Velista', 'pesticide', 'fungicide'],
+  ['v13_gravex', 'Gravex 20 EW', 'pesticide', 'fungicide'],
+  ['v13_celsius', 'Celsius WG', 'pesticide', 'post-emergent herbicide'],
+  ['v13_certainty', 'Certainty Turf Herbicide', 'pesticide', 'post-emergent herbicide'],
+  ['v13_blindside', 'Blindside Herbicide', 'pesticide', 'post-emergent herbicide'],
+  ['v13_dismiss', 'Dismiss 64 oz', 'pesticide', 'sedge herbicide'],
+  ['v13_nis', 'LESCO 90/10 Nonionic Surfactant', 'adjuvant', 'surfactant'],
+  ['v13_dispatch', 'Dispatch Sprayable Wetting Agent', 'wetting_agent', 'wetting agent'],
+].map(([key, label, type, category]) => ({ key, label, aliases: [label], type, category }));
+
+// Gate off: the legacy list, untouched. On: the v13 list, so readiness covers
+// the program the portal actually runs.
+function lawnProtocolProductDefinitions() {
+  return featureGates.lawnV13Live?.() === true ? V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS : LAWN_PROTOCOL_PRODUCT_DEFINITIONS;
+}
+
 function normalizeProtocolText(value) {
   return String(value || '').toLowerCase();
 }
@@ -995,7 +1030,7 @@ router.get('/', async (req, res, next) => {
 router.get('/lawn-outline-facts', async (req, res, next) => {
   try {
     const rows = [];
-    for (const definition of LAWN_PROTOCOL_PRODUCT_DEFINITIONS) {
+    for (const definition of lawnProtocolProductDefinitions()) {
       const references = protocolProductReferences(definition);
       if (!references.length) continue;
       let product = null;

@@ -354,18 +354,17 @@ describe('plan engine reads the matched v13 protocol row', () => {
     expect(stated).toEqual(expect.arrayContaining([migration.NAMES.STW, migration.NAMES.NT, migration.NAMES.DIM, migration.NAMES.TET, migration.NAMES.STW15]));
   });
 
-  test('an unpinned visit is blocked when GATE_LAWN_V13 is on and its structured protocol is not the staged v13 one', () => {
+  test('a visit is blocked when GATE_LAWN_V13 is on and its structured protocol is not the staged v13 one, pinned or not', () => {
     const staged = { version: LAWN_V13_VERSION };
     const old = { version: '2026.06' };
     const missing = (args) => withGate('true', () => engine.lawnV13ProtocolMissing(args));
-    expect(missing({ trackKey: 'bermuda', service: {}, structuredProtocol: null })).toBe(true);
-    expect(missing({ trackKey: 'bermuda', service: {}, structuredProtocol: old })).toBe(true);
-    expect(missing({ trackKey: 'bermuda', service: {}, structuredProtocol: staged })).toBe(false);
-    // A visit pinned to a version keeps that version; no track has its own block elsewhere.
-    expect(missing({ trackKey: 'bermuda', service: { lawn_protocol_version: '2026.06' }, structuredProtocol: old })).toBe(false);
-    expect(missing({ trackKey: null, service: {}, structuredProtocol: null })).toBe(false);
+    expect(missing({ trackKey: 'bermuda', structuredProtocol: null })).toBe(true);
+    expect(missing({ trackKey: 'bermuda', structuredProtocol: old })).toBe(true);
+    expect(missing({ trackKey: 'bermuda', structuredProtocol: staged })).toBe(false);
+    // No track has its own block elsewhere.
+    expect(missing({ trackKey: null, structuredProtocol: null })).toBe(false);
     // Gate off: never.
-    expect(withGate(undefined, () => engine.lawnV13ProtocolMissing({ trackKey: 'bermuda', service: {}, structuredProtocol: null }))).toBe(false);
+    expect(withGate(undefined, () => engine.lawnV13ProtocolMissing({ trackKey: 'bermuda', structuredProtocol: null }))).toBe(false);
   });
 
   describe('loadV13RowsForMonth', () => {
