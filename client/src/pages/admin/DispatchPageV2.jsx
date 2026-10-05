@@ -447,6 +447,9 @@ export default function DispatchPageV2({
   // an eligible visit opens instead of CompletionPanel.
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnFastService, setLawnFastService] = useState(null);
+  // The signed-in user scopes the Fast Complete attempts this device saves,
+  // as Tech Home scopes them (staffIdForDevice), so either page finds them.
+  const fastCompleteOperatorId = String(getAdminUser()?.id || "");
   const [closingVisitId, setClosingVisitId] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
@@ -1921,6 +1924,7 @@ export default function DispatchPageV2({
             routedAddress: typeof treeShrubFastService.address === "string" ? treeShrubFastService.address : null,
           }}
           request={adminFetch}
+          operatorId={fastCompleteOperatorId}
           onClose={(options) => {
             setTreeShrubFastService(null);
             if (options?.refresh) {
@@ -1975,6 +1979,7 @@ export default function DispatchPageV2({
             routedCatalogServiceId: lawnFastService.catalogServiceId || null,
           }}
           request={adminFetch}
+          operatorId={fastCompleteOperatorId}
           catalog={products}
           onClose={(options) => {
             setLawnFastService(null);

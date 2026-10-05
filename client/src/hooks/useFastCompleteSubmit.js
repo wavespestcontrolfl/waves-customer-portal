@@ -109,7 +109,7 @@ function sameScope(left, right) {
 }
 
 export default function useFastCompleteSubmit({
-  base, request, serviceId, operatorId, confirmable = false,
+  base, request, serviceId, operatorId, confirmable = false, sheet = '',
 }) {
   const keyRef = useRef(genIdempotencyKey());
   const pendingBodyRef = useRef(null);
@@ -225,9 +225,9 @@ export default function useFastCompleteSubmit({
   const markRefused = useCallback(async (scope, storedBody, summary) => {
     if (!scope.serviceId || !scope.operatorId || !storedBody) return;
     await putFastCompletionAttempt(scope.serviceId, scope.operatorId, {
-      body: storedBody, summary, expectedBody: storedBody, refused: true,
+      body: storedBody, summary, expectedBody: storedBody, refused: true, sheet,
     });
-  }, []);
+  }, [sheet]);
 
   // A definitive answer removes the send's stored copy; a refused copy that
   // stays is marked refused. True when no copy of that answer remains.
@@ -243,7 +243,7 @@ export default function useFastCompleteSubmit({
     const stored = await putFastCompletionAttempt(
       scope.serviceId,
       scope.operatorId,
-      { body, summary, expectedBody: persistedBodyRef.current },
+      { body, summary, expectedBody: persistedBodyRef.current, sheet },
     );
     if (!sameScope(scopeRef.current, scope)) return 'stale';
     if (stored) {
@@ -280,7 +280,7 @@ export default function useFastCompleteSubmit({
     storageWarningSeenRef.current = true;
     setFailure('storage');
     return 'warned';
-  }, [failure]);
+  }, [failure, sheet]);
 
   const settleFailure = useCallback(async (err, scope, body, summary, storedBody) => {
     const outcome = completionFailureOutcome(err, { confirmable });

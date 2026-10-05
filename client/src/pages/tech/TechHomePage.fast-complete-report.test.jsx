@@ -330,6 +330,20 @@ it('a device that cannot store saved completions at all stays quiet (GitHub Code
   expect(screen.queryByText(/Could not read the completion saved on this device/)).not.toBeInTheDocument();
 });
 
+it('a lawn visit attempt saved on Dispatch opens nothing here and says where to finish it', async () => {
+  // Typed lawn findings, like a lawn re-service body: only the tag tells them apart.
+  mocks.attempts.set('svc-lawn', {
+    body: { idempotencyKey: 'lawn-key', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } },
+    summary: 'Lawn visit', sheet: 'lawn_visit',
+  });
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  expect(await screen.findByText(/Open the visit on Dispatch to retry or discard it/)).toBeInTheDocument();
+  expect(screen.queryByTestId('lawn-sheet')).not.toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
 it('a visit with a saved retry the device cannot read now opens nothing (GitHub Codex P2 on 458cc517e5)', async () => {
   mocks.attempts.set('svc-live', { body: { idempotencyKey: 'live-key', reportDraftBase: {} }, summary: 'Saved report' });
   rows = [row('svc-live', { fastCompleteReportEnabled: true })];

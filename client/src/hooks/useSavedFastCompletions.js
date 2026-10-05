@@ -16,6 +16,9 @@ import {
 } from '../lib/completion-resume-store';
 
 export const SAVED_COMPLETION_READ_NOTICE = 'Could not read the completion saved on this device. Tap to try again.';
+// Tech Home has no lawn visit sheet: its saved attempt is retried where it was
+// made, so nothing here races it with a fresh completion.
+export const SAVED_ON_DISPATCH_NOTICE = 'This visit has a lawn completion saved on this device. Open the visit on Dispatch to retry or discard it.';
 
 // A durable retry must reopen the sheet that prepared its exact body even if
 // the live route now says completed. Report-flow bodies overlap the typed
@@ -24,6 +27,9 @@ export const SAVED_COMPLETION_READ_NOTICE = 'Could not read the completion saved
 export function savedCompletionKind(attempt) {
   const body = attempt?.body;
   if (!body || typeof body !== 'object') return null;
+  // A tag the sheet saved wins: the lawn visit sheet shares its findings type
+  // with the lawn re-service sheet.
+  if (attempt.sheet === 'lawn_visit') return 'lawn_visit';
   if (Object.hasOwn(body, 'reportDraftBase')) return 'report';
   if (body.structuredFindings?.type === 'tree_shrub') return 'tree_shrub';
   if (body.structuredFindings?.type === 'one_time_lawn_treatment') return 'lawn_reservice';
@@ -159,6 +165,10 @@ export default function useSavedFastCompletions({ operatorId, schedule, openShee
       : { attempt: null };
     if (seq !== tapSeq.current || operatorRef.current !== tapOperator) return null;
     const kind = savedCompletionKind(result.attempt);
+    if (kind === 'lawn_visit') {
+      setReadNotice(SAVED_ON_DISPATCH_NOTICE);
+      return null;
+    }
     if (kind) return { kind };
     const id = String(service.id);
     // A saved attempt this device knows of that cannot be read now: a fresh
