@@ -25,7 +25,7 @@ vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
   default: ({ service }) => <div>Tree and shrub sheet for {service.id}</div>,
 }));
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
-  default: ({ service, catalog, onClose, onCompleted, onFullForm }) => (
+  default: ({ service, catalog, onClose, onCompleted, onFullForm, onViewDetails }) => (
     <div>
       Lawn sheet for {service.id} (catalog {catalog.length}, type {String(service.routedServiceType)})
       <button type="button" onClick={() => onClose()}>Sheet close</button>
@@ -33,6 +33,10 @@ vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
       <button type="button" onClick={() => onCompleted()}>Sheet completed</button>
       <button type="button" onClick={() => onCompleted({ invoiceId: 'inv-fixture', invoiceToken: 'tok-fixture', invoiceTotal: 85, invoicePaymentActionRequired: true })}>Sheet completed unpaid</button>
       <button type="button" onClick={onFullForm}>Sheet full form</button>
+      <button type="button" onClick={() => onViewDetails()}>Sheet details</button>
+      <span>Sheet knows {service.customerId} / {service.fullAddress} / {service.customerPhone}</span>
+      <span>Sheet on-site {String(service.onSiteAt)}</span>
+      <span>Sheet trace {String(service.traceEligible)}</span>
     </div>
   ),
 }));
@@ -44,6 +48,7 @@ vi.mock('../../components/schedule/MobileDispatchList', () => ({ default: ({ ser
 vi.mock('../../components/schedule/MobilePaymentSheet', () => ({
   default: ({ invoiceId, service }) => <div>Payment sheet for {invoiceId} ({service?.id || 'no service'})</div>,
 }));
+vi.mock('../../components/schedule/MobileAppointmentDetailSheet', () => ({ default: ({ service }) => <div>Details sheet for {service.id}</div> }));
 vi.mock('../../components/schedule/MobileDayStrip', () => ({ default: () => <div>Day strip</div> }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
 
@@ -135,6 +140,33 @@ describe('Dispatch completion routing for lawn', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Sheet full form' }));
     expect(await screen.findByText('Completion panel for svc-lawn-escape')).toBeInTheDocument();
     expect(screen.queryByText(/Lawn sheet/)).not.toBeInTheDocument();
+  });
+
+  it('the sheet\'s Details pill closes it and opens the appointment details sheet, as the full form\'s does', async () => {
+    mount([visit('svc-lawn-details', { customerId: 'cust-9', address: '100 Example Lane, Bradenton, FL', customerPhone: '+19415550100', traceEligible: false })]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-details' }));
+    expect(await screen.findByText('Sheet knows cust-9 / 100 Example Lane, Bradenton, FL / +19415550100')).toBeInTheDocument();
+    // Codex r1: the schedule's trace eligibility reaches the sheet.
+    expect(screen.getByText('Sheet trace false')).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('button', { name: 'Sheet details' }));
+    expect(await screen.findByText('Details sheet for svc-lawn-details')).toBeInTheDocument();
+    expect(screen.queryByText(/Lawn sheet for/)).not.toBeInTheDocument();
+  });
+
+  it('passes the sheet the check-in time by the full form\'s rule: the on-site status-log entry, else checkInTime', async () => {
+    mount([
+      visit('svc-lawn-log', { statusLog: [{ status: 'en_route', at: '2026-09-12T12:00:00.000Z' }, { status: 'on_site', at: '2026-09-12T13:05:00.000Z' }], checkInTime: '2026-09-12T12:30:00.000Z' }),
+      visit('svc-lawn-checkin', { checkInTime: '2026-09-12T12:30:00.000Z' }),
+      visit('svc-lawn-none'),
+    ]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-log' }));
+    expect(await screen.findByText('Sheet on-site 2026-09-12T13:05:00.000Z')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Sheet close' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-checkin' }));
+    expect(await screen.findByText('Sheet on-site 2026-09-12T12:30:00.000Z')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Sheet close' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-none' }));
+    expect(await screen.findByText('Sheet on-site null')).toBeInTheDocument();
   });
 
   it('opens the full form from the ?completeService deep link the sheet escapes to', async () => {

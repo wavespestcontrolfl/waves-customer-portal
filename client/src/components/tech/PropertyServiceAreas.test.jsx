@@ -20,6 +20,14 @@ describe('property area review', () => {
     expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(null);
     expect(adminFetch).toHaveBeenCalledTimes(1);
   });
+  it('reads through the fetcher it is given (the lawn Fast Complete sheet passes its own), not the admin fetch', async () => {
+    const request = vi.fn().mockResolvedValue(measurements());
+    const onMeasurements = vi.fn();
+    render(<PropertyServiceAreas {...props} request={request} onMeasurements={onMeasurements} />);
+    await waitFor(() => expect(onMeasurements).toHaveBeenCalledWith(expect.objectContaining({ propertyId: 'property-1' })));
+    expect(request).toHaveBeenCalledWith('/admin/schedule/visit-1/property-areas');
+    expect(adminFetch).not.toHaveBeenCalled();
+  });
   it('saves only checked areas and preserves source; changing a value requires a new check', async () => {
     const onMeasurements = vi.fn();
     render(<PropertyServiceAreas {...props} onMeasurements={onMeasurements} />);

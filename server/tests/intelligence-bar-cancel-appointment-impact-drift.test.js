@@ -93,8 +93,12 @@ jest.mock('../services/appointment-cancel-impact', () => {
     cardRailFingerprint: actual.cardRailFingerprint,
     cardRailRows: actual.cardRailRows,
     prepaidCommitmentReason: (...a) => mockPrepaidCommitmentReason(...a),
+    linkedFollowUpRows: (...a) => mockLinkedFollowUpRows(...a),
   };
 });
+// A linked follow-up (call-booked child or package visit 2) re-read under
+// the lock. None by default.
+const mockLinkedFollowUpRows = jest.fn(async () => []);
 // Codex round 9 P1: the canonical prepaid/estimate-commitment readers,
 // re-run under the lock. Bare (null) by default.
 const mockPrepaidCommitmentReason = jest.fn(async () => null);
@@ -169,6 +173,7 @@ beforeEach(() => {
   mockCustomerRow = { first_name: 'Synthia', last_name: 'Tester' };
   mockCardRailRows = { estimate_card_holds: [], appointment_card_requests: [] };
   mockPrepaidCommitmentReason.mockReset().mockResolvedValue(null);
+  mockLinkedFollowUpRows.mockReset().mockResolvedValue([]);
   mockCancelMayReseedPlan.mockReturnValue(false);
   // Bare by default (owner ruling 2026-09-28) — clearAllMocks() only clears
   // call history, not a factory-provided implementation, but reset
@@ -686,6 +691,20 @@ test('a prepaid commitment that appears between the card and Confirm refuses und
   }, {});
   expect(result.success).not.toBe(true);
   expect(result.error).toMatch(/prepayment or prepaid plan coverage/);
+  expect(mockTransitionJobStatus).not.toHaveBeenCalled();
+});
+
+// Owner ruling 2026-10-04 (package visit 2): a linked follow-up booked after
+// the proposal would be cancelled with this visit, which the card never showed.
+test('a linked follow-up that appears between the card and Confirm refuses under the lock — nothing transitions', async () => {
+  mockComputeImpact.mockResolvedValue(FROZEN);
+  mockLinkedFollowUpRows.mockResolvedValue([{ id: 'svc-visit-2' }]);
+  const result = await executeTool('cancel_appointment', {
+    appointment_id: 'svc-synthetic-1',
+    _frozen_cancellation_impact: FROZEN,
+  }, {});
+  expect(result.success).not.toBe(true);
+  expect(result.error).toMatch(/linked follow-up visit that cancels with it/);
   expect(mockTransitionJobStatus).not.toHaveBeenCalled();
 });
 

@@ -3983,8 +3983,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // crafted client cannot keep it alive. An optional read: in a grouped
     // closeout `db` is the packet's transaction, so it runs in a savepoint,
     // and a failed read is a pick that cannot be verified (refused below).
-    // Every service but WDO, termite pre-treat, lawn and tree, shrub & palm
-    // (owner ruling 2026-10-02; blogPostAllowedFor is the search route's rule
+    // Every service but WDO, termite pre-treat, and tree, shrub & palm
+    // (owner ruling 2026-10-02, lawn added 2026-10-04; blogPostAllowedFor is the search route's rule
     // too): a post sent for any other visit is ignored, never frozen.
     const ReportBlogPost = require('../services/service-report/report-blog-post');
     const blogPostPick = require('../config/feature-gates').reportBlogPostLive()
@@ -13413,6 +13413,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
         // Same for the watering-instruction freeze (its own key, first writer wins).
         if (gate.wateringFreeze) recordStructuredNotes.lawnWateringFreeze = gate.wateringFreeze;
+        // And the "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH), keyed by assessment.
+        if (gate.techParagraphFreeze) recordStructuredNotes.lawnTechParagraph = { ...(recordStructuredNotes.lawnTechParagraph || {}), ...gate.techParagraphFreeze };
         // A token the earlier mint could not create but the gate's own mint did.
         const recovered = adoptRecoveredReportToken({ reportToken, gateToken: gate.reportToken, portalUrl });
         if (recovered) {

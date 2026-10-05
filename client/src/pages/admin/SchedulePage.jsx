@@ -61,6 +61,7 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
   stackablePresets,
@@ -1546,20 +1547,6 @@ function minutesToTime(total) {
   const h = Math.floor(total / 60);
   const m = total % 60;
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-
-function elapsedSince(isoTime) {
-  if (!isoTime) return "0:00";
-  const diff = Math.max(
-    0,
-    Math.floor((Date.now() - new Date(isoTime).getTime()) / 1000),
-  );
-  const m = Math.floor(diff / 60);
-  const s = diff % 60;
-  const h = Math.floor(m / 60);
-  if (h > 0)
-    return `${h}:${String(m % 60).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 const btnBase = {
@@ -14025,10 +14012,7 @@ export function CompletionPanel({
         ? AREAS_BY_SERVICE.bed_bug
         : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest))),
   ];
-  const onSiteEntry = (service.statusLog || []).find(
-    (e) => e.status === "on_site",
-  );
-  const onSiteTime = onSiteEntry ? onSiteEntry.at : service.checkInTime;
+  const onSiteTime = onSiteTimeOf(service);
 
   const svcTypeLower = (service.serviceType || "").toLowerCase();
   const isCallback =

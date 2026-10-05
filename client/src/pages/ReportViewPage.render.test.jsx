@@ -4,6 +4,8 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import ReportViewPage from './ReportViewPage';
 import legacyLawnReport from './__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
@@ -120,6 +122,14 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     // Shared sections still render exactly once in the V2 lead layout.
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
+  });
+
+  it('prints the Waves blog post picked at completion at the bottom, once (the lawn Fast Complete sheet offers one)', async () => {
+    const post = { title: 'Why Your St. Augustine Thins in Summer', url: 'https://www.wavespestcontrol.com/lawn-care/st-augustine-summer-thinning/' };
+    const { container } = renderReport({ ...lawnReportV2, blogPost: post });
+    await screen.findByText('Stable — watching thin areas');
+    expect(container.querySelectorAll('#from-the-blog')).toHaveLength(1);
+    expect(screen.getByRole('link', { name: post.title }).getAttribute('href')).toBe(post.url);
   });
 
   it('the watering banner renders once, directly under the visit status card', async () => {
@@ -1538,6 +1548,49 @@ describe('ReportViewPage — Ask Waves request carries the staff JWT only for st
   it('a customer browser sends no Authorization header', async () => {
     const headers = await askAndReadHeaders();
     expect(headers).not.toHaveProperty('Authorization');
+  });
+});
+
+// Owner pick B (2026-10-03): on phones Ask Waves starts as the slim ask row
+// and opens to the full card on first tap; the tools keep their full names
+// as accessible names while phones show the short labels.
+describe('ReportViewPage — phone first screen (pick B)', () => {
+  it('Ask Waves starts slim and stays open after the first tap', async () => {
+    renderReport(structuredClone(pestReportV2));
+    const input = await screen.findByLabelText('Ask Waves about this service report');
+    const card = input.closest('.waves-ask-card');
+    expect(card).toHaveAttribute('data-report-ask-slim');
+    fireEvent.focus(input);
+    expect(card).not.toHaveAttribute('data-report-ask-slim');
+    fireEvent.blur(input);
+    expect(card).not.toHaveAttribute('data-report-ask-slim');
+  });
+
+  it('the phone report tools keep the 44px touch floor', () => {
+    const page = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/ReportViewPage.jsx'), 'utf8');
+    const block = page.match(/\.report-action-bar \.report-action-buttons > button \{([^}]*)\}/);
+    expect(block).not.toBeNull();
+    const [, px] = block[1].match(/min-height:\s*(\d+)px/);
+    expect(Number(px)).toBeGreaterThanOrEqual(44);
+  });
+
+  it('the slim ask row keeps the 44px touch floor on phones', () => {
+    const glassThemeCss = fs.readFileSync(path.resolve(process.cwd(), 'src/glass/glass-theme.css'), 'utf8');
+    const slim = glassThemeCss.split('\n').filter((line) => line.includes('[data-report-ask-slim]') && line.includes('min-height'));
+    expect(slim.length).toBeGreaterThan(0);
+    for (const line of slim) {
+      for (const [, px] of line.matchAll(/min-height:\s*(\d+)px/g)) expect(Number(px)).toBeGreaterThanOrEqual(44);
+    }
+  });
+
+  it('report tools keep their full names for screen readers', async () => {
+    renderReport(structuredClone(pestReportV2));
+    const tools = await screen.findByRole('region', { name: 'Report tools' });
+    // The fixture has no PDF yet, so Download PDF is the disabled button.
+    expect(within(tools).queryByRole('link', { name: 'Download PDF' })
+      || within(tools).getByRole('button', { name: 'Download PDF' })).toBeInTheDocument();
+    expect(within(tools).getByRole('link', { name: 'Portal Login' })).toBeInTheDocument();
+    expect(within(tools).getByText('PDF')).toHaveAttribute('aria-hidden', 'true');
   });
 });
 

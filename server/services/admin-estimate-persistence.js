@@ -1670,6 +1670,10 @@ function buildEstimatePersistenceFields(body, context = {}) {
     address: body.address,
     customer_name: body.customerName,
     customer_phone: body.customerPhone,
+    // A staff save of the estimate is the office's own word for its phone (the typed-phone bell tells the office to
+    // confirm the number and put it on the estimate), so it clears the accept-card provenance, also when the number
+    // is unchanged: from here on the matcher trusts it like any office phone.
+    customer_phone_typed: null,
     customer_email: body.customerEmail,
     monthly_total: totals.monthlyTotal,
     annual_total: totals.annualTotal,

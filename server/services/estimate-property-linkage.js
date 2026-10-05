@@ -642,6 +642,13 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
   } catch (e) {
     logger.warn(`[estimate-property-linkage] link skipped for estimate ${estimateId}: ${e.message}`);
     return null;
+  } finally {
+    // A package visit 2 was booked with visit 1, BEFORE this linkage stamped
+    // visit 1's property and address, and it carries no source_estimate_id
+    // (it is not an accept retry anchor), so no update above reaches it.
+    // Mirror the stamp onto it or it dispatches to the customer's primary
+    // address. Gate-dark, best-effort (package-followup-booking.js).
+    await require('./package-followup-booking').mirrorPrimaryAddressOntoPackageChildren({ database, estimateId });
   }
 }
 

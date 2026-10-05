@@ -8890,6 +8890,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
       // Visit groups (visit-group-scope.md §2): stamp at scheduling —
       // gate-checked + best-effort + self-refusing inside maybeGroupRow.
       await require('../services/visit-groups').maybeGroupRow(svc.id, { database: trx, createdBy: 'dispatch' });
+      // Two-treatment package (cockroach / flea): visit 2 books with visit 1
+      // — gate-dark, savepoint-isolated, no-op for every other service
+      // (package-followup-booking.js).
+      await require('../services/package-followup-booking').ensurePackageFollowUpVisit({ trx, primary: svc, cols });
       createdAppointments.push({ id: svc.id, date: scheduledDate, confirmation: sendConfirmationSms === undefined ? true : !!sendConfirmationSms });
       // Inspection credit: durable in-transaction marker on the series
       // ANCHOR (Codex #3178 P1) — a recurring series is one booking, so
@@ -13701,6 +13705,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         }
       }
     }
+    // A package visit 1 with a live visit 2: changing its service would
+    // leave visit 2 as a $0 treatment of the wrong service. Change visit 2
+    // (or cancel it) first.
+    if (serviceEditPosted && await require('../services/package-followup-booking').hasLivePackageChild(db, [req.params.id])) {
+      const cur = await db('scheduled_services').where({ id: req.params.id }).first('service_id', 'service_type');
+      if ((updates.service_id !== undefined && String(updates.service_id || '') !== String(cur?.service_id || ''))
+        || (updates.service_type !== undefined && String(updates.service_type || '') !== String(cur?.service_type || ''))) {
+        return res.status(409).json({
+          error: 'This visit has a linked second treatment (package visit 2). Cancel or change that visit before changing this service.',
+          code: 'PACKAGE_CHILD_PRESENT',
+        });
+      }
+    }
     const addonsReplaced = Array.isArray(replaceAddons);
     const detailsChanged = Object.keys(updates).length > 0;
     // Set by the series-scope propagation block below when a 'following'
@@ -14981,7 +14998,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // commit and then sees the invoice in 'sending'. A payer can never
         // land between the claim and the provider request. Recurring children
         // keep inheriting the parent's Bill-To through this update.)
+        // A package visit 2 whose date staff set by hand stops following
+        // visit 1's moves: the reschedule_log row is the marker the parent
+        // shift hook reads (call-booking-catalog).
+        const pkgDateBefore = updates.scheduled_date
+          ? await trx('scheduled_services').where({ id: req.params.id, source_action: 'package_followup_auto' })
+            .first('customer_id', 'scheduled_date')
+          : null;
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
+        if (pkgDateBefore && dateOnly(pkgDateBefore.scheduled_date) !== dateOnly(updates.scheduled_date)) {
+          await trx('reschedule_log').insert({
+            scheduled_service_id: req.params.id, customer_id: pkgDateBefore.customer_id,
+            original_date: dateOnly(pkgDateBefore.scheduled_date), new_date: dateOnly(updates.scheduled_date),
+            reason_code: 'admin_edit', initiated_by: 'admin',
+          });
+        }
         // A job Bill-To edit (payer cleared, self-pay override set) that makes a
         // withdrawn combined-visit invoice self-pay again requeues it here.
         if (updates.payer_id !== undefined || updates.self_pay_override !== undefined) {
@@ -21738,6 +21769,8 @@ router.put('/:id/status', async (req, res, next) => {
         // recovery vehicle: re-attempt it directly (dedup-guarded,
         // fire-and-forget; Codex r4). Mirrors admin-dispatch.
         {
+          // The package visit 2 retire (job-status no-show cascade) re-runs too.
+          void require('../services/call-booking-catalog').cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: svc.id, packageOnly: true }).catch(() => {});
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
         }

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import LawnAssessmentPanel from './LawnAssessmentPanel';
 import { CompletionPanel } from './SchedulePage';
 
@@ -175,6 +175,71 @@ it.each([null, 0])('shows an unavailable or genuinely zero score on reload and p
   expect(confirmPosts()[0]).toEqual({});
 });
 
+// Steppers are tap-only (no hold-to-repeat): nothing runs between events, so a
+// press that ends off the button, a right-click, or a Confirm/Retake with a
+// second finger can never change a score on its own.
+it('a stepper has no hold-to-repeat: a long press steps at most once, and no timer keeps stepping after it', async () => {
+  vi.useFakeTimers();
+  try {
+    render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+    await vi.waitFor(() => screen.getByRole('button', { name: 'Confirm assessment' }));
+    const density = screen.getByLabelText('Density score');
+    const raise = screen.getByRole('button', { name: 'Raise Density score' });
+    fireEvent.pointerDown(raise);
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(density.value).toBe('80');
+    fireEvent.pointerUp(raise);
+    fireEvent.click(raise);
+    expect(density.value).toBe('81');
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(density.value).toBe('81');
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+// Owner ruling 2026-10-05: each score has a - and a + beside its number (this
+// is new on the shared block; no older test here asserted the buttons absent).
+it('each score has a Lower and a Raise button: one step per tap, clamped to 0-100, posting like a typed number', async () => {
+  render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+  await screen.findByRole('button', { name: 'Confirm assessment' });
+  for (const label of ['Density', 'Weed control', 'Color', 'Condition']) {
+    expect(screen.getByRole('button', { name: `Lower ${label} score` })).toBeTruthy();
+    expect(screen.getByRole('button', { name: `Raise ${label} score` })).toBeTruthy();
+  }
+  const density = screen.getByLabelText('Density score');
+  fireEvent.click(screen.getByRole('button', { name: 'Raise Density score' }));
+  expect(density.value).toBe('81');
+  fireEvent.click(screen.getByRole('button', { name: 'Lower Density score' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Lower Density score' }));
+  expect(density.value).toBe('79');
+  expect(screen.getByTestId('lawn-ai-score-turf_density').textContent).toBe('AI 80');
+  // The number stays typable, and the ends hold.
+  fireEvent.change(density, { target: { value: '100' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Raise Density score' }));
+  expect(density.value).toBe('100');
+  fireEvent.change(density, { target: { value: '0' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Lower Density score' }));
+  expect(density.value).toBe('0');
+  fireEvent.click(screen.getByRole('button', { name: 'Raise Density score' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
+  await waitFor(() => expect(confirmPosts()).toHaveLength(1));
+  expect(confirmPosts()[0]).toEqual({ turf_density: 1 });
+});
+
+it('a step from a blank score starts at the AI read, and the buttons are gone once confirmed', async () => {
+  loadedAssessment = { ...assessment, color_health: null };
+  visitAssessment = { runId: 'fixture-run', status: 'complete', aiScores: { turf_density: 80, weed_suppression: 80, color_health: null, fungus_control: 85, thatch_level: 85, stress_damage: 85 } };
+  render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+  await screen.findByRole('button', { name: 'Confirm assessment' });
+  fireEvent.click(screen.getByRole('button', { name: 'Raise Color score' }));
+  expect(screen.getByLabelText('Color score').value).toBe('1');
+  confirmation = { success: true, confirmed: true, assessment: { ...assessment, confirmed_by_tech: true, color_health: 1 } };
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
+  await screen.findByText('Assessment confirmed');
+  expect(screen.queryByRole('button', { name: /^(Lower|Raise) / })).toBeNull();
+});
+
 it('two partial saves: a server-derived Stress is never posted back as an explicit entry', async () => {
   // Stress is AI-blank and derived from fungus. Save 1 fills Color; the
   // server derives Stress 80 and returns it. Save 2 changes Density; the post
@@ -277,17 +342,20 @@ it('sends visit review state from the field panel and adopts saved decisions ret
   expect(second.reviewedFindings[0]).toEqual({ finding_id: 'F1', keep: true, name: null, tech_note: 'Saved note' });
 });
 
-it('shows a confirmed saved review read-only and preserves an explicitly cleared observation', async () => {
+// Owner 2026-10-04: the technician takes photos, the AI reads them and the
+// report is built. The evidence review is not on the Complete service screen;
+// the default review (every finding kept) is still what Confirm sends.
+it('does not show the evidence review while completing a visit, confirmed or not', async () => {
   visitAssessment = savedVisit();
   loadedAssessment = { ...assessment, confirmed_by_tech: true, observations: null };
   render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
   await screen.findByText('Assessment confirmed');
-  const observation = screen.getByLabelText('Observation');
-  expect(observation.value).toBe('');
-  expect(observation.disabled).toBe(true);
-  expect(screen.getByRole('checkbox', { name: 'Keep Possible drought' }).disabled).toBe(true);
-  expect(screen.getByLabelText('Technician detail 1').disabled).toBe(true);
-  expect(screen.getByRole('button', { name: 'Add detail' }).disabled).toBe(true);
+  expect(screen.queryByText('Visit evidence review')).toBeNull();
+  expect(screen.queryByText('Photo quality')).toBeNull();
+  expect(screen.queryByText('Photo findings')).toBeNull();
+  expect(screen.queryByLabelText('Observation')).toBeNull();
+  expect(screen.queryByRole('checkbox', { name: /^Keep / })).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Add detail' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Confirm assessment' })).toBeNull();
 });
 
