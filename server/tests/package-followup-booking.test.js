@@ -120,6 +120,25 @@ describe('scope + date math', () => {
   });
 });
 
+describe('mirrorPrimaryAddressOntoPackageChildren (estimate accept stamps visit 1 after the booking)', () => {
+  const { mirrorPrimaryAddressOntoPackageChildren } = require('../services/package-followup-booking');
+  test('copies visit 1 property + address onto its still-unstamped package child; gate off runs no query', async () => {
+    const database = { raw: jest.fn(async () => ({ rowCount: 1 })) };
+    expect(await mirrorPrimaryAddressOntoPackageChildren({ database, estimateId: 'est-1' })).toBe(1);
+    const [sql, bindings] = database.raw.mock.calls[0];
+    expect(bindings).toEqual([PACKAGE_FOLLOWUP_SOURCE_ACTION, 'est-1']);
+    expect(sql).toMatch(/c\.parent_service_id = p\.id/);
+    expect(sql).toMatch(/c\.service_address_line1 IS NULL/);
+    expect(sql).toMatch(/p\.source_estimate_id = \?/);
+    database.raw.mockRejectedValueOnce(new Error('boom'));
+    expect(await mirrorPrimaryAddressOntoPackageChildren({ database, estimateId: 'est-1' })).toBe(0);
+    delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
+    database.raw.mockClear();
+    expect(await mirrorPrimaryAddressOntoPackageChildren({ database, estimateId: 'est-1' })).toBe(0);
+    expect(database.raw).not.toHaveBeenCalled();
+  });
+});
+
 describe('ensurePackageFollowUpVisit', () => {
   test('gate off: nothing is read, nothing is booked', async () => {
     delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;

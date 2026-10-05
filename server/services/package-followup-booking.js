@@ -376,8 +376,40 @@ async function bookInSavepoint(sp, outerTrx, primary, cols, { promotePendingCall
   return child;
 }
 
+// Estimate acceptance stamps visit 1's property + service address AFTER the
+// booking commits (estimate-property-linkage linkAcceptedEstimateProperty).
+// Visit 2 was written with visit 1, so it copied the still-empty fields:
+// copy the stamp onto every live, still-unstamped package child of this
+// estimate's visits. Never throws; no query while the gate is off.
+async function mirrorPrimaryAddressOntoPackageChildren({ database, estimateId } = {}) {
+  if (!packageFollowupAutobookLive() || !database || !estimateId) return 0;
+  try {
+    const result = await database.raw(
+      `UPDATE scheduled_services AS c
+          SET property_id = p.property_id, lat = p.lat, lng = p.lng,
+              service_address_line1 = p.service_address_line1, service_address_line2 = p.service_address_line2,
+              service_address_city = p.service_address_city, service_address_state = p.service_address_state,
+              service_address_zip = p.service_address_zip, updated_at = NOW()
+         FROM scheduled_services AS p
+        WHERE c.parent_service_id = p.id
+          AND c.followup_source_service_id = p.id
+          AND c.source_action = ?
+          AND p.source_estimate_id = ?
+          AND c.service_address_line1 IS NULL
+          AND p.service_address_line1 IS NOT NULL
+          AND c.status NOT IN ('completed', 'cancelled', 'canceled', 'skipped', 'no_show')`,
+      [PACKAGE_FOLLOWUP_SOURCE_ACTION, estimateId],
+    );
+    return (result && result.rowCount) || 0;
+  } catch (err) {
+    logger.warn(`[package-followup] address mirror failed for estimate ${estimateId}: ${err.message}`);
+    return 0;
+  }
+}
+
 module.exports = {
   ensurePackageFollowUpVisit,
+  mirrorPrimaryAddressOntoPackageChildren,
   warnOnOverlap,
   isPackageFollowUpServiceKey,
   packageFollowUpDate,
