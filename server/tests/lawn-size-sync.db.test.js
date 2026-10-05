@@ -200,6 +200,100 @@ describeDb('lawn size from the estimate (real PostgreSQL)', () => {
     expect(audits).toHaveLength(1);
     expect(audits[0].metadata).toMatchObject({ estimate_id: newer.id, trigger: 'acceptance' });
   });
+
+  test('an office edit (turf 4000 -> 6100) committed before the fence is not overwritten with the estimate size', async () => {
+    const estimate = estimateRow();
+    await knex('estimates').insert(estimate);
+    const load = async () => [{ customer_id: customerId, estimate_ids: [estimate.id] }];
+    let firstReadDone; const readDone = new Promise((resolve) => { firstReadDone = resolve; });
+    let reads = 0;
+    const office = await knex.transaction();
+    await office.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+    await office('customers').where({ id: customerId }).forUpdate().first('id');
+    const pending = script.runBackfill({ knex, today: '2026-10-04', apply: true }, {
+      loadLawnCustomers: load,
+      loadRows: async (k, entries) => { const out = await script.loadRowsForTest(k, entries); reads += 1; if (reads === 1) firstReadDone(); return out; },
+    });
+    await readDone;
+    await office('customer_turf_profiles').where({ customer_id: customerId }).update({ lawn_sqft: 6100 });
+    await office.commit();
+    const out = await pending;
+    expect(out.rows[0]).toMatchObject({ class: 'differs', turf_lawn_sqft: 4000, confirmed_sqft: 5200 });
+    expect(out.applied).toEqual([expect.objectContaining({ status: 'skipped_changed_since_read', reason: 'turf 4000 -> 6100' })]);
+    expect((await state()).turf.lawn_sqft).toBe(6100);
+    expect(await knex('audit_log').where({ resource_id: customerId })).toHaveLength(0);
+  });
+
+  describe('--use-unconfirmed-when-empty', () => {
+    const aiEstimate = (over = {}) => estimateRow({ estimate_data: lawnData(4793, 'estimatedTurfSf'), ...over });
+    const clearSizes = async () => {
+      await knex('customer_turf_profiles').where({ customer_id: customerId }).update({ lawn_sqft: null });
+      await knex('customers').where({ id: customerId }).update({ property_sqft: null });
+      await knex('customer_properties').where({ id: primary.id }).update({ property_sqft: null });
+    };
+
+    test('empty customer + AI guess: not written without the flag, written with it (audit: basis + backfill_unconfirmed)', async () => {
+      const estimate = aiEstimate();
+      await knex('estimates').insert(estimate);
+      await clearSizes();
+      const load = async () => [{ customer_id: customerId, estimate_ids: [estimate.id] }];
+      const noFlag = await script.runBackfill({ knex, today: '2026-10-04', apply: true }, { loadLawnCustomers: load });
+      expect(noFlag.rows[0]).toMatchObject({ class: 'estimate_has_no_confirmed_size', guess_sqft: 4793, guess_basis: 'estimatedTurfSf', has_any_size: 'no' });
+      expect(noFlag.applied).toEqual([]);
+      expect((await state()).turf.lawn_sqft).toBeNull();
+      const flagged = await script.runBackfill({ knex, today: '2026-10-04', apply: true, useUnconfirmedWhenEmpty: true }, { loadLawnCustomers: load });
+      expect(flagged.applied).toEqual([expect.objectContaining({ class: 'turf_profile_empty_unconfirmed', status: 'written', after_turf: 4793, after_property: 4793, after_customer: 4793 })]);
+      const s = await state();
+      expect([s.turf.lawn_sqft, s.customer.property_sqft, s.property.property_sqft]).toEqual([4793, 4793, 4793]);
+      const audit = await knex('audit_log').where({ resource_id: customerId }).first();
+      expect(audit.metadata).toMatchObject({ trigger: 'backfill_unconfirmed', basis: 'estimatedTurfSf', source: 'unconfirmed_estimate', estimate_id: estimate.id, sqft: 4793 });
+    });
+
+    test('a customer with any size on file is never touched by a guess, even with the flag', async () => {
+      const estimate = aiEstimate();
+      await knex('estimates').insert(estimate);
+      const load = async () => [{ customer_id: customerId, estimate_ids: [estimate.id] }];
+      const out = await script.runBackfill({ knex, today: '2026-10-04', apply: true, useUnconfirmedWhenEmpty: true }, { loadLawnCustomers: load });
+      expect(out.rows[0]).toMatchObject({ class: 'estimate_has_no_confirmed_size', has_any_size: 'yes' });
+      expect(out.applied).toEqual([]);
+      const s = await state();
+      expect([s.turf.lawn_sqft, s.customer.property_sqft, s.property.property_sqft]).toEqual([4000, 3000, 3500]);
+    });
+
+    test('a size entered between the read and the fence stops the guess (under the lock)', async () => {
+      const estimate = aiEstimate();
+      await knex('estimates').insert(estimate);
+      await clearSizes();
+      const load = async () => [{ customer_id: customerId, estimate_ids: [estimate.id] }];
+      let firstReadDone; const readDone = new Promise((resolve) => { firstReadDone = resolve; });
+      let reads = 0;
+      const office = await knex.transaction();
+      await office.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+      await office('customers').where({ id: customerId }).forUpdate().first('id');
+      const pending = script.runBackfill({ knex, today: '2026-10-04', apply: true, useUnconfirmedWhenEmpty: true }, {
+        loadLawnCustomers: load,
+        loadRows: async (k, entries) => { const out = await script.loadRowsForTest(k, entries); reads += 1; if (reads === 1) firstReadDone(); return out; },
+      });
+      await readDone;
+      await office('customer_turf_profiles').where({ customer_id: customerId }).update({ lawn_sqft: 3300 });
+      await office.commit();
+      const out = await pending;
+      expect(out.applied[0].status).toBe('skipped_changed_since_read');
+      expect((await state()).turf.lawn_sqft).toBe(3300);
+    });
+
+    test('a guess under 500 or over 20,000 is flagged and not written', async () => {
+      await clearSizes();
+      for (const [sqft, flag] of [[300, 'under_500'], [25000, 'over_20000']]) {
+        const estimate = aiEstimate({ estimate_data: lawnData(sqft, 'estimatedTurfSf') });
+        await knex('estimates').insert(estimate);
+        const out = await script.runBackfill({ knex, today: '2026-10-04', apply: true, useUnconfirmedWhenEmpty: true }, { loadLawnCustomers: async () => [{ customer_id: customerId, estimate_ids: [estimate.id] }] });
+        expect(out.rows[0]).toMatchObject({ class: 'estimate_has_no_confirmed_size', guess_sqft: sqft, guess_flag: flag });
+        expect(out.applied).toEqual([]);
+      }
+      expect((await state()).turf.lawn_sqft).toBeNull();
+    });
+  });
 });
 
 describeDb('mirror-only repair (real PostgreSQL)', () => {

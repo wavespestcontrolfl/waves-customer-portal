@@ -85,6 +85,49 @@ describe('classifyCustomer', () => {
   });
 });
 
+describe('unconfirmed guess for a customer with no size at all (--use-unconfirmed-when-empty)', () => {
+  const guessEst = (sqft = 4793, basis = 'estimatedTurfSf') => est('g1', { estimate_data: data(sqft, basis) });
+  const run = (input, flag = true) => script.classifyCustomer({ customer: customer(), primary: primary(), turf: null, linked: [guessEst()], accepted: [], ...input }, { useUnconfirmedWhenEmpty: flag });
+
+  test('empty + AI guess + flag: its own class, guess and basis shown, has_any_size no', () => {
+    expect(run({})).toMatchObject({ class: 'turf_profile_empty_unconfirmed', reason: 'unconfirmed_estimate', guess_sqft: 4793, guess_basis: 'estimatedTurfSf', guess_flag: '', has_any_size: 'no' });
+  });
+  test('turf 0 with no mirror size counts as empty', () => {
+    expect(run({ turf: { lawn_sqft: 0 } }).class).toBe('turf_profile_empty_unconfirmed');
+  });
+  test('without the flag the row stays estimate_has_no_confirmed_size, with the guess still visible', () => {
+    expect(run({}, false)).toMatchObject({ class: 'estimate_has_no_confirmed_size', guess_sqft: 4793, guess_basis: 'estimatedTurfSf', has_any_size: 'no' });
+  });
+  test('any existing size, in turf or either mirror, is never replaced by a guess', () => {
+    for (const input of [
+      { turf: { lawn_sqft: 4000 } },
+      { customer: customer({ property_sqft: 3000 }) },
+      { primary: primary({ property_sqft: 3000 }) },
+    ]) {
+      expect(run(input)).toMatchObject({ class: 'estimate_has_no_confirmed_size', guess_sqft: 4793, has_any_size: 'yes' });
+    }
+  });
+  test.each([[300, 'under_500'], [499, 'under_500'], [20001, 'over_20000'], [30000, 'over_20000']])('a guess of %i is flagged %s for a person and not offered for writing', (sqft, flag) => {
+    expect(run({ linked: [guessEst(sqft)] })).toMatchObject({ class: 'estimate_has_no_confirmed_size', guess_sqft: sqft, guess_flag: flag });
+  });
+  test('the floor and ceiling themselves are accepted', () => {
+    expect(run({ linked: [guessEst(500)] }).class).toBe('turf_profile_empty_unconfirmed');
+    expect(run({ linked: [guessEst(20000)] }).class).toBe('turf_profile_empty_unconfirmed');
+  });
+  test('a lot-fallback basis is a guess too, and its basis is shown', () => {
+    expect(run({ linked: [guessEst(3900, 'lotFallback')] })).toMatchObject({ class: 'turf_profile_empty_unconfirmed', guess_basis: 'lotFallback' });
+  });
+  test('an estimate for another property gets no guess class', () => {
+    expect(run({ linked: [est('g2', { property_id: 'p9', estimate_data: data(4793, 'estimatedTurfSf') })] }).class).toBe('estimate_for_another_property');
+  });
+  test('the summary lists customers with no size on file (ids only) with the guess', () => {
+    const row = (() => { const { estimate, snapshot, ...r } = run({}, false); return r; })();
+    const text = script.summaryText(script.summarize([row]), 1, 'dry run', [row]);
+    expect(text).toContain('customers with no lawn size on file (1)');
+    expect(text).toContain('c1  estimate_has_no_confirmed_size  guess 4793 (estimatedTurfSf)');
+  });
+});
+
 describe('csv and summary', () => {
   test('the CSV carries customer ids and numbers only: no name, phone or address columns', () => {
     expect(script.CSV_COLUMNS.join(',')).not.toMatch(/name|phone|address|email|street/i);
@@ -207,6 +250,89 @@ describe('concurrent acceptance between the read and the write', () => {
   });
 });
 
+describe('guess apply path and the office-edit race', () => {
+  const guess = est('g1', { customer_id: 'c1', estimate_data: data(4793, 'estimatedTurfSf') });
+  const loaders = (turf) => ({
+    loadLawnCustomers: async () => [{ customer_id: 'c1', estimate_ids: ['g1'] }],
+    loadRows: async () => ({
+      customers: new Map([['c1', customer()]]), primaries: new Map([['c1', primary()]]),
+      turfs: new Map(turf === undefined ? [] : [['c1', turf()]]), estimates: new Map([['g1', guess]]), acceptedBy: new Map([['c1', [guess]]]),
+    }),
+  });
+  const writer = () => jest.fn(async (_k, args) => {
+    const stale = await args.revalidate({});
+    return stale ? { status: 'skipped', reason: 'changed_since_read', detail: stale } : { status: 'written', sqft: 4793, before: {}, after: {} };
+  });
+
+  test('flag + empty customer: written through the shared writer as backfill_unconfirmed', async () => {
+    const apply = writer();
+    const out = await script.runBackfill({ knex: {}, today: 't', apply: true, useUnconfirmedWhenEmpty: true }, { ...loaders(), applyEstimateLawnSqft: apply });
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(apply.mock.calls[0][1]).toMatchObject({ trigger: 'backfill_unconfirmed', allowUnconfirmedWhenEmpty: true });
+    expect(out.applied[0]).toMatchObject({ class: 'turf_profile_empty_unconfirmed', status: 'written' });
+  });
+  test('no flag: the same customer is not written', async () => {
+    const apply = writer();
+    const out = await script.runBackfill({ knex: {}, today: 't', apply: true }, { ...loaders(), applyEstimateLawnSqft: apply });
+    expect(apply).not.toHaveBeenCalled();
+    expect(out.rows[0]).toMatchObject({ class: 'estimate_has_no_confirmed_size', guess_sqft: 4793 });
+  });
+  test('flag but the customer has a size: never written', async () => {
+    const apply = writer();
+    await script.runBackfill({ knex: {}, today: 't', apply: true, useUnconfirmedWhenEmpty: true }, { ...loaders(() => ({ lawn_sqft: 4000 })), applyEstimateLawnSqft: apply });
+    expect(apply).not.toHaveBeenCalled();
+  });
+  test('dry run with the flag previews the class and writes nothing', async () => {
+    const apply = writer();
+    const out = await script.runBackfill({ knex: {}, today: 't', apply: false, useUnconfirmedWhenEmpty: true }, { ...loaders(), applyEstimateLawnSqft: apply });
+    expect(out.rows[0].class).toBe('turf_profile_empty_unconfirmed');
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  test('an office edit (turf 4000 -> 6100) between the read and the fence is not overwritten with the estimate size', async () => {
+    const e1 = est('e1', { customer_id: 'c1' }); // confirmed 5200
+    let turf = 4000;
+    const deps = {
+      loadLawnCustomers: async () => [{ customer_id: 'c1', estimate_ids: ['e1'] }],
+      loadRows: async () => ({
+        customers: new Map([['c1', customer()]]), primaries: new Map([['c1', primary()]]), turfs: new Map([['c1', { lawn_sqft: turf }]]),
+        estimates: new Map([['e1', e1]]), acceptedBy: new Map([['c1', [e1]]]),
+      }),
+    };
+    const wrote = jest.fn();
+    const apply = jest.fn(async (_k, args) => {
+      turf = 6100; // the office edit commits before the fence is taken
+      const stale = await args.revalidate({});
+      if (stale) return { status: 'skipped', reason: 'changed_since_read', detail: stale };
+      wrote();
+      return { status: 'written', sqft: 5200, before: {}, after: {} };
+    });
+    const out = await script.runBackfill({ knex: {}, today: 't', apply: true }, { ...deps, applyEstimateLawnSqft: apply });
+    expect(out.rows[0].class).toBe('differs'); // 4000 vs 5200 ...
+    expect(wrote).not.toHaveBeenCalled(); // ... and still differs at 6100, yet it is skipped
+    expect(out.applied[0]).toMatchObject({ status: 'skipped_changed_since_read', reason: 'turf 4000 -> 6100' });
+  });
+  test('a changed mirror, primary-property identity or address key also skips', async () => {
+    for (const [mutate, expected] of [
+      [(st) => { st.primary = primary({ property_sqft: 111 }); }, 'primarySqft none -> 111'],
+      [(st) => { st.customer = customer({ property_sqft: 222 }); }, 'customerSqft none -> 222'],
+      [(st) => { st.primary = primary({ id: 'p-other' }); }, 'primaryId p1 -> p-other'],
+      [(st) => { st.primary = primary({ address_line1: '5 Elm St' }); st.customer = customer(); }, 'primaryKey'],
+    ]) {
+      const e1 = est('e1', { customer_id: 'c1' });
+      const st = { customer: customer(), primary: primary() };
+      const deps = {
+        loadLawnCustomers: async () => [{ customer_id: 'c1', estimate_ids: ['e1'] }],
+        loadRows: async () => ({ customers: new Map([['c1', st.customer]]), primaries: new Map([['c1', st.primary]]), turfs: new Map([['c1', { lawn_sqft: 4000 }]]), estimates: new Map([['e1', e1]]), acceptedBy: new Map([['c1', [e1]]]) }),
+      };
+      const apply = jest.fn(async (_k, args) => { mutate(st); const stale = await args.revalidate({}); return stale ? { status: 'skipped', reason: 'changed_since_read', detail: stale } : { status: 'written', before: {}, after: {} }; });
+      const out = await script.runBackfill({ knex: {}, today: 't', apply: true }, { ...deps, applyEstimateLawnSqft: apply });
+      expect(out.applied[0].status).toBe('skipped_changed_since_read');
+      expect(out.applied[0].reason).toContain(expected);
+    }
+  });
+});
+
 describe('dry run is read-only at the session level', () => {
   const fakeFactory = () => { const f = jest.fn((config) => ({ config, destroy: async () => {} })); return f; };
   const query = (config) => { const calls = []; const conn = { query: (sql, cb) => { calls.push(sql); cb(null); } }; const done = jest.fn(); config.pool.afterCreate(conn, done); return { calls, done, conn }; };
@@ -237,6 +363,9 @@ describe('dry run is read-only at the session level', () => {
     const app = fakeFactory();
     await script.main(['--apply', '--i-am-sure-this-is-the-intended-database', '--out', out], env, { knexFactory: app, runBackfill });
     expect(app.mock.calls[0][0].pool.afterCreate).toBeUndefined();
+    expect(runBackfill.mock.calls.map(([a]) => a.useUnconfirmedWhenEmpty)).toEqual([false, false]);
+    await script.main(['--use-unconfirmed-when-empty', '--out', out], env, { knexFactory: fakeFactory(), runBackfill });
+    expect(runBackfill.mock.calls[2][0].useUnconfirmedWhenEmpty).toBe(true);
     for (const f of [out, `${out}.summary.txt`, `${out}.applied.csv`]) require('fs').rmSync(f, { force: true });
     console.log = original;
   });

@@ -120,6 +120,70 @@ describe('confirmedLawnSqftFromEstimate', () => {
   });
 });
 
+describe('unconfirmedLawnGuessFromEstimate', () => {
+  const ai = (over = {}) => adminEstimate({ turfBasis: 'estimatedTurfSf', turfEstimated: true, lawnSqFt: 4793, ...over });
+  test('returns the priced AI figure with its basis', () => {
+    expect(sync.unconfirmedLawnGuessFromEstimate(ai())).toEqual({ sqft: 4793, basis: 'estimatedTurfSf', field: 'lineItems[lawn_care].lawnSqFt', flag: null });
+  });
+  test('rounds a fractional AI figure; flags under 500 and over 20,000', () => {
+    expect(sync.unconfirmedLawnGuessFromEstimate(ai({ lawnSqFt: 4793.4 })).sqft).toBe(4793);
+    expect(sync.unconfirmedLawnGuessFromEstimate(ai({ lawnSqFt: 499 })).flag).toBe('under_500');
+    expect(sync.unconfirmedLawnGuessFromEstimate(ai({ lawnSqFt: 500 })).flag).toBeNull();
+    expect(sync.unconfirmedLawnGuessFromEstimate(ai({ lawnSqFt: 20000 })).flag).toBeNull();
+    expect(sync.unconfirmedLawnGuessFromEstimate(ai({ lawnSqFt: 20001 })).flag).toBe('over_20000');
+  });
+  test('no guess from a confirmed estimate, a zero, or a saved-size echo', () => {
+    expect(sync.unconfirmedLawnGuessFromEstimate(adminEstimate()).reason).toBe('has_confirmed_size');
+    expect(sync.unconfirmedLawnGuessFromEstimate(ai({ lawnSqFt: 0 })).reason).toBe('no_positive_size');
+    expect(sync.unconfirmedLawnGuessFromEstimate({ ...ai(), propertyFacts: { treatable_lawn_sqft: {} } }).reason).toBe('saved_size_echo');
+    expect(sync.unconfirmedLawnGuessFromEstimate({}).reason).toBe('no_priced_basis');
+  });
+});
+
+describe('applyEstimateLawnSqft with allowUnconfirmedWhenEmpty (backfill opt-in)', () => {
+  const estimate = { id: 'e1', property_id: null, address: '100 Main St, Bradenton, FL 34205' };
+  const aiData = (over = {}) => adminEstimate({ turfBasis: 'estimatedTurfSf', turfEstimated: true, lawnSqFt: 4793, ...over });
+  beforeEach(() => { mockAudit.mockClear(); mockColumn = true; });
+
+  test('empty customer: the guess is written and the audit row records the basis and source', async () => {
+    const db = fakeDb({ turf: undefined });
+    const out = await sync.applyEstimateLawnSqft(db, { customerId: 'c1', estimate, estimateData: aiData(), trigger: 'backfill_unconfirmed', allowUnconfirmedWhenEmpty: true });
+    expect(out).toMatchObject({ status: 'written', sqft: 4793 });
+    expect(db.state.turf.lawn_sqft).toBe(4793);
+    expect(mockAudit.mock.calls[0][0]).toMatchObject({ trigger: 'backfill_unconfirmed', basis: 'estimatedTurfSf', source: 'unconfirmed_estimate', sqft: 4793 });
+  });
+  test('without the option the same AI estimate is skipped', async () => {
+    const db = fakeDb({ turf: undefined });
+    const out = await sync.applyEstimateLawnSqft(db, { customerId: 'c1', estimate, estimateData: aiData() });
+    expect(out).toMatchObject({ status: 'skipped', reason: 'unconfirmed_estimate' });
+    expect(db.state.writes).toEqual([]);
+  });
+  test.each([
+    ['turf', { turf: { lawn_sqft: 4000 } }],
+    ['customer mirror', { turf: undefined, customer: { property_sqft: 3000 } }],
+    ['primary mirror', { turf: undefined, primary: { property_sqft: 3000 } }],
+  ])('existing size in the %s is never overwritten by a guess (checked under the lock)', async (_n, setup) => {
+    const db = fakeDb(setup);
+    const out = await sync.applyEstimateLawnSqft(db, { customerId: 'c1', estimate, estimateData: aiData(), trigger: 'backfill_unconfirmed', allowUnconfirmedWhenEmpty: true });
+    expect(out).toMatchObject({ status: 'skipped', reason: 'has_size' });
+    expect(db.state.writes).toEqual([]);
+    expect(mockAudit).not.toHaveBeenCalled();
+  });
+  test('a guess under 500 or over 20,000 is not written', async () => {
+    for (const [sqft, reason] of [[300, 'guess_under_500'], [25000, 'guess_over_20000']]) {
+      const db = fakeDb({ turf: undefined });
+      const out = await sync.applyEstimateLawnSqft(db, { customerId: 'c1', estimate, estimateData: aiData({ lawnSqFt: sqft }), allowUnconfirmedWhenEmpty: true });
+      expect(out).toMatchObject({ status: 'skipped', reason });
+      expect(db.state.writes).toEqual([]);
+    }
+  });
+  test('a confirmed estimate still takes the confirmed path (and overwrites) even with the option on', async () => {
+    const db = fakeDb({ turf: { lawn_sqft: 4000 } });
+    const out = await sync.applyEstimateLawnSqft(db, { customerId: 'c1', estimate, estimateData: adminEstimate(), allowUnconfirmedWhenEmpty: true });
+    expect(out).toMatchObject({ status: 'written', sqft: 5200 });
+  });
+});
+
 describe('estimateTargetsPrimary', () => {
   const customer = { id: 'c1', ...ADDR };
   const primary = { id: 'p1', ...ADDR };

@@ -157,6 +157,41 @@ function confirmedLawnSqftFromEstimate(estimateData) {
   return { sqft, field: candidates[0].field, basis: null, source: 'request_input' };
 }
 
+// A guess is only ever offered for a customer with no size at all. Below the
+// floor an imagery/lot figure is almost always a failed read (tree canopy, a
+// cut-off parcel), not a lawn: 500 sq ft is smaller than any real treatable
+// yard Waves services. Above the ceiling the estimate tool itself marks the
+// figure for custom-quote review (20,000 sq ft), so a person decides.
+const GUESS_FLOOR_SQFT = 500;
+const GUESS_CEILING_SQFT = 20000;
+
+/**
+ * The AI / satellite / lot-derived lawn size the estimate was PRICED on, when
+ * nobody confirmed a size. Used only by the backfill's explicit
+ * --use-unconfirmed-when-empty opt-in, for a customer with no size at all;
+ * estimate acceptance never uses it.
+ *
+ * Returns { sqft, basis, field, flag } where `flag` is 'under_500' or
+ * 'over_20000' when a person must look (the figure is shown but not written),
+ * else { sqft: null, reason }.
+ */
+function unconfirmedLawnGuessFromEstimate(estimateData) {
+  const data = parseData(estimateData);
+  const priced = [
+    ...lawnLines(data).map((li) => ({ field: 'lineItems[lawn_care].lawnSqFt', raw: li.lawnSqFt ?? li.turfSf, basis: li.turfBasis, estimated: li.turfEstimated })),
+    ...lawnMetas(data).map((m) => ({ field: 'results.lawnMeta.lsf', raw: m.lsf, basis: m.turfBasis, estimated: m.turfEstimated })),
+  ].filter((p) => p.basis);
+  if (!priced.length) return { sqft: null, reason: 'no_priced_basis' };
+  if (priced.some((p) => CONFIRMED_TURF_BASES.has(String(p.basis)) && p.estimated !== true)) return { sqft: null, reason: 'has_confirmed_size' };
+  if (echoesSavedSize(data)) return { sqft: null, reason: 'saved_size_echo' };
+  const values = new Set(priced.map((p) => Math.round(Number(p.raw))));
+  if (values.size > 1) return { sqft: null, reason: 'conflicting_sizes' };
+  const sqft = [...values][0];
+  if (!Number.isFinite(sqft) || sqft < 1 || sqft > LAWN_SQFT_MAX) return { sqft: null, reason: 'no_positive_size' };
+  const flag = sqft < GUESS_FLOOR_SQFT ? 'under_500' : (sqft > GUESS_CEILING_SQFT ? 'over_20000' : null);
+  return { sqft, basis: String(priced[0].basis), field: priced[0].field, flag };
+}
+
 /**
  * Does this estimate quote the customer's PRIMARY property? Reuses the
  * estimate-to-property rules the rest of the portal uses: a linked
@@ -224,7 +259,7 @@ async function syncLawnSqftMirrors(trx, customerId, lawnSqft, { customer = null,
  * when all three places already hold the size. Returns the before/after values
  * for the audit row.
  */
-async function writeLawnSqft(trx, customerId, sqft) {
+async function writeLawnSqft(trx, customerId, sqft, { onlyIfEmpty = false } = {}) {
   const customer = await trx('customers').where({ id: customerId }).first();
   const turf = await trx('customer_turf_profiles').where({ customer_id: customerId }).first('lawn_sqft');
   const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
@@ -237,6 +272,11 @@ async function writeLawnSqft(trx, customerId, sqft) {
     primary_property_sqft: mirrorTarget ? (mirrorTarget.property_sqft ?? null) : null,
     customer_property_sqft: customer?.property_sqft ?? null,
   };
+  // A guess never replaces a size: refused if ANY place already holds one
+  // (checked here on the locked reads, whatever the caller classified).
+  if (onlyIfEmpty && [turf?.lawn_sqft, primary?.property_sqft, customer?.property_sqft].some((v) => Number(v) > 0)) {
+    return { changed: false, refused: 'has_size', before, after: before, mirrorsSynced: false };
+  }
   const turfChanged = before.turf_lawn_sqft !== sqft;
   const mirrorDiffers = (!!mirrorTarget && (before.primary_property_sqft !== sqft || before.customer_property_sqft !== sqft))
     || (customerOnly && before.customer_property_sqft !== sqft);
@@ -270,8 +310,18 @@ async function writeLawnSqft(trx, customerId, sqft) {
  *
  * Returns { status: 'written' | 'unchanged' | 'skipped', reason?, sqft?, before?, after?, ... }.
  */
-async function applyEstimateLawnSqft(database, { customerId, estimate, estimateData, trigger = 'acceptance', actorId = null, revalidate = null }) {
-  const confirmed = confirmedLawnSqftFromEstimate(estimateData ?? estimate?.estimate_data);
+async function applyEstimateLawnSqft(database, { customerId, estimate, estimateData, trigger = 'acceptance', actorId = null, revalidate = null, allowUnconfirmedWhenEmpty = false }) {
+  let confirmed = confirmedLawnSqftFromEstimate(estimateData ?? estimate?.estimate_data);
+  // Backfill opt-in only (--use-unconfirmed-when-empty): the estimate's AI/lot
+  // figure, for a customer with no size at all. Acceptance never passes this.
+  let guessed = false;
+  if (confirmed.sqft === null && allowUnconfirmedWhenEmpty && confirmed.reason === 'unconfirmed_estimate') {
+    const guess = unconfirmedLawnGuessFromEstimate(estimateData ?? estimate?.estimate_data);
+    if (guess.sqft === null) return { status: 'skipped', reason: guess.reason, basis: confirmed.basis || null };
+    if (guess.flag) return { status: 'skipped', reason: `guess_${guess.flag}`, sqft: guess.sqft, basis: guess.basis };
+    confirmed = { sqft: guess.sqft, field: guess.field, basis: guess.basis, source: 'unconfirmed_estimate' };
+    guessed = true;
+  }
   if (confirmed.sqft === null) return { status: 'skipped', reason: confirmed.reason, basis: confirmed.basis || null };
   const { withTurfProfileFence } = require('./customer-pricing-ai');
   return withTurfProfileFence(database, customerId, async (trx) => {
@@ -297,7 +347,8 @@ async function applyEstimateLawnSqft(database, { customerId, estimate, estimateD
       }
       return { status: 'skipped', reason: targets.reason, sqft: confirmed.sqft, targetPropertyId: targets.targetPropertyId, targetPropertySqft };
     }
-    const written = await writeLawnSqft(trx, customerId, confirmed.sqft);
+    const written = await writeLawnSqft(trx, customerId, confirmed.sqft, { onlyIfEmpty: guessed });
+    if (written.refused) return { status: 'skipped', reason: written.refused, sqft: confirmed.sqft, before: written.before, after: written.after };
     if (!written.changed) return { status: 'unchanged', sqft: confirmed.sqft, ...written };
     await require('./audit-log').auditLawnSqftFromEstimate({
       customer_id: customerId, estimate_id: estimate?.id ?? null, sqft: confirmed.sqft,
@@ -309,7 +360,7 @@ async function applyEstimateLawnSqft(database, { customerId, estimate, estimateD
 }
 
 module.exports = {
-  LAWN_SQFT_MIN, LAWN_SQFT_MAX, CONFIRMED_TURF_BASES,
-  parseEstimateData: parseData, saneLawnSqft, confirmedLawnSqftFromEstimate, estimateTargetsPrimary,
+  LAWN_SQFT_MIN, LAWN_SQFT_MAX, CONFIRMED_TURF_BASES, GUESS_FLOOR_SQFT, GUESS_CEILING_SQFT,
+  parseEstimateData: parseData, saneLawnSqft, confirmedLawnSqftFromEstimate, unconfirmedLawnGuessFromEstimate, estimateTargetsPrimary,
   syncLawnSqftMirrors, writeLawnSqft, applyEstimateLawnSqft,
 };

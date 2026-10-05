@@ -18,6 +18,7 @@
 //                                      prints the (masked) database host first
 //   --out <file>                       CSV path (required)
 //   --only <customerId>                one customer
+//   --use-unconfirmed-when-empty       opt-in (dry run and --apply): see below
 //   --limit N                          first N customers (stable order)
 //
 // How a customer is linked to an estimate:
@@ -35,7 +36,7 @@
 // Classes (the first that applies wins):
 //   no_accepted_lawn_estimate | ambiguous | estimate_for_another_property |
 //   estimate_has_no_confirmed_size | turf_profile_empty | differs |
-//   mirrors_differ | same
+//   mirrors_differ | same   (+ turf_profile_empty_unconfirmed with the opt-in flag)
 // mirrors_differ = the turf profile already holds the estimate's size but the
 // primary property's property_sqft or customers.property_sqft (where those
 // mirrors apply) does not. `same` means all applicable places agree.
@@ -47,19 +48,37 @@
 // are unchanged since the dry-run read; otherwise it records
 // skipped_changed_since_read (a concurrent acceptance wins).
 //
+// --use-unconfirmed-when-empty (owner ruling 2026-10-04, "use the guess"): for a
+// customer with NO lawn size anywhere (turf profile empty or 0, and neither the
+// primary property's nor customers.property_sqft holds a positive size) whose
+// matched estimate has no confirmed size, copy the AI / satellite / lot figure
+// the estimate was PRICED on, as class turf_profile_empty_unconfirmed. Never
+// overwrites an existing size. A guess under 500 sq ft (below any real treatable
+// yard it is almost always a failed imagery read) or over 20,000 (the estimate
+// tool's own custom-quote review line) is not written and is flagged in
+// guess_flag for a person. Without the flag those rows stay
+// estimate_has_no_confirmed_size exactly as before, with the guess and its basis
+// still shown in guess_sqft / guess_basis, and has_any_size says whether the
+// customer has any size on file. The audit row records the basis and trigger
+// backfill_unconfirmed. ESTIMATE ACCEPTANCE IS NOT CHANGED BY THIS: acceptance
+// still writes confirmed sizes only.
+//
 // This script has no hard-coded connection: it reads DATABASE_URL only.
 const fs = require('fs');
 const { addressKey } = require('../services/customer-property-address-keys');
 
 const APPLY_CLASSES = new Set(['turf_profile_empty', 'differs', 'mirrors_differ']);
+// Written by --apply only when --use-unconfirmed-when-empty is given.
+const UNCONFIRMED_CLASS = 'turf_profile_empty_unconfirmed';
 const CLASSES = [
-  'same', 'differs', 'mirrors_differ', 'turf_profile_empty', 'no_accepted_lawn_estimate',
+  'same', 'differs', 'mirrors_differ', 'turf_profile_empty', UNCONFIRMED_CLASS, 'no_accepted_lawn_estimate',
   'estimate_has_no_confirmed_size', 'estimate_for_another_property', 'ambiguous',
 ];
 const CSV_COLUMNS = [
   'customer_id', 'class', 'reason', 'via', 'candidate_count', 'estimate_id', 'estimate_property_id',
   'estimate_accepted_at', 'confirmed_sqft', 'confirmed_field', 'confirmed_basis',
   'turf_lawn_sqft', 'primary_property_sqft', 'customer_property_sqft', 'pct_diff', 'over_20000',
+  'guess_sqft', 'guess_basis', 'guess_flag', 'has_any_size',
 ];
 // The estimate tool marks a confirmed size above this for custom-quote review;
 // the CSV flags it so the office can look before --apply.
@@ -131,8 +150,15 @@ function classifyCustomer({ customer, primary, turf, linked = [], accepted = [] 
     confirmed_sqft: '', confirmed_field: '', confirmed_basis: '',
     turf_lawn_sqft: num(turf?.lawn_sqft) ?? '', primary_property_sqft: num(primary?.property_sqft) ?? '',
     customer_property_sqft: num(customer.property_sqft) ?? '', pct_diff: '', over_20000: '',
+    guess_sqft: '', guess_basis: '', guess_flag: '',
+    has_any_size: [turf?.lawn_sqft, primary?.property_sqft, customer.property_sqft].some((v) => Number(v) > 0) ? 'yes' : 'no',
   };
-  const done = (patch, estimate = null) => ({ ...base, ...patch, estimate });
+  // What the locked re-read must still see for --apply to write (see changedSinceRead).
+  const snapshot = {
+    turf: num(turf?.lawn_sqft), primarySqft: num(primary?.property_sqft), customerSqft: num(customer.property_sqft),
+    primaryId: primary?.id ?? null, primaryKey: primary ? addressKey(primary) : null, customerKey: addressKey(customer),
+  };
+  const done = (patch, estimate = null) => ({ ...base, ...patch, estimate, snapshot });
 
   const linkedPool = linked.map(evaluate).filter((c) => c.lawn);
   let pool = linkedPool;
@@ -165,7 +191,17 @@ function classifyCustomer({ customer, primary, turf, linked = [], accepted = [] 
     confirmed_sqft: chosen.confirmed.sqft ?? '', confirmed_field: chosen.confirmed.field || '', confirmed_basis: chosen.confirmed.basis || '',
   };
   if (!chosen.target.match) return done({ ...fill, class: 'estimate_for_another_property', reason: chosen.target.reason }, e);
-  if (chosen.confirmed.sqft === null) return done({ ...fill, class: 'estimate_has_no_confirmed_size', reason: chosen.confirmed.reason }, e);
+  if (chosen.confirmed.sqft === null) {
+    const patch = { ...fill, class: 'estimate_has_no_confirmed_size', reason: chosen.confirmed.reason };
+    if (chosen.confirmed.reason === 'unconfirmed_estimate') {
+      const guess = sync.unconfirmedLawnGuessFromEstimate(e.estimate_data);
+      if (guess.sqft !== null) {
+        Object.assign(patch, { guess_sqft: guess.sqft, guess_basis: guess.basis, guess_flag: guess.flag || '' });
+        if (deps.useUnconfirmedWhenEmpty && !guess.flag && base.has_any_size === 'no') patch.class = UNCONFIRMED_CLASS;
+      }
+    }
+    return done(patch, e);
+  }
   const sqft = chosen.confirmed.sqft;
   const over = sqft > REVIEW_ABOVE_SQFT ? 'yes' : '';
   const turfSqft = num(turf?.lawn_sqft);
@@ -193,10 +229,20 @@ function summarize(rows) {
   for (const r of rows) counts[r.class] = (counts[r.class] || 0) + 1;
   return counts;
 }
-const summaryText = (counts, total, mode) => [
-  `lawn size backfill (${mode}): ${total} customers`,
-  ...CLASSES.map((c) => `  ${c}: ${counts[c] || 0}${APPLY_CLASSES.has(c) ? '  (written by --apply)' : ''}`),
-].join('\n');
+const summaryText = (counts, total, mode, rows = null) => {
+  const lines = [
+    `lawn size backfill (${mode}): ${total} customers`,
+    ...CLASSES.map((c) => `  ${c}: ${counts[c] || 0}${APPLY_CLASSES.has(c) ? '  (written by --apply)' : ''}${c === UNCONFIRMED_CLASS ? '  (written by --apply only with --use-unconfirmed-when-empty)' : ''}`),
+  ];
+  const noSize = (rows || []).filter((r) => r.has_any_size === 'no');
+  if (rows) {
+    lines.push(`customers with no lawn size on file (${noSize.length}), as read (ids only):`);
+    for (const r of noSize) {
+      lines.push(`  ${r.customer_id}  ${r.class}${r.guess_sqft ? `  guess ${r.guess_sqft} (${r.guess_basis})${r.guess_flag ? ` FLAG ${r.guess_flag}` : ''}` : ''}`);
+    }
+  }
+  return lines.join('\n');
+};
 
 /** Customers with a live recurring lawn visit, and the estimates those visits carry. */
 async function loadLawnCustomers(knex, { today, only = null, limit = null }) {
@@ -262,16 +308,22 @@ function classifyLoaded(customer, entry, loaded, deps) {
  * the customer fence can be stale: a newer lawn estimate accepted in between
  * would otherwise be overwritten with the older estimate's size.
  */
-async function changedSinceRead(handle, { customerId, decided, today }, deps) {
+async function changedSinceRead(handle, { customerId, decided, snapshot, today }, deps) {
   const [entry] = await (deps.loadLawnCustomers || loadLawnCustomers)(handle, { today, only: customerId });
   if (!entry) return 'no longer a live recurring lawn customer';
   const loaded = await (deps.loadRows || loadRows)(handle, [entry]);
   const customer = loaded.customers.get(customerId);
   if (!customer) return 'customer row missing';
-  const fresh = classifyLoaded(customer, entry, loaded, deps);
+  const { snapshot: freshSnap, ...fresh } = classifyLoaded(customer, entry, loaded, deps);
   if (String(fresh.estimate_id) !== String(decided.estimate_id)) return `estimate ${decided.estimate_id} -> ${fresh.estimate_id}`;
   if (fresh.class !== decided.class) return `class ${decided.class} -> ${fresh.class}`;
   if (String(fresh.confirmed_sqft) !== String(decided.confirmed_sqft)) return `size ${decided.confirmed_sqft} -> ${fresh.confirmed_sqft}`;
+  if (String(fresh.guess_sqft) !== String(decided.guess_sqft)) return `guess ${decided.guess_sqft} -> ${fresh.guess_sqft}`;
+  // Anything an office edit could have changed since the first read: the sizes
+  // this write would replace, and which property the mirrors belong to.
+  for (const key of ['turf', 'primarySqft', 'customerSqft', 'primaryId', 'primaryKey', 'customerKey']) {
+    if (freshSnap[key] !== snapshot[key]) return `${key} ${snapshot[key] ?? 'none'} -> ${freshSnap[key] ?? 'none'}`;
+  }
   return null;
 }
 
@@ -279,7 +331,9 @@ async function changedSinceRead(handle, { customerId, decided, today }, deps) {
  * Plan (and with apply:true, execute) the backfill. `deps.applyEstimateLawnSqft`
  * is injectable for tests; the default is the shared acceptance writer.
  */
-async function runBackfill({ knex, today, apply = false, only = null, limit = null, log = () => {}, chunk = 50 }, deps = {}) {
+async function runBackfill({ knex, today, apply = false, only = null, limit = null, log = () => {}, chunk = 50, useUnconfirmedWhenEmpty = false }, baseDeps = {}) {
+  const deps = { ...baseDeps, useUnconfirmedWhenEmpty };
+  const writeClasses = new Set([...APPLY_CLASSES, ...(useUnconfirmedWhenEmpty ? [UNCONFIRMED_CLASS] : [])]);
   const applyFn = deps.applyEstimateLawnSqft || require('../services/lawn-size-sync').applyEstimateLawnSqft;
   const entries = await (deps.loadLawnCustomers || loadLawnCustomers)(knex, { today, only, limit });
   const rows = [];
@@ -291,13 +345,15 @@ async function runBackfill({ knex, today, apply = false, only = null, limit = nu
       const customer = loaded.customers.get(entry.customer_id);
       if (!customer) continue;
       const result = classifyLoaded(customer, entry, loaded, deps);
-      const { estimate, ...row } = result;
+      const { estimate, snapshot, ...row } = result;
       rows.push(row);
-      if (!apply || !APPLY_CLASSES.has(row.class)) continue;
+      if (!apply || !writeClasses.has(row.class)) continue;
       try {
         const outcome = await applyFn(knex, {
-          customerId: customer.id, estimate, estimateData: estimate.estimate_data, trigger: 'backfill',
-          revalidate: (trx) => changedSinceRead(trx, { customerId: customer.id, decided: row, today }, deps),
+          customerId: customer.id, estimate, estimateData: estimate.estimate_data,
+          trigger: row.class === UNCONFIRMED_CLASS ? 'backfill_unconfirmed' : 'backfill',
+          allowUnconfirmedWhenEmpty: row.class === UNCONFIRMED_CLASS,
+          revalidate: (trx) => changedSinceRead(trx, { customerId: customer.id, decided: row, snapshot, today }, deps),
         });
         const changed = outcome.reason === 'changed_since_read';
         applied.push({ customer_id: customer.id, class: row.class, estimate_id: estimate.id,
@@ -347,11 +403,11 @@ async function main(argv = process.argv.slice(2), env = process.env, deps = {}) 
   try {
     const { etDateString } = require('../utils/datetime-et');
     const result = await (deps.runBackfill || runBackfill)({
-      knex, today: etDateString(), apply, only: typeof args.only === 'string' ? args.only : null, limit,
+      knex, today: etDateString(), apply, useUnconfirmedWhenEmpty: args['use-unconfirmed-when-empty'] === true, only: typeof args.only === 'string' ? args.only : null, limit,
       log: (m) => console.log(`[lawn-size-backfill] ${m}`),
     });
     fs.writeFileSync(args.out, toCsv(result.rows));
-    const text = summaryText(result.counts, result.rows.length, apply ? 'apply' : 'dry run');
+    const text = summaryText(result.counts, result.rows.length, apply ? 'apply' : 'dry run', result.rows);
     fs.writeFileSync(`${args.out}.summary.txt`, `${text}\n`);
     console.log(text);
     if (apply) {
@@ -370,4 +426,4 @@ if (require.main === module) {
   main().then(() => process.exit(0)).catch((err) => { console.error(`[lawn-size-backfill] ${err.message}`); process.exit(1); });
 }
 
-module.exports = { parseArgs, describeDatabase, classifyCustomer, runBackfill, toCsv, summarize, summaryText, loadLawnCustomers, loadRowsForTest: loadRows, changedSinceRead, buildKnex, CLASSES, APPLY_CLASSES, CSV_COLUMNS, main };
+module.exports = { parseArgs, describeDatabase, classifyCustomer, runBackfill, toCsv, summarize, summaryText, loadLawnCustomers, loadRowsForTest: loadRows, changedSinceRead, buildKnex, UNCONFIRMED_CLASS, CLASSES, APPLY_CLASSES, CSV_COLUMNS, main };
