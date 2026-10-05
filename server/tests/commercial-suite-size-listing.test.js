@@ -83,6 +83,7 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     // A numbered street in between is another address too.
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Other properties: 9900 51st St Suite 103 2,000 SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Other properties: 9900 9th Ave E Suite 103 2,000 SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Other properties: 9900 N Other St Suite 103 2,000 SF', c)).toEqual([]);
     // A stated direction must be the typed one; an omitted one is fine.
     const e = P.addressAnchors({ street: '4400 Test St E', unit: '103', city: 'Bradenton' });
     expect(P.extractSuiteSizes('4400 Test St W Suite 103 2,000 SF', e)).toEqual([]);
@@ -115,6 +116,10 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 25,000 SF total building area', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 1,350 SF retail space', c)).toEqual([1350]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Oak Plaza Suite 103 — 1,350 SF retail space in a plaza', c)).toEqual([1350]);
+    // Prose about the surroundings is a total, not the suite.
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 is located in a 25,000 SF shopping center', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103, part of a 60,000 SF retail center', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 within the 25,000 SF plaza', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103. Total 25,000 SF plaza; Suite 103 1,350 SF', c)).toEqual([1350]);
   });
 
@@ -207,6 +212,16 @@ describe('resolveViaListing', () => {
     expect(fetchText).not.toHaveBeenCalled();
     // The open query is not spent once a listing site answered.
     expect(serp).toHaveBeenCalledTimes(2);
+    // Every vendor call carries an abort signal tied to the leg's deadline.
+    expect(serp.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  });
+
+  test('a vendor call still running at the deadline is aborted, and the leg returns nothing', async () => {
+    let seen = null;
+    const serp = jest.fn((q, { signal }) => new Promise((resolve) => { seen = signal; signal.addEventListener('abort', () => resolve(null)); }));
+    const out = await resolveViaListing({ address: ADDRESS }, { serp, fetchText: jest.fn(), timeoutMs: 1600 });
+    expect(out).toBeNull();
+    expect(seen.aborted).toBe(true);
   });
 
   test('fetches a broker page (HTML only, bounded) when the listing sites have nothing, and reads the suite there', async () => {

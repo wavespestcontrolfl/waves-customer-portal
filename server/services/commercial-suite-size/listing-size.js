@@ -72,7 +72,7 @@ const UNIT_BEFORE_DASH_RE = /(?:suite|ste\.?|unit|bay|space|#)\s*#?\s*[A-Za-z]?\
 // figure: the figure belongs to that other property, not this one. A size
 // ("1,350 sf"), a suite ("suite 103") or a range word is not an address.
 // A street is a word ("Other St") or an ordinal ("51st St", "9th Ave").
-const OTHER_ADDRESS_RE = /(^|[^0-9a-z,.])(\d{2,6})\s+(?!(?:sf|sq|sqft|square|suite|ste|unit|bay|space|to|and|or)\b)(?:[a-z]{2,}|\d{1,3}(?:st|nd|rd|th)\b)/gi;
+const OTHER_ADDRESS_RE = /(^|[^0-9a-z,.])(\d{2,6})\s+(?:(?:n|s|e|w|ne|nw|se|sw)\s+)?(?!(?:sf|sq|sqft|square|suite|ste|unit|bay|space|to|and|or)\b)(?:[a-z]{2,}|\d{1,3}(?:st|nd|rd|th)\b)/gi;
 // The street's own word must follow the street number this closely for the
 // pair to be THIS address ("4400 Test Commons Pkwy"), never the same number
 // on another street ("4400 Other Street … Test Commons Pkwy" elsewhere).
@@ -89,7 +89,16 @@ const DIRECTION_RE = /^(?:N|S|E|W|NE|NW|SE|SW)$/;
 const TOTAL_WORDS = '(?:building|bldg|total|gross|lot|land|site|parcel|gla|rba|rentable|acres?)';
 const TOTAL_BEFORE_RE = new RegExp(`\\b${TOTAL_WORDS}\\b[^.;|]{0,24}$`, 'i');
 // "25,000 SF total building area": the same words right after the figure.
-const TOTAL_AFTER_RE = new RegExp(`^[^.;|]{0,24}\\b${TOTAL_WORDS}\\b`, 'i');
+// After the figure, a center / plaza / complex is a total too ("located in
+// a 25,000 SF shopping center"); before it, only the explicit total words.
+const TOTAL_AFTER_WORDS = `(?:${TOTAL_WORDS.slice(3, -1)}|shopping|center|centre|plaza|complex|development|campus|mall|strip|park|property)`;
+// The total word must be the noun the figure modifies (at most two words
+// between: "25,000 SF shopping center", "60,000 SF retail center"); "1,350 SF
+// retail space in a plaza" keeps its figure.
+const TOTAL_AFTER_RE = new RegExp(`^\\s*(?:of\\s+)?(?:[a-z-]+\\s+){0,2}${TOTAL_AFTER_WORDS}\\b`, 'i');
+// "located in a 25,000 SF …", "part of a …", "within a …": the figure that
+// follows describes the surroundings, not the suite.
+const CONTEXT_BEFORE_RE = /\b(?:located\s+in|situated\s+in|part\s+of|within|inside|anchored\s+by|in)\s+(?:a|an|the)\s*$/i;
 
 function normalizeText(s) {
   return String(s || '')
@@ -182,85 +191,115 @@ function wholeWordIndex(text, token) {
  * The text is read in BLOCKS (a sentence, a list item, a table cell: split on
  * periods, semicolons, pipes and block-level tags). A figure counts when:
  *   - the typed street number + full street (county spelling, directions
- *     agreeing) precedes it within reach with no other address in between;
- *   - it is a plain figure (150–100,000 sq ft; not a range endpoint; not a
- *     building / lot / site total);
+ *     agreeing) precedes it within reach with no other address in between
+ *     (addressAnchorPositions, nearestAnchor);
+ *   - it is a plain figure (150–100,000 sq ft; not a range endpoint or a
+ *     bound; not a building / lot / center total) (figureIsPlain);
+ *   - the postal ZIP, if any, from the anchor through the figure's block is
+ *     the typed one (zipAgrees);
  *   - with a suite typed: the figure's block names exactly one suite and it
- *     is this one (a block naming two suites, a combined suite, or only a
- *     neighbor is never this suite's);
- *   - with no suite typed: the staff-confirmed business's name (a match hint)
- *     introduces the figure's block and the block names at most one suite —
- *     without a name, nothing counts (a bare figure may be any tenant's).
+ *     is this one; with no suite typed: the staff-confirmed business's name
+ *     introduces the block and it names at most one suite (blockOwnsFigure).
  * @returns {number[]} square-foot values, in text order
  */
 function extractSuiteSizes(text, anchors) {
   const t = normalizeText(text);
   if (!t || !anchors) return [];
-  if (wholeWordIndex(t, anchors.number) < 0) return [];
-  // Address anchors: every mention of the street number that the street's
-  // own words follow (number + name, suffix canonicalized, direction agreeing).
-  const numberPositions = [];
-  {
-    const re = new RegExp(`(^|[^0-9A-Za-z])${anchors.number}(?![0-9A-Za-z])`, 'gi');
-    const streetRe = new RegExp(`\\b${anchors.streetWord.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}\\b`, 'i');
-    let m;
-    while ((m = re.exec(t))) {
-      const at = m.index + m[1].length;
-      const tail = t.slice(at + anchors.number.length, at + anchors.number.length + STREET_WORD_REACH).split(/[.;|]/)[0];
-      if (!streetRe.test(tail)) continue;
-      const line = t.slice(at, at + anchors.number.length + STREET_LINE_REACH).split(/[.;|]/)[0];
-      if (!streetLineMatches(line, anchors)) continue;
-      numberPositions.push(at);
-    }
-    if (!numberPositions.length) return [];
-  }
   const wanted = anchors.unit ? anchors.unit.toUpperCase() : null;
   const name = anchors.businessName ? anchors.businessName.toLowerCase() : null;
   if (!wanted && !name) return [];
+  const numberPositions = addressAnchorPositions(t, anchors);
+  if (!numberPositions.length) return [];
   const out = [];
   let m;
   SIZE_RE.lastIndex = 0;
   while ((m = SIZE_RE.exec(t))) {
     const value = Number(m[1].replace(/,/g, ''));
     if (!(value >= MIN_SUITE_SQFT && value <= MAX_SUITE_SQFT)) continue;
-    const idx = m.index;
-    const before = t.slice(Math.max(0, idx - 24), idx);
-    const after = t.slice(idx + m[0].length, idx + m[0].length + 24);
-    if (RANGE_UNIT_BEFORE_RE.test(before) || (RANGE_BEFORE_RE.test(before) && !UNIT_BEFORE_DASH_RE.test(before))
-      || /^\s*(?:-|–|—|to)\s*\d/i.test(after)) continue;
-    if (TOTAL_BEFORE_RE.test(t.slice(Math.max(0, idx - 48), idx))) continue;
-    if (BOUND_BEFORE_RE.test(t.slice(Math.max(0, idx - 20), idx))) continue;
-    if (TOTAL_AFTER_RE.test(t.slice(idx + m[0].length, idx + m[0].length + 40))) continue;
-    // This property's address block precedes the figure, nothing else's between.
-    let addressAt = -1;
-    for (const p of numberPositions) if (p <= idx && p > addressAt) addressAt = p;
-    if (addressAt < 0 || idx - addressAt > (wanted ? ADDRESS_REACH : NUMBER_REACH)) continue;
-    if (otherAddressBetween(t, addressAt + anchors.number.length, idx, anchors)) continue;
-    // The anchoring address block's own ZIP (postal position, ZIP+4 on its
-    // first five digits) must be the typed one; a block with no ZIP is not
-    // held to it. Judged per figure: another block of the page naming the
-    // typed ZIP vouches for nothing here.
-    // The figure's own block.
-    const blockStart = Math.max(t.lastIndexOf('.', idx), t.lastIndexOf(';', idx), t.lastIndexOf('|', idx)) + 1;
-    const nextEnds = [t.indexOf('. ', idx), t.indexOf(';', idx), t.indexOf('|', idx)].filter((i) => i >= 0);
-    const blockEnd = nextEnds.length ? Math.min(...nextEnds) : t.length;
-    const block = t.slice(blockStart, blockEnd);
-    // Postal information anywhere from the anchoring address through the end
-    // of the figure's block ("… 2,000 SF, Tampa FL 33602") must be the typed
-    // ZIP; a span with no ZIP is not held to it.
-    if (anchors.zip && zipsIn(t.slice(addressAt, Math.max(idx, blockEnd)), anchors.number).some((z) => z !== anchors.zip)) continue;
-    const units = [...new Set(unitMentions(block).map((u) => u.unit))];
-    if (wanted) {
-      if (units.length !== 1 || units[0] !== wanted) continue;
-      const mention = unitMentions(block).find((u) => u.unit === wanted);
-      if (Math.abs((blockStart + mention.index) - idx) > UNIT_REACH) continue;
-    } else {
-      const nameAt = block.toLowerCase().indexOf(name);
-      if (nameAt < 0 || blockStart + nameAt > idx || units.length > 1) continue;
-    }
+    if (!figureIsPlain(t, m.index, m[0].length)) continue;
+    const addressAt = nearestAnchor(t, numberPositions, m.index, anchors, wanted ? ADDRESS_REACH : NUMBER_REACH);
+    if (addressAt < 0) continue;
+    const block = figureBlock(t, m.index);
+    if (!zipAgrees(t, addressAt, m.index, block.end, anchors)) continue;
+    if (!blockOwnsFigure(t, block, m.index, { wanted, name })) continue;
     out.push(value);
   }
   return out;
+}
+
+// Every mention of the street number that the street's own words follow
+// (number + name, suffix canonicalized, direction agreeing).
+function addressAnchorPositions(t, anchors) {
+  if (wholeWordIndex(t, anchors.number) < 0) return [];
+  const positions = [];
+  const re = new RegExp(`(^|[^0-9A-Za-z])${anchors.number}(?![0-9A-Za-z])`, 'gi');
+  const streetRe = new RegExp(`\\b${anchors.streetWord.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}\\b`, 'i');
+  let m;
+  while ((m = re.exec(t))) {
+    const at = m.index + m[1].length;
+    const tail = t.slice(at + anchors.number.length, at + anchors.number.length + STREET_WORD_REACH).split(/[.;|]/)[0];
+    if (!streetRe.test(tail)) continue;
+    const line = t.slice(at, at + anchors.number.length + STREET_LINE_REACH).split(/[.;|]/)[0];
+    if (streetLineMatches(line, anchors)) positions.push(at);
+  }
+  return positions;
+}
+
+// A plain figure: not a range endpoint, not a bound ("up to"), not a
+// building / lot / center total before or after it.
+function figureIsPlain(t, idx, len) {
+  const before = t.slice(Math.max(0, idx - 24), idx);
+  const after = t.slice(idx + len, idx + len + 24);
+  if (RANGE_UNIT_BEFORE_RE.test(before) || (RANGE_BEFORE_RE.test(before) && !UNIT_BEFORE_DASH_RE.test(before))
+    || /^\s*(?:-|–|—|to)\s*\d/i.test(after)) return false;
+  if (TOTAL_BEFORE_RE.test(t.slice(Math.max(0, idx - 48), idx))) return false;
+  if (BOUND_BEFORE_RE.test(t.slice(Math.max(0, idx - 20), idx))) return false;
+  if (CONTEXT_BEFORE_RE.test(t.slice(Math.max(0, idx - 20), idx))) return false;
+  if (TOTAL_AFTER_RE.test(t.slice(idx + len, idx + len + 40))) return false;
+  return true;
+}
+
+// The nearest preceding anchor within reach, with no other street address
+// between it and the figure; -1 when there is none.
+function nearestAnchor(t, numberPositions, idx, anchors, reach) {
+  let addressAt = -1;
+  for (const p of numberPositions) if (p <= idx && p > addressAt) addressAt = p;
+  if (addressAt < 0 || idx - addressAt > reach) return -1;
+  if (otherAddressBetween(t, addressAt + anchors.number.length, idx, anchors)) return -1;
+  return addressAt;
+}
+
+// The figure's own block: a sentence, a list item or a table cell.
+function figureBlock(t, idx) {
+  const start = Math.max(t.lastIndexOf('.', idx), t.lastIndexOf(';', idx), t.lastIndexOf('|', idx)) + 1;
+  const nextEnds = [t.indexOf('. ', idx), t.indexOf(';', idx), t.indexOf('|', idx)].filter((i) => i >= 0);
+  const end = nextEnds.length ? Math.min(...nextEnds) : t.length;
+  return { start, end, text: t.slice(start, end) };
+}
+
+// Postal information anywhere from the anchoring address through the end
+// of the figure's block ("… 2,000 SF, Tampa FL 33602") must be the typed
+// ZIP (ZIP+4 on its first five digits); a span with no ZIP is not held to
+// it. Judged per figure: another block naming the typed ZIP vouches for
+// nothing here.
+function zipAgrees(t, addressAt, idx, blockEnd, anchors) {
+  if (!anchors.zip) return true;
+  return !zipsIn(t.slice(addressAt, Math.max(idx, blockEnd)), anchors.number).some((z) => z !== anchors.zip);
+}
+
+// With a suite typed: the block names exactly one suite, this one, within
+// reach of the figure. With none: the business's name introduces the block
+// (before the figure) and the block names at most one suite.
+function blockOwnsFigure(t, block, idx, { wanted, name }) {
+  const mentions = unitMentions(block.text);
+  const units = [...new Set(mentions.map((u) => u.unit))];
+  if (wanted) {
+    if (units.length !== 1 || units[0] !== wanted) return false;
+    const mention = mentions.find((u) => u.unit === wanted);
+    return Math.abs((block.start + mention.index) - idx) <= UNIT_REACH;
+  }
+  const nameAt = block.text.toLowerCase().indexOf(name);
+  return nameAt >= 0 && block.start + nameAt <= idx && units.length <= 1;
 }
 
 function sameSize(a, b) {
@@ -372,6 +411,18 @@ function organicItems(serpResponse) {
 // redirects NOT followed), one redirect hop re-validated the same way, http(s)
 // only, HTML only.
 const PAGE_FETCH_HEADERS = { 'user-agent': 'WavesPropertyLookup/1.0 (+https://wavespestcontrol.com)', accept: 'text/html' };
+// http(s) only, no credentials, and — since Node skips DNS (and the pinned
+// fetcher's rejecting lookup) for an IP literal — no private literal,
+// localhost or intranet name, judged BEFORE any request on every hop (a
+// redirect is the classic way in).
+function hopIsSafe(url, ssrf) {
+  let parsed;
+  try { parsed = new URL(url); } catch { return false; }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return false;
+  if (parsed.username || parsed.password) return false;
+  return !ssrf.isBlockedHostname(parsed.hostname);
+}
+
 async function defaultFetchText(url, timeoutMs, { fetchImpl = null, maxHops = 1 } = {}) {
   const { safeFetchImpl } = require('../content/content-registry-live-status');
   const { _internals: ssrf } = require('../seo/contact-finder'); // isBlockedHostname: private IP literals, localhost, intranet names
@@ -382,14 +433,7 @@ async function defaultFetchText(url, timeoutMs, { fetchImpl = null, maxHops = 1 
   for (let hop = 0; hop <= maxHops; hop += 1) {
     const left = deadline - Date.now();
     if (left <= 0) return null;
-    let parsed;
-    try { parsed = new URL(current); } catch { return null; }
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
-    if (parsed.username || parsed.password) return null;
-    // Node skips DNS (and the pinned fetcher's rejecting lookup) for an IP
-    // literal: refuse private literals, localhost and intranet names BEFORE
-    // any request, on every hop (a redirect is the classic way in).
-    if (ssrf.isBlockedHostname(parsed.hostname)) return null;
+    if (!hopIsSafe(current, ssrf)) return null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), left);
     let res;
@@ -430,58 +474,22 @@ async function resolveViaListing(input = {}, opts = {}) {
   // neighbor's on a page that lists several suites.
   const hint = String(input.businessNameHint || '').trim();
   if (hint.length >= 4) anchors.businessName = hint;
-  const serp = opts.serp || ((keyword) => require('../seo/dataforseo').serpOrganic(keyword, 'Bradenton,Florida,United States', 'desktop'));
+  const serp = opts.serp || ((keyword, { signal } = {}) => require('../seo/dataforseo').serpOrganic(keyword, 'Bradenton,Florida,United States', 'desktop', { signal }));
   const fetchText = opts.fetchText || defaultFetchText;
   const budgetMs = Math.min(opts.timeoutMs || DEFAULT_TIMEOUT_MS, remaining(opts.deadlineAt));
-  const stopAt = Date.now() + budgetMs;
   if (budgetMs < 1500) return null;
+  const stopAt = Date.now() + budgetMs;
 
-  const hits = [];
-  const pageCandidates = [];
-  const seenUrls = new Set();
-  const queries = buildQueries(anchors);
-  let queriesRun = 0;
-  for (let q = 0; q < queries.length; q += 1) {
-    // The open query runs only when the listing sites gave nothing.
-    if (q === 2 && (hits.length || pageCandidates.length)) break;
-    if (Date.now() + 1500 > stopAt) break;
-    let response = null;
-    try {
-      response = await Promise.race([
-        serp(queries[q]),
-        new Promise((resolve) => setTimeout(() => resolve(null), Math.max(0, stopAt - Date.now()))),
-      ]);
-    } catch (err) {
-      logger.warn(`[listing-size] search failed: ${err.message}`);
-    }
-    queriesRun += 1;
-    for (const item of organicItems(response)) {
-      if (!item.host || hostMatches(item.host, IGNORED_HOSTS) || seenUrls.has(item.url)) continue;
-      seenUrls.add(item.url);
-      for (const value of extractSuiteSizes(item.text, anchors)) hits.push({ value, url: item.url });
-      if (!hostMatches(item.host, SNIPPET_ONLY_HOSTS) && pageCandidates.length < MAX_PAGES) pageCandidates.push(item);
-    }
-  }
-
-  let pagesRead = 0;
-  for (const item of pageCandidates) {
-    const left = stopAt - Date.now();
-    if (left < 1000) break;
-    try {
-      const html = await fetchText(item.url, Math.min(PAGE_FETCH_TIMEOUT_MS, left));
-      pagesRead += 1;
-      if (!html) continue;
-      for (const value of extractSuiteSizes(html, anchors)) hits.push({ value, url: item.url });
-    } catch { /* fail-open: an unreadable page is no evidence */ }
-  }
-
+  const search = await searchListings(anchors, serp, stopAt);
+  const pages = await readPages(search.pageCandidates, anchors, fetchText, stopAt);
+  const hits = [...search.hits, ...pages.hits];
   const settled = settleSizes(hits);
   if (!settled || settled.conflict) {
-    logger.info(`[listing-size] no size: queries=${queriesRun} pages=${pagesRead} figures=${hits.length}${settled?.conflict ? ` conflict=${settled.conflict}` : ''}`);
+    logger.info(`[listing-size] no size: queries=${search.queriesRun} pages=${pages.pagesRead} figures=${hits.length}${settled?.conflict ? ` conflict=${settled.conflict}` : ''}`);
     return null;
   }
   const host = hostOf(settled.url);
-  logger.info(`[listing-size] size found: queries=${queriesRun} pages=${pagesRead} figures=${hits.length}`);
+  logger.info(`[listing-size] size found: queries=${search.queriesRun} pages=${pages.pagesRead} figures=${hits.length}`);
   return {
     value: settled.value,
     source: SOURCE,
@@ -494,6 +502,66 @@ async function resolveViaListing(input = {}, opts = {}) {
       url: settled.url,
     }],
   };
+}
+
+// The search leg: up to three queries, each vendor call aborted at the
+// deadline (never left running past the lookup) and its deadline timer
+// cleared when the call wins. Snippets are read here; fetchable hosts are
+// collected for readPages.
+async function searchListings(anchors, serp, stopAt) {
+  const hits = [];
+  const pageCandidates = [];
+  const seenUrls = new Set();
+  const queries = buildQueries(anchors);
+  let queriesRun = 0;
+  for (let q = 0; q < queries.length; q += 1) {
+    // The open query runs only when the listing sites gave nothing.
+    if (q === 2 && (hits.length || pageCandidates.length)) break;
+    if (Date.now() + 1500 > stopAt) break;
+    const response = await serpWithDeadline(serp, queries[q], stopAt);
+    queriesRun += 1;
+    for (const item of organicItems(response)) {
+      if (!item.host || hostMatches(item.host, IGNORED_HOSTS) || seenUrls.has(item.url)) continue;
+      seenUrls.add(item.url);
+      for (const value of extractSuiteSizes(item.text, anchors)) hits.push({ value, url: item.url });
+      if (!hostMatches(item.host, SNIPPET_ONLY_HOSTS) && pageCandidates.length < MAX_PAGES) pageCandidates.push(item);
+    }
+  }
+  return { hits, pageCandidates, queriesRun };
+}
+
+async function serpWithDeadline(serp, keyword, stopAt) {
+  const controller = new AbortController();
+  let timer = null;
+  try {
+    return await Promise.race([
+      serp(keyword, { signal: controller.signal }),
+      new Promise((resolve) => { timer = setTimeout(() => { controller.abort(); resolve(null); }, Math.max(0, stopAt - Date.now())); }),
+    ]);
+  } catch (err) {
+    logger.warn(`[listing-size] search failed: ${err.message}`);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// The page leg: each fetchable candidate once, within what is left of the
+// budget; an unreadable page is no evidence.
+async function readPages(pageCandidates, anchors, fetchText, stopAt) {
+  const hits = [];
+  let pagesRead = 0;
+  for (const item of pageCandidates) {
+    const left = stopAt - Date.now();
+    if (left < 1000) break;
+    try {
+      const html = await fetchText(item.url, Math.min(PAGE_FETCH_TIMEOUT_MS, left));
+      pagesRead += 1;
+      if (!html) continue;
+      for (const value of extractSuiteSizes(html, anchors)) hits.push({ value, url: item.url });
+    } catch { /* fail-open */ }
+  }
+  return { hits, pagesRead };
 }
 
 module.exports = {
