@@ -400,15 +400,15 @@
       "kind": "Insects · foliar spray (biological)",
       "targetTitle": "Pest targets",
       "targets": "Young caterpillars that eat the leaves, including oleander caterpillar (oleander moth). Bt acts only on caterpillars, so it spares bees and the natural enemies that control scale and whitefly. Use on live finds only, while the caterpillars are small.",
-      "apply": "Spray the leaves the caterpillars are eating, tops and undersides, until wet. Caterpillars must eat the treated leaves; they stop feeding within an hour and die in 1–3 days. Repeat while young caterpillars are still feeding.",
+      "apply": "Spray the leaves the caterpillars are eating, tops and undersides. On trees, mix by the 100-gallon rate; on shrubs and beds, weigh the product for the area treated so the per-acre rate is not exceeded. Caterpillars must eat the treated leaves; they stop feeding within an hour and die in 1–3 days. Repeat while young caterpillars are still feeding.",
       "rates": [
         [
           "½–1 lb / 100 gal",
-          "Ornamental and shade trees. In a small sprayer: 1–2 tsp per gallon."
+          "Ornamental and shade trees (hydraulic sprayer). In a small sprayer: 1–2 tsp per gallon."
         ],
         [
-          "Up to 2 lb / 100 gal",
-          "Flowers, bedding plants and ornamentals under heavy pressure. In a small sprayer: up to 4 tsp per gallon."
+          "0.5–2 lb / acre",
+          "Shrubs, flowers, bedding plants and ornamentals: about 0.2–0.7 oz of product per 1,000 sq ft treated. Measure by area, not by gallons sprayed; use at least 50 gal of mix per acre."
         ]
       ],
       "limits": [
@@ -425,7 +425,7 @@
         "flowzone",
         "rig"
       ],
-      "summary": "Choose pressure"
+      "summary": "Trees by tank · shrubs by area"
     },
     "zylam": {
       "kind": "Insects · foliar spray",
