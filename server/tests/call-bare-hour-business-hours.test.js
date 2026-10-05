@@ -34,8 +34,9 @@ function extraction(scheduling) {
 }
 
 const V2_PROMPT = buildExtractionPrompt(BARE_HOUR_WDO_TRANSCRIPT, '+19415550100', '2026-09-29');
-const processorSrc = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-const V1_PROMPT = processorSrc.slice(processorSrc.indexOf('- ARRIVAL WINDOW EXCEPTION:'), processorSrc.indexOf('- If the agent says "I\'ll text you"'));
+// extractCallData renders its appointment rules from the shared module (#5994).
+const V1_RULES = require('../services/prompts/appointment-confirmed-rules').appointmentConfirmedRules('2026-09-29');
+const V1_PROMPT = V1_RULES.slice(V1_RULES.indexOf('- ARRIVAL WINDOW EXCEPTION:'), V1_RULES.indexOf('- If the agent says "I\'ll text you"'));
 
 describe.each([
   ['V2 prompt (call-extraction-v1.js)', V2_PROMPT, 'confirmed_start_at null'],
