@@ -115,65 +115,35 @@ function isQuestionSource(source) {
   return /[?¿؟]/u.test(text) || INTERROGATIVE.test(text) || INDIRECT_INTERROGATIVE.test(text);
 }
 
-// Words that describe a missing, relational, replaced or dead code. The strict
-// form tests the value with them; the natural form tests the whole message, so
-// "Gate code is 5550. That code is disabled." saves nothing.
-const NOT_A_CREDENTIAL = /\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see|broken|disabled|deactivated|reset|removed|inactive|expired|invalid|off|down|gone|lost|stuck|jammed|dead|out|open|locked|unlocked)\b|n['’]t|^n[ /]?a$/i;
+// Words that describe a missing, relational, replaced or dead code value.
+const NOT_A_CREDENTIAL = /\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see|broken|disabled|reset|removed|inactive|expired|invalid|off|down|gone|lost|stuck|jammed|dead|out|open|locked|unlocked)\b|n['’]t|^n[ /]?a$/i;
 // Owner ruling 2026-10-04: a client's access code saves from the client's own
-// wording, not only from one sentence form ("Gate code is 1234" was dropped).
+// wording, not only from the strict form ("Gate code is 1234" was dropped).
 // Read at call time so the flip needs no redeploy.
 const accessCodeCaptureEnabled = () => gateEnvValue('GATE_ACCESS_CODE_CAPTURE');
-const PROPERTY_GATE_WORDS = /\b(?:side|back|rear|yard|backyard|left|right|pool|fence|driveway|property)\s+gate\b/i;
-const CODE_HEDGE = /\b(?:think|believe|guess|maybe|perhaps|possibly|probably|sure|unsure|may|might|could|should|would|supposed|used to|was|were|if)\b|\d[#*]?\s+or\s+[#*]?\d/i;
-// A code the client reports as dead or replaced, anywhere in the message.
-const CODE_INVALIDATED = /\b(?:no longer|any ?more|wrong|incorrect|changed|expired|invalid|broken|old code|used to|stopped working|(?:does|did|do|will|would)(?: not|n['’]t) work)\b/i;
-// Which one kind of code the message talks about; null when it names none or
-// more than one ("the gate and the garage"), because the digits then cannot be
-// tied to a kind. A plain "gate" beside a side or back gate is that same gate;
-// a plain "gate" alone is the neighborhood gate.
-function accessCodeKind(text) {
-  const propertyGate = new RegExp(PROPERTY_GATE_WORDS.source, 'i').test(text);
-  const communityGate = /\b(?:community|neighborhood|entrance|entry|front|main)\s+gate\b/i.test(text);
-  const kinds = [];
-  if (propertyGate) kinds.push('property_gate_code');
-  if (communityGate || (!propertyGate && /\bgate\b/i.test(text))) kinds.push('neighborhood_gate_code');
-  if (/\b(?:lock|key|code)\s?box\b/i.test(text)) kinds.push('lockbox_code');
-  if (/\bgarage\b/i.test(text)) kinds.push('garage_code');
-  return kinds.length === 1 ? kinds[0] : null;
-}
+// The WHOLE message must be this one sentence. Two review passes showed that a
+// list of refused words on free text never closes (a retraction, a hedge, a
+// spelled key symbol, a second number each got through in turn), so nothing
+// else may stand in the message: an optional greeting, the kind of code, a
+// credential word, the code, an optional thanks. A plain "gate" is the
+// neighborhood gate; a front, main, side or back gate is the property's own
+// gate, as call-profile-enrichment.js reads it.
+const NATURAL_ACCESS_CODE = new RegExp('^(?:(?:hi|hello|hey|good (?:morning|afternoon|evening))[,!.]?\\s+)?'
+  + '(?:(?:the|my|our)\\s+)?(?:new\\s+)?'
+  + '(?:((?:community|neighborhood|entrance)\\s+gate|gate)|((?:side|back|rear|yard|backyard|left|right|pool|front|main|property)\\s+gate)'
+  + '|(lock\\s?box|key\\s?box)|(garage(?:\\s+door)?))'
+  + '\\s+(?:code|pin|combo|key\\s?pad)\\s*(?:is\\s+|:\\s*|=\\s*|-\\s*)?([#*]?\\d{3,8}[#*]?)[.!]?'
+  + '(?:\\s+(?:thanks|thank you)[.!]?)?$', 'i');
+const NATURAL_ACCESS_FIELDS = ['neighborhood_gate_code', 'property_gate_code', 'lockbox_code', 'garage_code'];
 
-// The client's own wording, as a closed rule set over the WHOLE message (four
-// audit rounds each found a new phrase a sentence-level rule missed):
-//  - the code is the only word in the message that holds a digit or a key
-//    symbol (# or *), so no second
-//    number, phone number, address or "then press 2" can sit beside it;
-//  - it equals the value with the key symbols the client wrote;
-//  - it ends its sentence or its line;
-//  - the message has no negation, hedge, dead-code report, question, or word
-//    that continues a credential (then, press, pound, star);
-//  - the message names one kind of code and a credential word (code, pin,
-//    combo, keypad).
-// Anything else leaves the field empty for a person.
-const CODE_BLOCKERS = /\b(?:not|never|no|then|followed|plus|press|pound|star|hash|asterisk)\b|n['’]t/i;
 function matchesNaturalAccessCode({ field, value }, { messageBody = '', properties = [] } = {}) {
-  const candidate = String(value || '').trim();
-  const body = String(messageBody || '');
-  if (!/^[#*]?\d{3,8}[#*]?$/.test(candidate)) return false;
-  const words = [...body.matchAll(/\S+/g)].map((match) => ({ raw: match[0], end: match.index + match[0].length,
-    word: match[0].replace(/^[("'“‘:]+|[.,;:!?)"'”’]+$/g, '') }));
-  // A key symbol is part of a credential too, so one standing apart from the
-  // code ("# 5550") counts as a second code word.
-  const numbered = words.filter((entry) => /[\d#*]/.test(entry.raw));
-  if (numbered.length !== 1 || numbered[0].word !== candidate) return false;
-  if (!/[.!?]["'”’)]*$/.test(numbered[0].raw) && !/^[ \t]*(?:\r?\n|$)/.test(body.slice(numbered[0].end))) return false;
-  if (NOT_A_CREDENTIAL.test(body) || CODE_BLOCKERS.test(body) || CODE_HEDGE.test(body) || CODE_INVALIDATED.test(body) || isQuestionSource(body)) return false;
-  const digits = candidate.replace(/\D/g, '');
-  if (properties.some((property) => (String(property.address_line1 || '').match(/^\s*(\d+)/) || [])[1] === digits
-    || String(property.zip || '').slice(0, 5) === digits)) return false;
-  // A kind word alone does not make a number a credential ("the gate repair
-  // costs 1500"): the message must also name a code.
-  if (!/\b(?:code|pin|combo|combination|passcode|password|key ?pad)\b/i.test(body)) return false;
-  return accessCodeKind(body) === field;
+  const match = NATURAL_ACCESS_CODE.exec(String(messageBody || '').trim().replace(/\s+/g, ' '));
+  if (!match || match[5] !== String(value || '').trim()) return false;
+  if (NATURAL_ACCESS_FIELDS[[1, 2, 3, 4].findIndex((group) => match[group])] !== field) return false;
+  // The property's own house number or ZIP is not a code.
+  const digits = match[5].replace(/\D/g, '');
+  return !properties.some((property) => (String(property.address_line1 || '').match(/^\s*(\d+)/) || [])[1] === digits
+    || String(property.zip || '').slice(0, 5) === digits);
 }
 
 function matchesAccessCode(item, context) {
@@ -269,7 +239,7 @@ Facts:
 - Capture explicitly reported operational facts and instructions, not diagnoses or technical recommendations. Keep the customer's equipment/irrigation reports distinguished from verified findings.
 - value must be an exact substring of quote, except contact_preference which must be call, text or email. Capture only the useful operational preference, never its medical explanation.
 - For EVERY fact, quote must retain the whole CURRENT message, including every sentence and qualifier. For controller locations, notes, instructions, pet details and irrigation issues, value MUST equal quote. Never shorten a message to a standalone instruction that omits another clause. If separate topics do not belong together in the field, mark duration uncertain for staff review.
-- Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.${accessCodeCaptureEnabled() ? ' A plain "gate code" with no side, back or yard word is the neighborhood gate (field neighborhood_gate_code). For a code, value is the code alone with its # or * symbol. Never report a code the customer calls old, wrong, changed, disabled or unsure.' : ''}
+- Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.${accessCodeCaptureEnabled() ? ' A plain "gate code" with no side, back or yard word is the neighborhood gate (field neighborhood_gate_code). For a code, value is the code alone with its # or * symbol.' : ''}
 - An instruction for today/one visit/vacation is visit_only, not durable. Ambiguous duration is uncertain. A change to payment, billing, ownership or communication consent is an obligation to resolve, never a profile fact.
 - property_id may identify the sole provided property. With zero or multiple properties, use null, including requests covering all properties; opaque ids alone cannot prove which address the customer means. Never infer another person's authority or merge accounts.
 
