@@ -237,6 +237,18 @@ describe('validator: rejects', () => {
     expect(problemsOf(a, inputs)).toContain('target_stated_as_found:grub');
     const b = answer('Our technician found chinch bugs in the trouble spot. Our last visit put down an insecticide to protect against white grubs.', [['note'], ['prior', 'product']]);
     expect(problemsOf(b, inputs)).toEqual([]);
+    // Today's treatment cannot borrow last visit's target.
+    const fertilizerOnly = { ...inputs, products: inputs.products.filter((p) => p.kind === 'fertilizer') };
+    const c = answer('Our technician found chinch bugs in the trouble spot. We treated the whole yard to protect against white grubs.', [['note'], ['product']]);
+    expect(problemsOf(c, fertilizerOnly)).toContain('prior_purpose_as_today:grub');
+  });
+
+  test('"a few" is a quantity, not a hedge: a low-confidence finding still needs doubt', () => {
+    const inputs = { ...FIXTURE, technicianNote: 'Applied Arena to the front and side yards. Also applied LESCO 24-0-11 to the whole yard.' };
+    const a = answer('Arena 50 WDG went on the front and side yards. We found a few thin spots in the front yard.', [['note', 'product'], ['finding']]);
+    expect(problemsOf(a, inputs)).toContain('low_confidence_stated_as_fact:thin');
+    const b = answer('Arena 50 WDG went on the front and side yards. The photos suggest a few thin spots in the front yard.', [['note', 'product'], ['finding']]);
+    expect(problemsOf(b, inputs)).toEqual([]);
   });
 
   test('a cause only the last visit carries is not today\'s finding', () => {

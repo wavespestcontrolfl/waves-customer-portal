@@ -321,7 +321,8 @@ const PHOTO_REF_RE = /\b(?:photos?|pictures?|images?|shots?|scan|photo\s+read|re
 const CONFIRM_VERB_RE = /\b(?:confirm(?:s|ed|ing)?|show(?:s|ed|ing)?|prov(?:e|es|ed|ing|en)|verif(?:y|ies|ied)|identif(?:y|ies|ied)|reveal(?:s|ed|ing)?|detect(?:s|ed|ing)?|captur(?:e|es|ed|ing)|document(?:s|ed|ing)?|support(?:s|ed|ing)?)\b/i;
 // Words that make a statement about the record uncertain, in the note or the paragraph.
 const UNSURE_RE = /\b(?:suspect\w*|possible|possibly|may|might|could|maybe|perhaps|probably|likely|unsure|uncertain|unclear|seems?|appears?|looks?\s+like|think|thought|potential\w*)\b/i;
-const HEDGE_RE = /\b(?:possible|possibly|may|might|could|appears?|seems?|looks?\s+like|signs?\s+of|suggest\w*|watching|keeping\s+an\s+eye|a\s+few)\b/i;
+// "a few" and "some" count quantity, not certainty: they are not hedges.
+const HEDGE_RE = /\b(?:possible|possibly|may|might|could|appears?|seems?|looks?\s+like|signs?\s+of|suggest\w*|watching|keeping\s+an\s+eye)\b/i;
 const OBSERVED_CUE_RE = /\b(?:found|find|finding|saw|seen|see|spotted|noticed|observed|discovered|detected|there\s+(?:are|is|were|was)|showing|damage\s+(?:from|by)|damaged\s+by|caused\s+by|due\s+to|because\s+of|active)\b/i;
 // A treatment-PURPOSE phrase: what a product is for, which is all a product's
 // targets or role can license ("to go after chinch bugs", "weed control").
@@ -415,7 +416,7 @@ good better best normal usual same new old little small large big ok fine
 technician team technicians
 against ahead behind compared compare last prior previous protect protects protected protecting recovered recovers
 schedule shape signs since steady track expected early progress improving improved improvement other own make got sure
-worse worst think thinks thought suspect suspects possible possibly maybe likely seem seems appear appears
+worse worst think thinks thought suspect suspects possible possibly maybe likely seem seems appear appears suggest suggests suggested
 s t re ve ll d m
 `.split(/\s+/).filter(Boolean));
 
@@ -512,7 +513,9 @@ function provenanceOf(term, hay) {
     fact: has(hay.fact),
     // Targets and a product's role license a PURPOSE claim ("to protect against X")
     // and nothing else: never "found", "saw" or "there is".
-    purpose: has(hay.targets) || has(hay.priorTargets) || (!!term.generic && has(hay.role)) || noteStanceOf(term, hay.note) === 'purpose',
+    purpose: has(hay.targets) || (!!term.generic && has(hay.role)) || noteStanceOf(term, hay.note) === 'purpose',
+    // Last visit's targets: a purpose claim only, and only in a sentence that says so.
+    priorPurpose: has(hay.priorTargets),
   };
 }
 
@@ -544,6 +547,10 @@ function mentionProblem(term, sentence, mention, prov, from, inputs) {
     return `absence_not_in_record:${key}`;
   }
   const purposeOnly = PURPOSE_CUE_RE.test(mention.clause) && !OBSERVED_CUE_RE.test(mention.clause);
+  if (purposeOnly && !prov.purpose && prov.priorPurpose) {
+    // A past product's purpose needs an explicit last-visit reference and the prior source.
+    return PRIOR_REF_RE.test(sentence) && from.includes('prior') ? null : `prior_purpose_as_today:${key}`;
+  }
   if (purposeOnly && prov.purpose) {
     // A purpose claim that names a product must match THAT product's own targets
     // or role: Arena's chinch bugs never become the fertilizer's.
@@ -559,7 +566,7 @@ function mentionProblem(term, sentence, mention, prov, from, inputs) {
   if (prov.noteStance === 'affirmed' || prov.findingHigh || prov.progress || prov.fact) return null;
   if (prov.findingLow) return HEDGE_RE.test(sentence) ? null : `low_confidence_stated_as_fact:${key}`;
   if (prov.prior) return PRIOR_REF_RE.test(sentence) ? null : `condition_from_prior_only:${key}`;
-  if (prov.purpose) return `target_stated_as_found:${key}`;
+  if (prov.purpose || prov.priorPurpose) return `target_stated_as_found:${key}`;
   return `condition_not_in_inputs:${key}`;
 }
 
