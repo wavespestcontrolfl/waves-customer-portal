@@ -3631,7 +3631,7 @@ function ServiceLinesEditor({ product, showToast, onInventoryChanged }) {
   );
   const [saving, setSaving] = useState(false);
   const tagged = Array.isArray(lines);
-  const save = async () => {
+  const saveServiceLines = async () => {
     setSaving(true);
     try {
       await adminFetch(`/admin/inventory/${product.id}`, {
@@ -3676,7 +3676,7 @@ function ServiceLinesEditor({ product, showToast, onInventoryChanged }) {
             }
           />
         ))}
-        <Button type="button" onClick={save} disabled={saving} variant="primary">
+        <Button type="button" onClick={saveServiceLines} disabled={saving} variant="primary">
           {saving ? "Saving…" : "Save"}
         </Button>
       </div>
