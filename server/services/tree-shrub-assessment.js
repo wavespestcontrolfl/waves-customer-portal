@@ -1059,18 +1059,21 @@ function formatAssessmentScores(row) {
 
 // Link an assessment to THIS visit (by service record, then scheduled service).
 // No customer-wide fallback — a visit only shows an assessment that is its own.
-async function loadLinkedTreeShrubAssessment(service, knex = db) {
+async function loadLinkedTreeShrubAssessment(service, knex = db, { strict = false } = {}) {
   if (!service?.customer_id) return null;
+  // strict: a failed read throws instead of reading as "no assessment" (a cache key
+  // must tell "none" from "could not look").
+  const soft = (err) => { if (strict) throw err; return null; };
   const base = { customer_id: service.customer_id, confirmed_by_tech: true };
   const byRecord = service.id
     ? await knex('tree_shrub_assessments').where({ ...base, service_record_id: service.id })
-      .orderBy('confirmed_at', 'desc').orderBy('created_at', 'desc').first().catch(() => null)
+      .orderBy('confirmed_at', 'desc').orderBy('created_at', 'desc').first().catch(soft)
     : null;
   if (byRecord) return byRecord;
   const scheduledServiceId = service.scheduled_service_id || service.service_id;
   const byService = scheduledServiceId
     ? await knex('tree_shrub_assessments').where({ ...base, service_id: scheduledServiceId })
-      .orderBy('confirmed_at', 'desc').orderBy('created_at', 'desc').first().catch(() => null)
+      .orderBy('confirmed_at', 'desc').orderBy('created_at', 'desc').first().catch(soft)
     : null;
   return byService || null;
 }

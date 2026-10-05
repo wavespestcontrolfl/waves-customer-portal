@@ -18,8 +18,10 @@ jest.mock('../services/tree-shrub-assessment', () => ({
 const { dispatchWithFallback } = require('../services/llm/call');
 const { buildTreeShrubAssessmentReportData } = require('../services/tree-shrub-assessment');
 const { buildReportV1Data } = require('../services/service-report/report-data');
+const tech = require('../services/service-report/tree-shrub-tech-paragraph');
 
-const TEXT = 'Our technician found scale on the hedge along the back fence. Merit 2F went on the hedges, and Palm Gro 8-2-12 went on the palms.';
+const SLOTS = { observed: [{ condition: 'scale', plant: 'hedges' }], maybe: [], confirmed: [], products: ['Merit 2F'], allClear: null };
+const TEXT = tech.render(SLOTS);
 
 function makeKnex() {
   const knex = () => {
@@ -38,7 +40,7 @@ function makeKnex() {
 }
 
 const structured = (entry) => JSON.stringify(entry === undefined ? {} : { treeShrubTechParagraph: { 77: entry } });
-const frozenEntry = (text = TEXT, extra = {}) => ({ v: 1, promptVersion: 'ts_tech_paragraph_v1', assessmentId: '77', text, ...extra });
+const frozenEntry = (text = TEXT, extra = {}) => ({ v: 1, promptVersion: 'ts_tech_paragraph_v2', assessmentId: '77', text, slots: SLOTS, ...extra });
 
 const serviceOf = (structuredNotes) => ({
   id: 'svc-ts-1',
@@ -103,14 +105,15 @@ test('gate on, no entry or an entry for another assessment: the key is absent', 
   expect((await build(other)).reportV2).not.toHaveProperty('techParagraph');
 });
 
-test('gate on: a frozen text that fails the read-time screens (palm rules, promises) prints nothing', async () => {
+test('gate on: a frozen entry that no longer matches its slots (edited text, missing slots, banned term) prints nothing', async () => {
   gatesOn();
   for (const bad of [
-    'Our technician found scale on the hedge. We noticed a conk on one palm trunk.',
-    'Our technician found scale on the hedge. The palm crown looks good.',
-    'We will be back soon to recheck the hedges.',
+    frozenEntry(`${TEXT} Prune the hedge.`),
+    frozenEntry('Our technician saw a conk on one palm trunk.'),
+    frozenEntry(TEXT, { slots: undefined }),
+    frozenEntry(TEXT, { slots: { ...SLOTS, observed: [] } }),
   ]) {
-    const data = await build(structured(frozenEntry(bad)));
+    const data = await build(structured(bad));
     expect(data.reportV2).not.toHaveProperty('techParagraph');
   }
 });

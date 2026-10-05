@@ -29,8 +29,10 @@ const saved = Object.fromEntries(GATES.map((g) => [g, process.env[g]]));
 const gatesOn = () => { GATES.forEach((g) => { process.env[g] = 'true'; }); };
 afterEach(() => { GATES.forEach((g) => { if (saved[g] === undefined) delete process.env[g]; else process.env[g] = saved[g]; }); });
 
-const TEXT = 'Our technician found scale on the hedge along the back fence. Merit 2F went on the hedges, and Palm Gro 8-2-12 went on the palms.';
-const GOOD = { ok: true, paragraph: TEXT, sources: [{ sentence: 'a', from: ['note'] }], inputsHash: 'h1' };
+const SLOTS = { observed: [{ condition: 'scale', plant: 'hedges' }], maybe: [], confirmed: [], products: ['Merit 2F'], allClear: null };
+const TEXT = tech.render(SLOTS);
+const ENTRY = { v: 1, assessmentId: '77', text: TEXT, slots: SLOTS };
+const GOOD = { ok: true, paragraph: TEXT, slots: SLOTS, inputsHash: 'h1' };
 const SERVICE = { id: 'sr-1', customer_id: 'c1', scheduled_service_id: 'ss-1', service_line: 'tree_shrub', service_type: 'Tree & Shrub Care' };
 const INPUTS = { technicianNote: 'Found scale on the hedge.', products: [{ name: 'Merit 2F' }] };
 
@@ -111,7 +113,7 @@ describe('freezeTreeShrubTechParagraph', () => {
     const { knex, state } = fakeKnex({ other: 'kept' });
     const out = await freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate: jest.fn(async () => GOOD), now: () => new Date('2026-10-05T12:00:00Z') } });
     expect(Object.keys(out)).toEqual(['77']);
-    expect(out['77']).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v1', assessmentId: '77', text: TEXT });
+    expect(out['77']).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v2', assessmentId: '77', text: TEXT, slots: SLOTS });
     expect(state.notes.treeShrubTechParagraph['77'].text).toBe(TEXT);
     expect(state.notes.other).toBe('kept');
     // The report was built from the joined record and a token, then the inputs were gathered from it.
@@ -124,7 +126,7 @@ describe('freezeTreeShrubTechParagraph', () => {
 
   test('a retried completion finds the freeze and spends no second call', async () => {
     gatesOn();
-    const { knex } = fakeKnex({ treeShrubTechParagraph: { 77: { v: 1, assessmentId: '77', text: TEXT } } });
+    const { knex } = fakeKnex({ treeShrubTechParagraph: { 77: ENTRY } });
     const generate = jest.fn();
     expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate } })).toBeNull();
     expect(generate).not.toHaveBeenCalled();
@@ -147,18 +149,30 @@ describe('freezeTreeShrubTechParagraph', () => {
     expect(state.updates).toBe(0);
   });
 
-  test('the model is called on lane ts_tech_paragraph when no generator is injected', async () => {
+  test('the model is called on lane ts_tech_paragraph when no generator is injected; a model miss freezes the deterministic lines only', async () => {
     gatesOn();
-    gatherTreeShrubTechParagraphInputs.mockResolvedValue({
+    gatherTreeShrubTechParagraphInputs.mockResolvedValue(tech.normalizeInputs({
       technicianNote: 'Found scale on the back hedge and treated the hedges with Merit.',
-      products: [{ name: 'Merit 2F', kind: 'systemic', targets: ['scale'] }],
-      findings: [{ label: 'pest pressure signals', confidence: 'low' }],
-    });
+      products: [{ name: 'Merit 2F' }],
+      landscapeCondition: 'Good',
+    }));
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
     const { knex, state } = fakeKnex();
-    expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex })).toBeNull();
+    const out = await freezeTreeShrubTechParagraph({ service: SERVICE, knex });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     expect(dispatchWithFallback.mock.calls[0][1]).toMatchObject({ laneId: 'ts_tech_paragraph' });
-    expect(state.updates).toBe(0);
+    // The note was not read, so: the products line only. No observed line, no all-clear.
+    expect(out['77'].text).toBe('Today we applied Merit 2F.');
+    expect(state.notes.treeShrubTechParagraph['77'].slots.allClear).toBeNull();
+  });
+
+  test('a visit with no note makes no model call and still freezes the deterministic lines', async () => {
+    gatesOn();
+    gatherTreeShrubTechParagraphInputs.mockResolvedValue(tech.normalizeInputs({ technicianNote: '', products: [{ name: 'Merit 2F' }], landscapeCondition: 'Excellent' }));
+    const { knex } = fakeKnex();
+    const out = await freezeTreeShrubTechParagraph({ service: SERVICE, knex });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(out['77'].text).toBe('Today we applied Merit 2F. Your landscape looked excellent today.');
   });
 });
 
@@ -220,7 +234,7 @@ describe('one deadline for the whole step (the technician is waiting at Complete
 });
 
 describe('treeShrubTechParagraphPdfSignature', () => {
-  const frozen = { treeShrubTechParagraph: { 77: { v: 1, assessmentId: '77', text: TEXT } } };
+  const frozen = { treeShrubTechParagraph: { 77: ENTRY } };
 
   test('empty while the gate is off, for another service line, with no assessment and with no paragraph', async () => {
     const { knex, state } = fakeKnex(frozen);
@@ -239,16 +253,25 @@ describe('treeShrubTechParagraphPdfSignature', () => {
     const a = await treeShrubTechParagraphPdfSignature(SERVICE, fakeKnex(frozen).knex);
     expect(a).toBe(tech.techParagraphSignature(frozen, 77));
     expect(a).toMatch(/^:tp=[0-9a-f]{8}$/);
-    const other = { treeShrubTechParagraph: { 77: { v: 1, assessmentId: '77', text: `${TEXT} We also fed the palms.` } } };
+    const slots = { ...SLOTS, products: ['Merit 2F', 'Palm Gro 8-2-12'] };
+    const other = { treeShrubTechParagraph: { 77: { ...ENTRY, text: tech.render(slots), slots } } };
     expect(await treeShrubTechParagraphPdfSignature(SERVICE, fakeKnex(other).knex)).not.toBe(a);
   });
 
-  test('an unreadable record stamps a one-off key, never a stale hit', async () => {
+  test('a failed assessment lookup stamps a one-off sentinel, never the empty string (strict lookup)', async () => {
     gatesOn();
     loadLinkedTreeShrubAssessment.mockRejectedValue(new Error('db down'));
     const a = await treeShrubTechParagraphPdfSignature(SERVICE, fakeKnex().knex);
     const b = await treeShrubTechParagraphPdfSignature(SERVICE, fakeKnex().knex);
     expect(a).toMatch(/^:tp=err[0-9a-f]{8}$/);
     expect(a).not.toBe(b);
+    expect(loadLinkedTreeShrubAssessment).toHaveBeenCalledWith(SERVICE, expect.anything(), { strict: true });
+  });
+
+  test('a failed read of the record\'s notes stamps the sentinel too', async () => {
+    gatesOn();
+    loadLinkedTreeShrubAssessment.mockResolvedValue({ id: 77 });
+    const knex = () => ({ where() { return this; }, first: async () => { throw new Error('read failed'); } });
+    expect(await treeShrubTechParagraphPdfSignature(SERVICE, knex)).toMatch(/^:tp=err[0-9a-f]{8}$/);
   });
 });

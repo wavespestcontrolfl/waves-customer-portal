@@ -45,12 +45,15 @@ function parseJsonObject(value) {
  * @param {Function} cfg.normalizeInputs (raw) => canonical inputs (idempotent)
  * @param {Function} cfg.buildPrompt     (inputs) => { system, text, jsonSchema, promptVersion }
  * @param {Function} cfg.validateParagraph (answer, inputs) => { ok, paragraph, sources, problems }
- * @param {Function} cfg.frozenTextProblem (text) => null | reason (input-free read-time guard)
+ * @param {Function} [cfg.frozenTextProblem] (text) => null | reason (input-free read-time guard)
+ * @param {Function} [cfg.frozenEntryProblem] (entry) => null | reason; replaces frozenTextProblem
+ *   when the stored entry carries more than text (the T&S paragraph re-renders from its slots)
+ * @param {Function} [cfg.precheck] (inputs) => null | reason; replaces the lawn rule (a note and a product)
  */
 function createTechParagraphEngine(cfg) {
   const {
     logTag, laneId, promptVersion, freezeKey, freezeVersion, budgetMs: BUDGET_MS,
-    normalizeInputs, buildPrompt, validateParagraph, frozenTextProblem,
+    normalizeInputs, buildPrompt, validateParagraph, frozenTextProblem, frozenEntryProblem, precheck,
   } = cfg;
 
   function inputsHash(inputs) {
@@ -65,8 +68,13 @@ function createTechParagraphEngine(cfg) {
    */
   async function generateTechParagraph(rawInputs, deps = {}) {
     const inputs = normalizeInputs(rawInputs);
-    if (!inputs.technicianNote || inputs.technicianNote.length < 12) return { ok: false, reason: 'no_note' };
-    if (!inputs.products.length) return { ok: false, reason: 'no_products' };
+    if (typeof precheck === 'function') {
+      const reason = precheck(inputs);
+      if (reason) return { ok: false, reason };
+    } else {
+      if (!inputs.technicianNote || inputs.technicianNote.length < 12) return { ok: false, reason: 'no_note' };
+      if (!inputs.products.length) return { ok: false, reason: 'no_products' };
+    }
     // What is left of the step's one deadline (createAndFreezeTechParagraph passes it);
     // a call with under a second to run is not made.
     const budgetMs = Number.isFinite(deps.budgetMs) ? Math.min(BUDGET_MS, deps.budgetMs) : BUDGET_MS;
@@ -106,7 +114,10 @@ function createTechParagraphEngine(cfg) {
         return { ok: false, reason: problems.length ? 'rejected' : ((result && result.reason) || 'unavailable'), problems };
       }
       if (!verdict || !verdict.ok) return { ok: false, reason: 'rejected', problems: verdict ? verdict.problems : ['unvalidated'] };
-      return { ok: true, paragraph: verdict.paragraph, sources: verdict.sources, inputsHash: inputsHash(inputs) };
+      return {
+        ok: true, paragraph: verdict.paragraph, sources: verdict.sources, inputsHash: inputsHash(inputs),
+        ...(verdict.slots !== undefined ? { slots: verdict.slots } : {}),
+      };
     } catch (err) {
       logger.warn(`[${logTag}] generation failed: ${err.message}`);
       return { ok: false, reason: 'error' };
@@ -136,7 +147,7 @@ function createTechParagraphEngine(cfg) {
       const entry = storedTechParagraphFor(structuredNotes, assessmentId);
       if (!entry) return null;
       const text = clean(entry.text);
-      if (frozenTextProblem(text)) return null;
+      if (typeof frozenEntryProblem === 'function' ? frozenEntryProblem(entry) : frozenTextProblem(text)) return null;
       return text;
     } catch { return null; }
   }
@@ -231,6 +242,7 @@ function createTechParagraphEngine(cfg) {
         assessmentId: String(assessmentId),
         text: generated.paragraph,
         sources: generated.sources,
+        ...(generated.slots !== undefined ? { slots: generated.slots } : {}),
         inputsHash: generated.inputsHash || null,
         frozenAt: (deps.now ? deps.now() : new Date()).toISOString(),
       };

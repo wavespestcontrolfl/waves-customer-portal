@@ -111,8 +111,8 @@ async function freezeTreeShrubTechParagraph({ service, knex, deps = {} } = {}) {
  * text re-keys. '' unless the gate is live, the visit is a tree & shrub visit
  * with a confirmed assessment, and a whole frozen entry exists, so every other
  * visit keeps its key byte for byte. Read from the record itself (a cache-lookup
- * caller's row may be partial). An unreadable record stamps random (re-render,
- * never a stale hit).
+ * caller's row may be partial). Any failed lookup or read (the assessment, the
+ * record's notes) stamps a random sentinel (a fresh render, never a stale hit).
  */
 async function treeShrubTechParagraphPdfSignature(service, knex) {
   if (!featureGates.tsTechParagraphLive() || !service || !service.id || !knex) return '';
@@ -120,7 +120,8 @@ async function treeShrubTechParagraphPdfSignature(service, knex) {
     const line = service.service_line || detectServiceLine(service.service_type);
     if (line !== 'tree_shrub') return '';
     const { loadLinkedTreeShrubAssessment } = require('../tree-shrub-assessment');
-    const assessment = await loadLinkedTreeShrubAssessment(service, knex);
+    // Strict: a failed lookup throws into the sentinel below, never into "no paragraph".
+    const assessment = await loadLinkedTreeShrubAssessment(service, knex, { strict: true });
     if (!assessment || assessment.id == null) return '';
     const row = await knex('service_records').where({ id: service.id }).first('structured_notes');
     return require('./tree-shrub-tech-paragraph').techParagraphSignature(row && row.structured_notes, assessment.id);

@@ -1,9 +1,10 @@
-// Tree & shrub report "From your technician" paragraph (GATE_TS_TECH_PARAGRAPH):
-// the prompt as text, the tree & shrub profile of the shared validator, the one
-// model call (never a real one: every call is injected or mocked) and the
-// first-writer-wins freeze. The plumbing (deadline, freeze race) is the lawn
-// paragraph's engine and is pinned by lawn-tech-paragraph.test.js; this file
-// pins what differs by service line. Synthetic data only.
+// Tree & shrub report "From your technician" paragraph (GATE_TS_TECH_PARAGRAPH),
+// FIXED-SENTENCE design (owner 2026-10-05): the model only extracts closed-list
+// ids from the technician's note; code verifies them against the note and writes
+// every word from TS_SENTENCES. These tests pin (1) that every Codex round 1 and
+// round 2 example is impossible by construction, (2) the note checks, (3) the
+// deterministic lines, (4) the model call and (5) the freeze and read-back.
+// Synthetic data only.
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
@@ -11,311 +12,330 @@ jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
 const { dispatchWithFallback } = require('../services/llm/call');
 const MODELS = require('../config/models');
 const tech = require('../services/service-report/tree-shrub-tech-paragraph');
-const lawn = require('../services/service-report/lawn-tech-paragraph');
 
-const INPUTS = {
-  technicianNote: 'Found scale on the hedge along the back fence and heavy sooty mold on a few leaves. Treated the hedges with Merit and fed the palms with the palm fertilizer.',
-  products: [
-    { name: 'Merit 2F', activeIngredient: 'imidacloprid', kind: 'systemic', method: 'drench', targets: ['scale', 'whitefly', 'aphids'] },
-    { name: 'Palm Gro 8-2-12', activeIngredient: null, kind: 'fertilizer', method: 'broadcast', targets: [] },
-  ],
-  findings: [
-    { label: 'pest pressure signals', confidence: 'low' },
-  ],
-  knownProductNames: ['Merit 2F', 'Palm Gro 8-2-12', 'Safari 20 SG', 'Celsius WG'],
+const { TS_SENTENCES, CONDITIONS, PLANTS, FINDING_LABELS } = tech;
+
+const NOTE = 'Found scale on the hedges and sooty mold on the ixora. Applied Merit and fed the palms.';
+const PRODUCTS = [{ name: 'Merit 2F' }, { name: 'Palm Gro 8-2-12' }];
+const inputs = (over = {}) => tech.normalizeInputs({ technicianNote: NOTE, products: PRODUCTS, findings: [], landscapeCondition: null, ...over });
+const obs = (condition, plant = 'none') => ({ condition, plant });
+const slotsFor = (over, observations, opts) => {
+  const i = inputs(over);
+  return tech.buildSlots(i, tech.verifyObservations(observations, i.technicianNote), opts);
 };
+const textFor = (over, observations, opts) => tech.render(slotsFor(over, observations, opts));
 
-const sources = (text, from) => {
-  const sentences = text.match(/[^.!?]+[.!?]/g).map((s) => s.trim());
-  return sentences.map((sentence, i) => ({ sentence, from: from[i] || from[from.length - 1] }));
-};
-const answer = (paragraph, from = [['note']]) => ({ paragraph, sources: sources(paragraph, from) });
-const check = (a, inputs = INPUTS) => tech.validateParagraph(a, inputs);
-const problemsOf = (a, inputs) => check(a, inputs).problems;
+// Every character of any output must come from these shapes: a regex built from
+// TS_SENTENCES with each placeholder as a wildcard, plus the product names.
+const shapeRegexes = () => Object.values(TS_SENTENCES).map((tpl) => new RegExp(`^${tpl.replace(/[.*+?^$()|[\]\\]/g, '\\$&').replace(/\{\w+\}/g, '.+')}$`.replace(/\\\{\\w\+\\\}/g, '.+')));
+function sentencesOf(text) { return text.split(/(?<=\.)\s+/); }
+const onlyTemplateShapes = (text) => sentencesOf(text).every((s) => shapeRegexes().some((re) => re.test(s)));
 
-const GOOD_1 = answer(
-  'Our technician found scale on the hedge along the back fence, with some sooty mold on a few leaves. We applied Merit 2F to protect against scale. We also applied Palm Gro 8-2-12.',
-  [['note'], ['note', 'product'], ['note', 'product']],
-);
-const GOOD_2 = answer(
-  'Our technician found scale on the hedge along the back fence. We applied Merit 2F and Palm Gro 8-2-12. We are keeping an eye on possible pest pressure.',
-  [['note'], ['note', 'product'], ['finding']],
-);
-
-describe('prompt and schema', () => {
-  const prompt = tech.buildPrompt(tech.normalizeInputs(INPUTS));
-
-  test('the user message carries the note verbatim and every labeled input, and nothing private', () => {
-    expect(prompt.text).toContain(INPUTS.technicianNote);
-    for (const label of ['PRODUCTS APPLIED TODAY', 'PHOTO FINDINGS THE TECHNICIAN KEPT']) {
-      expect(prompt.text).toContain(label);
-    }
-    expect(prompt.text).toContain('Merit 2F');
-    expect(prompt.text).toContain('pest pressure signals (low confidence)');
-    // The watch list, the last visit, the headline, scores, progress lines, the
-    // catalog defense list and active ingredients never reach the model.
-    for (const absent of ['SEEN BY OUR TECHNICIAN', 'LAST VISIT', 'WHAT THE REPORT ALREADY SAYS', 'Safari 20 SG', 'Celsius WG', 'imidacloprid', 'active:']) {
-      expect(prompt.text).not.toContain(absent);
-    }
-    expect(prompt.text).not.toMatch(/SCORES|PROGRESS|\$\d/);
-  });
-
-  test('the system prompt carries the owner rules the code then enforces', () => {
-    for (const phrase of ['the note wins', 'never as something the photos showed', 'targets list', 'No numbers of any kind', 'never "will"', 'no better, worse', 'HUMAN PROSE RULES', 'PHOTO REACH', 'never where it went', 'No instructions to the customer']) {
-      expect(prompt.system.toLowerCase()).toContain(phrase.toLowerCase());
-    }
-    expect(prompt.system).not.toMatch(/SEEN BY OUR TECHNICIAN|watch list|headline/i);
-    expect(prompt.system).toContain('Waves Pest Control');
-    expect(prompt.promptVersion).toBe(tech.PROMPT_VERSION);
-    expect(prompt.promptVersion).toBe('ts_tech_paragraph_v1');
-  });
-
-  test('the prompt never names a diagnosis-only palm problem (owner 2026-10-03)', () => {
-    expect(`${prompt.system}\n${prompt.text}`).not.toMatch(/ganoderma|\bconks?\b|lethal\s+bronzing|fusarium/i);
-  });
-
-  test('the schema is the lawn paragraph\'s: one string plus sources, closed sets, no numeric bounds', () => {
-    expect(prompt.jsonSchema).toEqual(lawn.techParagraphSchema());
-    expect(JSON.stringify(prompt.jsonSchema)).not.toMatch(/"(minimum|maximum|minLength|maxLength|minItems|maxItems)"/);
-  });
-
-  test('normalizeInputs folds product kinds, drops the last visit, headline and lawn-only fields, and is idempotent', () => {
-    const once = tech.normalizeInputs({
-      ...INPUTS,
-      scores: { overall: 90 },
-      progressLines: ['Thickness is on track.'],
-      prior: { date: '2026-08-12', products: [{ name: 'Safari 20 SG' }], watched: ['whitefly'], findings: [] },
-      facts: { headline: 'Healthy — monitoring pest pressure', watering: 'Water the lawn.' },
+describe('TS_SENTENCES is the only source of words', () => {
+  test('it is frozen, small and readable: the owner approves exactly this', () => {
+    expect(Object.isFrozen(TS_SENTENCES)).toBe(true);
+    expect(TS_SENTENCES).toEqual({
+      observed: 'Our technician saw {items}.',
+      observedItemWithPlant: '{condition} on the {plant}',
+      observedItem: '{condition}',
+      maybe: 'There may be early signs of {labels}; we will keep an eye on it.',
+      confirmed: 'Our technician confirmed signs of {labels}.',
+      products: 'Today we applied {products}.',
+      allClear: 'Your landscape looked {rating} today.',
     });
-    expect(once.products.map((p) => p.kind)).toEqual(['insecticide', 'fertilizer']);
-    expect(once.findings).toEqual([{ label: 'pest pressure signals', confidence: 'low' }]);
-    expect(once.prior).toBeNull();
-    expect(once.facts).toEqual({ headline: null, watering: null });
-    expect(once.progressLines).toEqual([]);
-    expect(once.scores).toEqual({ overall: null, rows: [] });
-    expect(once.facts.watering).toBeNull();
-    expect(once.technicianNote.length).toBeLessThanOrEqual(1500);
-    expect(tech.normalizeInputs(once)).toEqual(once);
-    // A miticide is an insect product to the validator too.
-    expect(tech.normalizeInputs({ ...INPUTS, products: [{ name: 'Floramite SC', kind: 'miticide', targets: [] }] }).products[0].kind).toBe('insecticide');
+  });
+
+  test('a full paragraph is the five sentences in the fixed order, nothing else', () => {
+    const text = textFor(
+      { findings: [{ key: 'water_heat_mechanical_stress', kind: 'maybe' }, { key: 'foliage_fullness', kind: 'confirmed' }] },
+      [obs('scale', 'hedges'), obs('sooty_mold')],
+    );
+    expect(text).toBe('Our technician saw scale on the hedges and sooty mold. There may be early signs of stress; we will keep an eye on it. Our technician confirmed signs of thin foliage. Today we applied Merit 2F and Palm Gro 8-2-12.');
+    expect(onlyTemplateShapes(text)).toBe(true);
+  });
+
+  test('the all-clear line comes last', () => {
+    expect(textFor({ landscapeCondition: 'Excellent', technicianNote: 'Routine visit.' }, [])).toBe('Today we applied Merit 2F and Palm Gro 8-2-12. Your landscape looked excellent today.');
   });
 });
 
-describe('validator: accepts', () => {
-  test.each([['good example 1', GOOD_1], ['good example 2', GOOD_2]])('%s', (_name, a) => {
-    const verdict = check(a);
-    expect(verdict.problems).toEqual([]);
-    expect(verdict.ok).toBe(true);
-    expect(verdict.paragraph).toBe(a.paragraph);
-    expect(verdict.paragraph.split(/\s+/).length).toBeLessThanOrEqual(70);
+describe('Codex round 1 and 2 examples are impossible by construction', () => {
+  // A hostile model answer: every field is either a closed-list id or ignored.
+  const HOSTILE = [
+    { condition: 'It went on the palms.', plant: 'palms' },
+    { condition: 'pruning', plant: 'hedges' },
+    { condition: 'scale', plant: 'the front yard' },
+    { condition: 'imidacloprid', plant: 'none' },
+    { condition: 'scale', plant: 'none', text: 'Prune the hedge again.' },
+    { paragraph: 'The photos found scale. Prune the hedge.' },
+  ];
+
+  test('free text in any field never reaches the output', () => {
+    const slots = slotsFor({}, HOSTILE);
+    expect(slots.observed).toEqual([{ condition: 'scale', plant: 'none' }]);
+    const text = tech.render(slots);
+    expect(text).toBe('Our technician saw scale. Today we applied Merit 2F and Palm Gro 8-2-12.');
+    for (const forbidden of [/palms/i, /prune/i, /again/i, /photos/i, /imidacloprid/i, /yard/i, /before/i]) expect(text).not.toMatch(forbidden);
   });
 
-  test('a sentence may name a plant group or the finding when no product is named in it', () => {
-    const a = answer('Our technician saw scale on the hedges. We applied Merit 2F.', [['note'], ['note', 'product']]);
-    expect(problemsOf(a)).toEqual([]);
-  });
-});
-
-describe('validator: rejects', () => {
-  test('a product that was not applied, including last visit\'s', () => {
-    const a = answer('Our technician found scale on the hedge. We used Safari 20 SG on the hedges.', [['note'], ['product']]);
-    expect(problemsOf(a)).toEqual(expect.arrayContaining(['product_not_applied:safari']));
-    const b = answer('Our technician found scale on the hedge. We used Celsius WG on the hedges.', [['note'], ['product']]);
-    expect(problemsOf(b)).toEqual(expect.arrayContaining(['product_not_applied:celsius']));
-  });
-
-  test('a pest the record does not carry (the closed condition vocabulary)', () => {
-    const a = answer('Our technician found scale on the hedge. We also saw thrips on the new leaves.', [['note'], ['note']]);
-    expect(problemsOf(a)).toContain('condition_not_in_inputs:thrips');
-  });
-
-  test('a plant name or any word outside the closed vocabulary', () => {
-    const a = answer('Our technician found scale on the hibiscus hedge. We treated it with Merit 2F.', [['note'], ['product']]);
-    expect(problemsOf(a)).toContain('word_not_in_inputs');
-  });
-
-  test('any reference to an earlier visit or comparison with one (no prior visit is an input)', () => {
-    const a = answer('Our technician found scale on the hedge. The hedge looks healthier than at our last visit.', [['note'], ['prior']]);
-    expect(problemsOf(a)).toEqual(expect.arrayContaining(['prior_visit', 'comparison_without_progress']));
-    const b = answer('Our technician found scale on the hedge. At our last visit we treated for whitefly.', [['note'], ['prior']]);
-    expect(problemsOf(b)).toContain('prior_visit');
-    const withLine = { ...INPUTS, progressLines: ['Thickness is on track.'] };
-    expect(problemsOf(answer('Our technician found scale on the hedge. Thickness is on track since our last visit.', [['note'], ['prior']]), withLine)).toContain('comparison_without_progress');
-  });
-
-  test('a promise, a number, a date, a watering word', () => {
-    expect(problemsOf(answer('Our technician found scale on the hedge. We will recheck the hedges next visit.', [['note'], ['note']]))).toEqual(expect.arrayContaining(['promise:will']));
-    expect(problemsOf(answer('Our technician found scale on the hedge. We used 4 ounces of Merit 2F on the hedges.', [['note'], ['product']]))).toEqual(expect.arrayContaining(['number']));
-    expect(problemsOf(answer('Our technician found scale on the hedge. We treated the hedges with Merit 2F on Tuesday.', [['note'], ['product']]))).toContain('date_or_season');
-    expect(problemsOf(answer('Our technician found scale on the hedge. Keep the hedges watered after we treated them with Merit 2F.', [['note'], ['product']]))).toContain('watering_or_mowing');
-  });
-
-  test('the photos confirming a cause', () => {
-    const a = answer('Our technician found scale on the hedge. The photos confirmed scale on the leaves.', [['note'], ['finding']]);
-    expect(problemsOf(a)).toContain('photo_confirms_cause');
-  });
-
-  test('a low-confidence photo finding stated as fact, and the same finding hedged', () => {
-    const inputs = { ...INPUTS, technicianNote: 'Treated the hedges with Merit and fed the palms with the palm fertilizer.', findings: [{ label: 'leaf spot signals', confidence: 'low', source: 'photo' }] };
-    const stated = answer('We applied Merit 2F. We found leaf spot on the leaves.', [['product'], ['finding']]);
-    expect(problemsOf(stated, inputs)).toContain('low_confidence_stated_as_fact:leaf_spot');
-    const hedged = answer('We applied Merit 2F. We are keeping an eye on possible leaf spot on the leaves.', [['product'], ['finding']]);
-    expect(problemsOf(hedged, inputs)).toEqual([]);
-  });
-
-  test('a condition the note says was not found (the note wins)', () => {
-    const inputs = { ...INPUTS, technicianNote: 'No scale or whitefly on the hedges. Treated the hedges with Merit and fed the palms.', findings: [] };
-    const a = answer('Our technician found scale on the hedges. We treated the hedges with Merit 2F.', [['note'], ['product']]);
-    expect(problemsOf(a, inputs).some((p) => /^negated_in_note_stated_as_found:scale$/.test(p))).toBe(true);
-  });
-
-  test('a target stated as found, not as protection', () => {
-    const inputs = { ...INPUTS, technicianNote: 'Treated the hedges with Merit and fed the palms with the palm fertilizer.', findings: [], prior: null };
-    const a = answer('Our technician found whitefly on the hedges. We treated the hedges with Merit 2F.', [['note'], ['product']]);
-    expect(problemsOf(a, inputs)).toContain('target_stated_as_found:whitefly');
-  });
-});
-
-describe('Codex round 1 on #5968', () => {
-  const NOTE_ONLY = { ...INPUTS, technicianNote: 'Treated the hedges with Merit and fed the palms with the palm fertilizer.' };
-
-  test('an active ingredient the model supplies from memory is rejected; the listed product name is not', () => {
-    const named = answer('We applied imidacloprid.', [['product']]);
-    // Two sentences are required, so pair it with a clean one.
-    const a = answer('We applied Merit 2F. We applied imidacloprid.', [['product'], ['product']]);
-    expect(named.paragraph).toContain('imidacloprid');
-    expect(problemsOf(a, NOTE_ONLY)).toContain('active_ingredient');
-    expect(problemsOf(answer('We applied Merit 2F. We applied Palm Gro 8-2-12.', [['product'], ['product']]), NOTE_ONLY)).toEqual([]);
-    // An ingredient word that IS part of a listed product name stays allowed.
-    const inName = { ...NOTE_ONLY, products: [{ name: 'Imidacloprid 75 WSP', activeIngredient: 'imidacloprid', kind: 'systemic', targets: [] }], knownProductNames: [] };
-    expect(problemsOf(answer('We applied Imidacloprid 75 WSP. Our technician saw scale on the hedge.', [['product'], ['note']]), { ...inName, technicianNote: 'Saw scale on the hedge.' })).not.toContain('active_ingredient');
-  });
-
-  test('the report headline is not a fact: a low-confidence finding stated unhedged is rejected even when the headline carries it', () => {
-    const inputs = {
-      technicianNote: 'Treated the hedges with Merit and fed the palms with the palm fertilizer.',
-      products: INPUTS.products,
-      findings: [{ label: 'pest pressure signals', confidence: 'low' }],
-      facts: { headline: 'Healthy — monitoring pest pressure' },
-      knownProductNames: INPUTS.knownProductNames,
-    };
-    expect(tech.normalizeInputs(inputs).facts.headline).toBeNull();
-    const stated = answer('Our technician found pest pressure. We applied Merit 2F.', [['fact', 'finding'], ['product']]);
-    expect(problemsOf(stated, inputs)).toContain('low_confidence_stated_as_fact:insect');
-    const hedged = answer('We are keeping an eye on possible pest pressure. We applied Merit 2F.', [['finding'], ['product']]);
-    expect(problemsOf(hedged, inputs)).toEqual([]);
-  });
-
-  test('care advice to the customer is rejected; a finding about pruning stress is not', () => {
-    const bad = [
-      'Prune the hedge.', 'Trim back the hedges.', 'Cut back the dead fronds.', 'Water the beds deeply.', 'Fertilize the palms in spring.',
-      'You should prune the hedge.', 'You need to thin the canopy.', 'Please keep the hedge trimmed.',
-      'We applied Merit 2F, and trim the hedge.',
-    ];
-    for (const sentence of bad) {
-      expect(problemsOf(answer(`Our technician found scale on the hedge. ${sentence}`, [['note'], ['note']]), INPUTS)).toContain('care_instruction');
+  test('cross-sentence placement ("It went on the palms"), gerund advice, "again/before", photo attribution and passive voice have no template', () => {
+    const everyTemplate = Object.values(TS_SENTENCES).join(' ').replace(/\{\w+\}/g, '_');
+    // No sentence starts with a pronoun ("It went on the palms" has no template).
+    for (const tpl of Object.values(TS_SENTENCES)) expect(tpl).not.toMatch(/^(?:it|they|this|that|these|those|we)\b/i);
+    for (const shape of [/\bwent\b/i, /\bagain\b/i, /\bbefore\b/i, /\bphotos?\b/i, /\bwas\b|\bwere\b|\bbeen\b/i, /\b\w+ing\b/i]) {
+      expect(everyTemplate).not.toMatch(shape);
     }
-    expect(problemsOf(answer('Our technician found pruning stress on the hedge. We applied Merit 2F.', [['note'], ['product']]), { ...INPUTS, technicianNote: 'Found pruning stress on the hedge. Applied Merit.', findings: [] })).toEqual([]);
+    // And no model-controlled field carries a verb: ids and display names only.
+    for (const { display } of [...Object.values(CONDITIONS), ...Object.values(PLANTS)]) expect(display).not.toMatch(/\b(?:prune|trim|water|fertilize|apply|applied|put|went)\b/i);
+    for (const label of Object.values(FINDING_LABELS)) expect(label).not.toMatch(/\b(?:photos?|found|confirmed)\b/i);
   });
 
-  test('a sentence that names an applied product may not name a plant group or place', () => {
-    const run = (text) => problemsOf(answer(text, [['note'], ['note', 'product']]), INPUTS);
-    const lead = 'Our technician saw scale on the hedges. ';
-    expect(run(`${lead}We put Merit 2F on the palms.`)).toContain('product_placement');
-    expect(run(`${lead}We treated the hedges with Merit 2F.`)).toContain('product_placement');
-    expect(run(`${lead}Merit 2F went on the front and back.`)).toContain('product_placement');
-    expect(run(`${lead}Merit 2F went around the whole property.`)).toContain('product_placement');
-    expect(run(`${lead}We applied Merit 2F.`)).toEqual([]);
-    expect(run(`${lead}We applied Merit 2F to protect against scale.`)).toEqual([]);
-    // A product whose own name holds a place noun is cut out first, not flagged.
-    expect(run(`${lead}We applied Palm Gro 8-2-12.`)).toEqual([]);
-    // No product named: a plant group in the sentence is fine.
-    expect(problemsOf(answer('Our technician saw scale on the hedges. We also saw sooty mold on a few leaves.', [['note'], ['note']]), INPUTS)).toEqual([]);
+  test('a product sentence names no plant or place; an observed sentence names no product', () => {
+    const text = textFor({}, [obs('scale', 'hedges')]);
+    const [observed, products] = sentencesOf(text);
+    expect(observed).not.toMatch(/Merit|Palm Gro/);
+    expect(products).toBe('Today we applied Merit 2F and Palm Gro 8-2-12.');
+    expect(products).not.toMatch(/hedges|palms|shrubs|trees|plants|beds/);
+  });
+
+  test('no active ingredient exists in the inputs, the prompt or the output', () => {
+    const i = tech.normalizeInputs({ technicianNote: 'Found scale on the hedges.', products: [{ name: 'Merit 2F', activeIngredient: 'imidacloprid', targets: ['scale'], method: 'drench' }] });
+    expect(JSON.stringify(i)).not.toMatch(/imidacloprid|drench|targets/);
+    expect(tech.buildPrompt(i).text).not.toMatch(/imidacloprid|Merit|drench/);
+  });
+
+  test('the headline, the last visit and the watch list are not inputs', () => {
+    const i = tech.normalizeInputs({ technicianNote: NOTE, products: PRODUCTS, facts: { headline: 'Healthy — monitoring pest pressure' }, prior: { date: '2026-08-12', products: [{ name: 'Safari 20 SG' }] }, watchItems: [{ key: 'scale', state: 'seen' }] });
+    expect(Object.keys(i).sort()).toEqual(['findings', 'landscapeCondition', 'products', 'technicianNote']);
+    expect(JSON.stringify(tech.buildPrompt(i))).not.toMatch(/headline|Safari|watch/i);
+  });
+
+  test('the prompt shows only the note; the system prompt carries the closed lists', () => {
+    const prompt = tech.buildPrompt(inputs({ technicianNote: 'Found scale on the hedges and sooty mold on the ixora.' }));
+    expect(prompt.text).toContain('Found scale on the hedges and sooty mold on the ixora.');
+    expect(prompt.text).not.toMatch(/Merit|Palm Gro|PRODUCTS/);
+    for (const id of Object.keys(CONDITIONS)) expect(prompt.system).toContain(id);
+    for (const id of Object.keys(PLANTS)) expect(prompt.system).toContain(id);
+    expect(prompt.system).not.toMatch(/ganoderma|\bconks?\b|lethal\s+bronzing|fusarium/i);
+    expect(prompt.promptVersion).toBe('ts_tech_paragraph_v2');
+  });
+
+  test('the schema is closed enums, nothing numeric, and the lawn source enum is gone', () => {
+    const schema = tech.extractionSchema();
+    expect(schema.required).toEqual(['observations']);
+    const item = schema.properties.observations.items;
+    expect(item.properties.condition.enum).toEqual(Object.keys(CONDITIONS));
+    expect(item.properties.plant.enum).toEqual([...Object.keys(PLANTS), 'none']);
+    expect(JSON.stringify(schema)).not.toMatch(/"(minimum|maximum|minLength|maxLength|minItems|maxItems|exclusiveMinimum|exclusiveMaximum)"|sources|note|product/);
   });
 });
 
-describe('palm rules (owner 2026-10-01, 2026-10-03)', () => {
-  test.each([
-    ['a crown', 'Our technician found scale on the hedge. The palm crown looks good, and we fed the palms with Palm Gro 8-2-12.', 'palm_crown'],
-    ['a spear leaf', 'Our technician found scale on the hedge. The spear leaf on the palms looks fine.', 'palm_crown'],
-    ['the newest fronds', 'Our technician found scale on the hedge. The newest fronds on the palms look strong.', 'palm_crown'],
-    ['a conk', 'Our technician found scale on the hedge. We noticed a conk on one palm trunk.', 'palm_disease_name'],
-    ['Ganoderma', 'Our technician found scale on the hedge. One palm may have Ganoderma.', 'palm_disease_name'],
-  ])('rejects %s, even when the technician note carries the word', (_name, text, code) => {
-    const inputs = { ...INPUTS, technicianNote: `${INPUTS.technicianNote} Palm crown looks fine. Conk at the base of one palm. Possible Ganoderma.` };
-    expect(problemsOf(answer(text, [['note'], ['note']]), inputs)).toContain(code);
+describe('verifyObservations: the note must support each item', () => {
+  const verify = (note, ...items) => tech.verifyObservations(items, note);
+
+  test('a condition and plant in the same clause are kept', () => {
+    expect(verify('Found scale on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
+    expect(verify('Found scale on the hedge.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
+    expect(verify('Whitefly on the underside of leaves of several shrubs.', obs('whitefly', 'shrubs'))).toEqual([{ condition: 'whitefly', plant: 'shrubs' }]);
   });
 
-  test('the codes carry no token (the offending word may be copied from the note)', () => {
-    const inputs = { ...INPUTS, technicianNote: `${INPUTS.technicianNote} Conk at the base.` };
-    const problems = problemsOf(answer('Our technician found scale on the hedge. We noticed a conk on one palm trunk.', [['note'], ['note']]), inputs);
-    expect(JSON.stringify(problems)).not.toMatch(/conk/i);
+  test('scale and hedges in different note sentences: the item stays, the plant is dropped (a weaker, true claim)', () => {
+    expect(verify('Found scale along the fence. Trimmed the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: null }]);
+    // Same sentence but different clauses.
+    expect(verify('Scale on the palms, whitefly on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: null }]);
+    expect(verify('Scale on the palms, whitefly on the hedges.', obs('whitefly', 'hedges'))).toEqual([{ condition: 'whitefly', plant: 'hedges' }]);
   });
 
-  test('a frozen text that names a conk or a crown prints nothing', () => {
-    const entry = (text) => JSON.stringify({ treeShrubTechParagraph: { 9: { v: 1, assessmentId: '9', text } } });
-    expect(tech.readFrozenTechParagraph(entry(GOOD_1.paragraph), 9)).toBe(GOOD_1.paragraph);
-    expect(tech.readFrozenTechParagraph(entry('Our technician found scale on the hedge. We noticed a conk on one palm trunk.'), 9)).toBeNull();
-    expect(tech.readFrozenTechParagraph(entry('Our technician found scale on the hedge. The palm crown looks good.'), 9)).toBeNull();
+  test('a condition the note does not carry is dropped, and so is one it negates, hedges or ties to a palm-banned term', () => {
+    expect(verify('Found scale on the hedges.', obs('whitefly', 'hedges'))).toEqual([]);
+    expect(verify('No scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
+    expect(verify('Did not see scale.', obs('scale'))).toEqual([]);
+    expect(verify('Possible scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
+    expect(verify('Looks like scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
+    expect(verify('Scale on the palm crown.', obs('scale', 'palms'))).toEqual([]);
+    expect(verify('Scale near the conk on one palm.', obs('scale', 'palms'))).toEqual([]);
+    expect(verify('Scale on palms, possible Ganoderma.', obs('scale', 'palms'))).toEqual([]);
+  });
+
+  test('an unknown id, a repeat, a malformed item and everything past three are dropped', () => {
+    const note = 'Scale on the hedges, whitefly, aphids, thrips and sooty mold seen.';
+    const out = verify(note, obs('scale', 'hedges'), obs('scale', 'trees'), obs('made_up'), null, 'x', obs('whitefly'), obs('aphids'), obs('thrips'));
+    expect(out.map((o) => o.condition)).toEqual(['scale', 'whitefly', 'aphids']);
+  });
+
+  test('a negation or hedge in one sentence does not touch a plain mention in another', () => {
+    expect(verify('No whitefly. Found scale on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
+  });
+
+  test('palm-banned terms can never be rendered: they are in no list', () => {
+    const all = JSON.stringify([...Object.keys(CONDITIONS), ...Object.keys(PLANTS), ...Object.values(CONDITIONS).map((c) => c.display), ...Object.values(PLANTS).map((p) => p.display), ...Object.values(FINDING_LABELS), ...Object.values(TS_SENTENCES)]);
+    expect(all).not.toMatch(/ganoderma|conk|lethal|fusarium|crown|spear|newest|frond/i);
   });
 });
 
-describe('the one model call', () => {
+describe('deterministic lines', () => {
+  const LOW = (key) => ({ key, kind: 'maybe' });
+
+  test('a "may be" line comes from low-confidence kept findings the note does not already cover', () => {
+    expect(textFor({ technicianNote: 'Applied Merit.', findings: [LOW('pest_activity'), LOW('leaf_color_vigor')] }, [])).toBe(
+      'There may be early signs of pest activity and leaf color changes; we will keep an eye on it. Today we applied Merit 2F and Palm Gro 8-2-12.',
+    );
+    // The note covers pest activity (even negated: the note wins), so only the other stays.
+    expect(textFor({ technicianNote: 'No scale seen.', findings: [LOW('pest_activity'), LOW('foliage_fullness')] }, [])).toBe(
+      'There may be early signs of thin foliage; we will keep an eye on it. Today we applied Merit 2F and Palm Gro 8-2-12.',
+    );
+  });
+
+  test('at most two "may be" labels; the combined stress category reads "stress"', () => {
+    const slots = slotsFor({ technicianNote: 'Applied Merit.', products: [], findings: Object.keys(FINDING_LABELS).map(LOW) }, []);
+    expect(slots.maybe).toHaveLength(2);
+    expect(textFor({ technicianNote: 'Applied Merit.', products: [], findings: [LOW('water_heat_mechanical_stress')] }, [])).toBe('There may be early signs of stress; we will keep an eye on it.');
+    expect(FINDING_LABELS.water_heat_mechanical_stress).toBe('stress');
+  });
+
+  test('a finding the technician confirmed gets its own line, even when the note covers it', () => {
+    expect(textFor({ technicianNote: 'Scale seen.', products: [], findings: [{ key: 'pest_activity', kind: 'confirmed' }] }, [])).toBe('Our technician confirmed signs of pest activity.');
+  });
+
+  test('the products line lists display names only, up to five', () => {
+    const many = ['A1', 'B2', 'C3', 'D4', 'E5', 'F6'].map((name) => ({ name }));
+    expect(textFor({ technicianNote: '', products: many }, [])).toBe('Today we applied A1, B2, C3, D4 and E5.');
+    expect(textFor({ technicianNote: '', products: [{ name: 'Merit 2F' }] }, [])).toBe('Today we applied Merit 2F.');
+  });
+
+  test('all clear: only with no item at all, a note free of problem words, and a rating of Excellent or Good', () => {
+    const base = { technicianNote: 'Routine visit, everything looks fine.', products: [] };
+    expect(textFor({ ...base, landscapeCondition: 'Excellent' }, [])).toBe('Your landscape looked excellent today.');
+    expect(textFor({ ...base, landscapeCondition: 'Good' }, [])).toBe('Your landscape looked good today.');
+    for (const rating of ['Fair', 'Poor', 'Declining', 'Recovering', null, 'Great', 'good']) expect(textFor({ ...base, landscapeCondition: rating }, [])).toBe('');
+    // Any item blocks it.
+    expect(textFor({ ...base, landscapeCondition: 'Good', findings: [{ key: 'pest_activity', kind: 'maybe' }] }, [])).not.toMatch(/looked good/);
+    expect(textFor({ ...base, technicianNote: 'Scale on the hedges.', landscapeCondition: 'Good' }, [obs('scale', 'hedges')])).not.toMatch(/looked good/);
+    expect(textFor({ ...base, landscapeCondition: 'Good', findings: [{ key: 'pest_activity', kind: 'confirmed' }] }, [])).not.toMatch(/looked good/);
+    // A note that talks about a problem the closed list cannot name blocks it.
+    expect(textFor({ ...base, technicianNote: 'Bark beetle holes in the pine.', landscapeCondition: 'Good' }, [])).toBe('');
+    // A failed read of the note blocks it.
+    expect(textFor({ ...base, landscapeCondition: 'Good' }, [], { extractionFailed: true })).toBe('');
+  });
+
+  test('nothing applies: no sentence, no paragraph', () => {
+    expect(textFor({ technicianNote: '', products: [], landscapeCondition: null }, [])).toBe('');
+    expect(textFor({ technicianNote: 'Visited.', products: [], landscapeCondition: 'Fair' }, [])).toBe('');
+  });
+});
+
+describe('render: guards on the one free string (a catalog product name)', () => {
+  test('a product name the customer-copy screen rejects drops that sentence, never the others', () => {
+    const slots = { observed: [{ condition: 'scale', plant: 'hedges' }], maybe: [], confirmed: [], products: ['Safe Eco Spray'], allClear: null };
+    expect(tech.render(slots)).toBe('Our technician saw scale on the hedges.');
+  });
+  test('unknown ids render nothing', () => {
+    expect(tech.render({ observed: [{ condition: 'made_up', plant: 'palms' }], maybe: ['x'], confirmed: ['y'], products: [], allClear: 'terrible' })).toBe('');
+    expect(tech.render(null)).toBe('');
+  });
+});
+
+describe('the model call (extraction only)', () => {
   beforeEach(() => dispatchWithFallback.mockReset());
+  const goodAnswer = { observations: [obs('scale', 'hedges'), obs('sooty_mold')] };
 
-  test('goes through the report policy on lane ts_tech_paragraph, with the schema, the deadline and the validator', async () => {
+  test('one call through the report policy on lane ts_tech_paragraph, schema, deadline and validator; the paragraph is rendered from slots', async () => {
     dispatchWithFallback.mockImplementation(async (_policy, _payload, options) => {
-      const result = { ok: true, json: { paragraph: GOOD_1.paragraph, sources: GOOD_1.sources }, provider: 'openai' };
+      const result = { ok: true, json: goodAnswer, provider: 'openai' };
       return options.validate(result) ? { ok: false, reason: 'all_providers_failed' } : result;
     });
-    const out = await tech.generateTechParagraph(INPUTS);
-    expect(out).toMatchObject({ ok: true, paragraph: GOOD_1.paragraph });
+    const out = await tech.generateTechParagraph(inputs());
+    expect(out).toMatchObject({ ok: true, paragraph: 'Our technician saw scale on the hedges and sooty mold. Today we applied Merit 2F and Palm Gro 8-2-12.' });
+    expect(out.slots.observed).toEqual([{ condition: 'scale', plant: 'hedges' }, { condition: 'sooty_mold', plant: 'none' }]);
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
     expect(policy).toBe(MODELS.TEXT_POLICIES.report);
-    expect(payload).toMatchObject({ laneId: 'ts_tech_paragraph', promptVersion: 'ts_tech_paragraph_v1', jsonMode: true, timeoutMs: 15000 });
-    expect(payload.text).toContain(INPUTS.technicianNote);
+    expect(payload).toMatchObject({ laneId: 'ts_tech_paragraph', promptVersion: 'ts_tech_paragraph_v2', jsonMode: true, timeoutMs: 15000 });
+    expect(payload.jsonSchema).toEqual(tech.extractionSchema());
     expect(options).toMatchObject({ hardDeadline: true, reserveFallbackBudget: true });
-    // The validator the dispatcher runs is the tree & shrub one.
-    expect(options.validate({ ok: true, json: answer('Our technician found scale on the hedge. The palm crown looks good.', [['note'], ['note']]) })).toMatch(/palm_crown/);
+    expect(options.validate({ ok: true, json: { paragraph: 'Prune the hedge.' } })).toMatch(/no_answer/);
   });
 
-  test('a rejected answer stores nothing and says why; no note or no product makes no call', async () => {
-    const bad = answer('Our technician found scale on the hedge. We noticed a conk on one palm trunk.', [['note'], ['note']]);
-    const out = await tech.generateTechParagraph(INPUTS, { callModel: async () => ({ ok: true, json: bad }) });
-    expect(out).toMatchObject({ ok: false, reason: 'rejected', problems: expect.arrayContaining(['palm_disease_name']) });
-    expect(await tech.generateTechParagraph({ ...INPUTS, technicianNote: '' })).toEqual({ ok: false, reason: 'no_note' });
-    expect(await tech.generateTechParagraph({ ...INPUTS, products: [] })).toEqual({ ok: false, reason: 'no_products' });
+  test('an answer whose every item fails verification is a good read: deterministic lines only, all-clear still allowed', async () => {
+    dispatchWithFallback.mockImplementation(async (_p, _pl, options) => {
+      const result = { ok: true, json: { observations: [obs('thrips', 'palms')] } };
+      return options.validate(result) ? { ok: false, reason: 'x' } : result;
+    });
+    const out = await tech.generateTechParagraph(inputs({ technicianNote: 'Routine visit, all fine.', products: [], landscapeCondition: 'Good' }));
+    expect(out).toMatchObject({ ok: true, paragraph: 'Your landscape looked good today.' });
+  });
+
+  test('model failure, timeout or a malformed answer: deterministic lines only, and no all-clear (the note was not read)', async () => {
+    dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
+    const i = inputs({ landscapeCondition: 'Good', findings: [{ key: 'foliage_fullness', kind: 'maybe' }] });
+    const out = await tech.generateTechParagraph(i);
+    expect(out.paragraph).toBe('There may be early signs of thin foliage; we will keep an eye on it. Today we applied Merit 2F and Palm Gro 8-2-12.');
+    expect(out.paragraph).not.toMatch(/saw|looked/);
+    dispatchWithFallback.mockRejectedValueOnce(new Error('boom'));
+    expect((await tech.generateTechParagraph(inputs({ landscapeCondition: 'Good', products: [], technicianNote: 'Routine visit, all fine.' })))).toEqual({ ok: false, reason: 'nothing_to_say' });
+    const malformed = await tech.generateTechParagraph(i, { callModel: async () => ({ ok: true, json: { observations: 'scale' } }) });
+    expect(malformed.paragraph).toMatch(/^There may be/);
+  });
+
+  test('no technician note: no model call, deterministic lines still produce a paragraph', async () => {
+    const out = await tech.generateTechParagraph(inputs({ technicianNote: '', landscapeCondition: 'Excellent' }));
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(out.paragraph).toBe('Today we applied Merit 2F and Palm Gro 8-2-12. Your landscape looked excellent today.');
+    // A note too short to carry a finding also makes no call.
+    await tech.generateTechParagraph(inputs({ technicianNote: 'ok' }));
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('nothing to say at all: not ok', async () => {
+    expect(await tech.generateTechParagraph(inputs({ technicianNote: '', products: [] }))).toEqual({ ok: false, reason: 'nothing_to_say' });
   });
 });
 
-describe('freeze and read', () => {
-  const ENTRY = { v: 1, promptVersion: tech.PROMPT_VERSION, assessmentId: '77', text: GOOD_2.paragraph, sources: GOOD_2.sources, frozenAt: '2026-10-05T12:00:00.000Z' };
+describe('freeze and read back', () => {
+  const SLOTS = { observed: [{ condition: 'scale', plant: 'hedges' }], maybe: [], confirmed: [], products: ['Merit 2F'], allClear: null };
+  const TEXT = tech.render(SLOTS);
+  const ENTRY = { v: 1, promptVersion: tech.PROMPT_VERSION, assessmentId: '77', text: TEXT, slots: SLOTS, frozenAt: '2026-10-05T12:00:00.000Z' };
   const notes = (entry = ENTRY) => JSON.stringify({ treeShrubTechParagraph: { 77: entry } });
 
-  test('reads only a whole entry for its own assessment, under its own key', () => {
+  test('reads only an entry whose text equals render(slots) under the current templates', () => {
     expect(tech.FREEZE_KEY).toBe('treeShrubTechParagraph');
-    expect(tech.readFrozenTechParagraph(notes(), 77)).toBe(GOOD_2.paragraph);
+    expect(tech.readFrozenTechParagraph(notes(), 77)).toBe(TEXT);
     expect(tech.readFrozenTechParagraph(notes(), 78)).toBeNull();
     expect(tech.readFrozenTechParagraph(notes({ ...ENTRY, v: 2 }), 77)).toBeNull();
-    // The lawn paragraph's key is never read here.
     expect(tech.readFrozenTechParagraph(JSON.stringify({ lawnTechParagraph: { 77: ENTRY } }), 77)).toBeNull();
+  });
+
+  test('a hand-edited text, missing slots, drifted slots or a changed template print nothing', () => {
+    expect(tech.readFrozenTechParagraph(notes({ ...ENTRY, text: `${TEXT} Prune the hedge.` }), 77)).toBeNull();
+    expect(tech.readFrozenTechParagraph(notes({ ...ENTRY, slots: undefined }), 77)).toBeNull();
+    expect(tech.readFrozenTechParagraph(notes({ ...ENTRY, slots: { ...SLOTS, observed: [{ condition: 'whitefly', plant: 'palms' }] } }), 77)).toBeNull();
+    expect(tech.readFrozenTechParagraph(notes({ ...ENTRY, slots: [] }), 77)).toBeNull();
+    const saved = { ...TS_SENTENCES };
+    // The constant is frozen, so a "changed template" is modelled by an old text.
+    expect(tech.readFrozenTechParagraph(notes({ ...ENTRY, text: TEXT.replace('Our technician saw', 'We observed') }), 77)).toBeNull();
+    expect(saved).toEqual(TS_SENTENCES);
+  });
+
+  test('a palm-banned term in a product name is dropped at render, and a stored text holding one prints nothing', () => {
+    const bad = { ...SLOTS, products: ['Conk Cleaner'] };
+    expect(tech.render(bad)).toBe('Our technician saw scale on the hedges.');
+    const forged = `${TEXT} Our technician saw a conk.`;
+    expect(tech.readFrozenTechParagraph(notes({ ...ENTRY, text: forged }), 77)).toBeNull();
   });
 
   test('the PDF signature is empty without a paragraph and follows the text', () => {
     expect(tech.techParagraphSignature('{}', 77)).toBe('');
     const a = tech.techParagraphSignature(notes(), 77);
     expect(a).toMatch(/^:tp=[0-9a-f]{8}$/);
-    expect(tech.techParagraphSignature(notes({ ...ENTRY, text: GOOD_1.paragraph }), 77)).not.toBe(a);
+    const other = { ...SLOTS, products: ['Merit 2F', 'Palm Gro 8-2-12'] };
+    expect(tech.techParagraphSignature(notes({ ...ENTRY, text: tech.render(other), slots: other }), 77)).not.toBe(a);
   });
 
-  // The freeze statement the way Postgres applies it (the guard is the key's absence).
   function fakeKnex(initial = {}) {
     const state = { notes: JSON.parse(JSON.stringify(initial)), updates: 0 };
     const knex = () => {
       const q = { guardKey: null };
       q.where = () => q;
-      q.whereRaw = (sql, bindings) => { q.guardSql = sql; q.guardKey = bindings[0]; return q; };
+      q.whereRaw = (_sql, bindings) => { q.guardKey = bindings[0]; return q; };
       q.first = async () => ({ structured_notes: JSON.stringify(state.notes) });
       q.update = async ({ structured_notes: raw }) => {
         state.updates += 1;
@@ -336,22 +356,28 @@ describe('freeze and read', () => {
     expect(state.lastSql).toContain("'treeShrubTechParagraph'");
     expect(state.notes.other).toBe('kept');
     expect(state.notes.lawnTechParagraph).toEqual({ 77: 'lawn' });
-    expect(await tech.freezeTechParagraph('s1', { ...ENTRY, text: GOOD_1.paragraph }, knex)).toEqual(ENTRY);
-    expect(state.notes.treeShrubTechParagraph['77'].text).toBe(GOOD_2.paragraph);
+    const later = { ...SLOTS, products: ['Other'] };
+    expect(await tech.freezeTechParagraph('s1', { ...ENTRY, text: tech.render(later), slots: later }, knex)).toEqual(ENTRY);
+    expect(state.notes.treeShrubTechParagraph['77'].text).toBe(TEXT);
   });
 
-  test('createAndFreeze: a good paragraph freezes; a rejected or already-frozen one spends nothing', async () => {
+  test('createAndFreeze stores { text, slots, version }; a rejected or already-frozen step spends nothing', async () => {
     const { knex, state } = fakeKnex();
-    const run = (extra = {}) => tech.createAndFreezeTechParagraph({ serviceRecordId: 's1', assessmentId: 77, structuredNotes: extra.structuredNotes || '{}', knex, gatherInputs: async () => INPUTS, deps: extra.deps });
-    const rejected = await run({ deps: { generate: async () => ({ ok: false, reason: 'rejected', problems: ['palm_crown'] }) } });
-    expect(rejected).toMatchObject({ status: 'rejected', problems: ['palm_crown'] });
+    const run = (extra = {}) => tech.createAndFreezeTechParagraph({ serviceRecordId: 's1', assessmentId: 77, structuredNotes: extra.structuredNotes || '{}', knex, gatherInputs: async () => inputs(), deps: extra.deps });
+    expect((await run({ deps: { generate: async () => ({ ok: false, reason: 'nothing_to_say' }) } })).status).toBe('nothing_to_say');
     expect(state.updates).toBe(0);
     const generate = jest.fn();
     expect((await run({ structuredNotes: notes(), deps: { generate } })).status).toBe('already_frozen');
     expect(generate).not.toHaveBeenCalled();
-    const frozen = await run({ deps: { generate: async () => ({ ok: true, paragraph: GOOD_1.paragraph, sources: GOOD_1.sources }), now: () => new Date('2026-10-05T12:00:00Z') } });
+    dispatchWithFallback.mockImplementation(async (_p, _pl, options) => {
+      const result = { ok: true, json: { observations: [obs('scale', 'hedges')] } };
+      return options.validate(result) ? { ok: false, reason: 'x' } : result;
+    });
+    const frozen = await run({ deps: { now: () => new Date('2026-10-05T12:00:00Z') } });
     expect(frozen.status).toBe('frozen');
-    expect(state.notes.treeShrubTechParagraph['77']).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v1', assessmentId: '77', text: GOOD_1.paragraph });
-    expect(tech.readFrozenTechParagraph(state.notes, 77)).toBe(GOOD_1.paragraph);
+    const entry = state.notes.treeShrubTechParagraph['77'];
+    expect(entry).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v2', assessmentId: '77', text: 'Our technician saw scale on the hedges. Today we applied Merit 2F and Palm Gro 8-2-12.' });
+    expect(entry.slots.observed).toEqual([{ condition: 'scale', plant: 'hedges' }]);
+    expect(tech.readFrozenTechParagraph(state.notes, 77)).toBe(entry.text);
   });
 });

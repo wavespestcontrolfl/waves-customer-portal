@@ -410,22 +410,8 @@ worse worst think thinks thought suspect suspects possible possibly maybe likely
 s t re ve ll d m
 `.split(/\s+/).filter(Boolean));
 
-// What differs per service line: the condition vocabulary, the closed word list,
-// the place words, the input normalizer and any extra product names the
-// validator must recognize. The lawn report uses LAWN_PROFILE; the tree & shrub
-// report passes its own (tree-shrub-tech-paragraph.js). `extraChecks(text,
-// inputs, fail)` adds service-line rules; it runs after the shared screens.
-const LAWN_PROFILE = Object.freeze({
-  terms: TERMS,
-  paragraphWords: PARAGRAPH_WORDS,
-  placeWords: GRASS_AND_PLACE_WORDS,
-  normalizeInputs,
-  extraProductWords: [],
-  extraChecks: null,
-});
-
 // Every word of a candidate paragraph, minus the ones the rules above allow.
-function wordsOutsideVocabulary(text, inputs, hay, profile = LAWN_PROFILE) {
+function wordsOutsideVocabulary(text, inputs, hay) {
   // The technician's free text is NOT a source of words: a name typed there
   // must never reach the customer. Only system-built inputs count.
   const known = new Set(words([
@@ -435,11 +421,11 @@ function wordsOutsideVocabulary(text, inputs, hay, profile = LAWN_PROFILE) {
   const out = [];
   for (const sentence of splitSentences(text)) {
     const covered = new Set();
-    for (const term of profile.terms) {
+    for (const term of TERMS) {
       for (const m of sentence.matchAll(new RegExp(term.re.source, 'gi'))) for (const w of words(m[0])) covered.add(w);
     }
     for (const w of words(sentence)) {
-      if (/^\d+$/.test(w) || profile.paragraphWords.has(w) || covered.has(w) || known.has(w) || profile.placeWords.has(w) || GENERIC_NAME_TOKENS.has(w)) continue;
+      if (/^\d+$/.test(w) || PARAGRAPH_WORDS.has(w) || covered.has(w) || known.has(w) || GRASS_AND_PLACE_WORDS.has(w) || GENERIC_NAME_TOKENS.has(w)) continue;
       out.push(w);
     }
   }
@@ -647,8 +633,8 @@ function comparisonSupported(sentence, progressLines) {
  * Check a model answer against its inputs. Pure.
  * @returns {{ ok: boolean, paragraph?: string, sources?: object[], problems: string[] }}
  */
-function validateParagraph(answer, rawInputs, profile = LAWN_PROFILE) {
-  const inputs = profile.normalizeInputs(rawInputs); // idempotent: a normalized object comes back equal
+function validateParagraph(answer, rawInputs) {
+  const inputs = normalizeInputs(rawInputs); // idempotent: a normalized object comes back equal
   const problems = [];
   const fail = (code) => { if (!problems.includes(code)) problems.push(code); };
   if (!answer || typeof answer !== 'object' || typeof answer.paragraph !== 'string') return { ok: false, problems: ['no_answer'] };
@@ -705,7 +691,7 @@ function validateParagraph(answer, rawInputs, profile = LAWN_PROFILE) {
   // Prior visit's products count as products NOT applied today: the text may say
   // what KIND of thing we applied then, never name it as today's work.
   const priorNames = inputs.prior ? inputs.prior.products.map((p) => p.name) : [];
-  const unapplied = distinctTokens([...inputs.knownProductNames, ...priorNames, ...BUILTIN_PRODUCT_WORDS, ...profile.extraProductWords], applied);
+  const unapplied = distinctTokens([...inputs.knownProductNames, ...priorNames, ...BUILTIN_PRODUCT_WORDS], applied);
   const lowerWords = new Set(words(text));
   for (const token of unapplied) if (lowerWords.has(token)) { fail(`product_not_applied:${token}`); break; }
   sentences.forEach((sentence) => {
@@ -713,10 +699,10 @@ function validateParagraph(answer, rawInputs, profile = LAWN_PROFILE) {
     tokens.forEach((t, idx) => {
       if (!/^[A-Z]/.test(t) || t === 'I') return;
       const w = t.toLowerCase();
-      if (applied.has(w) || profile.placeWords.has(w) || /^\d/.test(t)) return;
+      if (applied.has(w) || GRASS_AND_PLACE_WORDS.has(w) || /^\d/.test(t)) return;
       // A sentence may open with an ordinary word; a capitalized word that is
       // not ordinary is a name wherever it stands.
-      if (idx === 0 && (profile.paragraphWords.has(w) || GENERIC_NAME_TOKENS.has(w) || profile.terms.some((term) => term.re.test(t)))) return;
+      if (idx === 0 && (PARAGRAPH_WORDS.has(w) || GENERIC_NAME_TOKENS.has(w) || TERMS.some((term) => term.re.test(t)))) return;
       // Fixed code, no token: the name may be a person's, copied from the note,
       // and the write gate logs these codes.
       fail('unrecognized_name');
@@ -726,13 +712,13 @@ function validateParagraph(answer, rawInputs, profile = LAWN_PROFILE) {
   // Conditions, per sentence, against the inputs and the sentence's own sources.
   const hay = haystacks(inputs);
   // Closed vocabulary, fixed code: the offending word may be a name.
-  if (wordsOutsideVocabulary(text, inputs, hay, profile).length) fail('word_not_in_inputs');
+  if (wordsOutsideVocabulary(text, inputs, hay).length) fail('word_not_in_inputs');
   let prevCauses = []; // cause terms the previous sentence named: what "them" / "it" means
   sentences.forEach((rawSentence, i) => {
     const sentence = rawSentence.replace(/\bWaves\s+Pest\s+Control\b/gi, 'we');
     const from = fromBySentence[i] || [];
     const named = [];
-    for (const term of profile.terms) {
+    for (const term of TERMS) {
       if (!term.re.test(sentence)) continue;
       named.push(term);
       const prov = provenanceOf(term, hay);
@@ -770,7 +756,7 @@ function validateParagraph(answer, rawInputs, profile = LAWN_PROFILE) {
     // "found nematodes" names no term, so nothing above checked it. Every clause
     // that says found / saw / there is must name a known condition.
     for (const clause of sentence.split(CLAUSE_BREAK_RE)) {
-      if (OBSERVED_CUE_RE.test(clause) && !profile.terms.some((t) => t.re.test(clause))) { fail('observed_unrecognized'); break; }
+      if (OBSERVED_CUE_RE.test(clause) && !TERMS.some((t) => t.re.test(clause))) { fail('observed_unrecognized'); break; }
     }
     // The photos never confirm a cause: that comes from the technician.
     if (named.some((t) => t.cause) && PHOTO_REF_RE.test(sentence) && CONFIRM_VERB_RE.test(sentence)) fail('photo_confirms_cause');
@@ -785,8 +771,6 @@ function validateParagraph(answer, rawInputs, profile = LAWN_PROFILE) {
     // Color is never compared between visits.
     if (COLOR_WORD_RE.test(sentence) && (PRIOR_REF_RE.test(sentence) || COMPARE_WORD_RE.test(sentence)) && /\b(?:since|than|compared|last\s+visit|previous|earlier|prior|before|better|worse|greener|darker|lighter|yellower|browner|paler|improv\w*|declin\w*)\b/i.test(sentence)) fail('color_comparison');
   });
-
-  if (typeof profile.extraChecks === 'function') profile.extraChecks(text, inputs, fail);
 
   if (problems.length) return { ok: false, problems };
   return {
@@ -848,13 +832,5 @@ module.exports = {
   techParagraphSignature,
   freezeTechParagraph,
   createAndFreezeTechParagraph,
-  // For the tree & shrub paragraph (tree-shrub-tech-paragraph.js), which runs this
-  // validator with its own profile and reuses the prompt-building helpers.
-  LAWN_PROFILE,
-  PARAGRAPH_WORDS,
-  frozenTextProblem,
-  cleanConfidence,
-  productLine,
-  listOrNone,
   _test: { frozenTextProblem, TERMS, inputsHash },
 };

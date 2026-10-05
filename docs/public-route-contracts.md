@@ -483,40 +483,40 @@ render (gate on or off, every service line) — `report-data.js`'s
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
 
-Tree & Shrub "From your technician" paragraph (proposed 2026-10-05, owner go-ahead pending, the lawn
-paragraph's twin; `GATE_TS_TECH_PARAGRAPH` — dark, strict `'true'`, read at call
-time, effective only while `GATE_TS_TECH_FINDINGS_COPY` is also live; off leaves the
+Tree & Shrub "From your technician" paragraph (owner 2026-10-05, go-ahead; fixed
+sentences; `GATE_TS_TECH_PARAGRAPH` — dark, strict `'true'`, read at call time,
+effective only while `GATE_TS_TECH_FINDINGS_COPY` is also live; off leaves the
 tree/shrub payload, the render, the PDF and its cache signature unchanged, key for
 key, with no model call and no read): on the tree/shrub service-report payload
 (`/api/reports/:token/data` and the PDF) the one new optional key is
-`reportV2.techParagraph`, a string of 2 to 4 sentences and at most 70 words in the
-first person plural. It is written ONCE, at completion
-(`freezeTreeShrubTechParagraph`, `tree-shrub-tech-paragraph-gate.js`), by one model
-call (lane `ts_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second deadline across
-the whole step) from the technician's note (verbatim), the products applied with
-their stored targets and the kept photo findings (symptom labels with a
-confidence; a finding the technician hid or rewrote never reaches the model). The
-seasonal watch list (`GATE_TS_WATCH_LIST`) is NOT an input and stays tech-facing;
-neither is the last visit, the report's headline or a product's active ingredient.
-The input gather builds the report with `skipNarrativeGeneration`, so it never
-dispatches the treatment-narrative lane. It never reads the raw photo-read text, a
-price, an address or any customer name. The text freezes first-writer-wins under
-`structured_notes.treeShrubTechParagraph[assessmentId]`; a render only reads it from
-the record the build already loaded. The key is absent when no paragraph was written
-(no note, no product, no confirmed assessment, a failed or slow call, or any
-rejection). Code rejects the WHOLE paragraph, and stores nothing, on the lawn
-paragraph's rules (`validateParagraph` with a tree & shrub profile: unapplied or
-unknown product, a pest, disease or condition no input carries or the note negates
-or doubts, a number, date, promise, timing, watering advice, any reference to an
-earlier visit or comparison, "the photos confirmed", a word outside the closed
-vocabulary, the customer-copy screens) plus: no care instruction to the customer, no
-active-ingredient name that is not part of a listed product name, no sentence that
-names an applied product and also a plant group or place, and the palm rules: never Ganoderma, a conk or the other
-diagnosis-only palm diseases, never crown, spear leaf or newest fronds. The web
-report prints it under "What we applied today" as "From your technician"; the PDF
-prints the same text under the same label. The text is screened again where it is
-read. The PDF cache signature gains `:tp=<hash of the text>` only while the gate is
-live AND a whole frozen entry exists.
+`reportV2.techParagraph`, a string made ONLY of the sentences in the code constant
+`TS_SENTENCES` (`tree-shrub-tech-paragraph.js`), in this fixed order: "Our technician
+saw {items}." (up to 3 closed-list conditions, each optionally "on the {plant}"),
+"There may be early signs of {labels}; we will keep an eye on it." (low-confidence
+kept photo findings the note does not cover, at most 2), "Our technician confirmed
+signs of {labels}." (findings the technician confirmed), "Today we applied
+{products}." (product display names only) and "Your landscape looked {excellent|good}
+today." (only when nothing else applies and the technician rated the landscape
+Excellent or Good). No model text is ever printed. It is written ONCE, at completion
+(`freezeTreeShrubTechParagraph`, `tree-shrub-tech-paragraph-gate.js`), with at most
+one model call (lane `ts_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second
+deadline across the whole step) that only EXTRACTS closed-list `{ condition, plant }`
+ids from the technician's note; code verifies each against the note (not negated,
+not hedged, same clause for the plant) and drops a failing item. Inputs: the note,
+the applied products' names, the kept photo findings (a finding the technician hid
+or rewrote never enters) and the technician's landscape rating. The seasonal watch
+list (`GATE_TS_WATCH_LIST`), the last visit, the report headline and a product's
+ingredient, targets and method are NOT inputs. The build used for the gather
+(`skipNarrativeGeneration`) never dispatches the treatment-narrative lane. The text
+freezes first-writer-wins under `structured_notes.treeShrubTechParagraph[assessmentId]`
+as `{ text, slots }`; a render only reads it from the record the build already
+loaded, and prints it only when the text equals the render of its slots under the
+current templates and passes the palm rules and the customer-copy screen. The key is
+absent when no sentence applied, the assessment is missing, the step timed out, or the
+stored entry fails the read-time check. The web report prints it under "What we
+applied today" as "From your technician"; the PDF prints the same text under the same
+label. The PDF cache signature gains `:tp=<hash of the text>` only while the gate is
+live AND a whole frozen entry exists; a failed lookup stamps a one-off sentinel.
 
 Tree & Shrub technician findings in the report (owner ruling 2026-10-02,
 lawn parity, `GATE_TS_TECH_FINDINGS_COPY` — dark, off unless exactly `'true'`,
