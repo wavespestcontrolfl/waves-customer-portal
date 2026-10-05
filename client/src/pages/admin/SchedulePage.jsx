@@ -498,6 +498,39 @@ export function areasFromProductRows(selectedProducts, orderedAreas) {
   }
   return [...orderedAreas.filter((area) => used.has(area)), ...offList];
 }
+// A seeded default product row on a regular pest visit starts on an area
+// (owner 2026-10-05, "prefill areas"): with no row area the report's exterior
+// re-entry line drops off, and a tech would tap Perimeter on nearly every
+// visit. An exterior method starts on "Perimeter"; an interior method
+// (crack & crevice spot work, gel bait) starts on the conservative room pair
+// Kitchen + Bathrooms; any other method starts empty. Each value must sit on
+// the pest area list AND on the matching side of treatment-area-scopes.json,
+// or it is not offered. Fills an empty area only, and is marked
+// applicationAreaDefault like the lawn prefill, so a tech's own pick (which
+// clears the mark) is never replaced.
+const PEST_ROW_DEFAULT_AREAS = {
+  exterior: ["Perimeter"],
+  interior: ["Kitchen", "Bathrooms"],
+};
+const PEST_ROW_METHOD_SCOPE = {
+  perimeter_spray: "exterior",
+  broadcast_spray: "exterior",
+  granular_broadcast: "exterior",
+  spot_treatment: "interior",
+  bait_placement: "interior",
+};
+export function pestRowDefaultArea(applicationMethod) {
+  const scope = PEST_ROW_METHOD_SCOPE[normalizeApplicationMethod(applicationMethod)];
+  if (!scope) return "";
+  return PEST_ROW_DEFAULT_AREAS[scope]
+    .filter((area) => AREAS_BY_SERVICE.pest.includes(area) && AREA_SCOPES[scope].includes(area))
+    .join(", ");
+}
+export function withPestRowDefaultArea(row) {
+  if (!row || row.applicationArea) return row;
+  const applicationArea = pestRowDefaultArea(row.applicationMethod);
+  return applicationArea ? { ...row, applicationArea, applicationAreaDefault: true } : row;
+}
 function toggleProductAreaValue(currentValue, area, orderedChoices) {
   const selected = parseApplicationAreas(currentValue);
   const next = selected.includes(area)
@@ -13780,7 +13813,9 @@ export function CompletionPanel({
     const rows = pestDefaultMixSelections(products)
       .filter(({ product }) => !protocolCompletionDefaultsRemovedIds.includes(String(product.id)))
       .map(({ product, totalAmount }) => ({
-      ...buildSelectedProduct(product),
+      // A regular pest visit's seeded rows start on their area (owner
+      // 2026-10-05): Perimeter for the exterior mix and its surfactant.
+      ...(isRegularPestVisit ? withPestRowDefaultArea(buildSelectedProduct(product)) : buildSelectedProduct(product)),
       totalAmount,
       totalAmountManual: true,
       // Marked manual so a rate or area edit cannot recompute the house
@@ -13795,7 +13830,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
@@ -13847,12 +13882,15 @@ export function CompletionPanel({
       // A row the tech already removed by hand never comes back, even
       // into a freshly emptied list (a sibling's removal, or the outage
       // clearing effect, both restart from empty).
-      .filter((row) => !protocolCompletionDefaultsRemovedIds.includes(String(row.productId)));
+      .filter((row) => !protocolCompletionDefaultsRemovedIds.includes(String(row.productId)))
+      // On a regular pest visit a seeded row starts on its area (owner
+      // 2026-10-05); every other line keeps its rows as built.
+      .map((row) => (isRegularPestVisit ? withPestRowDefaultArea(row) : row));
     if (!rows.length) return;
     protocolCompletionDefaultsSeededRef.current = true;
     protocolCompletionDefaultsSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
+  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, isRegularPestVisit, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
   // Pre-push audit P1, PR #5049 r1 (cockroach/protocol rows) + Codex r3 P1
   // (pest-mix rows): an inspection_only / customer_declined outcome bills
   // as NOTHING applied (shared/specialty-service-closeouts.js's own

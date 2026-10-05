@@ -6,9 +6,13 @@
 // whole pest area list. The areas sent at completion are the rows' own areas.
 // A non-pest line keeps both fields. One box stays (owner 2026-10-05):
 // "Swept eaves and webs" records the pest protocol's sweep action.
+// Seeded default rows start on an area (owner 2026-10-05): Perimeter for an
+// exterior method, Kitchen + Bathrooms for an interior one.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AREAS_BY_SERVICE, CompletionPanel, areasFromProductRows } from './SchedulePage';
+import {
+  AREAS_BY_SERVICE, CompletionPanel, areasFromProductRows, pestRowDefaultArea, withPestRowDefaultArea,
+} from './SchedulePage';
 
 vi.mock('../../hooks/useFeatureFlag', () => ({
   useFeatureFlagReady: () => ({ enabled: false, ready: true }),
@@ -89,6 +93,75 @@ describe('areasFromProductRows', () => {
   it('is empty with no rows or no areas', () => {
     expect(areasFromProductRows([], list)).toEqual([]);
     expect(areasFromProductRows([{ applicationArea: '' }], list)).toEqual([]);
+  });
+});
+
+describe('pestRowDefaultArea', () => {
+  it('maps an exterior method to Perimeter and an interior method to Kitchen, Bathrooms', () => {
+    for (const method of ['perimeter_spray', 'broadcast_spray', 'granular_broadcast', 'Perimeter band']) {
+      expect(pestRowDefaultArea(method)).toBe('Perimeter');
+    }
+    for (const method of ['spot_treatment', 'bait_placement', 'Gel bait']) {
+      expect(pestRowDefaultArea(method)).toBe('Kitchen, Bathrooms');
+    }
+  });
+  it('leaves an unknown, missing or non-room method empty', () => {
+    for (const method of ['soil_drench', 'station_check', 'fog_ulv', '', undefined]) {
+      expect(pestRowDefaultArea(method)).toBe('');
+    }
+  });
+  it('only ever offers areas on the pest list', () => {
+    for (const area of [...pestRowDefaultArea('perimeter_spray').split(', '), ...pestRowDefaultArea('spot_treatment').split(', ')]) {
+      expect(AREAS_BY_SERVICE.pest).toContain(area);
+    }
+  });
+  it('fills an empty area only, and marks it as a default', () => {
+    expect(withPestRowDefaultArea({ applicationMethod: 'spot_treatment', applicationArea: '' }))
+      .toEqual({ applicationMethod: 'spot_treatment', applicationArea: 'Kitchen, Bathrooms', applicationAreaDefault: true });
+    const own = { applicationMethod: 'perimeter_spray', applicationArea: 'Garage' };
+    expect(withPestRowDefaultArea(own)).toBe(own);
+    const unknown = { applicationMethod: 'soil_drench', applicationArea: '' };
+    expect(withPestRowDefaultArea(unknown)).toBe(unknown);
+  });
+});
+
+describe('a protocol default row on a regular pest visit', () => {
+  const roachCatalog = [
+    { id: 'a1', name: 'Alpine WSG', category: 'Insecticide' },
+    { id: 'a2', name: 'Gentrol IGR', category: 'Insect Growth Regulator' },
+    { id: 'a3', name: 'Advion Cockroach Gel Bait', category: 'Gel Bait' },
+    { id: 'a4', name: 'Synthetic Drench', category: 'Insecticide' },
+  ];
+  const protocolResponse = {
+    source: 'protocol_visit',
+    programKey: 'general_pest',
+    products: [
+      { id: 'a1', completionApplicationMethod: 'spot_treatment' },
+      { id: 'a2', completionApplicationMethod: 'spot_treatment' },
+      { id: 'a3', completionApplicationMethod: 'bait_placement' },
+      { id: 'a4', completionApplicationMethod: 'soil_drench' },
+    ],
+  };
+  it('starts interior rows on Kitchen and Bathrooms and an unknown method on no area', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({
+      ok: true,
+      json: async () => (String(url).includes('/default-products')
+        ? protocolResponse
+        : { customer: {}, actions: [], available: false }),
+    })));
+    const onSubmit = vi.fn().mockResolvedValue({});
+    await act(async () => {
+      render(<CompletionPanel service={regularPest()} products={roachCatalog} onClose={() => {}} onSubmit={onSubmit} />);
+    });
+    await screen.findByText('Alpine WSG');
+    await waitFor(() => expect(screen.getAllByText('Treatment areas')).toHaveLength(4));
+    await act(async () => { fireEvent.click(submitButton()); });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.products.map((p) => p.applicationArea)).toEqual([
+      'Kitchen, Bathrooms', 'Kitchen, Bathrooms', 'Kitchen, Bathrooms', null,
+    ]);
+    expect(body.areasServiced).toEqual(['Kitchen', 'Bathrooms']);
   });
 });
 
@@ -196,8 +269,9 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
     for (const area of AREAS_BY_SERVICE.pest) {
       expect(within(pickers[0].parentElement).getByRole('button', { name: area })).toBeTruthy();
     }
-    // Row two picks Yard then Garage, row one picks Kitchen; the visit's
-    // areas come out in the list's order whatever the order of the taps.
+    // Every seeded row opens on Perimeter (owner 2026-10-05). Row two adds
+    // Yard then Garage, row one adds Kitchen; the visit's areas come out in
+    // the list's order whatever the order of the taps.
     fireEvent.click(within(pickers[1].parentElement).getByRole('button', { name: 'Yard' }));
     fireEvent.click(within(pickers[1].parentElement).getByRole('button', { name: 'Garage' }));
     fireEvent.click(within(pickers[0].parentElement).getByRole('button', { name: 'Kitchen' }));
@@ -205,31 +279,56 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
     await act(async () => { fireEvent.click(submitButton()); });
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     const body = onSubmit.mock.calls[0][1];
-    expect(body.areasServiced).toEqual(['Garage', 'Kitchen', 'Yard']);
-    expect(body.products.map((p) => p.applicationArea)).toEqual(['Kitchen', 'Garage, Yard', null]);
+    expect(body.areasServiced).toEqual(['Perimeter', 'Garage', 'Kitchen', 'Yard']);
+    expect(body.products.map((p) => p.applicationArea)).toEqual([
+      'Perimeter, Kitchen', 'Perimeter, Garage, Yard', 'Perimeter',
+    ]);
     expect(body.customerInteraction).toBe('tech_home_spoke_with_them');
     expect(body.protocolActionsCompleted).toEqual([]);
   });
 
-  it('sends no areas when no row names one, and gives a row no other row\'s area', async () => {
+  // Owner 2026-10-05: the house mix and its surfactant start on Perimeter, so
+  // the report's exterior re-entry line has an area without a tap.
+  it('opens the Taurus, Talak and LESCO rows on Perimeter and sends it as the visit\'s area', async () => {
     const onSubmit = await mount(regularPest());
     await screen.findByText('Taurus SC');
     fillLinearFeet();
     await act(async () => { fireEvent.click(submitButton()); });
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-    expect(onSubmit.mock.calls[0][1].areasServiced).toEqual([]);
+    const body = onSubmit.mock.calls[0][1];
+    // p1 Taurus SC, p2 Atticus Talak 7.9 F, p3 LESCO 90/10 surfactant.
+    expect(body.products.map((p) => [p.productId, p.applicationArea])).toEqual([
+      ['p1', 'Perimeter'], ['p2', 'Perimeter'], ['p3', 'Perimeter'],
+    ]);
+    expect(body.areasServiced).toEqual(['Perimeter']);
+  });
+
+  it('keeps an area the tech changed, and a row the tech cleared stays clear', async () => {
+    const onSubmit = await mount(regularPest());
+    const pickers = await screen.findAllByText('Treatment areas');
+    // Row one: Perimeter off, Yard on. Row two: Perimeter off, nothing else.
+    fireEvent.click(within(pickers[0].parentElement).getByRole('button', { name: 'Perimeter' }));
+    fireEvent.click(within(pickers[0].parentElement).getByRole('button', { name: 'Yard' }));
+    fireEvent.click(within(pickers[1].parentElement).getByRole('button', { name: 'Perimeter' }));
+    fillLinearFeet();
+    await act(async () => { fireEvent.click(submitButton()); });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.products.map((p) => p.applicationArea)).toEqual(['Yard', null, 'Perimeter']);
+    expect(body.areasServiced).toEqual(['Perimeter', 'Yard']);
 
     cleanup();
     localStorage.clear();
     const second = await mount(regularPest());
-    const pickers = await screen.findAllByText('Treatment areas');
-    fireEvent.click(within(pickers[0].parentElement).getByRole('button', { name: 'Perimeter' }));
+    const again = await screen.findAllByText('Treatment areas');
+    for (const picker of again) {
+      fireEvent.click(within(picker.parentElement).getByRole('button', { name: 'Perimeter' }));
+    }
     fillLinearFeet();
     await act(async () => { fireEvent.click(submitButton()); });
     await waitFor(() => expect(second).toHaveBeenCalledTimes(1));
-    const body = second.mock.calls[0][1];
-    expect(body.areasServiced).toEqual(['Perimeter']);
-    expect(body.products.map((p) => p.applicationArea)).toEqual(['Perimeter', null, null]);
+    expect(second.mock.calls[0][1].areasServiced).toEqual([]);
+    expect(second.mock.calls[0][1].products.map((p) => p.applicationArea)).toEqual([null, null, null]);
   });
 
   it('an untouched form mints no draft', async () => {
@@ -340,6 +439,31 @@ describe('restoring a saved draft on a regular pest visit', () => {
     const body = onSubmit.mock.calls[0][1];
     expect(body.products.map((p) => p.applicationArea)).toEqual(['Perimeter, Kitchen', 'Yard']);
     expect(body.areasServiced).toEqual(['Perimeter', 'Kitchen', 'Yard']);
+  });
+
+  // Owner 2026-10-05: the prefill is for a freshly seeded row only.
+  it('keeps a restored draft\'s own row areas, empty ones included', async () => {
+    const service = regularPest();
+    const row = (id, name, applicationArea) => ({
+      productId: id, name, rate: '', rateUnit: '', totalAmount: 4, amountUnit: 'fl_oz',
+      applicationMethod: 'perimeter_spray', applicationArea, areaUnit: 'linear_ft', targets: [],
+    });
+    const onSubmit = vi.fn().mockResolvedValue({});
+    localStorage.setItem(draftKey(service), JSON.stringify({
+      serviceId: service.id,
+      notes: 'Saved note',
+      selectedProducts: [row('p1', 'Taurus SC', 'Yard'), row('p2', 'Atticus Talak 7.9 F', '')],
+    }));
+    await mount(service, { onSubmit });
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    await screen.findByText('Taurus SC');
+    await waitFor(() => expect(screen.getAllByText('Treatment areas')).toHaveLength(2));
+    fillLinearFeet();
+    await act(async () => { fireEvent.click(submitButton()); });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.products.map((p) => p.applicationArea)).toEqual(['Yard', null]);
+    expect(body.areasServiced).toEqual(['Yard']);
   });
 
   it('an old draft that carries the sweep opens with the box checked and sends it', async () => {
