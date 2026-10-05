@@ -55,7 +55,6 @@ const featureGates = require('../config/feature-gates');
 const {
   SYSTEM_PROMPT,
   buildReportAskFacts,
-  AI_ASK_TOPICS,
   buildReportAskPrompt,
   screenAskAnswer,
   placeOfApplication,
@@ -131,6 +130,10 @@ function reportData(overrides = {}) {
 const nextAppointment = { service_type: 'Quarterly Pest Control', scheduled_date: '2027-01-05', window_start: '09:00:00' };
 const NOW = new Date('2026-10-05T14:00:00Z');
 
+function withPetData() {
+  return { serviceLine: 'pest', applications: [], dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated zones until dry.' } } };
+}
+
 describe('buildReportAskFacts', () => {
   const facts = buildReportAskFacts({ data: reportData(), nextAppointment, now: NOW });
   const sheet = JSON.stringify(facts);
@@ -154,14 +157,14 @@ describe('buildReportAskFacts', () => {
   test('carries the visit\'s recorded pet precaution', () => {
     const withPet = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated zones until dry.' } } } });
     expect(withPet.pet_precaution_today).toBe('Keep pets off treated zones until dry.');
-    // A fixed wait does not survive the timing strip; re-entry questions
-    // never reach the AI anyway.
+    // A fixed wait does not survive the timing strip as a fact; it reaches the
+    // model only as a required line, word for word.
     const timed = { serviceLine: 'pest', applications: [], advisory: { pet_advisory: 'Keep pets indoors for 2 hours.' } };
     expect(buildReportAskFacts({ data: timed }).pet_precaution_today).toBeUndefined();
-    expect(AI_ASK_TOPICS.has('reentry')).toBe(false);
-    expect(AI_ASK_TOPICS.has('next_steps')).toBe(false);
-    expect(AI_ASK_TOPICS.has('watering')).toBe(false);
-    expect(AI_ASK_TOPICS.has('applied')).toBe(true);
+    // A precaution that is already a required line is not sent twice.
+    const asLine = buildReportAskFacts({ data: withPetData(), requiredLines: ['Keep pets off treated zones until dry.'] });
+    expect(asLine.pet_precaution_today).toBeUndefined();
+    expect(asLine.required_lines).toEqual(['Keep pets off treated zones until dry.']);
   });
 
   test('carries the visit facts the answer needs', () => {
@@ -456,11 +459,54 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: QUESTION.length, topic: 'applied' });
   });
 
-  test('gate on, a re-entry question: the fixed-rule answer and no model call', async () => {
+  // A lawn report with a recorded pet precaution: the re-entry question now
+  // reaches the AI, which must carry the precaution word for word.
+  const PET_LINE = 'Keep pets off treated zones until fully dry.';
+  const lawnReport = (petAdvisory = PET_LINE) => ({
+    serviceLine: 'lawn',
+    applications: [],
+    advisory: { pet_advisory: petAdvisory },
+    lawnAssessment: { scores: { overallScore: 82 }, snapshot: { summary: 'Your lawn is thickening.' } },
+  });
+
+  test('gate on, a lawn report, a re-entry question: AI answer only when it carries the pet precaution verbatim', async () => {
     process.env.GATE_REPORT_ASK_AI = 'true';
+    buildReportV1Data.mockResolvedValue(lawnReport());
+    const q = 'Can my dog go back out on the lawn?';
+    const rules = routeServiceReportQuestion({ question: q, data: lawnReport() }).answer;
+    expect(rules).toContain(PET_LINE);
+
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { answer: `Soon. ${PET_LINE}` }, provider: 'anthropic' });
+    const { eventInsert } = mockDb();
+    await withServer(async (baseUrl) => {
+      const { status, body } = await ask(baseUrl, q);
+      expect(status).toBe(200);
+      expect(body).toEqual({ answer: `Soon. ${PET_LINE}` });
+    });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    // The model was handed the precaution as a required line.
+    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('"required_lines"');
+    expect(dispatchWithFallback.mock.calls[0][1].text).toContain(PET_LINE);
+    expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'reentry' });
+
+    // The same call, but the model drops the precaution: the rule answer wins.
+    jest.clearAllMocks();
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { answer: 'Your dog can go out once the lawn is dry.' }, provider: 'anthropic' });
     mockDb();
-    const q = 'When can I re-enter treated areas?';
-    const rules = routeServiceReportQuestion({ question: q, data: { serviceLine: 'pest', applications: [] } }).answer;
+    await withServer(async (baseUrl) => {
+      const { body } = await ask(baseUrl, q);
+      expect(body).toEqual({ answer: rules });
+    });
+  });
+
+  test('gate on, a recorded fixed wait trips the screen: the rule answer states it, no model call', async () => {
+    process.env.GATE_REPORT_ASK_AI = 'true';
+    const wait = 'Keep pets inside for 2 hours.';
+    buildReportV1Data.mockResolvedValue(lawnReport(wait));
+    const q = 'Can my dog go back out on the lawn?';
+    const rules = routeServiceReportQuestion({ question: q, data: lawnReport(wait) }).answer;
+    expect(rules).toContain(wait);
+    mockDb();
     await withServer(async (baseUrl) => {
       const { body } = await ask(baseUrl, q);
       expect(body).toEqual({ answer: rules });
@@ -468,17 +514,29 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  test('gate on, a lawn report: the fixed-rule answer and no model call (its aftercare stays rule-driven)', async () => {
-    process.env.GATE_REPORT_ASK_AI = 'true';
-    buildReportV1Data.mockResolvedValue({ serviceLine: 'lawn', applications: [] });
+  test('gate off, a lawn report: the fixed-rule answer, byte for byte, no model call', async () => {
+    delete process.env.GATE_REPORT_ASK_AI;
+    buildReportV1Data.mockResolvedValue(lawnReport());
+    const q = 'Can my dog go back out on the lawn?';
+    const rules = routeServiceReportQuestion({ question: q, data: lawnReport() }).answer;
     mockDb();
-    const lawnRules = routeServiceReportQuestion({ question: QUESTION, data: { serviceLine: 'lawn', applications: [] } }).answer;
     await withServer(async (baseUrl) => {
-      const { status, body } = await ask(baseUrl, QUESTION);
-      expect(status).toBe(200);
-      expect(body).toEqual({ answer: lawnRules });
+      const { body } = await ask(baseUrl, q);
+      expect(body).toEqual({ answer: rules });
     });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test.each(['lawn', 'tree_shrub', 'mosquito', 'termite', 'rodent'])('gate on, a %s report reaches the AI for a plain question', async (line) => {
+    process.env.GATE_REPORT_ASK_AI = 'true';
+    buildReportV1Data.mockResolvedValue({ serviceLine: line, applications: [] });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { answer: 'No products were recorded on this report.' }, provider: 'anthropic' });
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { body } = await ask(baseUrl, QUESTION);
+      expect(body).toEqual({ answer: 'No products were recorded on this report.' });
+    });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
   });
 
   test('gate on: the model answer, same reply shape, same event (length and topic only)', async () => {

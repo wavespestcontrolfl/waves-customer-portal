@@ -3,8 +3,12 @@
 
 /**
  * Prints the exact prompt the service report's "Ask Waves" AI answer would
- * send to the model (GATE_REPORT_ASK_AI), as JSON { system, user }. No server,
- * no database, no model call: it reads a saved report payload and a question.
+ * send to the model (GATE_REPORT_ASK_AI), as JSON { system, user, topic,
+ * requiredLines, ruleAnswer }: the prompt, the rule router's topic, the
+ * recorded instructions the AI answer must repeat word for word, and the
+ * fixed-rule answer the customer gets when the gate is off or the AI misses.
+ * No server, no database, no model call: it reads a saved report payload and
+ * a question.
  *
  *   node scripts/dev/report-ask-prompt.js <report-data.json> "<question>"
  *
@@ -15,7 +19,7 @@
  *
  * From Node:
  *   const { buildReportAskPrompt } = require('./server/services/service-report/report-ask-ai');
- *   buildReportAskPrompt({ question, data, nextAppointment }) // -> { system, user }
+ *   buildReportAskPrompt({ question, data, nextAppointment, requiredLines }) // -> { system, user }
  */
 
 const fs = require('node:fs');
@@ -43,7 +47,17 @@ function main(argv) {
   // Keep stdout pure JSON: the portal logger prints module-load warnings there.
   process.env.LOG_LEVEL = 'error';
   const { buildReportAskPrompt } = require('../../server/services/service-report/report-ask-ai');
-  process.stdout.write(`${JSON.stringify(buildReportAskPrompt({ question, data, nextAppointment }), null, 2)}\n`);
+  const { routeServiceReportQuestion } = require('../../server/services/service-report/report-assistant');
+  const routed = routeServiceReportQuestion({ question, data, nextAppointment });
+  const prompt = buildReportAskPrompt({
+    question, data, nextAppointment, requiredLines: routed.requiredLines,
+  });
+  process.stdout.write(`${JSON.stringify({
+    ...prompt,
+    topic: routed.topic,
+    requiredLines: routed.requiredLines,
+    ruleAnswer: routed.answer,
+  }, null, 2)}\n`);
   return 0;
 }
 
