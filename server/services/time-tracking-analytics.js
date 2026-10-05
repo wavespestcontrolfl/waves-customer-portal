@@ -7,7 +7,7 @@
  * this stop expected to take" (owner planning minutes under
  * GATE_SCHEDULING_CAPACITY, else window span / estimated_duration_minutes /
  * 60). The old analytics queries selected scheduled_services.estimated_duration,
- * a column that only exists on dispatch_jobs, and the route answered 500.
+ * a column scheduled_services does not have, and the route answered 500.
  */
 const { workDuration } = require('./route-reorder-window-fit');
 const { etWeekStart, etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');

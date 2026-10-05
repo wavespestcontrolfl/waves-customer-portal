@@ -1,6 +1,6 @@
 // Time Tracking analytics: the /analytics and /analytics/comparison reads
 // 500'd in prod because they selected scheduled_services.estimated_duration,
-// a column that exists only on dispatch_jobs (the real one is
+// a column scheduled_services does not have (the real one is
 // estimated_duration_minutes). These tests pin the fix, the efficiency math
 // and the load-ahead week window.
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
