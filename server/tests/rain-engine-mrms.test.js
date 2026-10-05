@@ -237,6 +237,20 @@ describe('fetchMrmsDailyRain payload handling', () => {
     expect(new Set(global.fetch.mock.calls.map(([url]) => startOf(url))).size).toBe(3);
   });
 
+  test('a re-request never leaves the start year (the relay returns no MRMS for a two-year window)', async () => {
+    const neighbor = { ok: true, json: async () => ({ ...NEIGHBOR_CELL, data: [{ date: '2027-01-04', mrms_precip_in: 0.91 }] }) };
+    global.fetch = jest.fn().mockResolvedValue(neighbor);
+    expect(await fetchMrmsDailyRain({ ...HOME, start: '2027-01-04', end: '2027-01-10' })).toBeNull();
+    const starts = global.fetch.mock.calls.map(([url]) => startOf(url));
+    expect(starts.length).toBeGreaterThan(1);
+    expect(new Set(starts).size).toBe(starts.length);
+    expect(starts.every((s) => s >= '2027-01-01' && s <= '2027-01-04')).toBe(true);
+    // A window that starts on January 1 has no earlier day in its year: one request, then the fallback.
+    global.fetch = jest.fn().mockResolvedValue(neighbor);
+    expect(await fetchMrmsDailyRain({ ...HOME, start: '2027-01-01', end: '2027-01-03' })).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
   test('the matching cell is taken on the first request; a cell-edge coordinate accepts either side', async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,

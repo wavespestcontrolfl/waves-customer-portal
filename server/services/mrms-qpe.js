@@ -76,18 +76,27 @@ function shiftYmd(ymd, days) {
   return new Date(Date.parse(`${ymd}T00:00:00Z`) + days * 86400000).toISOString().slice(0, 10);
 }
 
+// The relay leaves MRMS null for a window that spans two calendar years, so
+// the earlier start stays inside the requested start's year. Returns null when
+// the year has no earlier day left (a window that starts on January 1).
 function retryStart(start, cell, attempt) {
+  const daysIntoYear = Math.round((Date.parse(`${start}T00:00:00Z`) - Date.parse(`${start.slice(0, 4)}-01-01T00:00:00Z`)) / 86400000);
+  if (!(daysIntoYear > 0)) return null;
   const spread = attempt === 1
     ? (cell.i * 131 + cell.j) % RETRY_SPREAD_DAYS
     : (cell.i * 17 + cell.j * 7) % RETRY_SPREAD_DAYS;
-  return shiftYmd(start, -(1 + (attempt - 1) * RETRY_SPREAD_DAYS + spread));
+  return shiftYmd(start, -(1 + (((attempt - 1) * RETRY_SPREAD_DAYS + spread) % daysIntoYear)));
 }
 
 // One request per attempt, each under its own timeout. Returns the rows read
 // at this property's cell, or null (unreachable, or another cell every time).
 async function fetchOwnCellRows({ lat, lon, start, end, cell, controller }) {
+  const tried = new Set();
   for (let attempt = 0; attempt <= 2; attempt += 1) {
     const windowStart = attempt === 0 ? start : retryStart(start, cell, attempt);
+    // No other window left inside the year: nothing new to ask.
+    if (!windowStart || tried.has(windowStart)) break;
+    tried.add(windowStart);
     const url = `${IEMRE_BASE}/${windowStart}/${end}/${lat.toFixed(4)}/${lon.toFixed(4)}/json`;
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
