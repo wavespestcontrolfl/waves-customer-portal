@@ -663,6 +663,17 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(assessmentEstimateCloseRefusal({ status: 'on_site', scheduled_date: YESTERDAY, primary_line_price: '49.00' }, new Date(), { today: TODAY })).toBe('assessment_has_charge');
   });
 
+  test('an unresolved street-level address hold leaves the assessment open — completing it would confirm the address with nobody approving it', async () => {
+    const customerId = await customer();
+    const visitId = await visit(customerId, { status: 'confirmed', day: YESTERDAY, customer_confirmed: false });
+    await estimate(customerId, { sentAt: new Date() });
+    await mockPg('triage_items').insert({ category: 'booking', reason_code: 'outbound_booking_review',
+      payload: JSON.stringify({ street_level_address: 'true', scheduled_service_id: visitId }) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
+    expect((await row(visitId)).status).toBe('confirmed');
+    expect(await audits(visitId, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'street_level_hold' }) })]);
+  });
+
   test('money is a person\'s: a priced assessment, a prepaid one and one with a linked invoice are never candidates', async () => {
     const priced = await customer();
     const pricedVisit = await visit(priced, { estimated_price: 75 });

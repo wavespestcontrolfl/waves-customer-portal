@@ -274,13 +274,19 @@ async function estimateForAssessment(conn, visit, { now }) {
   return null;
 }
 
-// Reads beyond the visit row that keep it open: an invoice is linked to it (money: a
+// Reads beyond the visit row that keep it open: an unresolved street-level
+// address hold, an invoice is linked to it (money: a
 // person's), its technician's job timer is still running (they are working
 // it right now), or it is one stop of a grouped visit (the whole visit
 // closes together).
 async function liveRefusal(conn, visit) {
   const invoice = await conn('invoices').where({ scheduled_service_id: visit.id }).whereRaw("status IS DISTINCT FROM 'void'").first('id');
   if (invoice) return 'assessment_has_invoice';
+  // An unresolved street-level address hold (a voice-agent booking awaiting
+  // the office): completing the visit would stamp the address confirmed
+  // without anyone approving it (pre-push audit P1). Fails closed: a lookup
+  // error reads as held.
+  if (await require('./street-level-hold').isStreetLevelHoldVisit(visit.id, conn)) return 'street_level_hold';
   const { visitJobTimerRunning } = require('./invoice-issued-closeout');
   if (await visitJobTimerRunning(conn, visit.id)) return 'visit_timer_running';
   if (visit.visit_id) {
