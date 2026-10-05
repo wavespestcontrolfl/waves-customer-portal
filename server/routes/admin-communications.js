@@ -2068,8 +2068,13 @@ router.post('/call', async (req, res, next) => {
       if (relatedCommitmentId && !require('../services/callback-cards').enabled()) {
         throw Object.assign(new Error('Callback cards are disabled'), { status: 409 });
       }
+      // The staff leg rings from the main line regardless of the gate — the
+      // line the staff cell has always seen — and only the customer leg
+      // presents the home line (callerIdNumber on the prompt URL → the
+      // /outbound-connect <Dial callerId>). The lead auto-bridge splits the
+      // two legs the same way (routes/lead-webhook.js).
       bridged = await placeBridgeCall({
-        to: dialTo, bridgePhone, from, customer, source, adminUserId: req.technicianId, metadata, leadName,
+        to: dialTo, bridgePhone, from, bridgeFrom: TWILIO_NUMBERS.mainLine.number, customer, source, adminUserId: req.technicianId, metadata, leadName,
       });
     } catch (err) {
       // An ambiguous create can already be ringing. Its claim and initiated
