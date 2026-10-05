@@ -688,9 +688,12 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   const suiteSize = propertyFacts?.commercialSuiteSize;
   if (usesHomeSqft && suiteSize
     && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS
+      || suiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT
       || suiteSize.source === SQFT_SOURCES.SUITE_TYPE_DEFAULT)) {
     const sizedSqft = Number(propertyFacts.home?.value) || suiteSize.value;
-    if (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
+    if (suiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT) {
+      reasons.push(`suite size read from a public listing: ${sizedSqft.toLocaleString()} sq ft${suiteSize.url ? ` (${suiteSize.url})` : ''} — confirm on site`);
+    } else if (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
       reasons.push(`suite size estimated from state restaurant license: ${suiteSize.seats ?? '?'} seats → ${sizedSqft.toLocaleString()} sq ft — confirm on site`);
     } else {
       // Label with the input that actually SELECTED the default (the

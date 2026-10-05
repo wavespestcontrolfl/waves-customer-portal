@@ -25,6 +25,8 @@ const { lookupPoolPermitsByParcel } = require('../services/property-lookup/count
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const { commercialSuiteSizingLive, lookupBusinessIdentityLive } = require('../config/feature-gates');
+// Own line so gate PRs never conflict on the shared import.
+const { lookupListingSizeLive } = require('../config/feature-gates');
 const {
   identifyBusinessAtAddress,
   timeoutMsFromEnv: businessIdentityTimeoutMs,
@@ -1869,9 +1871,15 @@ function subdivisionMedianEstimate(rc) {
 const DAY_MS = 24 * 60 * 60 * 1000;
 const SUITE_SIZE_STAMP_MAX_AGE_MS = {
   license_seats: 30 * DAY_MS,
+  // A published listing size (PR 5b): re-checked after 90 days (owner spec).
+  listing_verified_text: 90 * DAY_MS,
 };
 function commercialSuiteSizeStampIsFresh(stamp, now = Date.now()) {
   if (!stamp || !(Number(stamp.value) > 0)) return false;
+  // A persisted listing size (PR 5b) is honoured only while its gate is on:
+  // unsetting the kill switch must stop pricing from cached listing sizes
+  // at once, not after the 90-day stamp age.
+  if (stamp.source === 'listing_verified_text' && !lookupListingSizeLive()) return false;
   const maxAge = SUITE_SIZE_STAMP_MAX_AGE_MS[stamp.source];
   if (!maxAge) return true;
   const resolvedAt = Date.parse(stamp.resolvedAt);
@@ -1931,7 +1939,9 @@ function verifiedSqftLooksSuiteScoped(rc) {
 // input, and model output never reaches it (AGENTS.md).
 function reconcileCommercialSuiteSubtype(subtype, suiteSize) {
   if (!suiteSize || subtype !== 'office_retail') return subtype;
-  return suiteSize.source === 'license_seats' ? 'restaurant' : subtype;
+  // A license at the suite classifies it, whichever source sized it (a
+  // listing size can carry the license's classification, licenseBacked).
+  return (suiteSize.source === 'license_seats' || suiteSize.licenseBacked === true) ? 'restaurant' : subtype;
 }
 
 // Commercial subpremise: the shared residential predicate deliberately
@@ -2547,6 +2557,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup });
+  // A cached listing-size stamp reused on this profile keeps its
+  // confirm-on-site flag (the fresh path adds it in applyCommercialSuiteSize).
+  if (resolvedCommercialSuiteSize?.source === 'listing_verified_text' && Number(resolvedCommercialSuiteSize.value) > 0) {
+    fieldVerifyFlags.push(listingSizeVerifyFlag(resolvedCommercialSuiteSize));
+  }
   if (residentialCondoUnitLookup) {
     // One propertyType flag per profile: win/loss tallies every flag, so a
     // source-conflict warning on the same field would double-count (codex
@@ -3204,7 +3219,18 @@ function suiteUnitKey(address) {
 // Only SOURCED sizes are pinned to the cache row — a type default is a
 // guess (cold DBPR cache, resolver miss) and pinning it would stop every
 // later cache hit from upgrading to a license size until the row expires.
-const PERSISTED_SUITE_SIZE_SOURCES = new Set(['license_seats']);
+const PERSISTED_SUITE_SIZE_SOURCES = new Set(['license_seats', 'listing_verified_text']);
+
+// The field-verify flag a listing suite size (PR 5b) always carries, fresh
+// or reused from the cached stamp: a published figure, not a measurement.
+function listingSizeVerifyFlag(suiteSize) {
+  return {
+    field: 'homeSqFt',
+    reason: `Suite size ${Number(suiteSize.value).toLocaleString('en-US')} sq ft read from a public listing${suiteSize.url ? ` (${suiteSize.url})` : ''} — confirm on site before pricing`,
+    priority: 'MEDIUM',
+    ...(suiteSize.url ? { url: suiteSize.url } : {}),
+  };
+}
 
 // The matched listing's suite and name, as hints for the suite-size match —
 // only for a staff-confirmed business suite at an address with no typed unit.
@@ -3241,8 +3267,10 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
     // The listing's name was a hint for the match only. Unless a public
     // record (a license row) vouched for the result, the resolver just echoes
     // the hint back as businessName — and the suite size is stored, so the
-    // echo is dropped: nothing from Places is saved.
-    if (suiteSize && candidate.businessNameHint && !PERSISTED_SUITE_SIZE_SOURCES.has(suiteSize.source)) {
+    // echo is dropped: nothing from Places is saved. Only the license names
+    // the business itself; a listing size (PR 5b) is persisted too but
+    // carries no name of its own, so the hint is stripped there as well.
+    if (suiteSize && candidate.businessNameHint && suiteSize.source !== 'license_seats' && suiteSize.licenseBacked !== true) {
       suiteSize.businessName = null;
     }
     if (suiteSize && Number(suiteSize.value) > 0) {
@@ -3270,10 +3298,22 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
         businessType: suiteSize.businessType || null,
         evidence: suiteSize.evidence || [],
         ...(suiteSize.seats != null ? { seats: suiteSize.seats } : {}),
+        // The listing page the size was read from (PR 5b): shown to staff
+        // beside the size so they can check it; licenseBacked = a DBPR
+        // license at the suite classified it as a restaurant.
+        ...(suiteSize.url ? { url: suiteSize.url } : {}),
+        ...(suiteSize.licenseBacked ? { licenseBacked: true } : {}),
         // When this was resolved, so a persisted stamp can be aged out
         // (see commercialSuiteSizeStampIsFresh) rather than trusted forever.
         resolvedAt: new Date().toISOString(),
       };
+      // A listing size is a published figure, not a measurement: the field
+      // stays flagged for confirmation, with the link (owner 2026-10-02:
+      // price automatically, draft yellow + field-verify). The same flag is
+      // restored when a cached stamp is reused (buildEnrichedProfile).
+      if (suiteSize.source === 'listing_verified_text' && Array.isArray(profile.fieldVerifyFlags)) {
+        profile.fieldVerifyFlags.push(listingSizeVerifyFlag(profile.suiteSize));
+      }
       // Same rule the synchronous stamp-reuse path applies (see
       // reconcileCommercialSuiteSubtype) — shared so the two can never
       // disagree about the same suite.
@@ -4954,6 +4994,16 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     err.failClosed = true;
     throw err;
   }
+  // Same kill-switch rule for a listing suite size (PR 5b): a profile still
+  // carrying one (an open tab, a saved estimate) after GATE_LOOKUP_LISTING_SIZE
+  // went off is not priced on it — a fresh lookup is required.
+  if (p.suiteSize?.source === 'listing_verified_text' && !lookupListingSizeLive()) {
+    const err = new Error('Listing suite sizes are off. Re-run the property lookup before pricing this address.');
+    err.statusCode = 409;
+    err.code = 'LISTING_SIZE_OFF';
+    err.failClosed = true;
+    throw err;
+  }
   assertScopeAnswered(p);
   if (p.suiteSize) {
     const associationJob = isAssociationCommercialJob({ commercialRiskType, commercialSubtype });
@@ -6175,6 +6225,8 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyCommercialSuiteSize,
+  commercialSuiteSizeStampIsFresh,
+  listingSizeVerifyFlag,
   reconcileCommercialSuiteSubtype,
   resolveCommercialSuiteScope,
   buildResultFromCachedLookup,

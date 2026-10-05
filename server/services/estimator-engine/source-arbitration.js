@@ -40,6 +40,9 @@ const SQFT_SOURCES = {
   // field) — the ladder is caller/tech-stated -> DBPR license seats ->
   // type default.
   LICENSE_SEATS: 'license_seats',
+  // A size a public listing publishes for the suite (PR 5b): read by plain
+  // code off a search snippet or a fetchable page, never a model's number.
+  LISTING_VERIFIED_TEXT: 'listing_verified_text',
   SUITE_TYPE_DEFAULT: 'suite_type_default',
   NONE: 'unresolved',
 };

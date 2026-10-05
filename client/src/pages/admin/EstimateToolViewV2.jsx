@@ -346,6 +346,7 @@ function buildAiProviderWarnings({ sources, errors = [], providerStatus = {} } =
 // Only two sizing sources exist (a web-search leg is never a size source —
 // AGENTS.md: an LLM proposes intent, it never picks a price/size field).
 const COMMERCIAL_SUITE_SOURCE_LABELS = {
+  listing_verified_text: "a public listing for this suite",
   license_seats: "state restaurant license",
   verified: "tech-verified measurement",
   suite_type_default: "typical size for this business type",
@@ -360,7 +361,8 @@ function commercialSuiteSizeNote(enrichedProfile) {
     ? ` Building total ${Number(enrichedProfile.suiteBuildingTotalSqFt).toLocaleString()} sq ft.`
     : "";
   const nameNote = suite.businessName ? ` — ${suite.businessName}` : "";
-  return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}`;
+  const linkNote = suite.source === "listing_verified_text" && suite.url ? ` Listing: ${suite.url} — confirm on site.` : "";
+  return `Suite size ${Number(suite.value).toLocaleString()} sq ft — from ${sourceLabel}${seatsNote}.${buildingNote}${nameNote}${linkNote}`;
 }
 
 function adminFetch(path, options = {}) {

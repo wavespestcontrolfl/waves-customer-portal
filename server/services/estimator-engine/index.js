@@ -2682,7 +2682,8 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             // re-resolved with those (no second web search).
             const lookupSuiteSize = effectiveParcelOk ? (effectiveSignals.enriched?.suiteSize || null) : null;
             let suiteSize = (lookupSuiteSize && Number(lookupSuiteSize.value) > 0
-              && (lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS || lookupSuiteSize.source === 'verified'))
+              && (lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS || lookupSuiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT
+                || lookupSuiteSize.source === 'verified'))
               ? lookupSuiteSize
               : null;
             if (!suiteSize) {
@@ -2729,7 +2730,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               // this: a web-search businessType is model output, and model
               // output must not pick the pricing program (AGENTS.md).
               if (!intent.commercial_risk_type
-                && suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
+                && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS || suiteSize.licenseBacked === true)) {
                 intent.commercial_risk_type = 'restaurant_food';
               }
             }

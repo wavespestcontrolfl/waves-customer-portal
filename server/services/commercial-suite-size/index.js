@@ -10,8 +10,14 @@
  * admin estimate tool's property lookup, the same way a residential
  * estimate is auto-sized from county/subdivision data.
  *
- * Two SIZE sources, tried in priority order, each fail-open (an error or a
+ * Three SIZE sources, tried in priority order, each fail-open (an error or a
  * miss just falls through to the next):
+ *   0. listing_verified_text — a size a public listing publishes for THIS
+ *                           suite (./listing-size.js; address-match PR 5b,
+ *                           owner 2026-10-02; dark, GATE_LOOKUP_LISTING_SIZE):
+ *                           plain code reads search-result snippets and
+ *                           fetchable broker pages for a figure next to the
+ *                           typed street number and suite. No model.
  *   1. license_seats     — an active FL DBPR food-service license naming
  *                           this suite (server/services/commercial-suite-size/dbpr-food-license.js).
  *   2. suite_type_default — a business-type-keyed rough default
@@ -33,9 +39,11 @@
 const logger = require('../logger');
 const { resolveViaDbprLicense } = require('./dbpr-food-license');
 const { resolveViaWebSearch } = require('./web-search-leg');
+const { resolveViaListing, SOURCE: LISTING_SOURCE } = require('./listing-size');
 const { defaultSuiteSizeBasis } = require('./type-defaults');
 
 const SOURCES = {
+  LISTING_VERIFIED_TEXT: LISTING_SOURCE,
   LICENSE_SEATS: 'license_seats',
   SUITE_TYPE_DEFAULT: 'suite_type_default',
 };
@@ -46,6 +54,7 @@ const SOURCES = {
 // Absent (the estimator engine), every leg keeps its own default.
 const DBPR_DEFAULT_TIMEOUT_MS = 15000;
 const WEB_SEARCH_DEFAULT_TIMEOUT_MS = 20000;
+const LISTING_DEFAULT_TIMEOUT_MS = 12000;
 const MIN_LEG_REMAINING_MS = 2000;
 
 function remainingBudgetMs(deadlineAt) {
@@ -80,15 +89,55 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
   let businessName = businessNameHint || null;
   let businessType = null;
 
+  // Listing leg (PR 5b): a size published for THIS suite. Network-bound
+  // (a search vendor, up to three page fetches), so the cache-hit path that
+  // skips the web-search leg skips this one too; the gate inside returns
+  // null at once when dark.
+  // The listing's SIZE is authoritative when found, but the DBPR license
+  // below still runs: a license at this suite is what classifies it as a
+  // restaurant (subtype correction, cadence), whichever source sized it.
+  let listing = null;
+  const listingRemaining = remainingBudgetMs(opts.deadlineAt);
+  if (opts.skipWebSearch || opts.skipListing) {
+    // skipped by the caller
+  } else if (listingRemaining < MIN_LEG_REMAINING_MS) {
+    logger.warn(`[commercial-suite-size] skipping listing leg — ${Math.max(0, Math.round(listingRemaining))}ms left in the lookup budget`);
+  } else {
+    try {
+      const found = await resolveViaListing({ address, businessNameHint }, {
+        ...opts,
+        timeoutMs: Math.min(opts.listingTimeoutMs || LISTING_DEFAULT_TIMEOUT_MS, listingRemaining),
+      });
+      if (found && Number(found.value) > 0) listing = found;
+    } catch (err) {
+      logger.warn(`[commercial-suite-size] listing leg errored: ${err.message}`);
+    }
+  }
+  const listingResult = (license) => ({
+    value: listing.value,
+    source: SOURCES.LISTING_VERIFIED_TEXT,
+    confidence: 'medium',
+    businessName: (license && license.businessName) || businessName,
+    // Only a license (a public record) classifies the business; the
+    // listing itself never does.
+    businessType: license ? 'restaurant_food' : null,
+    ...(license ? { licenseBacked: true, seats: license.seats, licenseEvidence: license.evidence } : {}),
+    evidence: listing.evidence,
+    url: listing.url,
+    listingFetchedAt: listing.fetchedAt,
+  });
+
   const dbprRemaining = remainingBudgetMs(opts.deadlineAt);
   if (dbprRemaining < MIN_LEG_REMAINING_MS) {
     logger.warn(`[commercial-suite-size] skipping DBPR leg — ${Math.max(0, Math.round(dbprRemaining))}ms left in the lookup budget`);
+    if (listing) return listingResult(null);
   } else {
     try {
       const dbprOpts = Number.isFinite(dbprRemaining)
         ? { ...opts, timeoutMs: Math.min(DBPR_DEFAULT_TIMEOUT_MS, dbprRemaining) }
         : opts;
       const dbpr = await resolveViaDbprLicense({ address, phone, businessNameHint }, dbprOpts);
+      if (listing) return listingResult(dbpr && (Number(dbpr.value) > 0 || dbpr.businessName) ? dbpr : null);
       if (dbpr) {
         businessName = businessName || dbpr.businessName || null;
         if (Number(dbpr.value) > 0) {
@@ -105,6 +154,7 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
       }
     } catch (err) {
       logger.warn(`[commercial-suite-size] DBPR leg errored: ${err.message}`);
+      if (listing) return listingResult(null);
     }
   }
 
