@@ -182,7 +182,6 @@ describe('pricing bundle offer tiers', () => {
     const [good, better, best] = bundle.offerTiers;
     expect(good).toEqual(expect.objectContaining({ key: 'good', serviceMode: 'one_time', oneTimeTotal: 264 }));
     expect(better).toEqual(expect.objectContaining({ key: 'better', services: ['pest_control'], usesBundleFrequencies: true }));
-    expect(best.services).toEqual(['pest_control', 'lawn_care']);
     expect(best.frequencies.map((f) => f.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);
     const bestQuarterly = best.frequencies.find((f) => f.key === 'quarterly');
     // Pest 35.67 + lawn 57.75, both at the Silver 10% the stored bundle carries.
@@ -198,6 +197,14 @@ describe('pricing bundle offer tiers', () => {
     expect(bestCombo.perServiceTreatments.map((r) => r.service).sort()).toEqual(['lawn_care', 'pest_control']);
     expect(bestCombo.monthly).toBeCloseTo(84.08, 2);
     expect(best.serviceCadenceCombos.every((c) => c.perServiceTreatments.some((r) => r.service === 'lawn_care'))).toBe(true);
+    // The page renders Best's sections from the tier itself; the bundle's own
+    // sections stay pest-only.
+    expect(best.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
+    expect(best.combinedRecurring).toBeTruthy();
+    expect(best.waveGuardTier).toBe('Silver');
+    // (the pest-only bundle renders one combined 'bundle' section, no lawn)
+    expect(bundle.services.map((s) => s.key)).toEqual(['bundle']);
+    expect(bundle.services.some((s) => s.key === 'lawn_care')).toBe(false);
   });
 
   test('gate off: byte-identical bundle, no tier fields', async () => {

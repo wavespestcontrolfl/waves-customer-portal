@@ -372,3 +372,29 @@ describe('SlotPicker (B18: an estimate parked for the office)', () => {
     }
   });
 });
+
+describe('SlotPicker offerTier (Good / Better / Best)', () => {
+  const emptySlots = { primary: [], expander: [] };
+  const urlsOf = () => global.fetch.mock.calls.map((c) => String(c[0]));
+
+  it("sends offerTier=best on the slot read only for the Best tier, and refetches when it changes", async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(emptySlots)));
+    const props = { token: 'tok', selectedSlotId: null, onSelect: vi.fn(), refreshSignal: 0, serviceMode: 'recurring', selectedFrequency: 'quarterly' };
+    const { rerender } = render(<SlotPicker {...props} offerTier={null} />);
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    expect(new URL(urlsOf()[0], 'http://x').searchParams.get('offerTier')).toBeNull();
+
+    rerender(<SlotPicker {...props} offerTier="best" />);
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(2));
+    const params = new URL(urlsOf()[1], 'http://x').searchParams;
+    expect(params.get('offerTier')).toBe('best');
+    expect(params.get('serviceMode')).toBe('recurring');
+  });
+
+  it('never sends offerTier on a one-time read', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(emptySlots)));
+    render(<SlotPicker token="tok" selectedSlotId={null} onSelect={vi.fn()} refreshSignal={0} serviceMode="one_time" offerTier="best" />);
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    expect(new URL(urlsOf()[0], 'http://x').searchParams.get('offerTier')).toBeNull();
+  });
+});
