@@ -458,20 +458,23 @@ async function lockCustomer(trx, customerId) {
   return !!(await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id'));
 }
 
-// The visit a visit-life code belongs to. The office may name it; otherwise it
-// is the customer's first live visit on or after the day the customer SENT the
-// code (not the day the office reviewed it), inside the window. A "today only"
-// code reviewed after that visit ended therefore binds to nothing, and never
-// to a later appointment. Returns { id } or { error }.
+// The visit a visit-life code belongs to. The office may name a live one.
+// Otherwise it is the customer's first visit on or after the day the customer
+// SENT the code (not the day the office reviewed it), inside the window,
+// completed or not: a "today only" code reviewed after that visit ended
+// stays bound to the ended visit, so it is out of the live list at once and
+// never moves to a later appointment. Returns { id } or { error }.
 async function visitFor(trx, customerId, { from, chosenId }) {
-  const live = () => trx('scheduled_services').where({ customer_id: customerId })
-    .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES);
+  const visits = () => trx('scheduled_services').where({ customer_id: customerId });
   if (chosenId !== undefined && chosenId !== null) {
     if (!UUID_RE.test(String(chosenId))) return { error: 'invalid_visit' };
-    const chosen = await live().where({ id: chosenId }).first('id');
+    const chosen = await visits().where({ id: chosenId })
+      .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
+      .first('id');
     return chosen ? { id: chosen.id } : { error: 'invalid_visit' };
   }
-  const row = await live()
+  // A cancelled or skipped visit never took place, so the code was not for it.
+  const row = await visits().whereRaw("COALESCE(status, 'pending') NOT IN ('cancelled', 'skipped')")
     .whereBetween('scheduled_date', [etDateString(from), etDateString(addETDays(from, VISIT_WINDOW_DAYS))])
     .orderBy('scheduled_date').orderByRaw('window_start NULLS LAST').orderBy('id')
     .first('id');

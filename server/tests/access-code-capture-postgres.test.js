@@ -461,19 +461,22 @@ postgres('access codes section', () => {
       expect(list.active.map((r) => r.id)).toEqual([standing.id]);
     });
 
-    test('a visit code binds to the visit of the day it was sent, never to a later one after a late review', async () => {
+    test('a visit code reviewed after its visit ended stays with that visit and never moves to a later one', async () => {
       const c = await customer();
       const sameDay = await visit(c.id, day(0));
-      const later = await visit(c.id, day(5));
+      await visit(c.id, day(5));
       const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
-      await trx('customer_access_codes').where({ id: row.id }).update({ source_at: NOW });
       await trx('scheduled_services').where({ id: sameDay }).update({ status: 'completed' });
       const out = await access.accept(trx, row.id, { now: new Date(NOW.getTime() + 20 * 86400000) });
-      expect(out.row.scheduledServiceId).toBe(later);
-      await trx('scheduled_services').where({ id: later }).update({ scheduled_date: day(30) });
-      const again = await found(c.id, { kind: 'door', code: '#8080', life: 'visit' });
-      await trx('customer_access_codes').where({ id: again.id }).update({ source_at: NOW });
-      expect((await access.accept(trx, again.id, { now: NOW })).row.scheduledServiceId).toBeNull();
+      expect(out.row.scheduledServiceId).toBe(sameDay);
+      expect((await access.listForCustomer(trx, c.id)).active).toHaveLength(0);
+    });
+
+    test('a visit code with no visit inside 14 days of the day it was sent binds to nothing', async () => {
+      const c = await customer();
+      await visit(c.id, day(30));
+      const row = await found(c.id, { kind: 'door', code: '#8080', life: 'visit' });
+      expect((await access.accept(trx, row.id, { now: NOW })).row.scheduledServiceId).toBeNull();
     });
 
     test('the office can name the visit; a visit of another customer or an ended visit is refused', async () => {
