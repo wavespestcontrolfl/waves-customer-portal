@@ -153,7 +153,14 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     await mockPg('technicians').insert({ id, name: 'Fixture Technician', role: 'technician', active: true });
     return id;
   }
-  async function visit(customerId, { status = 'on_site', day = TODAY, serviceType = 'Waves Assessment', serviceId = assessmentCatalogId, ...rest } = {}) {
+  // Midnight-safe fixtures (pre-push audit): the default visit is dated to the
+  // ET day of its own start stamp (50 minutes ago), never to "today", so a run
+  // just after midnight ET builds the same shape — a visit, then an estimate
+  // sent after it. Only its posture differs then (yesterday's visit closes in
+  // the backfill posture), which no assertion below depends on.
+  const startDay = () => etDateString(minutesAgo(50));
+  const postureOf = (day) => (day < etDateString() ? 'backfill' : 'live');
+  async function visit(customerId, { status = 'on_site', day = startDay(), serviceType = 'Waves Assessment', serviceId = assessmentCatalogId, ...rest } = {}) {
     const id = randomUUID();
     await mockPg('scheduled_services').insert({
       id, customer_id: customerId, technician_id: await technician(), service_id: serviceId, service_type: serviceType,
@@ -229,7 +236,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     // Unstarted, estimate the same day: a quote ahead of the walkthrough.
     const ahead = await customer();
     const aheadVisit = await visit(ahead, { status: 'confirmed' });
-    await estimate(ahead);
+    await estimate(ahead, { sentAt: minutesAgo(50) });
     const out = await closeAssessmentsWithSentEstimates({ conn: mockPg });
     expect(out.closed).toBe(0);
     for (const id of [earlyVisit, draftVisit, noneVisit, aheadVisit]) {
@@ -243,7 +250,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
   test('an unstarted assessment closes once the estimate was sent on a later day', async () => {
     const customerId = await customer();
     const visitId = await visit(customerId, { status: 'confirmed', day: YESTERDAY });
-    await estimate(customerId, { sentAt: minutesAgo(5) });
+    await estimate(customerId, { sentAt: new Date() });
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
     expect((await row(visitId)).status).toBe('completed');
     await expectQuiet(customerId, visitId);
@@ -370,7 +377,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     };
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
     const firstKeys = await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key');
-    expect(firstKeys).toEqual([`assessment-estimate:${visitId}:live`]);
+    expect(firstKeys).toEqual([`assessment-estimate:${visitId}:${postureOf(startDay())}`]);
     // Next day: the timer stopped and the visit day has passed → backfill
     // posture. The completion reads the real clock, so the day passing is
     // modeled by moving the fixture one day back (visit, stamps and send),
@@ -382,8 +389,8 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const closed = await row(visitId);
     expect(closed.status).toBe('completed');
     expect(closed.service_time_minutes).toBeNull();
-    expect((await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key')).sort())
-      .toEqual([`assessment-estimate:${visitId}:backfill`, firstKeys[0]]);
+    expect(new Set(await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key')))
+      .toEqual(new Set([`assessment-estimate:${visitId}:backfill`, firstKeys[0]]));
   });
 
   test('a completion this closeout committed and left parked is resumed from its own posture — with no fresh estimate needed, no locked guard, and behind the open visits', async () => {
