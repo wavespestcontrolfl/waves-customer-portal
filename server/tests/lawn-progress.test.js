@@ -335,6 +335,30 @@ describe('rule 3: color across a season change is seasonal', () => {
     expect(item(progress, ISSUE_ID.dry_spot, 'color_health').state).toBe('seasonal');
   });
 
+  // Owner 2026-10-05: a real report said "The color change since then is
+  // mostly seasonal" when color had not moved (70 -> 70). Seasonal explains a
+  // CHANGE; a move inside the band is not one, and is still never "behind".
+  it.each(COLOR_CASES)('a color move inside the band across a season change is not called seasonal, and never behind (%s)', (_name, input) => {
+    const base = scores().color_health;
+    for (const move of [-(CATEGORY_BAND - 1), -1, 0, 1, CATEGORY_BAND - 1]) {
+      for (const days of [10, 30, 60, 100]) {
+        const progress = run({ ...winter, ...input, days, cur: { color_health: base + move } });
+        for (const it of progress.items.filter((i) => i.metric === 'color_health')) {
+          expect(it.state).not.toBe('seasonal');
+          expect(it.state).not.toBe('behind');
+        }
+      }
+    }
+  });
+
+  it.each(COLOR_CASES)('a color move of the band or more across a season change is seasonal (%s)', (_name, input) => {
+    const base = scores().color_health;
+    for (const move of [-CATEGORY_BAND, CATEGORY_BAND]) {
+      const progress = run({ ...winter, ...input, days: 30, cur: { color_health: base + move } });
+      for (const it of progress.items.filter((i) => i.metric === 'color_health')) expect(it.state).toBe('seasonal');
+    }
+  });
+
   it('the same season is not seasonal, and peak to shoulder also counts as a cool change', () => {
     const base = { applied: [PRODUCT.celsius], issues: ['dry_spot'], days: 30, cur: { color_health: 30 } };
     expect(item(run(base), ISSUE_ID.dry_spot, 'color_health').state).toBe('behind');
