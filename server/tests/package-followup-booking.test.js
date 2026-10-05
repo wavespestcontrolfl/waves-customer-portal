@@ -142,6 +142,20 @@ describe('mirrorPrimaryAddressOntoPackageChildren (estimate accept stamps visit 
   });
 });
 
+describe('hasLivePackageChild (Intelligence Bar move refusal)', () => {
+  const { hasLivePackageChild } = require('../services/package-followup-booking');
+  test('true only when a live package child hangs off one of the ids', async () => {
+    const calls = [];
+    const conn = () => {
+      const q = { whereIn: (c, v) => { calls.push([c, v]); return q; }, where: (o) => { calls.push(o); return q; }, first: async () => ({ id: 'child' }) };
+      return q;
+    };
+    expect(await hasLivePackageChild(conn, ['p1', null])).toBe(true);
+    expect(calls).toEqual([['parent_service_id', ['p1']], { source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION }, ['status', ['pending', 'confirmed', 'rescheduled']]]);
+    expect(await hasLivePackageChild(conn, [])).toBe(false);
+  });
+});
+
 describe('ensurePackageFollowUpVisit', () => {
   test('gate off: nothing is read, nothing is booked', async () => {
     delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;

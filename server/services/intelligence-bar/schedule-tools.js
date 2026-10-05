@@ -1332,6 +1332,11 @@ async function moveStopsToDay(input, actionContext = {}) {
         : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null),
     };
   });
+  // A package visit 1 with a live visit 2: the card lists only the stops,
+  // so the bar does not move it (same rule as the single reschedule).
+  if (await require('../package-followup-booking').hasLivePackageChild(db, classified.map((c) => c.s.id))) {
+    return { error: 'One of these stops has a linked second treatment (a two-treatment package visit 2) that this card does not show. Move that stop from the Schedule screen, which moves both. Nothing was moved.' };
+  }
   const { lockTechDays } = require('../scheduling/tech-day-lock');
   const runBatchTrx = async () => db.transaction(async (trx) => {
     const overlappedIds = [];
@@ -1433,23 +1438,6 @@ async function moveStopsToDay(input, actionContext = {}) {
   }
   for (const c of classified) movedIds.add(c.s.id);
 
-  // Keep each moved stop's linked follow-up (a call-booked or package
-  // visit 2) spaced from it — the same hook the Schedule page and the
-  // rebooker run; best-effort after commit, no-op when the date did not change.
-  // A parent whose visit 2 is in this same batch is skipped: the operator
-  // placed that child by hand, and a second shift would move it again.
-  const parentsMovedWithChild = new Set(classified.map((c) => c.s.parent_service_id).filter(Boolean).map(String));
-  for (const c of classified) {
-    if (parentsMovedWithChild.has(String(c.s.id))) continue;
-    try {
-      await require('../call-booking-catalog').shiftCallFollowUpsForParentMove({
-        conn: db, parentServiceId: c.s.id, fromDate: c.observedDate, toDate: dateStr,
-        noticeActorId: actionContext.technicianId || null,
-      });
-    } catch (err) {
-      logger.error(`[intelligence-bar] linked follow-up shift failed for ${c.s.id}: ${err.message}`);
-    }
-  }
 
   // Tech-facing notices (tech-visit-notifications.js): this writer changes
   // scheduled_date itself, so it tells the holder itself. Post-commit,

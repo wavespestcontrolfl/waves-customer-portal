@@ -1,4 +1,7 @@
 jest.mock('../models/db', () => jest.fn());
+// The package visit 2 refusal (package-followup-booking.hasLivePackageChild): none by default.
+const mockHasLivePackageChild = jest.fn(async () => false);
+jest.mock('../services/package-followup-booking', () => ({ hasLivePackageChild: (...a) => mockHasLivePackageChild(...a) }));
 // The follow-up shift is a separate fenced+transactional unit with its own
 // suite (call-booking-catalog.test.js) — mocked so this suite's sequential
 // db-query queue models only the rebooker's own queries.

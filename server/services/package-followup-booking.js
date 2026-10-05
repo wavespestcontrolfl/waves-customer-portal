@@ -447,8 +447,23 @@ async function mirrorPrimaryAddressOntoPackageChildren({ database, estimateId } 
   }
 }
 
+// Whether any of these visits has a live package visit 2. The Intelligence
+// Bar move tools refuse such a visit: their confirm card cannot show visit 2.
+// Reads regardless of the gate: a child booked while it was on still exists.
+async function hasLivePackageChild(conn, parentIds = []) {
+  const ids = parentIds.filter(Boolean).map(String);
+  if (!ids.length) return false;
+  const row = await conn('scheduled_services')
+    .whereIn('parent_service_id', ids)
+    .where({ source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION })
+    .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+    .first('id');
+  return !!row;
+}
+
 module.exports = {
   ensurePackageFollowUpVisit,
+  hasLivePackageChild,
   mirrorPrimaryAddressOntoPackageChildren,
   warnOnOverlap,
   isPackageFollowUpServiceKey,

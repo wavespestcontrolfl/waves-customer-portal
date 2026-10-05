@@ -3124,10 +3124,6 @@ async function createAppointment(input, actionContext = {}) {
     // (savepoint on the trx; a grouping failure never poisons the booking;
     // the IB write-gate confirm boundary is upstream and unaffected).
     await require('../visit-groups').maybeGroupRow(created.id, { database: trx, createdBy: 'dispatch' });
-    // Two-treatment package (cockroach / flea): visit 2 books with visit 1 —
-    // gate-dark, savepoint-isolated, no-op for every other service; part of
-    // the same card-confirmed write (package-followup-booking.js).
-    await require('../package-followup-booking').ensurePackageFollowUpVisit({ trx, primary: created });
     // W0B authorization pin: a card-confirmed booking is approved as
     // credit-FREE (credit-bearing bookings are refused at proposal). Verify
     // inside the booking transaction — if an open credit appeared since the
@@ -3518,6 +3514,12 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // so the pre-read `appt` may name a tech who was swapped out meanwhile).
   let committedTechId = null;
   let overlapAdvisory = null;
+  // A package visit 1 with a live visit 2: the card shows one visit, so the
+  // bar does not move it (ib-write-tools: the card shows everything the
+  // commit does). The Schedule screen moves both.
+  if (await require('../package-followup-booking').hasLivePackageChild(db, [appt.id])) {
+    return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.' };
+  }
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
@@ -3606,18 +3608,6 @@ async function rescheduleAppointment(input, actionContext = {}) {
   });
   if (updatedRows === 0) {
     return { error: 'Appointment changed concurrently (status, date, or window) while the reschedule was pending — nothing was moved. Re-check the appointment and retry if still applicable.' };
-  }
-  // Keep a linked follow-up (a call-booked or package visit 2) spaced from
-  // its parent — the same hook the Schedule page and the rebooker run;
-  // best-effort after commit (a failed shift leaves the child where it was,
-  // and the helper no-ops when the date did not change).
-  try {
-    await require('../call-booking-catalog').shiftCallFollowUpsForParentMove({
-      conn: db, parentServiceId: appt.id, fromDate: observedDate, toDate: dateStr,
-      noticeActorId: actionContext.technicianId || null,
-    });
-  } catch (err) {
-    logger.error(`[intelligence-bar] linked follow-up shift failed for ${appt.id}: ${err.message}`);
   }
   // Tech-facing notice (tech-visit-notifications.js): this writer moves the
   // row itself, so it tells the holder itself. Post-commit, best-effort,
