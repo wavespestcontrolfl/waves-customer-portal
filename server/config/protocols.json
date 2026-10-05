@@ -931,8 +931,7 @@
         "4A/neonic: TriStar 8.5 SL (acetamiprid) counts toward the annual 4A log; live scale crawler or whitefly finds only.",
         "Oil/contact: TriTek spray oil for crawlers, mites, and soft-bodied pests when plant/weather safe.",
         "Spinosyn: Conserve for caterpillar/thrips-type work where labeled.",
-        "Miticide: Floramite for confirmed mites only.",
-        "Broad-spectrum rescue: Talstar or Sevin only when documented pest/site conditions justify it."
+        "Miticide: Floramite for confirmed mites only."
       ],
       "fungicide_disease": [
         "P07: KPHITE 7LP for root/oomycete/Phytophthora-type support where justified.",
@@ -1181,7 +1180,7 @@
         "visit_type": "Granular bed visit + optional targeted foliar",
         "main_goal": "Visible bed cleanup, Q2 nutrition, spring crawler check, and route-speed discipline.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer: exact bag label needed; hold dose",
-        "secondary": "Shortstop PGR add-on only on healthy established hedges ($26.56)\nTriTek spray oil 1.0-1.5% only if scale crawlers are active and safe ($6.08)\nConserve or Mainspring for caterpillars where labeled ($4.05)\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
+        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nShortstop PGR add-on only on healthy established hedges ($26.56)\nTriTek spray oil 1.0-1.5% only if scale crawlers are active and safe ($6.08)\nConserve or Mainspring for caterpillars where labeled ($4.05)\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1305,7 +1304,7 @@
         "visit_type": "Foliar PHC + scout",
         "main_goal": "Begin Sarasota/Manatee N/P blackout, manage summer pest/disease pressure, and avoid heat injury.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 0-0-16 #510513 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\nTriTek spray oil: 1.0% early morning only when plant/weather safe ($6.08)\nKPHITE 7LP: verify container label and method; foliar and soil rates differ; FRAC P07\nCopper: exact container label needed; separate from oil\nFe/Mn micros: label rate where deficiency symptoms justify ($2.85)",
-        "secondary": "Conserve or Mainspring for caterpillars ($4.05)\nFloramite for confirmed mites ($6.02)\nScout/photo/customer note when heat stress makes chemistry the wrong move",
+        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nConserve or Mainspring for caterpillars ($4.05)\nFloramite for confirmed mites ($6.02)\nScout/photo/customer note when heat stress makes chemistry the wrong move\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1326,6 +1325,14 @@
             }
           ],
           "conditional": [
+            {
+              "key": "distance",
+              "where": "Whitefly or scale nymphs"
+            },
+            {
+              "key": "tristar",
+              "where": "Armored scale crawlers or whitefly, live finds"
+            },
             {
               "key": "tritek",
               "where": "Scale or mites, early morning"
@@ -1361,7 +1368,7 @@
         "visit_type": "Granular Snapshot + scout/spot PHC",
         "main_goal": "Keep beds clean during summer while maintaining a zero-N/P route for Sarasota/Manatee.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nScout bed weeds, whitefly, scale crawlers, palm deficiency symptoms, and heat stress\nSarasota/Manatee: zero N/P landscape fertilizer during blackout\nLESCO 0-0-16 #510513 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago",
-        "secondary": "Mainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nTriTek spray oil 1.0% only if plant/weather safe ($6.08)\nAzatin O organic option where label/site/pest fit ($37.25)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
+        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nMainspring GNL 4-8 fl oz/100 gal for whitefly/caterpillar pressure ($26.98)\nTriTek spray oil 1.0% only if plant/weather safe ($6.08)\nAzatin O organic option where label/site/pest fit ($37.25)\nTrue 0-N/0-P corrective product only if legal and diagnosis supports it ($3.00 est)\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
@@ -1532,7 +1539,7 @@
         "visit_type": "Granular bed visit + optional disease/root PHC",
         "main_goal": "Restart legal nutrition after blackout, reset beds, and protect fall disease/root-prone ornamentals.",
         "primary": "Snapshot 2.5TG: 2.3–4.6 lb/1,000 sq ft beds; select the labeled weed rate; water in ($17.16); only when due (60+ days since the last, one per quarter)\nLESCO 8-0-12 #511542 palm fertilizer: Waves canopy chart, in lb per palm, only when the last palm feed was 3 or more months ago\n13-0-13 ornamental fertilizer: exact bag label needed; hold dose\nKPHITE 7LP: verify container label and method; foliar and soil rates differ; FRAC P07",
-        "secondary": "Fall scale flush inspection\nHigh-value palms: offer injection assessment, not automatic injection\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
+        "secondary": "Distance IGR on live crawlers only: whiteflies 6–8 fl oz/100 gal; listed scales 8–12 fl oz/100 gal ($16.52)\nFall scale flush inspection\nHigh-value palms: offer injection assessment, not automatic injection\nTriStar 8.5 SL (acetamiprid): armored scale crawlers or whitefly, live finds only; label rate",
         "material_cost": null,
         "labor_cost": "standard",
         "tier_4x": false,
