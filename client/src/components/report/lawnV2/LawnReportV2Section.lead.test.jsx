@@ -88,6 +88,25 @@ describe('LawnLeadCard layout', () => {
     expect(screen.getByTestId('lawn-lead-watching')).toHaveTextContent('Thin areas along the driveway edge.');
   });
 
+  it('renders "From your technician" right under the applied block, at 16px, and nothing when the key is absent (GATE_LAWN_TECH_PARAGRAPH)', () => {
+    const TEXT = 'Our technician saw chinch bugs at the trouble spot, which explains the damaged turf in the photo. Arena 50 WDG went on the front and side yards to treat them.';
+    const { unmount } = renderLead();
+    expect(screen.queryByTestId('lawn-lead-tech')).toBeNull();
+    expect(screen.queryByText('From your technician')).toBeNull();
+    unmount();
+    renderLead({ lead: { ...LEAD, whatToExpect: 'Weeds usually start to yellow or curl.', techParagraph: TEXT } });
+    const block = screen.getByTestId('lawn-lead-tech');
+    expect(block).toHaveTextContent('From your technician');
+    expect(block).toHaveTextContent(TEXT);
+    expect(within(block).getByText(TEXT)).toHaveStyle({ fontSize: '16px' });
+    expect(within(block).getByText('From your technician')).toHaveStyle({ fontSize: '14px' });
+    // Directly under the applied block, above What to expect.
+    const region = screen.getByTestId('lawn-lead-region');
+    const applied = within(region).getByText(LEAD.applied).closest('div[style]').parentElement;
+    expect(applied.nextElementSibling).toBe(block);
+    expect(block.nextElementSibling).toBe(screen.getByTestId('lawn-lead-expect'));
+  });
+
   it('leaves out Today’s focus, the driving box, the watching list, "What Waves will do next" and the seasonal note', () => {
     renderLead();
     const region = screen.getByTestId('lawn-lead-region');
