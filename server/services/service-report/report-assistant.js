@@ -526,7 +526,9 @@ function answerNextSteps({ data = {}, nextAppointment, required } = {}) {
     scopeLine,
     reentry ? `Re-entry: ${need(reentry)}` : '',
     need(rinseLine),
-    need(weather),
+    // Background, not an instruction: stays in the rule answer, never a
+    // required line for the AI answer.
+    weather,
     `${watchArea} Text Waves if activity increases, moves inside, or shows up in a new area before the next visit.`,
     nextAppointment ? `Next scheduled visit: ${serviceDateText(nextAppointment.scheduled_date)}.` : '',
   ].filter(Boolean).join('\n');
