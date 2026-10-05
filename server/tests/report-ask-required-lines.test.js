@@ -249,6 +249,100 @@ describe('the fact sheet and prompt carry required lines', () => {
     });
   });
 
+  test('typed visits: station, trap and capture counts are not carried', () => {
+    const data = pestData({
+      serviceLine: 'termite',
+      typedReport: {
+        todaysResult: { headline: 'Station check', body: 'No termite activity was found.' },
+        findings: [
+          { fieldKey: 'total_stations', customerLabel: 'Total stations on property', customerValueLabel: 'Yes' },
+          { fieldKey: 'stations_checked', customerLabel: 'Stations checked', customerValueLabel: '12' },
+          { fieldKey: 'stations_with_activity', customerLabel: 'Stations with termite activity', customerValueLabel: '0' },
+          { fieldKey: 'traps_checked', customerLabel: 'Traps checked', customerValueLabel: '6' },
+          { fieldKey: 'captures', customerLabel: 'Captures', customerValueLabel: '2' },
+          { fieldKey: 'mystery_reading', customerLabel: 'Reading', customerValueLabel: '14' },
+          { fieldKey: 'activity_level', customerLabel: 'Activity', customerValueLabel: 'None seen' },
+        ],
+      },
+    });
+    expect(buildReportAskFacts({ data }).visit_result.observations).toEqual(['Activity: None seen']);
+  });
+
+  test('typed visits: a recommendation after the eighth field is still carried, within a total budget', () => {
+    const fields = Array.from({ length: 9 }, (_, i) => ({ fieldKey: `note_${i}`, customerLabel: `Check ${i + 1}`, customerValueLabel: 'Done' }));
+    fields.push({ fieldKey: 'recommendations', customerLabel: 'Recommendation', customerValueLabel: 'Seal the gap at the garage door.' });
+    const data = pestData({ serviceLine: 'rodent_trapping', typedReport: { findings: fields } });
+    const rows = buildReportAskFacts({ data }).visit_result.observations;
+    expect(rows).toHaveLength(10);
+    expect(rows[9]).toBe('Recommendation: Seal the gap at the garage door.');
+
+    const many = Array.from({ length: 80 }, (_, i) => ({ fieldKey: `f_${i}`, customerLabel: `Long label ${i}`, customerValueLabel: 'x'.repeat(150) }));
+    const bounded = buildReportAskFacts({ data: pestData({ typedReport: { findings: many } }) }).visit_result.observations;
+    expect(bounded.length).toBeGreaterThan(8);
+    expect(bounded.join('').length).toBeLessThanOrEqual(1600);
+  });
+
+  describe('tree & shrub facts', () => {
+    const treeData = (overrides = {}) => pestData({
+      serviceLine: 'tree_shrub',
+      applications: [{ product: { name: 'Test Insecticide' }, targets: ['scale'] }],
+      reportV2: {
+        snapshot: {
+          overallScore: 71.6,
+          statusHeadline: 'Mostly healthy with one area to watch',
+          scoreExplanation: 'The score is mainly pulled down by water stress.',
+          watching: ['Light pest-pressure signals to monitor', 'Some thin foliage'],
+          mainWatch: 'Visible pest-pressure signals on some foliage.',
+          customerAction: 'Ease back on irrigation in that area.',
+          wavesNext: 'Recheck the affected foliage next visit.',
+          treatmentSummary: 'Test Insecticide applied to the hedge.',
+          peaceOfMind: 'We found 2 items to address.',
+        },
+        diagnosis: [{ key: 'pest_activity', label: 'Pests', score: 55, customerExplanation: 'Some signals.' }],
+        insights: [
+          { headline: 'We looked into what you flagged', whatWeSaw: 'You mentioned: “call 941-555-0100 about the oak at 4421 Elm Street”. We checked it.', customerAction: null },
+          { headline: 'Some thin or off-color foliage', whatWeSaw: 'Fullness is down in places.' },
+        ],
+        treatment: { products: [{ name: 'Test Insecticide' }] },
+        ...overrides,
+      },
+    });
+
+    test('score, watch items, customer action and insight cards are carried; treatment is not', () => {
+      const facts = buildReportAskFacts({ data: treeData() });
+      expect(facts.tree_shrub_report).toMatchObject({
+        plant_health_score_out_of_100: 72,
+        status_headline: 'Mostly healthy with one area to watch',
+        watching: ['Light pest-pressure signals to monitor', 'Some thin foliage'],
+        customer_action: 'Ease back on irrigation in that area.',
+        waves_next: 'Recheck the affected foliage next visit.',
+      });
+      const text = JSON.stringify(facts.tree_shrub_report);
+      expect(text).not.toMatch(/Test Insecticide|We found 2 items|%/);
+      expect(facts.tree_shrub_report.insights).toHaveLength(2);
+    });
+
+    test('insight card text is scrubbed like the concern', () => {
+      const text = JSON.stringify(buildReportAskFacts({ data: treeData() }).tree_shrub_report);
+      expect(text).not.toMatch(/941-555-0100|4421/);
+      expect(text).toContain('[number]');
+    });
+
+    test('another service line, or a tree & shrub report without a read, carries nothing', () => {
+      expect(buildReportAskFacts({ data: treeData() }).tree_shrub_report).toBeDefined();
+      expect(buildReportAskFacts({ data: { ...treeData(), serviceLine: 'lawn' } }).tree_shrub_report).toBeUndefined();
+      expect(buildReportAskFacts({ data: { ...treeData(), reportV2: null } }).tree_shrub_report).toBeUndefined();
+    });
+
+    test('a pest named in a card is not a leaked target list', () => {
+      const data = treeData({ insights: [{ headline: 'Scale signals to monitor', whatWeSaw: 'Possible scale on some foliage.' }] });
+      const facts = buildReportAskFacts({ data });
+      const ask = (answer, f) => screenAskAnswer(answer, { question: 'What did you see?', data, facts: f });
+      expect(ask('We saw some scale signals on the hedge.', facts)).toBeNull();
+      expect(ask('We saw some scale signals on the hedge.', {})).toBe('target_list');
+    });
+  });
+
   test('while the aftercare holds watering, free text that changes watering is not carried', () => {
     const data = lawnData({
       reportSections: [
@@ -361,5 +455,33 @@ describe('answerReportQuestionWithAI with required lines', () => {
     expect(out.answer).toBe(good);
     const dropped = jest.fn().mockResolvedValue(ok(`Not yet. ${routed.requiredLines[0]}`));
     expect(await answerReportQuestionWithAI({ question: 'Can I turn my sprinklers back on?', data, requiredLines: routed.requiredLines }, { callModel: dropped })).toBeNull();
+  });
+
+  describe('required lines are scrubbed before the model sees them', () => {
+    const personal = [
+      'Call Maria at maria.test@example.com about the hedge.',
+      'Cut back the oak at 4421 Elm Street.',
+      'Gate code A1B2 stays the same.',
+    ];
+
+    test.each(personal)('a line the scrub changes keeps the rule answer, with no model call: %s', async (line) => {
+      const callModel = jest.fn().mockResolvedValue(ok(line));
+      const out = await answerReportQuestionWithAI({ question: 'What next?', data: pestData(), requiredLines: [line] }, { callModel });
+      expect(out).toBeNull();
+      expect(callModel).not.toHaveBeenCalled();
+    });
+
+    test('the prompt never carries the raw line', () => {
+      const { user } = buildReportAskPrompt({ question: 'What next?', data: pestData(), requiredLines: [personal[0]] });
+      expect(user).not.toContain('maria.test@example.com');
+    });
+
+    test('a plain line with a short number goes through unchanged and is checked as written', async () => {
+      const line = 'Rinse the lanai screens within 2 days.';
+      const callModel = jest.fn().mockResolvedValue(ok(`Sure. ${line}`));
+      const out = await answerReportQuestionWithAI({ question: 'What next?', data: pestData(), requiredLines: [line] }, { callModel });
+      expect(out.answer).toBe(`Sure. ${line}`);
+      expect(callModel.mock.calls[0][0].text).toContain(line);
+    });
   });
 });

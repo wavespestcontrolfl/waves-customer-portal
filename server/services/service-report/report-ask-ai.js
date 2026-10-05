@@ -349,7 +349,32 @@ function lawnAssessmentFacts(data = {}, keep = () => true) {
 
 // Typed visits (termite, mosquito, rodent, tree & shrub, specialty): the
 // customer-facing result and the recorded observation chips. Station maps,
-// counts of traps and per-product detail are not carried.
+// counts of stations, traps, bait and captures, and per-product detail are not
+// carried: a count field is dropped by its key (and a bare number by its
+// value), so the model can never repeat one.
+const COUNT_FIELD_KEY = /(?:^|_)(?:stations?|traps?|captures?|baits?)(?:_|$)|_(?:count|total|serviced)$/;
+const BARE_NUMBER = /^\d+(?:\.\d+)?$/;
+// Every customer-visible observation stays (a recommendation or follow-up can
+// sit anywhere in the list); the prompt stays bounded by this total budget.
+const OBSERVATIONS_CHAR_BUDGET = 1600;
+
+function observationRows(findings, text) {
+  let spent = 0;
+  const rows = [];
+  for (const item of asArray(findings)) {
+    const label = cleanText(item?.customerLabel);
+    const value = cleanText(item?.customerValueLabel);
+    const row = label && value && !COUNT_FIELD_KEY.test(cleanText(item.fieldKey)) && !BARE_NUMBER.test(value)
+      ? text(`${label}: ${value}`, 200)
+      : null;
+    if (row && spent + row.length <= OBSERVATIONS_CHAR_BUDGET) {
+      spent += row.length;
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
 function typedReportFacts(data = {}, keep = () => true) {
   const typed = data.typedReport;
   if (!typed || typeof typed !== 'object') return null;
@@ -358,14 +383,7 @@ function typedReportFacts(data = {}, keep = () => true) {
     const out = clip(value, max);
     return out && keep(out) ? out : null;
   };
-  const observations = (Array.isArray(typed.findings) ? typed.findings : [])
-    .slice(0, 8)
-    .map((item) => {
-      const label = cleanText(item?.customerLabel);
-      const value = cleanText(item?.customerValueLabel);
-      return label && value ? text(`${label}: ${value}`, 160) : null;
-    })
-    .filter(Boolean);
+  const observations = observationRows(typed.findings, text);
   const row = {
     result_headline: text(today.headline, 160),
     result: text(today.body, 400),
@@ -373,6 +391,37 @@ function typedReportFacts(data = {}, keep = () => true) {
   };
   const kept = Object.fromEntries(Object.entries(row).filter(([, value]) => value !== null));
   return Object.keys(kept).length ? kept : null;
+}
+
+// Tree & shrub reports keep their customer-visible read in data.reportV2
+// (tree-shrub-report-v2.js): the plant-health score out of 100, what we are
+// watching, the homeowner's one task and the insight cards. Not carried: the
+// treatment block (products, narrative), category scores and photo text. Card
+// text can quote the customer's own concern or a technician's edit, so every
+// string goes through the same scrub as the concern.
+function treeShrubFacts(data = {}, keep = () => true) {
+  const v2 = data.reportV2;
+  if (data.serviceLine !== 'tree_shrub' || !v2 || typeof v2 !== 'object') return null;
+  const snapshot = v2.snapshot || {};
+  const text = (value, max) => {
+    const out = scrubFreeText(value, max);
+    return out && keep(out) ? out : null;
+  };
+  const score = readingOrNull(snapshot.overallScore);
+  return dropEmpty({
+    plant_health_score_out_of_100: score === null ? null : Math.round(score),
+    status_headline: text(snapshot.statusHeadline, 200),
+    score_explanation: text(snapshot.scoreExplanation, 300),
+    watching: asArray(snapshot.watching).slice(0, 3).map((item) => text(item, 160)).filter(Boolean),
+    main_watch: text(snapshot.mainWatch, 240),
+    customer_action: text(snapshot.customerAction, 240),
+    waves_next: text(snapshot.wavesNext, 240),
+    insights: asArray(v2.insights).slice(0, 4).map((card) => dropEmpty({
+      headline: text(card?.headline, 160),
+      what_we_saw: text(card?.whatWeSaw, 240),
+      customer_action: text(card?.customerAction, 240),
+    })).filter((card) => Object.keys(card).length),
+  });
 }
 
 function buildReportAskFacts({
@@ -416,6 +465,7 @@ function buildReportAskFacts({
     findings,
     lawn_assessment: lawnAssessmentFacts(data, keep),
     visit_result: typedReportFacts(data, keep),
+    tree_shrub_report: treeShrubFacts(data, keep),
     weather_during_visit: weatherFact(data.conditions || {}),
     pest_pressure: pressureFact(data),
     products,
@@ -440,7 +490,7 @@ RULES
 2a. REQUIRED LINES. When the facts hold required_lines, those are the office's recorded instructions for this customer. Put every one of them into your answer exactly as written, word for word, with the same punctuation, as its own sentence. You may put your own sentence before or after a required line. Never reword, shorten, merge, split, skip or contradict one, and never add a different instruction on the same subject. Required lines do not count toward the 4 sentences. If a required line already answers the question, add at most one short sentence of your own.
 3. Answer the question that was asked, about the thing that was asked. A question about one product talks about that product only: what it does and where it went. Do not bring in the other products or the rest of the visit.
 4. If the customer's own concern (customer_concern) bears on the question, lead with it and tie the answer to it.
-5. Never give amounts, rates, totals, mix strengths, percentages, counts of product used, or EPA numbers. Lawn scores in lawn_assessment are out of 100: say "82 out of 100", never with a percent sign.
+5. Never give amounts, rates, totals, mix strengths, percentages, counts of product used, or EPA numbers. Lawn scores in lawn_assessment and plant_health_score_out_of_100 are out of 100: say "82 out of 100", never with a percent sign.
 6. Never use the word "safe" in any form (safe, safely, safety). Never say "non-toxic", "harmless", "chemical-free" or "pet-friendly". For a question about pets, kids, or when anyone can go back out, give the dry or re-entry instruction from the facts (pet_precaution_today first when present, then pets_and_kids_wording, label_reentry, label_precaution, reentry) in plain words, and always include pet_precaution_today when it is present. If the facts hold none, say treated areas should dry completely before pets and kids go back, and offer to confirm by text or call.
 7. Never list which pests a product targets. If asked what a product is for, use only its what_it_does and labeled_for lines (for example "labeled for 25+ pests").
 8. applied_where says where a product went: outside, inside, inside and outside, or not recorded. For "not recorded", say the report does not say where.
@@ -514,7 +564,7 @@ function leaksTargetList(text, {
   const approvedWording = asArray(facts?.products).map((product) => [product.what_it_does, product.labeled_for]);
   const allowed = [
     question, data.customerConcern, facts?.report_sections, facts?.findings, facts?.visit_summary,
-    facts?.lawn_assessment, facts?.visit_result, approvedWording, requiredLines,
+    facts?.lawn_assessment, facts?.visit_result, facts?.tree_shrub_report, approvedWording, requiredLines,
   ]
     .map((part) => (typeof part === 'string' ? part : JSON.stringify(part)))
     .join(' ')
