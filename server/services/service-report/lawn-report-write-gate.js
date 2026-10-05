@@ -37,12 +37,12 @@ async function freezeTechParagraphFor({ record, data, instruction, service, knex
     const tech = require('./lawn-tech-paragraph');
     const assessmentId = data && data.lawnAssessment && data.lawnAssessment.assessmentId;
     if (assessmentId == null) return null;
-    // The row's CURRENT notes: a retried completion finds the freeze and spends no second call.
-    const row = await knex('service_records').where({ id: service.id }).first('structured_notes');
     const outcome = await tech.createAndFreezeTechParagraph({
       serviceRecordId: service.id,
       assessmentId,
-      structuredNotes: row && row.structured_notes,
+      // The row's CURRENT notes, read inside the step's one deadline: a retried
+      // completion finds the freeze and spends no second call.
+      getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
       gatherInputs: () => require('./lawn-tech-paragraph-inputs').gatherTechParagraphInputs({ record, data, instruction, knex }),
       knex,
     });

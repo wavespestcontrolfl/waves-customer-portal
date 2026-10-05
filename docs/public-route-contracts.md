@@ -2628,7 +2628,7 @@ read) adds ONE optional string, `reportV2.lead.techParagraph`: the "From your
 technician" paragraph, 2 to 4 sentences and at most 70 words, in the first person
 plural. It is written ONCE, at completion (`finalizeLawnReportSynthesis`,
 `lawn-report-write-gate.js`), by one model call (lane `lawn_tech_paragraph`,
-`TEXT_POLICIES.report`, 15-second ceiling for both legs together: about 7.5 s for the first, the rest for the backup, and on expiry nothing is stored and completion goes on) from the technician's
+`TEXT_POLICIES.report`, ONE 15-second deadline across the whole step: record read, input gather, model call, validation and freeze; about 7.5 s for the first provider, the rest for the backup; a stage that would start after expiry does not run, a freeze already issued finishes whole (it is one atomic first-writer-wins statement, issued only after a validated paragraph), and on expiry nothing further is stored and completion goes on) from the technician's
 note (verbatim), the products applied with their stored targets, the confirmed
 scores, the technician-kept photo findings (allowlisted symptom labels with the
 read's confidence), the last visit's products, watched topics and kept findings, the
@@ -2650,8 +2650,13 @@ disease, weed or condition no input carries (a product's target list licenses on
 "protects against", never "found"); states a number other than one inside an applied
 product's own name, a date, month, amount, price, timing, promise ("will", "next
 visit", "follow up") or watering/mowing advice; says "no issues" or "all clear";
-compares color between visits or compares anything with the last visit except by
-restating a fixed progress sentence; says the photos confirmed a cause (the
+compares color between visits or compares anything with the last visit unless a fixed
+progress sentence has the same metric (thickness, weeds or stress) and direction
+(better, same, worse, on track); says a condition is present when the note says it
+was NOT found or only MIGHT be (negation and uncertainty are read around the term;
+a negated term may appear only as negated, an uncertain one only hedged); states a
+product's target or role as found, seen or present (they license a purpose claim
+only: "to protect against", "to go after"); says the photos confirmed a cause (the
 technician's note wins over the photo read); states a low-confidence photo finding
 without a hedge; or fails `customerCopyViolations`, the writer-rules timing screen
 or the next-visit claim lint. The model also returns a per-sentence `sources` list

@@ -45,6 +45,7 @@ const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 const { customerCopyViolations } = require('./technician-report-copy');
 const { lawnResultTimingViolation } = require('./report-writer-rules');
 const { nextVisitProblems, splitSentences } = require('./next-visit-claims');
+const { METRIC_SENTENCE } = require('./lawn-since-last-copy');
 
 const PROMPT_VERSION = 'lawn_tech_paragraph_v1';
 const FREEZE_KEY = 'lawnTechParagraph';
@@ -316,9 +317,13 @@ const COMPARE_WORD_RE = /\b(?:since|than|compared|comparison|versus|improv\w*|be
 const PRIOR_REF_RE = /\b(?:last\s+visit|previous|earlier|prior|before|since)\b/i;
 const PHOTO_REF_RE = /\b(?:photos?|pictures?|images?|shots?|scan|photo\s+read|read)\b/i;
 const CONFIRM_VERB_RE = /\b(?:confirm(?:s|ed|ing)?|show(?:s|ed|ing)?|prov(?:e|es|ed|ing|en)|verif(?:y|ies|ied)|identif(?:y|ies|ied)|reveal(?:s|ed|ing)?|detect(?:s|ed|ing)?|captur(?:e|es|ed|ing)|document(?:s|ed|ing)?|support(?:s|ed|ing)?)\b/i;
+// Words that make a statement about the record uncertain, in the note or the paragraph.
+const UNSURE_RE = /\b(?:suspect\w*|possible|possibly|may|might|could|maybe|perhaps|probably|likely|unsure|uncertain|unclear|seems?|appears?|looks?\s+like|think|thought|potential\w*)\b/i;
 const HEDGE_RE = /\b(?:possible|possibly|may|might|could|appears?|seems?|looks?\s+like|signs?\s+of|suggest\w*|watching|keeping\s+an\s+eye|a\s+few)\b/i;
 const OBSERVED_CUE_RE = /\b(?:found|find|finding|saw|seen|see|spotted|noticed|observed|discovered|detected|there\s+(?:are|is|were|was)|showing|damage\s+(?:from|by)|damaged\s+by|caused\s+by|due\s+to|because\s+of|active)\b/i;
-const PROTECT_CUE_RE = /\b(?:protect\w*|prevent\w*|guard\w*|defend\w*|against|designed|aimed|made\s+to|targets?|targeting)\b/i;
+// A treatment-PURPOSE phrase: what a product is for, which is all a product's
+// targets or role can license ("to go after chinch bugs", "weed control").
+const PURPOSE_CUE_RE = /\b(?:protect\w*|prevent\w*|guard\w*|defend\w*|against|designed|aimed|made\s+to|targets?|targeting|go\s+after|control\w*|treat\w*\s+(?:for|against)|stop\w*|manage\w*|get\s+rid)\b/i;
 
 // Conditions a text can name. `cause: true` terms name a specific pest, disease or
 // cause; the rest are symptoms or generic words. Each is allowed only when an input
@@ -352,7 +357,7 @@ const TERMS = [
 ];
 
 // What each product kind is for, so "weed control" beside a herbicide is not an
-// invented weed finding.
+// invented weed finding. A role licenses a PURPOSE claim only.
 const ROLE_WORDS = {
   herbicide: 'weed weeds control', pre_emergent: 'weed weeds prevention', insecticide: 'insect insects bug bugs pest pests control',
   fungicide: 'fungus fungal disease protection', fertilizer: 'fertilizer nutrient nutrients feeding', supplement: 'nutrient nutrients iron color support',
@@ -376,34 +381,124 @@ function haystacks(inputs) {
   };
 }
 
-// Which inputs carry a term: the record, split by how much it can license.
+// ── Stance: does a text say a condition IS there, is NOT there, or MIGHT be? ──
+// A cue ("no", "not", "none", "didn't", "without", "free of", "ruled out") within
+// eight words before the term, or "not found / none / absent" right after it, makes
+// that mention NEGATED. A hedge in the same stretch (suspect, possible, may, might,
+// unsure, ...) makes it UNCERTAIN. Anything else is AFFIRMED. A stretch ends at
+// "but / however / although / except". Misreading is deliberately one-sided: a
+// negation cue that does not really apply only costs a paragraph, never a claim.
+const NEG_BEFORE_RE = /(?:^|\W)(?:no|not|none|never|without|nothing|zero|free\s+of|rule[sd]?\s+out|ruled\s+out|\w+n['’]t)(?:\W|$)/i;
+const NEG_AFTER_RE = /^(?:\W+\w+){0,3}?\W+(?:not\s+(?:found|seen|present|observed|detected)|none|absent|ruled\s+out|negative|free)\b/i;
+const CUT_RE = /\b(?:but|however|although|though|except)\b/gi;
+const CLAUSE_BREAK_RE = /[,;:]|\b(?:and|but|while|so|which|because)\b/gi;
+
+function occurrences(term, text) {
+  const out = [];
+  for (const sentence of String(text || '').split(/[.!?;\n]+/)) {
+    for (const m of sentence.matchAll(new RegExp(term.re.source, 'gi'))) {
+      let start = 0;
+      for (const c of sentence.slice(0, m.index).matchAll(CUT_RE)) start = c.index + c[0].length;
+      let end = sentence.length;
+      const after = sentence.slice(m.index + m[0].length);
+      const nextCut = after.search(new RegExp(CUT_RE.source, 'i'));
+      if (nextCut >= 0) end = m.index + m[0].length + nextCut;
+      const segment = sentence.slice(start, end);
+      const before = sentence.slice(start, m.index).replace(/\bnot\s+(?:sure|certain)\b/gi, 'unsure').split(/\s+/).slice(-8).join(' ');
+      const negated = NEG_BEFORE_RE.test(before) || NEG_AFTER_RE.test(after.slice(0, end - m.index - m[0].length));
+      let stance = 'affirmed';
+      if (UNSURE_RE.test(segment) || /\bnot\s+(?:sure|certain)\b/i.test(segment)) stance = 'uncertain';
+      else if (negated) stance = 'negated';
+      // The clause around the match, for purpose / observed cues.
+      let cs = 0;
+      let ce = sentence.length;
+      for (const b of sentence.matchAll(CLAUSE_BREAK_RE)) {
+        if (b.index + b[0].length <= m.index) cs = b.index + b[0].length;
+        else if (b.index >= m.index + m[0].length) { ce = b.index; break; }
+      }
+      out.push({ stance, clause: sentence.slice(cs, ce) });
+    }
+  }
+  return out;
+}
+
+// One stance for a whole text: affirmed beats uncertain beats negated, and an
+// affirmed mention beside a negated one is a conflict, which reads as uncertain.
+function noteStanceOf(term, note) {
+  const stances = occurrences(term, note).map((o) => o.stance);
+  if (!stances.length) return null;
+  if (stances.includes('affirmed')) return stances.includes('negated') ? 'uncertain' : 'affirmed';
+  return stances.includes('uncertain') ? 'uncertain' : 'negated';
+}
+
+// Which inputs carry a term, split by how much each can license.
 function provenanceOf(term, hay) {
   const has = (text) => !!text && term.re.test(text);
   return {
-    note: has(hay.note),
+    noteStance: noteStanceOf(term, hay.note),
     findingHigh: has(hay.findingHigh),
     findingLow: has(hay.findingLow),
     prior: has(hay.prior),
     progress: has(hay.progress),
     fact: has(hay.fact),
-    targets: has(hay.targets),
-    role: !!term.generic && has(hay.role),
+    // Targets and a product's role license a PURPOSE claim ("to protect against X")
+    // and nothing else: never "found", "saw" or "there is".
+    purpose: has(hay.targets) || (!!term.generic && has(hay.role)),
   };
 }
 
-function termProblem(term, sentence, prov, from) {
-  const solid = prov.note || prov.findingHigh || prov.prior || prov.progress || prov.fact || prov.role;
-  if (solid) {
-    // A cause that only a prior visit carries is history, not today's finding.
-    if (term.cause && !prov.note && !prov.findingHigh && !prov.role && prov.prior && !PRIOR_REF_RE.test(sentence)) return `condition_from_prior_only:${term.key}`;
-    return null;
+// One mention of a term in the paragraph, against the record. null = fine.
+function mentionProblem(term, sentence, mention, prov, from) {
+  const key = term.key;
+  if (mention.stance === 'negated') {
+    if (prov.noteStance === 'negated') return from.includes('note') ? null : `negation_unsourced:${key}`;
+    if (prov.noteStance === 'affirmed' || prov.findingHigh) return `negation_contradicts_record:${key}`;
+    return `absence_not_in_record:${key}`;
   }
-  if (prov.findingLow) return HEDGE_RE.test(sentence) ? null : `low_confidence_stated_as_fact:${term.key}`;
-  if (prov.targets) {
-    if (OBSERVED_CUE_RE.test(sentence) || !PROTECT_CUE_RE.test(sentence)) return `target_stated_as_found:${term.key}`;
-    return from.includes('product') ? null : `target_without_product_source:${term.key}`;
+  const purposeOnly = PURPOSE_CUE_RE.test(mention.clause) && !OBSERVED_CUE_RE.test(mention.clause);
+  if (purposeOnly && prov.purpose) return from.includes('product') ? null : `purpose_without_product_source:${key}`;
+  // From here the paragraph says the condition is (or may be) PRESENT.
+  if (prov.noteStance === 'affirmed' || prov.findingHigh || prov.progress || prov.fact) return null;
+  if (prov.noteStance === 'uncertain') return mention.stance === 'uncertain' ? null : `uncertain_stated_as_fact:${key}`;
+  if (prov.findingLow) return HEDGE_RE.test(sentence) ? null : `low_confidence_stated_as_fact:${key}`;
+  if (prov.prior) return PRIOR_REF_RE.test(sentence) ? null : `condition_from_prior_only:${key}`;
+  if (prov.noteStance === 'negated') return `negated_in_note_stated_as_found:${key}`;
+  if (prov.purpose) return `target_stated_as_found:${key}`;
+  return `condition_not_in_inputs:${key}`;
+}
+
+// ── Progress comparisons: only a fixed progress line can license one ──
+const METRIC_OF = { turf_density: 'density', weed_suppression: 'weeds', stress_damage: 'stress' };
+const DIRECTION_OF = { improving: 'better', on_track: 'ontrack', holding_steady: 'same', too_early: 'early', behind: 'worse' };
+const PROGRESS_META = new Map();
+for (const [metric, label] of Object.entries(METRIC_OF)) {
+  for (const [state, text] of Object.entries(METRIC_SENTENCE[metric] || {})) {
+    if (DIRECTION_OF[state]) PROGRESS_META.set(text, { metric: label, direction: DIRECTION_OF[state] });
   }
-  return `condition_not_in_inputs:${term.key}`;
+}
+const SENTENCE_METRICS = {
+  density: /\b(?:thick\w*|dens\w*|thin\w*|fuller|fill(?:ing|ed)?\s+in|bare)\b/i,
+  weeds: /\bweeds?\b/i,
+  stress: /\b(?:stress\w*|damage\w*|repair\w*)\b/i,
+};
+const SENTENCE_DIRECTIONS = {
+  better: /\b(?:better|improv\w*|ahead|thicker|fuller|healthier|stronger|recover\w*|gain\w*|fewer|reduced)\b/i,
+  worse: /\b(?:worse|behind|declin\w*|thinner|slipp\w*|lost|loss)\b/i,
+  same: /\b(?:steady|unchanged|same|holding|flat|stable)\b/i,
+  ontrack: /\bon\s+track\b|\bas\s+expected\b|\bon\s+schedule\b/i,
+  early: /\btoo\s+early\b/i,
+};
+const COMPARISON_RE = /\b(?:since|than|compared|improv\w*|better|worse|recover\w*|declin\w*|thicker|fuller|healthier|thinner|ahead|behind|progress\w*|steady|unchanged|on\s+track|as\s+expected|too\s+early)\b/i;
+
+// A comparison sentence passes only when a fixed progress line says the same
+// thing about the same metric (thickness, weeds or stress) in the same direction.
+function comparisonSupported(sentence, progressLines) {
+  const metrics = Object.keys(SENTENCE_METRICS).filter((k) => SENTENCE_METRICS[k].test(sentence));
+  const directions = Object.keys(SENTENCE_DIRECTIONS).filter((k) => SENTENCE_DIRECTIONS[k].test(sentence));
+  return progressLines.some((line) => {
+    const meta = PROGRESS_META.get(line);
+    return !!meta && metrics.includes(meta.metric) && directions.includes(meta.direction);
+  });
 }
 
 /**
@@ -487,12 +582,16 @@ function validateParagraph(answer, rawInputs) {
       if (!term.re.test(sentence)) continue;
       named.push(term);
       const prov = provenanceOf(term, hay);
-      const problem = termProblem(term, sentence, prov, from);
-      if (problem) fail(problem);
-      // A cause the record carries must be sourced to where the record has it: the
-      // note, a finding or the last visit. A product's source licenses protection
-      // from its targets, never a finding.
-      else if (term.cause && (prov.note || prov.findingHigh || prov.prior) && !from.some((k) => ['note', 'finding', 'prior'].includes(k))) fail(`cause_unsourced:${term.key}`);
+      for (const mention of occurrences(term, sentence)) {
+        const problem = mentionProblem(term, sentence, mention, prov, from);
+        if (problem) { fail(problem); continue; }
+        // A cause the record carries must be sourced to where the record has it: the
+        // note, a finding or the last visit. A product's source licenses a purpose
+        // claim, never a finding.
+        const purposeOnly = mention.stance !== 'negated' && PURPOSE_CUE_RE.test(mention.clause) && !OBSERVED_CUE_RE.test(mention.clause) && prov.purpose;
+        if (term.cause && !purposeOnly && mention.stance !== 'negated' && (prov.noteStance === 'affirmed' || prov.noteStance === 'uncertain' || prov.findingHigh || prov.prior)
+          && !from.some((k) => ['note', 'finding', 'prior'].includes(k))) fail(`cause_unsourced:${term.key}`);
+      }
     }
     // The photos never confirm a cause: that comes from the technician.
     if (named.some((t) => t.cause) && PHOTO_REF_RE.test(sentence) && CONFIRM_VERB_RE.test(sentence)) fail('photo_confirms_cause');
@@ -501,9 +600,9 @@ function validateParagraph(answer, rawInputs) {
     // Product talk needs the product source (or the note that named it).
     if ([...applied].some((tok) => tok.length >= 4 && !GENERIC_NAME_TOKENS.has(tok) && new RegExp(`\\b${escapeRe(tok)}\\b`, 'i').test(sentence))
       && !from.some((k) => k === 'product' || k === 'note')) fail('product_unsourced');
-    // Last-visit talk needs the prior or progress source; a comparison needs progress.
+    // Last-visit talk needs the prior or progress source; a comparison needs a matching fixed progress line.
     if (PRIOR_REF_RE.test(sentence) && /\b(?:last\s+visit|previous|earlier|prior)\b/i.test(sentence) && !from.some((k) => k === 'prior' || k === 'progress')) fail('prior_unsourced');
-    if (COMPARE_WORD_RE.test(sentence) && /\b(?:since|than|compared|improv\w*|better|worse|recover\w*|declin\w*|thicker|fuller|healthier|thinner|ahead|behind|progress\w*)\b/i.test(sentence) && !from.includes('progress')) fail('unsupported_comparison');
+    if (COMPARISON_RE.test(sentence) && !comparisonSupported(sentence, inputs.progressLines)) fail('comparison_without_progress');
     // Color is never compared between visits.
     if (COLOR_WORD_RE.test(sentence) && (PRIOR_REF_RE.test(sentence) || COMPARE_WORD_RE.test(sentence)) && /\b(?:since|than|compared|last\s+visit|previous|earlier|prior|before|better|worse|greener|darker|lighter|yellower|browner|paler|improv\w*|declin\w*)\b/i.test(sentence)) fail('color_comparison');
   });
@@ -540,10 +639,14 @@ async function generateTechParagraph(rawInputs, deps = {}) {
   const inputs = normalizeInputs(rawInputs);
   if (!inputs.technicianNote || inputs.technicianNote.length < 12) return { ok: false, reason: 'no_note' };
   if (!inputs.products.length) return { ok: false, reason: 'no_products' };
+  // What is left of the step's one deadline (createAndFreezeTechParagraph passes it);
+  // a call with under a second to run is not made.
+  const budgetMs = Number.isFinite(deps.budgetMs) ? Math.min(BUDGET_MS, deps.budgetMs) : BUDGET_MS;
+  if (budgetMs < 1000) return { ok: false, reason: 'timeout' };
   const prompt = buildPrompt(inputs);
   const payload = {
     laneId: 'lawn_tech_paragraph', promptVersion: PROMPT_VERSION, system: prompt.system, text: prompt.text, jsonMode: true,
-    jsonSchema: prompt.jsonSchema, maxTokens: 900, timeoutMs: BUDGET_MS,
+    jsonSchema: prompt.jsonSchema, maxTokens: 900, timeoutMs: budgetMs,
   };
   let verdict = null;
   const validate = (result) => {
@@ -562,7 +665,7 @@ async function generateTechParagraph(rawInputs, deps = {}) {
     };
     let timer;
     const expired = new Promise((resolve) => {
-      timer = setTimeout(() => resolve({ ok: false, reason: 'timeout' }), BUDGET_MS);
+      timer = setTimeout(() => resolve({ ok: false, reason: 'timeout' }), budgetMs);
       if (typeof timer.unref === 'function') timer.unref();
     });
     const racing = call();
@@ -651,39 +754,79 @@ async function freezeTechParagraph(serviceRecordId, entry, knex) {
 }
 
 /**
- * The completion step: inputs in, frozen entry out. Never throws, never blocks
- * completion beyond BUDGET_MS (15 s, both providers together). `gather` and `generate` are injectable for tests.
- * Returns { status, entry? } where entry is the whole freeze map of this record
- * (for the caller to fold into its in-memory structured_notes).
+ * The completion step: record read, input gather, model call, validation and
+ * freeze, all under ONE deadline of BUDGET_MS from the call (the technician is
+ * waiting at Complete). Never throws. `gatherInputs` and `deps.generate` are
+ * injectable for tests.
+ *
+ * Deadline rule. Every await checks the deadline before the next stage starts,
+ * and a stage that starts after expiry does not run. The freeze is the one
+ * stage that cannot be cut short: it is a single atomic, first-writer-wins
+ * UPDATE, so once issued it finishes whole or not at all, and it only ever
+ * starts after a validated paragraph exists (so one in flight at the deadline is
+ * necessarily past the model call). Expiry returns { status: 'timeout' }
+ * without waiting for it. Nothing is ever written after expiry that was not
+ * already issued before it.
+ *
+ * Either `structuredNotes` (already read) or `getStructuredNotes` (an async read
+ * of the row's CURRENT notes, so it is under the deadline too) says whether a
+ * paragraph is already frozen.
+ * Returns { status, entry? }; entry is the frozen entry, for the caller's in-memory notes.
  */
 async function createAndFreezeTechParagraph({
-  serviceRecordId, assessmentId, structuredNotes, gatherInputs, knex, deps = {},
+  serviceRecordId, assessmentId, structuredNotes, getStructuredNotes, gatherInputs, knex, deps = {},
 }) {
   if (!serviceRecordId || !assessmentId || typeof gatherInputs !== 'function') return { status: 'skipped' };
-  // First writer wins and a retry must not spend a second call.
-  if (storedTechParagraphFor(structuredNotes, assessmentId)) return { status: 'already_frozen' };
-  let inputs;
-  try {
-    inputs = await gatherInputs();
-  } catch (err) {
-    logger.warn(`[lawn-tech-paragraph] input read failed for ${serviceRecordId}: ${err.message}`);
-    return { status: 'read_failed' };
-  }
-  if (!inputs) return { status: 'no_inputs' };
-  const generated = await (deps.generate || generateTechParagraph)(inputs, deps);
-  if (!generated.ok) return { status: generated.reason || 'no_paragraph', problems: generated.problems };
-  const entry = {
-    v: FREEZE_VERSION,
-    promptVersion: PROMPT_VERSION,
-    assessmentId: String(assessmentId),
-    text: generated.paragraph,
-    sources: generated.sources,
-    inputsHash: generated.inputsHash || null,
-    frozenAt: (deps.now ? deps.now() : new Date()).toISOString(),
+  const startedAt = Date.now();
+  let expired = false;
+  const remaining = () => BUDGET_MS - (Date.now() - startedAt);
+  const live = () => !expired && remaining() > 0;
+
+  const run = async () => {
+    const notes = typeof getStructuredNotes === 'function' ? await getStructuredNotes() : structuredNotes;
+    if (!live()) return { status: 'timeout' };
+    // First writer wins and a retry must not spend a second call.
+    if (storedTechParagraphFor(notes, assessmentId)) return { status: 'already_frozen' };
+    let inputs;
+    try {
+      inputs = await gatherInputs();
+    } catch (err) {
+      logger.warn(`[lawn-tech-paragraph] input read failed for ${serviceRecordId}: ${err.message}`);
+      return { status: 'read_failed' };
+    }
+    if (!live()) return { status: 'timeout' };
+    if (!inputs) return { status: 'no_inputs' };
+    const generated = await (deps.generate || generateTechParagraph)(inputs, { ...deps, budgetMs: remaining() });
+    if (!live()) return { status: 'timeout' };
+    if (!generated.ok) return { status: generated.reason || 'no_paragraph', problems: generated.problems };
+    const entry = {
+      v: FREEZE_VERSION,
+      promptVersion: PROMPT_VERSION,
+      assessmentId: String(assessmentId),
+      text: generated.paragraph,
+      sources: generated.sources,
+      inputsHash: generated.inputsHash || null,
+      frozenAt: (deps.now ? deps.now() : new Date()).toISOString(),
+    };
+    const frozen = await freezeTechParagraph(serviceRecordId, entry, knex);
+    if (!frozen) return { status: 'freeze_failed' };
+    return { status: 'frozen', entry: frozen };
   };
-  const frozen = await freezeTechParagraph(serviceRecordId, entry, knex);
-  if (!frozen) return { status: 'freeze_failed' };
-  return { status: 'frozen', entry: frozen };
+
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => { expired = true; resolve({ status: 'timeout' }); }, BUDGET_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+  const stepping = run().catch((err) => {
+    logger.warn(`[lawn-tech-paragraph] step failed for ${serviceRecordId}: ${err.message}`);
+    return { status: 'error' };
+  });
+  try {
+    return await Promise.race([stepping, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 module.exports = {

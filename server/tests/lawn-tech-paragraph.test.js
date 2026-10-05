@@ -89,16 +89,24 @@ describe('validator: accepts', () => {
     expect(verdict.paragraph.split(/\s+/).length).toBeLessThanOrEqual(70);
   });
 
-  test('a restated progress line is allowed when the sentence names progress as its source', () => {
-    const inputs = { ...FIXTURE, progressLines: ['Weed pressure is holding steady.'] };
-    const a = answer(
-      'Our technician saw chinch bugs at the trouble spot. Arena 50 WDG went on the front and side yards to treat them. Weeds are holding steady compared with our last visit.',
-      [['note'], ['note', 'product'], ['progress', 'prior']],
-    );
-    expect(check(a, inputs).problems).toEqual([]);
-    // The same sentence without that source, or with no progress line, is a guess.
-    const unsourced = { ...a, sources: sources(a.paragraph, [['note'], ['note', 'product'], ['prior']]) };
-    expect(check(unsourced, inputs).problems).toContain('unsupported_comparison');
+  test('a comparison is accepted only when a fixed progress line has the same metric and direction', () => {
+    const inputs = { ...FIXTURE, progressLines: ['Weed pressure is holding steady.', 'Thickness is on track.'] };
+    const base = 'Our technician saw chinch bugs at the trouble spot. Arena 50 WDG went on the front and side yards to treat them.';
+    const withThird = (third, from = ['progress', 'prior']) => answer(`${base} ${third}`, [['note'], ['note', 'product'], from]);
+    expect(check(withThird('Weeds are holding steady compared with our last visit.'), inputs).problems).toEqual([]);
+    expect(check(withThird('Thickness is on track since our last visit.'), inputs).problems).toEqual([]);
+    // Right metric, wrong direction; wrong metric; no metric: all rejected.
+    expect(check(withThird('Weeds are ahead of schedule compared with our last visit.'), inputs).problems).toContain('comparison_without_progress');
+    expect(check(withThird('Weeds are behind where we hoped compared with our last visit.'), inputs).problems).toContain('comparison_without_progress');
+    expect(check(withThird('Stressed areas are holding steady compared with our last visit.'), inputs).problems).toContain('comparison_without_progress');
+    expect(check(withThird('The lawn is better than at our last visit.'), inputs).problems).toContain('comparison_without_progress');
+  });
+
+  test('naming "progress" as the source is not enough: with no progress line every comparison is rejected', () => {
+    for (const progressLines of [[], undefined]) {
+      const a = answer('Our technician found chinch bugs in the trouble spot. The turf looks thicker than at our last visit.', [['note'], ['progress', 'prior']]);
+      expect(check(a, { ...FIXTURE, progressLines }).problems).toContain('comparison_without_progress');
+    }
   });
 
   test('a product target may be named as protection only when the product is the source', () => {
@@ -161,7 +169,7 @@ describe('validator: rejects', () => {
 
   test('a comparison with the last visit that restates no progress line', () => {
     const a = answer('Our technician found chinch bugs in the trouble spot. The turf looks thicker than at our last visit.', [['note'], ['prior']]);
-    expect(problemsOf(a)).toContain('unsupported_comparison');
+    expect(problemsOf(a)).toContain('comparison_without_progress');
   });
 
   test('"the photos confirmed" a cause, in any wording', () => {
@@ -203,6 +211,64 @@ describe('validator: rejects', () => {
     const inputs = { ...FIXTURE, technicianNote: 'Applied Arena to the front yard and fertilizer to the whole yard today.', prior: { ...FIXTURE.prior, watched: ['chinch bug damage'] } };
     const a = answer('We found chinch bugs in the front yard. Arena 50 WDG went on to treat them.', [['prior'], ['product']]);
     expect(problemsOf(a, inputs).join(' ')).toMatch(/condition_from_prior_only:chinch/);
+  });
+});
+
+describe('validator: negation and uncertainty in the technician note', () => {
+  const noted = (technicianNote) => ({ ...FIXTURE, technicianNote });
+  const NONE = noted('Applied Arena to the front and side yards. No chinch bugs found today, this was a preventive treatment. Also applied LESCO 24-0-11 to the whole yard.');
+  const MAYBE = noted('Applied Arena to the front and side yards. May be chinch bugs in the trouble spot, not sure. Also applied LESCO 24-0-11 to the whole yard.');
+  const sentenceOf = (second, from) => answer(`Arena 50 WDG went on the front and side yards. ${second}`, [['note', 'product'], from]);
+
+  test('note says "no chinch bugs found" + Arena: "found chinch bugs" is rejected', () => {
+    const a = sentenceOf('Our technician found chinch bugs in the trouble spot.', ['note']);
+    expect(check(a, NONE).problems).toContain('negated_in_note_stated_as_found:chinch');
+  });
+
+  test('...but a treatment-purpose claim is accepted', () => {
+    for (const second of ['We treated the whole lawn to protect against chinch bugs.', 'The treatment is there to go after chinch bugs.']) {
+      expect(check(sentenceOf(second, ['product']), NONE).problems).toEqual([]);
+    }
+    // A purpose claim still needs the product source.
+    expect(check(sentenceOf('We treated the whole lawn to protect against chinch bugs.', ['note']), NONE).problems).toContain('purpose_without_product_source:chinch');
+  });
+
+  test('...and "found no chinch bugs" is accepted, with a note source; without one it is not', () => {
+    expect(check(sentenceOf('Our technician found no chinch bugs today.', ['note']), NONE).problems).toEqual([]);
+    expect(check(sentenceOf('Our technician found no chinch bugs today.', ['fact']), NONE).problems).toContain('negation_unsourced:chinch');
+  });
+
+  test('"no chinch bugs" when the record never says so, or says the opposite, is rejected', () => {
+    expect(check(sentenceOf('Our technician found no chinch bugs today.', ['note']), FIXTURE).problems).toContain('negation_contradicts_record:chinch');
+    expect(check(sentenceOf('Our technician found no grubs today.', ['note']), FIXTURE).problems).toContain('absence_not_in_record:grub');
+  });
+
+  test('note says "may be chinch bugs": unhedged "found chinch bugs" is rejected; hedged is accepted', () => {
+    expect(check(sentenceOf('Our technician found chinch bugs in the trouble spot.', ['note']), MAYBE).problems).toContain('uncertain_stated_as_fact:chinch');
+    expect(check(sentenceOf('Our technician thinks chinch bugs may be in the trouble spot.', ['note']), MAYBE).problems).toEqual([]);
+  });
+
+  test('negation reaches a whole list, and a "but" ends it', () => {
+    const list = noted('Applied Arena. No chinch bugs, grubs or webworms seen. Applied LESCO 24-0-11 to the whole yard.');
+    expect(check(sentenceOf('Our technician saw grubs near the fence.', ['note']), list).problems).toContain('negated_in_note_stated_as_found:grub');
+    const but = noted('Applied Arena. Did not see grubs, but there are chinch bugs at the trouble spot. Applied LESCO 24-0-11 to the whole yard.');
+    expect(check(sentenceOf('Our technician found chinch bugs in the trouble spot.', ['note']), but).problems).toEqual([]);
+    expect(check(sentenceOf('Our technician saw grubs near the fence.', ['note']), but).problems).toContain('negated_in_note_stated_as_found:grub');
+  });
+
+  test('a product role or target never makes a "found" claim: "We found insects" on a preventive Arena visit', () => {
+    const preventive = noted('Applied Arena to the front and side yards as a preventive treatment. Applied LESCO 24-0-11 to the whole yard.');
+    for (const second of ['We found insects in the front yard.', 'We saw white grubs along the edge.', 'There are billbugs in the lawn.']) {
+      const verdict = check(sentenceOf(second, ['note', 'product']), preventive);
+      expect(verdict.ok).toBe(false);
+      expect(verdict.problems.join(' ')).toMatch(/target_stated_as_found|condition_not_in_inputs/);
+    }
+    expect(check(sentenceOf('Arena protects against white grubs.', ['product']), preventive).problems).toEqual([]);
+  });
+
+  test('a conflict in the note (affirmed and negated for the same term) reads as uncertain', () => {
+    const conflict = noted('Applied Arena. There are chinch bugs in the front. No chinch bugs in the back. Applied LESCO 24-0-11.');
+    expect(check(sentenceOf('Our technician found chinch bugs in the trouble spot.', ['note']), conflict).problems).toContain('uncertain_stated_as_fact:chinch');
   });
 });
 
@@ -270,6 +336,68 @@ describe('the one model call', () => {
       expect(out.value).toMatchObject({ ok: false, reason: 'timeout' });
       await jest.advanceTimersByTimeAsync(10000);
       expect(out.value.ok).toBe(false);
+    });
+
+    test('a slow record read, a slow gather or a late model makes the WHOLE step time out at 15 s with no write', async () => {
+      jest.useFakeTimers();
+      const never = () => new Promise(() => {});
+      const cases = [
+        { name: 'record read', args: { getStructuredNotes: never, gatherInputs: async () => FIXTURE } },
+        { name: 'gather', args: { structuredNotes: '{}', gatherInputs: never } },
+        { name: 'gather finishing late', args: { structuredNotes: '{}', gatherInputs: () => new Promise((r) => setTimeout(() => r(FIXTURE), 20000)) } },
+      ];
+      for (const { args } of cases) {
+        dispatchWithFallback.mockReset();
+        const knex = jest.fn();
+        const out = settled(tech.createAndFreezeTechParagraph({ serviceRecordId: 's1', assessmentId: 77, knex, ...args }));
+        await jest.advanceTimersByTimeAsync(14999);
+        expect(out.done).toBe(false);
+        await jest.advanceTimersByTimeAsync(1);
+        expect(out.value).toEqual({ status: 'timeout' });
+        await jest.advanceTimersByTimeAsync(10000); // the straggler lands: still nothing
+        expect(knex).not.toHaveBeenCalled();
+        expect(dispatchWithFallback).not.toHaveBeenCalled();
+      }
+    });
+
+    test('time spent reading and gathering is taken off the model call, and a validated paragraph that lands after the deadline is not frozen', async () => {
+      jest.useFakeTimers();
+      const knex = jest.fn();
+      // Gather takes 9 s: the model gets only the remaining ~6 s.
+      const seen = [];
+      const generate = jest.fn(async (_inputs, deps) => { seen.push(deps.budgetMs); await new Promise((r) => setTimeout(r, 7000)); return { ok: true, paragraph: GOOD_2.paragraph, sources: GOOD_2.sources }; });
+      const out = settled(tech.createAndFreezeTechParagraph({
+        serviceRecordId: 's1', assessmentId: 77, structuredNotes: '{}', knex, deps: { generate },
+        gatherInputs: () => new Promise((r) => setTimeout(() => r(FIXTURE), 9000)),
+      }));
+      await jest.advanceTimersByTimeAsync(15000);
+      expect(seen[0]).toBeLessThanOrEqual(6000);
+      expect(seen[0]).toBeGreaterThan(5000);
+      expect(out.value).toEqual({ status: 'timeout' });
+      await jest.advanceTimersByTimeAsync(5000);
+      expect(knex).not.toHaveBeenCalled();
+    });
+
+    test('the freeze already issued before the deadline finishes whole (one atomic statement); none is issued after it', async () => {
+      jest.useFakeTimers();
+      let issued = 0;
+      let finished = 0;
+      const knex = () => ({ where() { return this; }, whereRaw() { return this; }, update: async () => { issued += 1; await new Promise((r) => setTimeout(r, 3000)); finished += 1; return 1; } });
+      knex.raw = () => ({});
+      const generate = async () => ({ ok: true, paragraph: GOOD_2.paragraph, sources: GOOD_2.sources });
+      const out = settled(tech.createAndFreezeTechParagraph({ serviceRecordId: 's1', assessmentId: 77, structuredNotes: '{}', knex, deps: { generate }, gatherInputs: () => new Promise((r) => setTimeout(() => r(FIXTURE), 13000)) }));
+      await jest.advanceTimersByTimeAsync(13000);
+      expect(issued).toBe(1); // started at 13 s, past the model call
+      await jest.advanceTimersByTimeAsync(2000);
+      expect(out.value).toEqual({ status: 'timeout' }); // the caller is released at 15 s
+      await jest.advanceTimersByTimeAsync(2000);
+      expect(finished).toBe(1);
+      // A freeze that would START after the deadline never does.
+      issued = 0;
+      const late = settled(tech.createAndFreezeTechParagraph({ serviceRecordId: 's1', assessmentId: 77, structuredNotes: '{}', knex, deps: { generate: () => new Promise((r) => setTimeout(() => r({ ok: true, paragraph: GOOD_2.paragraph, sources: GOOD_2.sources }), 16000)) }, gatherInputs: async () => FIXTURE }));
+      await jest.advanceTimersByTimeAsync(20000);
+      expect(late.value).toEqual({ status: 'timeout' });
+      expect(issued).toBe(0);
     });
 
     test('the whole completion step (read, call, freeze) stores nothing and returns at 15 s', async () => {
