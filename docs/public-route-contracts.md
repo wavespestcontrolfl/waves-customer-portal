@@ -6604,46 +6604,6 @@ effective post-discount amounts (`annualAfterDiscount`/`visitsPerYear`),
 never the pre-discount list `perTreatment`.
 NOTHING is sent to the customer and no bell rings: one `activity_log` row,
 written ATOMICALLY with the estimate update, is the whole audit surface.
-Good / Better / Best offer tiers (`GATE_ESTIMATE_OFFER_TIERS`, owner
-2026-10-05; STRICT opt-in, off = every response and accept byte-identical):
-an eligible one-time-toggle estimate (`show_one_time_option`, v1 shape,
-recurring pest plus lawn and/or tree & shrub, residential, no opt-out, no
-member evidence, no manual discount) carries `pricing.offerTiers` on `/data`
-— `good` (one-time visit, `oneTimeTotal`), `better` (pest-only plan,
-`usesBundleFrequencies:true` — the bundle's own pest-only ladder) and `best`
-(the full quoted bundle with its OWN `frequencies` + `serviceCadenceCombos`,
-`pestOnly:false`, `services` as the key list, plus its own contract view for
-the page: `sections` (pricing sections), `combinedRecurring` and
-`waveGuardTier`) — plus `pricing.offerTierDefaultKey`. Served only on a
-live accept-active surface, never to a LIVE active member — judged the way the
-accept resolves the customer: the linked `customer_id`, else the prospective
-phone match (`offerTierMemberBlock`, strict, fail-closed) — and a tiered
-payload withholds the `serviceOptOut` block (no remove / add rails). A send
-snapshot or cached bundle frozen before the gate carries no tier verdict:
-under a live gate it is served with its prices untouched and the live v1
-build's tier fields grafted on (`offerTiersEvaluated` stamps a judged
-bundle so an ineligible estimate is not rebuilt on every read). `PUT /:token/accept` takes `selectedTier`: absent = today's
-behavior; an unknown value, a value on an estimate with no stored tiers, or
-a tier whose service mode disagrees with `serviceMode` is 400
-`offer_tier_unavailable`; `best` keeps the companion programs the toggle's
-companion exclusion drops (the pest-only list filters and the
-`result.recurring.services` rewrite are skipped), prices off the stored
-`best` ladder / combos, refuses `prepay_annual` (400), and is recorded as
-`estimate_data.customerSelection.offerTier`; from then on (accepted or
-price-locked row) `/data` serves the Best tier's own view — ladder, combos and
-summary, picker fields dropped, `pricing.acceptedOfferTier: 'best'` — even
-after the gate is turned off, so the recap keeps what was booked. `/available-slots` (query),
-`/find-slots` and `/reserve` (body) take `offerTier`; only `best` changes
-the visit profile (every quoted program; part of the slot-cache key), and
-only when the live gate is on, the estimate's stored bundle offers that
-tier, and the customer the accept would land on is not a LIVE active member
-(the same `offerTierMemberBlock`, fail-closed on any read error) — the same
-three facts the accept re-checks (before and again inside its transaction,
-409) — and `/reserve` re-judges all three on the LOCKED row inside the
-reservation transaction (409 `offer_tier_unavailable` when the tier is gone or
-the customer became a member), so a hold can never size a visit the accept
-refuses; the accept's reservation commit carries the resolved value.
-
 The same PUT is the priced ADD rail under `GATE_ESTIMATE_SERVICE_ADD`
 (STRICT opt-in, needs the opt-out gate; off = the `/data` `addable` stamp is
 withheld and the write refuses 400 `service_not_addable`): `included:true`
