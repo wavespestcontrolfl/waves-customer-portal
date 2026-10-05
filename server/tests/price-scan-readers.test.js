@@ -13,8 +13,9 @@ const solutions = require('../services/price-scan/adapters/solutions');
 const domyown = require('../services/price-scan/adapters/domyown');
 const veseris = require('../services/price-scan/adapters/veseris');
 const { desktopUserAgent } = require('../services/price-scan/scanner');
+const { analysesIn } = require('../utils/fertilizer-analysis');
 const {
-  offerFromSnapshot, verifyMatch, fertilizerAnalyses, namesConflict,
+  offerFromSnapshot, verifyMatch, namesConflict,
 } = require('../services/price-scan/extract');
 
 const FIX = path.join(__dirname, 'fixtures', 'price-scan');
@@ -168,12 +169,21 @@ describe('verifyMatch product identity (2026-10-05 false positives)', () => {
     )).toBe(true);
   });
 
-  test('an analysis on only one side is a different product', () => {
-    expect(accepts(
-      'LESCO Stonewall 0.43% 0-0-7 AM Pre-Emergent Granular Herbicide Plus Fertilizer',
-      'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide',
-      '50 lb',
-    )).toBe(false);
+  test('separator variants of the same analysis still verify (en dash, spaced dash, slashes)', () => {
+    const expected = 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer';
+    for (const analysis of ['15\u20130\u201315', '15 - 0 - 15', '15 / 0 / 15', '15/0/15']) {
+      expect(accepts(`LESCO Stonewall 0.43% ${analysis} 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer 50 lb`, expected, '50 lb')).toBe(true);
+    }
+    expect(accepts('LESCO Stonewall 0.43% 0\u20130\u20137 AM Pre-Emergent Plus Fertilizer 50 lb', expected, '50 lb')).toBe(false);
+    expect(accepts('LESCO Stonewall 0.43% 0 / 0 / 7 AM Pre-Emergent Plus Fertilizer 50 lb', expected, '50 lb')).toBe(false);
+  });
+
+  test('an analysis on only one side is not a conflict: catalog aliases drop it', () => {
+    // migration 20260712000051: "LESCO 12-0-0 Chelated Iron Plus" is the keeper "LESCO Chelated Iron Plus"
+    expect(accepts('LESCO 12-0-0 Chelated Iron Plus 2.5 gal', 'LESCO Chelated Iron Plus', '2.5 gal')).toBe(true);
+    expect(accepts('LESCO Chelated Iron Plus 2.5 gal', 'LESCO 12-0-0 Chelated Iron Plus', '2.5 gal')).toBe(true);
+    // ...but the rest of the name check still decides
+    expect(accepts('Acme Plus Stabilizer 12-0-0 2.5 gal', 'LESCO Chelated Iron Plus', '2.5 gal')).toBe(false);
   });
 
   test('Induce is not LESCO 90/10 Nonionic Surfactant', () => {
@@ -201,15 +211,17 @@ describe('verifyMatch product identity (2026-10-05 false positives)', () => {
     expect(verdict.matched).toBe(true); // EPA identity, not name overlap
   });
 
-  describe('fertilizerAnalyses', () => {
-    test('reads N-P-K analyses, decimals included', () => {
-      expect([...fertilizerAnalyses('Lesco 24-0-11 and 12-0-0.5 blend')]).toEqual(['24-0-11', '12-0-0.5']);
-      expect([...fertilizerAnalyses('Stonewall 0.43% 15-0-15 50%')]).toEqual(['15-0-15']);
+  describe('analysesIn (shared with the procurement matcher)', () => {
+    test('reads N-P-K analyses across separators and dash styles', () => {
+      expect(analysesIn('Lesco 24-0-11 and 12-0-0.5 blend')).toEqual(['24-0-11', '12-0-0.5']);
+      expect(analysesIn('Stonewall 0.43% 15\u20130\u201315 50%')).toEqual(['15-0-15']);
+      expect(analysesIn('Stonewall 15 / 0 / 15')).toEqual(['15-0-15']);
     });
-    test('ignores EPA registrations, dates and plain sizes', () => {
-      expect(fertilizerAnalyses('EPA Reg 55260-1-12345').size).toBe(0);
-      expect(fertilizerAnalyses('Acelepryn 2026-10-05 64 oz').size).toBe(0);
-      expect(fertilizerAnalyses('Talstar P 1-gal').size).toBe(0);
+    test('ignores EPA registrations, mixed numbers, cued dates and plain sizes', () => {
+      expect(analysesIn('EPA Reg 55260-1-12345')).toEqual([]);
+      expect(analysesIn('Taurus SC 1-1/2 gal')).toEqual([]);
+      expect(analysesIn('buy by 9/27/26')).toEqual([]);
+      expect(analysesIn('Talstar P 1-gal')).toEqual([]);
     });
   });
 
@@ -217,6 +229,7 @@ describe('verifyMatch product identity (2026-10-05 false positives)', () => {
     test('sees an analysis kept only in the catalog productName', () => {
       expect(namesConflict('LESCO Stonewall 0-0-7', ['LESCO Stonewall', 'LESCO Stonewall 15-0-15 Plus Fertilizer'])).toBe(true);
       expect(namesConflict('LESCO Stonewall 15-0-15', ['LESCO Stonewall', 'LESCO Stonewall 15-0-15 Plus Fertilizer'])).toBe(false);
+      expect(namesConflict('LESCO Stonewall 15-0-15', ['LESCO Stonewall Plus Fertilizer'])).toBe(false); // one side only
     });
     test('needs a shared brand token only when both sides have brand tokens', () => {
       expect(namesConflict('Soaker Plus Wetting Agent', 'LESCO-Wet Plus Nonionic Wetting Agent')).toBe(true);

@@ -4,6 +4,7 @@
 // hand them to these functions, so the messy parsing logic stays testable.
 
 const { convertToOz, parsePackSize } = require('../product-costing');
+const { analysesIn } = require('../../utils/fertilizer-analysis');
 
 // Scraped pack sizes are messy ("78 oz jug", "18 lb pail", "1/2 gal",
 // "4 x 30 g"), so normalize through product-costing's robust parsePackSize
@@ -621,18 +622,6 @@ function formulationCodes(name) {
   }
   return codes;
 }
-// Fertilizer analyses ("15-0-15", "0-0-7", "24-0-11") — N-P-K percentages written as three
-// dash-joined numbers. nameTokens drops every token under 3 characters, so an analysis
-// vanishes from the name overlap entirely and "Stonewall 15-0-15" verified against
-// "Stonewall 0-0-7" (2026-10-05 scan). Returns a Set of normalized "15-0-15" strings. The
-// lookarounds keep it off longer dash chains (EPA regs "55260-1-12345", dates, part numbers).
-function fertilizerAnalyses(name) {
-  const out = new Set();
-  const re = /(?<![\d.-])(\d{1,2}(?:\.\d+)?)-(\d{1,2}(?:\.\d+)?)-(\d{1,2}(?:\.\d+)?)(?![\d-]|\.\d)/g;
-  for (const m of String(name || '').matchAll(re)) out.add(`${Number(m[1])}-${Number(m[2])}-${Number(m[3])}`);
-  return out;
-}
-
 // Words that describe WHAT a product is or how it is packed, not WHICH product it is — so
 // "nonionic surfactant" or "(2.5 gal)" never counts as a brand/product-line token.
 const DESCRIPTOR_WORDS = new Set([
@@ -651,22 +640,52 @@ function brandKeyTokens(name) {
 }
 
 // PURE: do the two names name DIFFERENT products even though they share generic words?
-//  - fertilizer analysis: when either name carries one, the expected analyses must all be
-//    in the scraped name ("15-0-15" vs "0-0-7" is a different fertilizer; an analysis on
-//    only one side is a different product too);
+//  - fertilizer analysis: reject only when BOTH sides carry an analysis and the expected
+//    ones are not all in the scraped name ("15-0-15" vs "0-0-7"). An analysis on one side
+//    only is no conflict: catalog aliases drop it ("LESCO 12-0-0 Chelated Iron Plus" is
+//    the keeper "LESCO Chelated Iron Plus"), so the rest of the name check decides.
+//    nameTokens drops every token under 3 characters, so without this an analysis would
+//    never take part in the name overlap at all (2026-10-05 scan: 15-0-15 vs 0-0-7).
+//    Parsed by the shared utils/fertilizer-analysis (separators, mixed dashes, dates).
 //  - brand / product-line: both names have such tokens and share none ("LESCO 90/10
 //    Nonionic Surfactant" vs "Induce Nonionic Surfactant", "LESCO-Wet Plus" vs "Soaker
 //    Plus Wetting Agent" share only descriptors / generic words).
 // `expectedNames` is every name the catalog row carries (analysis may sit in only one).
 function namesConflict(scrapedName, expectedNames) {
   const names = [].concat(expectedNames).filter(Boolean);
-  const scrAn = fertilizerAnalyses(scrapedName);
-  const expAn = new Set(names.flatMap((n) => [...fertilizerAnalyses(n)]));
-  if ((scrAn.size || expAn.size) && !(expAn.size && [...expAn].every((a) => scrAn.has(a)))) return true;
+  const scrAn = new Set(analysesIn(scrapedName));
+  const expAn = new Set(names.flatMap((n) => analysesIn(n)));
+  if (scrAn.size && expAn.size && ![...expAn].every((a) => scrAn.has(a))) return true;
   const scrKeys = brandKeyTokens(scrapedName);
   const expKeys = new Set(names.flatMap((n) => [...brandKeyTokens(n)]));
   return scrKeys.size > 0 && expKeys.size > 0 && ![...expKeys].some((t) => scrKeys.has(t));
 }
+
+// The name signal is the AND of these named checks, each `(scrapedName, ctx) => bool`
+// where ctx = { expName, expNames, nameThreshold }. Erring toward a miss (no savings
+// alert) is the safe direction vs. trusting a wrong price.
+const NAME_CHECKS = [
+  // Coverage of the EXPECTED name (not the smaller token set), AND at least 2 shared
+  // tokens when the expected name has them — a lone category word ("Termiticide") can't
+  // satisfy the name signal on its own. Single-token brands still match on that token.
+  ['coverage', (scr, { expName, nameThreshold }) => {
+    const { inter, expectedSize } = sharedTokenStats(scr, expName);
+    return (expectedSize ? inter / expectedSize : 0) >= nameThreshold && inter >= Math.min(2, expectedSize);
+  }],
+  // The shared tokens must include one OUTSIDE the generic category/application
+  // vocabulary — an actual brand/active token. Else two products that only share "post
+  // emergent liquid herbicide" would verify each other (Tenacity vs a 2,4-D Three-Way).
+  ['distinctive', (scr, { expName }) => sharedDistinctiveCount(scr, expName) >= 1],
+  // A formulation code on the expected name that the scraped name lacks is a different
+  // formulation of the same brand (Taurus SC vs Taurus CS): it can only verify via EPA.
+  ['formulation', (scr, { expName }) => {
+    const scrCodes = formulationCodes(scr);
+    return [...formulationCodes(expName)].every((c) => scrCodes.has(c));
+  }],
+  // A different fertilizer analysis, or no brand / product-line token in common, is a
+  // different product that merely shares generic words.
+  ['identity', (scr, { expNames }) => !namesConflict(scr, expNames)],
+];
 
 // Normalize an EPA registration to its company-product key ("53883-279-1234" ->
 // "53883-279"). The first two segments identify the product; a trailing
@@ -702,48 +721,19 @@ function verifyMatch(scraped = {}, expected = {}, opts = {}) {
     ? convertToOz(expected.packSizeValue, expected.packSizeUnit)
     : quantityToOz(expected.quantity);
   const sizeKnown = !!(scrapedOz && expectedOz);
-  if (sizeKnown) {
-    signals.packSize = Math.abs(scrapedOz - expectedOz) / expectedOz <= sizeTolerance;
-  }
+  signals.packSize = sizeKnown && Math.abs(scrapedOz - expectedOz) / expectedOz <= sizeTolerance;
 
   const expName = expected.vendorProductName || expected.productName || expected.name;
-  if (scraped.name && expName) {
-    const { inter, expectedSize } = sharedTokenStats(scraped.name, expName);
-    // Coverage of the EXPECTED name (not the smaller token set), AND at least 2
-    // shared distinctive tokens when the expected name has them — so a lone
-    // category word ("Termiticide") can't satisfy the name signal on its own.
-    // Single-token brands still match on that one brand token. Erring toward a
-    // miss (no savings alert) is the safe direction vs. trusting a wrong price.
-    const coverage = expectedSize ? inter / expectedSize : 0;
-    signals.name = coverage >= nameThreshold && inter >= Math.min(2, expectedSize);
-    // Distinctiveness guard: the shared tokens must include at least one OUTSIDE the
-    // generic category/application vocabulary — an actual brand/active token. Without
-    // it, two unrelated products that only share "post emergent liquid herbicide" (or
-    // any category phrase) would verify each other on inflated generic overlap alone
-    // (Tenacity vs a 2,4-D Three-Way). Erring toward a miss is the safe direction.
-    if (signals.name && sharedDistinctiveCount(scraped.name, expName) < 1) signals.name = false;
-    // Formulation guard: if the expected name carries a formulation code that the
-    // scraped name doesn't, it's a different formulation of the same brand
-    // (Taurus SC vs Taurus CS) — drop the name signal so it can only verify via
-    // EPA, never on brand overlap alone.
-    if (signals.name) {
-      const expCodes = formulationCodes(expName);
-      const scrCodes = formulationCodes(scraped.name);
-      if (expCodes.size && ![...expCodes].every((c) => scrCodes.has(c))) signals.name = false;
-    }
-    // Product-identity guard: a different fertilizer analysis, or no brand / product-line
-    // token in common, means a different product that merely shares generic words.
-    if (signals.name && namesConflict(scraped.name, [expName, expected.productName, expected.name])) signals.name = false;
-  }
+  const nameCtx = { expName, expNames: [expName, expected.productName, expected.name], nameThreshold };
+  // (a missing name on either side fails the 'distinctive' check: no shared token.)
+  signals.name = NAME_CHECKS.every(([, ok]) => ok(scraped.name, nameCtx));
 
   // EPA evidence: distinguish the offer's OWN name (strongly tied to the selected
   // offer) from the page body (which on a multi-product page may belong to a
   // DIFFERENT offer than the one selected).
-  let epaInName = false;
-  if (epaKey(expected.epaReg)) {
-    epaInName = epaInText(scraped.name || '', expected.epaReg);
-    signals.epa = epaInName || epaInText(scraped.text || '', expected.epaReg);
-  }
+  // (epaInText is false for an expected reg that has no usable key, and reads null text as empty.)
+  const epaInName = epaInText(scraped.name, expected.epaReg);
+  signals.epa = epaInName || epaInText(scraped.text, expected.epaReg);
 
   // Body-only EPA can stand in for the name signal — a vendor's generic-equivalent
   // listing carrying the same EPA reg IS the same registered product. But when the
@@ -782,7 +772,6 @@ module.exports = {
   deriveNormalizedUnitPrice,
   tokenOverlap,
   verifyMatch,
-  fertilizerAnalyses,
   namesConflict,
   epaKey,
 };
