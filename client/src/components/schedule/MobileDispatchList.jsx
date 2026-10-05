@@ -183,6 +183,9 @@ function DriveLine({ service, statusById }) {
     ? service.driveLateServiceIds : [service.id];
   const late = Number.isFinite(service.driveLateMin) && service.driveLateMin > 0
     && atRisk.some((id) => !ON_THE_WAY.has(statusById?.get(id) ?? service.status));
+  // A finished visit's drive is history (owner 2026-10-05, idea 6) — unless
+  // a later visit at the same stop is still at risk.
+  if (service.status === 'completed' && !late) return null;
   const from = service.drivePrevName ? ` from ${service.drivePrevName}` : '';
   return (
     <div
@@ -233,6 +236,10 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
     : serviceColor(service.serviceType).bg;
 
   const displayName = customerMissing ? 'Unassigned' : name;
+  // A finished visit reads quieter than the work still ahead (owner
+  // 2026-10-05, idea 6): grey name and a "Done" tag. Badges and buttons
+  // (Closeout owed, Audit) keep full strength.
+  const done = service.status === 'completed';
   const techInitial = service.technicianName
     ? service.technicianName.trim().charAt(0).toUpperCase()
     : '';
@@ -297,9 +304,10 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
           className="block w-full text-left bg-white active:bg-zinc-50 u-focus-ring"
         >
           <span className="flex items-baseline gap-2 flex-wrap">
-            <span className="font-medium text-zinc-900" style={{ fontSize: 15 }}>
+            <span className={'font-medium ' + (done ? 'text-ink-tertiary' : 'text-zinc-900')} style={{ fontSize: 15 }}>
               {displayName}
             </span>
+            {done && <Badge tone="neutral">Done</Badge>}
             {service.tier && <Badge tone="neutral">{service.tier}</Badge>}
             {owesCompletion?.(service) && (
               // Completed but the closeout (invoice / report / text) is still
