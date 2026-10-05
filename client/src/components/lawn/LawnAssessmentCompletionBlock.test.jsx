@@ -55,5 +55,7 @@ describe('LawnAssessmentCompletionBlock', () => {
     expect(screen.queryByTestId('lawn-shot-list-hint')).toBeNull();
     // The lawn length box shows in the compact mode too, once the host asks for it.
     expect(screen.getByText('Lawn length')).toBeTruthy();
+    // On the lawn sheet it is a row at the end of the photo slot list.
+    expect(screen.getByTestId('lawn-shot-list').lastElementChild.getAttribute('data-testid')).toBe('lawn-length-row');
   });
 });

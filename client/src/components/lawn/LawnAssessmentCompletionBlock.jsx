@@ -515,6 +515,25 @@ export default function LawnAssessmentCompletionBlock({
   useEffect(() => {
     onProgress?.({ photos: photos.length, assessed: hasResult });
   }, [photos.length, hasResult]);
+  // The lawn sheet (compact, with the shot list) shows lawn length as one more
+  // row under the photo slots; everywhere else it stays beside the photo button.
+  const gaugeInSlots = compact && shotList && !hasResult;
+  const gaugeInput = (
+    <Input
+      type="number"
+      inputMode="decimal"
+      step="0.25"
+      min="0.5"
+      max="8"
+      value={gaugeHeightIn ?? ""}
+      disabled={disabled || analyzing}
+      placeholder="e.g. 4"
+      aria-label="Lawn length in inches"
+      onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
+      className={`!w-20 ${FIELD}`}
+    />
+  );
+
   return (
     <UiSurface density="comfortable" className="flex flex-col gap-3 text-zinc-900">
       {loading && (
@@ -547,21 +566,10 @@ export default function LawnAssessmentCompletionBlock({
             {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" className="text-14 text-zinc-500">Checking photo options…</span>}
           </>
         )}
-        {showGaugeReading && (
+        {showGaugeReading && !gaugeInSlots && (
           <>
             <span className="text-14 font-medium text-zinc-500">Lawn length</span>
-            <Input
-              type="number"
-              inputMode="decimal"
-              step="0.25"
-              min="0.5"
-              max="8"
-              value={gaugeHeightIn ?? ""}
-              disabled={disabled || analyzing}
-              placeholder="e.g. 4"
-              onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
-              className={`!w-20 ${FIELD}`}
-            />
+            {gaugeInput}
             <span className="text-14 text-zinc-500">inches</span>
           </>
         )}
@@ -599,6 +607,15 @@ export default function LawnAssessmentCompletionBlock({
                   </li>
                 );
               })}
+              {showGaugeReading && gaugeInSlots && (
+                <li data-testid="lawn-length-row" className="flex items-center gap-2 rounded-[12px] border border-[#E5E5E5] bg-white px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-14 font-medium text-zinc-900">Lawn length</div>
+                    <div className="text-14 leading-snug text-zinc-500">In inches, if you measured it.</div>
+                  </div>
+                  {gaugeInput}
+                </li>
+              )}
             </ul>
           )}
           {photos.length > 0 && (

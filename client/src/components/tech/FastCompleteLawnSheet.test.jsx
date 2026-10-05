@@ -1228,7 +1228,8 @@ describe('the lawn length (the full form\'s optional mowing height box)', () => 
   test('shows only when the server asks for it, in the Lawn assessment section, and is optional: Analyze, Confirm and Complete never wait for it', async () => {
     await openSheet({ request: lengthCtx() });
     expect(screen.getByText('Lawn length')).toBeTruthy();
-    expect(screen.getByText('inches')).toBeTruthy();
+    // With the shot list it is one more row under the photo slots; without it, the box beside the photo button.
+    expect(screen.queryByTestId('lawn-length-row') || screen.getByText('inches')).toBeTruthy();
     expect(screen.getByPlaceholderText('e.g. 4').closest('section').querySelector('h3').textContent).toBe('Lawn assessment');
     await analyzeAndComplete();
     // Left empty: the body carries the key as null, as the full form's does.
