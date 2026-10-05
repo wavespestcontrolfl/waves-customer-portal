@@ -115,10 +115,13 @@ function photoLightsFromRun(run) {
 }
 
 /**
- * ONE light for a whole visit, from the photos the area scores (and so the color
- * score) rest on: usable photos of an overview shot (full area weight: front,
- * back, side, or untagged). Detail shots and half-weight shots (shade, hot edge)
- * do not count: a close-up in shade must not void a sunny overview.
+ * ONE light for a whole visit, from the photos the color score rests on: every
+ * usable photo whose shot carries a POSITIVE area weight (shotList.areaWeight, the
+ * same weights the shot guide gives color_health: front, back, side, untagged,
+ * and the half-weight shade and hot-edge shots). Detail shots (weight 0) do not
+ * count: a close-up in shade must not void a sunny overview. A shade photo in
+ * different light from the front photo makes the visit mixed, because it moves
+ * the color score too.
  *   - no such photo, or any of them unknown       -> unknown
  *   - all the same                                -> that light
  *   - all overcast / open shade                   -> overcast (open_shade if none is overcast)
@@ -128,7 +131,7 @@ function photoLightsFromRun(run) {
  */
 function visitLightFromPhotos(photos) {
   const overview = (Array.isArray(photos) ? photos : [])
-    .filter((p) => p && USABLE_QUALITY.has(p.quality) && shotList.areaWeight(p.zone) === 1);
+    .filter((p) => p && USABLE_QUALITY.has(p.quality) && shotList.areaWeight(p.zone) > 0);
   if (!overview.length) return 'unknown';
   const lights = overview.map((p) => (LIGHTING.includes(p.light) ? p.light : 'unknown'));
   if (lights.includes('unknown')) return 'unknown';

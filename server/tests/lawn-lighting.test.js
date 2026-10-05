@@ -86,9 +86,21 @@ describe('a photo\'s light read', () => {
 describe('a visit\'s one light', () => {
   const p = (light, zone, quality = 'adequate') => ({ light, zone, quality });
 
-  test('rests on usable overview photos only: a close-up in shade or a poor photo never voids a sunny overview', () => {
-    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('open_shade', 'close_up'), p('low_light', 'trouble'), p('mixed_sun_shade', 'shade'), p('overcast', 'front', 'poor')])).toBe('full_sun');
-    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('full_sun', 'back'), p('full_sun', null)])).toBe('full_sun');
+  test('rests on every usable photo that carries color weight: a close-up in shade or a poor photo never voids a sunny overview', () => {
+    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('open_shade', 'close_up'), p('low_light', 'trouble'), p('overcast', 'front', 'poor')])).toBe('full_sun');
+    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('full_sun', 'back'), p('full_sun', null), p('mixed_sun_shade', 'blade_crown')])).toBe('full_sun');
+  });
+
+  test('half-weight shots (shade, hot edge) move the color score, so they count: a sunny front beside an overcast shade photo is a mixed visit', () => {
+    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('overcast', 'shade')])).toBe('mixed_sun_shade');
+    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('full_sun', 'hot_edge')])).toBe('full_sun');
+    expect(lighting.visitLightFromPhotos([p('full_sun', 'front'), p('unknown', 'hot_edge')])).toBe('unknown');
+    // the rule follows the shot list's own weights, not a hard-coded list
+    const shots = require('../services/lawn-photo-shots');
+    for (const shot of shots.SHOTS) {
+      const counts = lighting.visitLightFromPhotos([p('full_sun', 'front'), p('overcast', shot.key)]) !== 'full_sun';
+      expect(counts).toBe(shot.areaWeight > 0);
+    }
   });
 
   test('no usable overview photo, or any overview photo with no read, is unknown', () => {

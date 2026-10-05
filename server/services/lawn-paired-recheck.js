@@ -325,8 +325,12 @@ function normalizeAnswer(json, { pairs, items, promptVersion = PROMPT_VERSION })
     if (!askedKeys.has(key) || !WRITABLE_VERDICTS.has(answer.verdict)) continue;
     const cited = [...new Set(answer.pairs)].filter((n) => (byPair.get(n)?.verdict || 'cannot_tell') !== 'cannot_tell');
     if (!cited.length) continue;
-    // An item may name color only when at least one pair it rests on can speak to it.
-    const colorAllowed = cited.some((n) => !colorBlocked(n));
+    // An item may name color only when a cited pair that CAN speak to it (compatible
+    // light) itself reported a color change; color seen only in a blocked pair, or
+    // not seen in the compatible pairs, does not survive. Gate-off pairs (no light
+    // marks) keep the item's own answer.
+    const lightMarked = pairs.some((pair) => pair.colorComparable !== undefined);
+    const colorAllowed = !lightMarked || cited.some((n) => !colorBlocked(n) && pairChanges(byPair.get(n)).includes('color'));
     const changed = answer.verdict === 'same' ? [] : orderedChanges(answer.what_changed).filter((d) => d !== 'color' || colorAllowed);
     if (answer.verdict !== 'same' && !changed.length) continue;
     rechecks[key] = {

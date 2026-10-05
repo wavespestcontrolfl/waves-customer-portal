@@ -211,3 +211,30 @@ describe('where the read is stored, and who sees it', () => {
     expect(responseForRun({ id: 'r', status: 'pending' }).photoQuality).toEqual([]);
   });
 });
+
+describe('every reader of the gate is listed in the public route contract', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const root = path.join(__dirname, '..');
+  const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) return e.name === 'tests' || e.name === 'node_modules' || e.name === 'migrations' ? [] : walk(full);
+    return e.name.endsWith('.js') ? [full] : [];
+  });
+
+  test('only these server files CALL lawnLightingLive() or read the env var, and the contract names each', () => {
+    const readers = walk(root)
+      .filter((file) => /lawnLightingLive\(|process\.env\.GATE_LAWN_LIGHTING/.test(fs.readFileSync(file, 'utf8')))
+      .map((file) => path.relative(root, file))
+      .sort();
+    expect(readers).toEqual([
+      'config/feature-gates.js',
+      'services/lawn-paired-recheck.js',
+      'services/lawn-visit-assessment.js',
+      'services/service-report/report-copy-context.js',
+      'services/service-report/report-data.js',
+    ]);
+    const contract = fs.readFileSync(path.join(root, '../docs/public-route-contracts.md'), 'utf8');
+    for (const file of readers.filter((f) => f !== 'config/feature-gates.js')) expect(contract).toContain(`server/${file}`);
+  });
+});

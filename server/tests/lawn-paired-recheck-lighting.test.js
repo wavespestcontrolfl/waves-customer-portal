@@ -170,6 +170,22 @@ describe('gate on: v3', () => {
     for (const record of Object.values(stored.rechecks)) expect(record.whatChanged).not.toContain('color');
   });
 
+  test('with several cited pairs, color stays on an item only when a cited COMPATIBLE pair itself reported color', async () => {
+    // front: sun vs sun (compatible) reports density only; back: sun vs overcast (blocked) reports color
+    const { knex } = makeKnex({ runs: [lightRun(PRIOR, SUN, SUN), lightRun(CUR, SUN, CLOUD)] });
+    dispatchWithFallback.mockResolvedValue(ok({
+      pairs: [{ pair: 1, verdict: 'better', what_changed: ['density'] }, { pair: 2, verdict: 'better', what_changed: ['color', 'density'] }],
+      items: [
+        { item: 'coverage', verdict: 'better', what_changed: ['color', 'density'], pairs: [1, 2] },
+        { item: 'weeds', verdict: 'better', what_changed: ['color'], pairs: [1, 2] },
+      ],
+    }));
+    await recheck.runPairedRecheck(ctx, { knex, photoService: photoService(), dispatch: dispatchWithFallback });
+    const stored = recordPairedRecheck.mock.calls[0][2];
+    expect(stored.rechecks.coverage.whatChanged).toEqual(['density']); // color was seen only in the blocked pair
+    expect(stored.rechecks.weeds).toBeUndefined(); // color was its only change: nothing left to write
+  });
+
   test('a FAILED read of the stored light writes nothing (never frozen as a healthy recheck)', async () => {
     const { knex } = makeKnex({ runs: [], failRuns: true });
     const out = await recheck.runPairedRecheck(ctx, { knex, photoService: photoService(), dispatch: dispatchWithFallback });
