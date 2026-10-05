@@ -13713,25 +13713,26 @@ export function CompletionPanel({
       ));
     }
   }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
-  // A regular pest visit has no visit-level areas either (owner 2026-10-04),
-  // but there the areas belong on the product rows, so a draft saved before
-  // the change hands its ticked areas to the rows that name none (what the
-  // old submit did for a single tick). An area no row then names joins the
-  // first row, so none is dropped (Codex P2 #5889). With no product row yet
-  // the ticks stay in the hidden state, still sent by completionAreasServiced,
-  // until a row exists to carry them.
+  // A regular pest visit has no visit-level areas either (owner 2026-10-04):
+  // the areas belong on the product rows. A draft saved before the change
+  // carries visit-level ticks, which say where the visit went but not which
+  // product went there, so the ticks no row names go onto ONE row (the
+  // first with no area, else the first), where the technician sees and can
+  // move them: none dropped (Codex P2 r1 #5889), none copied onto every row
+  // (Codex P2 r2). With no product row yet the ticks stay in the hidden
+  // state, still sent by completionAreasServiced, until a row exists.
   useEffect(() => {
     if (!isRegularPestVisit || !areasServiced.length) return;
     const carried = areasFromProductRows([{ applicationArea: areasServiced.join(", ") }], AREAS_BY_SERVICE.pest);
     if (carried.length) {
       if (!selectedProducts.some(Boolean)) return;
       setSelectedProducts((prev) => {
-        const filled = prev.map((p) => (p && !p.applicationArea ? { ...p, applicationArea: carried.join(", ") } : p));
-        const named = new Set(filled.flatMap((p) => (p ? parseApplicationAreas(p.applicationArea) : [])));
+        const named = new Set(prev.flatMap((p) => (p ? parseApplicationAreas(p.applicationArea) : [])));
         const missing = carried.filter((area) => !named.has(area));
-        const first = filled.findIndex(Boolean);
-        if (!missing.length || first < 0) return filled;
-        return filled.map((p, index) => (index === first
+        const empty = prev.findIndex((p) => p && !p.applicationArea);
+        const target = empty >= 0 ? empty : prev.findIndex(Boolean);
+        if (!missing.length || target < 0) return prev;
+        return prev.map((p, index) => (index === target
           ? { ...p, applicationArea: [...parseApplicationAreas(p.applicationArea), ...missing].join(", ") }
           : p));
       });
