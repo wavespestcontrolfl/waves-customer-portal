@@ -140,7 +140,8 @@ function accessCodeKind(text) {
 
 // The client's own wording, as a closed rule set over the WHOLE message (four
 // audit rounds each found a new phrase a sentence-level rule missed):
-//  - the code is the only word in the message that holds a digit, so no second
+//  - the code is the only word in the message that holds a digit or a key
+//    symbol (# or *), so no second
 //    number, phone number, address or "then press 2" can sit beside it;
 //  - it equals the value with the key symbols the client wrote;
 //  - it ends its sentence or its line;
@@ -155,7 +156,9 @@ function matchesNaturalAccessCode({ field, value }, { messageBody = '', properti
   if (!/^[#*]?\d{3,8}[#*]?$/.test(candidate)) return false;
   const words = [...body.matchAll(/\S+/g)].map((match) => ({ raw: match[0], end: match.index + match[0].length,
     word: match[0].replace(/^[("'“‘:]+|[.,;:!?)"'”’]+$/g, '') }));
-  const numbered = words.filter((entry) => /\d/.test(entry.word));
+  // A key symbol is part of a credential too, so one standing apart from the
+  // code ("# 5550") counts as a second code word.
+  const numbered = words.filter((entry) => /[\d#*]/.test(entry.raw));
   if (numbered.length !== 1 || numbered[0].word !== candidate) return false;
   if (!/[.!?]["'”’)]*$/.test(numbered[0].raw) && !/^[ \t]*(?:\r?\n|$)/.test(body.slice(numbered[0].end))) return false;
   if (CODE_BLOCKERS.test(body) || CODE_HEDGE.test(body) || CODE_INVALIDATED.test(body) || isQuestionSource(body)) return false;
