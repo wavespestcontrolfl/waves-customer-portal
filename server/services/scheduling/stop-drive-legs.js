@@ -47,26 +47,45 @@ function simRow(s) {
   };
 }
 
+// isCoVisitPair's rule on day-feed rows: no visit group on either side, the
+// same customer, the same promised window, the same pin and the same
+// resolved premise (the feed's `address` is the effective service address,
+// unit included). Anything unknown is not a pair.
+function coVisitPair(a, b) {
+  if (a.visitId || b.visitId) return false;
+  if (a.customerId == null || String(a.customerId) !== String(b.customerId)) return false;
+  if (minutesOf(a.windowStart) !== minutesOf(b.windowStart)) return false;
+  if (!samePlace(a, b)) return false;
+  return Boolean(a.address) && a.address === b.address;
+}
+
 // On-site minutes for one physical stop, with the simulator's own pieces:
-// a visit group sums its rows (arrival-route.js groupRouteStops); ungrouped
-// rows sharing the pin are one co-visit (startCoVisitChain/advanceCoVisit,
-// so two span-only rows sharing an hour stay one hour); the pieces add up.
+// a visit group sums its rows (arrival-route.js groupRouteStops); a run of
+// co-visit rows is one chain (startCoVisitChain/advanceCoVisit, so two
+// span-only rows sharing an hour stay one hour); every other piece adds up.
 function stopWork(members) {
   const groups = new Map();
   const loose = [];
   for (const m of members) {
-    if (!m.visitId) { loose.push(simRow(m)); continue; }
+    if (!m.visitId) { loose.push(m); continue; }
     if (!groups.has(m.visitId)) groups.set(m.visitId, []);
     groups.get(m.visitId).push(simRow(m));
   }
   let work = 0;
   for (const g of groups.values()) work += g.reduce((sum, r) => sum + workDuration(r), 0);
-  if (loose.length) {
-    let chain = { ...startCoVisitChain(loose[0]), arrivalMin: 0 };
-    chain.clock = chain.coMerged;
-    for (const r of loose.slice(1)) chain = advanceCoVisit(chain, r);
-    work += chain.coMerged;
+  let chain = null;
+  let prev = null;
+  for (const m of loose) {
+    if (chain && coVisitPair(prev, m)) {
+      chain = advanceCoVisit(chain, simRow(m));
+    } else {
+      if (chain) work += chain.coMerged;
+      chain = { ...startCoVisitChain(simRow(m)), arrivalMin: 0 };
+      chain.clock = chain.coMerged;
+    }
+    prev = m;
   }
+  if (chain) work += chain.coMerged;
   return work;
 }
 

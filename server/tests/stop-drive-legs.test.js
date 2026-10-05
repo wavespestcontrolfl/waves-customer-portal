@@ -151,9 +151,10 @@ describe('attachDriveLegs', () => {
   });
 
   it('keeps ungrouped rows at one pin on their own planned end (no phantom hour)', () => {
+    const same = { customerId: 'cust-1', address: '1 Sample St, Parrish, FL 34219' };
     const services = [
-      stop('r1', '09:00', A, { windowEnd: '10:00' }),
-      stop('r2', '09:00', A, { windowEnd: '10:00' }),
+      stop('r1', '09:00', A, { windowEnd: '10:00', ...same }),
+      stop('r2', '09:00', A, { windowEnd: '10:00', ...same }),
       stop('c', '09:00', C),
     ];
     attachDriveLegs(services);
@@ -169,9 +170,10 @@ describe('attachDriveLegs', () => {
   });
 
   it('sums real estimates of ungrouped rows at one pin', () => {
+    const same = { customerId: 'cust-1', address: '1 Sample St, Parrish, FL 34219' };
     const services = [
-      stop('r1', '09:00', A, { estimatedDuration: 90 }),
-      stop('r2', '09:00', A, { estimatedDuration: 90 }),
+      stop('r1', '09:00', A, { estimatedDuration: 90, ...same }),
+      stop('r2', '09:00', A, { estimatedDuration: 90, ...same }),
       stop('c', '10:00', C),
     ];
     attachDriveLegs(services);
@@ -181,9 +183,10 @@ describe('attachDriveLegs', () => {
   });
 
   it('counts a real 60-minute estimate but not the feed\'s 60 fill', () => {
+    const same = { customerId: 'cust-1', address: '1 Sample St, Parrish, FL 34219' };
     const real = [
-      stop('r1', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: 60, windowEnd: '09:30' }),
-      stop('r2', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: 60, windowEnd: '09:30' }),
+      stop('r1', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: 60, windowEnd: '09:30', ...same }),
+      stop('r2', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: 60, windowEnd: '09:30', ...same }),
       stop('c', '09:00', C),
     ];
     attachDriveLegs(real);
@@ -191,8 +194,8 @@ describe('attachDriveLegs', () => {
     const lateReal = 11 * 60 + leg - (9 * 60 + 120);
     expect(real[2].driveLateMin).toBe(lateReal > 0 ? lateReal : null);
     const filled = [
-      stop('r1', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: null, windowEnd: '09:30' }),
-      stop('r2', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: null, windowEnd: '09:30' }),
+      stop('r1', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: null, windowEnd: '09:30', ...same }),
+      stop('r2', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: null, windowEnd: '09:30', ...same }),
       stop('c', '09:00', C),
     ];
     attachDriveLegs(filled);
@@ -256,5 +259,16 @@ describe('attachDriveLegs', () => {
     ];
     attachDriveLegs(services);
     expect(services[2].driveLateMin).toBeNull();
+  });
+
+  it('adds up rows at one pin that are not one customer\'s co-visit', () => {
+    const services = [
+      stop('u1', '09:00', A, { windowEnd: '10:00', customerId: 'cust-1', address: '1 Sample St, Unit 1' }),
+      stop('u2', '09:00', A, { windowEnd: '10:00', customerId: 'cust-2', address: '1 Sample St, Unit 2' }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(services);
+    // Two customers in one building: two hours of work, leaving at 11:00.
+    expect(services[2].driveLateMin).toBe(11 * 60 + services[2].driveFromPrevMin - (9 * 60 + 120));
   });
 });
