@@ -47,3 +47,12 @@ test('suggested granular identities cannot inherit an unrelated catalog dose or 
   const rows = protocolCompletionDefaultSelections(response, [{ id: 'palm' }], () => ({ rate: 10, rateUnit: 'lb', totalAmount: 90, carrierGallons: 110 }));
   expect(rows[0]).toMatchObject({ rate: '', rateUnit: 'lb/palm', totalAmount: '', carrierGallons: '', amountUnit: 'lb' });
 });
+
+test('a September guide offers Snapshot, the summer palm feed and TriStar; Talus and Headway are gone', () => {
+  const sep = protocols.tree_shrub.visits.find(v => v.month === 'Sep');
+  const products = Object.fromEntries([...sep.fieldGuide.routine, ...sep.fieldGuide.conditional].map(r => [r.key, reference.products[r.key]]));
+  render(<TreeShrubFieldGuide guide={{ ...sep.fieldGuide, month: 'Sep', ...reference, products }} />);
+  expect(screen.getByRole('button', { name: /Snapshot 2.5TG/ })).toBeTruthy();
+  expect(screen.getByRole('button', { name: /TriStar 8.5 SL/ })).toBeTruthy();
+  expect(screen.queryByRole('button', { name: /Talus|Headway/ })).toBeNull();
+});

@@ -59,6 +59,18 @@
  * was sent and the failure can clear (a hold, a non-terminal provider
  * failure, a terminal rejection of our own sender or account).
  *
+ * Empty voicemail (GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL, this lane
+ * only — the bell never reads it): a caller who waits at the voicemail
+ * greeting and hangs up without speaking still leaves a recording, which the
+ * recording processor rejects as no-speech (transcription_status 'rejected',
+ * or a transcript of only the [VOICEMAIL]/[NO SPEECH] markers). The voicemail
+ * lane does nothing with it, so with the gate on that call counts as "no
+ * message left" here — every other rule above still applies. A recording
+ * still awaiting transcription never counts. The rejection lands minutes
+ * after the call, so the call's send slot opens when this lane first sees the
+ * finished verdict (stamped once in metadata, see sendSlotDeadline); the
+ * 2-minute sweep is what picks it up.
+ *
  * Timing: every call gets one send slot (SEND_SLOT_MS) from the first
  * moment it may be texted — right after the voicemail-landing grace, any
  * hour of the day. Past the slot the call is skipped for good, so a crashed
@@ -73,7 +85,7 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { whereNotBlockedCall } = require('../middleware/spam-block');
 const {
-  missedCallShapeEligible, UNKNOWN_CALLER_MIN_SECONDS,
+  missedCallShapeEligible, isEmptyVoicemailRecording, UNKNOWN_CALLER_MIN_SECONDS,
   UNANSWERED, UNANSWERED_STATUSES, TERMINAL_STATUSES, VOICEMAIL_GRACE_MS,
 } = require('./missed-call-bell');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -87,6 +99,7 @@ const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { autoTextHoldReason, deliveredTexts } = require('./messaging/auto-text-holds');
 
 const GATE = 'missedCallTextBack';
+const EMPTY_VOICEMAIL_GATE = 'missedCallTextBackEmptyVoicemail';
 const MESSAGE_TYPE = 'missed_call_text_back';
 // voicemail-lead-sms.js's provisional claim outcome: its text is not out
 // yet, and it deletes the row on a failure that never consumed its one-shot.
@@ -132,6 +145,16 @@ const SEND_SLOT_MS = 30 * 60 * 1000;
 // an hour); this cap is pure backstop headroom for a stalled sweep or a
 // backlog, not a scheduled wait.
 const MAX_CALL_AGE_MS = 16 * 60 * 60 * 1000;
+// An empty-voicemail call's send slot opens when this lane first sees the
+// processor's finished no-speech verdict (transcription is async, minutes
+// after the call). A sighting later than this after the voicemail grace is
+// treated as happening then, so a stalled processor or sweep never produces
+// an hours-late "sorry we missed your call".
+const EMPTY_VOICEMAIL_LANDING_MS = 60 * 60 * 1000;
+// SQL pre-filter twin of isEmptyVoicemailRecording's marker-only case: the
+// whole transcript is one or more [VOICEMAIL]/[NO SPEECH] markers and
+// punctuation. The JS check stays the authority.
+const EMPTY_VOICEMAIL_MARKER_ONLY_SQL = "transcription ~* '^[^[:alnum:]]*(\\[(voicemail|no speech)\\][^[:alnum:]]*)+$'";
 
 // Later-call outcomes that mean someone already spoke with the caller.
 const ANSWERED_BY_SOMEONE = ['human', 'ai_agent'];
@@ -199,8 +222,15 @@ function fromNumberForDialed(dialed) {
  * bell's delivery keys (see header). Does NOT cover the known-caller phone
  * match (needs a DB read) or the one-per-number claim.
  */
-function textBackCoreEligible(row) {
-  return Boolean(row) && !row.customer_id && missedCallShapeEligible(row, { unknownCallers: true });
+function textBackCoreEligible(row, opts) {
+  return Boolean(row) && !row.customer_id
+    && missedCallShapeEligible(row, { unknownCallers: true, emptyVoicemail: Boolean(opts && opts.emptyVoicemail) });
+}
+
+// The widening is its own gate, read at the point of use (the post-call hook,
+// the sweep, the lease and the provider boundary each read it fresh).
+function emptyVoicemailOn() {
+  return isEnabled(EMPTY_VOICEMAIL_GATE) === true;
 }
 
 /**
@@ -228,7 +258,45 @@ function callEndedAt(row) {
 function sendSlotDeadline(row) {
   const terminalAt = callEndedAt(row);
   if (!Number.isFinite(terminalAt)) return null;
-  return terminalAt + VOICEMAIL_GRACE_MS + SEND_SLOT_MS;
+  const graceClears = terminalAt + VOICEMAIL_GRACE_MS;
+  if (isEmptyVoicemailRecording(row)) {
+    // The call may be texted only once the processor has rejected its
+    // recording. The row carries no immutable completion time (updated_at
+    // moves with every later status callback), so this lane stamps the first
+    // moment it SAW the finished empty recording (stampEmptyVoicemailSeen,
+    // written once, never moved) — the slot opens at the later of the grace
+    // and that stamp, bounded so a late sighting cannot slide the slot out
+    // by hours. No stamp yet → the plain grace-based slot.
+    const seenAt = new Date(parseMeta(row.metadata).missed_call_text_empty_voicemail_seen_at).getTime();
+    const opensAt = Number.isFinite(seenAt)
+      ? Math.min(Math.max(graceClears, seenAt), graceClears + EMPTY_VOICEMAIL_LANDING_MS)
+      : graceClears;
+    return opensAt + SEND_SLOT_MS;
+  }
+  return graceClears + SEND_SLOT_MS;
+}
+
+// Stamp, once and never moved, the first time this lane sees a call's
+// recording finished and speech-less (the slot's opening time, see
+// sendSlotDeadline). Returns the row with the stamp in its metadata, or null
+// when the stamp could not be written or read back: the caller must leave the
+// call unsettled for the next sweep pass, never judge it on the unstamped
+// (earlier) deadline.
+async function stampEmptyVoicemailSeen(row) {
+  const key = 'missed_call_text_empty_voicemail_seen_at';
+  if (parseMeta(row.metadata)[key]) return row;
+  try {
+    await db('call_log').where({ id: row.id })
+      .whereRaw("COALESCE(metadata->>'missed_call_text_empty_voicemail_seen_at', '') = ''")
+      .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('missed_call_text_empty_voicemail_seen_at', ?::text)", [new Date(Date.now()).toISOString()]) });
+    const current = await db('call_log').where({ id: row.id }).first('metadata');
+    const stored = parseMeta(current && current.metadata);
+    if (!stored[key]) return null;
+    return { ...row, metadata: { ...parseMeta(row.metadata), ...stored } };
+  } catch (e) {
+    logger.warn(`[missed-call-text-back] empty-voicemail stamp failed for call ${String(row.twilio_call_sid).slice(-6)}: ${e.code || e.name || 'db_error'}`);
+    return null;
+  }
 }
 
 /** Bounded catch-up, exported for tests: past the send slot, or past the overall age belt. */
@@ -560,7 +628,7 @@ function providerBoundaryCheck(row, phone, attempt) {
   return async ({ dbi = db } = {}) => {
     try {
       const current = await dbi('call_log').where({ id: row.id }).modify(whereNotBlockedCall).first();
-      if (!textBackCoreEligible(current)) {
+      if (!textBackCoreEligible(current, { emptyVoicemail: emptyVoicemailOn() })) {
         return { ok: false, code: BOUNDARY.NOT_MISSED, reason: 'the call is no longer an unanswered, message-less miss' };
       }
       const contact = await contactState(phone, row, dbi);
@@ -720,11 +788,21 @@ async function classifySendOutcome(result, phone, attempt, row, { releaseLease, 
  * the post-call hook and the durable sweep so the two paths can never
  * diverge. Returns { outcome: 'sent' | 'pending' | 'skipped' | 'error', reason? }.
  */
-async function attemptForRow(row, now = Date.now()) {
+async function attemptForRow(inputRow, now = Date.now()) {
+  let row = inputRow;
   if (!row || !row.twilio_call_sid) return { outcome: 'skipped', reason: 'no_sid' };
-  if (!textBackCoreEligible(row)) return { outcome: 'skipped', reason: 'not_missed' };
-  const meta = parseMeta(row.metadata);
-  if (meta.missed_call_text_settled_at) return { outcome: 'skipped', reason: 'already_settled' };
+  const emptyVoicemail = emptyVoicemailOn();
+  if (!textBackCoreEligible(row, { emptyVoicemail })) return { outcome: 'skipped', reason: 'not_missed' };
+  // True only for a call eligible BECAUSE its recording held no speech.
+  const viaEmptyVoicemail = emptyVoicemail && isEmptyVoicemailRecording(row);
+  if (parseMeta(row.metadata).missed_call_text_settled_at) return { outcome: 'skipped', reason: 'already_settled' };
+  if (viaEmptyVoicemail) {
+    const stamped = await stampEmptyVoicemailSeen(row);
+    // Unstamped: stay unsettled so a later pass retries, instead of letting
+    // precheckRow judge the call on the earlier, plain deadline (too_old).
+    if (!stamped) return { outcome: 'error', reason: 'empty_voicemail_stamp_failed' };
+    row = stamped;
+  }
 
   const settle = async (outcome) => {
     try {
@@ -755,12 +833,24 @@ async function attemptForRow(row, now = Date.now()) {
     .whereRaw("COALESCE(metadata->>'missed_call_text_settled_at', '') = ''")
     .whereRaw("(COALESCE(metadata->>'missed_call_text_leased_at', '') = '' OR (metadata->>'missed_call_text_leased_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
     .whereNull('customer_id')
-    .whereNull('recording_sid')
-    .whereNull('recording_url')
+    .modify((q) => {
+      if (viaEmptyVoicemail) {
+        // Still the same finished, speech-less recording the read judged —
+        // a transcript that changed since (a re-run found words) loses the race.
+        q.where('transcription_status', row.transcription_status)
+          .whereRaw('transcription IS NOT DISTINCT FROM ?', [row.transcription ?? null]);
+      } else {
+        q.whereNull('recording_sid').whereNull('recording_url');
+      }
+    })
     .whereNull('voicemail_callback_alerted_at')
     .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
     .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
-    .update({ metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('missed_call_text_leased_at', ?::text)", [leaseToken]) });
+    .update({
+      metadata: viaEmptyVoicemail
+        ? db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('missed_call_text_leased_at', ?::text, 'missed_call_text_empty_voicemail', true)", [leaseToken])
+        : db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('missed_call_text_leased_at', ?::text)", [leaseToken]),
+    });
   if (!leased) return { outcome: 'skipped', reason: 'lease_lost' };
 
   const fenced = () => db('call_log').where({ id: row.id }).whereRaw("metadata->>'missed_call_text_leased_at' = ?", [leaseToken]);
@@ -800,6 +890,7 @@ async function textBackIfMissed(callSid) {
 async function sweepMissedCallTextBacks({ limit = 50 } = {}) {
   await reconcileOrphanedClaims().catch((err) => logger.warn(`[missed-call-text-back] orphan reconcile pass failed: ${err?.code || err?.name || 'error'}`));
   if (!isEnabled(GATE)) return { sent: 0, offered: 0 };
+  const emptyVoicemail = emptyVoicemailOn();
   const now = Date.now();
   let sent = 0;
   let offered = 0;
@@ -811,8 +902,19 @@ async function sweepMissedCallTextBacks({ limit = 50 } = {}) {
       .whereNull('customer_id')
       .modify((q) => whereNotSandboxCall(q))
       .whereIn('status', TERMINAL_STATUSES)
-      .whereNull('recording_sid')
-      .whereNull('recording_url')
+      .modify((q) => {
+        if (!emptyVoicemail) return q.whereNull('recording_sid').whereNull('recording_url');
+        // Gate on: also page in recordings the processor finished with and
+        // found speech-less. A pre-filter only — textBackCoreEligible below
+        // makes the real call; a recording still pending never matches.
+        return q.where((rec) => rec
+          .where((none) => none.whereNull('recording_sid').whereNull('recording_url'))
+          .orWhere((withRec) => withRec
+            .where((has) => has.whereNotNull('recording_sid').orWhereNotNull('recording_url'))
+            .where((done) => done
+              .where('transcription_status', 'rejected')
+              .orWhere((marked) => marked.where('transcription_status', 'completed').whereRaw(EMPTY_VOICEMAIL_MARKER_ONLY_SQL)))));
+      })
       .whereNull('voicemail_callback_alerted_at')
       .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
       .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
@@ -836,7 +938,7 @@ async function sweepMissedCallTextBacks({ limit = 50 } = {}) {
       // Same eligibility rule as delivery, checked BEFORE counting: a row
       // that can never be texted (withheld ID, Nomorobo spam) is paged past
       // instead of eating the pass's budget — the bell's sweep does the same.
-      if (!r.twilio_call_sid || !textBackCoreEligible(r)) continue;
+      if (!r.twilio_call_sid || !textBackCoreEligible(r, { emptyVoicemail })) continue;
       offered += 1;
       try {
         // A fresh clock per row: a long pass must not judge a later row's
@@ -866,6 +968,9 @@ module.exports = {
   sweepMissedCallTextBacks,
   _private: {
     textBackCoreEligible,
+    emptyVoicemailOn,
+    stampEmptyVoicemailSeen,
+    EMPTY_VOICEMAIL_LANDING_MS,
     callEndedAt,
     sendSlotDeadline,
     tooOldToText,

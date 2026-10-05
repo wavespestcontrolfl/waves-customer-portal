@@ -6401,6 +6401,12 @@ router.get('/', async (req, res, next) => {
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
         estimatedDuration: s.estimated_duration_minutes || 60,
+        // The stored estimate before the 60 fill: the drive-line late check
+        // sums real estimates only (stop-drive-legs.js).
+        rawEstimateMinutes: s.estimated_duration_minutes ?? null,
+        // The effective service premise, for the late check's co-visit
+        // rule (premiseStampConflicts reads these canonically).
+        premise: { line1: s.address_line1 || null, line2: s.address_line2 || null, city: s.city || null, zip: s.zip || null },
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
@@ -6483,8 +6489,8 @@ router.get('/', async (req, res, next) => {
       Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
     }
 
-    // Drive legs and the stop each leg comes from, for the day list
-    // (display only).
+    // Drive legs, the stop each leg comes from, and late risk against the
+    // 2-hour arrival window, for the day list (display only).
     Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services));
 
     // Calculate tech summaries
@@ -18980,8 +18986,9 @@ async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
   return termsByCustomer;
 }
 
-// True when this save puts an UNSTAMPED visit back at the price the /secure
-// plan was sold at (its per_visit_amount baseline). Such an edit can never
+// True when this save puts an UNSTAMPED visit back at the price the term was
+// sold at for it (the /secure per_visit_amount baseline, or the visit's own
+// mint price under GATE_PREPAY_MINT_PRICE_HOLD). Such an edit can never
 // leave the old-price invoice covering a different price, so the rail lets
 // it through — it is exactly the repair the stamp-time hold's office alert
 // asks for. A visit the term already stamped (prepaid money on it) is never
@@ -18989,8 +18996,8 @@ async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
 async function editRestoresSoldPrice(conn, term, row, proposedPrice) {
   if (proposedPrice === undefined || proposedPrice === null || proposedPrice === '') return false;
   if (row?.prepaid_amount != null && Number(row.prepaid_amount) > 0) return false;
-  const { securePlanSoldPerVisitCents } = require('../services/annual-prepay-renewals');
-  const soldCents = await securePlanSoldPerVisitCents(term, conn);
+  const { soldPriceCentsForVisit } = require('../services/annual-prepay-renewals');
+  const soldCents = await soldPriceCentsForVisit(term, row, conn);
   return soldCents != null && Math.round(Number(proposedPrice) * 100) === soldCents;
 }
 

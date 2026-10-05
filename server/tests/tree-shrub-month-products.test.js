@@ -23,7 +23,8 @@ const CATALOG = [
   row('kphite', 'KPHITE 7LP Systemic Fungicide'),
   row('copper', 'Southern Ag Copper Fungicide 27.15%'),
   row('cytogro', 'Cytogro Liquid Biostimulant'),
-  row('talus', 'Talus 70 DF IGR'),
+  // No TriStar catalog row exists yet; one here proves it is a secondary line, never suggested.
+  row('tristar', 'TriStar 8.5 SL Insecticide'),
   row('espoma', 'Espoma Organic Soil Acidifier'),
   row('sequestar', 'Sequestar 6% Fe EDDHA Soluble Micronutrient'),
   row('nr-1gal', 'Arborjet NUTRIROOT 1 gal'),
@@ -35,23 +36,62 @@ const ids = (date, rows = CATALOG) => resolveMonthProducts(date, rows).map((entr
 
 describe('resolveMonthProducts', () => {
   test('every month matches the protocol primary list; the ambiguous NutriRoot entry is skipped', () => {
+    // Every month card names Snapshot and a palm feed (program date rules,
+    // owner 2026-10-05): Oct-May the 8-0-12 palm SKU, Jun-Sep the 0-0-16 one.
+    // The due gates (60-day/quarter Snapshot, 3-month palm) decide what shows.
     // Lines still waiting on an exact label (13-0-13, Copper) are withheld too.
     expect(ids('2026-01-15')).toEqual(['snapshot', 'palm']);
-    expect(ids('2026-02-10')).toEqual(['tritek']);
     // KPHITE and Sequestar lines say their method is unverified: withheld.
-    expect(ids('2026-03-10')).toEqual(['mainspring', 'distance']);
+    expect(ids('2026-02-10')).toEqual(['snapshot', 'palm', 'tritek']);
+    expect(ids('2026-03-10')).toEqual(['snapshot', 'palm', 'mainspring', 'distance']);
     expect(ids('2026-04-10')).toEqual(['snapshot', 'palm']);
-    expect(ids('2026-05-10')).toEqual(['mainspring', 'palm']);
+    expect(ids('2026-05-10')).toEqual(['snapshot', 'mainspring', 'palm']);
     // June's "Fe/Mn micros" line is not a suggestion: Iron Plus is 12-0-0 N.
-    expect(ids('2026-06-10')).toEqual(['tritek']);
     // The summer palm feeding is the 0-0-16 palm SKU, never the lawn winterizer.
+    expect(ids('2026-06-10')).toEqual(['snapshot', 'palm16', 'tritek']);
     expect(ids('2026-07-10')).toEqual(['snapshot', 'palm16']);
-    expect(ids('2026-08-10')).toEqual(['mainspring', 'distance', 'tritek', 'cytogro']);
-    // Sep Talus is "(held: … prohibits residential use)" — never suggested.
-    expect(ids('2026-09-10')).toEqual(['distance', 'tritek']);
+    expect(ids('2026-08-10')).toEqual(['snapshot', 'palm16', 'mainspring', 'distance', 'tritek', 'cytogro']);
+    // Talus and Headway are gone from the program; TriStar is secondary only.
+    expect(ids('2026-09-10')).toEqual(['snapshot', 'palm16', 'distance', 'tritek']);
     expect(ids('2026-10-01')).toEqual(['snapshot', 'palm']);
-    expect(ids('2026-11-10')).toEqual(['tritek', 'espoma']);
-    expect(ids('2026-12-10')).toEqual(['palm', 'cytogro']);
+    expect(ids('2026-11-10')).toEqual(['snapshot', 'palm', 'tritek', 'espoma']);
+    expect(ids('2026-12-10')).toEqual(['snapshot', 'palm', 'cytogro']);
+  });
+
+  test('a visit in a month that used to have no palm line now yields the palm feed (signup-date visits)', () => {
+    // February, March, June, August, September and November had no palm line before.
+    expect(ids('2026-02-10')).toContain('palm');
+    expect(ids('2026-02-10')).not.toContain('palm16');
+    expect(ids('2026-08-10')).toContain('palm16');
+    expect(ids('2026-08-10')).not.toContain('palm');
+    expect(ids('2026-02-10')).toContain('snapshot');
+    expect(ids('2026-08-10')).toContain('snapshot');
+  });
+
+  test('every month card carries both lines and a 6x flag; quarterly 4x is retired', () => {
+    for (const visit of protocols.tree_shrub.visits) {
+      const lines = primaryLines(visit);
+      const summer = ['Jun', 'Jul', 'Aug', 'Sep'].includes(visit.month);
+      expect(lines.some((l) => /^Snapshot 2\.5TG:.*only when due \(60\+ days since the last, one per quarter\)/.test(l))).toBe(true);
+      expect(lines.some((l) => (summer ? /^LESCO 0-0-16 #510513 palm fertilizer/ : /^LESCO 8-0-12 #511542 palm fertilizer/).test(l)
+        && /only when the last palm feed was 3 or more months ago/.test(l))).toBe(true);
+      // Never the opposite-season palm SKU (8-0-12 carries N: June 1-Sept 30 blackout).
+      expect(lines.some((l) => (summer ? /8-0-12/ : /0-0-16/).test(l))).toBe(false);
+      expect(visit.tier_6x).toBe(true);
+      expect(visit.tier_4x).toBe(false);
+    }
+  });
+
+  test('Talus, Headway and the Apr rescue line are gone; TriStar is a conditional secondary line only', () => {
+    const text = JSON.stringify(protocols.tree_shrub.visits);
+    expect(text).not.toMatch(/talus|headway|talstar|sevin/i);
+    for (const visit of protocols.tree_shrub.visits) {
+      expect(primaryLines(visit).join('\n')).not.toMatch(/tristar/i);
+      if (/scale|whitefl/i.test(`${visit.primary}\n${visit.secondary}`)) {
+        expect(visit.secondary).toMatch(/^TriStar 8\.5 SL \(acetamiprid\): armored scale crawlers or whitefly, live finds only; label rate$/m);
+      }
+    }
+    expect(protocols.tree_shrub.notes.join('\n')).toMatch(/Visits start on the customer's signup date/);
   });
 
   test('each entry carries the application method', () => {
@@ -88,7 +128,7 @@ describe('resolveMonthProducts', () => {
 
   test('inactive rows do not count: an inactive near-duplicate neither matches nor makes the entry ambiguous', () => {
     const withInactiveDup = [...CATALOG, row('tritek-old', 'TriTek Spray Oil Emulsion', { active: false })];
-    expect(ids('2026-02-10', withInactiveDup)).toEqual(['tritek']);
+    expect(ids('2026-02-10', withInactiveDup)).toEqual(['snapshot', 'palm', 'tritek']);
     expect(ids('2026-07-10', CATALOG.map((r) => (r.id === 'snapshot' ? { ...r, active: false } : r)))).toEqual(['palm16']);
   });
 

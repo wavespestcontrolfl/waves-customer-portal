@@ -39,7 +39,9 @@ const PROTOCOL_PRODUCTS = [
   { token: /\bkphite\b/i, pattern: /^kphite\s+7lp\b/i, method: 'foliar_spray' },
   { token: /\bcopper\b/i, pattern: /^southern\s+ag\s+copper\s+fungicide\b/i, method: 'foliar_spray' },
   { token: /\bcytogro\b/i, pattern: /^cytogro\b/i, method: 'foliar_spray' },
-  { token: /\btalus\b/i, pattern: /^talus\s+70\s+df\b/i, method: 'foliar_spray' },
+  // No catalog row yet: resolves to nothing until one exists (and the line is a
+  // conditional secondary today, never a primary suggestion).
+  { token: /\btristar\b/i, pattern: /^tristar\s+8\.5\s*sl\b/i, method: 'foliar_spray' },
   { token: /\bacidifier\b/i, pattern: /^espoma\s+organic\s+soil\s+acidifier\b/i, method: 'granular_broadcast' },
   { token: /\bsequestar\b/i, pattern: /^sequestar\s+6%\s+fe\s+eddha\b/i, method: 'soil_drench' },
 ];
@@ -47,7 +49,7 @@ const PROTOCOL_PRODUCTS = [
 // Primary lines that name no product to suggest: scouting and reporting work,
 // the blackout reminder, and "Mn Combo" (no products_catalog row).
 // Lines the sheet never turns into a suggestion. "(held" marks a product
-// the protocol withholds (Sep Talus: label prohibits residential use).
+// the protocol withholds (e.g. a label that prohibits residential use).
 // "Fe/Mn micros" has no verified catalog product: the old mapping was LESCO
 // Chelated Iron Plus, a 12-0-0 nitrogen source the owner dropped from T&S
 // (2026-10-01, #5089), and June sits inside the summer N blackout.

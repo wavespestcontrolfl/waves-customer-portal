@@ -12,9 +12,33 @@ test('dark guide stays off; scheduled month projects only its own product detail
   expect(january.products.merit.equipment).toEqual(['soil']);
   expect(january.products.talus).toBeUndefined();
   const september = treeShrubFieldGuide(visit('Sep'));
-  expect(september.products.snapshot).toBeUndefined();
-  expect(september.products.talus.mix).toBeUndefined();
-  expect(september.products.talus.pending).toMatch(/prohibited/);
+  // Snapshot and the palm feed are routine on every month card (due gates decide).
+  expect(september.products.snapshot.equipment).toEqual(['hand', 'push']);
+  expect(september.products.f0016).toBeDefined();
+  // Talus (residential use prohibited) and Headway (turf-only label) are gone.
+  expect(september.products.talus).toBeUndefined();
+  expect(september.products.headway).toBeUndefined();
+  expect(september.products.tristar.mix).toBeUndefined();
+});
+
+test('Talus and Headway are not in the reference; TriStar carries the verified Cleary label', () => {
+  const reference = require('../config/tree-shrub-field-guide.json');
+  expect(reference.products.talus).toBeUndefined();
+  expect(reference.products.headway).toBeUndefined();
+  expect(JSON.stringify(reference)).not.toMatch(/talus|headway/i);
+  expect(reference.products.tristar).toMatchObject({ name: 'TriStar 8.5 SL', equipment: ['bg', 'flowzone', 'rig'] });
+  expect(reference.products.tristar.rates[0][0]).toBe('8.5–16.5 fl oz / 100 gal');
+  expect(reference.products.tristar.source).toMatch(/8033-106-1001/);
+  // Every product a month card names exists in the reference.
+  for (const row of program.visits) {
+    for (const { key } of [...row.fieldGuide.routine, ...row.fieldGuide.conditional]) {
+      expect(reference.products[key]).toBeDefined();
+    }
+    // Every month card offers Snapshot and the season's palm feed as routine.
+    const routine = row.fieldGuide.routine.map(r => r.key);
+    expect(routine).toContain('snapshot');
+    expect(routine).toContain(['Jun', 'Jul', 'Aug', 'Sep'].includes(row.month) ? 'f0016' : 'f8012');
+  }
 });
 
 const application = (product_name, date, overrides = {}) => ({ product_name, application_date: date, property_id: 'property-a', rate_unit: 'lb', application_rate: 2.3, ...overrides });
@@ -85,4 +109,27 @@ test('history older than 12 months never holds a suggestion; undated rows still 
 test('a rate unit written with a comma ("lb/1,000 sq ft") is recognized', () => {
   const due = rows => treeShrubDueReason('snapshot', rows, '2028-07-01', 'property-a');
   expect(due([application('Snapshot 2.5TG', '2028-04-01', { rate_unit: 'lb/1,000 sq ft' })])).toBeNull();
+});
+
+describe('DiPel and manganese sulfate guide entries (owner 2026-10-05)', () => {
+  const guide = require('../config/tree-shrub-field-guide.json');
+  const protocols = require('../config/protocols.json');
+  const conditionalKeys = (month) => protocols.tree_shrub.visits
+    .find((v) => v.month === month).fieldGuide.conditional.map((c) => c.key);
+
+  test('both products carry a label source and no fluid-ounce mix for the dry Bt powder', () => {
+    expect(guide.products.dipel.source).toMatch(/EPA 73049-39/);
+    expect(guide.products.dipel.mixes).toBeUndefined();
+    expect(guide.products.mnsulfate.url).toMatch(/MANGANESESULFATE/i);
+    expect(guide.products.mnsulfate.limits.join(' ')).toMatch(/stain/i);
+  });
+
+  test('they are conditional only, in the caterpillar and palm-manganese months', () => {
+    for (const m of ['Mar', 'Apr', 'Jun', 'Jul', 'Dec']) expect(conditionalKeys(m)).toContain('dipel');
+    for (const m of ['Feb', 'May', 'Jun', 'Sep', 'Nov']) expect(conditionalKeys(m)).toContain('mnsulfate');
+    for (const v of protocols.tree_shrub.visits) {
+      expect(v.primary).not.toMatch(/dipel|manganese sulfate/i);
+      expect((v.fieldGuide.routine || []).map((r) => r.key)).not.toEqual(expect.arrayContaining(['dipel', 'mnsulfate']));
+    }
+  });
 });

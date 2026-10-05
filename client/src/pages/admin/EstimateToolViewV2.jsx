@@ -3484,6 +3484,7 @@ export default function EstimateToolViewV2({
         cache: data.meta?.cache,
         errors: data.errors || [],
         businessIdentityBypassed: data.meta?.businessIdentityBypassed === true,
+        addressStatus: data.meta?.addressStatus || null,
       });
       setVerifySaveState({});
       unitLookupAddressRef.current = ep.unitScopedLookup ? address : "";
