@@ -174,7 +174,7 @@ test('a receipt with no printed date (today fallback) never drives a duplicate m
   expect(mockState.lastDuplicateFilter).toBeUndefined();
 });
 
-test.each([['failed'], ['due'], ['none'], [undefined], [null]])('a classifier-amount receipt with payment_status %p is never booked', async (status) => {
+test.each([['received'], ['failed'], ['due'], ['none'], [undefined], [null]])('a classifier-amount receipt with payment_status %p is never booked', async (status) => {
   noPdf();
   await processVendorInvoice({ id: 'e16', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Your payment' },
     { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15', ...(status ? { payment_status: status } : {}) } });
