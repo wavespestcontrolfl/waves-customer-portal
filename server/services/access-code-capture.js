@@ -138,7 +138,11 @@ function verifyItem(item, bodyText, { refuse, phones }) {
     if (!MODEL_CODE_SHAPE.test(code) || !/\d/.test(code) || !codeIsWholeTokenIn(code, quote)) return null;
     const digits = digitsOf(code);
     if (refuse.has(digits)) return null;
-    if (phones.some((phone) => digits === phone || (digits.length >= 7 && phone.endsWith(digits)))) return null;
+    // A phone number is never a code, with or without its country prefix: ten
+    // or more digits are refused outright, and seven or more that end one of
+    // the message's own numbers too.
+    if (digits.length >= 10) return null;
+    if (phones.some((phone) => digits.length >= 7 && phone.endsWith(digits))) return null;
   } else if (!instructions) return null;
   return { kind: item.kind, code, instructions, life: item.life, quote, value_hash: valueHash(code, instructions) };
 }

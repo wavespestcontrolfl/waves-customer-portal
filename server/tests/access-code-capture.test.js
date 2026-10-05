@@ -146,6 +146,10 @@ describe('verifyItems', () => {
   test('drops a code that is the last ten digits of either phone on the message', () => {
     expect(verify([item({ code: '9415550142', quote: 'code 9415550142' })], 'code 9415550142')).toEqual([]);
     expect(verify([item({ code: '941-555-0199', quote: 'code 941-555-0199' })], 'code 941-555-0199')).toEqual([]);
+    // With the country prefix, and any other ten-digit run: a phone number is never a code.
+    expect(verify([item({ code: '19415550142', quote: 'code 19415550142' })], 'code 19415550142')).toEqual([]);
+    expect(verify([item({ code: '2025550177', quote: 'code 2025550177' })], 'code 2025550177')).toEqual([]);
+    expect(verify([item({ code: '5550142', quote: 'code 5550142' })], 'code 5550142')).toEqual([]);
     // A code that only shares a few digits with a phone stays.
     expect(verify([item({ code: '0142', quote: 'code 0142' })], 'code 0142')).toHaveLength(1);
   });
