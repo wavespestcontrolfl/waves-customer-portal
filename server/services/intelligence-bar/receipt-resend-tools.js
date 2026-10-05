@@ -44,7 +44,7 @@ const RECEIPT_RESEND_TOOLS = [
   {
     name: 'resend_receipt',
     description: `Send (or re-send) the paid receipt for ONE invoice to the customer, exactly as the Invoices page "Resend receipt" button does. The first call returns a PREVIEW and sends nothing: the invoice, the amount the receipt states, the paid date, whether a receipt was already sent and when (then the card says plainly it is a RE-SEND), the channels, and who it reaches (masked). The operator approves on the confirmation card; the confirmed run re-checks all of it, refuses if anything changed, and reports email and text separately (sent, not sent with the reason, or unknown when the provider did not answer), the outcome of the visit closeout, and what became of a queued automatic receipt for the invoice (back in the queue and will deliver on its own, held for reconciliation, or none) — say only what those fields report.
-Refused with the reason: a memo with a text-only send, invoice not found, not paid, a receipt for this invoice is being delivered right now, no recipient on file, amount unverifiable. A customer who opted out of payment receipts is NOT refused (a staff resend usually answers their own request): the card says so, and you tell the operator before they confirm.
+Refused with the reason: a memo with a text-only send, invoice not found, not paid, a receipt for this invoice is being delivered right now, no recipient on file, amount unverifiable, an opted-out customer with no email leg. A customer who opted out of payment receipts is NOT refused by email (a staff resend usually answers their own request): only the email goes, the card says so, and you tell the operator before they confirm.
 Takes invoice_id OR invoice_number (e.g. WPC-2026-0534), exactly one. via is email, sms or both (default both). memo is an optional note that appears in the receipt EMAIL only (the receipt text, the receipt PDF and the receipt page do not carry it), so it needs via email or both: a memo with via sms is refused — only include a memo when the operator gave you the words. The customer is contacted. Admin-only.
 Use for: "resend the receipt for invoice X", "send the paid receipt again", "the customer never got their receipt". To know whether a receipt already went out, read receipt_sent_at from get_invoice_detail / get_customer_invoices; never guess.`,
     input_schema: {
@@ -85,8 +85,9 @@ function reach(who, via) {
   if (via !== 'sms') parts.push(who.email ? `email to ${maskEmail(who.email)}${who.payerBilled ? " (the payer's billing inbox)" : ''}` : 'no email (none on file)');
   if (via !== 'email') {
     const text = who.payerBilled ? 'no text (a payer-billed receipt is never texted)'
+      : who.optedOut ? 'no text (the customer opted out of payment receipts; only the email ignores that)'
       : [who.phone && `text to ${maskPhone(who.phone)}`, who.app && 'a Waves app notification'].filter(Boolean).join(' or ') || 'no text (no phone on file)';
-    parts.push(who.phone || who.app ? `${text}, sent now if the customer's receipt settings allow` : text);
+    parts.push((who.phone || who.app) && !who.payerBilled && !who.optedOut ? `${text}, sent now if the customer's receipt settings allow` : text);
   }
   return parts.join('; ');
 }
@@ -111,6 +112,11 @@ async function checkEligibility(input, ownClaimToken) {
     return blocked(`A receipt cannot be sent: ${who.blocker}.`, who.blocker === 'invoice not found' ? 'invoice_not_found' : 'resend_blocked', target.id);
   }
   if (via === 'email' && !who.email) return blocked('A receipt cannot be sent by email: no receipt email on file.', 'resend_blocked', target.id);
+  // An opted-out customer is reached by the manual email only: sendReceipt honors the same opt-out for
+  // the text and app legs (receipt_texts_opted_out), so a send with no email leg would send nothing.
+  if (who.optedOut && (via === 'sms' || !who.email)) {
+    return blocked(`A receipt cannot be sent: the customer opted out of payment receipts, so only an email can reach them, and ${via === 'sms' ? 'this send has no email' : 'no receipt email is on file'}.`, 'resend_blocked', target.id);
+  }
   if (via === 'sms' && (who.payerBilled || !(who.phone || who.app))) {
     return blocked(`A receipt cannot be sent by text: ${who.payerBilled ? 'a payer-billed receipt is never texted' : 'no phone on file'}.`, 'resend_blocked', target.id);
   }

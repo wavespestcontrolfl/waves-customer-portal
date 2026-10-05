@@ -193,6 +193,26 @@ describe('plain refusals — nothing previewed, nothing sent', () => {
     expect(plain._version.opted_out).toBe(false);
   });
 
+  test('opted out: the text leg is shown as not going, since only the email ignores the opt-out', async () => {
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
+    const out = await run({ via: 'both' });
+    expect(out.preview).toBe(true);
+    expect(out.recipients).toMatch(/email to /);
+    expect(out.recipients).toMatch(/no text \(the customer opted out of payment receipts/);
+  });
+
+  test('opted out with no email leg: refused (the text and app legs honor the opt-out, so nothing would send)', async () => {
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
+    const textOnly = await run({ via: 'sms' });
+    expect(textOnly.error).toMatch(/opted out of payment receipts, so only an email can reach them, and this send has no email/);
+    expect(textOnly.preview).toBeUndefined();
+    receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
+    resolveReceiptEmailRecipient.mockResolvedValueOnce({ ok: false, error: 'No receipt recipient email' });
+    const noEmail = await run({ via: 'both' });
+    expect(noEmail.error).toMatch(/only an email can reach them, and no receipt email is on file/);
+    expect(sendInvoiceReceipt).not.toHaveBeenCalled();
+  });
+
   test('opted out with a queued automatic receipt: the card says the queue will not send it', async () => {
     receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
     db.mockImplementation(fakeDb({ receipt_delivery_jobs: [{ id: 'job-1', invoice_id: INV, status: 'queued' }] }));
