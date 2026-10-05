@@ -145,10 +145,13 @@ function matchesNaturalAccessCode({ field, value }, { messageBody = '', properti
   const candidate = String(value || '').trim();
   const body = String(messageBody || '');
   if (!/^[#*]?\d{3,8}[#*]?$/.test(candidate)) return false;
-  // The one number in the message, with the key symbols the client wrote
-  // around it: "#5550" never saves as "5550".
-  const tokens = body.match(/[#*]*\d{3,}[#*]*/g) || [];
-  if (tokens.length !== 1 || tokens[0] !== candidate) return false;
+  // The one number in the message, as the whole word the client wrote: its
+  // key symbols stay ("#5550" never saves as "5550") and a longer credential
+  // ("A5550", "5550-12", "5550 12") never saves as a part of itself.
+  const words = body.split(/\s+/).map((word) => word.replace(/^[("'“‘:]+|[.,;:!?)"'”’]+$/g, ''));
+  const numbered = words.map((word, index) => (/\d{3,}/.test(word) ? index : -1)).filter((index) => index >= 0);
+  if (numbered.length !== 1 || words[numbered[0]] !== candidate) return false;
+  if ([words[numbered[0] - 1], words[numbered[0] + 1]].some((word) => /\d/.test(word || ''))) return false;
   if (CODE_HEDGE.test(body) || CODE_INVALIDATED.test(body) || isQuestionSource(body)) return false;
   // "Gate code is not 5550": a negation in the number's own sentence.
   const sentence = body.split(/(?<=[.!?])\s+|\n+/).find((part) => part.includes(candidate)) || body;

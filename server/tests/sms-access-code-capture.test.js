@@ -68,6 +68,9 @@ describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)',
     ['a code reported broken in a later sentence', 'neighborhood_gate_code', 'Gate code is 5550. It doesn\'t work on Sundays.', '5550'],
     ['a value without the symbol the client wrote', 'neighborhood_gate_code', 'Gate code is #5550', '5550'],
     ['a value without the trailing symbol', 'garage_code', 'Garage keypad 5550#', '5550'],
+    ['part of a lettered credential', 'neighborhood_gate_code', 'Gate code is A5550', '5550'],
+    ['part of a hyphenated credential', 'neighborhood_gate_code', 'Gate code is 5550-12', '5550'],
+    ['part of a spaced credential', 'neighborhood_gate_code', 'Gate code is 5550 12', '5550'],
   ])('gate on still refuses %s', (_name, field, quote, value) => {
     process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
     const item = codeFact(field, quote, value);
