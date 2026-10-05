@@ -306,7 +306,16 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
   // Already shown above for the SAME access point; equal values at different
   // points (a gate and a door both 1234) are both shown.
   const shown = new Set(shownCodes.map(([kind, c]) => `${kind}:${String(c).trim().toLowerCase()}`));
+  // A one-home customer's gate, garage and lockbox rows come marked
+  // `profileBacked`: the profile code of that kind is the one source, so such a
+  // row is hidden only when that profile code actually reached this card (the
+  // brief's facts can be off or fail soft), and unless it adds directions to
+  // the same code. Otherwise it is shown.
+  const profileByKind = Object.fromEntries(shownCodes.map(([kind, c]) => [kind, String(c).trim().toLowerCase()]));
+  const profileHolds = (r) => r.profileBacked && Object.hasOwn(profileByKind, r.kind)
+    && (!r.instructions || String(r.code || '').trim().toLowerCase() !== profileByKind[r.kind]);
   const mine = rows.filter((r) => (r.life === 'standing' || ids.includes(r.scheduledServiceId))
+    && !profileHolds(r)
     && !(r.code && !r.instructions && shown.has(`${r.kind}:${String(r.code).trim().toLowerCase()}`)));
   if (failed) {
     return (

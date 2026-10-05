@@ -1557,27 +1557,29 @@ postgres('access codes section', () => {
       expect(await live(c.id)).toEqual([]);
     });
 
-    test('the visit read leaves the profile-backed kinds to the profile on a one-home account', async () => {
+    test('the visit read marks the profile-backed kinds profileBacked on a one-home account and drops nothing', async () => {
       const c = await customer({ prefs: { garage_code: '2468' } });
       await mirror();
       await staffRow(c.id, { kind: 'door', code: '7716' });
       await staffRow(c.id, { kind: 'call_box', code: '55' });
       const v = await atVisit(c.id, c.propertyIds[0]);
       const out = await access.listForVisit(trx, { techRole: 'admin' }, v);
-      expect(out.codes.map((r) => [r.kind, r.code]).sort()).toEqual([['call_box', '55'], ['door', '7716']]);
+      expect(out.codes.map((r) => [r.kind, r.code, r.profileBacked === true]).sort())
+        .toEqual([['call_box', '55', false], ['door', '7716', false], ['garage', '2468', true]]);
       // the office list still has the mirrored row
       expect((await access.listForCustomer(trx, c.id)).active.map((r) => r.sourceType)).toContain('profile');
     });
 
-    test('the visit read keeps a profile-kind row when the profile field is empty or it adds directions to the same code', async () => {
+    test('the visit read marks standing code rows of a profile-backed kind, not directions-only or visit-life rows', async () => {
       const c = await customer();
       const bare = await staffRow(c.id, { kind: 'lockbox', code: '1212' });
+      const directions = await staffRow(c.id, { kind: 'lockbox', code: null, instructions: 'Behind the water meter' });
       const v = await atVisit(c.id, c.propertyIds[0]);
-      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes.map((r) => r.id)).toEqual([bare.id]);
-      await trx('property_preferences').insert({ customer_id: c.id, lockbox_code: '1212' });
-      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes).toEqual([]);
-      const directed = await staffRow(c.id, { kind: 'lockbox', code: '1 2 12', instructions: 'Behind the water meter' });
-      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes.map((r) => r.id)).toEqual([directed.id]);
+      const out = await access.listForVisit(trx, { techRole: 'admin' }, v);
+      expect(out.codes.find((r) => r.id === bare.id)).toMatchObject({ profileBacked: true });
+      expect(out.codes.find((r) => r.id === directions.id)).not.toHaveProperty('profileBacked');
+      expect(Object.keys(out.codes.find((r) => r.id === bare.id)).sort())
+        .toEqual(['code', 'id', 'instructions', 'kind', 'life', 'profileBacked', 'scheduledServiceId']);
     });
 
     test('the visit read keeps every kind for a multi-home account', async () => {
@@ -1587,7 +1589,9 @@ postgres('access codes section', () => {
       await access.accept(trx, row.id, { propertyId: a });
       const atA = await atVisit(c.id, a);
       const atB = await atVisit(c.id, b);
-      expect((await access.listForVisit(trx, { techRole: 'admin' }, atA)).codes.map((r) => r.code)).toEqual(['2468']);
+      const out = await access.listForVisit(trx, { techRole: 'admin' }, atA);
+      expect(out.codes.map((r) => r.code)).toEqual(['2468']);
+      expect(out.codes[0]).not.toHaveProperty('profileBacked');
       expect((await access.listForVisit(trx, { techRole: 'admin' }, atB)).codes).toEqual([]);
     });
 
@@ -1622,14 +1626,64 @@ postgres('access codes section', () => {
       expect((await live(c.id)).map((r) => [r.code, r.property_id])).toEqual([['2468', c.propertyIds[0]]]);
     });
 
-    test('a technician reads a one-home visit without the mirrored code', async () => {
+    test('a technician reads a one-home visit with the mirrored code marked profileBacked', async () => {
       const c = await customer({ prefs: { garage_code: '2468' } });
       await mirror();
       const techId = await tech();
       const v = await visit(c.id, etDateString(new Date()));
       await trx('scheduled_services').where({ id: v }).update({ technician_id: techId });
       const out = await access.listForVisit(trx, { techRole: 'technician', technicianId: techId }, v);
-      expect(out).toMatchObject({ ok: true, codes: [] });
+      expect(out).toMatchObject({ ok: true, codes: [{ kind: 'garage', code: '2468', profileBacked: true }] });
+    });
+
+    test('a field edited to a value the table cannot hold retires the mirrored row, keeping the profile', async () => {
+      const c = await customer({ prefs: { garage_code: '2468', lockbox_code: '1212' } });
+      await mirror();
+      const long = 'x'.repeat(41);
+      await edit(c.id, { garage_code: long });
+      expect(await mirror()).toMatchObject({ retired: 1, created: 0 });
+      expect((await live(c.id)).map((r) => [r.kind, r.code])).toEqual([['lockbox', '1212']]);
+      expect((await profile(c.id)).garage_code).toBe(long);
+      // control characters too, and an adopted office row of the old value goes with it
+      const staff = await staffRow(c.id, { kind: 'lockbox', code: '1212' });
+      await edit(c.id, { lockbox_code: '12\n12' });
+      await mirror();
+      expect(await live(c.id)).toEqual([]);
+      expect((await trx('customer_access_codes').where({ id: staff.id }).first()).status).toBe('retired');
+    });
+
+    test('mirror-only path (no activation time): a failed mirror fails the job with the tally', async () => {
+      delete process.env.GATE_ACCESS_CODES_SECTION_SINCE;
+      await customer({ prefs: { garage_code: '2468' } });
+      const failing = new Proxy((...args) => trx(...args), {
+        get(_t, key) {
+          if (key === 'transaction') return () => Promise.reject(Object.assign(new Error('boom'), { code: 'XX000' }));
+          const value = trx[key];
+          return typeof value === 'function' ? value.bind(trx) : value;
+        },
+      });
+      await expect(access.runAccessCodeNet({ now: NOW, conn: failing, read: stub([]) })).rejects
+        .toMatchObject({ code: 'ACCESS_NET_FAILURES', tally: { skipped: 'activation_time_required', mirror: { failed: 1 } } });
+    });
+
+    test('the only home changes: the former home\'s profile rows retire at once and the new home gets them', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await mirror();
+      const [a] = c.propertyIds;
+      const b = randomUUID();
+      await trx('customer_properties').insert({
+        id: b, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      await mirror();
+      expect((await live(c.id)).map((r) => r.property_id)).toEqual([a]);
+      await trx('customer_properties').where({ id: a }).update({ active: false });
+      // no profile edit, no day passed: the changed sole home alone makes it due
+      expect(await mirror()).toMatchObject({ checked: 1, created: 1, retired: 1 });
+      expect((await live(c.id)).map((r) => [r.code, r.property_id])).toEqual([['2468', b]]);
+      const old = await trx('customer_access_codes').where({ customer_id: c.id, property_id: a }).first();
+      expect(old.status).toBe('retired');
+      expect(await mirror()).toMatchObject({ checked: 0 });
     });
   });
 });

@@ -444,9 +444,12 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
   const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
   // The profile mirror reads no text, so it needs the gate and nothing else.
   if (!since) {
-    return runExclusive('access-code-net', async () => ({
-      skipped: 'activation_time_required', movedRetired: await retireMovedSources(conn), mirror: await mirrorProfileCodes(conn),
-    }));
+    return runExclusive('access-code-net', async () => {
+      const tally = { skipped: 'activation_time_required', movedRetired: await retireMovedSources(conn), mirror: await mirrorProfileCodes(conn) };
+      // The same failure rule as the full sweep: a failed mirror fails job health.
+      if (tally.mirror.failed) throw Object.assign(new Error('access_code_net_failures'), { code: 'ACCESS_NET_FAILURES', tally });
+      return tally;
+    });
   }
   return runExclusive('access-code-net', async () => {
     const movedRetired = await retireMovedSources(conn);
@@ -564,6 +567,16 @@ async function mirrorCustomer(conn, customerId) {
     const oneHome = homes.length === 1;
     if (oneHome && prefs) {
       const home = homes[0];
+      // A mirrored row bound to a home this customer no longer has as its only
+      // one (deactivated, or another home now stands alone) goes; the codes of
+      // the home that remains are mirrored below.
+      const former = await trx('customer_access_codes')
+        .where({ customer_id: customerId, status: 'active', life: 'standing', source_type: 'profile' })
+        .whereNotNull('property_id').whereNot('property_id', home).forUpdate();
+      for (const row of former) {
+        await retireLocked(trx, row, { action: 'access_code.profile_superseded', keepProfile: true });
+        out.retired += 1;
+      }
       for (const kind of PROFILE_KINDS) {
         const value = String(prefs[PROFILE_FIELD[kind]] || '').trim();
         const live = () => trx('customer_access_codes')
@@ -584,7 +597,17 @@ async function mirrorCustomer(conn, customerId) {
           delete hashes[kind];
           continue;
         }
-        if (!mirrorable(value)) { delete hashes[kind]; continue; }
+        if (!mirrorable(value)) {
+          // A value the table cannot hold: what the sweep mirrored or adopted
+          // for the field goes, so no stale "From the profile" row stays live.
+          const stale = await live().where(function mirrored() {
+            this.where('source_type', 'profile');
+            if (hashes[kind]) this.orWhere('value_hash', hashes[kind]);
+          }).forUpdate();
+          await retireAll(stale);
+          delete hashes[kind];
+          continue;
+        }
         const hash = valueHash(value, null);
         const others = await live().whereNot('value_hash', hash).forUpdate();
         await retireAll(others);
@@ -600,6 +623,8 @@ async function mirrorCustomer(conn, customerId) {
         hashes[kind] = hash;
       }
     }
+    // The sole home rides in the receipt, so a change of it is noticed at once.
+    if (oneHome) hashes._home = homes[0]; else delete hashes._home;
     // The receipt, whatever happened: the customer is not looked at again
     // until their profile, their home count or the day changes.
     // (the edit time is copied in SQL: a JavaScript date drops the microseconds
@@ -624,13 +649,16 @@ async function mirrorProfileCodes(conn = db, { limit = MIRROR_BATCH } = {}) {
     .join('customers as c', 'c.id', 'p.customer_id').whereNull('c.deleted_at')
     .leftJoin('access_code_profile_mirror as m', 'm.customer_id', 'p.customer_id')
     .where(function hasCode() {
-      this.whereRaw(`(${PROFILE_NONEMPTY_SQL})`).orWhereRaw("m.hashes <> '{}'::jsonb");
+      this.whereRaw(`(${PROFILE_NONEMPTY_SQL})`).orWhereRaw("(m.hashes - '_home') <> '{}'::jsonb");
     })
     .where(function due() {
       this.whereNull('m.customer_id')
         .orWhereRaw('m.profile_updated_at IS DISTINCT FROM p.updated_at')
         .orWhereRaw(`m.mirrored_at < now() - interval '${MIRROR_RECHECK_HOURS} hours'`)
-        .orWhereRaw('m.one_home IS DISTINCT FROM ((SELECT count(*) FROM customer_properties cp WHERE cp.customer_id = p.customer_id AND cp.active = true) = 1)');
+        .orWhereRaw('m.one_home IS DISTINCT FROM ((SELECT count(*) FROM customer_properties cp WHERE cp.customer_id = p.customer_id AND cp.active = true) = 1)')
+        // the sole home itself changed (one home swapped for another)
+        .orWhereRaw(`m.hashes->>'_home' IS DISTINCT FROM (SELECT CASE WHEN count(*) = 1 THEN min(cp.id::text) END
+          FROM customer_properties cp WHERE cp.customer_id = p.customer_id AND cp.active = true)`);
     })
     .orderByRaw('m.mirrored_at ASC NULLS FIRST').limit(limit).select('p.customer_id');
   for (const { customer_id: customerId } of candidates) {
@@ -806,24 +834,20 @@ async function listForVisit(conn, req, visitId) {
     return fail(isTechnicianRequest(req) ? 403 : 409, isTechnicianRequest(req) ? 'service_not_assigned' : 'visit_changed');
   }
   // One source per access point: a one-home account's gate, garage and lockbox
-  // codes are its profile fields (kept current by the mirror, and what the
-  // visit card already shows), so the same codes are not sent twice. A row
-  // stays when the field of its kind is empty (a code not yet mirrored) or when
-  // it carries directions for the same code. Multi-home accounts get every row:
-  // their codes are bound to a home and never reach the profile.
-  const profile = homes.length === 1 && active.some((r) => PROFILE_FIELD[r.kind])
-    ? await conn('property_preferences').where({ customer_id: visit.customer_id }).first(...PROFILE_KINDS.map((k) => PROFILE_FIELD[k])) : null;
-  const inProfile = (r) => {
-    const field = PROFILE_FIELD[r.kind];
-    const held = profile && field ? String(profile[field] || '').trim() : '';
-    if (!held || r.life !== 'standing' || !r.code) return false;
-    return !r.instructions || canonicalLower(r.code) !== canonicalLower(held);
-  };
+  // codes are its profile fields (kept current by the mirror). The visit card
+  // shows those fields only when the brief's facts reached it, so the rows are
+  // never dropped here: each is marked `profileBacked` and the card hides it
+  // only when it holds the profile value for the same kind. Multi-home
+  // accounts' rows are never marked: their codes are bound to a home and never
+  // reach the profile.
+  const profileBacked = (r) => homes.length === 1 && r.life === 'standing' && !!r.code && !!PROFILE_FIELD[r.kind];
   // Only what a stop needs: never the customer's message, its source or who decided.
   return { ok: true, codes: active.filter((r) => r.life === 'standing' || r.scheduledServiceId === visit.id)
     .filter(sameHome)
-    .filter((r) => !inProfile(r))
-    .map((r) => ({ id: r.id, kind: r.kind, code: r.code, instructions: r.instructions, life: r.life, scheduledServiceId: r.scheduledServiceId })) };
+    .map((r) => ({
+      id: r.id, kind: r.kind, code: r.code, instructions: r.instructions, life: r.life, scheduledServiceId: r.scheduledServiceId,
+      ...(profileBacked(r) ? { profileBacked: true } : {}),
+    })) };
 }
 
 async function listFound(conn, { limit = 50, offset = 0 } = {}) {
