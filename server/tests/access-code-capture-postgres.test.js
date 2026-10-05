@@ -1121,6 +1121,25 @@ postgres('access codes section', () => {
       expect((await access.listForCustomer(trx, c.id)).visits).toEqual([expect.objectContaining({ id: v, property_id: b.id })]);
     });
 
+    test('on a multi-home account a texted code already on file for one home still reaches the office', async () => {
+      const c = await customer({ properties: 2 });
+      const [a] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '1234', propertyId: a.id });
+      await text(c.id, 'The door code is 1234');
+      expect(await sweep(stub([gateItem({ kind: 'door', code: '1234', quote: 'The door code is 1234' })]))).toMatchObject({ found: 1 });
+    });
+
+    test('back to one home, retire promotes only a code of that home', async () => {
+      const c = await customer({ properties: 2 });
+      const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const first = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: a.id });
+      await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '1357', propertyId: b.id });
+      await trx('customer_properties').where({ id: b.id }).update({ active: false });
+      await trx('property_preferences').insert({ customer_id: c.id, garage_code: '2468' }).onConflict('customer_id').merge();
+      expect(await access.retire(trx, first.row.id, {})).toMatchObject({ ok: true, promoted: false });
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBeNull();
+    });
+
     test('home choices name the unit and the property label', async () => {
       const c = await customer({ properties: 2 });
       const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');

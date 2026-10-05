@@ -382,6 +382,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
     let toInsert = [];
     if (items.length) {
       const prefs = await trx('property_preferences').where({ customer_id: customer.id }).first() || {};
+      const multiHome = liveProperties.length > 1;
       // A retired or dismissed value the customer sends again is news, and so is
       // a visit code whose visit has ended (the live list no longer shows it):
       // only a row still waiting or still live makes a new one redundant.
@@ -398,7 +399,9 @@ async function fileFoundItems(conn, { message }, items, receipt) {
       // too. One text still yields one row per kind and value (unique index).
       // Only a DECIDED (active) row covers: a waiting row from another text may
       // still be corrected away, and each text must keep its own evidence.
-      const covered = (item) => existing.some((r) => r.status === 'active' && r.kind === item.kind
+      // On a multi-home account a found code may be for another home: nothing
+      // already on file covers it, and the office picks its home.
+      const covered = (item) => !multiHome && existing.some((r) => r.status === 'active' && r.kind === item.kind
         && r.value_hash === item.value_hash && r.life === 'standing' && item.life === 'standing'
         && normalizeText(r.instructions) === normalizeText(item.instructions));
       toInsert = items.filter((item) => {
@@ -407,7 +410,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
         const field = PROFILE_FIELD[item.kind];
         // Only a standing item is covered by the profile value; a visit-only code
         // for this visit still reaches the office.
-        return !(field && item.code && item.life === 'standing' && !item.instructions
+        return multiHome || !(field && item.code && item.life === 'standing' && !item.instructions
           && canonicalLower(prefs[field]) === canonicalLower(item.code));
       });
     }
@@ -941,9 +944,10 @@ async function retireLocked(trx, row, { adminUserId = null, action }) {
         // newest one), so profile readers never lose a code the customer still has.
         // Shared profile fields are read at every visit of the customer: only a
         // one-home account hands the field to another code; otherwise it is cleared.
-        const homeCount = Number((await trx('customer_properties').where({ customer_id: row.customer_id, active: true }).count({ n: '*' }).first())?.n || 0);
-        const heir = homeCount > 1 ? null : await trx('customer_access_codes')
+        const liveHomes = await trx('customer_properties').where({ customer_id: row.customer_id, active: true }).pluck('id');
+        const heir = liveHomes.length !== 1 ? null : await trx('customer_access_codes')
           .where({ customer_id: row.customer_id, kind: row.kind, status: 'active', life: 'standing' })
+          .where('property_id', liveHomes[0])
           .whereNot('id', row.id).whereNotNull('code')
           .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'))
           .orderBy('decided_at', 'desc').orderBy('created_at', 'desc').orderBy('id').first('code');
