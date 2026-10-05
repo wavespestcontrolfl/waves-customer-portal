@@ -794,9 +794,14 @@ async function visitTwin(trx, customerId, next, scheduledServiceId, exceptId = n
 
 async function standingTwin(trx, customerId, { kind, life, value_hash: hash, property_id: home = null }, exceptId = null) {
   if (life !== 'standing') return null;
-  // The same code at another home of the customer is not a twin.
+  // The same code at another home of the customer is not a twin. On a one-home
+  // account an older row with no home is that home's code.
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).count({ n: '*' }).first();
   const q = trx('customer_access_codes').where({ customer_id: customerId, kind, value_hash: hash, status: 'active', life: 'standing' })
-    .whereRaw('property_id IS NOT DISTINCT FROM ?', [home])
+    .where(function sameHome() {
+      this.whereRaw('property_id IS NOT DISTINCT FROM ?', [home]);
+      if (Number(homes?.n || 0) <= 1) this.orWhereNull('property_id');
+    })
     .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'));
   if (exceptId) q.whereNot('id', exceptId);
   return (await q.forUpdate().first('id', 'instructions')) || null;

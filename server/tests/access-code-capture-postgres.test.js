@@ -1092,6 +1092,14 @@ postgres('access codes section', () => {
       expect((await access.listForVisit(trx, { techRole: 'admin' }, stamped)).codes).toEqual([]);
     });
 
+    test('on a one-home account an older home-less code still counts as a duplicate', async () => {
+      const c = await customer({ properties: 1 });
+      const old = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, old.id, {});
+      await trx('customer_access_codes').where({ id: old.id }).update({ property_id: null });
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468' })).toMatchObject({ ok: false, code: 'duplicate_active' });
+    });
+
     test('home choices name the unit and the property label', async () => {
       const c = await customer({ properties: 2 });
       const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
