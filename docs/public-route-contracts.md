@@ -2659,7 +2659,8 @@ a negated term may appear only as negated, an uncertain one only hedged); states
 product's target or role as found, seen or present (they license a purpose claim
 only: "to protect against", "to go after"); says the photos confirmed a cause (the
 technician's note wins over the photo read); states a low-confidence photo finding
-without a hedge; or fails `customerCopyViolations`, the writer-rules timing screen
+without a hedge; says it found, saw or there is something the condition vocabulary
+does not know (fail closed, `observed_unrecognized`); or fails `customerCopyViolations`, the writer-rules timing screen
 or the next-visit claim lint. The model also returns a per-sentence `sources` list
 (note / product / finding / prior / progress / fact) that the code checks
 against what each sentence names. No tip or blog suggestion is produced yet; the

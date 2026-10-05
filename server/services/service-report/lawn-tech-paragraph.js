@@ -294,13 +294,15 @@ function distinctTokens(names, exclude) {
 }
 
 // Digit tokens that belong to an applied product's listed name ("50", "24-0-11").
-function allowedNumberTokens(inputs) {
-  const set = new Set();
-  for (const p of inputs.products) for (const t of String(p.name).split(/\s+/)) if (/\d/.test(t)) set.add(t.replace(/[.,;:]+$/, '').toLowerCase());
-  return set;
+// The text with every applied product's listed name cut out, longest name first.
+function stripAppliedNames(text, inputs) {
+  const names = inputs.products.map((p) => clean(String(p.name || ''))).filter(Boolean).sort((a, b) => b.length - a.length);
+  let out = text;
+  for (const name of names) out = out.replace(new RegExp(escapeRe(name).replace(/\\?\s+/g, '\\s+'), 'gi'), ' ');
+  return out;
 }
 
-const NUMBER_TOKEN_RE = /\d[\d.,/\-]*\d|\d/g;
+const NUMBER_TOKEN_RE = /\d/;
 const UNIT_RE = /\b(?:oz|ounces?|fl|ml|milliliters?|liters?|gal|gallons?|lbs?|pounds?|grams?|kg|kilograms?|percent|acres?|sq\.?\s?ft|square\s+feet|linear\s+feet|inches|inch|feet)\b|%/i;
 const MONEY_RE = /\$|\bprice|\bcost|\bfree\b|\bwarranty\b|\bbond\b|\bepa\b/i;
 const PROMISE_RE = /\b(?:will|won['’]t|shall|going\s+to|plan(?:s|ned)?\s+to|should|expect(?:s|ed|ing)?|soon|eventually|promise[sd]?|guarantee[sd]?|next\s+(?:visit|time|service|round|application|treatment)|upcoming|follow[\s-]?up|re-?check|re-?treat|re-?inspect|come\s+back|return(?:ing)?|see\s+you|in\s+time|over\s+time|coming\s+(?:days|weeks))\b|['’]ll\b/i;
@@ -559,12 +561,11 @@ function validateParagraph(answer, rawInputs) {
   if (WATERING_RE.test(text)) fail('watering_or_mowing');
   if (UNIT_RE.test(text)) fail('measurement');
 
-  // Numbers: only those inside an applied product's own listed name.
-  const okNumbers = allowedNumberTokens(inputs);
-  for (const m of text.matchAll(NUMBER_TOKEN_RE)) {
-    const token = m[0].replace(/[.,;:]+$/, '').toLowerCase();
-    if (!okNumbers.has(token)) { fail(`number:${token}`); break; }
-  }
+  // Numbers: only those inside an applied product's own listed name, in place.
+  // The product names are cut out of the text first, so "50" is allowed in
+  // "Arena 50 WDG" and nowhere else. The code carries no raw token: a rejected
+  // number may be part of something the log must not hold.
+  if (NUMBER_TOKEN_RE.test(stripAppliedNames(text, inputs))) fail('number');
 
   // Products: only applied ones. A catalog or built-in name that was not applied,
   // or a capitalized name nothing carries, is a product we did not use.
@@ -581,7 +582,9 @@ function validateParagraph(answer, rawInputs) {
       if (idx === 0 || !/^[A-Z]/.test(t) || t === 'I') return;
       const w = t.toLowerCase();
       if (applied.has(w) || GRASS_AND_PLACE_WORDS.has(w) || /^\d/.test(t)) return;
-      fail(`unrecognized_name:${t}`);
+      // Fixed code, no token: the name may be a person's, copied from the note,
+      // and the write gate logs these codes.
+      fail('unrecognized_name');
     });
   });
 
@@ -605,6 +608,12 @@ function validateParagraph(answer, rawInputs) {
         if (term.cause && !purposeOnly && mention.stance !== 'negated' && (prov.noteStance === 'affirmed' || prov.noteStance === 'uncertain' || prov.findingHigh || prov.prior)
           && !from.some((k) => ['note', 'finding', 'prior'].includes(k))) fail(`cause_unsourced:${term.key}`);
       }
+    }
+    // Fail closed on an observation of something the vocabulary does not know:
+    // "found nematodes" names no term, so nothing above checked it. Every clause
+    // that says found / saw / there is must name a known condition.
+    for (const clause of sentence.split(CLAUSE_BREAK_RE)) {
+      if (OBSERVED_CUE_RE.test(clause) && !TERMS.some((t) => t.re.test(clause))) { fail('observed_unrecognized'); break; }
     }
     // The photos never confirm a cause: that comes from the technician.
     if (named.some((t) => t.cause) && PHOTO_REF_RE.test(sentence) && CONFIRM_VERB_RE.test(sentence)) fail('photo_confirms_cause');

@@ -146,7 +146,9 @@ describe('validator: rejects', () => {
 
   test('a name nothing carries, even when the catalog does not know it', () => {
     const a = answer('Our technician found chinch bugs in the trouble spot. We used Zorbex on the front yard.', [['note'], ['note']]);
-    expect(problemsOf(a)).toContain('unrecognized_name:Zorbex');
+    expect(problemsOf(a)).toContain('unrecognized_name');
+    // The code never carries the token: the write gate logs these codes.
+    expect(problemsOf(a).join(' ')).not.toMatch(/Zorbex/);
   });
 
   test.each([
@@ -154,9 +156,12 @@ describe('validator: rejects', () => {
     ['a fungus nobody named', 'Our technician found chinch bugs in the trouble spot. We also saw signs of large patch near the fence.', 'condition_not_in_inputs:large_patch'],
     ['a target stated as found', 'Our technician found chinch bugs in the trouble spot. We saw mole crickets along the edge.', 'target_stated_as_found:mole_cricket'],
     ['a low-confidence finding stated as fact', 'Our technician found chinch bugs in the trouble spot. The lawn has thinning turf in the front.', 'low_confidence_stated_as_fact:thin'],
-    ['a number', 'Our technician found chinch bugs in the trouble spot. We used 16.6 grams on the front yard.', 'number:16.6'],
-    ['a score', 'Our technician found chinch bugs in the trouble spot. Your lawn scored 94 today.', 'number:94'],
+    ['a number', 'Our technician found chinch bugs in the trouble spot. We used 16.6 grams on the front yard.', 'number'],
+    ['a score', 'Our technician found chinch bugs in the trouble spot. Your lawn scored 94 today.', 'number'],
     ['a unit', 'Our technician found chinch bugs in the trouble spot. We used a few grams on the front yard.', 'measurement'],
+    ['a product-name number used elsewhere', 'Our technician found chinch bugs in the trouble spot. Arena 50 WDG went on, and the lawn is 50 recovered.', 'number'],
+    ['a condition the vocabulary does not know', 'Our technician found nematodes in the lawn. Arena 50 WDG went on the front yard to treat them.', 'observed_unrecognized'],
+    ['a found claim with no condition at all', 'Our technician found the lawn in good shape. Arena 50 WDG went on the front yard.', 'observed_unrecognized'],
     ['a promise', 'Our technician found chinch bugs in the trouble spot. The lawn will recover on its own.', 'promise:will'],
     ['a next visit', 'Our technician found chinch bugs in the trouble spot. We are checking the spot again next visit.', 'promise:next visit'],
     ['result timing', 'Our technician found chinch bugs in the trouble spot. You should see improvement within two weeks.', 'timing'],
