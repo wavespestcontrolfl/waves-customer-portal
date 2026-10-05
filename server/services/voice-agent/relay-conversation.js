@@ -4239,7 +4239,9 @@ class RelayConversation {
             // a booking, the capture floor) IS this call's artifact once it lands:
             // the hand-off stands down rather than race it.
             pendingWrites: this._inFlightWrites.size > 0 || detachedWrites.length > 0 || Boolean(this._captureFloorWrite),
-            leadCaptured: this.leadCaptured === true,
+            // The floor's "ran, wrote NO lead" (an existing customer) latches leadCaptured to
+            // stand down, but it is not an artifact: the office still gets the bell.
+            leadCaptured: this.leadCaptured === true && this._floorNoLead !== true,
             leadId: this._leadId || null,
             estimateFields: this._estimateFields || null,
             fence: fenceOwner,
@@ -4552,7 +4554,7 @@ class RelayConversation {
         }
         const floorLeadId = result && result.leadId;
         this.leadCaptured = true;
-        if (!floorLeadId) this._noLeadCreated = true;
+        if (!floorLeadId) { this._noLeadCreated = true; this._floorNoLead = true; }
         logger.info(
           `[voice-relay] capture-floor ${floorLeadId ? 'lead written' : 'ran with NO lead (existing customer)'} `
           + `callSid=${this.callSid} reason=${reason || 'end'}`

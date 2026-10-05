@@ -70,6 +70,22 @@ test('a write that outlives the close drain is passed on as pending (the hand-of
   expect(run.mock.calls[0][0].pendingWrites).toBe(true);
 });
 
+test('an existing customer the floor wrote no lead for is still handed off (the floor latch is not an artifact)', async () => {
+  primeDb(1);
+  const c = convo({ from: '+19415550133' }); // the floor runs; the mocked writer creates no lead
+  await c.end('ws_close');
+  expect(c.leadCaptured).toBe(true);
+  expect(run.mock.calls[0][0]).toMatchObject({ leadCaptured: false, pendingWrites: false });
+});
+
+test('a lead the floor DID write is passed on as captured', async () => {
+  primeDb(1);
+  require('../services/lead-from-extraction').createLeadFromExtraction.mockResolvedValueOnce({ leadId: 'L-floor' });
+  const c = convo({ from: '+19415550133' });
+  await c.end('ws_close');
+  expect(run.mock.calls[0][0]).toMatchObject({ leadCaptured: true, leadId: 'L-floor' });
+});
+
 test('0 rows reconciled (a failure outcome already won): the hand-off is not run', async () => {
   primeDb(0);
   await convo().end('ws_close');
