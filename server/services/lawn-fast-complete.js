@@ -504,10 +504,11 @@ function protocolRate(product) {
  * with the products it lists, so the sheet can offer them as one-tap add-ons
  * ("Also in October's protocol"; owner 2026-10-05). `{ title, month, visitType,
  * products }` or null when no protocol or window resolves. The read mirrors the
- * plan engine's: the customer's active turf profile sets the track
- * (selectProtocolVisit; St. Augustine when nothing is recorded, the engine's
- * lenient read), an assigned protocol / window on the visit is honored, and the
- * active protocol for the track otherwise. Every lawn visit type gets it: a
+ * plan engine's completion-defaults read: the customer's active turf profile
+ * (or the legacy lawn_type) sets the track, and an UNKNOWN track resolves no
+ * window at all (requireKnownGrass; never a guessed St. Augustine recipe
+ * offered as one-tap add-ons), an assigned protocol / window on the visit is
+ * honored, and the active protocol for the track otherwise. Every lawn visit type gets it: a
  * one-time visit has no plan, so the window's defaults are add-ons there too
  * (`defaultInPlan` says which; the sheet decides). Only products with a catalog
  * row are listed (the sheet builds its row from the catalog). A failed read is
@@ -519,10 +520,11 @@ async function loadProtocolWindow(svc, knex, readFailures) {
     const serviceDate = parseETDateTime(`${etCalendarDayOf(svc.scheduled_date)}T12:00`);
     const { selectProtocolVisit } = require('./waveguard-plan-engine');
     const { getProtocolWindowContext } = require('./lawn-protocol-operating-layer');
-    const { trackKey } = selectProtocolVisit(profile, serviceDate, svc.lawn_type, { requireKnownGrass: false });
+    const { trackKey } = selectProtocolVisit(profile, serviceDate, svc.lawn_type, { requireKnownGrass: true });
+    if (!trackKey) return null;
     const context = await getProtocolWindowContext(knex, {
       serviceDate,
-      grassTrack: trackKey || 'st_augustine',
+      grassTrack: trackKey,
       region: 'swfl',
       windowKey: svc.lawn_protocol_window_key || undefined,
       protocolKey: svc.lawn_protocol_key || undefined,

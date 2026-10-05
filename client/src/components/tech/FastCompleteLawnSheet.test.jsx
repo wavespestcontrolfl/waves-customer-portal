@@ -858,6 +858,22 @@ describe('products', () => {
     expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('10');
   });
 
+  test('an amount the tech clears stays empty: the figured one does not come back, and the row is recorded without one', async () => {
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: RATED } });
+    await addProductByName('Talak 7.9%');
+    const talak = editorFor('Talak 7.9%');
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('10');
+    fireEvent.change(within(talak).getByLabelText('Talak 7.9%'), { target: { value: '' } });
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('');
+    expect(within(talak).queryByText(/per 1,000 sq ft/)).toBeNull();
+    expect(within(talak).getByText('No amount entered. It is recorded without one.')).toBeTruthy();
+    await analyze();
+    await submit();
+    const sent = completeCalls()[0].body.products[0];
+    expect(sent.totalAmount).toBeUndefined();
+    expect(sent.amountUnit).toBeUndefined();
+  });
+
   test('an amount the tech types wins over the figured one and survives a method change', async () => {
     await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: RATED } });
     await addProductByName('Talak 7.9%');

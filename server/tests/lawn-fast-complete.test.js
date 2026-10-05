@@ -805,6 +805,17 @@ describe('this month\'s protocol window (the sheet\'s add-on row)', () => {
     expect(ctx.readFailures).not.toContain('protocol_window');
   });
 
+  test('an unknown grass track resolves no window: nothing is guessed, no protocol read is made', async () => {
+    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
+    selectProtocolVisit.mockReturnValueOnce({ trackKey: null, track: null, month: 'Oct', visit: null });
+    getProtocolWindowContext.mockResolvedValue(window());
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ customer_turf_profiles: undefined })), technicianId: 'tech-1' });
+    expect(ctx.protocolWindow).toBeNull();
+    expect(getProtocolWindowContext).not.toHaveBeenCalled();
+    expect(ctx.readFailures).not.toContain('protocol_window');
+    expect(selectProtocolVisit).toHaveBeenCalledWith(undefined, expect.any(Date), undefined, { requireKnownGrass: true });
+  });
+
   test('a failed window read is advisory: null, protocol_window in readFailures, the sheet still opens', async () => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
     getProtocolWindowContext.mockRejectedValue(new Error('db down'));
