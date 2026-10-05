@@ -593,7 +593,32 @@ async function listForCustomer(conn, customerId) {
   return {
     active: kept.filter((r) => r.status === 'active').map(serialize),
     found: kept.filter((r) => r.status === 'found').map(serialize),
+    properties: await homeChoices(conn, [customerId]).then((m) => m.get(customerId) || []),
   };
+}
+
+// The customer's active homes, for the home picker a multi-home account needs.
+async function homeChoices(conn, customerIds) {
+  const ids = [...new Set(customerIds.filter(Boolean))];
+  const rows = ids.length ? await conn('customer_properties').whereIn('customer_id', ids).where({ active: true })
+    .select('id', 'customer_id', 'address_line1', 'is_primary').orderBy('is_primary', 'desc').orderBy('address_line1') : [];
+  const out = new Map();
+  for (const r of rows) out.set(r.customer_id, [...(out.get(r.customer_id) || []), { id: r.id, label: r.address_line1 || 'Home' }]);
+  return out;
+}
+
+// A standing code of a multi-home account must name its home, or a technician
+// at one home would get another home's code. Returns { propertyId } or { error }.
+async function resolveHome(trx, customerId, { life, propertyId, current = null }) {
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
+  if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
+    if (!homes.includes(propertyId)) return { error: 'invalid_property' };
+    return { propertyId };
+  }
+  if (current && homes.includes(current)) return { propertyId: current };
+  if (homes.length === 1) return { propertyId: homes[0] };
+  if (life === 'standing' && homes.length > 1) return { error: 'property_required' };
+  return { propertyId: null };
 }
 
 // Every customer's codes waiting for a decision, newest first.
@@ -605,6 +630,13 @@ async function listForVisit(conn, req, visitId) {
   const { technicianCurrentVisitFilter, isTechnicianRequest } = require('./technician-visit-scope');
   const q = conn('scheduled_services').where('scheduled_services.id', visitId);
   technicianCurrentVisitFilter(req, q);
+  // A technician reads codes only around the visit day (yesterday through
+  // tomorrow) and only for a visit still to be done; post-visit paperwork
+  // scope is wider than what a door code needs.
+  if (isTechnicianRequest(req)) {
+    q.whereBetween('scheduled_services.scheduled_date', [etDateString(addETDays(new Date(), -1)), etDateString(addETDays(new Date(), 1))])
+      .whereRaw(`COALESCE(scheduled_services.status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES);
+  }
   const visit = await q.first('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id');
   if (!visit) {
     if (isTechnicianRequest(req) && await conn('scheduled_services').where({ id: visitId }).first('id')) return fail(403, 'service_not_assigned');
@@ -617,7 +649,9 @@ async function listForVisit(conn, req, visitId) {
   const homes = await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id');
   const visitHome = visit.property_id || (homes.length === 1 ? homes[0] : null);
   const sameHome = (r) => !r.propertyId || (!!visitHome && r.propertyId === visitHome);
-  return { ok: true, codes: active.filter((r) => (r.life === 'standing' && sameHome(r)) || r.scheduledServiceId === visit.id) };
+  // Only what a stop needs: never the customer's message, its source or who decided.
+  return { ok: true, codes: active.filter((r) => (r.life === 'standing' && sameHome(r)) || r.scheduledServiceId === visit.id)
+    .map((r) => ({ id: r.id, kind: r.kind, code: r.code, instructions: r.instructions, life: r.life, scheduledServiceId: r.scheduledServiceId })) };
 }
 
 async function listFound(conn, { limit = 50, offset = 0 } = {}) {
@@ -643,6 +677,7 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
     .where('scheduled_date', '<=', etDateString(addETDays(new Date(), VISIT_WINDOW_DAYS)))
     .select('id', 'customer_id', conn.raw('scheduled_date::text AS scheduled_date'), 'status', 'service_type')
     .orderBy('scheduled_date').orderBy('id') : [];
+  const homes = await homeChoices(conn, customerIds);
   return {
     total: Number(count),
     items: rows.map((r) => {
@@ -650,6 +685,7 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
       return {
         ...serialize(r),
         customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || r.company_name || null,
+        propertyChoices: homes.get(r.customer_id) || [],
         visitChoices: visits.filter((v) => v.customer_id === r.customer_id && v.scheduled_date <= last)
           .map((v) => ({ id: v.id, scheduled_date: v.scheduled_date, status: v.status, service_type: v.service_type })),
       };
@@ -791,7 +827,7 @@ async function officeTransaction(conn, work) {
 // Accept a found code (optionally edited by the office): it becomes active, a
 // visit-life code attaches to the customer's next visit, and a standing code
 // fills an empty profile field. Only a `found` row can be accepted.
-async function accept(conn, id, { adminUserId = null, kind, life, code, instructions, scheduledServiceId: chosenId, now = new Date() } = {}) {
+async function accept(conn, id, { adminUserId = null, kind, life, code, instructions, scheduledServiceId: chosenId, propertyId, now = new Date() } = {}) {
   if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
   const head = await conn('customer_access_codes').where({ id }).first('customer_id');
   if (!head) return fail(404, 'not_found');
@@ -818,13 +854,16 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (visit.error) return fail(400, visit.error);
       const scheduledServiceId = visit.id;
       if (await visitTwin(trx, row.customer_id, next, scheduledServiceId, row.id)) return fail(409, 'duplicate_active');
+      const home = visit.propertyId ? { propertyId: visit.propertyId }
+        : await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id });
+      if (home.error) return fail(400, home.error);
       const profileField = await fillEmptyProfileField(trx, row.customer_id, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));
       const [updated] = await trx('customer_access_codes').where({ id }).update({
         kind: next.kind, life: next.life, code: next.code, instructions: next.instructions, value_hash: next.value_hash,
         scheduled_service_id: scheduledServiceId, status: 'active', decided_by: adminUserId || null,
-        // The named visit says which home the code is for.
-        ...(visit.propertyId ? { property_id: visit.propertyId } : {}),
+        // The named visit or the named home says which home the code is for.
+        property_id: home.propertyId,
         decided_at: trx.fn.now(), updated_at: trx.fn.now(),
       }).returning('*');
       await audit(trx, adminUserId, 'access_code.accepted', id, {
@@ -934,7 +973,7 @@ async function retire(conn, id, { adminUserId = null } = {}) {
 }
 
 // The office adds a code itself: active at once.
-async function addByStaff(conn, { customerId, kind, life, code, instructions, scheduledServiceId: chosenId, adminUserId = null, now = new Date() } = {}) {
+async function addByStaff(conn, { customerId, kind, life, code, instructions, scheduledServiceId: chosenId, propertyId, adminUserId = null, now = new Date() } = {}) {
   if (!UUID_RE.test(String(customerId))) return fail(400, 'invalid_customer');
   const checked = validateFields({}, { kind, life, code, instructions });
   if (checked.error) return fail(400, checked.error);
@@ -943,14 +982,15 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
     if (!(await lockCustomer(trx, customerId))) return fail(404, 'customer_not_found');
     const refused = await supersedeOrRefuse(trx, customerId, next, { adminUserId });
     if (refused) return refused;
-    const properties = await trx('customer_properties').where({ customer_id: customerId, active: true }).select('id');
     const visit = next.life === 'visit' ? await visitFor(trx, customerId, { from: now, chosenId }) : { id: null };
     if (visit.error) return fail(400, visit.error);
     const scheduledServiceId = visit.id;
     if (await visitTwin(trx, customerId, next, scheduledServiceId)) return fail(409, 'duplicate_active');
+    const home = visit.propertyId ? { propertyId: visit.propertyId } : await resolveHome(trx, customerId, { life: next.life, propertyId });
+    if (home.error) return fail(400, home.error);
     const profileField = await fillEmptyProfileField(trx, customerId, next);
     const [row] = await trx('customer_access_codes').insert({
-      customer_id: customerId, property_id: visit.propertyId || (properties.length === 1 ? properties[0].id : null),
+      customer_id: customerId, property_id: home.propertyId,
       kind: next.kind, code: next.code, instructions: next.instructions, life: next.life,
       scheduled_service_id: scheduledServiceId, status: 'active', source_type: 'staff', source_at: trx.fn.now(),
       value_hash: next.value_hash, decided_by: adminUserId || null, decided_at: trx.fn.now(),

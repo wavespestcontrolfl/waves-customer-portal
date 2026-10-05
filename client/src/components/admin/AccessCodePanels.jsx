@@ -108,7 +108,7 @@ function LifeToggle({ value, onChange, disabled }) {
 
 // kind / code / directions / life / visit: the fields a found code is edited
 // in and a staff code is typed into. `draft` and `setDraft` live in the caller.
-function CodeFields({ idPrefix, draft, setDraft, choices, busy }) {
+function CodeFields({ idPrefix, draft, setDraft, choices, busy, homes = [] }) {
   const set = (key) => (event) => setDraft((d) => ({ ...d, [key]: event.target.value }));
   return (
     <div className="grid gap-2">
@@ -151,6 +151,15 @@ function CodeFields({ idPrefix, draft, setDraft, choices, busy }) {
           </label>
         )}
       </div>
+      {draft.life === "standing" && homes.length > 1 && (
+        <label className="block">
+          <Label>Home</Label>
+          <Select id={`${idPrefix}-home`} value={draft.propertyId} onChange={set("propertyId")} disabled={busy}>
+            <option value="">Choose which home</option>
+            {homes.map((h) => <option key={h.id} value={h.id}>{h.label}</option>)}
+          </Select>
+        </label>
+      )}
       {draft.life === "visit" && choices.length === 0 && (
         <div className="text-ui-label text-ink-secondary">
           No visit to tie it to. The code is kept for 14 days from the day it was sent.
@@ -169,6 +178,8 @@ export function bodyFromDraft(draft) {
     instructions: draft.instructions.trim() || null,
   };
   if (draft.life === "visit" && draft.scheduledServiceId) body.scheduledServiceId = draft.scheduledServiceId;
+  // A multi-home account names the home of a standing code.
+  if (draft.life === "standing" && draft.propertyId) body.propertyId = draft.propertyId;
   return body;
 }
 
@@ -180,10 +191,11 @@ function draftFromRow(row, choices) {
     code: row.code || "",
     instructions: row.instructions || "",
     scheduledServiceId: bound,
+    propertyId: row.propertyId || "",
   };
 }
 
-const BLANK_DRAFT = { kind: "door", life: "standing", code: "", instructions: "", scheduledServiceId: "" };
+const BLANK_DRAFT = { kind: "door", life: "standing", code: "", instructions: "", scheduledServiceId: "", propertyId: "" };
 
 function useGuarded() {
   const [busy, setBusy] = useState(false);
@@ -240,7 +252,8 @@ export function ActiveCodeRow({ row, onRetire }) {
 // A code found in a text, waiting for the office. `visits` is the customer's
 // upcoming visits; `renderHeading` names the customer on the page that lists
 // every customer's codes.
-export function FoundCodeCard({ row, visits, onSave, onDismiss, onNeedVisits = null, renderHeading = null }) {
+export function FoundCodeCard({ row, visits, homes = null, onSave, onDismiss, onNeedVisits = null, renderHeading = null }) {
+  const homeList = homes || row.propertyChoices || [];
   const choices = visitChoices(visits, row.sourceAt);
   const [draft, setDraft] = useState(() => draftFromRow(row, choices));
   // A list that does not carry the customer's visits asks for them once a
@@ -258,7 +271,7 @@ export function FoundCodeCard({ row, visits, onSave, onDismiss, onNeedVisits = n
         </blockquote>
       )}
       <div className="text-ui-label text-ink-secondary">{sourceLabel(row)}</div>
-      <CodeFields idPrefix={`found-${row.id}`} draft={draft} setDraft={setDraft} choices={choices} busy={busy} />
+      <CodeFields idPrefix={`found-${row.id}`} draft={draft} setDraft={setDraft} choices={choices} busy={busy} homes={homeList} />
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex flex-wrap items-center gap-2">
         <Button size="sm" disabled={busy || !typed} onClick={() => run(() => onSave(row, bodyFromDraft(draft)), "Could not save the code")}>
@@ -273,7 +286,7 @@ export function FoundCodeCard({ row, visits, onSave, onDismiss, onNeedVisits = n
 }
 
 // The office types a code in itself.
-export function AddCodeForm({ visits, onSubmit, onCancel }) {
+export function AddCodeForm({ visits, homes = [], onSubmit, onCancel }) {
   const choices = visitChoices(visits);
   const [draft, setDraft] = useState(BLANK_DRAFT);
   const { busy, error, run } = useGuarded();
@@ -286,7 +299,7 @@ export function AddCodeForm({ visits, onSubmit, onCancel }) {
         if (await run(() => onSubmit(bodyFromDraft(draft)), "Could not add the code")) onCancel();
       }}
     >
-      <CodeFields idPrefix="add-access-code" draft={draft} setDraft={setDraft} choices={choices} busy={busy} />
+      <CodeFields idPrefix="add-access-code" draft={draft} setDraft={setDraft} choices={choices} busy={busy} homes={homes} />
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex flex-wrap items-center gap-2">
         <Button type="submit" size="sm" disabled={busy || !typed}>Add code</Button>

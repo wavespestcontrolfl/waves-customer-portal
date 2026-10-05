@@ -215,3 +215,13 @@ describe('visit picker dates', () => {
     expect(out[0].label).toMatch(/Mar 12/);
   });
 });
+
+describe('home picker', () => {
+  it('a standing code on a two-home account asks for the home and sends it', async () => {
+    const { bodyFromDraft } = await import('./AccessCodePanels');
+    expect(bodyFromDraft({ kind: 'door', life: 'standing', code: '2468', instructions: '', scheduledServiceId: '', propertyId: 'p2' }))
+      .toEqual({ kind: 'door', life: 'standing', code: '2468', instructions: null, propertyId: 'p2' });
+    expect(bodyFromDraft({ kind: 'door', life: 'visit', code: '2468', instructions: '', scheduledServiceId: 'v1', propertyId: 'p2' }))
+      .toEqual({ kind: 'door', life: 'visit', code: '2468', instructions: null, scheduledServiceId: 'v1' });
+  });
+});

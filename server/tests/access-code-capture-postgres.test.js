@@ -1038,10 +1038,9 @@ postgres('access codes section', () => {
       const atB = await visit(c.id, day(1));
       await trx('scheduled_services').where({ id: atB }).update({ property_id: b.id });
       const row = await found(c.id, { kind: 'door', code: '2468' });
-      await access.accept(trx, row.id, {});
-      await trx('customer_access_codes').where({ id: row.id }).update({ property_id: a.id });
-      const wide = await found(c.id, { kind: 'garage', code: '1357' });
-      await access.accept(trx, wide.id, {});
+      await access.accept(trx, row.id, { propertyId: a.id });
+      const atHomeB = await found(c.id, { kind: 'garage', code: '1357' });
+      await access.accept(trx, atHomeB.id, { propertyId: b.id });
       const out = await access.listForVisit(trx, { techRole: 'admin' }, atB);
       expect(out.codes.map((r) => r.code)).toEqual(['1357']);
     });
@@ -1065,20 +1064,52 @@ postgres('access codes section', () => {
       expect(items.find((r) => r.customerId === c.id).visitChoices.map((v) => v.id)).toEqual([soon]);
     });
 
+    test('a standing code of a multi-home customer must name its home', async () => {
+      const c = await customer({ properties: 2 });
+      const [a] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '2468' })).toMatchObject({ ok: false, code: 'property_required' });
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '2468', propertyId: randomUUID() })).toMatchObject({ ok: false, code: 'invalid_property' });
+      const ok = await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '2468', propertyId: a.id });
+      expect(ok).toMatchObject({ ok: true, row: { propertyId: a.id } });
+      const row = await found(c.id, { kind: 'garage', code: '1357' });
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, code: 'property_required' });
+      expect((await access.accept(trx, row.id, { propertyId: a.id })).row.propertyId).toBe(a.id);
+      expect((await access.listForCustomer(trx, c.id)).properties).toHaveLength(2);
+    });
+
+    test('a technician sees only what a stop needs, and only around the visit day', async () => {
+      const c = await customer();
+      const techId = randomUUID();
+      await trx('technicians').insert({ id: techId, name: 'Sample Tech' });
+      const today = await visit(c.id, etDateString(new Date()));
+      const later = await visit(c.id, etDateString(addETDays(new Date(), 5)));
+      const done = await visit(c.id, etDateString(new Date()), 'completed');
+      await trx('scheduled_services').whereIn('id', [today, later, done]).update({ technician_id: techId });
+      const row = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, row.id, {});
+      const asTech = { techRole: 'technician', technicianId: techId };
+      const out = await access.listForVisit(trx, asTech, today);
+      expect(Object.keys(out.codes[0]).sort()).toEqual(['code', 'id', 'instructions', 'kind', 'life', 'scheduledServiceId']);
+      expect(await access.listForVisit(trx, asTech, later)).toMatchObject({ ok: false, status: 403 });
+      expect(await access.listForVisit(trx, asTech, done)).toMatchObject({ ok: false, status: 403 });
+    });
+
     test('a technician reads the codes of a visit assigned to them, and only those', async () => {
       const c = await customer();
       const techId = await tech();
       const other = await tech();
-      const mine = await visit(c.id, day(1));
-      const theirs = await visit(c.id, day(2));
+      // Around the real visit day: a technician reads codes only yesterday through tomorrow.
+      const mine = await visit(c.id, etDateString(new Date()));
+      const theirs = await visit(c.id, etDateString(addETDays(new Date(), 1)));
       await trx('scheduled_services').where({ id: mine }).update({ technician_id: techId });
       await trx('scheduled_services').where({ id: theirs }).update({ technician_id: other });
       const standing = await found(c.id, { kind: 'garage', code: '2468' });
       await access.accept(trx, standing.id, {});
       const forMine = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
-      await access.accept(trx, forMine.id, { scheduledServiceId: mine, now: NOW });
       const forTheirs = await found(c.id, { kind: 'door', code: '#8080', life: 'visit' });
-      await access.accept(trx, forTheirs.id, { scheduledServiceId: theirs, now: NOW });
+      await trx('customer_access_codes').whereIn('id', [forMine.id, forTheirs.id]).update({ source_at: new Date() });
+      await access.accept(trx, forMine.id, { scheduledServiceId: mine });
+      await access.accept(trx, forTheirs.id, { scheduledServiceId: theirs });
       const asTech = { techRole: 'technician', technicianId: techId };
       const out = await access.listForVisit(trx, asTech, mine);
       expect(out.ok).toBe(true);

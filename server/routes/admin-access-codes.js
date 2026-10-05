@@ -70,6 +70,8 @@ const MESSAGES = {
   value_required: 'A code or instructions are required',
   invalid_visit: 'scheduledServiceId must be a visit of this customer that has not ended',
   visit_required: 'Choose the visit this code is for',
+  property_required: 'Choose which home this code is for',
+  invalid_property: 'propertyId must be an active home of this customer',
   expired: 'This one-visit code is more than 14 days old',
   source_moved: 'The text this code came from now belongs to another customer',
   source_changed: 'The text this code came from has changed; it will be read again',
@@ -97,7 +99,7 @@ const body = (req) => (req.body && typeof req.body === 'object' && !Array.isArra
 // an explicit null clears code or instructions.
 function suppliedFields(input) {
   const out = {};
-  for (const key of ['kind', 'life', 'code', 'instructions', 'scheduledServiceId']) {
+  for (const key of ['kind', 'life', 'code', 'instructions', 'scheduledServiceId', 'propertyId']) {
     if (Object.prototype.hasOwnProperty.call(input, key)) out[key] = input[key];
   }
   return out;
