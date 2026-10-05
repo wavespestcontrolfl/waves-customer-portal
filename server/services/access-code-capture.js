@@ -321,7 +321,10 @@ async function fileFoundItems(conn, { message, properties }, items, receipt) {
         if (covered(item)) return false;
         // Already on the profile: the strict rule saved it, nothing is lost.
         const field = PROFILE_FIELD[item.kind];
-        return !(field && item.code && !item.instructions && canonicalLower(prefs[field]) === canonicalLower(item.code));
+        // Only a standing item is covered by the profile value; a visit-only code
+        // for this visit still reaches the office.
+        return !(field && item.code && item.life === 'standing' && !item.instructions
+          && canonicalLower(prefs[field]) === canonicalLower(item.code));
       });
     }
     const propertyId = properties.length === 1 ? properties[0].id : null;

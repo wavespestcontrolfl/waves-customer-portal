@@ -191,6 +191,13 @@ postgres('access codes section', () => {
       await staffInsert();
     });
 
+    test('a visit-only code is kept even when the profile holds the same value', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await text(c.id, 'The garage code is 2468 for today only');
+      const read = stub([gateItem({ kind: 'garage', code: '2468', life: 'visit', quote: 'The garage code is 2468 for today only' })]);
+      expect(await sweep(read)).toMatchObject({ found: 1 });
+    });
+
     test('a text corrected after its receipt is read again', async () => {
       const c = await customer();
       const id = await text(c.id, 'See you Tuesday');
