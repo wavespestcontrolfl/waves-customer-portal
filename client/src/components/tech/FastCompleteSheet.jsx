@@ -540,7 +540,7 @@ export default function FastCompleteSheet({ service, request, onClose, onComplet
     // Voice still recording, transcribing or filling: closing (×, backdrop or
     // Escape all come through here) would drop those words and the sheet's edits.
     if (submitting || voiceBusy) return;
-    if (done) onCompleted?.(done.response || null);
+    if (done) onCompleted?.();
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
   }, [submitting, voiceBusy, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
@@ -573,7 +573,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, onOverla
   // tech marked shows there.
   if (submission.done && !reportFlow) {
     return (
-      <SavedView service={service} summary={submission.done.summary} onCompleted={() => onCompleted?.(submission.done.response || null)}>
+      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
         <CustomerTextResult outcome={submission.done.customerText} />
       </SavedView>
     );
@@ -1690,7 +1690,7 @@ function ReportFlowForm({
       description: visitPromises.promises.find((promise) => promise.id === mark.id)?.description || '',
     }));
     return (
-      <SavedView service={service} summary={submission.done.summary} onCompleted={() => onCompleted?.(submission.done.response || null)}>
+      <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted}>
         <SentSummary result={submission.done.response} doneMarks={doneMarks} base={base} request={request} followupBooking={ctx.followupBooking} />
         <CollectPayment result={submission.done.response} />
       </SavedView>
