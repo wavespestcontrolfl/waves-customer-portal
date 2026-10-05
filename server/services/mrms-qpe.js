@@ -77,27 +77,51 @@ function shiftYmd(ymd, days) {
 }
 
 // The relay leaves MRMS null for a window that spans two calendar years, so
-// the earlier start stays inside the requested start's year. Returns null when
-// the year has no earlier day left (a window that starts on January 1).
-function retryStart(start, cell, attempt) {
-  const daysIntoYear = Math.round((Date.parse(`${start}T00:00:00Z`) - Date.parse(`${start.slice(0, 4)}-01-01T00:00:00Z`)) / 86400000);
-  if (!(daysIntoYear > 0)) return null;
+// every request stays inside one year: a window is asked for one year at a
+// time, and a re-request moves its start earlier only as far as January 1.
+function yearSegments(start, end) {
+  const segments = [];
+  for (let year = Number(start.slice(0, 4)); year <= Number(end.slice(0, 4)); year += 1) {
+    segments.push({
+      start: year === Number(start.slice(0, 4)) ? start : `${year}-01-01`,
+      end: year === Number(end.slice(0, 4)) ? end : `${year}-12-31`,
+    });
+  }
+  return segments;
+}
+
+function daysBetween(fromYmd, toYmd) {
+  return Math.round((Date.parse(`${toYmd}T00:00:00Z`) - Date.parse(`${fromYmd}T00:00:00Z`)) / 86400000);
+}
+
+// Another window (= cache key) that still covers [start, end] inside its year:
+// an earlier start, or for a window that starts on January 1 a later end (the
+// relay answers a window that runs past today with the days it has). Null
+// when the year has no other day left.
+function retryWindow({ start, end }, cell, attempt) {
+  const year = start.slice(0, 4);
+  const back = daysBetween(`${year}-01-01`, start);
+  const forward = daysBetween(end, `${year}-12-31`);
+  const room = back > 0 ? back : forward;
+  if (!(room > 0)) return null;
   const spread = attempt === 1
     ? (cell.i * 131 + cell.j) % RETRY_SPREAD_DAYS
     : (cell.i * 17 + cell.j * 7) % RETRY_SPREAD_DAYS;
-  return shiftYmd(start, -(1 + (((attempt - 1) * RETRY_SPREAD_DAYS + spread) % daysIntoYear)));
+  const shift = 1 + (((attempt - 1) * RETRY_SPREAD_DAYS + spread) % room);
+  return back > 0 ? { start: shiftYmd(start, -shift), end } : { start, end: shiftYmd(end, shift) };
 }
 
 // One request per attempt, each under its own timeout. Returns the rows read
 // at this property's cell, or null (unreachable, or another cell every time).
-async function fetchOwnCellRows({ lat, lon, start, end, cell, controller }) {
+async function fetchOwnCellRows({ lat, lon, segment, cell, controller }) {
   const tried = new Set();
   for (let attempt = 0; attempt <= 2; attempt += 1) {
-    const windowStart = attempt === 0 ? start : retryStart(start, cell, attempt);
+    const window = attempt === 0 ? segment : retryWindow(segment, cell, attempt);
+    const key = window && `${window.start}/${window.end}`;
     // No other window left inside the year: nothing new to ask.
-    if (!windowStart || tried.has(windowStart)) break;
-    tried.add(windowStart);
-    const url = `${IEMRE_BASE}/${windowStart}/${end}/${lat.toFixed(4)}/${lon.toFixed(4)}/json`;
+    if (!window || tried.has(key)) break;
+    tried.add(key);
+    const url = `${IEMRE_BASE}/${key}/${lat.toFixed(4)}/${lon.toFixed(4)}/json`;
     const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     try {
       const response = await fetch(url, { signal: controller.signal });
@@ -132,8 +156,14 @@ async function fetchMrmsDailyRain({ latitude, longitude, start, end, signal } = 
     else signal.addEventListener('abort', onCallerAbort, { once: true });
   }
   try {
-    const rows = await fetchOwnCellRows({ lat, lon, start, end, cell: expectedMrmsCell(lat, lon), controller });
-    if (!rows || !rows.length) return null;
+    if (!(end >= start)) return null;
+    const cell = expectedMrmsCell(lat, lon);
+    // A year whose request fails leaves its days as gaps; the other year's
+    // observations still stand.
+    const perYear = await Promise.all(yearSegments(start, end).map((segment) => fetchOwnCellRows({ lat, lon, segment, cell, controller })
+      .catch((err) => { logger.warn(`[mrms-qpe] fetch failed: ${err.message}`); return null; })));
+    const rows = perYear.flatMap((part) => part || []);
+    if (!rows.length) return null;
     const byDate = new Map();
     for (const row of rows) {
       if (!row || typeof row.date !== 'string') continue;
@@ -164,4 +194,4 @@ async function fetchMrmsDailyRain({ latitude, longitude, start, end, signal } = 
   }
 }
 
-module.exports = { fetchMrmsDailyRain, _test: { round2, expectedMrmsCell, retryStart } };
+module.exports = { fetchMrmsDailyRain, _test: { round2, expectedMrmsCell, retryWindow, yearSegments } };
