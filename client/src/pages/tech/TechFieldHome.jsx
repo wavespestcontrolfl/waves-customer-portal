@@ -1,5 +1,6 @@
 import { ArrowRight, BookOpen, Camera, ChevronRight, ClipboardList, CloudRain, FileText, Leaf, MapPin, Navigation, RefreshCw, Wrench } from 'lucide-react';
 import { serviceWindowLabel, stopPropertyAlerts, stopStatusLabel, stopSummaryLabel, stopWindow, stopHasCustomerSentPhotos } from './routeStops';
+import { withPassLinks } from './passLinks';
 
 function StopCard({ stop, onOpen, disabled, featured = false, index }) {
   const service = stop.primary;
@@ -30,7 +31,7 @@ function StopCard({ stop, onOpen, disabled, featured = false, index }) {
         <div className="tf-tags"><span className="tf-tag">{serviceLabel}</span>{customerSentPhotos && <span className="tf-tag">📷 Customer sent photos</span>}</div>
         {stopPropertyAlerts(stop).map((alert, i) => (
           <div key={i} className={`tf-alert ${alert?.type === 'chemical' ? 'tf-error' : ''}`}>
-            {typeof alert === 'string' ? alert : alert.text}
+            {withPassLinks(typeof alert === 'string' ? alert : alert.text, { className: 'tf-button' })}
           </div>
         ))}
         {service.address && <a className="tf-button" href={`https://maps.google.com/?q=${encodeURIComponent(service.address)}`} target="_blank" rel="noopener noreferrer"><Navigation aria-hidden="true" />Directions</a>}

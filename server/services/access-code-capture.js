@@ -17,6 +17,13 @@
  * mirrors the profile fields into `profile` rows (mirrorProfileCodes), and the
  * visit read leaves those kinds to the profile fields the card already shows.
  *
+ * Owner ruling 2026-10-05: every code is saved, customer or not. A text from a
+ * number with no customer record is filed unlinked (customer_id null, the
+ * sender's phone, and a suggested customer when the text names exactly one
+ * home) and the office links it to a customer before it can be accepted. An
+ * accepted standing visitor pass is also filed to its neighborhood's directory
+ * (GATE_NEIGHBORHOOD_ACCESS) so every technician there sees it.
+ *
  * Dark behind GATE_ACCESS_CODES_SECTION (read at call time); the sweep also
  * needs GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) so turning the
  * gate on never reads history. Nothing here rings a bell or sends a message
@@ -53,6 +60,9 @@ const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = requi
 const { stringifySmsEvidence } = require('./sms-operational-extractor');
 const { eligibleMessage, loadMessageContext } = require('./sms-operational-actions');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { canonicalizeAddress, stripTrailingUnit, normalizeZip, STREET_SUFFIX_CANON } = require('./customer-property-address-keys');
+const { filePassEntry, retireDirectoryEntry } = require('./neighborhood-access');
+const { neighborhoodAccessLive } = require('../config/feature-gates');
 
 // data_hygiene_source_extractions.extractor_version is varchar(32).
 const VERSION = 'access-net-v1';
@@ -143,10 +153,39 @@ function codeIsWholeTokenIn(code, quote) {
   return new RegExp(`(?<![A-Za-z0-9#*-])${escapeRegExp(code)}(?![A-Za-z0-9#*-])`).test(quote);
 }
 
+const SUFFIX_WORDS = new Set(Object.values(STREET_SUFFIX_CANON));
+const STREET_WORDS_MAX = 4;
+
+// The street addresses a text names, for a text with no customer (so no
+// properties to compare): { addresses: [{ number, street: [words] }], zips }.
+// An address is a number then up to four words that end in a street suffix
+// ("4455 Example Lane"), a ZIP is the five digits after the state.
+function addressesIn(body) {
+  const words = canonicalizeAddress(body).split(/\s+/).filter(Boolean);
+  const addresses = [];
+  for (let i = 0; i < words.length - 1; i += 1) {
+    if (!/^\d{1,6}$/.test(words[i]) || !/^[a-z]/.test(words[i + 1])) continue;
+    const street = [];
+    for (let j = i + 1; j < words.length && street.length < STREET_WORDS_MAX; j += 1) {
+      if (!/^[a-z][a-z0-9'-]*$/.test(words[j])) break;
+      street.push(words[j]);
+      if (SUFFIX_WORDS.has(words[j])) { addresses.push({ number: words[i], street }); break; }
+    }
+  }
+  const zips = [...String(body || '').matchAll(/\b(?:FL|Florida)\.?,?\s+(\d{5})(?:-\d{4})?\b/gi)].map((m) => m[1]);
+  return { addresses, zips };
+}
+
 // Digits that are the property's own number (house number, ZIP) or the
-// customer's phone: an address or a phone read as a code.
+// customer's phone: an address or a phone read as a code. A text with no
+// customer has no properties, so the address the text itself states counts.
 function digitsToRefuse(message, properties) {
   const refuse = new Set();
+  if (!message.customer_id) {
+    const { addresses, zips } = addressesIn(message.message_body);
+    for (const a of addresses) refuse.add(a.number);
+    for (const z of zips) refuse.add(z);
+  }
   for (const p of properties || []) {
     const house = (String(p.address_line1 || '').match(/^\s*(\d+)/) || [])[1];
     if (house) refuse.add(house);
@@ -154,6 +193,15 @@ function digitsToRefuse(message, properties) {
     if (zip.length === 5) refuse.add(zip);
   }
   return { refuse, phones: [tail10(message.from_phone), tail10(message.to_phone)].filter(Boolean) };
+}
+
+const URL_RE = /https?:\/\/[^\s<>"']+/gi;
+const trimLink = (u) => u.replace(/[.,;:!?)\]]+$/, '');
+function linksAreWhole(instructions, bodyText) {
+  const links = (instructions.match(URL_RE) || []).map(trimLink);
+  if (!links.length) return true;
+  const whole = new Set((bodyText.match(URL_RE) || []).map(trimLink));
+  return links.every((link) => whole.has(link));
 }
 
 // One item against the current message; the kept item or null.
@@ -167,6 +215,9 @@ function verifyItem(item, bodyText, { refuse, phones }) {
   // Directions are the customer's own words too: they must stand in the text,
   // so a grounded code never carries invented steps into a one-tap save.
   if (instructions && !bodyText.toLowerCase().includes(normalizeText(instructions).toLowerCase())) return null;
+  // A pass link is kept verbatim: a link cropped part-way is a different
+  // address, so every link in the directions must be a whole link of the text.
+  if (instructions && !linksAreWhole(instructions, bodyText)) return null;
   if (code) {
     // Whole token in the quote AND in the full text: a quote cropped to "4821"
     // out of "#4821" must not strip the symbol or shorten the code.
@@ -252,7 +303,7 @@ The CURRENT message was sent on ${formatETDay(new Date(message.created_at))}, ${
 
 An item is a code or a way in that a technician needs to reach the property or the door: kind is one of neighborhood_gate (the community gate), property_gate (this property's own gate), door, lockbox, garage, call_box, pass (a visitor, guest or gate pass, QR code or app pass), other.
 - quote: copied word for word from the CURRENT message, the shortest span that holds the whole item. Never from a prior message.
-- code: the code alone, keeping its # or * symbols, with no words around it. A visitor pass, QR code or app pass has code null and instructions. Never report a guard list, a name to give at the gate, an open or unlocked gate, or any other direction without a code or a pass. instructions is always a span copied word for word from the CURRENT message (the customer's own words for how to get in or how to show the pass), never a summary; it is null when the message adds nothing a technician must know beyond the code.
+- code: the code alone, keeping its # or * symbols, with no words around it. A visitor pass, QR code or app pass has code null and instructions; when the message has a link to the pass, instructions holds that whole link exactly as written. Never report a guard list, a name to give at the gate, an open or unlocked gate, or any other direction without a code or a pass. instructions is always a span copied word for word from the CURRENT message (the customer's own words for how to get in or how to show the pass), never a summary; it is null when the message adds nothing a technician must know beyond the code.
 - life: visit for "today", "for this job", "tomorrow only", a one-day code, or a door code for a one-time job at the job site. Otherwise standing.
 - Never report a code the customer calls old, wrong, changed, expired, not working or unsure, and never a code that only appears in a question ("is the gate code 1234?").
 - If the kind is unclear, use other. Never guess a code. Never copy a house number, ZIP code or phone number as a code.
@@ -299,6 +350,44 @@ async function priorOutboundAskedForCode(conn, message) {
   return !!prior && askedForCode(prior.message_body);
 }
 
+// The model's context for a text. A text from a number with no customer reads
+// the thread of that same pair of numbers (also unlinked) and has no
+// properties or profile to compare.
+async function loadContext(conn, message) {
+  if (message.customer_id) return loadMessageContext(conn, message);
+  const history = await excludeUnresolvedSendReservations(conn('sms_log').whereNull('customer_id')
+    .where('created_at', '<', new Date(message.created_at)))
+    .where(function endpoints() {
+      this.where({ from_phone: message.from_phone, to_phone: message.to_phone })
+        .orWhere({ from_phone: message.to_phone, to_phone: message.from_phone });
+    }).orderBy('created_at', 'desc').limit(HISTORY_FOR_MODEL).select(...SOURCE_COLUMNS);
+  return { message, history: history.reverse(), properties: [], preferences: {} };
+}
+
+// The customer a no-customer text names: the one live home whose house number
+// and street name start match an address in the text (a differing ZIP in the
+// text rules a home out). Two matches, or none, suggest nobody: the office picks.
+async function suggestCustomer(conn, body) {
+  const { addresses, zips } = addressesIn(body);
+  if (!addresses.length) return null;
+  const numbers = [...new Set(addresses.map((a) => a.number))].slice(0, 5);
+  const homes = await conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
+    .where('p.active', true).whereNull('c.deleted_at')
+    .whereRaw(`substring(p.address_line1 from '^\\s*(\\d+)') in (${numbers.map(() => '?').join(', ')})`, numbers)
+    .select('p.id', 'p.customer_id', 'p.address_line1', 'p.zip');
+  const matches = homes.filter((home) => {
+    const words = canonicalizeAddress(stripTrailingUnit(home.address_line1)).split(/\s+/).filter(Boolean);
+    const [number, ...street] = words;
+    if (zips.length && normalizeZip(home.zip) && !zips.includes(normalizeZip(home.zip))) return false;
+    return addresses.some((a) => {
+      if (a.number !== number || !street.length) return false;
+      const n = Math.min(a.street.length, street.length);
+      return a.street.slice(0, n).join(' ') === street.slice(0, n).join(' ');
+    });
+  });
+  return matches.length === 1 ? matches[0].customer_id : null;
+}
+
 const canonicalLower = (v) => String(v || '').trim().replace(/\s+/g, '').toLowerCase();
 
 // Insert the kept items as `found` and write the receipt, in one transaction.
@@ -324,16 +413,20 @@ function isLive(r, now = new Date()) {
 // or emptied) all of them are. A waiting row is the read's output, not a
 // decision, so removing it loses nothing and a later read that brings the
 // code back files it again. Decided rows stay as history.
+// A text with no customer files unlinked rows, and the office may have linked
+// one to a customer since: those rows answer to the text too. Once a text has
+// a customer, its unlinked rows are removed (what it still states is filed
+// again for that customer).
+const rowKey = (r) => `${r.kind}:${r.value_hash}:${normalizeText(r.instructions)}`;
 async function reconcileSource(trx, message, items) {
-  const key = (r) => `${r.kind}:${r.value_hash}:${normalizeText(r.instructions)}`;
-  const latest = new Map(items.map((item) => [key(item), item]));
-  const waiting = await trx('customer_access_codes')
-    .where({ customer_id: message.customer_id, source_type: 'sms', source_id: message.id, status: 'found' })
-    .forUpdate().select('id', 'kind', 'value_hash', 'instructions', 'life', 'source_quote');
+  const latest = new Map(items.map((item) => [rowKey(item), item]));
+  const q = trx('customer_access_codes').where({ source_type: 'sms', source_id: message.id, status: 'found' });
+  if (message.customer_id) q.where((w) => w.where('customer_id', message.customer_id).orWhereNull('customer_id'));
+  const waiting = await q.forUpdate().select('id', 'customer_id', 'kind', 'value_hash', 'instructions', 'life', 'source_quote');
   const stale = [];
   for (const row of waiting) {
-    const item = latest.get(key(row));
-    if (!item) { stale.push(row.id); continue; }
+    const item = latest.get(rowKey(row));
+    if (!item || (message.customer_id && !row.customer_id)) { stale.push(row.id); continue; }
     if (item.life !== row.life || item.quote !== row.source_quote) {
       await trx('customer_access_codes').where({ id: row.id })
         .update({ life: item.life, source_quote: item.quote, updated_at: trx.fn.now() });
@@ -350,9 +443,10 @@ async function reconcileSource(trx, message, items) {
 async function sourceStillCurrent(trx, message, receipt) {
   const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
   if (!enabled() || !since || new Date(message.created_at) < since) return false;
-  if (!(await lockCustomer(trx, message.customer_id))) return false;
+  // A text with no customer has none to lock: the text row itself is the lock.
+  if (message.customer_id && !(await lockCustomer(trx, message.customer_id))) return false;
   const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'message_body');
-  return !!live && live.customer_id === message.customer_id && live.direction === 'inbound'
+  return !!live && (live.customer_id || null) === (message.customer_id || null) && live.direction === 'inbound'
     && sourceHash(live) === receipt.source_hash;
 }
 
@@ -367,6 +461,34 @@ async function closeSource(conn, message, receipt, status, extra = {}) {
   });
 }
 
+// A text from a number with no customer (owner ruling 2026-10-05: save every
+// code). Its rows carry the sender's phone and, when the text names exactly one
+// home, a suggested customer; nothing is decided until the office links one. A
+// value this text already filed (waiting, decided, or linked by the office
+// since) is not filed twice. Runs inside fileFoundItems' transaction, under
+// the lock on the text row.
+async function fileUnlinkedItems(trx, message, items, receipt) {
+  const { refuse } = digitsToRefuse(message, []);
+  items = items.filter((item) => !item.code || !NUMERIC_CODE.test(item.code) || !refuse.has(digitsOf(item.code)));
+  await reconcileSource(trx, message, items);
+  const filed = new Set((await trx('customer_access_codes').where({ source_type: 'sms', source_id: message.id })
+    .select('kind', 'value_hash', 'instructions')).map(rowKey));
+  const toInsert = items.filter((item) => !filed.has(rowKey(item)));
+  let inserted = 0;
+  if (toInsert.length) {
+    const suggested = await suggestCustomer(trx, message.message_body);
+    const rows = await trx('customer_access_codes').insert(toInsert.map((item) => ({
+      customer_id: null, sender_phone: String(message.from_phone).trim(), suggested_customer_id: suggested,
+      kind: item.kind, code: item.code, instructions: item.instructions, life: item.life, status: 'found',
+      source_type: 'sms', source_id: message.id, source_quote: item.quote, source_at: new Date(message.created_at),
+      value_hash: item.value_hash,
+    }))).onConflict().ignore().returning('id');
+    inserted = rows.length;
+  }
+  await recordExtractionAttempt({ ...receipt, trx, status: items.length ? 'ok' : 'no_fields', proposal_count: inserted });
+  return inserted;
+}
+
 async function fileFoundItems(conn, { message }, items, receipt) {
   return conn.transaction(async (trx) => {
     // The model call ran outside any lock. Before a write: the gate and its
@@ -375,6 +497,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
     // the same words. A merge or an edit in between leaves no receipt, so the
     // next pass reads the text again from its current state.
     if (!(await sourceStillCurrent(trx, message, receipt))) return 0;
+    if (!message.customer_id) return fileUnlinkedItems(trx, message, items, receipt);
     const customer = { id: message.customer_id };
     // Re-read under the customer lock: a property added, moved or closed during
     // the model call changes which home the code belongs to, and its house
@@ -455,7 +578,7 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
     const movedRetired = await retireMovedSources(conn);
     const mirror = await mirrorProfileCodes(conn);
     const candidates = await conn('sms_log as s')
-      .where('s.direction', 'inbound').whereNotNull('s.customer_id')
+      .where('s.direction', 'inbound')
       // A blank text is still selected when it filed something earlier, so the
       // correction can clear it; a blank text with nothing filed is skipped.
       .where(function textOrFiled() {
@@ -464,8 +587,13 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
         });
       })
       .where('s.created_at', '>=', since).where('s.created_at', '<=', now)
-      .whereExists(function availableCustomer() {
-        this.select(1).from('customers as c').whereRaw('c.id = s.customer_id').whereNull('c.deleted_at');
+      // A text from a number with no customer is read too (owner ruling
+      // 2026-10-05); one with a customer needs that customer to be live.
+      .where(function ownerAvailable() {
+        this.whereNull('s.customer_id').whereRaw("btrim(coalesce(s.from_phone, '')) <> ''")
+          .orWhereExists(function availableCustomer() {
+            this.select(1).from('customers as c').whereRaw('c.id = s.customer_id').whereNull('c.deleted_at');
+          });
       })
       .whereNotExists(function completedAttempt() {
         this.select(1).from('data_hygiene_source_extractions as x').whereRaw('x.source_id = s.id')
@@ -490,7 +618,7 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
       const receipt = { source_type: 'message', source_id: message.id, extractor_version: VERSION,
         source_hash: sourceHash(message) };
       try {
-        if (!eligibleMessage(message) || String(message.message_body || '').trim() === ''
+        if (!eligibleMessage(message, { unlinked: !message.customer_id }) || String(message.message_body || '').trim() === ''
           || String(message.message_body).length > MAX_BODY) {
           // A text corrected out of reach (emptied, too long) drops what it filed.
           await closeSource(conn, message, receipt, 'no_fields');
@@ -508,7 +636,7 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
           tally.skipped += 1;
           continue;
         }
-        const context = await loadMessageContext(conn, message);
+        const context = await loadContext(conn, message);
         tally.read += 1;
         const extracted = await read(context);
         const items = verifyItems(extracted.items, context.message, context);
@@ -717,7 +845,8 @@ const iso = (v) => (v ? new Date(v).toISOString() : null);
 function serialize(row) {
   return {
     id: row.id,
-    customerId: row.customer_id,
+    customerId: row.customer_id || null,
+    senderPhone: row.sender_phone || null,
     propertyId: row.property_id || null,
     kind: row.kind,
     code: row.code || null,
@@ -730,6 +859,7 @@ function serialize(row) {
     sourceId: row.source_id || null,
     sourceQuote: row.source_quote || null,
     sourceAt: iso(row.source_at),
+    inNeighborhoodDirectory: !!row.neighborhood_access_id,
     decidedBy: row.decided_by || null,
     decidedAt: iso(row.decided_at),
     createdAt: iso(row.created_at),
@@ -745,7 +875,9 @@ function serialize(row) {
 async function sourceStillOwned(trx, row) {
   if (row.source_type !== 'sms' || !row.source_id) return true;
   const source = await trx('sms_log').where({ id: row.source_id }).first('customer_id');
-  return !source || source.customer_id === row.customer_id;
+  // A text with no customer has no owner to move away from: the office linked
+  // its codes to the customer it chose.
+  return !source || !source.customer_id || source.customer_id === row.customer_id;
 }
 
 // At an office accept the text must still say what the row quotes: a text
@@ -756,7 +888,9 @@ async function sourceStillSupports(trx, row) {
   const source = await trx('sms_log').where({ id: row.source_id }).forUpdate().first(...SOURCE_COLUMNS);
   if (!source) return true;
   // Still a text the sweep would read: inbound, eligible, this owner's.
-  if (source.customer_id !== row.customer_id || source.direction !== 'inbound' || !eligibleMessage(source)) return false;
+  // (A text with no customer is the office's to link: its rows answer to it.)
+  if ((source.customer_id && source.customer_id !== row.customer_id) || source.direction !== 'inbound'
+    || !eligibleMessage(source, { unlinked: !source.customer_id })) return false;
   // The sweep has read these exact words for this owner, and that read left
   // this row waiting (reconcile removes what it no longer supports), so its
   // code, directions and life are what the current text says.
@@ -774,7 +908,7 @@ async function sourceStillSupports(trx, row) {
   return !!read;
 }
 const OWNED_SOURCE_SQL = `(a.source_type <> 'sms' OR a.source_id IS NULL OR NOT EXISTS (
-  SELECT 1 FROM sms_log src WHERE src.id = a.source_id AND src.customer_id IS DISTINCT FROM a.customer_id))`;
+  SELECT 1 FROM sms_log src WHERE src.id = a.source_id AND src.customer_id IS NOT NULL AND src.customer_id IS DISTINCT FROM a.customer_id))`;
 
 async function listForCustomer(conn, customerId) {
   const rows = await conn('customer_access_codes as a')
@@ -884,10 +1018,13 @@ async function listForVisit(conn, req, visitId) {
     })) };
 }
 
+// Every code waiting for a decision. A row with no customer yet carries the
+// sender's phone and, when the text named exactly one home, that customer.
 async function listFound(conn, { limit = 50, offset = 0 } = {}) {
   const base = () => conn('customer_access_codes as a')
-    .join('customers as c', 'c.id', 'a.customer_id')
-    .whereNull('c.deleted_at').where('a.status', 'found').whereRaw(OWNED_SOURCE_SQL)
+    .leftJoin('customers as c', 'c.id', 'a.customer_id')
+    .where((w) => w.whereNull('a.customer_id').orWhereNull('c.deleted_at'))
+    .where('a.status', 'found').whereRaw(OWNED_SOURCE_SQL)
     // A one-visit code older than its window is no longer a candidate.
     .where(function current() {
       this.where('a.life', 'standing')
@@ -895,7 +1032,14 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
     });
   const [{ count }] = await base().count({ count: '*' });
   const rows = await base()
-    .select('a.*', 'c.first_name', 'c.last_name', 'c.company_name')
+    .leftJoin('customers as sc', function suggested() {
+      this.on('sc.id', 'a.suggested_customer_id').andOnNull('sc.deleted_at');
+    })
+    .joinRaw(`LEFT JOIN LATERAL (SELECT hp.address_line1, hp.city FROM customer_properties hp
+      WHERE hp.customer_id = sc.id AND hp.active ORDER BY hp.is_primary DESC, hp.id LIMIT 1) sp ON true`)
+    .select('a.*', 'c.first_name', 'c.last_name', 'c.company_name',
+      'sc.first_name as sc_first', 'sc.last_name as sc_last', 'sc.company_name as sc_company',
+      'sp.address_line1 as sc_address', 'sp.city as sc_city')
     .orderBy('a.created_at', 'desc').orderBy('a.id').limit(limit).offset(offset);
   // The visit picker's choices for every row on the page, in one query: the
   // customer's live visits from today through 14 days after the code was sent.
@@ -908,13 +1052,19 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
     .select('id', 'customer_id', conn.raw('scheduled_date::text AS scheduled_date'), 'status', 'service_type', 'property_id')
     .orderBy('scheduled_date').orderBy('id') : [];
   const homes = await homeChoices(conn, customerIds);
+  const nameOf = (first, last, company) => [first, last].filter(Boolean).join(' ').trim() || company || null;
   return {
     total: Number(count),
     items: rows.map((r) => {
       const last = etDateString(addETDays(new Date(r.source_at || r.created_at), VISIT_WINDOW_DAYS));
       return {
         ...serialize(r),
-        customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || r.company_name || null,
+        customerName: nameOf(r.first_name, r.last_name, r.company_name),
+        suggestedCustomer: !r.customer_id && r.suggested_customer_id && nameOf(r.sc_first, r.sc_last, r.sc_company) ? {
+          id: r.suggested_customer_id,
+          name: nameOf(r.sc_first, r.sc_last, r.sc_company),
+          address: [r.sc_address, r.sc_city].filter(Boolean).join(', ') || null,
+        } : null,
         propertyChoices: homes.get(r.customer_id) || [],
         visitChoices: visits.filter((v) => v.customer_id === r.customer_id && v.scheduled_date <= last)
           .map((v) => ({ id: v.id, scheduled_date: v.scheduled_date, status: v.status, service_type: v.service_type, property_id: v.property_id })),
@@ -1049,7 +1199,7 @@ async function standingTwin(trx, customerId, { kind, life, value_hash: hash, pro
     })
     .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'));
   if (exceptId) q.whereNot('id', exceptId);
-  return (await q.forUpdate().first('id', 'instructions')) || null;
+  return (await q.forUpdate().first('id', 'instructions', 'neighborhood_access_id')) || null;
 }
 
 // The same code with the same directions is a duplicate. The same code with
@@ -1062,6 +1212,7 @@ async function supersedeOrRefuse(trx, customerId, next, { exceptId = null, admin
   await trx('customer_access_codes').where({ id: twin.id }).update({
     status: 'retired', decided_by: adminUserId || null, decided_at: trx.fn.now(), updated_at: trx.fn.now(),
   });
+  if (twin.neighborhood_access_id) await retireDirectoryEntry(trx, twin.neighborhood_access_id);
   await recordAuditEvent({ trx, critical: true, actor_type: 'admin', actor_id: adminUserId || null,
     action: 'access_code.superseded', resource_type: 'customer_access_codes', resource_id: twin.id,
     metadata: { customer_id: customerId, kind: next.kind } });
@@ -1090,6 +1241,23 @@ async function officeTransaction(conn, work) {
   }
 }
 
+// A standing visitor pass the office decided on also goes to its home's
+// neighborhood directory (owner ruling 2026-10-05: it acts like a gate code
+// for every tech with a stop there, and it is "always only" standing). The home
+// is the one the code is bound to (the strict home rule: never a guess such as
+// the primary home); no home or no neighborhood, no entry. A visit-life pass
+// stays on its visit: a one-day pass left in the directory would never leave
+// it. Under the customer lock the caller holds; returns the directory row this
+// code created (the only one it may retire), or null.
+async function fileToDirectory(trx, customerId, propertyId, next) {
+  if (next.kind !== 'pass' || next.life !== 'standing' || !propertyId || !neighborhoodAccessLive()) return null;
+  const home = await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true }).first('neighborhood_id');
+  if (!home || !home.neighborhood_id) return null;
+  const text = [next.code && `Code ${next.code}`, next.instructions].filter(Boolean).join(' - ');
+  const filed = await filePassEntry(trx, { neighborhoodId: home.neighborhood_id, instructions: text, sourceCustomerId: customerId });
+  return filed.status === 'filed' ? filed.id : null;
+}
+
 // Accept a found code (optionally edited by the office): it becomes active, a
 // visit-life code attaches to the customer's next visit, and a standing code
 // sets the profile field on a one-home account. Only a `found` row can be accepted.
@@ -1097,6 +1265,8 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
   if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
   const head = await conn('customer_access_codes').where({ id }).first('customer_id');
   if (!head) return fail(404, 'not_found');
+  // A code from a number with no customer is saved only after the office links it.
+  if (!head.customer_id) return fail(409, 'link_required');
   try {
     return await officeTransaction(conn, async (trx) => {
       if (!(await lockCustomer(trx, head.customer_id))) return fail(404, 'customer_not_found');
@@ -1129,17 +1299,18 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const home = next.life === 'standing' ? standingHome : { propertyId: visit.propertyId || null };
       if (home.error) return fail(400, home.error);
       const profileField = await syncProfileField(trx, row.customer_id, next);
+      const directoryId = await fileToDirectory(trx, row.customer_id, home.propertyId, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));
       const [updated] = await trx('customer_access_codes').where({ id }).update({
         kind: next.kind, life: next.life, code: next.code, instructions: next.instructions, value_hash: next.value_hash,
         scheduled_service_id: scheduledServiceId, status: 'active', decided_by: adminUserId || null,
         // The named visit or the named home says which home the code is for.
-        property_id: home.propertyId,
+        property_id: home.propertyId, neighborhood_access_id: directoryId,
         decided_at: trx.fn.now(), updated_at: trx.fn.now(),
       }).returning('*');
       await audit(trx, adminUserId, 'access_code.accepted', id, {
         customer_id: row.customer_id, kind: next.kind, life: next.life, source_type: row.source_type,
-        edited, profile_field: profileField, scheduled_service_id: scheduledServiceId,
+        edited, profile_field: profileField, scheduled_service_id: scheduledServiceId, neighborhood_filed: !!directoryId,
       });
       await retireReplacedRows(trx, row.customer_id, updated, updated.id, adminUserId);
       return { ok: true, row: serialize(updated), profileField };
@@ -1163,6 +1334,43 @@ async function decide(conn, id, { from, to, action, adminUserId }) {
     await audit(trx, adminUserId, action, id, { customer_id: row.customer_id, kind: row.kind, life: row.life });
     return { ok: true, row: serialize(updated) };
   });
+}
+
+// Link a code found in a text from a number with no customer to the customer
+// the office chose. The customer is locked first (the office writers' order),
+// then the row; the row must still be waiting and unlinked, and its text must
+// not have a customer of its own by now. After this it behaves like any found
+// row: accept or dismiss. The audit event carries no code.
+async function link(conn, id, { customerId, adminUserId = null } = {}) {
+  if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
+  if (!UUID_RE.test(String(customerId))) return fail(400, 'invalid_customer');
+  try {
+    return await officeTransaction(conn, async (trx) => {
+      if (!(await lockCustomer(trx, customerId))) return fail(404, 'customer_not_found');
+      const row = await trx('customer_access_codes').where({ id }).forUpdate().first();
+      if (!row) return fail(404, 'not_found');
+      if (row.customer_id) return fail(409, 'not_unlinked');
+      if (row.status !== 'found') return fail(409, 'not_pending');
+      if (row.source_type === 'sms' && row.source_id) {
+        const owner = await trx('sms_log').where({ id: row.source_id }).first('customer_id');
+        if (owner && owner.customer_id) return fail(409, 'source_moved');
+      }
+      const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).select('id');
+      const [updated] = await trx('customer_access_codes').where({ id }).update({
+        customer_id: customerId, property_id: homes.length === 1 ? homes[0].id : null, sender_phone: null,
+        suggested_customer_id: null, updated_at: trx.fn.now(),
+      }).returning('*');
+      await audit(trx, adminUserId, 'access_code.linked', id, {
+        customer_id: customerId, kind: row.kind, life: row.life, source_type: row.source_type,
+        suggested: row.suggested_customer_id === customerId,
+      });
+      return { ok: true, row: serialize(updated) };
+    });
+  } catch (err) {
+    // The customer already has this value from the same text.
+    if (err && err.code === '23505') return fail(409, 'duplicate');
+    throw err;
+  }
 }
 
 const dismiss = (conn, id, { adminUserId = null } = {}) => decide(conn, id, { from: 'found', to: 'dismissed', action: 'access_code.dismissed', adminUserId });
@@ -1200,8 +1408,11 @@ async function retireLocked(trx, row, { adminUserId = null, action, keepProfile 
     const [updated] = await trx('customer_access_codes').where({ id: row.id }).update({
       status: 'retired', decided_by: adminUserId || null, decided_at: trx.fn.now(), updated_at: trx.fn.now(),
     }).returning('*');
+    // The directory row this code created leaves with it (no other entry).
+    const directoryRetired = row.neighborhood_access_id ? await retireDirectoryEntry(trx, row.neighborhood_access_id) : false;
     await audit(trx, adminUserId, action, row.id, {
       customer_id: row.customer_id, kind: row.kind, life: row.life, profile_field_cleared: clearedField, profile_field_promoted: promoted,
+      neighborhood_retired: directoryRetired,
     });
     return { ok: true, row: serialize(updated), clearedField, promoted };
 }
@@ -1234,9 +1445,9 @@ async function retireMovedSources(conn, { limit = BATCH } = {}) {
 // in its profile field (accept and addByStaff write it): the same
 // value there is cleared under the preference lock, so existing profile
 // readers stop showing a dead code and its replacement can fill the field. A
-// field that holds a different value is left alone. The shared neighborhood
-// directory entry is not touched: other homes rely on it, and the office
-// retires it on the Gate codes page.
+// field that holds a different value is left alone. A pass's directory entry
+// leaves with the code that created it (and only that one); any other shared
+// entry stays, the office retires it on the Gate codes page.
 async function retire(conn, id, { adminUserId = null } = {}) {
   if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
   const head = await conn('customer_access_codes').where({ id }).first('customer_id');
@@ -1270,14 +1481,16 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
     const home = standingHome || (visit.propertyId ? { propertyId: visit.propertyId } : await resolveHome(trx, customerId, { life: next.life, propertyId }));
     if (home.error) return fail(400, home.error);
     const profileField = await syncProfileField(trx, customerId, next);
+    const directoryId = await fileToDirectory(trx, customerId, home.propertyId, next);
     const [row] = await trx('customer_access_codes').insert({
-      customer_id: customerId, property_id: home.propertyId,
+      customer_id: customerId, property_id: home.propertyId, neighborhood_access_id: directoryId,
       kind: next.kind, code: next.code, instructions: next.instructions, life: next.life,
       scheduled_service_id: scheduledServiceId, status: 'active', source_type: 'staff', source_at: trx.fn.now(),
       value_hash: next.value_hash, decided_by: adminUserId || null, decided_at: trx.fn.now(),
     }).returning('*');
     await audit(trx, adminUserId, 'access_code.added', row.id, {
       customer_id: customerId, kind: next.kind, life: next.life, profile_field: profileField, scheduled_service_id: scheduledServiceId,
+      neighborhood_filed: !!directoryId,
     });
     await retireReplacedRows(trx, customerId, row, row.id, adminUserId);
     return { ok: true, row: serialize(row), profileField };
@@ -1292,6 +1505,7 @@ module.exports = {
   enabled,
   flagsAccess,
   verifyItems,
+  suggestCustomer,
   valueHash,
   buildPrompt,
   readAccessCodes,
@@ -1300,6 +1514,7 @@ module.exports = {
   listForCustomer,
   listFound,
   accept,
+  link,
   dismiss,
   retire,
   addByStaff,

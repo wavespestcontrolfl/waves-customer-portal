@@ -8,6 +8,9 @@
  *                             { customerId, kind, life, code?, instructions? }
  * POST   /:id/accept        — accept a found code, optionally edited
  *                             { kind?, life?, code?, instructions? }
+ * POST   /:id/link          — link a found code from a number with no customer to
+ *                             a customer { customerId }; it must be linked before
+ *                             it can be accepted (`link_required`)
  * POST   /:id/dismiss       — found → dismissed
  * POST   /:id/retire        — active → retired
  *
@@ -59,6 +62,8 @@ const MESSAGES = {
   not_found: 'That access code was not found',
   customer_not_found: 'That customer was not found',
   not_pending: 'That code was already decided',
+  link_required: 'Link this code to a customer first',
+  not_unlinked: 'That code already belongs to a customer',
   not_active: 'That code is not active',
   duplicate_active: 'That customer already has this code',
   duplicate: 'Another code from the same text already has this value',
@@ -151,6 +156,16 @@ router.post('/:id/accept', async (req, res) => {
     return send(res, await access.accept(db, req.params.id, { ...suppliedFields(input), adminUserId: req.technicianId }));
   } catch (err) {
     return failWith(res, 'accept', err);
+  }
+});
+
+router.post('/:id/link', async (req, res) => {
+  const input = body(req);
+  if (!input) return res.status(400).json({ error: MESSAGES.invalid_body, code: 'invalid_body' });
+  try {
+    return send(res, await access.link(db, req.params.id, { customerId: String(input.customerId || ''), adminUserId: req.technicianId }));
+  } catch (err) {
+    return failWith(res, 'link', err);
   }
 });
 

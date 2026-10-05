@@ -40,6 +40,35 @@ describe('VisitBriefPanel access codes', () => {
     expect(request).toHaveBeenCalledWith('/admin/access-codes/visits/svc-1');
   });
 
+  it('shows a pass link as an Open visitor pass button, never as raw text', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [
+      code({ id: 'p1', kind: 'pass', code: null, instructions: 'View your pass: https://pass.example.com/v/abc123.' }),
+      code({ id: 'p2', kind: 'pass', code: null, instructions: 'Scan the QR at the guard house' }),
+      code({ id: 'p3', kind: 'pass', code: null, instructions: 'Not secure http://pass.example.com/v/x and javascript:alert(1)' }),
+    ] }));
+    renderPanel(request);
+    const button = await screen.findByRole('link', { name: 'Open visitor pass' });
+    expect(button).toHaveAttribute('href', 'https://pass.example.com/v/abc123');
+    expect(button).toHaveAttribute('target', '_blank');
+    expect(button).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.queryByText(/pass\.example\.com\/v\/abc123/)).toBeNull();
+    expect(screen.getByText(/View your pass:/)).toBeInTheDocument();
+    expect(screen.getByText(/Scan the QR at the guard house/)).toBeInTheDocument();
+    // Only an https link becomes a button; an http link stays text.
+    expect(screen.getAllByRole('link', { name: 'Open visitor pass' })).toHaveLength(1);
+    expect(screen.getByText(/http:\/\/pass\.example\.com\/v\/x/)).toBeInTheDocument();
+  });
+
+  it('shows a neighborhood pass entry in the Access section as the same button', async () => {
+    const service = { ...SERVICE, propertyAlerts: [{ type: 'gate', text: 'Gate: https://pass.example.com/v/hood1 (neighborhood)' }] };
+    render(<VisitBriefPanel stop={{ ...stop, services: [service], primary: service }} detail={{ status: 'ready', byService: {} }} request={vi.fn(() => Promise.resolve({ accessCodes: [] }))} />);
+    const button = await screen.findByRole('link', { name: 'Open visitor pass' });
+    expect(button).toHaveAttribute('href', 'https://pass.example.com/v/hood1');
+    expect(button).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.queryByText(/pass\.example\.com/)).toBeNull();
+    expect(screen.getByText(/\(neighborhood\)/)).toBeInTheDocument();
+  });
+
   it('shows nothing, with no error, when the list is refused', async () => {
     const request = vi.fn(() => Promise.reject(Object.assign(new Error('nope'), { status: 404 })));
     renderPanel(request);

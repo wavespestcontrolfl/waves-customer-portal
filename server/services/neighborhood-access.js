@@ -308,6 +308,42 @@ async function fileNeighborhoodCode(conn, { neighborhoodId, value, source, sourc
   return { status: 'filed', id, written_at: written, flagged: [] };
 }
 
+// A visitor or QR pass the office accepted (access codes section, owner ruling
+// 2026-10-05): it acts like a gate code for every stop in the neighborhood, so
+// it files ACTIVE (the office vouched for it) as a `pass` entry carrying the
+// pass text or link; a pass is never a keypad code, so there is no code to
+// conflict with. Same lock order as the filer above (neighborhood row first),
+// and one live copy of the same text per neighborhood. Returns
+// { status: 'filed' | 'duplicate' | 'empty' | 'no_neighborhood', id? }; only
+// a 'filed' row belongs to the caller.
+async function filePassEntry(conn, { neighborhoodId, instructions, sourceCustomerId }) {
+  const text = String(instructions || '').trim();
+  if (!text) return { status: 'empty' };
+  const hood = await conn('neighborhoods').where({ id: neighborhoodId }).forUpdate().first('id', 'active');
+  if (!hood || !hood.active) return { status: 'no_neighborhood' };
+  const existing = await conn('neighborhood_access')
+    .where({ neighborhood_id: neighborhoodId, access_type: 'pass', instructions: text })
+    .whereNot('status', 'retired').first('id');
+  if (existing) return { status: 'duplicate', id: existing.id };
+  const [ins] = await conn('neighborhood_access').insert({
+    neighborhood_id: neighborhoodId, access_type: 'pass', code: null, instructions: text, status: 'active',
+    source: 'access_codes', source_customer_id: sourceCustomerId || null, last_confirmed_at: conn.fn.now(),
+  }).returning('id');
+  return { status: 'filed', id: ins.id ?? ins };
+}
+
+// Retire one directory row (the pass an access code created). Neighborhood
+// row first, then the entry, like every other writer. Returns true when it
+// moved a live row to retired.
+async function retireDirectoryEntry(conn, entryId) {
+  const peek = await conn('neighborhood_access').where({ id: entryId }).first('neighborhood_id');
+  if (!peek) return false;
+  await conn('neighborhoods').where({ id: peek.neighborhood_id }).forUpdate().first('id');
+  const moved = await conn('neighborhood_access').where({ id: entryId }).whereNot('status', 'retired')
+    .update({ status: 'retired', updated_at: conn.fn.now(), flagged_wrong_at: null, flagged_wrong_by: null });
+  return moved > 0;
+}
+
 // Same physical street, whatever the spelling: suffix and directional long
 // forms abbreviated, a trailing directional one side omits tolerated, two
 // different directionals never equal. Shared with customer-properties.js's
@@ -628,6 +664,8 @@ module.exports = {
   parcelMatchesProperty,
   resolvePropertyNeighborhood,
   fileNeighborhoodCode,
+  filePassEntry,
+  retireDirectoryEntry,
   countyHint,
   VALUE_HASH_SQL,
   neighborhoodGateEntriesForVisits,

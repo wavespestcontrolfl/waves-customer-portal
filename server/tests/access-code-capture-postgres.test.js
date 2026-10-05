@@ -137,7 +137,7 @@ postgres('access codes section', () => {
       expect(read).not.toHaveBeenCalled();
       const probes = [
         ['GET', `/?customerId=${c.id}`], ['GET', '/found'], ['POST', '/', {}],
-        ['POST', `/${randomUUID()}/accept`, {}], ['POST', `/${randomUUID()}/dismiss`], ['POST', `/${randomUUID()}/retire`],
+        ['POST', `/${randomUUID()}/accept`, {}], ['POST', `/${randomUUID()}/link`, {}], ['POST', `/${randomUUID()}/dismiss`], ['POST', `/${randomUUID()}/retire`],
       ];
       for (const [method, path, body] of probes) {
         const res = await call(method, path, body);
@@ -1813,4 +1813,276 @@ postgres('access codes section', () => {
       expect((await live(c.id)).map((r) => [r.code, r.property_id])).toEqual([['2468', b]]);
     });
   });
+
+  describe('texts from a number with no customer, and passes in the directory', () => {
+    const SENDER = '+19415550188';
+    const PASS_TEXT = 'Gate Systems shared with you a Visitor Pass to visit 4455 Example Lane, Lakewood Ranch, FL 34202. View your pass: https://pass.example.com/v/abc123';
+    const LINK = 'https://pass.example.com/v/abc123';
+    const passItem = (extra = {}) => ({ kind: 'pass', code: null, instructions: `View your pass: ${LINK}`, life: 'standing', quote: PASS_TEXT, ...extra });
+    const hood = async (name = 'Example Glen') => {
+      const id = randomUUID();
+      await trx('neighborhoods').insert({ id, name, county: 'Manatee', match_key: `manatee|${name.toLowerCase()}|${id}`, source: 'office' });
+      return id;
+    };
+    const unlinked = (extra = {}) => trx('customer_access_codes').whereNull('customer_id').where(extra).orderBy('created_at');
+    const OLD_HOOD_GATE = process.env.GATE_NEIGHBORHOOD_ACCESS;
+    afterEach(() => { if (OLD_HOOD_GATE === undefined) delete process.env.GATE_NEIGHBORHOOD_ACCESS; else process.env.GATE_NEIGHBORHOOD_ACCESS = OLD_HOOD_GATE; });
+
+    test('a pass link texted from a number with no customer is filed unlinked, with the one home it names suggested', async () => {
+      const home = await customer();
+      await customer({ house: '9001' });
+      const messageId = await text(null, PASS_TEXT, { from: SENDER });
+      const read = stub([passItem()]);
+      expect(await sweep(read)).toMatchObject({ scanned: 1, read: 1, found: 1, failed: 0 });
+      const [row, ...rest] = await unlinked();
+      expect(rest).toEqual([]);
+      expect(row).toMatchObject({
+        customer_id: null, sender_phone: SENDER, suggested_customer_id: home.id, kind: 'pass', code: null,
+        instructions: `View your pass: ${LINK}`, status: 'found', source_type: 'sms', source_id: messageId, property_id: null,
+      });
+      expect((await receipts(messageId))[0]).toMatchObject({ status: 'ok', proposal_count: 1 });
+      expect(await sweep(read)).toMatchObject({ scanned: 0, found: 0 });
+      // Receipt gone: the same text files nothing twice.
+      await trx('data_hygiene_source_extractions').where({ source_id: messageId }).del();
+      expect(await sweep(read)).toMatchObject({ scanned: 1, found: 0, failed: 0 });
+      expect(await unlinked()).toHaveLength(1);
+    });
+
+    test('two homes at the named address suggest nobody; the office picks', async () => {
+      await customer();
+      await customer();
+      await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      expect((await unlinked())[0]).toMatchObject({ sender_phone: SENDER, suggested_customer_id: null });
+    });
+
+    test('a different ZIP in the text rules the home out', async () => {
+      await customer({ zip: '34219' });
+      await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      expect((await unlinked())[0].suggested_customer_id).toBeNull();
+    });
+
+    test('the unlinked read refuses the house number and ZIP the text itself names, and a bare direction', async () => {
+      const body = 'Visit 4455 Example Lane, Lakewood Ranch, FL 34202. Gate code 4455 and the guard house list is on the desk';
+      await text(null, body, { from: SENDER });
+      const read = stub([
+        { kind: 'neighborhood_gate', code: '4455', instructions: null, life: 'standing', quote: 'Gate code 4455' },
+        { kind: 'neighborhood_gate', code: '34202', instructions: null, life: 'standing', quote: 'FL 34202' },
+        { kind: 'other', code: null, instructions: 'the guard house list is on the desk', life: 'standing', quote: 'the guard house list is on the desk' },
+      ]);
+      expect(await sweep(read)).toMatchObject({ read: 1, found: 0 });
+      expect(await unlinked()).toEqual([]);
+    });
+
+    test('a link cropped part-way is refused; the whole link is kept', async () => {
+      await text(null, PASS_TEXT, { from: SENDER });
+      expect(await sweep(stub([passItem({ instructions: 'View your pass: https://pass.example.com/v/abc' })]))).toMatchObject({ found: 0 });
+      expect(await unlinked()).toEqual([]);
+    });
+
+    test('a text with no customer is eligible only inbound, from a number, to one of ours', async () => {
+      await text(null, PASS_TEXT, { from: SENDER, to: '+19415550001' });
+      await text(null, PASS_TEXT, { direction: 'outbound', from: SENDER });
+      const read = stub([passItem()]);
+      expect(await sweep(read)).toMatchObject({ found: 0 });
+      expect(await unlinked()).toEqual([]);
+    });
+
+    test('accept before a link is refused; dismiss works on an unlinked row', async () => {
+      await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      const [row] = await unlinked();
+      let res = await call('POST', `/${row.id}/accept`, {});
+      expect([res.status, res.body.code]).toEqual([409, 'link_required']);
+      res = await call('POST', `/${row.id}/dismiss`);
+      expect([res.status, res.body.accessCode.status, res.body.accessCode.customerId]).toEqual([200, 'dismissed', null]);
+      // A dismissed text is not filed again.
+      expect(await sweep(stub([passItem()]))).toMatchObject({ found: 0 });
+    });
+
+    test('the found list shows the sender and the suggested home, then the link makes it an ordinary found row', async () => {
+      const home = await customer();
+      await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      let res = await call('GET', '/found');
+      expect(res.body.items).toHaveLength(1);
+      expect(res.body.items[0]).toMatchObject({
+        customerId: null, customerName: null, senderPhone: SENDER,
+        suggestedCustomer: { id: home.id, name: 'Sample Owner', address: '4455 Example Lane, Lakewood Ranch' },
+      });
+      const id = res.body.items[0].id;
+      res = await call('POST', `/${id}/link`, { customerId: home.id }, { 'x-test-admin': ADMIN_ID });
+      expect([res.status, res.body.accessCode.customerId, res.body.accessCode.senderPhone, res.body.accessCode.propertyId])
+        .toEqual([200, home.id, null, home.propertyIds[0]]);
+      const audits = JSON.stringify(await trx('audit_log').where({ action: 'access_code.linked', resource_id: id }).select('metadata'));
+      expect(audits).toContain(home.id);
+      expect(audits).not.toContain(LINK);
+      res = await call('GET', '/found');
+      expect(res.body.items[0]).toMatchObject({ customerId: home.id, customerName: 'Sample Owner', suggestedCustomer: null });
+      res = await call('POST', `/${id}/link`, { customerId: home.id });
+      expect([res.status, res.body.code]).toEqual([409, 'not_unlinked']);
+      res = await call('POST', `/${id}/accept`, {}, { 'x-test-admin': ADMIN_ID });
+      expect([res.status, res.body.accessCode.status]).toEqual([200, 'active']);
+      expect((await call('GET', `/?customerId=${home.id}`)).body.active.map((r) => r.instructions)).toEqual([`View your pass: ${LINK}`]);
+    });
+
+    test('link refuses a missing customer, a bad id and a row that is not waiting', async () => {
+      await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      const [row] = await unlinked();
+      const home = await customer();
+      let res = await call('POST', `/${row.id}/link`, { customerId: randomUUID() });
+      expect([res.status, res.body.code]).toEqual([404, 'customer_not_found']);
+      res = await call('POST', `/${row.id}/link`, { customerId: 'nope' });
+      expect([res.status, res.body.code]).toEqual([400, 'invalid_customer']);
+      res = await call('POST', `/${row.id}/link`, ['x']);
+      expect([res.status, res.body.code]).toEqual([400, 'invalid_body']);
+      res = await call('POST', `/${randomUUID()}/link`, { customerId: home.id });
+      expect([res.status, res.body.code]).toEqual([404, 'not_found']);
+      await call('POST', `/${row.id}/dismiss`);
+      res = await call('POST', `/${row.id}/link`, { customerId: home.id });
+      expect([res.status, res.body.code]).toEqual([409, 'not_pending']);
+    });
+
+    test('a text that later gets a customer drops its unlinked rows and files for that customer', async () => {
+      const home = await customer();
+      const messageId = await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      await trx('sms_log').where({ id: messageId }).update({ customer_id: home.id });
+      // Hidden at once (its text has an owner), then read again for that owner.
+      expect((await call('GET', '/found')).body.items).toEqual([]);
+      expect(await sweep(stub([passItem()]))).toMatchObject({ found: 1 });
+      expect(await unlinked()).toEqual([]);
+      expect((await rows(home.id)).map((r) => r.status)).toEqual(['found']);
+    });
+
+    test('a text corrected to say nothing clears its unlinked row, and the one the office linked', async () => {
+      const home = await customer();
+      const messageId = await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      const [row] = await unlinked();
+      await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      expect(await unlinked()).toHaveLength(2);
+      await call('POST', `/${row.id}/link`, { customerId: home.id });
+      await trx('sms_log').where({ id: messageId }).update({ message_body: 'Thanks, see you Tuesday' });
+      await sweep(stub([]));
+      expect(await rows(home.id)).toEqual([]);
+      expect(await unlinked()).toHaveLength(1);
+    });
+
+    test('a pass the office accepts is filed to the neighborhood directory, and retiring it retires that entry', async () => {
+      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
+      const home = await customer();
+      const hoodId = await hood();
+      await trx('customer_properties').where({ id: home.propertyIds[0] }).update({ neighborhood_id: hoodId });
+      await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      const [row] = await unlinked();
+      // Not in the directory until accepted.
+      expect(await trx('neighborhood_access').where({ neighborhood_id: hoodId })).toEqual([]);
+      await call('POST', `/${row.id}/link`, { customerId: home.id });
+      let res = await call('POST', `/${row.id}/accept`, {}, { 'x-test-admin': ADMIN_ID });
+      expect([res.status, res.body.accessCode.inNeighborhoodDirectory]).toEqual([200, true]);
+      const [entry, ...others] = await trx('neighborhood_access').where({ neighborhood_id: hoodId });
+      expect(others).toEqual([]);
+      expect(entry).toMatchObject({
+        access_type: 'pass', code: null, instructions: `View your pass: ${LINK}`, status: 'active', source: 'access_codes',
+        source_customer_id: home.id,
+      });
+      expect((await trx('customer_access_codes').where({ id: row.id }).first()).neighborhood_access_id).toBe(entry.id);
+      res = await call('POST', `/${row.id}/retire`, undefined, { 'x-test-admin': ADMIN_ID });
+      expect(res.status).toBe(200);
+      expect((await trx('neighborhood_access').where({ id: entry.id }).first()).status).toBe('retired');
+    });
+
+    test('retiring a pass leaves a directory entry it did not create, and a visit-life pass or a gate-off accept files nothing', async () => {
+      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
+      const home = await customer();
+      const hoodId = await hood();
+      await trx('customer_properties').where({ id: home.propertyIds[0] }).update({ neighborhood_id: hoodId });
+      // The same pass text is already in the directory (another neighbor's): not this code's.
+      const [other] = await trx('neighborhood_access').insert({
+        neighborhood_id: hoodId, access_type: 'pass', instructions: 'Show the QR pass', status: 'active', source: 'office',
+      }).returning('id');
+      let res = await call('POST', '/', { customerId: home.id, kind: 'pass', life: 'standing', instructions: 'Show the QR pass' });
+      expect(res.status).toBe(200);
+      expect(res.body.accessCode.inNeighborhoodDirectory).toBe(false);
+      await call('POST', `/${res.body.accessCode.id}/retire`);
+      expect((await trx('neighborhood_access').where({ id: other.id ?? other }).first()).status).toBe('active');
+      // A visit-life pass stays on its visit.
+      res = await call('POST', '/', { customerId: home.id, kind: 'pass', life: 'visit', instructions: 'Show the QR pass today' });
+      expect([res.status, res.body.accessCode.inNeighborhoodDirectory]).toEqual([200, false]);
+      // Directory gate off: nothing filed.
+      process.env.GATE_NEIGHBORHOOD_ACCESS = 'false';
+      res = await call('POST', '/', { customerId: home.id, kind: 'pass', life: 'standing', instructions: 'Scan the guest QR' });
+      expect([res.status, res.body.accessCode.inNeighborhoodDirectory]).toEqual([200, false]);
+      expect(await trx('neighborhood_access').where({ neighborhood_id: hoodId })).toHaveLength(1);
+    });
+
+    test('a pass for a home with no neighborhood files nothing in the directory', async () => {
+      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
+      const home = await customer();
+      const res = await call('POST', '/', { customerId: home.id, kind: 'pass', life: 'standing', instructions: 'Scan the guest QR' });
+      expect([res.status, res.body.accessCode.inNeighborhoodDirectory]).toEqual([200, false]);
+    });
+
+    test('a multi-home pass needs its home, files to that home\'s neighborhood only, and shows at that home\'s visit only', async () => {
+      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
+      const c = await customer({ properties: 2 });
+      const [a, b] = c.propertyIds;
+      const hoodA = await hood('Alpha Glen');
+      const hoodB = await hood('Beta Glen');
+      await trx('customer_properties').where({ id: a }).update({ neighborhood_id: hoodA });
+      await trx('customer_properties').where({ id: b }).update({ neighborhood_id: hoodB });
+      await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      const [row] = await unlinked();
+      // A linked multi-home row has no home yet: the office names it.
+      let res = await call('POST', `/${row.id}/link`, { customerId: c.id });
+      expect([res.status, res.body.accessCode.propertyId]).toEqual([200, null]);
+      res = await call('POST', `/${row.id}/accept`, {}, { 'x-test-admin': ADMIN_ID });
+      expect([res.status, res.body.code]).toEqual([400, 'property_required']);
+      expect(await trx('neighborhood_access').whereIn('neighborhood_id', [hoodA, hoodB])).toEqual([]);
+      res = await call('POST', `/${row.id}/accept`, { propertyId: b }, { 'x-test-admin': ADMIN_ID });
+      expect([res.status, res.body.accessCode.propertyId, res.body.accessCode.inNeighborhoodDirectory]).toEqual([200, b, true]);
+      expect(await trx('neighborhood_access').where({ neighborhood_id: hoodA })).toEqual([]);
+      expect(await trx('neighborhood_access').where({ neighborhood_id: hoodB })).toHaveLength(1);
+      const atA = await visit(c.id, day(0));
+      await trx('scheduled_services').where({ id: atA }).update({ property_id: a });
+      const atB = await visit(c.id, day(0));
+      await trx('scheduled_services').where({ id: atB }).update({ property_id: b });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, atA)).codes).toEqual([]);
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, atB)).codes.map((r) => r.instructions)).toEqual([`View your pass: ${LINK}`]);
+    });
+
+    test('an unlinked row never reaches the profile mirror, and linking it makes it an ordinary row', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      const [row] = await unlinked();
+      expect(await access.mirrorProfileCodes(trx)).toMatchObject({ failed: 0 });
+      const after = await trx('customer_access_codes').where({ id: row.id }).first();
+      expect([after.customer_id, after.status, after.sender_phone]).toEqual([null, 'found', SENDER]);
+      await call('POST', `/${row.id}/link`, { customerId: c.id });
+      expect(await access.mirrorProfileCodes(trx)).toMatchObject({ failed: 0 });
+      expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('found');
+    });
+
+    test('a newer pass replacing an older one with the same code retires the old directory entry', async () => {
+      process.env.GATE_NEIGHBORHOOD_ACCESS = 'true';
+      const home = await customer();
+      const hoodId = await hood();
+      await trx('customer_properties').where({ id: home.propertyIds[0] }).update({ neighborhood_id: hoodId });
+      let res = await call('POST', '/', { customerId: home.id, kind: 'pass', life: 'standing', code: '4821', instructions: 'Guest code at the visitor lane' });
+      const first = res.body.accessCode.id;
+      res = await call('POST', '/', { customerId: home.id, kind: 'pass', life: 'standing', code: '4821', instructions: 'Guest code at the new visitor lane' });
+      expect(res.status).toBe(200);
+      const entries = await trx('neighborhood_access').where({ neighborhood_id: hoodId }).orderBy('created_at');
+      expect(entries.map((e) => e.status).sort()).toEqual(['active', 'retired']);
+      expect((await trx('customer_access_codes').where({ id: first }).first()).status).toBe('retired');
+    });
+  });
+
 });

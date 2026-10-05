@@ -221,6 +221,45 @@ describe('verifyItems', () => {
   });
 });
 
+describe('verifyItems for a text with no customer', () => {
+  const passBody = 'Gate Systems shared with you a Visitor Pass to visit 4455 Example Lane, Lakewood Ranch, FL 34202. View your pass: https://pass.example.com/v/abc123.';
+  const message = (body) => ({
+    id: '00000000-0000-4000-8000-000000000202', customer_id: null, direction: 'inbound', message_body: body,
+    from_phone: '+19415550188', to_phone: '+19415550199',
+  });
+  const pass = (instructions, extra = {}) => ({ kind: 'pass', code: null, instructions, life: 'standing', quote: passBody, ...extra });
+  const verify = (items, body = passBody) => verifyItems(items, message(body), { properties: [] });
+
+  test('keeps a visitor pass with its link verbatim', () => {
+    const kept = verify([pass('View your pass: https://pass.example.com/v/abc123.')]);
+    expect(kept).toHaveLength(1);
+    expect(kept[0]).toMatchObject({ kind: 'pass', code: null, instructions: 'View your pass: https://pass.example.com/v/abc123.' });
+    expect(verify([pass('https://pass.example.com/v/abc123')])).toHaveLength(1);
+  });
+
+  test('refuses a link cropped part-way or one the text does not hold', () => {
+    expect(verify([pass('View your pass: https://pass.example.com/v/abc')])).toEqual([]);
+    expect(verify([pass('https://pass.example.com/v/abc1234')])).toEqual([]);
+  });
+
+  test('refuses the house number and ZIP the text itself names, but not another number', () => {
+    const body = 'Visit 4455 Example Lane, Lakewood Ranch, FL 34202. Gate code 4455, side gate 7788';
+    const gate = (code) => ({ kind: 'neighborhood_gate', code, instructions: null, life: 'standing', quote: `Gate code ${code}` });
+    expect(verify([gate('4455')], body)).toEqual([]);
+    expect(verify([{ ...gate('34202'), quote: 'FL 34202' }], body)).toEqual([]);
+    expect(verify([{ ...gate('7788'), quote: 'side gate 7788' }], body)).toHaveLength(1);
+  });
+
+  test('a number that is not part of an address is a code', () => {
+    const body = 'The code for 4821 is 4821 at the front gate';
+    expect(verify([{ kind: 'neighborhood_gate', code: '4821', instructions: null, life: 'standing', quote: 'The code for 4821 is 4821' }], body)).toHaveLength(1);
+  });
+
+  test('still drops a guard list or an open gate with no code', () => {
+    expect(verify([{ kind: 'other', code: null, instructions: 'FL 34202', life: 'standing', quote: 'FL 34202' }])).toEqual([]);
+  });
+});
+
 describe('valueHash', () => {
   test('a code ignores inner whitespace and edge spaces, instructions are trimmed only', () => {
     expect(valueHash(' # 4821 ', null)).toBe(valueHash('#4821', null));

@@ -44,10 +44,12 @@ const keyOf = (item) => `${item.party}:${item.kind}:${hashExtractionSource(
   JSON.stringify([item.quote, item.property_id, item.description]),
 ).slice(0, 20)}`;
 
-function eligibleMessage(message = {}, { captured = false } = {}) {
+// `unlinked`: an inbound text from a number with no customer record (the
+// access codes net files it for the office to link); every other rule holds.
+function eligibleMessage(message = {}, { captured = false, unlinked = false } = {}) {
   const statuses = captured ? ['sent', 'delivered', 'failed', 'undelivered'] : ['sent', 'delivered'];
   const ourNumber = message.direction === 'inbound' ? message.to_phone : message.from_phone;
-  return !!message.customer_id && !!message.message_body
+  return (!!message.customer_id || (unlinked && message.direction === 'inbound')) && !!message.message_body
     && !isInternalTestCustomerId(message.customer_id)
     && tail(ourNumber) !== tail(numbers.tollFree.number)
     && !!numbers.findByNumber(ourNumber)

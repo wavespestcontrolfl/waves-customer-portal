@@ -73,6 +73,11 @@ const ALLOWLIST = [
   },
   {
     file: 'services/access-code-capture.js',
+    snippet: "const owner = await trx('sms_log').where({ id: row.source_id }).first('customer_id');",
+    reason: 'link: reads the one source text of an unlinked found row, by id, to see whether it has a customer now; a send reservation is never an inbound source.',
+  },
+  {
+    file: 'services/access-code-capture.js',
     snippet: "const source = await trx('sms_log').where({ id: row.source_id }).forUpdate().first(...SOURCE_COLUMNS);",
     reason: 'sourceStillSupports: locks the one source text of a found row, by id, and refuses it unless it is still an eligible inbound text.',
   },
