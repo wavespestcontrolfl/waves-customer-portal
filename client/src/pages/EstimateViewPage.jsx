@@ -3887,13 +3887,67 @@ export function ContactGapFields({
   onEmailChange,
   onEmailBlur,
   emailInvalid = false,
+  phone = '',
+  onPhoneChange,
+  onPhoneSave,
+  phoneSaving = false,
+  phoneError = '',
   disabled = false,
 }) {
-  if (!gaps || (!gaps.firstName && !gaps.lastName && !gaps.email)) return null;
+  if (!gaps || (!gaps.firstName && !gaps.lastName && !gaps.email && !gaps.phone)) return null;
+  const phoneDigits = String(phone).replace(/\D/g, '');
+  const phoneReady = phoneDigits.length === 10 || (phoneDigits.length === 11 && phoneDigits.startsWith('1'));
   const firstNameMissing = gaps.firstName && firstNameTouched && !firstName.trim();
   const lastNameMissing = gaps.lastName && lastNameTouched && !lastName.trim();
   return (
     <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
+      {/* Mobile number (owner 2026-10-04): asked only when the estimate has no
+          phone and no customer record. It is saved on its own, before the card
+          step and the Accept button unlock: the card and the booking are both
+          set up against the phone. */}
+      {gaps.phone ? (
+        <div style={{ display: 'grid', gap: 6 }}>
+          <label htmlFor="estimate-contact-phone" style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>Mobile number</label>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <input
+              id="estimate-contact-phone"
+              type="tel"
+              value={phone}
+              onChange={(e) => onPhoneChange?.(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && phoneReady && !phoneSaving) { e.preventDefault(); onPhoneSave?.(); } }}
+              autoComplete="tel"
+              inputMode="tel"
+              maxLength={20}
+              disabled={disabled || phoneSaving}
+              aria-required="true"
+              aria-invalid={phoneError ? true : undefined}
+              aria-describedby="estimate-contact-phone-help"
+              placeholder="(941) 555-0142"
+              style={{ ...softExitInputStyle, flex: '1 1 180px', minWidth: 0, ...(phoneError ? { borderColor: W.red } : {}) }}
+            />
+            <button
+              type="button"
+              onClick={() => onPhoneSave?.()}
+              disabled={disabled || phoneSaving || !phoneReady}
+              style={{
+                minHeight: 44, padding: '0 16px', borderRadius: 10, border: `1px solid ${COLORS.navy}`,
+                background: COLORS.navy, color: '#fff', fontSize: 14, fontWeight: 600,
+                cursor: disabled || phoneSaving || !phoneReady ? 'default' : 'pointer',
+                opacity: disabled || phoneSaving || !phoneReady ? 0.55 : 1,
+              }}
+            >
+              {phoneSaving ? 'Saving…' : 'Save number'}
+            </button>
+          </div>
+          {phoneError ? (
+            <span role="alert" style={{ fontSize: 14, color: W.red }}>{phoneError}</span>
+          ) : (
+            <span id="estimate-contact-phone-help" style={{ fontSize: 14, color: COLORS.navy }}>
+              We use it for your appointment reminders and to reach you on service day. Save it to continue.
+            </span>
+          )}
+        </div>
+      ) : null}
       {gaps.firstName ? (
         <label style={{ display: 'grid', gap: 6 }}>
           <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>First name</span>
@@ -5838,6 +5892,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const [contactEmail, setContactEmail] = useState('');
   const [contactLastNameTouched, setContactLastNameTouched] = useState(false);
   const [contactEmailTouched, setContactEmailTouched] = useState(false);
+  // Mobile number for an estimate that has none (contactGaps.phone). Saved by
+  // its own request (PUT /contact-phone) before the card step and Accept.
+  const [contactPhone, setContactPhone] = useState('');
+  const [contactPhoneSaving, setContactPhoneSaving] = useState(false);
+  const [contactPhoneError, setContactPhoneError] = useState('');
   // Acceptance deposit (flat $49/$99). depositIntent holds the live
   // POST /deposit-intent response while the Payment Element modal is open;
   // the ref carries the paid PI id into accept (server live-verifies it —
@@ -7294,6 +7353,33 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // after that step. Same shape as the server's EMAIL_RE; blank stays fine.
   const contactEmailInvalid = contactEmailGap && !!contactEmail.trim()
     && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(contactEmail.trim());
+  // While the estimate has no phone, the card step and Accept stay locked:
+  // the server refuses both until a phone is on the estimate.
+  const contactPhoneGap = !!data?.contactGaps?.phone;
+  const saveContactPhone = useCallback(async () => {
+    if (readOnlyPreview || contactPhoneSaving) return;
+    setContactPhoneSaving(true);
+    setContactPhoneError('');
+    try {
+      const r = await fetch(`${API_BASE}/public/estimates/${token}/contact-phone`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contactPhone }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setContactPhoneError(body.error || 'We could not save that number. Please try again, or call our office.');
+        return;
+      }
+      // The estimate now has a phone: reload so the gap, the card policy and
+      // every phone-dependent option reflect it.
+      await loadEstimate({ preserveSelection: true });
+    } catch {
+      setContactPhoneError('We could not save that number. Please check your connection and try again.');
+    } finally {
+      setContactPhoneSaving(false);
+    }
+  }, [readOnlyPreview, contactPhoneSaving, contactPhone, token, loadEstimate]);
 
   const performAccept = useCallback(async () => {
     // Defense in depth for the draft preview — handlePaymentChoice already
@@ -7305,6 +7391,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // Required-field guard mirrors confirmDisabled below (defense in depth —
     // the button is disabled while this is true, but a stale disabled-state
     // read should never let a request through with a required field blank).
+    if (contactPhoneGap) {
+      setError('Please save your mobile number to continue.');
+      return;
+    }
     if (contactFirstNameMissing) {
       setContactFirstNameTouched(true);
       setError('Please enter your first name to continue.');
@@ -7734,7 +7824,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
+  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -7743,6 +7833,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // is off, so this falls straight through to performAccept.
   const handleConfirm = useCallback(async () => {
     if (readOnlyPreview) return;
+    // No card step and no accept while the estimate has no phone: the server
+    // refuses both. The review button is disabled for it; this covers every
+    // other entry (the annual-prepay confirm).
+    if (data?.contactGaps?.phone) {
+      setError('Please save your mobile number to continue.');
+      return;
+    }
     // Live-ref submit lock (mirror of the onToggleAddOn/SlotPicker guards):
     // a double-tap on Confirm must not double-enter the flow — the second
     // entry would re-mint a deposit/card-hold intent and re-PUT /accept.
@@ -8217,6 +8314,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   useEffect(() => {
     if (ctaPhase !== 'review' || !reservation) return;
     if (readOnlyPreview || !inlineAutoPayActive || inlineCardIntent) return;
+    // No card intent while the estimate has no phone: the server refuses it.
+    // The effect reruns when the saved number closes the gap.
+    if (data?.contactGaps?.phone) return;
     if (recurringCardSetupIntentIdRef.current || recurringCardForceRef.current) return;
     if (inlineIntentMintRef.current) return;
     inlineIntentMintRef.current = true;
@@ -9695,6 +9795,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 onEmailChange={setContactEmail}
                 onEmailBlur={() => setContactEmailTouched(true)}
                 emailInvalid={contactEmailTouched && contactEmailInvalid}
+                phone={contactPhone}
+                onPhoneChange={(value) => { setContactPhone(value); setContactPhoneError(''); }}
+                onPhoneSave={saveContactPhone}
+                phoneSaving={contactPhoneSaving}
+                phoneError={contactPhoneError}
                 // Locked for the whole confirm, including the inline card
                 // confirmSetup() wait (ctaPhase stays 'review' there) — the
                 // running confirm already captured these values.
@@ -9711,6 +9816,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               // only confirm — the underlying review CTA stays disabled so
               // a plain confirm can't race the payment authorization
               // (pre-push Codex P0 r2).
+              || contactPhoneGap
               || contactFirstNameMissing
               || contactLastNameMissing
               || contactEmailInvalid

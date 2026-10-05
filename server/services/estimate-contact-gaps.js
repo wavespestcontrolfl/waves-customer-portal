@@ -1,7 +1,8 @@
 // Missing-contact capture on the public estimate accept card (owner ruling
 // 2026-09-27): when a customer accepts and we're missing their LAST NAME or
 // EMAIL, the accept card asks for whatever's actually missing — last name
-// required, email optional/skippable. This module owns the three pieces
+// required, email optional/skippable. Owner 2026-10-04: a missing PHONE is
+// asked for too, required, on an estimate with no linked customer. This module owns the three pieces
 // shared between the /:token/data payload (contactGaps) and the accept
 // route (sanitize + apply): gap detection, input sanitization/validation,
 // and the guarded "fill an existing customer's blank field" writes.
@@ -87,7 +88,34 @@ function computeContactGaps({ estimate = {}, linkedCustomer = null } = {}) {
   const lastName = (tokens.length < 2 || nameIsLinkedFirstName) && !hasRealLastName(linkedLast);
   const firstName = (tokens.length === 0 || nameIsLinkedLastName) && !hasRealFirstName(linkedFirst);
   const email = !hasEmail(estimate.customer_email) && !hasEmail(linkedCustomer?.email);
-  return { firstName, lastName, email };
+  // gaps.phone (owner 2026-10-04): the estimate has no phone AND no linked
+  // customer. customers.phone is NOT NULL, so a linked profile always has
+  // one; an unlinked estimate with no phone cannot become a customer, and
+  // the accept refuses it (CUSTOMER_CONTACT_REQUIRED) unless the page
+  // collects one.
+  const phone = !estimate.customer_id && !linkedCustomer && !hasPhone(estimate.customer_phone);
+  return { firstName, lastName, email, phone };
+}
+
+function hasPhone(value) {
+  return String(value ?? '').replace(/\D/g, '').length >= 10;
+}
+
+// Returns { value, error } like the other sanitizers. value is E.164
+// (+1XXXXXXXXXX) for a 10-digit US number (an 11-digit one with a leading 1
+// is accepted), null when nothing was typed. Anything else that was typed is
+// an error: a phone is the record's contact key, so a near-miss is refused,
+// never stored. NANP: the area code and the exchange start with 2-9.
+function sanitizeContactPhone(raw) {
+  if (typeof raw !== 'string') return { value: null, error: null };
+  const collapsed = collapseWhitespace(raw) || '';
+  if (!collapsed) return { value: null, error: null };
+  const invalid = { value: null, error: { code: 'CONTACT_PHONE_INVALID', message: 'Please enter a valid 10-digit mobile number.' } };
+  if (CONTROL_CHARS_RE.test(collapsed) || collapsed.length > 32 || !/^[+\d\s().-]+$/.test(collapsed)) return invalid;
+  let digits = collapsed.replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
+  if (!/^[2-9]\d{2}[2-9]\d{6}$/.test(digits)) return invalid;
+  return { value: `+1${digits}`, error: null };
 }
 
 // Returns { value, error }. value is null when nothing usable was supplied
@@ -206,7 +234,45 @@ async function fillExistingCustomerEmail(trx, customerId, email, { expectedName 
   return backfillCustomerEmailInTrx(trx, { customerId, email, source: 'estimate-accept-contact' });
 }
 
+const CALL_OFFICE_REFUSAL = {
+  error: 'We could not complete this booking online — please call the Waves office and we’ll finish setting up your service right away.',
+  code: 'CUSTOMER_CONTACT_REQUIRED',
+};
+
+// The accept-card phone capture behind PUT /api/estimates/:token/contact-phone
+// (the route owns the token, viewability and gate checks; see its comment for
+// why this is a write of its own). Returns { status, body }; never throws for
+// a business outcome.
+//   - estimate already linked or already has a phone → 200 { saved:false,
+//     alreadyOnFile:true }, nothing validated, nothing written;
+//   - nothing usable typed / malformed → 400 CONTACT_PHONE_INVALID;
+//   - the number belongs to ANY customer on file → nothing written,
+//     onExistingCustomerPhone runs (the office bell), 409 "call the office";
+//   - otherwise a guarded update (still unlinked, still phone-less) saves it.
+//     Zero rows = a concurrent writer closed the gap first: alreadyOnFile.
+async function saveAcceptContactPhone({ estimate, rawPhone, database, countCustomersWithPhone, onExistingCustomerPhone }) {
+  if (estimate.customer_id || hasPhone(estimate.customer_phone)) {
+    return { status: 200, body: { saved: false, alreadyOnFile: true } };
+  }
+  const { value: typedPhone, error } = sanitizeContactPhone(rawPhone);
+  if (error || !typedPhone) {
+    return { status: 400, body: { error: 'Please enter a valid 10-digit mobile number.', code: 'CONTACT_PHONE_INVALID' } };
+  }
+  const candidateCount = await countCustomersWithPhone(typedPhone);
+  if (candidateCount > 0) {
+    if (onExistingCustomerPhone) await onExistingCustomerPhone({ typedPhone, candidateCount });
+    return { status: 409, body: { ...CALL_OFFICE_REFUSAL } };
+  }
+  const saved = await database('estimates').where({ id: estimate.id }).whereNull('customer_id')
+    .whereRaw("length(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g')) < 10")
+    .update({ customer_phone: typedPhone });
+  return saved
+    ? { status: 200, body: { saved: true } }
+    : { status: 200, body: { saved: false, alreadyOnFile: true } };
+}
+
 module.exports = {
+  saveAcceptContactPhone,
   IDENTITY_MISMATCH,
   capCodePoints,
   hasRealLastName,
@@ -220,6 +286,8 @@ module.exports = {
   computeContactGaps,
   sanitizeContactLastName,
   sanitizeContactEmail,
+  sanitizeContactPhone,
+  hasPhone,
   fillExistingCustomerLastName,
   fillExistingCustomerEmail,
 };

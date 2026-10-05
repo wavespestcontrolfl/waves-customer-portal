@@ -29,6 +29,7 @@ const {
   sanitizeContactLastName,
   sanitizeContactFirstName,
   sanitizeContactEmail,
+  saveAcceptContactPhone,
   fillExistingCustomerLastName,
   fillExistingCustomerEmail,
   cleanedNameTokens: contactGapNameTokens,
@@ -742,6 +743,48 @@ async function refuseParkedWrite(estimate, rejectedCustomerId) {
 // recurrence after the row was completed (marked Done) or auto-cleared reopens it and rings. The episode is versioned by the
 // rejected customer id, so a phone later changed to a DIFFERENT customer's number is a new version that refreshes and rings.
 // ALERT_EPISODES killed (the shared kill switch): the plain deduped raise this alert always had (rings once per estimate).
+// The contact gaps the PAGE is told about. The phone gap exists only while its capture endpoint does
+// (GATE_ESTIMATE_ACCEPT_PHONE, default on): with the gate off the page never asks for a phone it could not save.
+function pageContactGaps(args) {
+  const gaps = computeContactGaps(args);
+  if (!featureGates.isEnabled('estimateAcceptPhone')) gaps.phone = false;
+  return gaps;
+}
+
+// Accept-card phone capture (owner 2026-10-04): the number a customer typed on a phone-less estimate already belongs to a
+// customer on file. A typed phone proves nothing about who is typing, so the accept is NOT attached to that account and
+// nothing is written: the office finishes it. One row per estimate; the typed number is in the detail for the call back.
+// Best-effort: a failed alert never changes the refusal.
+async function raiseAcceptTypedPhoneMatchAlert({ estimate, typedPhone, candidateCount }) {
+  try {
+    const { fitAction } = require('../services/admin-alert-names');
+    await require('../services/admin-alert-compose').raiseAdminAlert('estimate', {
+      area: 'Estimates',
+      action: fitAction('Estimates', estimate.customer_name || 'this customer', [
+        (n) => `call ${n} to finish their estimate`,
+        (n) => `call ${n} about their estimate`,
+        (n) => `call ${n}`,
+      ]),
+      why: 'The phone they typed to accept is already a customer\u2019s, so it was not booked online.',
+      severity: 'needs-you',
+      link: `/admin/estimates?estimateId=${encodeURIComponent(estimate.id)}`,
+      subject: { type: 'estimate', id: String(estimate.id) },
+      doneWhen: 'estimate_accepted',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `accept-typed-phone-match:${estimate.id}`,
+      dedupeVersion: 'v1',
+      detail: `The estimate had no phone. On the accept card the customer typed ${typedPhone}, which matches ${candidateCount} customer record${candidateCount === 1 ? '' : 's'} on file. `
+        + 'Nothing was saved to the estimate, no customer was created or changed, no card was taken and no time is held. '
+        + 'Confirm who this is, then link the estimate to the right customer or put the phone on the estimate, and they can accept.',
+      metadata: { estimateId: String(estimate.id), typedPhoneMatches: candidateCount },
+    });
+  } catch (err) {
+    logger.warn(`[estimate-accept] typed-phone-match office alert failed for estimate ${estimate.id}: ${err.code || err.name || 'error'}`);
+  }
+}
+
 async function raiseAcceptParkedAlert({ estimate, rejectedCustomerId }) {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
@@ -9233,8 +9276,8 @@ async function handleEstimateView(req, res, next) {
         const linkedCustomerForGaps = estimate.customer_id
           ? await db('customers').where({ id: estimate.customer_id }).first('first_name', 'last_name', 'email')
           : null;
-        const gaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
-        contactGapsForceReactView = !!(gaps.firstName || gaps.lastName || gaps.email);
+        const gaps = pageContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
+        contactGapsForceReactView = !!(gaps.firstName || gaps.lastName || gaps.email || gaps.phone);
       } catch (e) {
         // Fail CLOSED toward the React view: it can collect the fields,
         // the legacy page cannot (codex #5102 r7).
@@ -18752,6 +18795,56 @@ async function transferGroupFollowupOwnership(estimate) {
     logger.warn(`[estimate-public] follow-up ownership transfer failed for estimate ${estimate?.id}: ${e.message}`);
   }
 }
+
+// PUT /api/estimates/:token/contact-phone  { contactPhone }
+// Accept-card PHONE capture (owner 2026-10-04: a missing phone is asked for at accept and logged, like the last name
+// and the email). It is its own write, ahead of the card step and the accept, because a phone is the identity every
+// later decision is made on: /recurring-card-intent and /card-hold-intent refuse a phone-less unlinked estimate before
+// any card is captured, and the accept creates the customer from the estimate's phone. Saving it here means every one
+// of those routes simply reads an estimate that has a phone; none of them takes a typed value.
+//   - Only the gap the server itself sees is ever filled: an estimate with a phone or a linked customer answers
+//     { saved: false, alreadyOnFile: true } and writes nothing, whatever was sent.
+//   - A typed phone proves nothing about who typed it. If it already belongs to ANY live customer, nothing is written,
+//     the office gets one bell with the number, and the answer is the standing "call the office" refusal
+//     (409 CUSTOMER_CONTACT_REQUIRED). It can therefore never attach this estimate, a saved card or a hold to an
+//     existing account.
+//   - Otherwise it is saved on the estimate (guarded: still unlinked, still phone-less) and the page reloads /data.
+// The 200/409 difference tells a token holder whether a number is a customer's. That is bounded by design: a number
+// that is NOT a customer's is saved and closes the gap (one guess per estimate), a number that IS rings the office, and
+// the limiter caps attempts per token and client.
+const contactPhoneLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${require('../middleware/rate-limit-key').rateLimitKey(req)}:${req.params.token}`,
+  message: { error: 'Too many attempts. Please wait a moment and try again, or call our office.' },
+});
+router.put('/:token/contact-phone', contactPhoneLimiter, async (req, res, next) => {
+  try {
+    if (!featureGates.isEnabled('estimateAcceptPhone')) return res.status(404).json({ error: 'Estimate not found' });
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (!isEstimateAcceptActive(estimate)) {
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
+    }
+    // The decision and the write live in services/estimate-contact-gaps (saveAcceptContactPhone) so they are tested
+    // without the route; the matcher and the office alert are this route's own.
+    const outcome = await saveAcceptContactPhone({
+      estimate,
+      rawPhone: req.body?.contactPhone,
+      database: db,
+      countCustomersWithPhone: async (phone) => (await matchAcceptCustomerByPhone({ customer_phone: phone }, db, { authoritative: true })).candidateCount,
+      onExistingCustomerPhone: ({ typedPhone, candidateCount }) => raiseAcceptTypedPhoneMatchAlert({ estimate, typedPhone, candidateCount }),
+    });
+    if (outcome.body.saved) logger.info(`[estimate-public] accept-card phone saved on estimate ${estimate.id}`);
+    return res.status(outcome.status).json(outcome.body);
+  } catch (err) { next(err); }
+});
 
 // PUT /api/estimates/:token/decline
 router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
@@ -29642,7 +29735,7 @@ async function composeEstimateDataPayload(estimate, {
       const linkedCustomerForGaps = estimate.customer_id
         ? await db('customers').where({ id: estimate.customer_id }).first('first_name', 'last_name', 'email')
         : null;
-      contactGaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
+      contactGaps = pageContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
     }
 
     // "Want us to come look first?" consultation offer (GATE_ESTIMATE_

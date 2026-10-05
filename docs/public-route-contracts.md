@@ -1509,7 +1509,7 @@ grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
 Missing-contact capture (owner ruling 2026-09-27). GET
-`/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email }` —
+`/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email, phone }` —
 booleans only — while the estimate is accept-active (never on
 accepted/declined/expired/off-surface estimates or the PDF render pass).
 `lastName` is true when the estimate's `customer_name` has fewer than two
@@ -1576,6 +1576,38 @@ accept-active estimate with a contact gap always gets the React view: the
 `/estimate/` mount skips the legacy renderer and the GrowthBook holdback, and
 the `/api/estimates` mount redirects to `/estimate/:token`. No message is sent
 because of these fields.
+
+Accept-card phone capture (owner 2026-10-04, `GATE_ESTIMATE_ACCEPT_PHONE`,
+default on). `contactGaps` also carries `phone` — true only when the estimate
+has no linked customer AND no usable phone (fewer than 10 digits); always
+false with the gate off. A phone is the identity the card routes and the
+accept decide on (`/recurring-card-intent` and `/card-hold-intent` refuse a
+phone-less unlinked estimate before any card is captured; the accept creates
+the customer from the estimate's phone), so it is saved by a write of its
+own, ahead of both: `PUT /api/estimates/:token/contact-phone` with
+`{ contactPhone }` (rate-limited 5/hour per client + token; 404 with the
+gate off, for an unknown or call-side-blocked token; the accept-inactive
+answer for a terminal / expired / off-surface estimate). Responses: `200
+{ saved: true }` — the number, normalized to E.164 (`+1XXXXXXXXXX`; a
+10-digit NANP number, an 11-digit one with a leading 1 accepted), was written
+to `estimates.customer_phone` by a guarded update (still unlinked, still
+phone-less); `200 { saved: false, alreadyOnFile: true }` — the estimate
+already has a phone or a linked customer (the field is ignored entirely, not
+even validated) or a concurrent writer closed the gap first; `400
+CONTACT_PHONE_INVALID` — nothing usable was sent; `409
+CUSTOMER_CONTACT_REQUIRED` with the standing "call the Waves office" copy —
+the number already belongs to ANY live customer: NOTHING is written, and one
+Estimates bell (deduped per estimate) gives the office the typed number. A
+typed phone proves nothing about who typed it, so it never attaches the
+estimate, a saved card or a hold to an existing account; a diff that lets a
+typed phone reach `matchAcceptCustomerByPhone`'s reuse path, or that writes
+it when it matches a customer, is a P0. The 200/409 difference tells a token
+holder whether a number is a customer's; that is bounded by design (a
+non-customer number is saved and closes the gap, a customer number rings the
+office, and the limiter caps attempts). The page keeps the card step and the
+Accept button locked while `contactGaps.phone` is true and reloads `/data`
+after a save. No message is sent because of this write; the accept's own
+confirmation text then goes to the saved number, as for any estimate phone.
 
 Pay-after-first-visit flag (owner ruling 2026-09-30, `GATE_PAY_AFTER_FIRST_VISIT`,
 dark). GET `/api/estimates/:token/data` carries `recurringCardPolicy.payAfterFirstVisit:

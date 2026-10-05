@@ -1654,6 +1654,16 @@ const gates = {
   // GATE_LEAD_UNVERIFIED_HOLD=false restores the plain 403.
   leadUnverifiedHold: process.env.GATE_LEAD_UNVERIFIED_HOLD !== 'false',
 
+  // Estimate accept-card phone (owner 2026-10-04). An estimate with no phone
+  // and no linked customer cannot become a customer, and the card step and
+  // the accept refuse it with "call the office". On, the estimate page asks
+  // for a mobile number in the "Confirm your details" card and
+  // PUT /api/estimates/:token/contact-phone saves it on the estimate before
+  // the card step. A typed number that already belongs to a customer is never
+  // saved or attached: the office gets a bell. Default on;
+  // GATE_ESTIMATE_ACCEPT_PHONE=false hides the field and 404s the route.
+  estimateAcceptPhone: process.env.GATE_ESTIMATE_ACCEPT_PHONE !== 'false',
+
   // AutoPay Customer SMS — customer-facing autopay/pre-charge/payment-retry
   // texts are opt-in everywhere until the WaveGuard autopay rollout is
   // verified. This does not affect internal admin alerts.

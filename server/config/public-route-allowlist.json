@@ -242,6 +242,7 @@
         "POST /api/estimates/:token/service-details/send",
         "PUT /api/estimates/:token/accept",
         "PUT /api/estimates/:token/bond",
+        "PUT /api/estimates/:token/contact-phone",
         "PUT /api/estimates/:token/decline",
         "PUT /api/estimates/:token/interior-service",
         "PUT /api/estimates/:token/preferences",
