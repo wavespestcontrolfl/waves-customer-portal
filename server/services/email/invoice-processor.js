@@ -108,8 +108,19 @@ function senderDomainCandidates(address) {
   return out;
 }
 
+// A vendor row may also name one exact sender address. A billing platform
+// (Billtrust, Stripe) sends for many companies from one domain, so only its
+// per-company address identifies the vendor (siteoneus@billtrust.com, a
+// Stripe invoice+statements+acct_… address). The exact address is tried
+// first, then the domain and its parents.
+function senderVendorKeys(address) {
+  const full = String(address || '').trim().toLowerCase();
+  const domains = senderDomainCandidates(full);
+  return domains.length ? [full, ...domains] : [];
+}
+
 async function vendorForSender(address) {
-  const candidates = senderDomainCandidates(address);
+  const candidates = senderVendorKeys(address);
   if (!candidates.length) return null;
   const rows = await db('vendor_email_domains').whereIn('domain', candidates);
   return candidates.map((d) => rows.find((r) => String(r.domain).toLowerCase() === d)).find(Boolean) || null;
@@ -401,4 +412,4 @@ async function processVendorInvoice(email, classification) {
   }
 }
 
-module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates };
+module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates, senderVendorKeys };
