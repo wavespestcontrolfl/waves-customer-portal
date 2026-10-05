@@ -142,18 +142,20 @@ function firstNameOf(data = {}) {
 }
 
 function weatherFact(conditions = {}) {
-  const temp = conditions.temp_f ?? conditions.temp;
-  const wind = conditions.wind_mph ?? conditions.wind;
-  const rain = conditions.rain_24h_in ?? conditions.rainfall_in;
-  const humidity = conditions.humidity_pct ?? conditions.humidity;
+  // A missing reading stays unknown: Number(null) is 0, which would claim
+  // "no rain" (pre-push audit P1).
+  const temp = readingOrNull(conditions.temp_f ?? conditions.temp);
+  const wind = readingOrNull(conditions.wind_mph ?? conditions.wind);
+  const rain = readingOrNull(conditions.rain_24h_in ?? conditions.rainfall_in);
+  const humidity = readingOrNull(conditions.humidity_pct ?? conditions.humidity);
   const sky = cleanText(conditions.conditions || conditions.summary || conditions.description || conditions.sky);
   const parts = [];
   if (sky && sky.length <= 80) parts.push(sky);
-  if (Number.isFinite(Number(temp))) parts.push(`about ${Math.round(Number(temp))}°F`);
-  if (Number.isFinite(Number(humidity))) parts.push(`${Math.round(Number(humidity))}% humidity`);
-  if (Number.isFinite(Number(wind))) parts.push(`wind about ${Math.round(Number(wind))} mph`);
-  if (Number.isFinite(Number(rain))) {
-    const inches = Number(rain);
+  if (temp !== null) parts.push(`about ${Math.round(temp)}°F`);
+  if (humidity !== null) parts.push(`${Math.round(humidity)}% humidity`);
+  if (wind !== null) parts.push(`wind about ${Math.round(wind)} mph`);
+  if (rain !== null) {
+    const inches = rain;
     parts.push(inches <= 0 ? 'no rain in the last 24 hours'
       : inches < 0.1 ? 'only a trace of rain in the last 24 hours'
         : 'rain in the last 24 hours');
@@ -267,7 +269,10 @@ function concernFact(value) {
   const text = clip(value, 400);
   if (!text) return null;
   const { redactContact } = require('../../utils/redact-contact');
-  return cleanText(redactContact(text).replace(/\d{3,}/g, '[number]')) || null;
+  // Access codes too, letters included ("gate code A1B2"): the shared
+  // redactor (pre-push audit P1).
+  const { redactAccessCodes } = require('../context-aggregator');
+  return cleanText(redactAccessCodes(redactContact(text)).replace(/\d{3,}/g, '[number]')) || null;
 }
 
 // ── The fact sheet ──────────────────────────────────────────────────────

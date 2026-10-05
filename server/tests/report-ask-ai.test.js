@@ -171,6 +171,12 @@ describe('buildReportAskFacts', () => {
     expect(facts.products[0].active_ingredient).toBe('Dinotefuran');
   });
 
+  test('masks a lettered access code in the concern and keeps missing weather unknown', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'gate code A1B2, roaches in the garage', conditions: { temp_f: 88, rain_24h_in: null, rainfall_in: null } } });
+    expect(facts.customer_concern).not.toMatch(/A1B2/);
+    expect(facts.weather_during_visit).toBe('about 88°F');
+  });
+
   test('reads a pg-hydrated DATE as its calendar date', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], serviceDate: new Date(2026, 9, 2) } });
     expect(facts.service_date).toBe('Friday, October 2, 2026');
