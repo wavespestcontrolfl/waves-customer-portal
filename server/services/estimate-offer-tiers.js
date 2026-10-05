@@ -203,6 +203,9 @@ function offerTierKeepsCompanions(tier) {
 const OFFER_TIER_ESTIMATE_COLUMNS = [
   'id', 'status', 'source', 'category', 'customer_id', 'show_one_time_option',
   'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
+  // The pricing cache keys on these (estimate-pricing-cache.js): without them
+  // the slot read could serve another version's cached bundle.
+  'updated_at', 'pricing_version',
 ];
 
 async function resolveBestOfferTierForSlots({
