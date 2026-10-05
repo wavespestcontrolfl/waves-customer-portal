@@ -2658,15 +2658,13 @@ const gates = {
   // Enable with GATE_ESTIMATE_SERVICE_ADD=true (with the opt-out gate on).
   estimateServiceAdd: process.env.GATE_ESTIMATE_SERVICE_ADD === 'true',
 
-  // Good / Better / Best offer tiers on a sent residential pest estimate
-  // (owner 2026-10-05): the one-time choice (Good), the pest-only recurring
-  // choice (Better) and — NEW — the full quoted bundle (Best: pest + lawn
-  // and/or tree & shrub) as three server-priced options the customer picks
-  // between. Rides the existing show_one_time_option machinery; the only new
-  // accept behavior is `selectedTier: 'best'`, which keeps the companion
-  // programs the one-time toggle used to drop. Read at call time via
-  // estimateOfferTiersLive() — this map entry is for logGateStatus only.
-  // STRICT opt-in: it changes what the page offers and what accept books.
+  // Good / Better / Best on a pest + lawn estimate (owner 2026-10-05): a
+  // three-tile picker that is a VIEW over the service opt-out rail — Best is
+  // the estimate as quoted, Better is lawn removed through the rail's own
+  // canonical re-price, Good is the one-time choice on that pest-only row.
+  // The stored row is always an ordinary valid estimate. Needs the opt-out
+  // gate. Read at call time via estimateOfferTiersLive(); this map entry is
+  // for logGateStatus only. STRICT opt-in.
   // Enable with GATE_ESTIMATE_OFFER_TIERS=true.
   estimateOfferTiers: process.env.GATE_ESTIMATE_OFFER_TIERS === 'true',
 
@@ -4717,8 +4715,7 @@ function autoDispatchSharedModelLive() {
 // reader server/services/estimate-consultation-offer.js uses. The offer
 // additionally requires leadInspectionLinkLive() (the /inspection/:token page
 // itself must be live too) — checked by the builder, not duplicated here.
-// GATE_ESTIMATE_OFFER_TIERS read at CALL time — strict `'true'` only, so an
-// unset variable is the kill switch (no redeploy). See the gates map entry.
+// GATE_ESTIMATE_OFFER_TIERS read at CALL time — strict `'true'` only.
 function estimateOfferTiersLive() {
   return process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
 }
@@ -5757,6 +5754,7 @@ module.exports.missedCallTextBackEmptyVoicemailLive = missedCallTextBackEmptyVoi
 module.exports.relayUnbookedHandoffLive = relayUnbookedHandoffLive;
 // GATE_LAWN_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.
 module.exports.lawnTechParagraphLive = lawnTechParagraphLive;
-module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_PREPAY_MINT_PRICE_HOLD reader, on its own line so gate PRs never conflict.
 module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
+// GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
+module.exports.estimateOfferTiersLive = estimateOfferTiersLive;

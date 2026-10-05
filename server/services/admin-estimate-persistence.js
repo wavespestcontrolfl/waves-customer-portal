@@ -2137,6 +2137,22 @@ async function resolveEstimateWritePayload({
     estimateData: trustedEstimateData,
   });
   if (deliveryError) throw errorWithStatus(deliveryError, 400);
+  // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): the office marks a pest
+  // + lawn estimate for the tier picker. A marker only — the row stays an
+  // ordinary estimate with the one-time option OFF (the opt-out rail turns
+  // that on if the customer removes lawn). Stamped only when asked AND the
+  // stored facts qualify; anything else saves unmarked.
+  {
+    const OfferTiers = require('./estimate-offer-tiers');
+    const { isCommercialEstimateData } = require('./estimate-delivery-options');
+    const tiersOk = body.offerTiers === true && !showOneTimeOption
+      && OfferTiers.offerTiersSaveEligibility({
+        estData: trustedEstimateData,
+        commercial: isCommercialEstimateData(trustedEstimateData),
+      }).eligible === true;
+    if (tiersOk) trustedEstimateData.offerTiersRequested = true;
+    else delete trustedEstimateData.offerTiersRequested;
+  }
 
   return {
     ...buildEstimatePersistenceFields(

@@ -149,33 +149,6 @@ const {
   savedFloorReplaySignals,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
-const OfferTiers = require('../services/estimate-offer-tiers');
-// GATE_ESTIMATE_OFFER_TIERS read at call time. Tests mock feature-gates with
-// a partial object, so the env read is the fallback when the reader is absent.
-function offerTiersGateOn() {
-  return typeof featureGates.estimateOfferTiersLive === 'function'
-    ? featureGates.estimateOfferTiersLive()
-    : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
-}
-// A LIVE active member never takes an offer tier (the member ladder is the
-// office's). "Member" is judged the way the accept will resolve the customer:
-// the linked customer_id when there is one, otherwise the prospective PHONE
-// match the accept lands on (matchAcceptCustomerByPhone) — an unlinked
-// estimate whose phone belongs to a member must not see the picker, reserve
-// a Best hold, or set up payment only to be refused at accept (Codex #5921 r1
-// P1). Strict and fail-closed: any read error reads as "member".
-async function offerTierMemberBlock(estimate, database = db) {
-  if (!estimate) return true;
-  try {
-    if (estimate.customer_id) {
-      return !!(await isActivePlanCustomer(database, estimate.customer_id, { strict: true }));
-    }
-    const { match } = await matchAcceptCustomerByPhone(estimate, database);
-    return !!match && match.active !== false && isMembershipCustomerRow(match);
-  } catch (_) {
-    return true;
-  }
-}
 const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
@@ -10252,10 +10225,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       const raw = req.body?.selectedFrequency;
       return typeof raw === 'string' ? raw.trim() : '';
     })();
-    // Offer tier (GATE_ESTIMATE_OFFER_TIERS): good | better | best. Resolved
-    // against the STORED tiers once the pricing bundle is built below —
-    // never from the body alone.
-    const selectedOfferTierRaw = req.body?.selectedTier;
     // Invoice-mode: admin opted the estimate into legacy auto-invoicing, OR
     // the estimate is a guarantee-only renewal (derived — see
     // resolveEstimateInvoiceMode): no visit to book, so accept creates the
@@ -10454,37 +10423,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(409).json({ error: 'existing appointment belongs to a different customer' });
     }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
-    const pricingBundleAsOffered = await buildPricingBundle(estimateForPricing);
-    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS, owner 2026-10-05): the
-    // customer's `selectedTier` must name a tier the bundle STORED, and its
-    // service mode must agree with `serviceMode`; anything else is a 400.
-    // 'good' and 'better' are today's one-time / pest-only paths untouched.
-    // 'best' keeps the companion programs the one-time toggle drops
-    // (keepCompanions below) and prices off the tier's own full-bundle
-    // ladder — the bundle view the rest of this handler already understands.
-    // A multi-service plan never prepays (estimate-public combos rule), so
-    // prepay on 'best' is refused up front rather than half-way through.
-    const { tier: offerTier, error: offerTierError } = OfferTiers.resolveSelectedOfferTier(
-      pricingBundleAsOffered,
-      selectedOfferTierRaw,
-      { serviceMode, gateOn: offerTiersGateOn() },
-    );
-    if (offerTierError) {
-      return res.status(400).json({ error: offerTierError, code: 'offer_tier_unavailable' });
-    }
-    if (offerTier && offerTier.key === 'best' && annualPrepaySelected) {
-      return res.status(400).json({ error: 'annual prepay is not available on the full-bundle option — pick pay_at_visit instead' });
-    }
-    // A LIVE active member never takes a tier (the member ladder is the
-    // office's — the same strict, fail-closed check the /data projection
-    // and the slot routes make; stored evidence alone can miss a customer
-    // who became a member after the quote was built). Re-judged inside the
-    // money-bearing transaction below.
-    if (offerTier && await offerTierMemberBlock(estimate, db)) {
-      return res.status(400).json({ error: 'offer tiers are not available for this estimate', code: 'offer_tier_unavailable' });
-    }
-    const keepCompanions = OfferTiers.offerTierKeepsCompanions(offerTier);
-    const pricingBundle = OfferTiers.pricingBundleForOfferTier(pricingBundleAsOffered, offerTier);
+    const pricingBundle = await buildPricingBundle(estimateForPricing);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
     if (quoteRequirement.quoteRequired) {
       const needsManagerApproval = quoteRequirement.reason === 'st_augustine_dethatching';
@@ -10526,7 +10465,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         reason: 'termite_trenching_review',
       });
     }
-    if (estimate.show_one_time_option && !keepCompanions && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
+    if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
       recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
     }
     const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
@@ -11536,7 +11475,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       const acceptedLists = acceptanceServiceLists(acceptedEstDataForPricing);
       recurringSvcList = acceptedLists.recurringSvcList;
       oneTimeList = acceptedLists.oneTimeList;
-      if (estimate.show_one_time_option && !keepCompanions && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
+      if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
         recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
       }
     }
@@ -11733,10 +11672,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       ? await slotReservation.prepareReservationCommit(capacityHold.id, { estimate: {
         ...estimate, estimate_data: acceptedEstDataForPricing || estimate.estimate_data },
         serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
-        selectedFrequency: acceptedSchedulingFrequencyKey, serviceCadences,
-        // Offer tier (GATE_ESTIMATE_OFFER_TIERS): the prepared capacity must
-        // size the same full-bundle visit the hold and the commit do.
-        offerTier: offerTier ? offerTier.key : null }) : null;
+        selectedFrequency: acceptedSchedulingFrequencyKey, serviceCadences }) : null;
     const txResult = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // the row-lock rule). When this accept will graduate a held slot,
@@ -11899,15 +11835,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // independently — recorded for the receipt/admin; the chosen tiers are
           // already rewritten into the recurring rows for scheduling/billing.
           ...(serviceCadences ? { serviceCadences } : {}),
-          // Offer tier the customer picked (GATE_ESTIMATE_OFFER_TIERS) —
-          // recorded beside the cadence choice for the receipt/admin.
-          ...(offerTier ? { offerTier: offerTier.key } : {}),
           selectedAt: new Date().toISOString(),
         };
-        // A resolved 'best' tier keeps every quoted program: the pest-only
-        // rewrite below is the one-time toggle's companion exclusion.
-        const persistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData)
-          && !keepCompanions;
+        const persistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData);
         if (persistPestOnlyRecurringChoice && Array.isArray(nextEstimateData.result?.recurring?.services)) {
           nextEstimateData.result = {
             ...nextEstimateData.result,
@@ -11923,18 +11853,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             services: nextEstimateData.recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)),
           };
         }
-        acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
-      }
-      // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a Good (one-time) accept has
-      // no selectedFrequency branch to ride, so the chosen tier is recorded
-      // here for every tiered accept (the recurring branch above wrote it
-      // already for Better / Best; this is idempotent on the same key).
-      if (offerTier && nextEstimateData && nextEstimateData.customerSelection?.offerTier !== offerTier.key) {
-        nextEstimateData.customerSelection = {
-          ...(nextEstimateData.customerSelection || {}),
-          offerTier: offerTier.key,
-          selectedAt: nextEstimateData.customerSelection?.selectedAt || new Date().toISOString(),
-        };
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
       const acceptedEstimateForScheduling = nextEstimateData
@@ -12490,26 +12408,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           || await estimateGreetingFirstName(trx, { ...estimate, customer_id: customerId || estimate.customer_id });
       }
 
-      // Offer tier (GATE_ESTIMATE_OFFER_TIERS): the live member exclusion,
-      // re-judged on the customer the accept ACTUALLY landed on — the linked,
-      // sibling, or phone-matched profile resolved above, never only the
-      // estimate's pre-read link — on the row locked FOR UPDATE under the
-      // already-locked estimate row (estimate → customer, the opt-out write's
-      // and the converter's order). A profile this accept just minted cannot
-      // be a member. Fails closed on a read error.
-      if (offerTier && customerId && !customerCreatedThisAccept) {
-        let liveMemberInTrx = true;
-        try {
-          const lockedCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
-          liveMemberInTrx = !!lockedCustomer && lockedCustomer.active !== false && isMembershipCustomerRow(lockedCustomer);
-        } catch (_) { liveMemberInTrx = true; }
-        if (liveMemberInTrx) {
-          throw Object.assign(new Error('offer tiers are not available for this estimate'), {
-            status: 409, isOperational: true, code: 'offer_tier_unavailable',
-          });
-        }
-      }
-
       // Bank tender re-judged UNDER THE CUSTOMER LOCK against the customer the
       // accept actually landed on (Codex #3723 r3 P1): the pre-transaction
       // verify judged a prospective match, and the ACH state — or the
@@ -12759,9 +12657,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
             selectedFrequency: acceptedSchedulingFrequencyKey,
             serviceCadences,
-            // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a 'best' commit sizes
-            // the visit from every quoted program, as the hold did.
-            offerTier: offerTier ? offerTier.key : null,
             // Rung 1 was pre-acquired on this key at the top of this txn —
             // commitReservation re-checks the hold still sits on it.
             preLockedDate: acceptPreLockedDate,
@@ -12834,7 +12729,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
               selectedFrequency: acceptedSchedulingFrequencyKey,
               serviceCadences,
-              offerTier: offerTier ? offerTier.key : null,
               // Rung 1 was pre-acquired on this key at the top of this txn —
               // commitReservation re-checks the hold still sits on it.
               preLockedDate: acceptPreLockedDate,
@@ -17521,6 +17415,106 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
   return { disclosures, wouldChargeBundled, afterPerApplication };
 }
 
+// Good / Better / Best tiles for the customer page (GATE_ESTIMATE_OFFER_TIERS).
+// A VIEW over the rail below: the row is in one of two ordinary states —
+// 'best' (pest + lawn, as quoted) or 'pest_only' (lawn removed through the
+// rail) — and the other state's numbers come from the rail's OWN dry run, so
+// a tile never shows a price the rail would not persist. Served only on a
+// live accept-active surface for a row the office marked, when the rail
+// itself would allow the move (its resolvers decide). null = no picker, the
+// page renders exactly as today.
+async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDraftPreview = false, mixChange = applyServiceMixChange }) {
+  const OfferTiers = require('../services/estimate-offer-tiers');
+  if (!OfferTiers.offerTiersGateLive() || !serviceOptOutGateOn()) return null;
+  if (adminDraftPreview || !OfferTiers.offerTiersRequested(estData)) return null;
+  if (!isEstimateAcceptActive(estimate) || estimate.price_locked_at) return null;
+  const OptOut = require('../services/estimate-service-opt-out');
+  const key = OfferTiers.COMPANION_KEY;
+  const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+  // A linked customer who became an active member after the save gets no
+  // picker (strict, fail-closed): the rail's commit would refuse them, and
+  // the dry run would show new-customer prices they cannot take.
+  if (estimate.customer_id) {
+    let activeMember = true;
+    try { activeMember = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
+    catch (_) { activeMember = true; }
+    if (activeMember) return null;
+  }
+  // The CURRENT mix must be exactly the model's: pest + lawn, or pest alone
+  // with lawn removed. A line added since the mark (the priced-add rail's
+  // mosquito, say) means "Better" would no longer be the pest plan — no
+  // picker; the page's ordinary controls stand.
+  let currentKeys;
+  try { currentKeys = OfferTiers.storedRecurringKeys(estData).slice().sort(); }
+  catch (_) { return null; }
+  const lawnRemoved = OptOut.currentlyOptedOutKeys(estData).includes(key);
+  const expectedKeys = lawnRemoved ? ['pest_control'] : ['lawn_care', 'pest_control'];
+  if (currentKeys.length !== expectedKeys.length || currentKeys.some((k, i) => k !== expectedKeys[i])) return null;
+  const rowKey = (row) => recurringServiceKey({ service: row?.service ?? row?.s, name: row?.label ?? row?.name ?? row?.s });
+  const perApp = (row) => {
+    const net = Number(row?.displayPrice);
+    const list = Number(row?.perTreatment);
+    return net > 0 ? net : (list > 0 ? list : null);
+  };
+  let state;
+  let dry;
+  try {
+    if (lawnRemoved) {
+      if (OptOut.serviceOptOutRestoreBlockedKeys(estData).includes(key)) return null;
+      if (OptOut.serviceOptOutBlockedByProposal(estData)
+        || OptOut.serviceOptOutTierSelectionActive(estData, estimate.waveguard_tier)) return null;
+      state = 'pest_only';
+      dry = await mixChange({ estimate: { ...estimate }, body: { serviceKey: key, included: true, dryRun: true }, actor: 'customer' });
+    } else {
+      const removable = Array.from(OptOut.serviceOptOutRemovableKeys(
+        estData, sections, estimate.waveguard_tier, { category: estimate.category },
+      ) || []);
+      if (!removable.includes(key)) return null;
+      state = 'best';
+      dry = await mixChange({ estimate: { ...estimate }, body: { serviceKey: key, included: false, dryRun: true }, actor: 'customer' });
+    }
+  } catch (err) {
+    logger.warn(`[estimate-data] offer tiers preview skipped for estimate ${estimate.id}: ${err.message}`);
+    return null;
+  }
+  if (!dry || dry.status !== 200 || dry.body?.dryRun !== true) return null;
+
+  const currentFrequency = defaultFrequencyFromList(Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : []);
+  const currentRows = (Array.isArray(currentFrequency?.perServiceTreatments) ? currentFrequency.perServiceTreatments : [])
+    .map((row) => ({ service: rowKey(row), perApplication: perApp(row), visitsPerYear: Number(row?.visitsPerYear) || null }))
+    .filter((row) => row.service && row.perApplication != null);
+  const otherRows = (Array.isArray(dry.body.perApplication) ? dry.body.perApplication : [])
+    .map((row) => ({ service: rowKey(row), perApplication: Number(row?.pa) > 0 ? Number(row.pa) : null }))
+    .filter((row) => row.service && row.perApplication != null);
+  const current = {
+    rows: currentRows,
+    oneTimeTotal: Number(estimate.onetime_total || 0),
+    waveGuardTier: pricingBundle?.waveGuardTier || estimate.waveguard_tier || null,
+  };
+  const other = {
+    rows: otherRows,
+    oneTimeTotal: Number(dry.body.next?.onetimeTotal || 0),
+    waveGuardTier: dry.body.next?.waveGuardTier || null,
+  };
+  const pestOnlyView = (view) => ({ ...view, rows: view.rows.filter((row) => row.service === 'pest_control') });
+  const better = pestOnlyView(state === 'best' ? other : current);
+  const best = state === 'best' ? current : other;
+  if (!better.rows.length || best.rows.length < 2) return null;
+  // Good: the one-time pest visit, priced the way the one-time option prices
+  // it — from the pest plan's own per-application list price.
+  const goodTotal = (state === 'pest_only' && estimate.show_one_time_option
+    ? resolveAcceptOneTimeTotal(estimate, pricingBundle)
+    : 0) || oneTimePestChoiceAmountFromResultStats(estData) || 0;
+  return {
+    state,
+    companionKey: key,
+    companionLabel: OfferTiers.COMPANION_LABEL,
+    good: goodTotal > 0 ? { oneTimeTotal: goodTotal } : null,
+    better,
+    best,
+  };
+}
+
 // The service-mix change rail — ONE implementation for a customer removal /
 // restore / add (PUT /:token/service-opt-out) and the staff send-time
 // "lead with one service" removal (admin-estimates sendEstimateNow, actor
@@ -17856,6 +17850,10 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       return { status: 200, body: ({
         success: true, dryRun: true, serviceKey, label, included, mode,
         previous, next, disclosures: impact.disclosures,
+        // The per-application terms the digest binds, as data (the Good /
+        // Better / Best tiles read them; the disclosures say the same thing
+        // in sentences).
+        perApplication: impact.afterPerApplication,
         // Echo this back on the commit; the write refuses if the row, the
         // pricing config, or the membership verdict moved since this preview.
         previewBasis: previewDigest,
@@ -17947,6 +17945,12 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     const serviceInterest = require('../services/estimate-service-lines')
       .inferEstimateServiceInterest({ estimate_data: parsedData });
 
+    // Good / Better / Best: on a row the office marked for tiers the one-time
+    // option follows the lawn line (on when lawn is removed, ALWAYS off when
+    // it is added back) — see oneTimeOptionUpdateForMixChange.
+    const offerTierOptionUpdate = require('../services/estimate-offer-tiers')
+      .oneTimeOptionUpdateForMixChange({ actor, serviceKey, mode, estData: parsedData, next });
+
     // One transaction for the price mutation and its audit row. The
     // activity_log row is the specified audit surface for a customer-visible
     // price rewrite — a best-effort insert after the update commits could
@@ -18032,6 +18036,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
           // dropped line is costed in every future audit forever.
           pricing_authority: 'SERVER',
           server_computed_price: next.annualTotal,
+          ...offerTierOptionUpdate,
           updated_at: trx.fn.now(),
         }));
       if (!updateCount) return;
@@ -25094,47 +25099,6 @@ function serviceCadenceComboKey(selection = {}) {
     .join('|');
 }
 
-// Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS, owner 2026-10-05): the
-// payload fields for an eligible v1-shaped one-time-toggle bundle. Eligibility
-// is the pure predicate in estimate-offer-tiers.js; the 'best' ladder and
-// combos are the SAME shapeFromV1 / buildServiceCadenceCombos calls the
-// non-toggle bundle makes, with pestOnly:false. Manual-discount estimates are
-// excluded: withManualDiscount nets the discount into payload.frequencies
-// only, and a second ladder it never touched could show a different number.
-function buildOfferTierFieldsForV1({ estimate, estData, v1, prefs, pestOnlyChoice, v1FloorOptions, anchorOneTimePrice }) {
-  if (!pestOnlyChoice) return {};
-  // A row already accepted on 'best' keeps its tier view even after the gate
-  // is turned off: what was booked must keep reading as what was booked
-  // (the /data projection never serves the picker on an accepted row).
-  const acceptedBest = OfferTiers.acceptedOfferTierKey(estData) === 'best';
-  if (!offerTiersGateOn() && !acceptedBest) return {};
-  if (normalizeManualDiscountSummary(estData)) return {};
-  const OptOut = require('../services/estimate-service-opt-out');
-  const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
-  const verdict = OfferTiers.offerTierEligibility({
-    gateOn: true,
-    estimate,
-    recurringKeys,
-    optedOutKeys: OptOut.currentlyOptedOutKeys(estData),
-    memberEvidence: OptOut.memberEvidenceInEstimateData(estData) || !!estData?.membershipSnapshot?.isExistingCustomer,
-    oneTimeChoicePrice: anchorOneTimePrice,
-    hasPestLadder: v1.pestTiers.length > 0,
-  });
-  if (!verdict.eligible) return {};
-  const bestFrequencies = [];
-  for (const [v1Label, ladder] of Object.entries(V1_LABEL_TO_LADDER)) {
-    const pestTier = v1.pestTiers.find((t) => t?.label === v1Label) || null;
-    bestFrequencies.push(shapeFromV1(v1, ladder, pestTier, prefs, { pestOnly: false, ...v1FloorOptions }));
-  }
-  const bestServiceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: false, ...v1FloorOptions });
-  return OfferTiers.buildOfferTiers({
-    oneTimeChoicePrice: anchorOneTimePrice,
-    recurringKeys,
-    bestFrequencies,
-    bestServiceCadenceCombos,
-  });
-}
-
 // Precompute every selectable cadence combination for a bundle so the view can
 // look up the authoritative total locally (no per-change round-trip) and the
 // accept handler can resolve the exact same number. Returns null when there is
@@ -26941,40 +26905,10 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
   // Presentation relabels apply LAST — attachPublicPricingContract rebuilds
   // the section list via buildPricingServices, so an earlier rename pass
   // would be overwritten for recomputed bundles (codex P2 on #2947 round 3).
-  const withContractBase = applyPresentationOverridesToBundle(
+  const withContract = applyPresentationOverridesToBundle(
     hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData), estData),
     estData,
   );
-  // Good / Better / Best: the page renders the Best tier's sections, combined
-  // summary and WaveGuard tier from the tier itself, so give it the same
-  // contract view the bundle gets (built through the SAME attach / floor-hide
-  // / presentation chain, from the tier's own ladder). The tier object is
-  // replaced, not mutated: the payload's array can be a cached bundle's.
-  // `services` stays the key list; the page's section objects ride on
-  // `sections`.
-  const bestOfferTier = OfferTiers.offerTiersOf(withContractBase).find((tier) => tier && tier.key === 'best');
-  let withContract = withContractBase;
-  if (bestOfferTier) {
-    const bestView = applyPresentationOverridesToBundle(
-      hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(
-        OfferTiers.pricingBundleForOfferTier({ ...withContractBase, offerTiers: undefined }, bestOfferTier),
-        estimate,
-        estData,
-      ), estData),
-      estData,
-    );
-    withContract = {
-      ...withContractBase,
-      offerTiers: withContractBase.offerTiers.map((tier) => (tier === bestOfferTier
-        ? {
-          ...tier,
-          sections: bestView.services,
-          combinedRecurring: bestView.combinedRecurring ?? null,
-          waveGuardTier: bestView.waveGuardTier ?? withContractBase.waveGuardTier ?? null,
-        }
-        : tier)),
-    };
-  }
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
     ...withContract,
@@ -27692,35 +27626,11 @@ function stampTreeShrubPalmCount(bundle, count) {
         return { ...c, perServiceTreatments: nextRows };
       })
     : bundle.serviceCadenceCombos;
-  // Offer tiers: the Best tier carries its own ladder, sections and combos
-  // (finalizePricingBundle), built before this stamp runs — stamp them the
-  // same way, as a bundle of their own.
-  let offerTiers = bundle.offerTiers;
-  if (Array.isArray(offerTiers)) {
-    offerTiers = offerTiers.map((tier) => {
-      if (!tier || tier.key !== 'best') return tier;
-      const stampedTier = stampTreeShrubPalmCount({
-        frequencies: tier.frequencies,
-        services: tier.sections,
-        serviceCadenceCombos: tier.serviceCadenceCombos,
-      }, count);
-      if (stampedTier.frequencies === tier.frequencies
-        && stampedTier.services === tier.sections
-        && stampedTier.serviceCadenceCombos === tier.serviceCadenceCombos) return tier;
-      touched = true;
-      return {
-        ...tier,
-        frequencies: stampedTier.frequencies,
-        ...(tier.sections !== undefined ? { sections: stampedTier.services } : {}),
-        ...(tier.serviceCadenceCombos !== undefined ? { serviceCadenceCombos: stampedTier.serviceCadenceCombos } : {}),
-      };
-    });
-  }
   // Byte-identical passthrough when nothing needed a change (no T&S
   // row/frequency present at all, or every one already carried the
   // resolved count).
   if (!touched) return bundle;
-  return { ...bundle, frequencies, services, serviceCadenceCombos, ...(Array.isArray(offerTiers) ? { offerTiers } : {}) };
+  return { ...bundle, frequencies, services, serviceCadenceCombos };
 }
 
 function pricingBundleViolatesLawnPolicy(bundle = {}, programMinMonthly) {
@@ -28041,31 +27951,7 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
     : addMissingBilledPerApplicationFlags(bundle);
 }
 
-// Offer tiers (Codex #5921 r1 P1): a bundle frozen while the gate was dark
-// (every send snapshot of an already-sent quote, and any cached payload from
-// before the flip) carries no tier verdict. The gate is read at call time, so
-// such a bundle is AUGMENTED on read: the live v1 build decides the tiers and
-// only its tier fields are grafted on — the frozen prices themselves stay
-// exactly as sent. A bundle built under the gate is stamped
-// offerTiersEvaluated so an ineligible estimate is not rebuilt on every read.
-function offerTiersVerdictMissing(bundle, estimate) {
-  return offerTiersGateOn()
-    && !!estimate?.show_one_time_option
-    && bundle && typeof bundle === 'object'
-    && bundle.offerTiersEvaluated !== true
-    && !Array.isArray(bundle.offerTiers);
-}
-function offerTierFieldsFrom(liveBundle) {
-  if (!liveBundle || typeof liveBundle !== 'object') return { offerTiersEvaluated: true };
-  return {
-    offerTiersEvaluated: true,
-    ...(Array.isArray(liveBundle.offerTiers) && liveBundle.offerTiers.length
-      ? { offerTiers: liveBundle.offerTiers, offerTierDefaultKey: liveBundle.offerTierDefaultKey }
-      : {}),
-  };
-}
-
-async function buildPricingBundleInner(estimate, { liveOnly = false } = {}) {
+async function buildPricingBundleInner(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
@@ -28174,13 +28060,7 @@ async function buildPricingBundleInner(estimate, { liveOnly = false } = {}) {
     // builders — fast-pathing them would bill the undiscounted row a
     // discounted quote displayed. Already-netted legacy snapshots pass.
     && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate)
-    && !liveOnly
   ) {
-    // Offer tiers: graft the live tier verdict onto a pre-gate snapshot
-    // (prices untouched — see offerTiersVerdictMissing).
-    const offerTierGraft = offerTiersVerdictMissing(snapshotBundle, estimate)
-      ? offerTierFieldsFrom(await buildPricingBundleInner(estimate, { liveOnly: true }))
-      : {};
     // Chokepoint stamp AFTER finalizePricingBundle (Codex r5 P0 on #4789):
     // attachPublicPricingContract rebuilds services[] split cards there and
     // would drop an earlier stamp. Never a price field, never written back;
@@ -28188,7 +28068,6 @@ async function buildPricingBundleInner(estimate, { liveOnly = false } = {}) {
     // corrected on every read.
     return stampTreeShrubPalmCount(finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
-      ...offerTierGraft,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
     })), estimate, estData), treeShrubPalmCountForEstData(estData) ?? stampedTreeShrubPalmCountInBundle(snapshotBundle));
@@ -28208,14 +28087,12 @@ async function buildPricingBundleInner(estimate, { liveOnly = false } = {}) {
     if (hasRodentTrapping) clearEstimatePricingCache(estimate);
   }
 
-  const cached = liveOnly ? null : getEstimatePricingCache(estimate);
+  const cached = getEstimatePricingCache(estimate);
   // Same missing-fee guard as the snapshot fast path: a cached bundle built
   // before the fee rule (or restored oddly) must not serve a first-visit
-  // total the converter won't bill. A cached bundle with no offer-tier
-  // verdict under a live gate rebuilds (offerTiersVerdictMissing).
+  // total the converter won't bill.
   if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData)
-    && !pricingBundleLacksManualDiscountNetting(cached, estData, estimate)
-    && !offerTiersVerdictMissing(cached, estimate)) {
+    && !pricingBundleLacksManualDiscountNetting(cached, estData, estimate)) {
     // Stamped after finalize for the same reason as the snapshot path; a
     // cache entry written before this deploy must never serve a stale count.
     return stampTreeShrubPalmCount(
@@ -28398,17 +28275,8 @@ async function buildPricingBundleInner(estimate, { liveOnly = false } = {}) {
     // backing combo pricing is present — the two never desync across snapshot /
     // engine / recompute paths.
     const serviceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: pestOnlyChoice, ...v1FloorOptions });
-    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): on an eligible one-time-toggle
-    // bundle, ALSO price the full-bundle ladder + combos (pestOnly:false, the
-    // very shape a non-toggle bundle serves) for the 'best' tier. Omitted
-    // entirely when ineligible so the payload stays byte-identical.
-    const offerTierFields = buildOfferTierFieldsForV1({
-      estimate, estData, v1, prefs, pestOnlyChoice, v1FloorOptions, anchorOneTimePrice,
-    });
     const payload = stampTreeShrubPalmCount(finalizePricingBundle(withManualDiscount({
       frequencies: finalFreqs,
-      ...(pestOnlyChoice && offerTiersGateOn() ? { offerTiersEvaluated: true } : {}),
-      ...offerTierFields,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice,
       // Back-compat: keep `setupFee` populated with the first waivable entry
@@ -29639,14 +29507,7 @@ async function composeEstimateDataPayload(estimate, {
     // cta.monthlyBilled below are read by the same page, so resolving twice
     // risks handing it two different answers (pre-push audit P1).
     const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
-    const pricingBundleAsBuilt = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
-    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): once a 'best' accept is on the
-    // row (customerSelection.offerTier, written with the price lock), every
-    // read serves the Best tier's own view — what was booked — instead of the
-    // one-time toggle's pest-only ladder; the picker fields are dropped.
-    const pricingBundle = (estimate.status === 'accepted' || estimate.price_locked_at)
-      ? OfferTiers.acceptedBestPricingView(pricingBundleAsBuilt, estimateDataForIntelligence)
-      : pricingBundleAsBuilt;
+    const pricingBundle = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
     const {
       defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance,
     } = await resolveEstimateAcceptance(estimate, estimateDataForIntelligence, pricingBundle);
@@ -30087,20 +29948,12 @@ async function composeEstimateDataPayload(estimate, {
       try { addStampBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
       catch (_) { addStampBlockedByMembership = true; }
     }
-    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): served only on a live,
-    // accept-active customer surface, and never to a LIVE active member
-    // (the member ladder is the office's — same fail-closed verdict as the
-    // add stamp; a lookup error withholds the tiers). The bundle may carry
-    // them (it is cached and send-snapshotted); this projection decides.
-    let offerTiersBlockedByMembership = false;
-    if (Array.isArray(pricingBundle?.offerTiers)) {
-      offerTiersBlockedByMembership = await offerTierMemberBlock(estimate, db);
-    }
-    const offerTiersServed = offerTiersGateOn()
-      && Array.isArray(pricingBundle?.offerTiers)
-      && !offerTiersBlockedByMembership
-      && !adminDraftPreview
-      && isEstimateAcceptActive(estimate);
+
+    // Good / Better / Best tiles (GATE_ESTIMATE_OFFER_TIERS): null unless
+    // the office marked this row and the opt-out rail would allow the move.
+    const offerTiersBlock = await buildOfferTiersBlock({
+      estimate, estData: estimateDataForIntelligence, pricingBundle, adminDraftPreview,
+    });
 
     const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms')
       && acceptanceTermsApplyTo(estimate);
@@ -30252,13 +30105,9 @@ async function composeEstimateDataPayload(estimate, {
       // this AND suppresses the mirror add-service offer with it — without the
       // suppression the page answers "remove lawn" with "Add Lawn Care and save
       // more" in three places.
+      ...(offerTiersBlock ? { offerTiers: offerTiersBlock } : {}),
       ...((() => {
         if (!serviceOptOutGateOn()) return {};
-        // A tiered estimate offers its choices through the tier picker: the
-        // remove / add-a-service rails are withheld so the page never shows
-        // two ways to change the same plan (and a 'best' accept keeps every
-        // quoted program, which a removal would contradict).
-        if (offerTiersServed) return {};
         const {
           currentlyOptedOutKeys, serviceOptOutLabel, serviceOptOutBlockedByProposal,
           serviceOptOutTierSelectionActive, serviceOptOutAddableKeys, staffOfferedKeys,
@@ -30550,9 +30399,6 @@ async function composeEstimateDataPayload(estimate, {
       },
       pricing: {
         ...stripInternalMarginFieldsDeep(pricingBundle),
-        // Offer tiers ride the bundle; drop them unless this projection
-        // serves them (undefined keys never reach the JSON).
-        ...(offerTiersServed ? {} : { offerTiers: undefined, offerTierDefaultKey: undefined }),
         // Review-lane enums on PRICED one-time items are pure exposure to
         // the token holder — the client reads them only on quote-required
         // items (quoteRequiredReasonCandidates), so keep them exactly there
@@ -31307,6 +31153,6 @@ module.exports.treeShrubFrequenciesFromResultStats = treeShrubFrequenciesFromRes
 module.exports.treeShrubPalmCountForEstData = treeShrubPalmCountForEstData;
 module.exports.shapeFromV1 = shapeFromV1;
 module.exports.stampTreeShrubPalmCount = stampTreeShrubPalmCount;
-module.exports.offerTierMemberBlock = offerTierMemberBlock;
 module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBundle;
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;
+module.exports.buildOfferTiersBlock = buildOfferTiersBlock;

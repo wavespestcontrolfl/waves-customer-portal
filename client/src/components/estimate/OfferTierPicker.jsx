@@ -1,118 +1,86 @@
 /**
- * Good / Better / Best plan picker for the customer estimate page
- * (GATE_ESTIMATE_OFFER_TIERS, owner 2026-10-05). Replaces the
- * [Recurring | One-time] toggle on an eligible estimate:
+ * Good / Better / Best picker for a pest + lawn estimate (owner 2026-10-05).
  *
- *   good   — one visit (the one-time price)
- *   better — the pest-only plan, preselected "Most popular"
- *   best   — the full quoted bundle, with the WaveGuard saving called out
+ * A VIEW over the service opt-out rail, not a pricing path: the server's
+ * `offerTiers` block carries every number (the other state's figures are the
+ * rail's own dry run), and a tile change is an ordinary rail move the page
+ * previews and confirms before anything is written. This component only
+ * renders the block and the confirm step the page hands it — no price,
+ * discount or cadence constant lives here.
  *
- * Every amount, cadence and discount comes from the server's payload
- * (`pricing.offerTiers`, `pricing.frequencies`) — nothing is priced here. The
- * only constants are display copy. House style: estimateInnerBox tiles and W
- * tokens (same idiom as SecurePlanChoice), so the glass walker restyles it.
+ *   Best   = pest + lawn as quoted            (block state 'best')
+ *   Better = lawn removed, recurring pest     (state 'pest_only', recurring)
+ *   Good   = the one-time pest visit          (state 'pest_only', one-time)
+ *
+ * The only price unit on the page is "/ application" (repo rule): never
+ * "per visit", never a monthly or yearly plan total.
  */
 import React, { useEffect, useState } from 'react';
 import { estimateCard, estimateInnerBox } from './cardStyles';
-import { perApplicationNetForFrequency } from './PriceCard';
-import { CUSTOMER_SURFACE } from '../../theme-customer';
-import { FS, FW, LH } from '../../theme-doc';
 import { W, waveGuardChipStyle } from './tokens';
 import { fmtMoney } from '../../lib/money';
+import { CUSTOMER_SURFACE } from '../../theme-customer';
+import { FS, FW, LH } from '../../theme-doc';
 
 const NAVY = W.blueDeeper;
-const RING = '0 0 0 4px rgba(4,57,94,.18)';
+const PEST_KEY = 'pest_control';
 
-const COMPANION_NAMES = {
-  lawn_care: 'lawn care',
-  tree_shrub: 'tree & shrub care',
-  mosquito: 'mosquito',
+const TILE_NAMES = {
+  good: 'One-time visit',
+  better: 'Pest control plan',
 };
-const COMPANION_SHORT = {
-  lawn_care: 'lawn',
-  tree_shrub: 'tree & shrub',
-  mosquito: 'mosquito',
-};
-// WaveGuard membership discount by tier, used only when the server did not
-// stamp a percentage on the tier's combined summary.
-const WAVEGUARD_PCT = { bronze: 0, silver: 10, gold: 15, platinum: 20 };
-const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
 
-function humanizeKey(key) {
-  return String(key || '').replace(/_/g, ' ').trim();
+function bestTileName(tiers) {
+  return `Pest + ${String(tiers?.companionLabel || 'lawn care').toLowerCase()}`;
 }
 
-// `tier.services` is the server's list of service keys (the tier's own
-// `sections` are the page's rendering objects, not read here).
-function tierServiceKeys(tier) {
-  return (Array.isArray(tier?.services) ? tier.services : []).filter((key) => typeof key === 'string' && key);
+export function offerTierName(key, tiers) {
+  return key === 'best' ? bestTileName(tiers) : TILE_NAMES[key] || '';
 }
 
-function companionKeys(tier) {
-  return tierServiceKeys(tier).filter((key) => key !== 'pest_control' && key !== 'bundle');
-}
-
-function pestSectionDefaultKey(pricing) {
-  const sections = Array.isArray(pricing?.services) ? pricing.services : [];
-  const section = sections.find((s) => s?.key === 'pest_control') || sections.find((s) => s?.key === 'bundle') || sections[0];
-  return section?.defaultFrequencyKey || null;
-}
-
-function defaultFrequency(frequencies, preferredKey) {
-  const list = Array.isArray(frequencies) ? frequencies : [];
-  return list.find((f) => f?.key === preferredKey)
-    || list.find((f) => f?.recommended === true || f?.selected === true)
-    || list[0]
-    || null;
-}
-
-function pestVisitsFor(frequency) {
-  if (!frequency) return null;
-  const direct = Number(frequency.visitsPerYear);
-  if (direct > 0) return direct;
-  const rows = Array.isArray(frequency.perServiceTreatments) ? frequency.perServiceTreatments : [];
-  const pest = rows.find((row) => row?.service === 'pest_control') || (rows.length === 1 ? rows[0] : null);
-  const fromRow = Number(pest?.visitsPerYear);
-  if (fromRow > 0) return fromRow;
-  return CADENCE_VISITS[frequency.key] || null;
-}
-
-function discountPctFor(tier) {
-  const stamped = Number(tier?.combinedRecurring?.waveGuardDiscountPct);
-  if (stamped > 0) return Math.round(stamped * 100);
-  const key = String(tier?.waveGuardTier || '').replace(/^WaveGuard\s+/i, '').trim().toLowerCase();
-  return WAVEGUARD_PCT[key] || 0;
-}
-
-function useNarrow() {
-  const query = '(max-width: 639px)';
+// matchMedia is missing in some runtimes (older webviews, jsdom): fall back
+// to the one-column layout rather than throwing.
+function useMinWidth(px) {
+  const query = `(min-width: ${px}px)`;
   const read = () => (typeof window !== 'undefined' && typeof window.matchMedia === 'function'
-    ? window.matchMedia(query).matches
+    ? !!window.matchMedia(query).matches
     : false);
-  const [narrow, setNarrow] = useState(read);
+  const [matches, setMatches] = useState(read);
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return undefined;
     const mql = window.matchMedia(query);
-    const onChange = () => setNarrow(mql.matches);
+    const onChange = () => setMatches(!!mql.matches);
     onChange();
-    if (typeof mql.addEventListener === 'function') mql.addEventListener('change', onChange);
-    else if (typeof mql.addListener === 'function') mql.addListener(onChange);
-    return () => {
-      if (typeof mql.removeEventListener === 'function') mql.removeEventListener('change', onChange);
-      else if (typeof mql.removeListener === 'function') mql.removeListener(onChange);
-    };
-  }, []);
-  return narrow;
+    if (typeof mql.addEventListener === 'function') {
+      mql.addEventListener('change', onChange);
+      return () => mql.removeEventListener('change', onChange);
+    }
+    if (typeof mql.addListener === 'function') {
+      mql.addListener(onChange);
+      return () => mql.removeListener(onChange);
+    }
+    return undefined;
+  }, [query]);
+  return matches;
 }
 
-function Pill({ children, style }) {
+function pestRow(view) {
+  return (view?.rows || []).find((row) => row?.service === PEST_KEY) || null;
+}
+
+function positive(n) {
+  const v = Number(n);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
+
+function Chip({ style, children }) {
   return (
     <span style={{
       display: 'inline-block',
       fontSize: FS.body,
       fontWeight: FW.bold,
       lineHeight: LH.snug,
-      padding: '3px 10px',
+      padding: '3px 9px',
       borderRadius: 999,
       ...style,
     }}
@@ -122,219 +90,252 @@ function Pill({ children, style }) {
   );
 }
 
-function tileModel(tier, tiers, pricing, estimate = null, selection = {}) {
-  // The tiles follow the cadence the customer has chosen below (the price
-  // card's own selection), so a tile never shows the quarterly figure beside
-  // a monthly price card. No selection yet = the section default.
-  const preferredKey = selection.frequencyKey || pestSectionDefaultKey(pricing);
-  const key = tier.key;
-  // The server's guarantee decision (serviceMixMakesNoGuaranteeClaim): on a
-  // no-guarantee estimate no tile may claim a callback or the Waves
-  // Guarantee — the same flag the price cards honor.
+function Tile({ selected, disabled, onClick, eyebrow, name, price, caption, extra, chips }) {
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      disabled={disabled}
+      onClick={onClick}
+      style={{
+        ...estimateInnerBox({
+          position: 'relative',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'flex-start',
+          gap: 6,
+          width: '100%',
+          height: '100%',
+          textAlign: 'left',
+          padding: '14px 14px 13px',
+          cursor: disabled ? 'default' : 'pointer',
+          opacity: disabled && !selected ? 0.6 : 1,
+          font: 'inherit',
+        }),
+        ...(selected
+          ? { border: `2px solid ${NAVY}`, boxShadow: `0 0 0 2px ${W.blueLight}`, background: '#F8FCFE' }
+          : {}),
+      }}
+    >
+      <span style={{ fontSize: FS.body, fontWeight: FW.bold, letterSpacing: '0.06em', color: W.textCaption }}>
+        {eyebrow}
+      </span>
+      <span style={{ fontSize: FS.bodyLg, fontWeight: FW.bold, color: NAVY, lineHeight: LH.snug }}>{name}</span>
+      <span style={{ fontSize: FS.sub, fontWeight: FW.bold, color: NAVY, lineHeight: LH.snug }}>
+        {price}
+        <span style={{ fontSize: FS.body, fontWeight: FW.semibold, color: W.textCaption }}> / application</span>
+      </span>
+      <span style={{ fontSize: FS.body, color: W.textBody, lineHeight: LH.body }}>{caption}</span>
+      {extra ? (
+        <span style={{ fontSize: FS.body, color: W.textBody, lineHeight: LH.body }}>{extra}</span>
+      ) : null}
+      {chips && chips.length ? (
+        <span style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>{chips}</span>
+      ) : null}
+    </button>
+  );
+}
+
+function cadenceCaption(rows, companionKey, companionLabel) {
+  const word = (row) => (row.service === companionKey
+    ? String(companionLabel || 'lawn').toLowerCase().replace(/ care$/, '')
+    : 'pest');
+  const parts = (rows || [])
+    .map((row) => ({ word: word(row), n: positive(row?.visitsPerYear) }))
+    .filter((part) => part.n);
+  if (!parts.length) return null;
+  return `${parts.map((part) => `${part.n} ${part.word}`).join(' and ')} applications a year`;
+}
+
+export default function OfferTierPicker({
+  tiers,
+  selectedKey,
+  onSelect,
+  disabled = false,
+  estimate = null,
+  change = null,
+  // Selection-aware rows for the tile the customer is on (the cadence they
+  // chose below); the other tiles are quoted at the standard schedule.
+  currentRows = null,
+  cadenceIsDefault = true,
+}) {
+  const wide = useMinWidth(640);
+  if (!tiers) return null;
+
   const noGuarantee = !!(estimate?.noGuaranteeClaims || estimate?.noEstimateWideGuarantee);
-  if (key === 'good') {
-    return {
-      eyebrow: 'GOOD',
-      name: 'One-time visit',
-      price: fmtMoney(tier.oneTimeTotal),
-      // "per application" is the estimate surface's one price unit
-      // (AGENTS.md "Per application price copy"); the one-visit nature of
-      // the tier is description, kept in the caption.
-      unit: '/ application',
-      caption: noGuarantee ? 'One application · no plan, no commitment' : 'One application · no plan, no commitment · 30-day callback',
-      chips: [],
-    };
-  }
-  if (key === 'better') {
-    const frequency = defaultFrequency(pricing?.frequencies, preferredKey);
-    const perApp = perApplicationNetForFrequency(frequency) ?? (Number(frequency?.perVisit) > 0 ? Number(frequency.perVisit) : null);
-    const visits = pestVisitsFor(frequency);
-    return {
-      eyebrow: 'BETTER',
-      name: 'Pest control plan',
-      price: perApp != null ? fmtMoney(perApp) : null,
-      unit: perApp != null ? '/ application' : null,
-      caption: `${visits ? `${visits} visits a year` : 'Year-round visits'}${noGuarantee ? '' : ' · Waves Guarantee'}`,
-      chips: [{ tone: 'navy', text: 'Most popular' }],
-    };
-  }
-  // best
-  const better = tiers.find((t) => t?.key === 'better') || null;
-  const betterFrequency = better ? defaultFrequency(pricing?.frequencies, preferredKey) : null;
-  const bestFrequency = defaultFrequency(tier.frequencies, preferredKey || betterFrequency?.key || null);
-  const companions = companionKeys(tier);
-  const name = companions.length
-    ? `Pest + ${companions.map((k) => COMPANION_NAMES[k] || humanizeKey(k)).join(' + ')}`
-    : (tier.label || 'Pest control + companion plan');
-  // While Best is the active tier, a matched cadence combo (lawn 9× / 12×,
-  // tree & shrub 6× / 9×) carries the exact rows the price card shows.
-  const comboRows = selection.bestActive && Array.isArray(selection.combo?.perServiceTreatments) && selection.combo.perServiceTreatments.length
-    ? selection.combo.perServiceTreatments
+  const phase = change?.phase || 'idle';
+  const busy = phase === 'previewing' || phase === 'committing';
+  const tilesDisabled = disabled || busy;
+  const { good } = tiers;
+  const liveRows = Array.isArray(currentRows) && currentRows.length ? currentRows : null;
+  const better = selectedKey === 'better' && liveRows && liveRows.some((row) => row?.service === 'pest_control')
+    ? { ...tiers.better, rows: liveRows.filter((row) => row?.service === 'pest_control') }
+    : tiers.better;
+  const best = selectedKey === 'best' && liveRows && liveRows.length >= 2
+    ? { ...tiers.best, rows: liveRows }
+    : tiers.best;
+  const betterPest = pestRow(better);
+  const bestPest = pestRow(best);
+  const betterPestPrice = positive(betterPest?.perApplication);
+  const bestPestPrice = positive(bestPest?.perApplication);
+  // The saving compares two tiles; with a non-standard cadence chosen they
+  // are no longer quoted on the same schedule, so the chip steps aside.
+  const saving = cadenceIsDefault && betterPestPrice != null && bestPestPrice != null && bestPestPrice < betterPestPrice
+    ? Math.round((betterPestPrice - bestPestPrice) * 100) / 100
     : null;
-  const rows = comboRows || (Array.isArray(bestFrequency?.perServiceTreatments) ? bestFrequency.perServiceTreatments : []);
-  const pestVisits = pestVisitsFor(bestFrequency);
-  const parts = [`${pestVisits ? `${pestVisits}×/yr ` : ''}pest`];
-  for (const k of companions) {
-    const row = rows.find((r) => r?.service === k);
-    const visits = Number(row?.visitsPerYear);
-    parts.push(`${COMPANION_SHORT[k] || humanizeKey(k)}${visits > 0 ? ` ${visits}×/yr` : ''}`);
-  }
-  // Per application is the estimate surface's one billing unit (owner
-  // 2026-07-11); the tile leads with each program's net per-application
-  // figure, never a monthly spread.
-  const perAppParts = rows
-    .map((r) => (Number(r?.displayPrice) > 0 ? Number(r.displayPrice) : (Number(r?.perTreatment) > 0 ? Number(r.perTreatment) : null)))
-    .filter((n) => n != null);
-  const pct = discountPctFor(tier);
-  const chips = [];
-  // The saving is promised only for programs the server actually discounted
-  // (a row whose net per-application figure sits below its list figure, or
-  // that the server marks eligible); a program excluded from the percentage
-  // (margin guard, excluded family) must not be promised the nominal rate.
-  // Corroborated per row, the way the price card does (±$0.06 rounding
-  // budget): a row counts as getting the nominal rate only when its actual
-  // reduction equals list × pct. A floor-clamped row is reduced by LESS than
-  // the rate; any such row, or a row whose figures cannot be checked, drops
-  // the percentage promise entirely (the metal tier chip still shows).
-  const rowReduction = (r) => {
-    const list = Number(r?.perTreatment);
-    const net = Number(r?.displayPrice);
-    if (!(list > 0) || !(net > 0)) return null;
-    return Math.round((list - net) * 100) / 100;
-  };
-  const rowAtNominalRate = (r) => {
-    const reduction = rowReduction(r);
-    if (reduction == null) return false;
-    return Math.abs(reduction - Math.round(Number(r.perTreatment) * pct) / 100) <= 0.06;
-  };
-  const fullRows = rows.filter(rowAtNominalRate);
-  const untouchedRows = rows.filter((r) => rowReduction(r) === 0);
-  if (pct > 0 && rows.length > 0 && fullRows.length === rows.length) {
-    chips.push({ tone: 'green', text: `Save ${pct}% on ${rows.length > 2 ? 'all' : 'both'}` });
-  } else if (pct > 0 && fullRows.length > 0 && fullRows.length + untouchedRows.length === rows.length) {
-    chips.push({ tone: 'green', text: `Save ${pct}% on eligible programs` });
-  }
-  if (pct > 0 && tier.waveGuardTier) {
-    chips.push({ tone: 'metal', text: `WaveGuard ${String(tier.waveGuardTier).replace(/^WaveGuard\s+/i, '')}`, tier: tier.waveGuardTier });
-  }
-  return {
-    eyebrow: 'BEST',
-    name,
-    price: perAppParts.length ? perAppParts.map((n) => fmtMoney(n)).join(' + ') : null,
-    unit: perAppParts.length ? '/ application' : null,
-    caption: parts.join(' · '),
-    chips,
-  };
-}
 
-function chipStyle(chip) {
-  if (chip.tone === 'navy') return { background: NAVY, color: W.white, border: `1px solid ${NAVY}` };
-  if (chip.tone === 'green') return { background: W.greenLight, color: W.green, border: '1px solid #BBF7D0' };
-  return waveGuardChipStyle(chip.tier);
-}
+  const firstVisitLine = (view) => (positive(view?.oneTimeTotal)
+    ? `+ ${fmtMoney(view.oneTimeTotal)} one-time first-visit charges`
+    : null);
 
-export default function OfferTierPicker({ tiers, selectedKey, onSelect, disabled = false, pricing = null, estimate = null, selectedFrequencyKey = null, selectedCombo = null }) {
-  const narrow = useNarrow();
-  if (!Array.isArray(tiers) || tiers.length === 0) return null;
+  const tiles = [];
+  if (good) {
+    tiles.push(
+      <Tile
+        key="good"
+        selected={selectedKey === 'good'}
+        disabled={tilesDisabled}
+        onClick={() => onSelect && onSelect('good')}
+        eyebrow="GOOD"
+        name={TILE_NAMES.good}
+        price={fmtMoney(good.oneTimeTotal)}
+        caption={`One application · no plan, no commitment${noGuarantee ? '' : ' · 30-day callback'}`}
+      />,
+    );
+  }
+  if (better && betterPestPrice != null) {
+    const cadence = cadenceCaption(better.rows, tiers.companionKey, tiers.companionLabel);
+    const base = (positive(betterPest?.visitsPerYear) ? `${betterPest.visitsPerYear} applications a year` : null)
+      || cadence
+      || 'Year-round service';
+    tiles.push(
+      <Tile
+        key="better"
+        selected={selectedKey === 'better'}
+        disabled={tilesDisabled}
+        onClick={() => onSelect && onSelect('better')}
+        eyebrow="BETTER"
+        name={TILE_NAMES.better}
+        price={fmtMoney(betterPestPrice)}
+        caption={`${base}${noGuarantee ? '' : ' · Waves Guarantee'}`}
+        extra={firstVisitLine(better)}
+        chips={[<Chip key="pop" style={{ background: NAVY, color: W.white }}>Most popular</Chip>]}
+      />,
+    );
+  }
+  if (best && (best.rows || []).length) {
+    const chips = [];
+    if (best.waveGuardTier) {
+      chips.push(
+        <Chip key="wg" style={waveGuardChipStyle(best.waveGuardTier)}>{`WaveGuard ${best.waveGuardTier}`}</Chip>,
+      );
+    }
+    if (saving != null) {
+      chips.push(
+        <Chip key="save" style={{ background: W.successWash, color: W.green, border: `1px solid ${W.greenLight}` }}>
+          {`Save ${fmtMoney(saving)} per pest application`}
+        </Chip>,
+      );
+    }
+    tiles.push(
+      <Tile
+        key="best"
+        selected={selectedKey === 'best'}
+        disabled={tilesDisabled}
+        onClick={() => onSelect && onSelect('best')}
+        eyebrow="BEST"
+        name={bestTileName(tiers)}
+        price={best.rows.map((row) => fmtMoney(row.perApplication)).join(' + ')}
+        caption={cadenceCaption(best.rows, tiers.companionKey, tiers.companionLabel) || 'Both programs on one plan'}
+        extra={firstVisitLine(best)}
+        chips={chips}
+      />,
+    );
+  }
+  if (!tiles.length) return null;
+
+  const disclosures = Array.isArray(change?.quote?.disclosures) ? change.quote.disclosures : [];
+  const targetName = change?.targetKey ? offerTierName(change.targetKey, tiers) : '';
 
   return (
-    <div style={estimateCard()}>
-      <div style={{
-        fontSize: 14, fontWeight: 700, color: W.textCaption,
-        textTransform: 'uppercase', letterSpacing: '0.12em', marginBottom: 8,
-      }}
-      >
+    <section style={estimateCard({ padding: 16 })} aria-label="Choose your plan">
+      <div style={{ fontSize: FS.body, fontWeight: FW.bold, letterSpacing: '0.06em', color: W.textCaption }}>
         Choose your plan
       </div>
       <h2 style={{
-        fontSize: FS.h2,
-        fontWeight: FW.medium,
-        color: NAVY,
-        lineHeight: LH.heading,
-        margin: 0,
-        marginBottom: 4,
+        margin: '4px 0 0', fontSize: FS.h3, fontWeight: FW.bold, lineHeight: LH.heading, color: CUSTOMER_SURFACE.text,
       }}
       >
         Pick the option that fits
       </h2>
-      <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, lineHeight: 1.5, marginBottom: 20 }}>
+      <p style={{ margin: '4px 0 12px', fontSize: FS.body, lineHeight: LH.body, color: W.textBody }}>
         You can change this any time before you approve.
-      </div>
+      </p>
       <div
         role="radiogroup"
-        aria-label="Choose your plan"
+        aria-label="Plan options"
         style={{
           display: 'grid',
-          gridTemplateColumns: narrow ? 'minmax(0, 1fr)' : 'repeat(3, minmax(0, 1fr))',
-          gap: 12,
+          gridTemplateColumns: wide ? `repeat(${Math.min(3, tiles.length)}, minmax(0, 1fr))` : '1fr',
+          gap: 10,
         }}
       >
-        {tiers.map((tier) => {
-          const model = tileModel(tier, tiers, pricing, estimate, {
-            frequencyKey: selectedFrequencyKey,
-            combo: selectedCombo,
-            bestActive: selectedKey === 'best',
-          });
-          const selected = tier.key === selectedKey;
-          return (
+        {tiles}
+      </div>
+      {!cadenceIsDefault ? (
+        <p style={{ margin: '10px 0 0', fontSize: FS.body, color: W.textCaption, lineHeight: LH.body }}>
+          Your selected option shows the schedule you chose. The other options show the standard schedule; the price updates when you switch.
+        </p>
+      ) : null}
+      {phase === 'previewing' || phase === 'committing' ? (
+        <div role="status" style={{ marginTop: 10, fontSize: FS.body, color: W.textBody, lineHeight: LH.body }}>
+          {phase === 'previewing' ? 'Checking your price…' : 'Updating your estimate…'}
+        </div>
+      ) : null}
+      {phase === 'preview' && change?.quote ? (
+        <div style={estimateInnerBox({ padding: '14px 16px', marginTop: 12 })}>
+          <div style={{ fontSize: FS.bodyLg, fontWeight: FW.bold, color: CUSTOMER_SURFACE.text, marginBottom: 8 }}>
+            {`Switch to ${targetName}?`}
+          </div>
+          {disclosures.length ? (
+            <ul style={{ margin: '0 0 0', paddingLeft: 18, fontSize: FS.body, color: CUSTOMER_SURFACE.body, lineHeight: LH.body }}>
+              {disclosures.map((d, i) => {
+                const text = typeof d === 'string' ? d : (d?.message || d?.text || '');
+                if (!text) return null;
+                return <li key={d?.code ? `${d.code}-${i}` : i} style={{ marginBottom: 4 }}>{text}</li>;
+              })}
+            </ul>
+          ) : (
+            <div style={{ fontSize: FS.body, color: CUSTOMER_SURFACE.body, lineHeight: LH.body }}>
+              Your estimate updates right away.
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 10, marginTop: 14, flexWrap: 'wrap' }}>
             <button
-              key={tier.key}
               type="button"
-              role="radio"
-              aria-checked={selected}
-              disabled={disabled}
-              onClick={() => { if (!disabled) onSelect?.(tier.key); }}
+              onClick={change.onConfirm}
               style={{
-                ...estimateInnerBox({
-                  position: 'relative',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'flex-start',
-                  gap: 6,
-                  width: '100%',
-                  textAlign: 'left',
-                  padding: '16px 16px 14px',
-                  cursor: disabled ? 'default' : 'pointer',
-                  opacity: disabled ? 0.6 : 1,
-                  font: 'inherit',
-                }),
-                ...(selected
-                  ? { border: `2px solid ${NAVY}`, boxShadow: RING, background: '#F8FCFE' }
-                  : {}),
+                padding: '10px 18px', background: NAVY, color: W.white, border: 'none',
+                borderRadius: 12, fontSize: FS.body, fontWeight: FW.semibold, cursor: 'pointer',
               }}
             >
-              <span style={{
-                fontSize: 14, fontWeight: FW.bold, color: W.textCaption,
-                textTransform: 'uppercase', letterSpacing: '0.12em',
-              }}
-              >
-                {model.eyebrow}
-              </span>
-              <span style={{ fontSize: FS.bodyLg, fontWeight: FW.bold, color: NAVY, lineHeight: LH.snug }}>
-                {model.name}
-              </span>
-              <span style={{ lineHeight: LH.snug }}>
-                {model.price ? (
-                  <span style={{ fontSize: 22, fontWeight: FW.bold, color: NAVY }}>{model.price}</span>
-                ) : null}
-                {model.unit ? (
-                  <span style={{ fontSize: 14, fontWeight: FW.semibold, color: W.textCaption }}>{` ${model.unit}`}</span>
-                ) : null}
-              </span>
-              <span style={{ fontSize: 14, color: W.textCaption, lineHeight: LH.body }}>
-                {model.caption}
-              </span>
-              {model.chips.length ? (
-                <span style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 2 }}>
-                  {model.chips.map((chip) => (
-                    <Pill key={chip.text} style={chipStyle(chip)}>{chip.text}</Pill>
-                  ))}
-                </span>
-              ) : null}
+              Switch my plan
             </button>
-          );
-        })}
-      </div>
-    </div>
+            <button
+              type="button"
+              onClick={change.onCancel}
+              style={{
+                padding: '10px 18px', background: 'transparent', color: CUSTOMER_SURFACE.body,
+                border: `1px solid ${CUSTOMER_SURFACE.border}`, borderRadius: 12, fontSize: FS.body,
+                fontWeight: FW.medium, cursor: 'pointer',
+              }}
+            >
+              Keep what I have
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 }
