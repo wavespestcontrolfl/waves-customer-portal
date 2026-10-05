@@ -1713,6 +1713,29 @@ postgres('access codes section', () => {
       expect(await mirror()).toMatchObject({ checked: 0 });
     });
 
+    test('an adopted older row with no home is bound to the sole home', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      const [a] = c.propertyIds;
+      const old = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: a });
+      await trx('customer_access_codes').where({ id: old.row.id }).update({ property_id: null });
+      await mirror();
+      expect((await trx('customer_access_codes').where({ id: old.row.id }).first()).property_id).toBe(a);
+    });
+
+    test('a multi-home pass forgets the per-kind hashes, so a later return to one home starts fresh', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      const [a] = c.propertyIds;
+      await mirror();
+      const b = randomUUID();
+      await trx('customer_properties').insert({
+        id: b, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      await mirror();
+      expect((await trx('access_code_profile_mirror').where({ customer_id: c.id }).first()).hashes).toEqual({});
+      expect(a).toBeTruthy();
+    });
+
     test('the only home changes: an office row the mirror adopted by value retires too', async () => {
       const c = await customer({ prefs: { garage_code: '2468' } });
       const [a] = c.propertyIds;

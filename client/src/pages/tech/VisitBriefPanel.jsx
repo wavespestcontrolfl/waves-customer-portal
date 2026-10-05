@@ -305,14 +305,16 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
   const ids = visitKey ? visitKey.split(',') : [];
   // Already shown above for the SAME access point; equal values at different
   // points (a gate and a door both 1234) are both shown.
-  const shown = new Set(shownCodes.map(([kind, c]) => `${kind}:${String(c).trim().toLowerCase()}`));
+  // Codes compare as the server does: case and every space ignored ("# 4821" = "#4821").
+  const canon = (c) => String(c || '').replace(/\s+/g, '').toLowerCase();
+  const shown = new Set(shownCodes.map(([kind, c]) => `${kind}:${canon(c)}`));
   // A one-home customer's gate, garage and lockbox rows come marked
   // `profileBacked`. The brief's profile codes may be off, fail soft or come
   // from a stale cached brief, so a row is hidden only when the card already
   // shows that exact code for the same access point (the dedupe below); a row
   // whose code differs is the current one and is always shown.
   const mine = rows.filter((r) => (r.life === 'standing' || ids.includes(r.scheduledServiceId))
-    && !(r.code && !r.instructions && shown.has(`${r.kind}:${String(r.code).trim().toLowerCase()}`)));
+    && !(r.code && !r.instructions && shown.has(`${r.kind}:${canon(r.code)}`)));
   if (failed) {
     return (
       <>

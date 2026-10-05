@@ -618,7 +618,10 @@ async function mirrorCustomer(conn, customerId) {
         const hash = valueHash(value, null);
         const others = await live().whereNot('value_hash', hash).forUpdate();
         await retireAll(others);
-        const same = await live().where('value_hash', hash).forUpdate().first('id');
+        const same = await live().where('value_hash', hash).forUpdate().first('id', 'property_id');
+        // An adopted older row with no home is bound to the sole home, so the
+        // visit read (which needs an exact home) can still return it.
+        if (same && !same.property_id) await trx('customer_access_codes').where({ id: same.id }).update({ property_id: home, updated_at: trx.fn.now() });
         if (!same) {
           const [row] = await trx('customer_access_codes').insert({
             customer_id: customerId, property_id: home, kind, code: value, instructions: null, life: 'standing',
@@ -631,7 +634,11 @@ async function mirrorCustomer(conn, customerId) {
       }
     }
     // The sole home rides in the receipt, so a change of it is noticed at once.
-    if (oneHome) hashes._home = homes[0]; else delete hashes._home;
+    // While the customer has several homes nothing is mirrored, so the per-kind
+    // hashes no longer describe any home and are forgotten: a later return to
+    // one home starts fresh instead of reading an old field as "emptied".
+    if (oneHome) hashes._home = homes[0];
+    else for (const key of Object.keys(hashes)) delete hashes[key];
     // The receipt, whatever happened: the customer is not looked at again
     // until their profile, their home count or the day changes.
     // (the edit time is copied in SQL: a JavaScript date drops the microseconds

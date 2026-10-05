@@ -106,6 +106,14 @@ describe('VisitBriefPanel access codes', () => {
     expect(screen.getAllByText('2468')).toHaveLength(2);
   });
 
+  it('a code that differs from the profile code only by spaces is shown once', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [garageRow({ code: '#4821', kind: 'neighborhood_gate' })] }));
+    render(<VisitBriefPanel stop={stop} detail={withFacts({ neighborhoodGate: '# 4821' })} request={request} />);
+    expect(await screen.findByText('# 4821')).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText('#4821')).toBeNull();
+  });
+
   it('one-home visit: a stale cached profile code does not hide the current row', async () => {
     const request = vi.fn(() => Promise.resolve({ accessCodes: [garageRow({ code: '1357' })] }));
     render(<VisitBriefPanel stop={stop} detail={withFacts({ garage: '2468' })} request={request} />);
