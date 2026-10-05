@@ -933,7 +933,7 @@ function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photo
 // gets a pay link or a review ask.
 function reportCompletionBody({
   form, rows, draft, perimeterFeet, trace, visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks, recordFields = null,
-  traceOnReport = true,
+  traceOnReport = true, photos = [],
 }) {
   const ratingSent = ratingAllowed && Number.isInteger(form.rating);
   // A lane or typed visit records its own record, as the report was written
@@ -971,6 +971,10 @@ function reportCompletionBody({
     technicianNotes: draft.text.trim(),
     reportDraftBase: draft.base,
     ...(promiseMarks.length ? { promiseMarks } : {}),
+    // The photo descriptions the report was written from (a changed one
+    // makes the report stale here): the server re-reads them under the visit
+    // lock, so one changed on another device refuses the send.
+    photoCaptionsSeen: photoCaptionsOf(photos),
     techTips: techTipsOf(form, tipsAvailable),
     // The picked Waves blog post; /complete checks it is still live and
     // freezes it onto the report.
@@ -1642,6 +1646,7 @@ function ReportFlowForm({
         form, rows, draft, perimeterFeet, trace, visitIdentity: ctx.visitIdentity, ratingAllowed, tipsAvailable, isReservice, promiseMarks,
         recordFields: recordState.inputs(record, draft?.facts),
         traceOnReport: ctx.traceOnReport,
+        photos: visitPhotos.photos,
       }),
       summary(),
     );

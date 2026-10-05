@@ -346,6 +346,7 @@ test('the SMS commit calls the shared cancel workflow with the pinned scheduled_
     expectedBodyDigest: require('crypto').createHash('md5').update('Synthetic reminder body', 'utf8').digest('hex'),
     expectedCustomerId: CUSTOMER_ID,
     simpleOnly: true,
+    keepRow: true, // the bar cancels in place (row kept, status canceled), never deletes
   });
   expect(refused.success).not.toBe(true);
   expect(refused.preview_changed).toBe(true);

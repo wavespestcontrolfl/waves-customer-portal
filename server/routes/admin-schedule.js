@@ -18986,8 +18986,9 @@ async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
   return termsByCustomer;
 }
 
-// True when this save puts an UNSTAMPED visit back at the price the /secure
-// plan was sold at (its per_visit_amount baseline). Such an edit can never
+// True when this save puts an UNSTAMPED visit back at the price the term was
+// sold at for it (the /secure per_visit_amount baseline, or the visit's own
+// mint price under GATE_PREPAY_MINT_PRICE_HOLD). Such an edit can never
 // leave the old-price invoice covering a different price, so the rail lets
 // it through — it is exactly the repair the stamp-time hold's office alert
 // asks for. A visit the term already stamped (prepaid money on it) is never
@@ -18995,8 +18996,8 @@ async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
 async function editRestoresSoldPrice(conn, term, row, proposedPrice) {
   if (proposedPrice === undefined || proposedPrice === null || proposedPrice === '') return false;
   if (row?.prepaid_amount != null && Number(row.prepaid_amount) > 0) return false;
-  const { securePlanSoldPerVisitCents } = require('../services/annual-prepay-renewals');
-  const soldCents = await securePlanSoldPerVisitCents(term, conn);
+  const { soldPriceCentsForVisit } = require('../services/annual-prepay-renewals');
+  const soldCents = await soldPriceCentsForVisit(term, row, conn);
   return soldCents != null && Math.round(Number(proposedPrice) * 100) === soldCents;
 }
 
