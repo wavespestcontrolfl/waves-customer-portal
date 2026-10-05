@@ -320,6 +320,30 @@ async function reconcileSource(trx, message, items) {
   return stale.length;
 }
 
+// Every write the sweep makes about a text (filing, or clearing what an older
+// version filed) first proves, under locks, that the gate and its activation
+// time still hold, the customer row is locked in the office writers' order,
+// and the text still belongs to that customer with the words this pass read.
+async function sourceStillCurrent(trx, message, receipt) {
+  const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
+  if (!enabled() || !since || new Date(message.created_at) < since) return false;
+  if (!(await lockCustomer(trx, message.customer_id))) return false;
+  const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_body');
+  return !!live && live.customer_id === message.customer_id && live.direction === 'inbound'
+    && hashExtractionSource(live.message_body) === receipt.source_hash;
+}
+
+// A text that names no way in any more (emptied, too long, unflagged, or its
+// read failed for good): clear what an older version filed and receipt it.
+async function closeSource(conn, message, receipt, status, extra = {}) {
+  await conn.transaction(async (trx) => {
+    const current = await sourceStillCurrent(trx, message, receipt);
+    if (current) await reconcileSource(trx, message, []);
+    // A stale snapshot leaves no receipt, so the next pass reads the text again.
+    if (current || status !== 'no_fields') await recordExtractionAttempt({ ...receipt, trx, status, ...extra });
+  });
+}
+
 async function fileFoundItems(conn, { message }, items, receipt) {
   return conn.transaction(async (trx) => {
     // The model call ran outside any lock. Before a write: the gate and its
@@ -327,12 +351,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
     // the office writers), and the text still belongs to that customer with
     // the same words. A merge or an edit in between leaves no receipt, so the
     // next pass reads the text again from its current state.
-    const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
-    if (!enabled() || !since || new Date(message.created_at) < since) return 0;
-    if (!(await lockCustomer(trx, message.customer_id))) return 0;
-    const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_body');
-    if (!live || live.customer_id !== message.customer_id || live.direction !== 'inbound'
-      || hashExtractionSource(live.message_body) !== receipt.source_hash) return 0;
+    if (!(await sourceStillCurrent(trx, message, receipt))) return 0;
     const customer = { id: message.customer_id };
     // Re-read under the customer lock: a property added, moved or closed during
     // the model call changes which home the code belongs to, and its house
@@ -434,10 +453,7 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
         if (!eligibleMessage(message) || String(message.message_body || '').trim() === ''
           || String(message.message_body).length > MAX_BODY) {
           // A text corrected out of reach (emptied, too long) drops what it filed.
-          await conn.transaction(async (trx) => {
-            if (await lockCustomer(trx, message.customer_id)) await reconcileSource(trx, message, []);
-            await recordExtractionAttempt({ ...receipt, trx, status: 'no_fields' });
-          });
+          await closeSource(conn, message, receipt, 'no_fields');
           tally.skipped += 1;
           continue;
         }
@@ -448,10 +464,7 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
         }
         if (!flagged) {
           // A text corrected so it no longer names a way in drops what it filed.
-          await conn.transaction(async (trx) => {
-            if (await lockCustomer(trx, message.customer_id)) await reconcileSource(trx, message, []);
-            await recordExtractionAttempt({ ...receipt, trx, status: 'no_fields' });
-          });
+          await closeSource(conn, message, receipt, 'no_fields');
           tally.skipped += 1;
           continue;
         }
@@ -463,7 +476,14 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
       } catch (err) {
         tally.failed += 1;
         try {
-          await recordExtractionAttempt({ ...receipt, trx: conn, status: 'failed', error_message: 'access_net_failed' });
+          const receiptRow = await recordExtractionAttempt({ ...receipt, trx: conn, status: 'failed', error_message: 'access_net_failed' });
+          // The current words could never be read: what an older version filed
+          // is not supported by them, so it leaves the review list.
+          if (receiptRow?.status === 'failed_max_retries') {
+            await conn.transaction(async (trx) => {
+              if (await sourceStillCurrent(trx, message, receipt)) await reconcileSource(trx, message, []);
+            });
+          }
         } catch { /* the next tick retries the same row */ }
         logger.warn(`[access-codes] capture failed for sms_log ${message.id} (${err.code || err.name || 'error'})`);
       }

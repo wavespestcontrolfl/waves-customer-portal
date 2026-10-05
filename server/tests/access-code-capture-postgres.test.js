@@ -261,6 +261,16 @@ postgres('access codes section', () => {
       expect((await rows(c.id)).map((r) => [r.code, r.status])).toEqual([['#4821', 'found']]);
     });
 
+    test('a corrected text whose read keeps failing clears what the old version filed', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'The gate code is #4821');
+      await sweep(stub([gateItem()]));
+      await trx('sms_log').where({ id }).update({ message_body: 'The gate code is #9876 now' });
+      const fail = jest.fn(async () => { throw Object.assign(new Error('x'), { code: 'ECONN' }); });
+      for (let i = 0; i < 3; i += 1) await expect(sweep(fail)).rejects.toMatchObject({ code: 'ACCESS_NET_FAILURES' });
+      expect(await rows(c.id)).toEqual([]);
+    });
+
     test('a corrected text never touches a row the office already decided', async () => {
       const c = await customer();
       const id = await text(c.id, 'The gate code is #4821');
