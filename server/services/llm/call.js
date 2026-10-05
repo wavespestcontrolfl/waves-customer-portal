@@ -783,7 +783,13 @@ async function callAnthropic({ model, system, text, images = [], documents = [],
   // row can span several attempts — the row is the CALL as the caller saw it.
   const t0 = nowMs();
   try {
-    const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    // A CLIENT-level timeout is required: with none, the SDK refuses any
+    // non-streaming request whose max_tokens implies over 10 minutes (about
+    // 21,333 tokens) before it reaches the network ("Streaming is required"),
+    // and the per-request timeout below is applied after that check. That
+    // silently failed every Opus 5.5 curation call (24,000) in 1 ms, so GPT
+    // scored every event. Same 10-minute value the SDK would otherwise use.
+    const client = anthropicClient || new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY, timeout: DEFAULT_TIMEOUT_MS });
     const req = anthropicRequest({
       model, system, text, images, documents, tools, jsonMode, jsonSchema, maxTokens, effort,
     });

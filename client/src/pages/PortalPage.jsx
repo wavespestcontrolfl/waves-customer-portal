@@ -2154,8 +2154,12 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         {metrics.map((m, i) => {
           const current = scores[m.key] || 0;
-          const initial = initialScores?.[m.initialKey] || 0;
-          const delta = current - initial;
+          // The server flags the first-visit color as hidden when the first and latest
+          // photos were not taken in known, compatible light (GATE_LAWN_LIGHTING):
+          // today's color shows alone, with no "from" and no change.
+          const compareHidden = m.key === 'colorHealth' && initialScores?.colorHidden === true;
+          const initial = compareHidden ? 0 : (initialScores?.[m.initialKey] || 0);
+          const delta = compareHidden ? 0 : current - initial;
           return (
             <div key={m.key}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
@@ -2170,17 +2174,17 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
                       {delta > 0 ? '+' : ''}{delta}
                     </span>
                   )}
-                  <span style={{ color: PORTAL_SHELL.muted, fontSize: 14, marginLeft: 4 }}>from {initial}%</span>
+                  {!compareHidden && <span style={{ color: PORTAL_SHELL.muted, fontSize: 14, marginLeft: 4 }}>from {initial}%</span>}
                 </span>
               </div>
               <div style={{
                 position: 'relative', height: 8, borderRadius: 4, background: B.grayLight, overflow: 'hidden',
               }}>
-                <div style={{
+                {!compareHidden && <div style={{
                   position: 'absolute', height: '100%', borderRadius: 4,
                   background: `linear-gradient(90deg, ${B.teal}30, ${B.green}30)`,
                   width: `${initial}%`,
-                }} />
+                }} />}
                 <div style={{
                   position: 'absolute', height: '100%', borderRadius: 4,
                   background: `linear-gradient(90deg, ${B.teal}, ${B.green})`,

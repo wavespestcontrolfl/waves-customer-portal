@@ -150,6 +150,20 @@ describe('LawnTrends first-visit baseline (owner 2026-08-04)', () => {
     expect(screen.getByText('Lawn Health Trend')).toBeInTheDocument();
     expect(screen.queryByText('Progress Tracking')).not.toBeInTheDocument();
   });
+
+  it('a payload with the color series left out (GATE_LAWN_LIGHTING) draws no Color & Vigor chart and keeps the others', () => {
+    const points = [
+      { date: '2026-06-01', label: 'Jun 1', value: 62 },
+      { date: '2026-07-01', label: 'Jul 1', value: 70 },
+    ];
+    const { unmount } = render(<LawnTrends trends={{ overall: points, weed: points }} baselineScore={70} />);
+    expect(screen.queryByText('Color & Vigor')).not.toBeInTheDocument();
+    expect(screen.getByText('Weed Cleanliness')).toBeInTheDocument();
+    expect(screen.getByText('Lawn Health Trend')).toBeInTheDocument();
+    unmount();
+    render(<LawnTrends trends={{ overall: points, color: points }} baselineScore={70} />);
+    expect(screen.getByText('Color & Vigor')).toBeInTheDocument();
+  });
 });
 
 describe('LawnTrends mowing band honesty', () => {

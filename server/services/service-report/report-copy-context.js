@@ -19,6 +19,7 @@ const { loadActiveConfig } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
 const { lawnScoreValue, resolveStressDamage } = require('../../../shared/lawn-scores.cjs');
 const { loadLinkedLawnAssessment } = require('./report-data');
+const { loadVisitLights, colorComparability, COLOR_NO_CHANGE_POINTS } = require('../lawn-lighting');
 const {
   techFindingsPromptLines, hasTechFindingLines, techFindingsCopyLive,
 } = require('./tree-shrub-tech-findings');
@@ -242,6 +243,7 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessm
         // June visit). Aliased as service_date so the label formatters keep
         // one field.
         knex.raw('COALESCE(ss.scheduled_date, la.service_date) as service_date'),
+        'la.id',
         'la.is_baseline',
         'la.turf_density', 'la.weed_suppression', 'la.color_health',
         'la.fungus_control', 'la.thatch_level', 'la.stress_damage',
@@ -266,14 +268,22 @@ function lawnAssessmentEntries(row) {
   ];
 }
 
-function lawnAssessmentLine(row, prior) {
+// `colorGuard` (GATE_LAWN_LIGHTING, owner 2026-10-04): { comparable } says whether
+// the two visits' photos were taken in known, compatible light. The color health
+// delta is given to the writer only then, and only when it is a real move
+// (COLOR_NO_CHANGE_POINTS or more); otherwise the writer gets today's color
+// score alone and has nothing to say about color improving or slipping. Absent
+// (gate off), every delta is given as before.
+function lawnAssessmentLine(row, prior, colorGuard = null) {
   const priorEntries = prior ? Object.fromEntries(lawnAssessmentEntries(prior)) : {};
   const parts = [];
   for (const [label, value] of lawnAssessmentEntries(row)) {
     if (value == null) continue;
     const prev = priorEntries[label];
+    const colorWithheld = colorGuard && label === 'color health'
+      && (!colorGuard.comparable || (prev != null && Math.abs(value - prev) < COLOR_NO_CHANGE_POINTS));
     // A delta is meaningful only when BOTH visits scored the category.
-    const delta = prev != null && prev !== value
+    const delta = prev != null && prev !== value && !colorWithheld
       ? ` (${value > prev ? '+' : ''}${value - prev} vs ${formatShortDate(prior.service_date)})`
       : '';
     parts.push(`${label} ${value}/100${delta}`);
@@ -684,9 +694,21 @@ async function buildReportCopyContext({
   // assessment exists, present it as history — never as today's reading.
   if (lawnAssessments?.today) {
     const isBaseline = !!lawnAssessments.today.is_baseline;
+    // GATE_LAWN_LIGHTING, read at call time: the color delta needs both visits'
+    // stored light to be known and compatible. A failed read is unknown light.
+    let colorGuard = null;
+    if (!isBaseline && lawnAssessments.prior && require('../../config/feature-gates').lawnLightingLive()) {
+      let comparable = false;
+      try {
+        const lights = await loadVisitLights(knex, [lawnAssessments.today.id, lawnAssessments.prior.id], { customerId });
+        comparable = colorComparability(lights.get(String(lawnAssessments.today.id)), lights.get(String(lawnAssessments.prior.id))).comparable;
+      } catch { /* unreadable light = unknown light */ }
+      colorGuard = { comparable };
+    }
     const scoreLine = lawnAssessmentLine(
       lawnAssessments.today,
       isBaseline ? null : lawnAssessments.prior,
+      colorGuard,
     );
     if (scoreLine) {
       sections.push(

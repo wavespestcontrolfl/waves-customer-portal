@@ -1060,3 +1060,38 @@ describe('buildPestExpectations — child keys present only with content (codex 
     expect(buildPestExpectations({ weekWeather: null, applications: [], serviceMonth: 3 })).toBeNull();
   });
 });
+
+// Owner report review 2026-10-03: the forecast alone fired the ants line
+// right under a light measured week (0.38" in October, under the 0.5"
+// rainy-season bar), and it read as though heavy rain had already fallen.
+describe('ants-after-rain line fired by the forecast alone', () => {
+  const LIGHT_WEEK = { rainInches: 0.38, rainConfidence: 'high' };
+  const ANT_BAND = { name: 'Taurus SC', method: 'perimeter_spray', methodInferred: false, targets: ['Ants'] };
+
+  it('says the rain is still to come, beside a light measured week', () => {
+    const out = buildRainExpectation({ weekWeather: LIGHT_WEEK, products: [], serviceMonth: 10, forecastHeavyRain: true });
+    expect(out.lines).toEqual([
+      'Our rain tracker recorded about 0.38" of rain at your property over the past 7 days.',
+      'Storms or heavy rain are in the forecast for the next few days. Heavy rain floods ant nests and pushes foragers indoors for a few days. If they\'re still coming in about a week after a downpour, text us and we\'ll come back out.',
+    ]);
+  });
+
+  it('the treated-band line says so too', () => {
+    const out = buildRainExpectation({ weekWeather: LIGHT_WEEK, products: [ANT_BAND], serviceMonth: 10, forecastHeavyRain: true });
+    expect(out.lines.at(-1)).toBe('Storms or heavy rain are in the forecast for the next few days. Heavy rain floods ant nests and pushes foragers indoors; trails after a downpour are foragers crossing the 6-foot perimeter band, picking up the active ingredient and carrying it back to the colony.');
+  });
+
+  it('a heavy measured week keeps the line about rain that fell, forecast or not', () => {
+    for (const forecastHeavyRain of [true, false]) {
+      const neutral = buildRainExpectation({ weekWeather: { rainInches: 0.8, rainConfidence: 'high' }, products: [], serviceMonth: 10, forecastHeavyRain });
+      expect(neutral.lines.at(-1)).toBe('Heavy rain floods ant nests and pushes foragers indoors for a few days. If they\'re still coming in after about a week, text us and we\'ll come back out.');
+      const band = buildRainExpectation({ weekWeather: { rainInches: 0.8, rainConfidence: 'high' }, products: [ANT_BAND], serviceMonth: 10, forecastHeavyRain });
+      expect(band.lines.at(-1)).toBe('Heavy rain floods ant nests and pushes foragers indoors. Trails over the next few days are foragers crossing the 6-foot perimeter band, picking up the active ingredient and carrying it back to the colony.');
+    }
+  });
+
+  it('no forecast and a light week: no ants line', () => {
+    const out = buildRainExpectation({ weekWeather: LIGHT_WEEK, products: [], serviceMonth: 10, forecastHeavyRain: false });
+    expect(out.lines.join(' ')).not.toMatch(/ant nests/);
+  });
+});

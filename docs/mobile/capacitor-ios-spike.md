@@ -74,6 +74,40 @@ change an entitlement in an installed iOS binary. See Apple's
   no cookie/SameSite work. Works offline and reads as a "real" native app to
   Apple review.
 
+## Offline opening (app-bound domains)
+
+In MODE A the app loads the live portal each time. iOS exposes service workers
+inside a `WKWebView` only to domains listed in the app's `WKAppBoundDomains`,
+so without that list the portal's offline copy (`client/public/sw.js`) never
+installs and the app shows a blank screen with no signal.
+
+- `bootstrap-ios.sh` writes `WKAppBoundDomains` into `Info.plist` from the
+  host of `server.url` (`portal.wavespestcontrol.com`) on every run.
+- `capacitor.config.json` sets `ios.limitsNavigationsToAppBoundDomains: true`;
+  Capacitor needs it to keep its plugin bridge working once the list exists.
+- Result: after one online open, the app opens offline from the saved copy
+  (including the tech Today page's last saved route). The first open after an
+  install still needs signal, and iOS may evict the copy when storage is low.
+- Switching to MODE B (no `server.url`) makes the bootstrap stop with an error:
+  set the bundled-mode domain list by hand then.
+
+Test on TestFlight before each submission that ships this setting. The list
+limits the app to the listed domain, so check every part that loads another
+company's page:
+
+1. Stripe card form (`client/src/lib/stripeLoader.js`). If it fails, add
+   Stripe's domain to the list (iOS allows up to 10 entries).
+2. Google address suggestions in the estimate and customer forms.
+3. Cloudflare Turnstile on public forms.
+4. Google Maps in the tech treatment-zone screen.
+5. Links to other sites open in Safari.
+6. Push, Face ID unlock, camera photos, universal links.
+7. Open once online, turn on Airplane Mode, force-quit, reopen: the app opens.
+8. Merge a small portal change: the app shows it on the next open.
+
+Rollback: remove the setting from `capacitor.config.json` and the plist step,
+rebuild and resubmit.
+
 ## Known follow-ups before submission
 
 1. **Backend APNs** — **Shipped.** See `apns-backend-pr-plan.md`; the

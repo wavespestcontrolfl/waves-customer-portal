@@ -2621,6 +2621,134 @@ selected at render from the frozen memory and the two visits' scores, so a
 permanent token repeats them while those inputs stand; approving an expectation
 row later adds that row's line to reports already delivered.
 
+`GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; off leaves every payload key,
+sentence, prompt and stored row unchanged, key for key) is ONE rule, "no color
+claim between visits shot in different or unknown light", with six independent
+effects. Each reads the gate at call time on its own; only effect 3 needs
+`GATE_LAWN_SINCE_LAST`. The gate reader `lawnLightingLive()` is true only when
+`GATE_LAWN_LIGHTING` AND `GATE_LAWN_VISIT_ASSESSMENT` are both on: the light read
+comes only from the one-call visit assessment (`/assess` stays on the legacy
+per-photo path without it), so without that gate no run would ever store a light,
+and no effect below can run without the reader that feeds it. It adds NO payload
+key to `GET /api/reports/:token/data`; it only removes or never writes color
+wording (the one added key is `initialScores.colorHidden` on the portal route,
+effect 6). A visit assessed before the gate
+has no light read, so its light is `unknown` and its color is never compared.
+Compatible light: full sun with full sun; overcast and open shade with each other;
+mixed sun and shade, low light and unknown are never compatible. A visit's light
+comes from its usable photos whose shot has positive color weight in
+`shared/lawn-photo-shots.json` (front, back, side, untagged, and the half-weight
+shade and hot-edge shots; detail shots do not count) when the visit was read under
+the shot-list prompt, and from EVERY usable photo when it was read under the legacy
+prompt (one whole-visit color score from all photos); which prompt is decided from
+the run's own stored prompt version, never from today's gate. A mix is mixed light. Any prompt position with no stored photo row (its insert failed) or no
+light read makes the visit's light unknown.
+
+Every code path that reads the gate (`lawnLightingLive()` in
+`server/config/feature-gates.js`; nothing else reads `GATE_LAWN_LIGHTING`):
+1. `server/services/lawn-visit-assessment.js` `analyzeVisit`: the visit assessment
+   reads each photo's light under `lawn-visit-v1-lighting` /
+   `lawn-visit-v1-shot-list-lighting` and the run stores it in
+   `lawn_assessment_runs.photo_quality` (left off the technician's response). The
+   input, result, referee, run-writer and eval modules receive that decision as a
+   parameter and do not read the gate.
+2. `server/services/lawn-paired-recheck.js` `runPairedRecheck`: the background
+   paired-photo job reads under `lawn-paired-recheck-v3`, told each pair's two
+   lights; `color` is dropped from a pair in incompatible or unknown light, and an
+   item keeps `color` only when a cited compatible pair itself reported it. A
+   recheck verdict already frozen on a visit memory is first-writer-wins and is
+   never rewritten. No payload effect.
+3. `server/services/service-report/report-data.js` (the progress engine call):
+   requires `GATE_LAWN_SINCE_LAST` to matter. It only REMOVES sentences from
+   `reportV2.lead.sinceLast.lines` (live views only, `mode: 'live'`; PDF and static
+   builds never carry that block, so PDF content and its cache signature are
+   unchanged and no signature stamp rides this gate). THE RULE: the gate may only
+   REMOVE a sentence gate-off would have printed, never print a different one, and
+   a removed sentence never makes room for another. So the engine first reaches
+   exactly the gate-off state for every item and the gate then only withholds:
+   the color lines ("Color is ahead of schedule.", "Color is on track.", "Color
+   is holding steady.", "Color is behind where we expected.", "The color change
+   since then is mostly seasonal.", "It is too early to judge the color
+   response.") are withheld unless both visits have a stored, compatible light,
+   and, in compatible light, a "behind" that rests on a color move under 8 points
+   (`COLOR_NO_CHANGE_POINTS`, the category band) is withheld too (nothing is said;
+   it is never rewritten to "holding steady"). Across a cool-season change the
+   gate-off engine itself (main, #5900) already calls a color move "mostly
+   seasonal" only when it reaches the band, and reads a smaller one as its normal
+   verdict (a would-be "behind" reads "holding steady"); in compatible light the
+   gate leaves that exactly as it is, so there is nothing further to withhold. The overall
+   sentence ("Your overall lawn score is up / down since then." / "...holding
+   steady.") is first decided exactly as gate-off decides it and is kept only when
+   thickness, weeds and stress damage agree with it (up with the no-color blend up
+   a band, down with it down a band, steady with it inside the band); otherwise
+   there is none. The two per-treatment slots, the four-line limit, the 40-word cap
+   and the lead's region word budget are all sized with the withheld lines still
+   counted (`budgetLines`, a non-enumerable hand-off, never a payload key), and the
+   withheld lines are removed last. A property test pins the rule over a grid of
+   score moves, seasons, treatments, photo confidence and light combinations: the
+   gate-on lines and lead strings are always a subset of the gate-off ones. For every
+   existing customer those color lines and color-driven overall sentences stop
+   appearing on reopened reports, because the block is re-selected from the frozen
+   memory and the two visits' scores on every live view; the frozen memory entry
+   and the frozen v6 copy are never rewritten. The two lights are read once per
+   live `/data` render (one `lawn_assessment_runs` and one `lawn_assessment_photos`
+   read, only with a prior visit). `/api/reports/:token/ask` and the PDF builder
+   pass no `lawnLighting` opt-in, read nothing and treat both lights as unknown;
+   an unreadable run is unknown light (fewer sentences, never a claim).
+4. `server/services/service-report/report-copy-context.js` (the report WRITER's
+   grounding, independent of `GATE_LAWN_SINCE_LAST`): while the lawn writer is
+   generating a report's text, the "LAWN ASSESSMENT" score line's color health
+   change against the prior visit ("+N vs <date>") is given to the model only when
+   both visits' stored light is compatible AND the move is 8 points or more;
+   otherwise the writer sees today's color score alone. The other categories keep
+   their changes. This changes only the INPUT of newly generated report text (new
+   visits, and regenerations); text already generated and frozen on a visit is
+   untouched, and the public route serves stored text as before. It adds one run
+   read and one photo read to generation, not to any public route.
+5. `server/services/service-report/report-data.js` (the trend): the report's
+   "Color & Vigor" trend, `reportV2.trends.color` (rendered by `LawnTrends` in
+   `client/src/components/report/lawnV2/LawnReportV2.jsx`, "Latest reading /
+   Previous reading"), is OMITTED from the payload unless the latest visit and the
+   visit before it (the chart's last two points) are in known, compatible light.
+   Compatible on both = the series is exactly as before; the series is never
+   rebuilt or relabeled, it is whole or absent. The overall trend and the weed,
+   coverage and stress trends are raw readings and stay. This is by the `/data`
+   render only (`lawnLighting` opt-in, any mode, one shared read with effect 3);
+   `/api/reports/:token/ask` and the PDF builder read nothing. THE PDF does not
+   carry the color trend: `mode=pdf` renders `ServiceReportDocument`
+   (`ReportViewPage.jsx`), which never mounts `LawnReportV2Section` or reads
+   `reportV2.trends`, so no cached PDF changes and no cache key is re-keyed (a test
+   pins this). EFFECT AT GATE-ON: every existing customer's report loses the
+   "Color & Vigor" chart (payload key `reportV2.trends.color`) until two
+   consecutive visits have been read under the lighting prompt in compatible light.
+6. `server/routes/lawn-health.js` (the customer portal's lawn health card,
+   `GET /api/lawn-health/:customerId`): the card's "Color / Nutrients: +N from X%"
+   compares the LATEST visit with the FIRST one, so unless those two visits were
+   photographed in known, compatible light the route sets `initialScores.colorHidden:
+   true` (the only added key; the gate-off payload has none) and
+   `beforeAfter.improvement.colorHealth: null`, and `PortalPage.jsx` then shows
+   today's color alone, with no "from" and no change. Every other number in that
+   payload is a raw reading and is unchanged.
+7. `server/config/feature-gates.js` `logGateStatus` entry (`lawnLighting`): logging
+   only.
+
+What the gate does NOT cover (raw readings, unchanged; each is a score the visit
+earned, shown with its own date, not a sentence about color changing). Color is part
+of these overall numbers, so they can still move when only the light did:
+- the overall trend `reportV2.trends.overall` and the overall points on the
+  before/after slider (`reportV2.progression`, `reportV2.beforeAfter`);
+- the weed, coverage and stress trends;
+- `lawnAssessment.trend[]`, `lawnAssessment.beforeAfter.improvement.*` (including
+  `colorHealth` and `overall`) and the legacy lawn card's "Since first assessment:
+  +N overall points" (`ReportViewPage.jsx`, only when `reportV2` is absent);
+- the portal's "N pts since first visit" and "+N pts improvement" overall deltas
+  (`PortalPage.jsx`; the overall score includes color);
+- the legacy narrative's `trendDirection` (`lawn-report-narrative.js`; env-gated and
+  bypassed whenever `GATE_LAWN_REPORT_COPY_V6` is live);
+- the report-assistant answer "Current lawn health is N% overall. Breakdown: ..."
+  (`report-assistant.js` `answerTrend`): current scores only, no comparison;
+- the staff and technician screens (Intelligence Bar, `LawnVisitReview`).
+
 `GATE_LAWN_RAINFAST_WATCH` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` is
 live, and the sentence prints only while `GATE_LAWN_REPORT_LEAD` is live; off
 leaves the lawn payload and render unchanged, key for key, with no weather read

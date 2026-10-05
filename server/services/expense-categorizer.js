@@ -59,9 +59,11 @@ Rules:
 - Chemicals, PPE, equipment supplies: use "Supplies"
 - If truly unclear, use "Office Expenses" as default`;
 
-  // ROUTINE tier first (owner 2026-10-04), Sol on a miss. A two-leg miss throws like the old SDK
+  // FLAGSHIP first, Sol on a miss. Not the ROUTINE tier: in the 2026-10-04
+  // bake-off Sonnet 5.5 filed 7 of 12 equipment buys as Depreciation where
+  // the books use Supplies, so the owner kept this lane on the flagship. A two-leg miss throws like the old SDK
   // path did — callers decide whether that blocks the insert.
-  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.routineAnswer, {
+  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
     laneId: 'expense_categorize',
     text: prompt,
     jsonMode: true,

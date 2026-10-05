@@ -10,7 +10,7 @@ const { anthropicMaxTokens, anthropicEffortFor, anthropicEffortConfig, THINKING_
 
 describe('anthropicMaxTokens', () => {
   test('raises the cap to the floor on models that think by default (Opus 5+, Sonnet 5.5+, Fable, Mythos)', () => {
-    for (const model of ['claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
+    for (const model of ['claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5-1']) {
       expect(anthropicMaxTokens(model, 200)).toBe(THINKING_FLOOR_TOKENS);
       expect(anthropicMaxTokens(model, 20000)).toBe(20000);
       expect(anthropicMaxTokens(model, undefined)).toBe(THINKING_FLOOR_TOKENS);
@@ -18,7 +18,7 @@ describe('anthropicMaxTokens', () => {
   });
 
   test("leaves today's models unchanged — Opus 4.x, Sonnet (tuned against its own thinking), Haiku", () => {
-    for (const model of ['claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-1', 'claude-sonnet-5', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'test-model', undefined]) {
+    for (const model of ['claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-1', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001', 'test-model', undefined]) {
       expect(anthropicMaxTokens(model, 200)).toBe(200);
       expect(anthropicMaxTokens(model, undefined)).toBeUndefined();
     }

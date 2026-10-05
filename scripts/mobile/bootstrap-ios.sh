@@ -136,6 +136,23 @@ if [ -f "$PLIST" ]; then
   # would otherwise see as a cancel — so set all of them.
   set_plist NSPhotoLibraryAddUsageDescription "Save photos you attach for your technician."
   echo "==> Info.plist usage strings set (Face ID, camera, photo library R/W) ✓"
+
+  # App-bound domains. WKWebView exposes service workers only to the domains
+  # listed in WKAppBoundDomains, so without this the portal's offline copy
+  # (client/public/sw.js) never installs inside the app and the app opens to
+  # a blank screen with no signal. capacitor.config.json sets
+  # ios.limitsNavigationsToAppBoundDomains, which Capacitor needs to keep its
+  # plugin bridge working once the list exists. The domain comes from
+  # server.url, so the two cannot drift. Rewritten on every bootstrap.
+  APP_BOUND_HOST="$(node -p "const c=require('./capacitor.config.json'); c.server && c.server.url ? new URL(c.server.url).hostname : ''")"
+  if [ -z "$APP_BOUND_HOST" ]; then
+    echo "ERROR: capacitor.config.json has no server.url; set WKAppBoundDomains for bundled mode by hand." >&2
+    exit 1
+  fi
+  /usr/libexec/PlistBuddy -c "Delete :WKAppBoundDomains" "$PLIST" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :WKAppBoundDomains array" "$PLIST"
+  /usr/libexec/PlistBuddy -c "Add :WKAppBoundDomains:0 string $APP_BOUND_HOST" "$PLIST"
+  echo "==> Info.plist WKAppBoundDomains = $APP_BOUND_HOST ✓"
 fi
 
 # @capacitor/filesystem touches file-timestamp APIs — Apple requires the app

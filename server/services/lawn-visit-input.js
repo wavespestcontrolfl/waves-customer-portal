@@ -4,6 +4,7 @@ const { CURATED_REFERENCE, FALSE_PRECISION_RULE } = require('./lawn-diagnostic-p
 const { isValidBase64 } = require('../utils/base64-validate');
 const { decodedBase64Bytes, MAX_PHOTO_BYTES } = require('../utils/request-photo-validation');
 const shotList = require('./lawn-photo-shots');
+const { LIGHTING, HARD_SHADOWS } = require('./lawn-lighting');
 
 const GATE = 'GATE_LAWN_VISIT_ASSESSMENT';
 const PROMPT_VERSION = 'lawn-visit-v1';
@@ -11,6 +12,12 @@ const PROMPT_VERSION = 'lawn-visit-v1';
 // prompt plus the shot guide and the shot-key zone enum. Its own version so a
 // replay never mixes the two modes (lawn report rebuild P19a).
 const SHOT_LIST_PROMPT_VERSION = `${PROMPT_VERSION}-shot-list`;
+// The variants a visit is read under while GATE_LAWN_LIGHTING is live (owner
+// 2026-10-04): the same prompt (and shot guide, for a shot-list capture) plus the
+// LIGHT block and a light read on every photo's quality row. Their own versions so
+// a replay never mixes a read that recorded the light with one that did not.
+const LIGHTING_PROMPT_VERSION = `${PROMPT_VERSION}-lighting`;
+const SHOT_LIST_LIGHTING_PROMPT_VERSION = `${SHOT_LIST_PROMPT_VERSION}-lighting`;
 const MAX_VISIT_PHOTOS = 6;
 const MAX_OUTPUT_TOKENS = 16384;
 // Owner ruling 2026-09-24: three named slots, all optional (no photo-count
@@ -358,6 +365,43 @@ const SHOT_LIST_SYSTEM_PROMPT = SYSTEM_PROMPT
 const SHOT_LIST_RESPONSE_SCHEMA = JSON.parse(JSON.stringify(RESPONSE_SCHEMA));
 SHOT_LIST_RESPONSE_SCHEMA.properties.findings.items.properties.zone = enumOf([...shotList.SHOT_KEYS, 'unknown']);
 
+// The lighting variants (GATE_LAWN_LIGHTING): each existing variant plus a LIGHT
+// block before the findings, and a lighting + hard_shadows read on every photo's
+// quality row. Enums only (no numeric bounds), every key required, no nullable
+// types: "cannot tell" is the word unknown, and storage turns it into null. The
+// four variants above stay untouched, so gate-off reads are byte-identical.
+const LIGHTING_BLOCK = `# LIGHT IN THE PHOTOS
+Sun, shade and cloud change how green and how thick turf looks in a photo. For EVERY
+photo, in its photo_quality entry, also record:
+- lighting: full_sun (direct sun on the turf), overcast (cloud cover: even, soft light,
+  no distinct shadows), open_shade (the turf sits in even shade, such as the shaded side
+  of a building, not dappled), mixed_sun_shade (sun and shade both on the turf in one
+  frame: dappled light or tree shadows), low_light (dusk, dawn or too dark to judge
+  color), unknown (you cannot tell).
+- hard_shadows: yes when hard-edged shadows (trees, fences, buildings, the photographer)
+  fall across the turf, no when none do, unknown when you cannot tell.
+Record only the light you can SEE in the pixels. Never infer it from the season, the
+weather, the time of year or the technician's notes.
+Judge color_health from turf in even light. Where one photo shows both sun and shade,
+read the sunlit turf and the shadowed turf each against its own light: never read
+shadowed turf as darker, thinner or more stressed turf, and never read sunlit turf as
+yellower or paler turf. When no turf in the set sits in even light, still give your
+best color_health from the most evenly lit turf and name the light in that photo's issue.
+Light is never a finding by itself.`;
+const withLight = (system) => system.replace(FINDINGS_HEADING, () => `\n${LIGHTING_BLOCK}\n${FINDINGS_HEADING}`);
+const withLightRead = (schema) => {
+  const copy = JSON.parse(JSON.stringify(schema));
+  copy.properties.photo_quality.items = obj({
+    photo: { type: 'integer' }, quality: enumOf(PHOTO_QUALITY), issue: STR,
+    lighting: enumOf(LIGHTING), hard_shadows: enumOf(HARD_SHADOWS),
+  });
+  return copy;
+};
+const LIGHTING_SYSTEM_PROMPT = withLight(SYSTEM_PROMPT);
+const LIGHTING_RESPONSE_SCHEMA = withLightRead(RESPONSE_SCHEMA);
+const SHOT_LIST_LIGHTING_SYSTEM_PROMPT = withLight(SHOT_LIST_SYSTEM_PROMPT);
+const SHOT_LIST_LIGHTING_RESPONSE_SCHEMA = withLightRead(SHOT_LIST_RESPONSE_SCHEMA);
+
 // The composed system prompt and the response schema, digested once per mode.
 // The prompt embeds rubric blocks this module does not own (CURATED_REFERENCE,
 // FALSE_PRECISION_RULE): editing one changes what the
@@ -366,22 +410,41 @@ SHOT_LIST_RESPONSE_SCHEMA.properties.findings.items.properties.zone = enumOf([..
 const digestOf = (system, schema) => crypto.createHash('sha256').update(system).update('\n').update(JSON.stringify(schema)).digest('hex');
 const PROMPT_DIGEST = digestOf(SYSTEM_PROMPT, RESPONSE_SCHEMA);
 const SHOT_LIST_PROMPT_DIGEST = digestOf(SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA);
+const LIGHTING_PROMPT_DIGEST = digestOf(LIGHTING_SYSTEM_PROMPT, LIGHTING_RESPONSE_SCHEMA);
+const SHOT_LIST_LIGHTING_PROMPT_DIGEST = digestOf(SHOT_LIST_LIGHTING_SYSTEM_PROMPT, SHOT_LIST_LIGHTING_RESPONSE_SCHEMA);
 
 // Everything a call needs that differs by capture mode: the version label, the
 // system prompt, the schema and the digest the context hash seeds with.
-function promptFor({ shotList: shotListOn = false } = {}) {
+// `lighting: true` (GATE_LAWN_LIGHTING, decided by the caller) selects the variant
+// that also reads each photo's light; off, the two original variants are returned
+// exactly as before.
+function promptFor({ shotList: shotListOn = false, lighting = false } = {}) {
+  if (lighting) {
+    return shotListOn
+      ? { version: SHOT_LIST_LIGHTING_PROMPT_VERSION, system: SHOT_LIST_LIGHTING_SYSTEM_PROMPT, schema: SHOT_LIST_LIGHTING_RESPONSE_SCHEMA, digest: SHOT_LIST_LIGHTING_PROMPT_DIGEST }
+      : { version: LIGHTING_PROMPT_VERSION, system: LIGHTING_SYSTEM_PROMPT, schema: LIGHTING_RESPONSE_SCHEMA, digest: LIGHTING_PROMPT_DIGEST };
+  }
   return shotListOn
     ? { version: SHOT_LIST_PROMPT_VERSION, system: SHOT_LIST_SYSTEM_PROMPT, schema: SHOT_LIST_RESPONSE_SCHEMA, digest: SHOT_LIST_PROMPT_DIGEST }
     : { version: PROMPT_VERSION, system: SYSTEM_PROMPT, schema: RESPONSE_SCHEMA, digest: PROMPT_DIGEST };
+}
+
+// The capture mode and light mode a stored prompt version was read under (the
+// eval groups replays by version and digests each one).
+function variantOfVersion(version) {
+  return {
+    shotList: version === SHOT_LIST_PROMPT_VERSION || version === SHOT_LIST_LIGHTING_PROMPT_VERSION,
+    lighting: version === LIGHTING_PROMPT_VERSION || version === SHOT_LIST_LIGHTING_PROMPT_VERSION,
+  };
 }
 
 // sha256 of everything the model saw: prompt version, the composed prompt
 // and schema (PROMPT_DIGEST), the context lines' inputs, and each photo's
 // bytes with its position, zone and media type. The eval replays by
 // assessment id and compares hashes to prove it rebuilt the same input.
-function contextHash({ photos = [], photoZones = [], visionContext = {}, shotList: shotListOn = false } = {}) {
+function contextHash({ photos = [], photoZones = [], visionContext = {}, shotList: shotListOn = false, lighting = false } = {}) {
   const c = visionContext || {};
-  const prompt = promptFor({ shotList: shotListOn });
+  const prompt = promptFor({ shotList: shotListOn, lighting });
   const hash = crypto.createHash('sha256');
   hash.update(prompt.version).update('\n').update(prompt.digest).update('\n');
   // The rendered user text too: its safety instructions and context
@@ -401,5 +464,5 @@ function contextHash({ photos = [], photoZones = [], visionContext = {}, shotLis
 }
 
 module.exports = {
-  GATE, PROMPT_VERSION, SHOT_LIST_PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA, PROMPT_DIGEST, SHOT_LIST_PROMPT_DIGEST, promptFor, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
+  GATE, PROMPT_VERSION, SHOT_LIST_PROMPT_VERSION, LIGHTING_PROMPT_VERSION, SHOT_LIST_LIGHTING_PROMPT_VERSION, MAX_VISIT_PHOTOS, MAX_OUTPUT_TOKENS, PHOTO_ZONES, LEGACY_PHOTO_ZONES, PHOTO_QUALITY, CONFIDENCE, SEVERITY_LEVELS, THATCH_LEVELS, SIGNAL_LEVELS, GRASS_TYPES, RESPONSE_SCHEMA, SYSTEM_PROMPT, SHOT_LIST_SYSTEM_PROMPT, SHOT_LIST_RESPONSE_SCHEMA, LIGHTING_RESPONSE_SCHEMA, SHOT_LIST_LIGHTING_RESPONSE_SCHEMA, LIGHTING_SYSTEM_PROMPT, SHOT_LIST_LIGHTING_SYSTEM_PROMPT, PROMPT_DIGEST, SHOT_LIST_PROMPT_DIGEST, LIGHTING_PROMPT_DIGEST, SHOT_LIST_LIGHTING_PROMPT_DIGEST, promptFor, variantOfVersion, buildUserText, normalizePhotoZone, normalizeDetailZone, photoLabel, photoTypeForZone, photoZoneLabel, pairBeforeAfterPhotos, validateVisitPhotos, contextHash
 };
