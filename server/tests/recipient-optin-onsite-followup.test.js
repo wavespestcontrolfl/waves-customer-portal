@@ -13,7 +13,7 @@ const OTHER = '5550100456';
 function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn = true, demoteGateOn = true } = {}) {
   jest.resetModules();
   const state = {
-    optin: rows.map((r) => ({ followup_claimed_at: null, followup_done_at: null, followup_armed_at: null, caller_demoted_at: null, ...r })),
+    optin: rows.map((r) => ({ followup_claimed_at: null, followup_done_at: null, followup_armed_at: null, caller_demoted_at: null, caller_choice_at: null, fanout_confirmed_at: null, ...r })),
     customer: { id: 'c1', service_contacts_consent_at: new Date('2026-10-01T00:00:00Z'), service_preferences: {}, ...customer },
     prefs: [],
     visitState,
@@ -56,7 +56,7 @@ function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn
           touched.forEach((r) => Object.assign(r, patch));
         }
         if (table === 'customers' && patch.service_contacts_consent_at) { Object.assign(state.customer, patch); touched = [state.customer]; }
-        if (table === 'notification_prefs') { touched = state.prefs.filter((r) => r.customer_id === ctx.filter.customer_id); touched.forEach((r) => Object.assign(r, patch)); }
+        if (table === 'notification_prefs') { const { updated_at: _ignored, ...rest } = patch; touched = state.prefs.filter((r) => r.customer_id === ctx.filter.customer_id); touched.forEach((r) => Object.assign(r, rest)); }
         const done = Promise.resolve(touched.length);
         done.returning = async () => touched.map((r) => ({ ...r }));
         return done;
@@ -72,6 +72,13 @@ function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn
   dbMock.transaction = jest.fn(async (fn) => fn(dbMock));
   dbMock.raw = (sql, binds) => (binds ? { sql, binds } : sql);
   jest.doMock('../models/db', () => dbMock);
+  // The canonical default-row helper: seeds the prefs row when absent (never a bare insert).
+  jest.doMock('../services/customer-default-rows', () => ({
+    createDefaultCustomerRows: jest.fn(async (_h, customerId) => {
+      if (prefsInsert) prefsInsert({ customer_id: customerId });
+      if (!state.prefs.some((r) => r.customer_id === customerId)) state.prefs.push({ customer_id: customerId });
+    }),
+  }));
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
   jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => gateOn), onSiteCallerDemoteLive: jest.fn(() => demoteGateOn) }));
   jest.doMock('../services/street-level-hold', () => ({ isStreetLevelHoldVisit: jest.fn(async () => state.visitState === 'wait') }));
@@ -443,8 +450,9 @@ describe('one sender at a time: the call fan-out takes the replay\'s row claim',
     expect(src.indexOf('confirmationLoggedForVisitPhone({')).toBeGreaterThan(src.indexOf('claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId)'));
     // Re-arming is idempotent per visit and never clears an in-flight claim.
     const optinSrc = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
-    expect(optinSrc).toContain(".whereRaw('NOT (visit_id IS NOT DISTINCT FROM ? AND followup_done_at IS NULL)', [visitId])\n      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null });");
-    expect(src).toContain('}).finally(releaseFollowUpClaim);');
+    expect(optinSrc).toContain(".whereRaw('NOT (visit_id IS NOT DISTINCT FROM ? AND followup_done_at IS NULL)', [visitId])\n      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null, fanout_confirmed_at: null });");
+    expect(src).toContain('async (result) => { await releaseFollowUpClaim(result); return result; },');
+    expect(src).toContain("confirmed: !!result && require('./messaging/send-customer-message').classifyDeliveryCertainty(result) !== 'not_sent',");
     // The visit reaches sms_log through the send's appointmentId (twilio.js noticeScope), which the dedupe reads.
     const twilio = require('fs').readFileSync(require.resolve('../services/twilio.js'), 'utf8');
     expect(twilio).toContain("noticeScope(options.appointmentId)");
@@ -501,6 +509,58 @@ describe('the demoted contact stops being confirmed: the caller gets appointment
   });
 });
 
+describe('round-3 rules', () => {
+  test('the holder set the preference after the demotion: it is theirs, a later STOP never switches it back on', async () => {
+    const { optin, state } = load({ rows: [row()], customer: spouse() });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+    // The holder turns texts on, then off again, through a settings save.
+    await optin.noteHolderSetNotifyPrimary(null, 'c1');
+    expect(state.optin[0].caller_choice_at).toBeInstanceOf(Date);
+    state.optin[0].status = 'declined';
+    await optin.onRecipientDeclined(KEY);
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+  });
+
+  test('a STOP then a renewed YES while the visit is ahead: the follow-up is owed again and the caller is demoted again', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    state.optin[0].status = 'declined';
+    await optin.onRecipientDeclined(KEY);
+    expect(state.prefs[0].appointment_notify_primary).toBe(true);
+    expect(state.optin[0].followup_done_at).toBeNull();
+    state.optin[0].status = 'confirmed';
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(1);
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+    expect(sendReplay).toHaveBeenCalledTimes(2);
+  });
+
+  test('the fan-out stamps an accepted send with its release: the replay is not sent on top, the demotion still runs', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
+    expect(await optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('claimed');
+    await optin.releaseFanOutFollowUpClaim('c1', '+15550100123', 'v1', { confirmed: true });
+    expect(state.optin[0].fanout_confirmed_at).toBeInstanceOf(Date);
+    expect(await optin.settleOnSiteFollowUps(['c1'])).toBe(1);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+    // A later booking re-arms the row and owes that visit's own confirmation.
+    await optin.rearmOnSiteFollowUp('c1', KEY, 'v2');
+    expect(state.optin[0].fanout_confirmed_at).toBeNull();
+  });
+
+  test('the demotion seeds the canonical prefs row and updates it (no bare insert); the three settings writers mark the holder\'s choice', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
+    expect(src).toContain("await require('./customer-default-rows').createDefaultCustomerRows(trx, customer.id);");
+    expect(src).not.toContain(".insert({ customer_id: customer.id, appointment_notify_primary: false })");
+    const portal = fs.readFileSync(require.resolve('../routes/notifications.js'), 'utf8');
+    expect(portal.split('noteHolderSetNotifyPrimary(trx,').length - 1).toBe(2);
+    expect(fs.readFileSync(require.resolve('../routes/admin-customers.js'), 'utf8')).toContain('noteHolderSetNotifyPrimary(trx, req.params.id)');
+  });
+});
+
 describe('account-wide demotion', () => {
   test('a saved property\'s own "send these to me too" choice is cleared with the demotion', () => {
     const src = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
@@ -517,7 +577,7 @@ describe('wiring', () => {
   });
   test('the replay claim is atomic on the row (one UPDATE ... RETURNING), never a read-then-write', () => {
     const src = read('../services/recipient-optin.js');
-    expect(src).toContain(".update({ followup_claimed_at: new Date() })\n    .returning(['phone_key', 'visit_id', 'confirmed_at', 'followup_armed_at', 'caller_demoted_at']);");
+    expect(src).toContain(".update({ followup_claimed_at: new Date() })\n    .returning(['phone_key', 'visit_id', 'confirmed_at', 'followup_armed_at', 'caller_demoted_at', 'fanout_confirmed_at']);");
     expect(src).toContain(".whereNull('caller_demoted_at')");
   });
 });

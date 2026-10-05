@@ -900,6 +900,9 @@ router.put('/preferences', async (req, res, next) => {
       if (Object.keys(propertyDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: req.customerId })
           .update({ ...propertyDbUpdates, updated_at: new Date() });
+        if (propertyDbUpdates.appointment_notify_primary !== undefined) {
+          await require('../services/recipient-optin').noteHolderSetNotifyPrimary(trx, req.customerId);
+        }
       }
       if (Object.keys(channelDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: primaryId })
@@ -1143,6 +1146,9 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       await trx('notification_prefs').where({ customer_id: req.params.customerId }).forUpdate().first('customer_id');
       await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, dbUpdates);
       await trx('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates);
+      if (dbUpdates.appointment_notify_primary !== undefined) {
+        await require('../services/recipient-optin').noteHolderSetNotifyPrimary(trx, req.params.customerId);
+      }
     });
     if (pendingOptinDispatch) {
       const { dispatchRecipientOptins } = require('../services/recipient-optin');

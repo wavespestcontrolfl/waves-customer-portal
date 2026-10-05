@@ -20522,8 +20522,14 @@ const CallRecordingProcessor = {
                         // the fan-out holds the row claim across its send.
                         const followUpClaim = await require('./recipient-optin').claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);
                         if (followUpClaim === 'busy') continue;
-                        const releaseFollowUpClaim = () => (followUpClaim === 'claimed'
-                          ? require('./recipient-optin').releaseFanOutFollowUpClaim(customerId, contact.phone, scheduledServiceId)
+                        // `result` = the send's outcome: an accepted or
+                        // uncertain handoff is stamped on the row with the
+                        // release, so the replay never follows it even where
+                        // the best-effort sms_log write was lost.
+                        const releaseFollowUpClaim = (result = null) => (followUpClaim === 'claimed'
+                          ? require('./recipient-optin').releaseFanOutFollowUpClaim(customerId, contact.phone, scheduledServiceId, {
+                            confirmed: !!result && require('./messaging/send-customer-message').classifyDeliveryCertainty(result) !== 'not_sent',
+                          })
                           : null);
                         // Read AFTER the claim settles: the follow-up's replay
                         // (this contact answered YES while this booking was
@@ -20567,7 +20573,10 @@ const CallRecordingProcessor = {
                             original_message_type: 'confirmation',
                             appointment_contact_role: contact.role,
                           },
-                        }).finally(releaseFollowUpClaim);
+                        }).then(
+                          async (result) => { await releaseFollowUpClaim(result); return result; },
+                          async (sendErr) => { await releaseFollowUpClaim(); throw sendErr; },
+                        );
                         if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
                           && contactResult.deferred && contactResult.nextAllowedAt
                           && confirmationRearmed) {
