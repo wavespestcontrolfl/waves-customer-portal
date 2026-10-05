@@ -404,13 +404,12 @@
 .tech-lawn-sheet .tech-protocol-addons { border: 1px solid #e5e5e5; border-radius: 12px; background: #ffffff; overflow: hidden; }
 .tech-lawn-sheet .tech-protocol-addons-head { padding: 12px 14px 10px; border-bottom: 1px solid #e5e5e5; }
 .tech-lawn-sheet .tech-protocol-addons-title { margin: 0; font-size: 14px; font-weight: 600; }
-.tech-lawn-sheet .tech-protocol-addons-head .tech-visit-muted { margin: 2px 0 0; font-size: 13px; }
+.tech-lawn-sheet .tech-protocol-addons-head .tech-visit-muted { margin: 2px 0 0; }
 .tech-lawn-sheet .tech-protocol-addon { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 56px; padding: 8px 14px; }
 .tech-lawn-sheet .tech-protocol-addon + .tech-protocol-addon { border-top: 1px solid #e5e5e5; }
 .tech-lawn-sheet .tech-protocol-addon-text { display: flex; flex-direction: column; min-width: 0; }
-.tech-lawn-sheet .tech-protocol-addon-text .tech-visit-muted { font-size: 13px; }
 .tech-lawn-sheet .tech-protocol-addon-name { font-size: 14px; font-weight: 500; line-height: 1.25; overflow-wrap: anywhere; }
-.tech-lawn-sheet .ui-action.tech-visit-action.tech-protocol-addon-add { flex-shrink: 0; min-height: 36px; padding: 0 14px; font-size: 12px; }
+.tech-lawn-sheet .ui-action.tech-visit-action.tech-protocol-addon-add { flex-shrink: 0; min-height: 40px; padding: 0 16px; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-protocol-addon-add:disabled { border-color: #e5e5e5; opacity: 1; }
 /* Catalog search results stay a plain list inside one hairline card: the pill
    rule above would otherwise give each row its own ink pill and uppercase it. */
