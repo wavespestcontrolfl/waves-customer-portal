@@ -619,8 +619,7 @@ const LINKED_FOLLOWUP_KIND_SQL = "((source_action = ? AND status = 'pending') OR
 const applyCallFollowUpFilter = (q, parentServiceId) => q
   .where({ parent_service_id: parentServiceId, customer_confirmed: false })
   .whereRaw(LINKED_FOLLOWUP_KIND_SQL, ['ai_call_pipeline_followup', PACKAGE_FOLLOWUP_SOURCE_ACTION]);
-const PACKAGE_CHILD_STILL_SPACED_SQL = '(source_action <> ? OR (scheduled_date - ?::date = COALESCE((SELECT sv.follow_up_interval_days FROM services sv WHERE sv.id = scheduled_services.service_id AND sv.follow_up_interval_days > 0), ?)'
-  + ' AND NOT EXISTS (SELECT 1 FROM reschedule_log rl WHERE rl.scheduled_service_id = scheduled_services.id)))';
+const PACKAGE_CHILD_NOT_MOVED_SQL = '(source_action <> ? OR NOT EXISTS (SELECT 1 FROM reschedule_log rl WHERE rl.scheduled_service_id = scheduled_services.id))';
 // A parent CANCEL is wider for the package child: it is a $0 included
 // treatment of the cancelled package, so it goes with visit 1 even after
 // the customer confirmed it (codex #5896 r1 P1). The call child keeps its
@@ -644,14 +643,15 @@ async function planCallFollowUpShift({ conn, parentServiceId, fromDate, toDate }
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return [];
   return applyCallFollowUpFilter(conn('scheduled_services'), parentServiceId)
-    // A package visit 2 follows only while it still sits on its spaced date
-    // (parent's old date + the catalog interval). The customer can move it
-    // from the portal, and that move leaves customer_confirmed false — a
-    // date the customer (or the office) picked by hand is theirs, and a
-    // later parent move must not overwrite it. A reschedule_log row of its
-    // own is the explicit marker (every rebooker move writes one, a
-    // same-day time change included; this hook's own shifts write none).
-    .whereRaw(PACKAGE_CHILD_STILL_SPACED_SQL, [PACKAGE_FOLLOWUP_SOURCE_ACTION, fromStr, DEFAULT_FOLLOW_UP_INTERVAL_DAYS])
+    // A package visit 2 follows only until it is rescheduled on its own.
+    // The customer can move it from the portal, and that move leaves
+    // customer_confirmed false — a date or time the customer picked is
+    // theirs, and a later parent move must not overwrite it. A
+    // reschedule_log row of its own is the marker (every rebooker move
+    // writes one, a same-day time change included; this hook's own shifts
+    // write none). Booking-time evidence only: the catalog interval is
+    // editable and says nothing about where this child was put.
+    .whereRaw(PACKAGE_CHILD_NOT_MOVED_SQL, [PACKAGE_FOLLOWUP_SOURCE_ACTION])
     .select('id', 'technician_id', 'window_start', 'window_end', 'estimated_duration_minutes', 'recurring_dispatch_due_date',
       conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"),
       conn.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));
@@ -866,12 +866,16 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
 // technician cancelling their own booking hears nothing about its follow-up
 // (codex #3887 r10 P2). Labels never come here: job_status_history's
 // transitioned_by is a uuid column.
-async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null }) {
+// packageOnly: the skipped / no-show cascade (job-status.js) — a package
+// visit 2 is treatment 2 of a visit 1 that never happened, so it goes; a
+// call-booked child keeps its office-owned lifecycle there, as before.
+async function cancelCallFollowUpsForParentCancel({ conn, parentServiceId, actorId = null, packageOnly = false }) {
   if (!parentServiceId) return 0;
   const { transitionJobStatus } = require('./job-status');
   const now = new Date();
-  const children = await applyCallFollowUpCancelFilter(conn('scheduled_services'), parentServiceId)
-    .select('id', 'status');
+  const childQuery = applyCallFollowUpCancelFilter(conn('scheduled_services'), parentServiceId);
+  if (packageOnly) childQuery.where({ source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION });
+  const children = await childQuery.select('id', 'status');
   let cancelled = 0;
   for (const child of children) {
     try {

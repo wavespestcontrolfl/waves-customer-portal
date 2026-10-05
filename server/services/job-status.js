@@ -548,6 +548,22 @@ async function transitionJobStatus({
       }
     }
 
+    // A package visit 1 that was skipped or missed never delivered
+    // treatment 1: its auto-booked visit 2 ($0, included, confirmed, arming
+    // reminders) must not stay on the schedule as if it were treatment 2.
+    // Same cascade a cancel runs, package children only; a rebooked visit 1
+    // books its own visit 2. Savepoint per child inside the helper; a
+    // failure never blocks the transition.
+    if (['skipped', 'no_show'].includes(String(toStatus || ''))) {
+      try {
+        await require('./call-booking-catalog').cancelCallFollowUpsForParentCancel({
+          conn: t, parentServiceId: jobId, actorId: transitionedBy || null, packageOnly: true,
+        });
+      } catch (cascadeErr) {
+        logger.warn(`[job-status] package visit 2 retire failed for ${jobId}: ${cascadeErr.message}`);
+      }
+    }
+
     // Consultation-outcomes: a no-showed Waves Assessment visit closes its
     // outcome as lost/no_show (no-op for every other visit and for one
     // already recorded lost/won). Savepoint-isolated (waves-db §5b) — an

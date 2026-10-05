@@ -1474,19 +1474,17 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     return { conn, log };
   }
 
-  test('a package visit 2 follows a parent move only while it still sits on its spaced date', async () => {
+  test('a package visit 2 follows a parent move only until it is rescheduled on its own', async () => {
     const { conn, log } = fakeConn({ updatedCount: 1 });
     await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
-    // The plan read carries the spacing predicate: a child the customer (or
-    // the office) moved by hand no longer equals parent-old-date + interval
-    // and is left where it was put (pre-push audit P1 on #5896).
-    const spaced = log.wheres.find((w) => w && w.sql && /scheduled_date - \?::date = COALESCE/.test(w.sql));
-    expect(spaced).toBeTruthy();
-    expect(spaced.sql.startsWith('(source_action <> ? OR ')).toBe(true);
-    expect(spaced.bindings).toEqual(['package_followup_auto', '2026-07-02', 14]);
-    // …and never once the child has a reschedule_log row of its own (a
-    // customer's same-day time change included).
-    expect(spaced.sql).toMatch(/NOT EXISTS \(SELECT 1 FROM reschedule_log rl WHERE rl\.scheduled_service_id = scheduled_services\.id\)/);
+    // The plan read excludes a package child with a reschedule_log row of
+    // its own (a customer's same-day time change included). Booking-time
+    // evidence, never the editable catalog interval (codex #5896 r2 P2).
+    const marker = log.wheres.find((w) => w && w.sql && /reschedule_log/.test(w.sql));
+    expect(marker).toEqual({
+      sql: '(source_action <> ? OR NOT EXISTS (SELECT 1 FROM reschedule_log rl WHERE rl.scheduled_service_id = scheduled_services.id))',
+      bindings: ['package_followup_auto'],
+    });
   });
 
   test('shifts the still-pending, never-confirmed child by the parent delta', async () => {
@@ -1773,6 +1771,12 @@ describe('cancelCallFollowUpsForParentCancel (shared parent-cancel child cascade
     const untouched = fakeConn();
     expect(await cancelCallFollowUpsForParentCancel({ conn: untouched.conn, parentServiceId: null })).toBe(0);
     expect(untouched.log.table).toBeNull();
+  });
+
+  test('packageOnly (skipped / no-show parent) narrows the cascade to package children', async () => {
+    const { conn, log } = fakeConn({ children: [{ id: 'child-pkg', status: 'confirmed' }] });
+    expect(await cancelCallFollowUpsForParentCancel({ conn, parentServiceId: 'svc-parent', packageOnly: true })).toBe(1);
+    expect(log.selectWhere).toEqual({ source_action: 'package_followup_auto' });
   });
 });
 
