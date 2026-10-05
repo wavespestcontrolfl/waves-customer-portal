@@ -624,7 +624,7 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
   test('a pipeline reuse never activates a street-level hold, and no follow-up child is created off it', () => {
     const s = src();
     expect(s).toContain('if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {');
-    const fu = s.indexOf('const ensureCallFollowUpVisit = async (primaryRow) => {');
+    const fu = s.indexOf('const ensureCallFollowUpVisit = async (primaryRow, { fresh = false } = {}) => {');
     const guard = s.indexOf('if (await isStreetLevelHoldRow(trx, primaryRow)) {', fu);
     expect(guard).toBeGreaterThan(fu);
     expect(guard - fu).toBeLessThan(1500);

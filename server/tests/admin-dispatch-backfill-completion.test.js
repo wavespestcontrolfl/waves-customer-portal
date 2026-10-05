@@ -2073,7 +2073,7 @@ describe('required-mint failure leaves the closeout resumable — fail-closed by
       // same hoisted derivations and row columns the shouldInvoice call
       // reads — the frozen posture can never describe a different population
       // than the one the mint decision bills.
-      expect(source).toMatch(/const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*issuedInvoiceCloseout: !!issuedInvoiceCloseout,\s*\n\s*recapReviewOnly,\s*\n\s*autopayCoversVisit,\s*\n\s*createInvoiceOnComplete: svc\.create_invoice_on_complete,\s*\n\s*waveguardTier: svc\.cust_waveguard_tier,\s*\n\s*explicitMembership: explicitMembershipLane,\s*\n\s*explicitPerVisitLane,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*hasVisitPrice,\s*\n\s*invoiceAmount,\s*\n\s*autoInvoicePricedVisits: process\.env\.GATE_AUTOINVOICE_PRICED_VISITS === 'true',\s*\n\s*serviceType: svc\.service_type,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*visitPerformed,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*\}\);/);
+      expect(source).toMatch(/const backfillMintRequiredAtCommit = backfillExpectedMintAtCommit\(\{\s*\n\s*isBackfillCompletion,\s*\n\s*issuedInvoiceCloseout: neverMints,\s*\n\s*recapReviewOnly,\s*\n\s*autopayCoversVisit,\s*\n\s*createInvoiceOnComplete: svc\.create_invoice_on_complete,\s*\n\s*waveguardTier: svc\.cust_waveguard_tier,\s*\n\s*explicitMembership: explicitMembershipLane,\s*\n\s*explicitPerVisitLane,\s*\n\s*perApplicationBilling,\s*\n\s*annualPrepayBilling,\s*\n\s*hasVisitPrice,\s*\n\s*invoiceAmount,\s*\n\s*autoInvoicePricedVisits: process\.env\.GATE_AUTOINVOICE_PRICED_VISITS === 'true',\s*\n\s*serviceType: svc\.service_type,\s*\n\s*isCallback: svc\.is_callback,\s*\n\s*visitPerformed,\s*\n\s*typedOneTimeBilling: typedOneTimeBillingProfile,\s*\n\s*\}\);/);
       // Dues coverage joins the freeze with its REAL value (fix round 12):
       // the coverage derivation is hoisted above the transaction — one
       // derivation shared with the invoice block, like every other input —
@@ -2310,7 +2310,7 @@ describe('completion route wiring (source contracts)', () => {
   const verdictSource = fs.readFileSync(path.join(__dirname, '../services/completion-charge-verdict.js'), 'utf8');
 
   test('route feeds the requester role into the plan and honors the 403 status', () => {
-    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: completionInput\.actor\.techRole, allowSameDay: !!completionInput\.issuedInvoiceCloseout \}\)/);
+    expect(source).toMatch(/backfillCompletionPlan\(\{ backfill, scheduledDate: svc\.scheduled_date, role: completionInput\.actor\.techRole, allowSameDay: !!completionInput\.issuedInvoiceCloseout \|\| completionInput\.systemQuietCloseout === true \}\)/);
     expect(source).toMatch(/\{ status: backfillPlan\.status \|\| 400, body: backfillPlan\.error \}/);
   });
 
@@ -2683,7 +2683,7 @@ describe('completion route wiring (source contracts)', () => {
     // log + job_complete notification block directly above still runs
     // first-run only.
     const before = source.slice(0, costingAt);
-    const activityGuardAt = before.lastIndexOf('if ((!resumingCommittedCompletion || packetEffects) && !issuedInvoiceCloseout) {');
+    const activityGuardAt = before.lastIndexOf('if ((!resumingCommittedCompletion || packetEffects) && !quietCloseoutActivity) {');
     const activityBlock = source.slice(activityGuardAt, costingAt);
     expect(activityBlock).toContain('Job form save failed');
   });

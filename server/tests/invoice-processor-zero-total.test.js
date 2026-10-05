@@ -10,7 +10,7 @@ const mockWrites = [];
 jest.mock('../models/db', () => {
   const chain = (table) => {
     const q = {
-      where: () => q, whereILike: () => q,
+      where: () => q, whereILike: () => q, whereIn: () => q, whereRaw: () => q,
       first: async () => null,
       update: async (row) => { mockWrites.push([table, 'update', row]); return 1; },
       insert: (row) => { mockWrites.push([table, 'insert', row]); return { returning: async () => [{ id: 'exp-1' }] }; },
@@ -18,7 +18,9 @@ jest.mock('../models/db', () => {
     };
     return q;
   };
-  return jest.fn(chain);
+  const mockDb = jest.fn(chain);
+  mockDb.transaction = async (cb) => { const trx = (t) => chain(t); trx.raw = async () => {}; return cb(trx); };
+  return mockDb;
 });
 
 const { processVendorInvoice } = require('../services/email/invoice-processor');

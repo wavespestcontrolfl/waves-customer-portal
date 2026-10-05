@@ -972,7 +972,6 @@ class AvailabilityEngine {
       // inert until linkage stamps it; explicit so every booking path
       // answers the stamping audit).
       await require('./visit-groups').maybeGroupRow(scheduledRow.id, { database: trx, createdBy: 'seeder' });
-
       // Inspection credit: this is a REAL customer booking (AI assistant /
       // confirmed call path), so record durable evidence in-transaction —
       // the hourly sweep mints from it (Codex #3178 r6 P0).
