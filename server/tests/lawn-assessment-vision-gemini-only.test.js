@@ -188,6 +188,16 @@ describe('analyzePhoto — timeoutMs budget', () => {
     expect(init.signal.aborted).toBe(false);
   });
 
+  it('an odd budget still yields a whole-millisecond abort delay (AbortSignal.timeout rejects a fraction)', async () => {
+    global.fetch = jest.fn().mockResolvedValue(geminiResponse(GEMINI_SCORES));
+
+    const result = await analyzePhoto('base64photo', 'image/jpeg', {}, { timeoutMs: 4001 });
+
+    expect(result.gemini).toMatchObject({ turf_density: 82 });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(global.fetch.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  });
+
   it('runs with no deadline when no budget is given', async () => {
     global.fetch = jest.fn().mockResolvedValue(geminiResponse(GEMINI_SCORES));
 
@@ -207,12 +217,14 @@ describe('analyzePhoto — timeoutMs budget', () => {
   });
 
   it('a Gemini miss that used up the budget returns null without calling Claude', async () => {
+    // The mock ignores its abort signal and answers after the whole budget
+    // has gone, as a transport that aborts late would.
     global.fetch = jest.fn().mockImplementation(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await new Promise((resolve) => setTimeout(resolve, 60));
       return { ok: false, status: 503, statusText: 'Service Unavailable' };
     });
 
-    const result = await analyzePhoto('base64photo', 'image/jpeg', {}, { timeoutMs: 1 });
+    const result = await analyzePhoto('base64photo', 'image/jpeg', {}, { timeoutMs: 40 });
 
     expect(result).toBeNull();
     expect(mockAnthropicCreate).not.toHaveBeenCalled();

@@ -195,9 +195,10 @@ function isValidVisionScores(parsed) {
   return true;
 }
 
-// Remaining milliseconds before `deadline`, floored so a call that starts late
-// still gets a real (if short) window rather than a zero timeout.
-const remainingMs = (deadline) => (deadline ? Math.max(1000, deadline - Date.now()) : null);
+// Whole milliseconds before `deadline` (AbortSignal.timeout rejects a
+// fraction), floored so a call that starts late still gets a real (if short)
+// window rather than a zero timeout.
+const remainingMs = (deadline) => (deadline ? Math.max(1000, Math.ceil(deadline - Date.now())) : null);
 
 async function callClaudeVision(base64Image, mimeType, context = {}, deadline = null) {
   if (!Anthropic || !process.env.ANTHROPIC_API_KEY) return null;
@@ -317,7 +318,7 @@ async function analyzePhoto(base64Image, mimeType, context = {}, { timeoutMs } =
   // When Claude can stand in, the Gemini attempts get the first half of the
   // budget so a stalled Gemini still leaves the fallback time to answer.
   const claudeAvailable = Boolean(Anthropic && process.env.ANTHROPIC_API_KEY);
-  const geminiDeadline = deadline && claudeAvailable ? Date.now() + timeoutMs / 2 : deadline;
+  const geminiDeadline = deadline && claudeAvailable ? Date.now() + Math.floor(timeoutMs / 2) : deadline;
   const gemini = await callGeminiVision(base64Image, mimeType, context, geminiDeadline);
   const claude = gemini || (deadline && Date.now() >= deadline) ? null : await callClaudeVision(base64Image, mimeType, context, deadline);
 
