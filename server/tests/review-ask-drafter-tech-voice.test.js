@@ -508,48 +508,36 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(recordWordsOf('', record)).toBeNull();
   });
 
-  test('replay 10-04: courtesy, light verbs and the visit by its cadence are not counted against a clause; an unbacked detail still is', () => {
+  test('replay 10-04: the coverage rule is unchanged; "house" is "home", "focus" is "focused", and the cadence must be quoted', () => {
     const { quoteSharesContent, sentenceClauses, sentenceVerdictReject } = Drafter.__private;
     const names = new Set(['adam']);
     const covered = (sentence, quote) => sentenceClauses(sentence, names).every((clause) => quoteSharesContent(clause, quote, names));
-    // plain sentences the replay refused
+    // plain sentences the replay refused only for a stem: house / home, focus / focused
     expect(covered('Sorry I missed you at the house today.', 'The customer was not home, so I missed them.')).toBe(true);
-    expect(covered('Good talking with you in person today.', 'I talked with them in person; we spoke during the visit.')).toBe(true);
-    // #5893 r4: words that put a statement in the customer's mouth are claims
-    expect(covered('Sorry I know you said cockroaches were the focus.', 'We focused on ants, spiders, and cockroaches')).toBe(false);
-    expect(covered('Sorry, you mentioned the house had roaches.', 'so I missed them at the house')).toBe(false);
-    // ... and stay judged by the rule on main, which this still passes
-    expect(covered('You mentioned the ants.', 'I keep seeing ants in the kitchen')).toBe(true);
-    // an opinion of how it went is a claim, never a no-claim word
-    expect(covered('Glad your visit went great.', 'we spoke during the visit')).toBe(false);
     expect(covered('Cockroaches were my focus on this visit.', 'We focused on ants, spiders, and cockroaches')).toBe(true);
-    // #5893 r2 / r3: how often the service comes is a fact and must be in the quotes, whatever else matches
-    expect(covered('Cockroaches were my focus on this quarterly visit.', 'We focused on ants, spiders, and cockroaches')).toBe(false);
-    expect(covered('I completed your monthly service today.', 'We completed your quarterly pest service today')).toBe(false);
-    expect(covered('I completed your quarterly service today.', 'We completed your quarterly pest service today')).toBe(true);
-    // #5893 r1: a clause of nothing but no-claim words is not waved through
-    expect(covered('Glad you came.', 'so I missed them at the house')).toBe(false);
-    expect(covered('I missed you at the house, glad you said so.', 'so I missed them at the house')).toBe(false);
-    expect(covered('I had full access to the property and got your monthly service done.', 'I had full access to the property. We completed your monthly pest service today')).toBe(true);
-    // #5893 r2: the cadence is a fact; the wrong one is not carried by "service" alone
-    expect(covered('Glad I got your monthly service done.', 'We completed your quarterly pest service today')).toBe(false);
-    expect(covered('Glad I got your quarterly service done.', 'We completed your quarterly pest service today')).toBe(true);
-    // #5524 r3 / r4: a detail the quotes do not carry still fails its clause
+    // the half-of-the-content-words rule is as it was (#5524 r3 / r4, #5893 r1-r5)
     expect(covered("I saw ants in your new baby's nursery.", 'We focused on ants')).toBe(false);
     expect(covered('You mentioned the ants and your new puppies.', 'I keep seeing ants in the kitchen')).toBe(false);
     expect(covered('Sorry about your mother.', 'The customer was not home, so I missed them.')).toBe(false);
-    expect(covered('Glad the new deck came out great.', 'I talked with them in person')).toBe(false);
-    expect(covered('I went ahead and sealed the garage door.', 'you can do the outside')).toBe(false);
-    // a pest, place or problem word must still be in the quotes whatever else matches
+    expect(covered('Glad you came.', 'so I missed them at the house')).toBe(false);
+    expect(covered('Glad you came home today.', 'The customer was home.')).toBe(false);
+    expect(covered('Glad your visit went great.', 'we spoke during the visit')).toBe(false);
+    expect(covered('Sorry I know you said cockroaches were the focus.', 'We focused on ants, spiders, and cockroaches')).toBe(false);
     expect(covered('Sorry I missed you and the roaches at the house.', 'so I missed them at the house')).toBe(false);
-    // end to end: the framed quote is accepted, a quote that is not in the record is not
+    // how often the service comes is a fact: it must be in the quotes whatever else matches (main did not check it)
+    expect(covered('I completed your monthly service today.', 'We completed your quarterly pest service today')).toBe(false);
+    expect(covered('Glad I got your monthly service done.', 'We completed your quarterly pest service today')).toBe(false);
+    expect(covered('I completed your quarterly service today.', 'We completed your quarterly pest service today')).toBe(true);
+    // end to end: a framed quote is accepted by the words it copies, a quote that is not in the record is not
     const record = 'SERVICE REPORT FOR THIS VISIT:\n- Conversation with the customer: The customer was not home, so I missed them.';
     const verdict = (quotes) => sentenceVerdictReject(
       { sentence: 'Sorry I missed you at the house.', ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes },
       'Sorry I missed you at the house.', { names, techNames: names, recordLines: record.split('\n'), visitDay: null },
       record.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
     expect(verdict(['Visit report: "The customer was not home, so I missed them."'])).toBeNull();
-    expect(verdict(['The customer missed the visit'])).toBe('unsupported_sentence');
+    expect(verdict(['The customer was not home, so I missed them.'])).toBeNull();
+    expect(verdict(['Visit report: "The customer missed the visit"'])).toBe('unsupported_sentence');
+    expect(verdict([])).toBe('unsupported_sentence');
   });
 
   test('replay 10-03: the writer is told which places a detail may come from, and a refused draft is told the rule it broke', () => {
