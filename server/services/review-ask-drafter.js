@@ -843,7 +843,8 @@ const DETAIL_STOP = new Set(`the and but for from with that this you your yours 
 function termStem(word) {
   let w = String(word || "").toLowerCase().replace(/[^a-z]/g, "");
   if (/ies$/.test(w)) w = `${w.slice(0, -3)}y`;
-  else if (/[^s]s$/.test(w)) w = w.slice(0, -1);
+  // "-us" is not a plural: "focus" must stem like "focused".
+  else if (/[^su]s$/.test(w)) w = w.slice(0, -1);
   w = w.replace(/(?:ing|ed)$/, "").replace(/e$/, "");
   w = TERM_ALIAS[w] || w;
   return w.length >= 3 ? w : "";
@@ -1076,7 +1077,9 @@ const ASK_STEMS = new Set([...ASK_WORDS].map(termStem).filter(Boolean));
 const SELF_INTRO_WORDS = new Set(["it's", "its", "it", "is", "this", "i'm", "i", "am", "here"]);
 // An introduction is exactly "(Hi,) It's / This is / I'm <tech name> (here)."
 // — "Adam is here." claims presence and is not one.
-const INTRO_RE = /^(?:(?:hi|hey|hello)\b[\s,!]*)?(?:it's|its|this is|i'm|i am)\s+([a-z'-]+)(?:\s+here)?\s*[.!]?$/i;
+// "Adam here." is the same introduction in texting shorthand; "Adam is
+// here." still claims presence and is not one.
+const INTRO_RE = /^(?:(?:hi|hey|hello)\b[\s,!]*)?(?:(?:it's|its|this is|i'm|i am)\s+([a-z'-]+)(?:\s+here)?|([a-z'-]+)\s+here)\s*[.!]?$/i;
 function isGreetingOnlySentence(sentence, names, techNames = names) {
   const words = String(sentence).toLowerCase().match(/[a-z']+/g) || [];
   if (!words.length || !words.every((w) => GREETING_WORDS.has(w) || names.has(w))) return false;
@@ -1087,7 +1090,7 @@ function isGreetingOnlySentence(sentence, names, techNames = names) {
   const lead = /^(?:(?:hi|hey|hello)\s+)?([a-z'-]+)\s*[,!]\s*/i.exec(String(sentence).trim());
   const greeted = lead && names.has(lead[1].toLowerCase()) && !techNames.has(lead[1].toLowerCase());
   const intro = INTRO_RE.exec(String(sentence).trim().slice(greeted ? lead[0].length : 0));
-  return !!intro && (String(intro[1]).toLowerCase().match(/[a-z']+/g) || []).every((w) => techNames.has(w));
+  return !!intro && (String(intro[1] || intro[2]).toLowerCase().match(/[a-z']+/g) || []).every((w) => techNames.has(w));
 }
 
 // dispatchWithFallback returns a copy of the winning leg's result, but the
@@ -1099,9 +1102,23 @@ function legCapture() {
   return { validate: (result) => { leg.result = result; return null; }, reject: (reason) => rejectCall(leg.result, reason) };
 }
 
+// Words that state nothing a record line could back: courtesy ("sorry",
+// "glad"), light verbs ("went ahead", "got", "let me know") and the visit
+// itself by its cadence ("your quarterly visit": the record's Service line,
+// which the checker reads). They are left out of clause coverage like
+// When a quote does not carry one of them it is not counted against the
+// clause, so the half-of-the-content-words rule below weighs the words that
+// do claim something (replay 2026-10-03: "Sorry I missed you at the house
+// today" failed it against "so I missed them"). One a quote does carry still
+// counts for the clause, as before.
+const NO_CLAIM_STEMS = new Set(`sorry glad good great nice happy know knew let letting went going ahead make made
+  came come took take said say like done visit service treatment appointment quarterly monthly weekly yearly
+  annual`.split(/\s+/).map(termStem).filter(Boolean));
+const isFiller = (w, nameStems) => isStop(w) || nameStems.has(w) || GREETING_STEMS.has(w) || ASK_STEMS.has(w) || TIME_STEMS.has(w);
+
 function quoteSharesContent(sentence, quote, names) {
   const nameStems = new Set([...names].map(termStem).filter(Boolean));
-  const words = [...stemSet(sentence)].filter((w) => !isStop(w) && !nameStems.has(w) && !GREETING_STEMS.has(w) && !ASK_STEMS.has(w) && !TIME_STEMS.has(w));
+  const words = [...stemSet(sentence)].filter((w) => !isFiller(w, nameStems));
   // A clause of only greeting / request words and names claims nothing.
   if (!words.length) return true;
   const quoteWords = stemSet(quote);
@@ -1113,7 +1130,35 @@ function quoteSharesContent(sentence, quote, names) {
   // judges meaning, this is the floor under it.)
   if (words.some((w) => GROUNDED_TERMS.has(w) && !quoteWords.has(w))) return false;
   const shared = words.filter((w) => quoteWords.has(w)).length;
-  return shared >= 1 && shared * 2 >= words.length;
+  const unbacked = words.filter((w) => !quoteWords.has(w) && !NO_CLAIM_STEMS.has(w)).length;
+  // Nothing left that claims anything ("I went ahead"): no backing needed.
+  if (!shared && !unbacked) return true;
+  return shared >= 1 && shared >= unbacked;
+}
+
+// The record words a checker quote copies, or null when it copies none. The
+// checker is asked for the exact words and usually gives them; the production
+// checker also frames them: a section label in front (Visit report: "..."),
+// the copied words inside quotation marks, or two runs joined by "...". Each
+// run that is left must still be in the record word for word, and at least
+// one must be three words or more (a bare heading proves nothing).
+function recordWordsOf(quote, normRecord) {
+  const raw = String(quote || "");
+  const quoted = [...raw.matchAll(/["\u201c]([^"\u201c\u201d]{3,})["\u201d]/g)].map((m) => m[1]);
+  // Words inside quotation marks are the copy; otherwise the runs between "...".
+  const runs = (quoted.length ? quoted : raw.split(/\.{3,}|\u2026/)).map(normalizeForMatch).filter((r) => r.length >= 3);
+  if (!runs.length) return null;
+  const kept = [];
+  for (const run of runs) {
+    // The checker sometimes restores a subject the record line left out
+    // ("We spot-treated ..." for "... and spot-treated ..."): one leading
+    // word may be dropped when four or more words still match in a row.
+    const tail = run.split(" ").slice(1);
+    const match = normRecord.includes(run) ? run : (tail.length >= 4 && normRecord.includes(tail.join(" ")) ? tail.join(" ") : null);
+    if (!match) return null;
+    kept.push(match);
+  }
+  return kept.some((run) => run.split(" ").length >= 3) ? kept.join(" ") : null;
 }
 
 // One checker verdict against the sentence it names. Returns a reject reason
@@ -1238,9 +1283,13 @@ function sentenceVerdictReject(j, sentence, { names, techNames, recordLines = []
   // needs no quote; code confirms it really is only that.
   if (j.ask_only) return isAskOnlySentence(sentence, names) ? null : "fact_check_bad_answer";
   if (j.greeting_only) return isGreetingOnlySentence(sentence, names, techNames) ? null : "fact_check_bad_answer";
-  const quotes = Array.isArray(j.quotes) ? j.quotes.filter((q) => typeof q === "string") : [];
-  if (!j.supported || !quotes.length) return "unsupported_sentence";
-  if (quotes.some((q) => normalizeForMatch(q).length < 3 || !normRecord.includes(normalizeForMatch(q)))) return "unsupported_sentence";
+  const cited = Array.isArray(j.quotes) ? j.quotes.filter((q) => typeof q === "string") : [];
+  if (!j.supported || !cited.length) return "unsupported_sentence";
+  // Each quote is reduced to the record words it copies (recordWordsOf); a
+  // quote with none is not evidence. Coverage and timing below read those
+  // words only, never the checker's framing.
+  const quotes = cited.map((q) => recordWordsOf(q, normRecord));
+  if (quotes.some((q) => !q)) return "unsupported_sentence";
   // Every clause must be backed: each one shares a content word (not filler,
   // not a name) with a cited quote, so "ants and your new baby" cannot ride
   // on a quote about the ants alone.
@@ -1257,9 +1306,8 @@ const TIME_STEMS = new Set(`today morning afternoon evening tonight yesterday we
 const CLAUSE_SPLIT_RE = /[,;:]|\s+-\s+|\s+(?:and|but|so|while|when|because|since|after|before|plus|then|also)\s+/i;
 function sentenceClauses(sentence, names = new Set()) {
   const nameStems = new Set([...names].map(termStem).filter(Boolean));
-  const filler = (w) => isStop(w) || GREETING_STEMS.has(w) || ASK_STEMS.has(w) || nameStems.has(w) || TIME_STEMS.has(w);
   return String(sentence).split(CLAUSE_SPLIT_RE)
-    .filter((clause) => [...stemSet(clause)].some((w) => !filler(w)));
+    .filter((clause) => [...stemSet(clause)].some((w) => !isFiller(w, nameStems)));
 }
 
 // The fact check starts on the provider the writer did NOT use, so a writer
@@ -1624,7 +1672,7 @@ const ReviewAskDrafter = {
   verifyEmailIntro,
   verifyTechVoiceDraft,
   etCalendarDayOf,
-  __private: { redraftNote, buildTechVoiceSystemPrompt, normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, repeatCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, timingUnsupported, listsTreatedAreas, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
+  __private: { recordWordsOf, sentenceVerdictReject, redraftNote, buildTechVoiceSystemPrompt, normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind, personFirstName, unknownProperNoun, ungroundedTerm, detailSupportedByQuote, factCheckTechVoice, repeatCheckTechVoice, isAskOnlySentence, isGreetingOnlySentence, legCapture, quoteSharesContent, sentenceClauses, callerTurns, notTechVoice, timingUnsupported, listsTreatedAreas, techVoiceSentences, buildTechVoiceFacts, customerOwnWords },
 };
 
 module.exports = ReviewAskDrafter;

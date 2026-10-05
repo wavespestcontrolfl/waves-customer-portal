@@ -469,11 +469,66 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const tech = new Set(['adam']);
     expect(isGreetingOnlySentence("Kevin, it's Adam.", names, tech)).toBe(true);
     expect(isGreetingOnlySentence("Hi Kevin, it's Adam.", names, tech)).toBe(true);
-    expect(isGreetingOnlySentence('Kevin, Adam here.', names, tech)).toBe(false);
+    // "Adam here." is the same introduction in shorthand; the name must be the technician's
+    expect(isGreetingOnlySentence('Kevin, Adam here.', names, tech)).toBe(true);
+    expect(isGreetingOnlySentence('Adam here.', names, tech)).toBe(true);
+    expect(isGreetingOnlySentence('Kevin here.', names, tech)).toBe(false);
+    expect(isGreetingOnlySentence('Adam is here.', names, tech)).toBe(false);
+    expect(isGreetingOnlySentence('Adam here with the new deck.', names, tech)).toBe(false);
     // the introduction must still name the technician, and nothing else may ride along
     expect(isGreetingOnlySentence("Adam, it's Kevin.", names, tech)).toBe(false);
     expect(isGreetingOnlySentence("Kevin, I'm here.", names, tech)).toBe(false);
     expect(isGreetingOnlySentence("Kevin, it's Adam with the new deck.", names, tech)).toBe(false);
+  });
+
+  test('replay 10-04: a checker quote counts by the record words it copies, whatever frames them', () => {
+    const { recordWordsOf } = Drafter.__private;
+    const norm = (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const record = norm('SERVICE REPORT FOR THIS VISIT:\n- Recap: We nourished your turf, and spot-treated areas showing lawn fungus along with weeds.\n- Conversation with the customer: The customer was not home, so I missed them.\n- [customer, 2026-10-01 11:11 ET] I get back in town this Saturday.');
+    // word for word, as before
+    expect(recordWordsOf('so I missed them', record)).toBe('so i missed them');
+    // the production checker's framing: a label and quotation marks, a timestamp, runs joined by "..."
+    expect(recordWordsOf('Visit report: "The customer was not home, so I missed them."', record)).toBe('the customer was not home so i missed them');
+    expect(recordWordsOf('[2026-10-01 11:11 ET] "I get back in town this Saturday."', record)).toBe('i get back in town this saturday');
+    expect(recordWordsOf('Service Report for This Visit: ... We nourished your turf ...', record)).toBe('service report for this visit we nourished your turf');
+    // a restored subject: one leading word may go when four or more still match in a row
+    expect(recordWordsOf('We spot-treated areas showing lawn fungus along with weeds.', record)).toBe('spot treated areas showing lawn fungus along with weeds');
+    expect(recordWordsOf('We missed them', record)).toBeNull();
+    // never a paraphrase, a run that is not in the record, or a bare heading
+    expect(recordWordsOf('The customer was away, so the tech missed them', record)).toBeNull();
+    expect(recordWordsOf('We nourished your turf ... and treated the new nursery', record)).toBeNull();
+    expect(recordWordsOf('Visit report: "the puppies were adorable"', record)).toBeNull();
+    expect(recordWordsOf('Recap', record)).toBeNull();
+    expect(recordWordsOf('', record)).toBeNull();
+  });
+
+  test('replay 10-04: courtesy, light verbs and the visit by its cadence are not counted against a clause; an unbacked detail still is', () => {
+    const { quoteSharesContent, sentenceClauses, sentenceVerdictReject } = Drafter.__private;
+    const names = new Set(['adam']);
+    const covered = (sentence, quote) => sentenceClauses(sentence, names).every((clause) => quoteSharesContent(clause, quote, names));
+    // plain sentences the replay refused
+    expect(covered('Sorry I missed you at the house today.', 'The customer was not home, so I missed them.')).toBe(true);
+    expect(covered('Good catching up in person today.', 'I talked with them in person; we spoke during the visit.')).toBe(true);
+    expect(covered('Cockroaches were my focus on this quarterly visit.', 'We focused on ants, spiders, and cockroaches')).toBe(true);
+    expect(covered("Thanks for letting me know you're out of town, I went ahead and did the outside like you said.", 'I am out of town but you can do the outside')).toBe(true);
+    expect(covered('I had full access to the property and got your monthly service done.', 'I had full access to the property. We completed your monthly pest service today')).toBe(true);
+    // #5524 r3 / r4: a detail the quotes do not carry still fails its clause
+    expect(covered("I saw ants in your new baby's nursery.", 'We focused on ants')).toBe(false);
+    expect(covered('You mentioned the ants and your new puppies.', 'I keep seeing ants in the kitchen')).toBe(false);
+    expect(covered('Sorry about your mother.', 'The customer was not home, so I missed them.')).toBe(false);
+    expect(covered('Glad the new deck came out great.', 'I talked with them in person')).toBe(false);
+    expect(covered('I went ahead and sealed the garage door.', 'you can do the outside')).toBe(false);
+    // a pest, place or problem word must still be in the quotes whatever else matches
+    expect(covered('Sorry I missed you and the roaches at the house.', 'so I missed them at the house')).toBe(false);
+    // end to end: the framed quote is accepted, a quote that is not in the record is not
+    const record = 'SERVICE REPORT FOR THIS VISIT:\n- Conversation with the customer: The customer was not home, so I missed them.';
+    const verdict = (quotes) => sentenceVerdictReject(
+      { sentence: 'Sorry I missed you at the house.', ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes },
+      'Sorry I missed you at the house.', { names, techNames: names, recordLines: record.split('\n'), visitDay: null },
+      record.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+    expect(verdict(['Visit report: "The customer was not home, so I missed them."'])).toBeNull();
+    expect(verdict(['The customer missed the visit'])).toBe('unsupported_sentence');
+    expect(verdict([])).toBe('unsupported_sentence');
   });
 
   test('replay 10-03: the writer is told which places a detail may come from, and a refused draft is told the rule it broke', () => {
