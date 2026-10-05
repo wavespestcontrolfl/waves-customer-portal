@@ -593,6 +593,12 @@ const SENTENCE_DIRECTIONS = {
 };
 const COMPARISON_RE = /\b(?:since|than|compared|improv\w*|better|worse|recover\w*|declin\w*|thicker|fuller|healthier|thinner|ahead|behind|progress\w*|steady|unchanged|on\s+track|as\s+expected|too\s+early)\b/i;
 
+// Any comparison cue, or any direction word (same, steady, stable, ...), makes a
+// sentence a comparison that needs a progress line.
+function isComparison(text) {
+  return COMPARISON_RE.test(text) || Object.values(SENTENCE_DIRECTIONS).some((re) => re.test(text));
+}
+
 // A comparison sentence passes only when every clause that compares is backed
 // by a fixed progress line saying the same thing about the same metric
 // (thickness, weeds or stress) in the same direction. Each clause is judged on
@@ -605,7 +611,7 @@ function comparisonSupported(sentence, progressLines) {
     if (meta) supported.add(`${meta.metric}:${meta.direction}`);
   }
   const clauses = sentence.split(CLAUSE_BREAK_RE).map((c) => c.trim()).filter(Boolean);
-  const comparing = clauses.filter((c) => COMPARISON_RE.test(c) || Object.values(SENTENCE_DIRECTIONS).some((re) => re.test(c)));
+  const comparing = clauses.filter(isComparison);
   if (!comparing.length) return false;
   return comparing.every((clause) => {
     const metrics = Object.keys(SENTENCE_METRICS).filter((k) => SENTENCE_METRICS[k].test(clause));
@@ -733,7 +739,7 @@ function validateParagraph(answer, rawInputs) {
       && !from.some((k) => k === 'product' || k === 'note')) fail('product_unsourced');
     // Last-visit talk needs the prior or progress source; a comparison needs a matching fixed progress line.
     if (PRIOR_REF_RE.test(sentence) && /\b(?:last\s+visit|previous|earlier|prior)\b/i.test(sentence) && !from.some((k) => k === 'prior' || k === 'progress')) fail('prior_unsourced');
-    if (COMPARISON_RE.test(sentence) && !comparisonSupported(sentence, inputs.progressLines)) fail('comparison_without_progress');
+    if (isComparison(sentence) && !comparisonSupported(sentence, inputs.progressLines)) fail('comparison_without_progress');
     // Color is never compared between visits.
     if (COLOR_WORD_RE.test(sentence) && (PRIOR_REF_RE.test(sentence) || COMPARE_WORD_RE.test(sentence)) && /\b(?:since|than|compared|last\s+visit|previous|earlier|prior|before|better|worse|greener|darker|lighter|yellower|browner|paler|improv\w*|declin\w*)\b/i.test(sentence)) fail('color_comparison');
   });

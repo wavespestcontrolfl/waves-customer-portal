@@ -116,6 +116,8 @@ describe('validator: accepts', () => {
 
   test('naming "progress" as the source is not enough: with no progress line every comparison is rejected', () => {
     for (const progressLines of [[], undefined]) {
+      const same = answer('Our technician found chinch bugs in the trouble spot. Weeds are the same as at our last visit.', [['note'], ['progress', 'prior']]);
+      expect(check(same, { ...FIXTURE, technicianNote: `${FIXTURE.technicianNote} A few weeds along the edge.`, progressLines }).problems).toContain('comparison_without_progress');
       const a = answer('Our technician found chinch bugs in the trouble spot. The turf looks thicker than at our last visit.', [['note'], ['progress', 'prior']]);
       expect(check(a, { ...FIXTURE, progressLines }).problems).toContain('comparison_without_progress');
     }
