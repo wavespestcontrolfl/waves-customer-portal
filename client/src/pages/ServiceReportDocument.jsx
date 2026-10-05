@@ -699,6 +699,11 @@ export default function ServiceReportDocument({ data, token }) {
   // derives it for lawn alone); tree & shrub is excluded here too, so it
   // prints exactly as before.
   const v2Lead = v2 && v2.lead && typeof v2.lead === 'object' && data.serviceLine !== 'tree_shrub' ? v2.lead : null;
+  // GATE_LAWN_TECH_PARAGRAPH / GATE_TS_TECH_PARAGRAPH: the frozen "From your technician"
+  // paragraph. Lawn carries it in the lead; tree & shrub has no lead and carries it
+  // as reportV2.techParagraph. Absent key prints nothing.
+  const techParagraph = v2Lead?.techParagraph
+    || (data.serviceLine === 'tree_shrub' && typeof v2?.techParagraph === 'string' && v2.techParagraph.trim() ? v2.techParagraph : null);
 
   const v2StatusLine = (() => {
     if (pestV2?.status?.label) return { label: 'Protection status', value: pestV2.status.label, detail: pestV2.statusSummary };
@@ -1073,13 +1078,14 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
-        {/* GATE_LAWN_TECH_PARAGRAPH: the same frozen paragraph the web lead prints under
-            "What we applied today", word for word (lead.techParagraph). Absent key
-            prints nothing. */}
-        {v2Lead?.techParagraph ? (
+        {/* GATE_LAWN_TECH_PARAGRAPH / GATE_TS_TECH_PARAGRAPH: the same frozen paragraph the
+            web report prints under "What we applied today", word for word
+            (lead.techParagraph for lawn, reportV2.techParagraph for tree & shrub).
+            Absent key prints nothing. */}
+        {techParagraph ? (
           <div className="doc-keep">
             <SectionHeader>From your technician</SectionHeader>
-            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{v2Lead.techParagraph}</p>
+            <p style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{techParagraph}</p>
           </div>
         ) : null}
 

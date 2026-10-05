@@ -5,7 +5,10 @@
  * Tech-facing and storage only. The choices ride the /complete body as
  * treeShrubReview.watchItems and are frozen on the service record
  * (structured_notes.treeShrubWatchItems). No customer report, PDF, SMS or email
- * reads them. Everything here is tolerant: an invalid entry is dropped, never a
+ * reads them, with one exception: the Seen items are an input to the report's
+ * "From your technician" paragraph (GATE_TS_TECH_PARAGRAPH, owner 2026-10-05;
+ * service-report/tree-shrub-tech-paragraph-inputs.js, which drops refer-only
+ * items and the trunk conk). Everything here is tolerant: an invalid entry is dropped, never a
  * completion failure, and the gate off stores nothing.
  */
 const { etCalendarDayOf } = require('../utils/datetime-et');

@@ -490,6 +490,23 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(pdf.container.textContent.split('From your technician').length - 1).toBe(1);
   });
 
+  it('prints the tree & shrub "From your technician" (GATE_TS_TECH_PARAGRAPH) word for word from reportV2.techParagraph, and nothing when the key is absent', () => {
+    const text = 'Our technician found scale on the hedge along the back fence. Merit 2F went on the hedges, and Palm Gro 8-2-12 went on the palms.';
+    const snapshot = { overallScore: 77, statusHeadline: 'Landscape looking healthy' };
+    const withKey = { ...BASE_DATA, serviceLine: 'tree_shrub', reportV2: { snapshot, techParagraph: text } };
+    const { container, unmount } = render(<ServiceReportDocument data={withKey} token="tok130" />);
+    expect(container.textContent).toContain('From your technician');
+    expect(screen.getByText(text)).toBeInTheDocument();
+    expect(container.textContent.split('From your technician').length - 1).toBe(1);
+    unmount();
+    const without = { ...BASE_DATA, serviceLine: 'tree_shrub', reportV2: { snapshot } };
+    expect(render(<ServiceReportDocument data={without} token="tok131" />).container.textContent).not.toContain('From your technician');
+    cleanup();
+    // Another service line never prints a tree & shrub key.
+    const pest = { ...BASE_DATA, serviceLine: 'pest', reportV2: { snapshot, techParagraph: text } };
+    expect(render(<ServiceReportDocument data={pest} token="tok132" />).container.textContent).not.toContain(text);
+  });
+
   it('prints the lead headline (the frozen v6 one) as Overall, so a later assessment correction cannot make the PDF disagree', () => {
     const snapshot = { overallScore: 86, statusHeadline: 'Needs attention — weed pressure' };
     const data = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Stable — watching weed pressure' } } };

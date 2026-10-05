@@ -38,9 +38,7 @@
  * write. No gate read: callers decide.
  */
 
-const crypto = require('crypto');
-const logger = require('../logger');
-const MODELS = require('../../config/models');
+const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
 const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 const { customerCopyViolations } = require('./technician-report-copy');
 const { lawnResultTimingViolation } = require('./report-writer-rules');
@@ -63,17 +61,9 @@ const BUDGET_MS = 15 * 1000;
 const MAX_NOTE_CHARS = 1500;
 const SOURCE_KEYS = Object.freeze(['note', 'product', 'finding', 'prior', 'progress', 'fact']);
 
-const clean = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
 const countWords = (text) => { const t = clean(text); return t ? t.split(' ').length : 0; };
 const norm = (text) => clean(text).toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 const escapeRe = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-function parseJsonObject(value) {
-  if (!value) return {};
-  if (typeof value === 'object' && !Array.isArray(value)) return value;
-  if (typeof value !== 'string') return {};
-  try { const parsed = JSON.parse(value); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}; } catch { return {}; }
-}
 
 // ── Inputs ────────────────────────────────────────────────────────────────
 
@@ -420,8 +410,22 @@ worse worst think thinks thought suspect suspects possible possibly maybe likely
 s t re ve ll d m
 `.split(/\s+/).filter(Boolean));
 
+// What differs per service line: the condition vocabulary, the closed word list,
+// the place words, the input normalizer and any extra product names the
+// validator must recognize. The lawn report uses LAWN_PROFILE; the tree & shrub
+// report passes its own (tree-shrub-tech-paragraph.js). `extraChecks(text,
+// inputs, fail)` adds service-line rules; it runs after the shared screens.
+const LAWN_PROFILE = Object.freeze({
+  terms: TERMS,
+  paragraphWords: PARAGRAPH_WORDS,
+  placeWords: GRASS_AND_PLACE_WORDS,
+  normalizeInputs,
+  extraProductWords: [],
+  extraChecks: null,
+});
+
 // Every word of a candidate paragraph, minus the ones the rules above allow.
-function wordsOutsideVocabulary(text, inputs, hay) {
+function wordsOutsideVocabulary(text, inputs, hay, profile = LAWN_PROFILE) {
   // The technician's free text is NOT a source of words: a name typed there
   // must never reach the customer. Only system-built inputs count.
   const known = new Set(words([
@@ -431,11 +435,11 @@ function wordsOutsideVocabulary(text, inputs, hay) {
   const out = [];
   for (const sentence of splitSentences(text)) {
     const covered = new Set();
-    for (const term of TERMS) {
+    for (const term of profile.terms) {
       for (const m of sentence.matchAll(new RegExp(term.re.source, 'gi'))) for (const w of words(m[0])) covered.add(w);
     }
     for (const w of words(sentence)) {
-      if (/^\d+$/.test(w) || PARAGRAPH_WORDS.has(w) || covered.has(w) || known.has(w) || GRASS_AND_PLACE_WORDS.has(w) || GENERIC_NAME_TOKENS.has(w)) continue;
+      if (/^\d+$/.test(w) || profile.paragraphWords.has(w) || covered.has(w) || known.has(w) || profile.placeWords.has(w) || GENERIC_NAME_TOKENS.has(w)) continue;
       out.push(w);
     }
   }
@@ -643,8 +647,8 @@ function comparisonSupported(sentence, progressLines) {
  * Check a model answer against its inputs. Pure.
  * @returns {{ ok: boolean, paragraph?: string, sources?: object[], problems: string[] }}
  */
-function validateParagraph(answer, rawInputs) {
-  const inputs = normalizeInputs(rawInputs); // idempotent: a normalized object comes back equal
+function validateParagraph(answer, rawInputs, profile = LAWN_PROFILE) {
+  const inputs = profile.normalizeInputs(rawInputs); // idempotent: a normalized object comes back equal
   const problems = [];
   const fail = (code) => { if (!problems.includes(code)) problems.push(code); };
   if (!answer || typeof answer !== 'object' || typeof answer.paragraph !== 'string') return { ok: false, problems: ['no_answer'] };
@@ -701,7 +705,7 @@ function validateParagraph(answer, rawInputs) {
   // Prior visit's products count as products NOT applied today: the text may say
   // what KIND of thing we applied then, never name it as today's work.
   const priorNames = inputs.prior ? inputs.prior.products.map((p) => p.name) : [];
-  const unapplied = distinctTokens([...inputs.knownProductNames, ...priorNames, ...BUILTIN_PRODUCT_WORDS], applied);
+  const unapplied = distinctTokens([...inputs.knownProductNames, ...priorNames, ...BUILTIN_PRODUCT_WORDS, ...profile.extraProductWords], applied);
   const lowerWords = new Set(words(text));
   for (const token of unapplied) if (lowerWords.has(token)) { fail(`product_not_applied:${token}`); break; }
   sentences.forEach((sentence) => {
@@ -709,10 +713,10 @@ function validateParagraph(answer, rawInputs) {
     tokens.forEach((t, idx) => {
       if (!/^[A-Z]/.test(t) || t === 'I') return;
       const w = t.toLowerCase();
-      if (applied.has(w) || GRASS_AND_PLACE_WORDS.has(w) || /^\d/.test(t)) return;
+      if (applied.has(w) || profile.placeWords.has(w) || /^\d/.test(t)) return;
       // A sentence may open with an ordinary word; a capitalized word that is
       // not ordinary is a name wherever it stands.
-      if (idx === 0 && (PARAGRAPH_WORDS.has(w) || GENERIC_NAME_TOKENS.has(w) || TERMS.some((term) => term.re.test(t)))) return;
+      if (idx === 0 && (profile.paragraphWords.has(w) || GENERIC_NAME_TOKENS.has(w) || profile.terms.some((term) => term.re.test(t)))) return;
       // Fixed code, no token: the name may be a person's, copied from the note,
       // and the write gate logs these codes.
       fail('unrecognized_name');
@@ -722,13 +726,13 @@ function validateParagraph(answer, rawInputs) {
   // Conditions, per sentence, against the inputs and the sentence's own sources.
   const hay = haystacks(inputs);
   // Closed vocabulary, fixed code: the offending word may be a name.
-  if (wordsOutsideVocabulary(text, inputs, hay).length) fail('word_not_in_inputs');
+  if (wordsOutsideVocabulary(text, inputs, hay, profile).length) fail('word_not_in_inputs');
   let prevCauses = []; // cause terms the previous sentence named: what "them" / "it" means
   sentences.forEach((rawSentence, i) => {
     const sentence = rawSentence.replace(/\bWaves\s+Pest\s+Control\b/gi, 'we');
     const from = fromBySentence[i] || [];
     const named = [];
-    for (const term of TERMS) {
+    for (const term of profile.terms) {
       if (!term.re.test(sentence)) continue;
       named.push(term);
       const prov = provenanceOf(term, hay);
@@ -766,7 +770,7 @@ function validateParagraph(answer, rawInputs) {
     // "found nematodes" names no term, so nothing above checked it. Every clause
     // that says found / saw / there is must name a known condition.
     for (const clause of sentence.split(CLAUSE_BREAK_RE)) {
-      if (OBSERVED_CUE_RE.test(clause) && !TERMS.some((t) => t.re.test(clause))) { fail('observed_unrecognized'); break; }
+      if (OBSERVED_CUE_RE.test(clause) && !profile.terms.some((t) => t.re.test(clause))) { fail('observed_unrecognized'); break; }
     }
     // The photos never confirm a cause: that comes from the technician.
     if (named.some((t) => t.cause) && PHOTO_REF_RE.test(sentence) && CONFIRM_VERB_RE.test(sentence)) fail('photo_confirms_cause');
@@ -781,6 +785,8 @@ function validateParagraph(answer, rawInputs) {
     // Color is never compared between visits.
     if (COLOR_WORD_RE.test(sentence) && (PRIOR_REF_RE.test(sentence) || COMPARE_WORD_RE.test(sentence)) && /\b(?:since|than|compared|last\s+visit|previous|earlier|prior|before|better|worse|greener|darker|lighter|yellower|browner|paler|improv\w*|declin\w*)\b/i.test(sentence)) fail('color_comparison');
   });
+
+  if (typeof profile.extraChecks === 'function') profile.extraChecks(text, inputs, fail);
 
   if (problems.length) return { ok: false, problems };
   return {
@@ -803,206 +809,24 @@ function frozenTextProblem(text) {
   return null;
 }
 
-// ── Generate ──────────────────────────────────────────────────────────────
+// ── Generate / freeze (shared plumbing: tech-paragraph-engine.js) ─────────
 
-/**
- * One model call, validated in code. Never throws. `deps.callModel` is injectable
- * for tests (and receives the exact payload the dispatcher would).
- * @returns {Promise<{ ok: boolean, paragraph?: string, sources?: object[], reason?: string, problems?: string[] }>}
- */
-async function generateTechParagraph(rawInputs, deps = {}) {
-  const inputs = normalizeInputs(rawInputs);
-  if (!inputs.technicianNote || inputs.technicianNote.length < 12) return { ok: false, reason: 'no_note' };
-  if (!inputs.products.length) return { ok: false, reason: 'no_products' };
-  // What is left of the step's one deadline (createAndFreezeTechParagraph passes it);
-  // a call with under a second to run is not made.
-  const budgetMs = Number.isFinite(deps.budgetMs) ? Math.min(BUDGET_MS, deps.budgetMs) : BUDGET_MS;
-  if (budgetMs < 1000) return { ok: false, reason: 'timeout' };
-  const prompt = buildPrompt(inputs);
-  const payload = {
-    laneId: 'lawn_tech_paragraph', promptVersion: PROMPT_VERSION, system: prompt.system, text: prompt.text, jsonMode: true,
-    jsonSchema: prompt.jsonSchema, maxTokens: 900, timeoutMs: budgetMs,
-  };
-  let verdict = null;
-  const validate = (result) => {
-    verdict = validateParagraph(result && result.json, inputs);
-    return verdict.ok ? null : `tech_paragraph:${verdict.problems.join('|')}`;
-  };
-  try {
-    const call = async () => {
-      if (typeof deps.callModel === 'function') {
-        const res = await deps.callModel(payload);
-        if (res && res.ok) { const reason = validate(res); if (reason) return { ok: false, reason }; }
-        return res;
-      }
-      const { dispatchWithFallback } = require('../llm/call');
-      return dispatchWithFallback(MODELS.TEXT_POLICIES.report, payload, { validate, hardDeadline: true, reserveFallbackBudget: true });
-    };
-    let timer;
-    const expired = new Promise((resolve) => {
-      timer = setTimeout(() => resolve({ ok: false, reason: 'timeout' }), budgetMs);
-      if (typeof timer.unref === 'function') timer.unref();
-    });
-    const racing = call();
-    racing.catch(() => {}); // a late settle after the ceiling is never an unhandled rejection
-    let result;
-    try { result = await Promise.race([racing, expired]); } finally { clearTimeout(timer); }
-    if (!result || !result.ok) {
-      const problems = verdict && !verdict.ok ? verdict.problems : [];
-      logger.warn(`[lawn-tech-paragraph] no paragraph (${(result && result.reason) || 'unavailable'})`);
-      return { ok: false, reason: problems.length ? 'rejected' : ((result && result.reason) || 'unavailable'), problems };
-    }
-    if (!verdict || !verdict.ok) return { ok: false, reason: 'rejected', problems: verdict ? verdict.problems : ['unvalidated'] };
-    return { ok: true, paragraph: verdict.paragraph, sources: verdict.sources, inputsHash: inputsHash(inputs) };
-  } catch (err) {
-    logger.warn(`[lawn-tech-paragraph] generation failed: ${err.message}`);
-    return { ok: false, reason: 'error' };
-  }
-}
-
-function inputsHash(inputs) {
-  const { knownProductNames, ...shown } = inputs; // eslint-disable-line no-unused-vars
-  return crypto.createHash('sha1').update(`${PROMPT_VERSION}|${JSON.stringify(shown)}`).digest('hex').slice(0, 12);
-}
-
-// ── Freeze (first writer wins, per assessment) ────────────────────────────
-
-/** One assessment's frozen entry out of a record's structured_notes, or null. */
-function storedTechParagraphFor(structuredNotes, assessmentId) {
-  if (!assessmentId) return null;
-  const map = parseJsonObject(structuredNotes)[FREEZE_KEY];
-  if (!map || typeof map !== 'object' || Array.isArray(map)) return null;
-  const entry = map[assessmentId];
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
-  if (entry.v !== FREEZE_VERSION || String(entry.assessmentId) !== String(assessmentId)) return null;
-  if (typeof entry.text !== 'string' || !entry.text.trim()) return null;
-  return entry;
-}
-
-/**
- * The paragraph a render may print: the frozen text if the entry is whole and the
- * text passes the read-time guards, else null. Never throws.
- */
-function readFrozenTechParagraph(structuredNotes, assessmentId) {
-  try {
-    const entry = storedTechParagraphFor(structuredNotes, assessmentId);
-    if (!entry) return null;
-    const text = clean(entry.text);
-    if (frozenTextProblem(text)) return null;
-    return text;
-  } catch { return null; }
-}
-
-/** PDF cache-key component: '' when nothing is frozen, else a short hash of the text. */
-function techParagraphSignature(structuredNotes, assessmentId) {
-  const text = readFrozenTechParagraph(structuredNotes, assessmentId);
-  return text ? `:tp=${crypto.createHash('sha1').update(text).digest('hex').slice(0, 8)}` : '';
-}
-
-/**
- * Freeze the entry under structured_notes.lawnTechParagraph[assessmentId], first
- * writer wins (the key's absence is in the UPDATE predicate, no preceding read; a
- * lost race adopts the winner). Copies freezeLawnCopyV6. Returns the entry the
- * record is now frozen to, or null on failure.
- */
-async function freezeTechParagraph(serviceRecordId, entry, knex) {
-  if (!serviceRecordId || !entry || !entry.assessmentId || !knex) return null;
-  const { assessmentId } = entry;
-  try {
-    const updated = await knex('service_records')
-      .where({ id: serviceRecordId })
-      .whereRaw(`COALESCE(structured_notes::jsonb, '{}'::jsonb) -> '${FREEZE_KEY}' -> ? IS NULL`, [assessmentId])
-      .update({
-        structured_notes: knex.raw(
-          `COALESCE(structured_notes::jsonb, '{}'::jsonb) || jsonb_build_object('${FREEZE_KEY}',`
-          + ` COALESCE(COALESCE(structured_notes::jsonb, '{}'::jsonb) -> '${FREEZE_KEY}', '{}'::jsonb) || ?::jsonb)`,
-          [JSON.stringify({ [assessmentId]: entry })],
-        ),
-      });
-    if (updated > 0) return entry;
-    const row = await knex('service_records').where({ id: serviceRecordId }).first('structured_notes');
-    return storedTechParagraphFor(row && row.structured_notes, assessmentId);
-  } catch (err) {
-    logger.warn(`[lawn-tech-paragraph] freeze failed for ${serviceRecordId}: ${err.message}`);
-    return null;
-  }
-}
-
-/**
- * The completion step: record read, input gather, model call, validation and
- * freeze, all under ONE deadline of BUDGET_MS from the call (the technician is
- * waiting at Complete). Never throws. `gatherInputs` and `deps.generate` are
- * injectable for tests.
- *
- * Deadline rule. Every await checks the deadline before the next stage starts,
- * and a stage that starts after expiry does not run. The freeze is the one
- * stage that cannot be cut short: it is a single atomic, first-writer-wins
- * UPDATE, so once issued it finishes whole or not at all, and it only ever
- * starts after a validated paragraph exists (so one in flight at the deadline is
- * necessarily past the model call). Expiry returns { status: 'timeout' }
- * without waiting for it. Nothing is ever written after expiry that was not
- * already issued before it.
- *
- * Either `structuredNotes` (already read) or `getStructuredNotes` (an async read
- * of the row's CURRENT notes, so it is under the deadline too) says whether a
- * paragraph is already frozen.
- * Returns { status, entry? }; entry is the frozen entry, for the caller's in-memory notes.
- */
-async function createAndFreezeTechParagraph({
-  serviceRecordId, assessmentId, structuredNotes, getStructuredNotes, gatherInputs, knex, deps = {},
-}) {
-  if (!serviceRecordId || !assessmentId || typeof gatherInputs !== 'function') return { status: 'skipped' };
-  const startedAt = Date.now();
-  let expired = false;
-  const remaining = () => BUDGET_MS - (Date.now() - startedAt);
-  const live = () => !expired && remaining() > 0;
-
-  const run = async () => {
-    const notes = typeof getStructuredNotes === 'function' ? await getStructuredNotes() : structuredNotes;
-    if (!live()) return { status: 'timeout' };
-    // First writer wins and a retry must not spend a second call.
-    if (storedTechParagraphFor(notes, assessmentId)) return { status: 'already_frozen' };
-    let inputs;
-    try {
-      inputs = await gatherInputs();
-    } catch (err) {
-      logger.warn(`[lawn-tech-paragraph] input read failed for ${serviceRecordId}: ${err.message}`);
-      return { status: 'read_failed' };
-    }
-    if (!live()) return { status: 'timeout' };
-    if (!inputs) return { status: 'no_inputs' };
-    const generated = await (deps.generate || generateTechParagraph)(inputs, { ...deps, budgetMs: remaining() });
-    if (!live()) return { status: 'timeout' };
-    if (!generated.ok) return { status: generated.reason || 'no_paragraph', problems: generated.problems };
-    const entry = {
-      v: FREEZE_VERSION,
-      promptVersion: PROMPT_VERSION,
-      assessmentId: String(assessmentId),
-      text: generated.paragraph,
-      sources: generated.sources,
-      inputsHash: generated.inputsHash || null,
-      frozenAt: (deps.now ? deps.now() : new Date()).toISOString(),
-    };
-    const frozen = await freezeTechParagraph(serviceRecordId, entry, knex);
-    if (!frozen) return { status: 'freeze_failed' };
-    return { status: 'frozen', entry: frozen };
-  };
-
-  let timer;
-  const deadline = new Promise((resolve) => {
-    timer = setTimeout(() => { expired = true; resolve({ status: 'timeout' }); }, BUDGET_MS);
-    if (typeof timer.unref === 'function') timer.unref();
-  });
-  const stepping = run().catch((err) => {
-    logger.warn(`[lawn-tech-paragraph] step failed for ${serviceRecordId}: ${err.message}`);
-    return { status: 'error' };
-  });
-  try {
-    return await Promise.race([stepping, deadline]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
+const engine = createTechParagraphEngine({
+  logTag: 'lawn-tech-paragraph',
+  laneId: 'lawn_tech_paragraph',
+  promptVersion: PROMPT_VERSION,
+  freezeKey: FREEZE_KEY,
+  freezeVersion: FREEZE_VERSION,
+  budgetMs: BUDGET_MS,
+  normalizeInputs,
+  buildPrompt,
+  validateParagraph: (answer, inputs) => validateParagraph(answer, inputs),
+  frozenTextProblem,
+});
+const {
+  generateTechParagraph, storedTechParagraphFor, readFrozenTechParagraph, techParagraphSignature,
+  freezeTechParagraph, createAndFreezeTechParagraph, inputsHash,
+} = engine;
 
 module.exports = {
   PROMPT_VERSION,
@@ -1024,5 +848,13 @@ module.exports = {
   techParagraphSignature,
   freezeTechParagraph,
   createAndFreezeTechParagraph,
+  // For the tree & shrub paragraph (tree-shrub-tech-paragraph.js), which runs this
+  // validator with its own profile and reuses the prompt-building helpers.
+  LAWN_PROFILE,
+  PARAGRAPH_WORDS,
+  frozenTextProblem,
+  cleanConfidence,
+  productLine,
+  listOrNone,
   _test: { frozenTextProblem, TERMS, inputsHash },
 };

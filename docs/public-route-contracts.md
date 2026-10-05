@@ -483,6 +483,37 @@ render (gate on or off, every service line) — `report-data.js`'s
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
 
+Tree & Shrub "From your technician" paragraph (owner 2026-10-05, the lawn
+paragraph's twin; `GATE_TS_TECH_PARAGRAPH` — dark, strict `'true'`, read at call
+time, effective only while `GATE_TS_TECH_FINDINGS_COPY` is also live; off leaves the
+tree/shrub payload, the render, the PDF and its cache signature unchanged, key for
+key, with no model call and no read): on the tree/shrub service-report payload
+(`/api/reports/:token/data` and the PDF) the one new optional key is
+`reportV2.techParagraph`, a string of 2 to 4 sentences and at most 70 words in the
+first person plural. It is written ONCE, at completion
+(`freezeTreeShrubTechParagraph`, `tree-shrub-tech-paragraph-gate.js`), by one model
+call (lane `ts_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second deadline across
+the whole step) from the technician's note (verbatim), the products applied with
+their stored targets, the watch-list items the technician marked Seen (never a
+refer-only item, never a trunk conk), the kept photo findings (symptom labels with a
+confidence; a finding the technician hid or rewrote never reaches the model) and
+the last visit's products and seen items. It never reads the raw photo-read text, a
+price, an address or any customer name. The text freezes first-writer-wins under
+`structured_notes.treeShrubTechParagraph[assessmentId]`; a render only reads it from
+the record the build already loaded. The key is absent when no paragraph was written
+(no note, no product, no confirmed assessment, a failed or slow call, or any
+rejection). Code rejects the WHOLE paragraph, and stores nothing, on the lawn
+paragraph's rules (`validateParagraph` with a tree & shrub profile: unapplied or
+unknown product, a pest, disease or condition no input carries or the note negates
+or doubts, a number, date, promise, timing, watering advice, any comparison with the
+last visit, "the photos confirmed", a word outside the closed vocabulary, the
+customer-copy screens) plus the palm rules: never Ganoderma, a conk or the other
+diagnosis-only palm diseases, never crown, spear leaf or newest fronds. The web
+report prints it under "What we applied today" as "From your technician"; the PDF
+prints the same text under the same label. The text is screened again where it is
+read. The PDF cache signature gains `:tp=<hash of the text>` only while the gate is
+live AND a whole frozen entry exists.
+
 Tree & Shrub technician findings in the report (owner ruling 2026-10-02,
 lawn parity, `GATE_TS_TECH_FINDINGS_COPY` — dark, off unless exactly `'true'`,
 read at call time, no redeploy to flip): on the tree/shrub service-report
