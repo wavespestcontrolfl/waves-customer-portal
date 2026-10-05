@@ -790,7 +790,8 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
                 onToggleSelect={onToggleSelect}
                 routeOrder={routeOrder}
                 accent={accent}
-                showDriveIn={Boolean(svc.drivePrevId) && !labelFits.has(svc.drivePrevId)}
+                showDriveIn={Array.isArray(svc.drivePrevIds) && svc.drivePrevIds.length > 0
+                  && !svc.drivePrevIds.some((id) => labelFits.has(id))}
               />
             );
           });

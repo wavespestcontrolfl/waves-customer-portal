@@ -462,7 +462,7 @@ describe('TimeGridDay drive labels', () => {
     const short = { ...SERVICES[0], driveToNextMin: 59 }; // 60 min: too short for a label
     const tall = {
       ...SERVICES[1], id: 'svc-tall', windowStart: '10:00', windowEnd: '12:00', windowDisplay: '10 AM–12 PM',
-      driveInShown: true, drivePrevId: 'svc-1', driveFromPrevMin: 59, lastStop: true,
+      driveInShown: true, drivePrevIds: ['svc-1'], driveFromPrevMin: 59, lastStop: true,
     };
     render(
       <TimeGridDay
@@ -478,7 +478,7 @@ describe('TimeGridDay drive labels', () => {
     const tall = { ...SERVICES[0], windowStart: '08:00', windowEnd: '10:00', windowDisplay: '8–10 AM', driveToNextMin: 12 };
     const next = {
       ...SERVICES[1], windowStart: '11:00', windowEnd: '13:00', windowDisplay: '11 AM–1 PM',
-      driveInShown: true, drivePrevId: 'svc-1', driveFromPrevMin: 12, lastStop: true,
+      driveInShown: true, drivePrevIds: ['svc-1'], driveFromPrevMin: 12, lastStop: true,
     };
     render(
       <TimeGridDay
@@ -489,5 +489,23 @@ describe('TimeGridDay drive labels', () => {
     );
     expect(screen.getByText('~12 min out')).toBeInTheDocument();
     expect(screen.queryByText('~12 min in')).toBeNull();
+  });
+
+  it('does not repeat a leg when a taller row of the same stop already shows it', () => {
+    const short = { ...SERVICES[0], driveToNextMin: 20 };
+    const tallSameStop = { ...SERVICES[0], id: 'svc-1b', windowStart: '08:00', windowEnd: '10:00', windowDisplay: '8–10 AM', driveToNextMin: 20 };
+    const next = {
+      ...SERVICES[1], windowStart: '11:00', windowEnd: '13:00', windowDisplay: '11 AM–1 PM',
+      driveInShown: true, drivePrevIds: ['svc-1', 'svc-1b'], driveFromPrevMin: 20, lastStop: true,
+    };
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[short, tallSameStop, next]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getByText('~20 min out')).toBeInTheDocument();
+    expect(screen.queryByText('~20 min in')).toBeNull();
   });
 });

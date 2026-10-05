@@ -108,7 +108,7 @@ describe('attachDriveLegs', () => {
     attachDriveLegs(services);
     const by = Object.fromEntries(services.map((s) => [s.id, s]));
     expect(by.a).toMatchObject({ driveInShown: false, drivePrevName: null });
-    expect(by.b1).toMatchObject({ driveInShown: true, drivePrevName: 'Sample A' });
+    expect(by.b1).toMatchObject({ driveInShown: true, drivePrevName: 'Sample A', drivePrevIds: ['a'] });
     expect(by.b2).toMatchObject({ driveInShown: false, drivePrevName: null });
     expect(by.c).toMatchObject({ driveInShown: true, drivePrevName: 'Sample B' });
   });
@@ -296,5 +296,17 @@ describe('attachDriveLegs', () => {
     const leg = services[2].driveFromPrevMin;
     // Arrive 10:00 so the 11:00 member starts on time; leave at 12:00.
     expect(services[2].driveLateMin).toBe(12 * 60 + leg - (10 * 60 + 120));
+  });
+
+  it('waits for a group member whose window no single arrival can keep', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', windowEnd: '10:00', displayOrder: 0 }),
+      stop('g2', '13:00', A, { visitId: 'v1', windowEnd: '14:00', displayOrder: 1 }),
+      stop('c', '11:00', C, { displayOrder: 2 }),
+    ];
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // The tech waits for the 13:00 member and leaves at 14:00.
+    expect(services[2].driveLateMin).toBe(14 * 60 + leg - (11 * 60 + 120));
   });
 });
