@@ -27674,11 +27674,35 @@ function stampTreeShrubPalmCount(bundle, count) {
         return { ...c, perServiceTreatments: nextRows };
       })
     : bundle.serviceCadenceCombos;
+  // Offer tiers: the Best tier carries its own ladder, sections and combos
+  // (finalizePricingBundle), built before this stamp runs — stamp them the
+  // same way, as a bundle of their own.
+  let offerTiers = bundle.offerTiers;
+  if (Array.isArray(offerTiers)) {
+    offerTiers = offerTiers.map((tier) => {
+      if (!tier || tier.key !== 'best') return tier;
+      const stampedTier = stampTreeShrubPalmCount({
+        frequencies: tier.frequencies,
+        services: tier.sections,
+        serviceCadenceCombos: tier.serviceCadenceCombos,
+      }, count);
+      if (stampedTier.frequencies === tier.frequencies
+        && stampedTier.services === tier.sections
+        && stampedTier.serviceCadenceCombos === tier.serviceCadenceCombos) return tier;
+      touched = true;
+      return {
+        ...tier,
+        frequencies: stampedTier.frequencies,
+        ...(tier.sections !== undefined ? { sections: stampedTier.services } : {}),
+        ...(tier.serviceCadenceCombos !== undefined ? { serviceCadenceCombos: stampedTier.serviceCadenceCombos } : {}),
+      };
+    });
+  }
   // Byte-identical passthrough when nothing needed a change (no T&S
   // row/frequency present at all, or every one already carried the
   // resolved count).
   if (!touched) return bundle;
-  return { ...bundle, frequencies, services, serviceCadenceCombos };
+  return { ...bundle, frequencies, services, serviceCadenceCombos, ...(Array.isArray(offerTiers) ? { offerTiers } : {}) };
 }
 
 function pricingBundleViolatesLawnPolicy(bundle = {}, programMinMonthly) {

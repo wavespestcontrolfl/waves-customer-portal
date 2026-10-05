@@ -305,3 +305,28 @@ describe('accepted Best view', () => {
     expect(OfferTiers.acceptedOfferTierKey({ customerSelection: { offerTier: 'gold' } })).toBeNull();
   });
 });
+
+describe('palm-count stamp on the Best tier', () => {
+  test('a tree & shrub row inside the Best tier takes the resolved palm count like the bundle rows do', () => {
+    const { stampTreeShrubPalmCount } = require('../routes/estimate-public');
+    const tsRow = { service: 'tree_shrub', name: 'Tree & Shrub', perTreatment: 55, visitsPerYear: 6 };
+    const bundle = {
+      frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', perTreatment: 107 }] }],
+      offerTiers: [{ key: 'better' }, {
+        key: 'best',
+        frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control', perTreatment: 107 }, { ...tsRow }] }],
+        sections: [{ key: 'tree_shrub', service: 'tree_shrub', frequencies: [{ key: 'standard', perServiceTreatments: [{ ...tsRow }] }] }],
+        serviceCadenceCombos: [{ key: 'c', perServiceTreatments: [{ ...tsRow }] }],
+      }],
+    };
+    const stamped = stampTreeShrubPalmCount(bundle, 4);
+    const best = stamped.offerTiers[1];
+    expect(best.frequencies[0].perServiceTreatments[1].palmCount).toBe(4);
+    expect(best.sections[0].frequencies[0].perServiceTreatments[0].palmCount).toBe(4);
+    expect(best.serviceCadenceCombos[0].perServiceTreatments[0].palmCount).toBe(4);
+    expect(stamped.offerTiers[0]).toBe(bundle.offerTiers[0]);
+    // No tree & shrub anywhere: byte-identical passthrough.
+    const plain = { frequencies: [], offerTiers: [{ key: 'best', frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control' }] }] }] };
+    expect(stampTreeShrubPalmCount(plain, 4)).toBe(plain);
+  });
+});
