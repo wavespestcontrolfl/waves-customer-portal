@@ -5720,8 +5720,9 @@ content. Optional body field `intent` — one of `findings` / `treatment` /
 `recommendations` / `next_visit`, sent by the shipped prompt chips — selects
 that answer directly; any other value is ignored and the question is
 keyword-routed as before, so older clients are unaffected. The service-report
-`/api/reports/:token/ask` (deterministic `report-assistant.js` answers, no
-LLM) writes one `service_report_events` row, `report_question_asked`, with
+`/api/reports/:token/ask` (deterministic `report-assistant.js` answers; with
+`GATE_REPORT_ASK_AI` on, a model-written answer for the topics and lines
+described under that gate, with the deterministic answer as fallback) writes one `service_report_events` row, `report_question_asked`, with
 metadata `{ question_length, topic }` — never the question text or the answer
 (owner ruling 2026-09-28: topic only). `topic` is the answer family the
 question was routed to, one of `REPORT_QUESTION_TOPICS` (`reentry`, `watering`,
