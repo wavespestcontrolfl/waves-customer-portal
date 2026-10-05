@@ -310,13 +310,13 @@ async function fileFoundItems(conn, { message, properties }, items, receipt) {
         .whereIn('a.value_hash', items.map((i) => i.value_hash))
         .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.instructions', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
         .filter((r) => isLive(r));
-      // A live standing row covers the same value for any life; a live visit row
-      // covers only another visit item, so a code first given for one visit and
-      // then given for good still reaches the office. New directions with a known
-      // code ("press 2 first") are news too.
+      // Only a live STANDING row makes a new item redundant. A visit row never
+      // does: the same door code sent for a second appointment is evidence for
+      // that appointment, and it must still reach the office when the first
+      // visit ends. New directions with a known code ("press 2 first") are news
+      // too. One text still yields one row per kind and value (unique index).
       const covered = (item) => existing.some((r) => r.kind === item.kind && r.value_hash === item.value_hash
-        && (r.life === 'standing' || r.life === item.life)
-        && normalizeText(r.instructions) === normalizeText(item.instructions));
+        && r.life === 'standing' && normalizeText(r.instructions) === normalizeText(item.instructions));
       toInsert = items.filter((item) => {
         if (covered(item)) return false;
         // Already on the profile: the strict rule saved it, nothing is lost.

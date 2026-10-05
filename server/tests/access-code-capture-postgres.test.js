@@ -588,17 +588,18 @@ postgres('access codes section', () => {
       expect((await access.listForCustomer(trx, c.id)).active).toHaveLength(0);
     });
 
-    test('a door code sent again after its visit ended is found again', async () => {
+    test('the same door code sent for a second appointment is found again, while the first is still open', async () => {
       const c = await customer();
       const first = await visit(c.id, day(2));
       const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
       await access.accept(trx, row.id, { scheduledServiceId: first, now: NOW });
       await text(c.id, 'The door code is #9090');
       const read = stub([gateItem({ kind: 'door', code: '#9090', life: 'visit', quote: 'The door code is #9090' })]);
-      expect(await sweep(read)).toMatchObject({ found: 0 });
-      await trx('scheduled_services').where({ id: first }).update({ status: 'completed' });
-      await trx('data_hygiene_source_extractions').where({ extractor_version: 'access-net-v1' }).del();
       expect(await sweep(read)).toMatchObject({ found: 1 });
+      // The same text read twice still yields one row.
+      await trx('data_hygiene_source_extractions').where({ extractor_version: 'access-net-v1' }).del();
+      expect(await sweep(read)).toMatchObject({ found: 0 });
+      expect((await rows(c.id)).map((r) => r.status).sort()).toEqual(['active', 'found']);
     });
 
     test('with no visit in the window the code stays attached to nothing and stays listed', async () => {
