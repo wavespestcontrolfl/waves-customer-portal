@@ -501,16 +501,20 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const v9 = await visit({ status: 'on_site', date: TODAY }); await invoice({ status: 'paid', date: TODAY, payer_statement_id: recent, scheduled_service_id: v9.id });
     // 10. unstarted TODAY → not a candidate: the settlement is a prepayment until someone arrives or the day passes
     const v10 = await visit({ date: TODAY }); await invoice({ status: 'paid', date: TODAY, payer_statement_id: recent, scheduled_service_id: v10.id });
-    // 11. refused on its own day (visit_scheduled_today), the day has now passed → retried: that refusal was of the day, not of the visit
+    // 11. unstarted, the statement settled before anyone arrived (visit_scheduled_today), the day has passed → LEFT ALONE: a prepayment is not proof the visit happened
     const v11 = await visit(); const i11 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v11.id });
     await auditRow(v11.id, i11.id, 'visit.completion_on_invoice_issued_refused', 'visit_scheduled_today');
+    // 13. ARRIVED, refused before 2026-10-04 with the historical visit_on_site → retried under the rule that now admits it
+    const v13 = await visit({ status: 'on_site' }); const i13 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v13.id });
+    await auditRow(v13.id, i13.id, 'visit.completion_on_invoice_issued_refused', 'visit_on_site');
     // 12. en_route → not a candidate
     const v12 = await visit({ status: 'en_route' }); await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v12.id });
 
     const out = await retrySettledStatementCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 6, retried: 5, closed: 5 });
+    expect(out).toEqual({ candidates: 7, retried: 5, closed: 5 });
     const retriedIds = mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort();
-    expect(retriedIds).toEqual([v1.id, v2.id, v7.id, v9.id, v11.id].sort());
+    expect(retriedIds).toEqual([v1.id, v2.id, v7.id, v9.id, v13.id].sort());
+    expect(retriedIds).not.toContain(v11.id);
     expect(retriedIds).not.toContain(v10.id);
     expect(retriedIds).not.toContain(v12.id);
     expect(mockCompleteScheduledService.mock.calls.find(([args]) => args.serviceId === v7.id)[0].idempotencyKey).toBe(`invoice-issued:${i7.id}`);
@@ -674,6 +678,10 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const a7 = want(await visit({ status: 'on_site' }), 'paid'); const ia7 = await paid(a7); await auditRow(a7.id, ia7.id, 'issued_visit_identity_changed');
     // A8. viewed (delivered, unpaid) → the same as sent
     const a8 = want(await visit({ status: 'on_site' }), 'sent'); await invoice({ status: 'viewed', sent_at: new Date(), scheduled_service_id: a8.id });
+    // A16. refused before 2026-10-04 with the historical visit_on_site (every arrived visit was) → retried under the rule that now admits it
+    const a16 = want(await visit({ status: 'on_site' }), 'sent'); const ia16 = await sent(a16); await auditRow(a16.id, ia16.id, 'visit_on_site', { trigger: 'sent' });
+    // A17. arrived, sent on its own day (visit_scheduled_today), the day has passed → retried: on an arrived visit that row only meant "not paid yet, today"
+    const a17 = want(await visit({ status: 'on_site' }), 'sent'); const ia17 = await sent(a17); await auditRow(a17.id, ia17.id, 'visit_scheduled_today', { trigger: 'sent' });
     // A9. SENT today → not a candidate: a send never closes a same-day visit
     const a9 = await visit({ status: 'on_site', date: TODAY }); await sent(a9, { date: TODAY });
     // A10. refused for a real reason → left alone, never re-audited
@@ -712,7 +720,7 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const c2 = await visit({ status: 'completed' }); await paid(c2);
 
     const out = await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 16, retried: 11, closed: 11 });
+    expect(out).toEqual({ candidates: 18, retried: 13, closed: 13 });
     const calls = mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout.trigger]);
     expect(calls.sort()).toEqual(expectRetried.sort());
     // A retry is nobody's action: the system is the actor.

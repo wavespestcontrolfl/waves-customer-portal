@@ -294,7 +294,10 @@ function retryableVisitFilter(q, today) {
 // passed; a visit that is still not eligible is then refused by the resolver
 // with a code that is NOT in this list (visit_en_route, visit_in_future, …),
 // so nothing is retried forever.
-const TRANSIENT_REFUSAL_CODES = ['error', 'visit_scheduled_today', 'visit_timer_running', 'issued_visit_in_progress', 'issued_visit_rescheduled', 'issued_visit_identity_changed'];
+// `visit_on_site` is HISTORICAL: before 2026-10-04 every arrived visit was
+// refused with it. The rule now admits an arrived visit, so those rows are
+// refusals of an old moment, and the invoices behind them must not stay stuck.
+const TRANSIENT_REFUSAL_CODES = ['error', 'visit_scheduled_today', 'visit_on_site', 'visit_timer_running', 'issued_visit_in_progress', 'issued_visit_rescheduled', 'issued_visit_identity_changed'];
 
 // …and every 5xx the canonical completion RETURNED rather than threw (a
 // failed profile / prepay / setup-fee read answers 503 with its own code):
@@ -324,6 +327,14 @@ async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null })
 
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
 
+// The prepayment guard, shared by both sweeps. `visit_scheduled_today` on a
+// visit nobody has arrived at says "settled before anyone went". The day
+// passing does not turn that into evidence the visit happened (it may have
+// been rained out and never moved), so no sweep completes such a visit on
+// the strength of that row. On an ARRIVED visit the same code only meant
+// "sent, not paid, today", which the day passing does resolve.
+const prepaidAndNobodyArrived = (last, visitStatus) => !isArrivedVisitStatus(visitStatus) && last?.meta?.code === 'visit_scheduled_today';
+
 async function retrySettledStatementCloseouts({ conn = db, today = etDateString(), sinceDays = 7 } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { candidates: 0, retried: 0, closed: 0 };
   let rows = [];
@@ -335,7 +346,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       .where('ps.paid_at', '>=', new Date(Date.now() - sinceDays * 86400000))
       .where((q) => retryableVisitFilter(q, today))
       .orderBy(['ps.id', 'i.id'])
-      .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
+      .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', 's.status as visit_status', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
   } catch (err) {
     logger.error(`[invoice-issued-closeout] settled-statement retry: candidate lookup failed: ${err.message}`);
     return { candidates: 0, retried: 0, closed: 0 };
@@ -354,6 +365,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       // Never ran (the settlement is the only trigger a child gets), or
       // refused for the moment; a real refusal is left alone.
       if (last && !refusedForTheMoment(last)) continue;
+      if (prepaidAndNobodyArrived(last, row.visit_status)) continue;
     }
     retried += 1;
     const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today });
@@ -432,7 +444,8 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
         continue;
       }
       if (last && !refusedForTheMoment(last)) continue;
-      if (!isArrivedVisitStatus(row.visit_status) && (!last || last.meta.code === 'visit_scheduled_today')) continue;
+      if (!isArrivedVisitStatus(row.visit_status) && !last) continue;
+      if (prepaidAndNobodyArrived(last, row.visit_status)) continue;
     }
     retried += 1;
     const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
