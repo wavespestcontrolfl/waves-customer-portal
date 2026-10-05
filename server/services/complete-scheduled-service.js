@@ -13511,6 +13511,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
           });
         }
       } catch { /* best-effort — render-time reconciliation still applies */ }
+      // Tree & shrub "From your technician" paragraph (GATE_TS_TECH_PARAGRAPH): ONE
+      // model call here, frozen first-writer-wins under its own key. Same posture as
+      // the lawn paragraph above: best-effort, a miss stores nothing, and the gate off
+      // returns before any read or call. It uses the completion's own report token and
+      // mints none (no token, no paragraph). Fold the freeze back so the later
+      // sending/sent writes (which spread recordStructuredNotes) don't clobber it.
+      try {
+        const { freezeTreeShrubTechParagraph } = require('../services/service-report/tree-shrub-tech-paragraph-gate');
+        const tsParagraph = await freezeTreeShrubTechParagraph({ service: record, knex: db, reportToken });
+        if (tsParagraph) recordStructuredNotes.treeShrubTechParagraph = { ...(recordStructuredNotes.treeShrubTechParagraph || {}), ...tsParagraph };
+      } catch { /* best-effort — a miss prints no paragraph */ }
     }
 
     // Separate lawn watering text (GATE_LAWN_WATERING_SMS, owner 2026-09-30):
