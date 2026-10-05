@@ -310,6 +310,19 @@ export function carryPestCadenceAcrossTiers(nextServices = [], nextSelected = {}
   return { ...nextSelected, [pestSection.key]: carriedKey };
 }
 
+// The cross-sell card must not offer a manual "add this service" inquiry for
+// a program the customer can already pick as a tier: every service key an
+// offered tier carries joins the offer's suppress list.
+export function offerTierSuppressKeys(pricing, removedKeys = []) {
+  const keys = new Set(Array.isArray(removedKeys) ? removedKeys : []);
+  for (const tier of offerTiersOfPricing(pricing)) {
+    for (const key of (Array.isArray(tier?.services) ? tier.services : [])) {
+      if (typeof key === 'string' && key) keys.add(key);
+    }
+  }
+  return Array.from(keys);
+}
+
 export function pricingViewForOfferTier(pricing, tierKey) {
   if (!pricing || tierKey !== 'best') return pricing;
   const best = offerTiersOfPricing(pricing).find((tier) => tier?.key === 'best');
@@ -6298,9 +6311,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       services,
       data?.cta?.terminalState === 'accepted' ? 'recurring' : serviceMode,
       data?.estimate?.membership,
-      data?.serviceOptOut?.removedKeys,
+      // Good / Better / Best: a program an offered tier already carries is
+      // never upsold as a manual inquiry beside the picker.
+      tiered ? offerTierSuppressKeys(data?.pricing, data?.serviceOptOut?.removedKeys) : data?.serviceOptOut?.removedKeys,
     ),
-    [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership, data?.serviceOptOut?.removedKeys]
+    [services, serviceMode, tiered, data?.pricing, data?.cta?.terminalState, data?.estimate?.membership, data?.serviceOptOut?.removedKeys]
   );
   // Priced add (GATE_ESTIMATE_SERVICE_ADD): the offer prices in place when the
   // server stamped its key addable — same optOut state and rail as a restore.

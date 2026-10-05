@@ -9,7 +9,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import WavesShell from '../components/brand/WavesShell';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
-import EstimateViewPage, { carryPestCadenceAcrossTiers, pricingViewForOfferTier } from './EstimateViewPage';
+import EstimateViewPage, { carryPestCadenceAcrossTiers, estimateAddServiceOffer, offerTierSuppressKeys, pricingViewForOfferTier } from './EstimateViewPage';
 import pageSource from './EstimateViewPage.jsx?raw';
 
 const routerState = vi.hoisted(() => ({ token: 'tiered-token' }));
@@ -221,5 +221,17 @@ describe('EstimateViewPage Good / Better / Best', () => {
     const defaults = { bundle: 'quarterly' };
     expect(carryPestCadenceAcrossTiers(betterServices, defaults, 'bi_monthly')).toBe(defaults);
     expect(carryPestCadenceAcrossTiers(betterServices, defaults, null)).toBe(defaults);
+  });
+
+  it('never upsells a program an offered tier already carries', () => {
+    const { pricing } = tieredPayload();
+    const suppress = offerTierSuppressKeys(pricing, ['mosquito']);
+    expect(suppress).toEqual(expect.arrayContaining(['mosquito', 'pest_control', 'lawn_care', 'one_time_pest']));
+    // On Better the page's sections are pest-only; without the suppress list
+    // the cross-sell would offer "Add Lawn Care" beside a Best tier that has it.
+    const pestOnly = [{ key: 'pest_control', label: 'Pest Control', isRecurring: true, isPest: true, frequencies: [{ key: 'quarterly' }] }];
+    expect(estimateAddServiceOffer(pestOnly, 'recurring', null, [])?.serviceKey).toBe('lawn_care');
+    expect(estimateAddServiceOffer(pestOnly, 'recurring', null, suppress)?.serviceKey).not.toBe('lawn_care');
+    expect(offerTierSuppressKeys({ frequencies: [] }, undefined)).toEqual([]);
   });
 });
