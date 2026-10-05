@@ -456,6 +456,16 @@ export function RecoveredCompletion({ submission }) {
       </div>
     );
   }
+  if (submission.failure === 'unreadable') {
+    return (
+      <div className="tech-visit-body">
+        <ActionFeedback error className="tech-visit-feedback">{submission.error}</ActionFeedback>
+        <div className="tech-visit-actions">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-wide" onClick={submission.recheck}>Try again</Button>
+        </div>
+      </div>
+    );
+  }
   const canRetry = submission.hasPendingBody() && submission.retryPending;
   // A request refused for good whose saved copy would not clear keeps it here
   // to discard, never to retry.

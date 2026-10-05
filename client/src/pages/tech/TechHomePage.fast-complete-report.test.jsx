@@ -344,6 +344,24 @@ it('a lawn visit attempt saved on Dispatch opens nothing here and says where to 
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
 });
 
+it('the Dispatch notice clears once a scan no longer finds that lawn attempt (GitHub Codex P2 on #6001)', async () => {
+  mocks.attempts.set('svc-lawn', {
+    body: { idempotencyKey: 'lawn-key', structuredFindings: { type: 'one_time_lawn_treatment', values: {} } },
+    summary: 'Lawn visit', sheet: 'lawn_visit',
+  });
+  rows = [row('svc-open', { fastCompleteReportEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  fireEvent.click(await screen.findByText(/Saved completion/));
+  expect(await screen.findByText(/Open the visit on Dispatch/)).toBeInTheDocument();
+  // Finished on Dispatch: the next scan has no such attempt.
+  mocks.attempts.delete('svc-lawn');
+  fireEvent.click(screen.getByRole('button', { name: /Project Report/ }));
+  fireEvent.click(await screen.findByText('Fixture svc-open'));
+  fireEvent.click(await screen.findByRole('button', { name: 'Close sheet' }));
+  await waitFor(() => expect(screen.queryByText(/Open the visit on Dispatch/)).not.toBeInTheDocument());
+});
+
 it('a visit with a saved retry the device cannot read now opens nothing (GitHub Codex P2 on 458cc517e5)', async () => {
   mocks.attempts.set('svc-live', { body: { idempotencyKey: 'live-key', reportDraftBase: {} }, summary: 'Saved report' });
   rows = [row('svc-live', { fastCompleteReportEnabled: true })];

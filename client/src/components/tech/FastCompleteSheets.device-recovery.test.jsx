@@ -81,6 +81,26 @@ for (const [name, Sheet, reportFlow] of [
     expect(screen.getByText(/Another completion for this visit/)).toBeInTheDocument();
   });
 
+  test(`${name} waits on a saved attempt it cannot read, then shows it on Try again (GitHub Codex P2 on #6001)`, async () => {
+    const body = { idempotencyKey: 'unread-key', technicianNotes: 'Unread work' };
+    await putFastCompletionAttempt('visit-u', 'tech-a', { body, summary: 'Unread visit' });
+    const store = globalThis.indexedDB;
+    globalThis.indexedDB = undefined;
+    const onFullForm = vi.fn();
+    const request = vi.fn(async (path) => {
+      if (path.endsWith('/complete')) return { success: true };
+      throw Object.assign(new Error('Not this sheet'), { status: 404 });
+    });
+    render(<Sheet service={{ id: 'visit-u', reportFlow }} operatorId="tech-a" request={request}
+      onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={onFullForm} />);
+    expect(await screen.findByText(/saved on this device but can’t be read right now/)).toBeInTheDocument();
+    expect(onFullForm).not.toHaveBeenCalled();
+    expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0);
+    globalThis.indexedDB = store;
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByRole('button', { name: 'Retry', exact: true })).toBeInTheDocument();
+  });
+
   test(`${name} shows a refused copy found after a reload to discard only, then a fresh form (GitHub Codex P2 on #5967)`, async () => {
     const body = { idempotencyKey: 'refused-key', technicianNotes: 'Refused work' };
     await putFastCompletionAttempt('visit-a', 'tech-a', { body, summary: 'Refused visit', refused: true });
