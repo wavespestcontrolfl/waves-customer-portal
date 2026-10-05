@@ -202,22 +202,28 @@ describe('products', () => {
     expect(within(editor).queryByRole('button', { name: 'mL' })).toBeNull();
   });
 
-  test('an injection product is absent from the picker and the sheet', async () => {
+  test('the product search sits in the Products section (no picker sheet, no + Other product)', async () => {
     await openSheet();
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    const picker = screen.getByRole('dialog', { name: 'Add a product' });
-    expect(within(picker).getByRole('button', { name: /SuffOil-X/ })).toBeTruthy();
-    expect(within(picker).queryByText('Arbor Inject Palm')).toBeNull();
-    fireEvent.change(within(picker).getByLabelText('Search products'), { target: { value: 'inject' } });
-    expect(within(picker).queryByText('Arbor Inject Palm')).toBeNull();
+    expect(screen.queryByRole('button', { name: '+ Other product' })).toBeNull();
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'suff' } });
+    expect(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /SuffOil-X/ })).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: 'Add a product' })).toBeNull();
+  });
+
+  test('an injection product is absent from the search and the sheet', async () => {
+    await openSheet();
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'inject' } });
     expect(screen.queryByText('Arbor Inject Palm')).toBeNull();
+    expect(screen.getByText('No products match.')).toBeTruthy();
   });
 
   test('an added product opens its editor with method chips and can be removed', async () => {
     const request = makeRequest();
     await readyVisit(request);
-    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
-    fireEvent.click(within(screen.getByRole('dialog', { name: 'Add a product' })).getByRole('button', { name: /Imidacloprid Drench/ }));
+    fireEvent.change(screen.getByLabelText('Search products'), { target: { value: 'imidacloprid' } });
+    fireEvent.click(within(screen.getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /Imidacloprid Drench/ }));
+    // One tap adds the row and clears the box.
+    expect(screen.getByLabelText('Search products').value).toBe('');
     const editor = editorFor('Imidacloprid Drench');
     // Foliar spray by default; soil drench and granular are chips.
     const how = within(editor).getByRole('group', { name: 'How' });
@@ -369,8 +375,9 @@ describe('photos and the photo read', () => {
     for (const label of ['Front beds', 'Back or side landscape', 'Whole palm', 'Oldest fronds', 'Leaf close-up']) {
       expect(screen.getByLabelText(`${label} photo file`)).toBeTruthy();
     }
-    expect(screen.getByText(/The whole front bed line from the driveway apron or walk/)).toBeTruthy();
-    expect(screen.getByText(/Step back until the worst-looking palm fits top to bottom/)).toBeTruthy();
+    expect(screen.getByText('Whole front bed line, same spot as last time.')).toBeTruthy();
+    expect(screen.getByText('The worst palm, top to bottom, from the ground.')).toBeTruthy();
+    expect(screen.getByText('0 added')).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'Good' }));
     expect(screen.getByText('Add a front beds photo.')).toBeTruthy();
@@ -672,5 +679,34 @@ describe('blocked states', () => {
     const request = makeRequest({ context: Object.assign(new Error('Server exploded'), { status: 500 }) });
     render(<FastCompleteTreeShrubSheet service={SERVICE} request={request} onClose={() => {}} />);
     expect(await screen.findByText('Server exploded')).toBeTruthy();
+  });
+});
+
+// The lawn sheet's 2026-10-05 screen rulings (#5951), applied here.
+describe('the lawn screen rulings', () => {
+  test('Customer is preset to not home, full access, and rides /complete as customerInteraction', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    expect(screen.getByRole('button', { name: 'Not home — full access' }).getAttribute('aria-pressed')).toBe('true');
+    fireEvent.click(screen.getByRole('button', { name: 'Home — spoke with them' }));
+    const body = await completeBody(request);
+    expect(body.customerInteraction).toBe('tech_home_spoke_with_them');
+  });
+
+  test('a visit with no tap on Customer sends the preset', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    const body = await completeBody(request);
+    expect(body.customerInteraction).toBe('not_home_full_access');
+  });
+
+  test('the mic sits inside the note box and the hint text is gone', async () => {
+    await openSheet();
+    const row = screen.getByLabelText('Tell me about the visit').closest('.tech-visit-note-row');
+    expect(row.classList.contains('tech-visit-note-row--inside')).toBe(true);
+    for (const hint of ['Optional', 'Tap what you applied', 'Areas treated (optional)', 'No suggested products this month. Add what you applied.']) {
+      expect(screen.queryByText(hint)).toBeNull();
+    }
+    expect(screen.getByText('Areas treated')).toBeTruthy();
   });
 });
