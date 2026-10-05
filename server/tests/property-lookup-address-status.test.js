@@ -112,3 +112,30 @@ describe('resolveAddressStatus', () => {
     expect(validate).not.toHaveBeenCalled();
   });
 });
+
+describe('countyRollAnswer — read off the lookup evidence, never inferred from an absence', () => {
+  jest.mock('../models/db', () => {
+    const mock = jest.fn(() => { throw new Error('db not expected'); });
+    mock.fn = { now: jest.fn(() => 'NOW') };
+    mock.raw = jest.fn((sql) => ({ __raw: sql }));
+    return mock;
+  });
+  const { countyRollAnswer } = require('../routes/property-lookup-v2')._private;
+  const audit = (over) => ({ county: 'Manatee', houseNumber: '100', streetExists: true, hasExactMatch: false, ...over });
+
+  test('a county-backed record, or an exact audit match with no record, is found', () => {
+    expect(countyRollAnswer({ propertyRecord: { _parcel: { parcelId: '123' } } })).toBe('found');
+    expect(countyRollAnswer({ propertyRecord: null, addressAudit: audit({ hasExactMatch: true }) })).toBe('found');
+  });
+
+  test('only an audit that ran for a county and found no exact match is not_found', () => {
+    expect(countyRollAnswer({ propertyRecord: null, addressAudit: audit() })).toBe('not_found');
+    expect(countyRollAnswer({ propertyRecord: { _addressAudit: audit({ streetExists: false }) } })).toBe('not_found');
+  });
+
+  test('no audit, an audit that could not run, or a snapped-record marker alone is unknown', () => {
+    expect(countyRollAnswer({ propertyRecord: null })).toBe('unknown');
+    expect(countyRollAnswer({ propertyRecord: {}, addressAudit: null })).toBe('unknown');
+    expect(countyRollAnswer({ propertyRecord: null, addressAudit: { county: null, streetExists: null, hasExactMatch: false } })).toBe('unknown');
+  });
+});

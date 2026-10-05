@@ -1333,6 +1333,23 @@ function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
   };
 }
 
+// The county roll's own answer for the address status line (PR 4), read off
+// the lookup's evidence and never inferred from an absence:
+//   found      a county-backed record, or the house-number audit matched
+//              the typed number exactly
+//   not_found  the audit RAN for a county (it answered whether the street
+//              exists) and has no exact match
+//   unknown    anything else: no audit, an audit that could not run
+//              (outage, out of area), or only a snapped-record marker
+function countyRollAnswer(result) {
+  const record = result?.propertyRecord;
+  if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId || record._raw?.parcelId || hasCountyEvidence(record))) return 'found';
+  const audit = result?.addressAudit || record?._addressAudit || null;
+  if (audit?.hasExactMatch === true) return 'found';
+  if (audit && audit.county && typeof audit.streetExists === 'boolean' && audit.hasExactMatch === false) return 'not_found';
+  return 'unknown';
+}
+
 // ─────────────────────────────────────────────
 // MAIN ROUTE — admin/tech-gated thin wrapper over performPropertyLookup
 // ─────────────────────────────────────────────
@@ -1361,13 +1378,7 @@ router.post('/property-lookup', async (req, res) => {
     if (addressStatus) {
       // The county roll's own answer rides beside it, never folded into it:
       // an address Google confirms can still be missing from the roll.
-      // 'not_found' only when the roll ANSWERED and has no row (the profile's
-      // addressVerdict 'audited'); a roll that never answered (outage,
-      // out-of-area) is 'unknown', never a miss.
-      const record = result.propertyRecord;
-      const onRoll = Boolean(record && (record._parcel?.parcelId || record._parcel?.paoParcelId || record._raw?.parcelId || hasCountyEvidence(record)));
-      const rollAnswered = result.enriched?.addressVerdict === 'audited';
-      result.meta.addressStatus = { ...addressStatus, countyRoll: onRoll ? 'found' : (rollAnswered ? 'not_found' : 'unknown') };
+      result.meta.addressStatus = { ...addressStatus, countyRoll: countyRollAnswer(result) };
     }
     // A whole-property (association) lookup skips the business check. The
     // tool is told so it can ask for a fresh lookup if the business type
@@ -6336,6 +6347,7 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyCommercialSuiteSize,
+  countyRollAnswer,
   reconcileCommercialSuiteSubtype,
   resolveCommercialSuiteScope,
   buildResultFromCachedLookup,
