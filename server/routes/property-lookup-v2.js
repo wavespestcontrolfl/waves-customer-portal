@@ -1265,6 +1265,7 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
   // much as a synchronous DBPR match — see applyCommercialSuiteSize.
   // The FRESH lookup path (performPropertyLookupCore) runs the full leg
   // with none of these restrictions.
+  const listingRefresh = listingStampNeedsRefresh(record);
   await applyCommercialSuiteSize(enriched, {
     skipWebSearch: true,
     requireWarmCache: true,
@@ -1272,9 +1273,17 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
     // The row carries a listing size whose stamp aged out (90 days, or 30
     // when license-backed): re-read the listing on this hit instead of
     // dropping the published size to a license estimate or a type default.
-    listingRefresh: lookupListingSizeLive() && record?._commercialSuiteSize?.source === 'listing_verified_text'
-      && !commercialSuiteSizeStampIsFresh(record._commercialSuiteSize),
+    listingRefresh,
   });
+  // The refresh ran and found no listing size this time (the listing was
+  // removed, or no longer shows a usable figure): mark the old stamp so the
+  // next hits do not repeat the search, and try again in 30 days.
+  if (listingRefresh && enriched?.suiteSize?.source !== 'listing_verified_text'
+    && options.persist !== false && options.cacheOnly !== true) {
+    const checked = { ...record._commercialSuiteSize, refreshCheckedAt: new Date().toISOString() };
+    record._commercialSuiteSize = checked;
+    await attachCommercialSuiteSizeToCachedLookup(address, checked);
+  }
   // A license size resolved on THIS hit (older row with no stamp, or an
   // aged-out stamp, and a warm DBPR cache) is backfilled onto the cached
   // row like the fresh path persists it — otherwise every process restart
@@ -3394,6 +3403,17 @@ function suiteUnitKey(address) {
 // later cache hit from upgrading to a license size until the row expires.
 const PERSISTED_SUITE_SIZE_SOURCES = new Set(['license_seats', 'listing_verified_text']);
 
+// A cached row whose listing-size stamp aged out and has not been re-read in
+// the last 30 days: the next cache hit re-reads the listing once.
+const LISTING_REFRESH_RETRY_MS = 30 * DAY_MS;
+function listingStampNeedsRefresh(record, now = Date.now()) {
+  const stamp = record?._commercialSuiteSize;
+  if (!lookupListingSizeLive() || !stamp || stamp.source !== 'listing_verified_text') return false;
+  if (commercialSuiteSizeStampIsFresh(stamp, now)) return false;
+  const checkedAt = Date.parse(stamp.refreshCheckedAt);
+  return !(Number.isFinite(checkedAt) && now - checkedAt < LISTING_REFRESH_RETRY_MS);
+}
+
 // The field-verify flag a listing suite size (PR 5b) always carries, fresh
 // or reused from the cached stamp: a published figure, not a measurement.
 function listingSizeVerifyFlag(suiteSize) {
@@ -3417,90 +3437,103 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
   if (!profile) return profile;
   const candidate = profile._commercialSuiteCandidate;
   delete profile._commercialSuiteCandidate;
-  if (!candidate) return profile;
   // cacheOnly (the public-quote latency-bound path): reuse a persisted
   // stamp only — buildEnrichedProfile already did that synchronously above;
   // a candidate surviving to here means the cached row carries none (or an
   // expired one). Never spend so much as a synchronous DBPR match here.
-  if (opts.cacheOnly) return profile;
+  if (!candidate || opts.cacheOnly) return profile;
   try {
-    const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
-    const { suiteAddressParts } = require('../services/commercial-suite-size/address-parts');
-    const parts = suiteAddressParts(candidate.address);
-    const suiteSize = await resolveCommercialSuiteSize({
-      address: candidate.unitHint && !parts.unit ? { ...parts, unit: candidate.unitHint } : parts,
-      phone: null,
-      // The point of this lane is discovering the business FROM the
-      // address — no hint is typed in by the operator here; a
-      // staff-confirmed listing supplies its own name (businessSuiteHints).
-      businessNameHint: candidate.businessNameHint || null,
-      commercialRiskType: null,
-      commercialSubtype: candidate.commercialSubtype,
-      // A listing size needs a suite the operator TYPED. A unit known only
-      // from the Places listing (unitHint) may match a license row, but it
-      // never starts the listing leg: a size read and stored on a
-      // Places-supplied unit would be Places content kept by another name.
-    }, (candidate.unitHint && !parts.unit) ? { ...opts, skipListing: true } : opts);
-    // The listing's name was a hint for the match only. Unless a public
-    // record (a license row) vouched for the result, the resolver just echoes
-    // the hint back as businessName — and the suite size is stored, so the
-    // echo is dropped: nothing from Places is saved. Only the license names
-    // the business itself; a listing size (PR 5b) is persisted too but
-    // carries no name of its own, so the hint is stripped there as well.
-    if (suiteSize && candidate.businessNameHint && suiteSize.source !== 'license_seats' && suiteSize.licenseBacked !== true) {
-      suiteSize.businessName = null;
-    }
-    if (suiteSize && Number(suiteSize.value) > 0) {
-      profile.homeSqFt = suiteSize.value;
-      // The suite's own ground-floor footprint — a single in-line strip/
-      // plaza suite (no stories field of its own; blankUnitScopedGroundsAndSize
-      // already forced profile.stories to 1 above, the same single-floor
-      // assumption a residential unit gets). This is the field pricing/
-      // translateV2CallToV1Input actually reads (footprintSqFt <-
-      // p.footprint ?? p.footprintSqFt) — leaving it at the pre-resolution
-      // 0 would still price the building once footprintUnknown-style zeroing
-      // stopped applying. Perimeter/attic/slab stay unset (null, from the
-      // rc.squareFootage=0 zeroing above) — the resolver has no real suite
-      // perimeter, so pricing derives it from THIS footprint (4·√area)
-      // rather than inheriting the building's ~1,000+ LF exterior wall.
-      profile.footprint = suiteSize.value;
-      // The building-level unknown-stories flag describes the aggregate, not
-      // this suite — left set, the translator would zero the footprint.
-      delete profile.footprintUnknown;
-      profile.suiteSize = {
-        value: suiteSize.value,
-        source: suiteSize.source,
-        confidence: suiteSize.confidence,
-        businessName: suiteSize.businessName || null,
-        businessType: suiteSize.businessType || null,
-        evidence: suiteSize.evidence || [],
-        ...(suiteSize.seats != null ? { seats: suiteSize.seats } : {}),
-        // The listing page the size was read from (PR 5b): shown to staff
-        // beside the size so they can check it; licenseBacked = a DBPR
-        // license at the suite classified it as a restaurant.
-        ...(suiteSize.url ? { url: suiteSize.url } : {}),
-        ...(suiteSize.licenseBacked ? { licenseBacked: true } : {}),
-        ...(typeof suiteSize.licenseChecked === 'boolean' ? { licenseChecked: suiteSize.licenseChecked } : {}),
-        // When this was resolved, so a persisted stamp can be aged out
-        // (see commercialSuiteSizeStampIsFresh) rather than trusted forever.
-        resolvedAt: new Date().toISOString(),
-      };
-      // A listing size is a published figure, not a measurement: the field
-      // stays flagged for confirmation, with the link (owner 2026-10-02:
-      // price automatically, draft yellow + field-verify). The same flag is
-      // restored when a cached stamp is reused (buildEnrichedProfile).
-      if (suiteSize.source === 'listing_verified_text' && Array.isArray(profile.fieldVerifyFlags)) {
-        profile.fieldVerifyFlags.push(listingSizeVerifyFlag(profile.suiteSize));
-      }
-      // Same rule the synchronous stamp-reuse path applies (see
-      // reconcileCommercialSuiteSubtype) — shared so the two can never
-      // disagree about the same suite.
-      profile.commercialSubtype = reconcileCommercialSuiteSubtype(profile.commercialSubtype, profile.suiteSize);
-    }
+    const suiteSize = await resolveSuiteSizeForCandidate(candidate, opts);
+    if (suiteSize && Number(suiteSize.value) > 0) applyResolvedSuiteSize(profile, suiteSize);
   } catch (err) {
     logger.warn(`[property-lookup] commercial suite size resolve failed: ${err.message}`);
   }
   return profile;
+}
+
+async function resolveSuiteSizeForCandidate(candidate, opts) {
+  const { resolveCommercialSuiteSize } = require('../services/commercial-suite-size');
+  const { suiteAddressParts } = require('../services/commercial-suite-size/address-parts');
+  const parts = suiteAddressParts(candidate.address);
+  // A listing size needs a suite the operator TYPED. A unit known only from
+  // the Places listing (unitHint) may match a license row, but it never
+  // starts the listing leg: a size read and stored on a Places-supplied
+  // unit would be Places content kept by another name.
+  const hintedUnitOnly = Boolean(candidate.unitHint) && !parts.unit;
+  const suiteSize = await resolveCommercialSuiteSize({
+    address: hintedUnitOnly ? { ...parts, unit: candidate.unitHint } : parts,
+    phone: null,
+    // The point of this lane is discovering the business FROM the address —
+    // no hint is typed in by the operator here; a staff-confirmed listing
+    // supplies its own name (businessSuiteHints).
+    businessNameHint: candidate.businessNameHint || null,
+    commercialRiskType: null,
+    commercialSubtype: candidate.commercialSubtype,
+  }, hintedUnitOnly ? { ...opts, skipListing: true } : opts);
+  // The listing's name was a hint for the match only. Unless a public record
+  // (a license row) vouched for the result, the resolver just echoes the
+  // hint back as businessName — and the suite size is stored, so the echo is
+  // dropped: nothing from Places is saved. Only the license names the
+  // business itself; a listing size (PR 5b) is persisted too but carries no
+  // name of its own, so the hint is stripped there as well.
+  const licenseNamed = suiteSize && (suiteSize.source === 'license_seats' || suiteSize.licenseBacked === true);
+  if (suiteSize && candidate.businessNameHint && !licenseNamed) suiteSize.businessName = null;
+  return suiteSize;
+}
+
+// The persisted / returned form of a resolved suite size.
+function suiteSizeForProfile(suiteSize) {
+  const out = {
+    value: suiteSize.value,
+    source: suiteSize.source,
+    confidence: suiteSize.confidence,
+    businessName: suiteSize.businessName || null,
+    businessType: suiteSize.businessType || null,
+    evidence: suiteSize.evidence || [],
+    // When this was resolved, so a persisted stamp can be aged out
+    // (see commercialSuiteSizeStampIsFresh) rather than trusted forever.
+    resolvedAt: new Date().toISOString(),
+  };
+  if (suiteSize.seats != null) out.seats = suiteSize.seats;
+  // The listing page the size was read from (PR 5b): shown to staff beside
+  // the size so they can check it; licenseBacked = a DBPR license at the
+  // suite classified it as a restaurant; licenseChecked = the license list
+  // really loaded for that check.
+  if (suiteSize.url) out.url = suiteSize.url;
+  if (suiteSize.licenseBacked) out.licenseBacked = true;
+  if (typeof suiteSize.licenseChecked === 'boolean') out.licenseChecked = suiteSize.licenseChecked;
+  return out;
+}
+
+function applyResolvedSuiteSize(profile, suiteSize) {
+  profile.homeSqFt = suiteSize.value;
+  // The suite's own ground-floor footprint — a single in-line strip/plaza
+  // suite (no stories field of its own; blankUnitScopedGroundsAndSize
+  // already forced profile.stories to 1 above, the same single-floor
+  // assumption a residential unit gets). This is the field pricing/
+  // translateV2CallToV1Input actually reads (footprintSqFt <- p.footprint ??
+  // p.footprintSqFt) — leaving it at the pre-resolution 0 would still price
+  // the building once footprintUnknown-style zeroing stopped applying.
+  // Perimeter/attic/slab stay unset (null, from the rc.squareFootage=0
+  // zeroing above) — the resolver has no real suite perimeter, so pricing
+  // derives it from THIS footprint (4·√area) rather than inheriting the
+  // building's ~1,000+ LF exterior wall.
+  profile.footprint = suiteSize.value;
+  // The building-level unknown-stories flag describes the aggregate, not
+  // this suite — left set, the translator would zero the footprint.
+  delete profile.footprintUnknown;
+  profile.suiteSize = suiteSizeForProfile(suiteSize);
+  // A listing size is a published figure, not a measurement: the field stays
+  // flagged for confirmation, with the link (owner 2026-10-02: price
+  // automatically, draft yellow + field-verify). The same flag is restored
+  // when a cached stamp is reused (buildEnrichedProfile).
+  if (suiteSize.source === 'listing_verified_text' && Array.isArray(profile.fieldVerifyFlags)) {
+    profile.fieldVerifyFlags.push(listingSizeVerifyFlag(profile.suiteSize));
+  }
+  // Same rule the synchronous stamp-reuse path applies (see
+  // reconcileCommercialSuiteSubtype) — shared so the two can never disagree
+  // about the same suite.
+  profile.commercialSubtype = reconcileCommercialSuiteSubtype(profile.commercialSubtype, profile.suiteSize);
 }
 
 function buildProviderStatus() {
@@ -6440,6 +6473,7 @@ module.exports._private = {
   applyCommercialSuiteSize,
   commercialSuiteSizeStampIsFresh,
   listingSizeVerifyFlag,
+  listingStampNeedsRefresh,
   countyRollAnswer,
   reconcileCommercialSuiteSubtype,
   resolveCommercialSuiteScope,

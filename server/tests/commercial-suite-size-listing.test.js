@@ -157,6 +157,15 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103, Bradenton, FL — 1,350 SF', c)).toEqual([1350]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 Riverside Plaza — 1,350 SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 2,000 SF warehouse suite', c)).toEqual([2000]);
+    // What follows the figure must describe a space; any other qualifier is refused.
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 2,000 SF per floor', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 2,000 SF each', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 2,000 SF floor plate', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 2,000 SF mezzanine', c)).toEqual([]);
+    // Hidden page content (scripts, styles, templates, comments) is never read.
+    expect(P.extractSuiteSizes('<p>4400 Test Commons Pkwy</p><script>var s = "4400 Test Commons Pkwy Suite 103 — 9,000 SF";</script><p>4400 Test Commons Pkwy Suite 103 — 2,000 SF</p>', c)).toEqual([2000]);
+    expect(P.extractSuiteSizes('<style>.x{}</style><template>4400 Test Commons Pkwy Suite 103 — 9,000 SF</template><!-- 4400 Test Commons Pkwy Suite 103 — 8,000 SF -->', c)).toEqual([]);
+    expect(P.extractSuiteSizes('<p>ok</p><script>4400 Test Commons Pkwy Suite 103 — 9,000 SF', c)).toEqual([]);
     // An approximation mark between the number and the unit is an estimate.
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350 ± SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350 +/- SF', c)).toEqual([]);

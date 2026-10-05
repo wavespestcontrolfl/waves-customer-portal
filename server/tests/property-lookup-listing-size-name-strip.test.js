@@ -17,7 +17,7 @@ jest.mock('../services/commercial-suite-size', () => ({
   SOURCES: { LISTING_VERIFIED_TEXT: 'listing_verified_text', LICENSE_SEATS: 'license_seats', SUITE_TYPE_DEFAULT: 'suite_type_default' },
 }));
 
-const { applyCommercialSuiteSize, commercialSuiteSizeStampIsFresh, listingSizeVerifyFlag } = require('../routes/property-lookup-v2')._private;
+const { applyCommercialSuiteSize, commercialSuiteSizeStampIsFresh, listingSizeVerifyFlag, listingStampNeedsRefresh } = require('../routes/property-lookup-v2')._private;
 const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
 const savedGate = process.env.GATE_LOOKUP_LISTING_SIZE;
 afterEach(() => { if (savedGate === undefined) delete process.env.GATE_LOOKUP_LISTING_SIZE; else process.env.GATE_LOOKUP_LISTING_SIZE = savedGate; });
@@ -108,4 +108,19 @@ test('a unit known only from the Places listing never starts the listing leg; a 
   typed._commercialSuiteCandidate = { ...typed._commercialSuiteCandidate, address: '14617 SR 70 E Suite 103, Bradenton, FL 34202', unitHint: null };
   await applyCommercialSuiteSize(typed, {});
   expect(resolved.lastOpts.skipListing).toBeUndefined();
+});
+
+test('an aged-out listing stamp is re-read once, then not again for 30 days after a refresh that found nothing', () => {
+  process.env.GATE_LOOKUP_LISTING_SIZE = 'true';
+  const at = (days) => new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
+  const aged = { value: 1350, source: 'listing_verified_text', unitKey: '103', resolvedAt: at(95) };
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: aged })).toBe(true);
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, refreshCheckedAt: at(3) } })).toBe(false);
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, refreshCheckedAt: at(31) } })).toBe(true);
+  // A fresh stamp, another source, no stamp, or the gate off: no refresh.
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, resolvedAt: at(5) } })).toBe(false);
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: { ...aged, source: 'license_seats' } })).toBe(false);
+  expect(listingStampNeedsRefresh({})).toBe(false);
+  delete process.env.GATE_LOOKUP_LISTING_SIZE;
+  expect(listingStampNeedsRefresh({ _commercialSuiteSize: aged })).toBe(false);
 });

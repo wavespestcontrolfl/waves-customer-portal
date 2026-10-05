@@ -107,6 +107,9 @@ const TOTAL_BEFORE_RE = new RegExp(`\\b${TOTAL_WORDS}\\b[^.;|]{0,24}$`, 'i');
 const TOTAL_AFTER_WORDS_RE = new RegExp(`\\b(?:${TOTAL_WORDS.slice(3, -1)}|shopping|center|centre|plaza|complex|development|campus|mall|strip|park|property|anchored)\\b`, 'i');
 // A hyphen inside a word ("multi-tenant", "grocery-anchored") is part of the
 // phrase; only a spaced hyphen or a dash ends it.
+const SPACE_WORDS = new Set(['retail', 'office', 'restaurant', 'medical', 'dental', 'commercial', 'industrial', 'flex', 'warehouse',
+  'showroom', 'salon', 'storefront', 'inline', 'in-line', 'endcap', 'end-cap', 'end', 'cap', 'corner', 'ground-floor', 'first-floor',
+  'second-floor', 'street-level', 'space', 'suite', 'unit', 'bay', 'vacant', 'leasable', 'usable', 'rentable', 'net', 'now']);
 const NOUN_PHRASE_END_RE = /[.,;:|()—–]|\s-\s|\b(?:in|at|of|on|with|for|near|by|to|from|and|is|are|was|available|located|within)\b/i;
 function nounPhraseAfter(text) {
   const head = String(text || '').replace(/^\s*(?:of\s+)?/i, '');
@@ -119,6 +122,11 @@ const CONTEXT_BEFORE_RE = /\b(?:located\s+in|situated\s+in|part\s+of|within|insi
 
 function normalizeText(s) {
   return String(s || '')
+    // Non-rendered element BODIES (scripts, styles, templates, serialized
+    // app state, comments) are not listing text: removed whole, never read.
+    .replace(/<(script|style|template|noscript|svg|head)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' | ')
+    .replace(/<(?:script|style|template|noscript)\b[^>]*>[\s\S]*$/gi, ' | ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
     .replace(/<\/(?:li|p|div|tr|td|th|h[1-6]|dd|dt|section|article)\s*>|<br\s*\/?>/gi, ' | ')
     .replace(/<[^>]+>/g, ' ')
     // A thousands group split by a non-breaking space ("1&nbsp;350") is one
@@ -303,7 +311,13 @@ function figureIsPlain(t, idx, len) {
   if (BETWEEN_BEFORE_RE.test(t.slice(Math.max(0, idx - 44), idx))) return false;
   if (CONTEXT_BEFORE_RE.test(t.slice(Math.max(0, idx - 20), idx))) return false;
   if (BOUND_AFTER_RE.test(t.slice(idx + len, idx + len + 24))) return false;
-  if (TOTAL_AFTER_WORDS_RE.test(nounPhraseAfter(t.slice(idx + len, idx + len + 120)))) return false;
+  const phrase = nounPhraseAfter(t.slice(idx + len, idx + len + 120));
+  if (TOTAL_AFTER_WORDS_RE.test(phrase)) return false;
+  // What follows the figure must be nothing, or words that describe a space
+  // ("retail space", "warehouse suite", "in-line retail space"). Anything
+  // else ("per floor", "each", "floor plate", "of land") qualifies the
+  // figure in a way this code does not understand: refused.
+  if (!phrase.split(/\s+/).filter(Boolean).every((w) => SPACE_WORDS.has(w.toLowerCase()))) return false;
   return true;
 }
 

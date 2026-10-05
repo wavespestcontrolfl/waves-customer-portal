@@ -86,127 +86,135 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
     commercialRiskType = null, commercialSubtype = null,
   } = input;
 
-  let businessName = businessNameHint || null;
-  let businessType = null;
-
-  // Listing leg (PR 5b): a size published for THIS suite. Network-bound
-  // (a search vendor, up to three page fetches), so the cache-hit path that
-  // skips the web-search leg skips this one too; the gate inside returns
-  // null at once when dark.
-  // The listing's SIZE is authoritative when found, but the DBPR license
-  // below still runs: a license at this suite is what classifies it as a
+  // The listing's SIZE is authoritative when found (PR 5b), but the DBPR
+  // license still runs: a license at this suite is what classifies it as a
   // restaurant (subtype correction, cadence), whichever source sized it.
-  let listing = null;
-  const listingRemaining = remainingBudgetMs(opts.deadlineAt);
-  // The cache-hit path (skipWebSearch) skips this network leg, EXCEPT when
-  // the row's own listing stamp aged out (opts.listingRefresh): then the
-  // published size is re-read rather than dropped to a default.
-  if ((opts.skipWebSearch && opts.listingRefresh !== true) || opts.skipListing) {
-    // skipped by the caller
-  } else if (listingRemaining < MIN_LEG_REMAINING_MS) {
-    logger.warn(`[commercial-suite-size] skipping listing leg — ${Math.max(0, Math.round(listingRemaining))}ms left in the lookup budget`);
-  } else {
-    try {
-      const found = await resolveViaListing({ address, businessNameHint }, {
-        ...opts,
-        timeoutMs: Math.min(opts.listingTimeoutMs || LISTING_DEFAULT_TIMEOUT_MS, listingRemaining),
-      });
-      if (found && Number(found.value) > 0) listing = found;
-    } catch (err) {
-      logger.warn(`[commercial-suite-size] listing leg errored: ${err.message}`);
-    }
-  }
-  const listingResult = (license, licenseChecked = false) => ({
-    value: listing.value,
-    source: SOURCES.LISTING_VERIFIED_TEXT,
-    confidence: 'medium',
-    businessName: (license && license.businessName) || businessName,
-    // Only a license (a public record) classifies the business; the
-    // listing itself never does.
-    businessType: license ? 'restaurant_food' : null,
-    ...(license ? { licenseBacked: true, seats: license.seats, licenseEvidence: license.evidence } : {}),
-    // Whether the license leg actually ANSWERED for this suite. false = it
-    // was skipped or failed (budget, outage): the stamp is kept short so a
-    // later lookup asks again instead of pinning "no license" for 90 days.
-    licenseChecked: Boolean(license) || licenseChecked,
-    evidence: listing.evidence,
-    url: listing.url,
-    listingFetchedAt: listing.fetchedAt,
-  });
-
-  const dbprRemaining = remainingBudgetMs(opts.deadlineAt);
-  if (dbprRemaining < MIN_LEG_REMAINING_MS) {
-    logger.warn(`[commercial-suite-size] skipping DBPR leg — ${Math.max(0, Math.round(dbprRemaining))}ms left in the lookup budget`);
-    if (listing) return listingResult(null);
-  } else {
-    try {
-      // diag.extractLoaded: the license list really loaded, so a null result
-      // is "no license at this suite", not an outage or a timeout.
-      const dbprDiag = {};
-      const dbprOpts = Number.isFinite(dbprRemaining)
-        ? { ...opts, diag: dbprDiag, timeoutMs: Math.min(DBPR_DEFAULT_TIMEOUT_MS, dbprRemaining) }
-        : { ...opts, diag: dbprDiag };
-      const dbpr = await resolveViaDbprLicense({ address, phone, businessNameHint }, dbprOpts);
-      if (listing) return listingResult(dbpr && (Number(dbpr.value) > 0 || dbpr.businessName) ? dbpr : null, dbprDiag.extractLoaded === true);
-      if (dbpr) {
-        businessName = businessName || dbpr.businessName || null;
-        if (Number(dbpr.value) > 0) {
-          return {
-            value: dbpr.value,
-            source: SOURCES.LICENSE_SEATS,
-            confidence: 'medium',
-            businessName: dbpr.businessName || businessName,
-            businessType: 'restaurant_food',
-            evidence: dbpr.evidence,
-            seats: dbpr.seats,
-          };
-        }
-      }
-    } catch (err) {
-      logger.warn(`[commercial-suite-size] DBPR leg errored: ${err.message}`);
-      if (listing) return listingResult(null);
-    }
-  }
+  const listing = await listingLeg({ address, businessNameHint }, opts);
+  const license = await licenseLeg({ address, phone, businessNameHint }, opts);
+  if (listing) return listingResult(listing, license, businessNameHint || null);
+  const licensed = licenseResult(license.row, businessNameHint);
+  if (licensed) return licensed;
 
   // Name-only leg (see web-search-leg.js — it never returns a size).
-  // skipWebSearch: the admin lookup's cache-hit path, which must stay fast.
-  const webRemaining = remainingBudgetMs(opts.deadlineAt);
-  if (opts.skipWebSearch) {
-    // skipped by the caller
-  } else if (webRemaining < MIN_LEG_REMAINING_MS) {
-    logger.warn(`[commercial-suite-size] skipping web-search leg — ${Math.max(0, Math.round(webRemaining))}ms left in the lookup budget`);
-  } else {
-    try {
-      const webOpts = Number.isFinite(webRemaining)
-        ? { ...opts, timeoutMs: Math.min(opts.timeoutMs || WEB_SEARCH_DEFAULT_TIMEOUT_MS, webRemaining) }
-        : opts;
-      const web = await resolveViaWebSearch({ address, businessNameHint }, webOpts);
-      if (web) {
-        businessName = businessName || web.businessName || null;
-        businessType = businessType || web.businessType || null;
-      }
-    } catch (err) {
-      logger.warn(`[commercial-suite-size] web-search leg errored: ${err.message}`);
-    }
-  }
+  const web = await webSearchLeg({ address, businessNameHint }, opts);
+  const names = [businessNameHint, license.row && license.row.businessName, web && web.businessName];
+  return typeDefaultResult({ commercialRiskType, commercialSubtype }, names.find(Boolean) || null, web);
+}
 
-  // Type default keys OFF commercialRiskType/commercialSubtype ONLY — a
-  // web-search-reported businessType never chooses the size (AGENTS.md); it
-  // still rides the RESULT for display/notes. The label names the ONE input
-  // that chose the value (a specific subtype, else the risk type).
-  const { sqft: value, basis } = defaultSuiteSizeBasis({ commercialRiskType, commercialSubtype });
-  const businessTypeLabel = basis || 'this business type';
+// A license-sized result, or null when the license names no size.
+function licenseResult(row, nameHint) {
+  if (!row || !(Number(row.value) > 0)) return null;
+  return {
+    value: row.value,
+    source: SOURCES.LICENSE_SEATS,
+    confidence: 'medium',
+    businessName: row.businessName || nameHint || null,
+    businessType: 'restaurant_food',
+    evidence: row.evidence,
+    seats: row.seats,
+  };
+}
+
+// Type default keys OFF commercialRiskType/commercialSubtype ONLY — a
+// web-search-reported businessType never chooses the size (AGENTS.md); it
+// still rides the RESULT for display/notes. The label names the ONE input
+// that chose the value (a specific subtype, else the risk type).
+function typeDefaultResult(types, businessName, web) {
+  const { sqft: value, basis } = defaultSuiteSizeBasis(types);
   return {
     value,
     source: SOURCES.SUITE_TYPE_DEFAULT,
     confidence: 'low',
     businessName,
-    businessType,
+    businessType: (web && web.businessType) || null,
     defaultBasis: basis || null,
     evidence: [{
       source: SOURCES.SUITE_TYPE_DEFAULT,
-      detail: `no suite-specific measurement found — defaulted to ${value.toLocaleString()} sq ft for ${businessTypeLabel}`,
+      detail: `no suite-specific measurement found — defaulted to ${value.toLocaleString()} sq ft for ${basis || 'this business type'}`,
     }],
+  };
+}
+
+// Listing leg (PR 5b): a size published for THIS suite, or null. Network-
+// bound (a search vendor, up to three page fetches), so the cache-hit path
+// (skipWebSearch) skips it, EXCEPT when the row's own listing stamp aged out
+// (opts.listingRefresh): then the published size is re-read rather than
+// dropped to a default. The gate inside returns null at once when dark.
+async function listingLeg(input, opts) {
+  if ((opts.skipWebSearch && opts.listingRefresh !== true) || opts.skipListing) return null;
+  const remaining = remainingBudgetMs(opts.deadlineAt);
+  if (remaining < MIN_LEG_REMAINING_MS) {
+    logger.warn(`[commercial-suite-size] skipping listing leg — ${Math.max(0, Math.round(remaining))}ms left in the lookup budget`);
+    return null;
+  }
+  try {
+    const found = await resolveViaListing(input, { ...opts, timeoutMs: Math.min(opts.listingTimeoutMs || LISTING_DEFAULT_TIMEOUT_MS, remaining) });
+    return found && Number(found.value) > 0 ? found : null;
+  } catch (err) {
+    logger.warn(`[commercial-suite-size] listing leg errored: ${err.message}`);
+    return null;
+  }
+}
+
+// DBPR license leg. `row` is the matched license (or null); `checked` is
+// true only when the license list really loaded, so a null row then means
+// "no license at this suite", not an outage, a timeout or a skipped leg.
+async function licenseLeg(input, opts) {
+  const remaining = remainingBudgetMs(opts.deadlineAt);
+  if (remaining < MIN_LEG_REMAINING_MS) {
+    logger.warn(`[commercial-suite-size] skipping DBPR leg — ${Math.max(0, Math.round(remaining))}ms left in the lookup budget`);
+    return { row: null, checked: false };
+  }
+  const diag = {};
+  const legOpts = Number.isFinite(remaining)
+    ? { ...opts, diag, timeoutMs: Math.min(DBPR_DEFAULT_TIMEOUT_MS, remaining) }
+    : { ...opts, diag };
+  try {
+    const row = await resolveViaDbprLicense(input, legOpts);
+    return { row: row || null, checked: diag.extractLoaded === true };
+  } catch (err) {
+    logger.warn(`[commercial-suite-size] DBPR leg errored: ${err.message}`);
+    return { row: null, checked: false };
+  }
+}
+
+// Name-only web-search leg. skipWebSearch: the admin lookup's cache-hit
+// path, which must stay fast.
+async function webSearchLeg(input, opts) {
+  if (opts.skipWebSearch) return null;
+  const remaining = remainingBudgetMs(opts.deadlineAt);
+  if (remaining < MIN_LEG_REMAINING_MS) {
+    logger.warn(`[commercial-suite-size] skipping web-search leg — ${Math.max(0, Math.round(remaining))}ms left in the lookup budget`);
+    return null;
+  }
+  const legOpts = Number.isFinite(remaining)
+    ? { ...opts, timeoutMs: Math.min(opts.timeoutMs || WEB_SEARCH_DEFAULT_TIMEOUT_MS, remaining) }
+    : opts;
+  try {
+    return (await resolveViaWebSearch(input, legOpts)) || null;
+  } catch (err) {
+    logger.warn(`[commercial-suite-size] web-search leg errored: ${err.message}`);
+    return null;
+  }
+}
+
+// A listing-sized result. Only a license (a public record) classifies the
+// business; the listing itself never does. The license's own evidence rides
+// beside the listing's, so the record that justified a restaurant
+// classification is kept with the result.
+function listingResult(listing, license, nameHint) {
+  const row = license.row && (Number(license.row.value) > 0 || license.row.businessName) ? license.row : null;
+  return {
+    value: listing.value,
+    source: SOURCES.LISTING_VERIFIED_TEXT,
+    confidence: 'medium',
+    businessName: (row && row.businessName) || nameHint,
+    businessType: row ? 'restaurant_food' : null,
+    ...(row ? { licenseBacked: true, seats: row.seats } : {}),
+    licenseChecked: Boolean(row) || license.checked,
+    evidence: [...(listing.evidence || []), ...((row && row.evidence) || [])],
+    url: listing.url,
+    listingFetchedAt: listing.fetchedAt,
   };
 }
 

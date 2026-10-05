@@ -22,6 +22,8 @@ describe('resolveCommercialSuiteSize — listing rung (PR 5b) sits above the lic
     resolveViaDbprLicense.mockResolvedValue({ value: 1400, businessName: 'Test Taco Shop', seats: 25, evidence: [{ source: 'license_seats', detail: '25 seats' }] });
     const result = await resolveCommercialSuiteSize({ address: ADDRESS });
     expect(result).toMatchObject({ value: 1350, source: SOURCES.LISTING_VERIFIED_TEXT, confidence: 'medium', url: 'https://www.loopnet.com/x', businessName: 'Test Taco Shop', businessType: 'restaurant_food', licenseBacked: true, seats: 25 });
+    // The license record that justified the classification rides with the result.
+    expect(result.evidence.map((e) => e.source)).toEqual(['listing_verified_text', 'license_seats']);
     expect(resolveViaDbprLicense).toHaveBeenCalledTimes(1);
     expect(resolveViaWebSearch).not.toHaveBeenCalled();
   });
