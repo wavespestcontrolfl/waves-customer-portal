@@ -635,3 +635,16 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
     await expect(shadowVoicemails()).resolves.toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 0 });
   });
 });
+
+describe('AUDIT_PROMPT appointment definition', () => {
+  // The auditor grades production's appointment_confirmed, so it must ask the
+  // same question: a new visit with a day and a clock time, never a promised
+  // callback with a time or the ETA of a visit already booked (10-05: 6 of 8
+  // confirmed "missed appointment" incidents were one of those two).
+  const { AUDIT_PROMPT } = require('../services/call-self-audit');
+  test('defines appointment_agreed the way production does', () => {
+    expect(AUDIT_PROMPT).toMatch(/NEW Waves field-service visit with a specific day AND a specific clock time/);
+    expect(AUDIT_PROMPT).toMatch(/text, email or call back with a time/);
+    expect(AUDIT_PROMPT).toMatch(/ETA, a delay or the status of a visit already booked/);
+  });
+});
