@@ -3232,3 +3232,15 @@ with no run): posted number, then the saved row value, then the AI read. The
 run's `scores_adjusted` snapshot stays the AI read, so calibration records the
 technician-versus-AI difference. The standalone admin Lawn assessment page
 (`LawnAssessmentPanel`) is unchanged.
+
+## 2026-10-04 — The last navy field pieces take the Waves Admin look
+
+Owner 2026-10-04 ("slice 3", "ok go"): the timecard sign-off card, the Quick
+Move sheet and the Project Report service picker (all in `TechHomePage.jsx`)
+move from the tech-portal navy palette to the admin one: white surface,
+hairline borders, 4px/6px radii, weight 500, 14px text, one ink primary
+button, amber for overtime and a 50%+ rain chance, red only for an error.
+The `--tfx-*` palettes in the visit brief, visual notes and the three tool
+pages keep their tokens but fall back to the same light values (the page
+that needed the navy fallbacks was deleted). Visual only: same data, same
+actions.

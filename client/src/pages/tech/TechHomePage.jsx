@@ -25,8 +25,7 @@
 //                                \--> skipped (with reason)
 //
 // Renders inside TechFieldShell (the field workspace in the Waves Admin
-// look). The timecard sign-off card, Quick Move sheet and project picker in
-// this file still carry the dark palette until their own slice.
+// look).
 //
 // Audit focus:
 // - State transitions: confirm a tech can't accidentally skip an
@@ -85,13 +84,15 @@ const ProjectDetail = lazy(() =>
   import('../admin/ProjectsPage').then((m) => ({ default: m.ProjectDetail })),
 );
 
-const DARK = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
+// The Waves Admin field palette (tech-field.css values) for the inline-styled
+// timecard card, Quick Move sheet and project picker below.
+const FIELD = {
+  bg: '#fafaf9',
+  card: '#ffffff',
+  border: '#d6d3d1',
+  ink: '#1c1917',
+  text: '#1c1917',
+  muted: '#57534e',
 };
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -1237,8 +1238,8 @@ export default function TechHomePage({ section = 'today' }) {
       {rainOutResult && (
         <div style={{
           position: 'fixed', bottom: 16, left: 16, right: 16, zIndex: 1100,
-          padding: '10px 14px', borderRadius: 10, fontSize: 14, fontWeight: 600,
-          background: '#22c55e22', border: '1px solid #22c55e', color: '#22c55e',
+          padding: '10px 14px', borderRadius: 6, fontSize: 14, fontWeight: 500,
+          background: '#f5f5f4', border: '1px solid #1c1917', color: '#1c1917',
         }}>
           {rainOutResult}
         </div>
@@ -1261,8 +1262,8 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
     >
       <div style={{
         width: '100%', maxWidth: 460, margin: '0 12px',
-        background: DARK.card, border: `1px solid ${DARK.border}`,
-        borderRadius: 12, padding: 14,
+        background: FIELD.card, border: `1px solid ${FIELD.border}`,
+        borderRadius: 6, padding: 14,
       }}>
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -1270,12 +1271,11 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
         }}>
           <div>
             <div style={{
-              fontSize: 16, fontWeight: 800, color: DARK.text,
-              fontFamily: "'Montserrat', sans-serif",
+              fontSize: 16, fontWeight: 500, color: FIELD.text,
             }}>
               Select service
             </div>
-            <div style={{ fontSize: 12, color: DARK.muted, marginTop: 2 }}>
+            <div style={{ fontSize: 14, color: FIELD.muted, marginTop: 2 }}>
               Link the report to the visit it documents.
             </div>
           </div>
@@ -1284,15 +1284,15 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
             onClick={onClose}
             aria-label="Close"
             style={{
-              background: 'transparent', border: 'none', color: DARK.muted,
+              background: 'transparent', border: 'none', color: FIELD.muted,
               fontSize: 24, cursor: 'pointer', padding: '4px 10px',
             }}
           >×</button>
         </div>
         {services.length === 0 ? (
           <div style={{
-            padding: 16, border: `1px solid ${DARK.border}`, borderRadius: 8,
-            color: DARK.muted, fontSize: 13,
+            padding: 16, border: `1px solid ${FIELD.border}`, borderRadius: 4,
+            color: FIELD.muted, fontSize: 14,
           }}>
             No services scheduled today.
           </div>
@@ -1306,15 +1306,15 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
                   type="button"
                   onClick={() => onSelect(service)}
                   style={{
-                    textAlign: 'left', padding: '10px 12px', borderRadius: 8,
-                    border: `1px solid ${DARK.border}`, background: DARK.bg,
-                    color: DARK.text, cursor: 'pointer',
+                    textAlign: 'left', padding: '10px 12px', borderRadius: 4,
+                    border: `1px solid ${FIELD.border}`, background: FIELD.bg,
+                    color: FIELD.text, cursor: 'pointer',
                   }}
                 >
-                  <div style={{ fontSize: 14, fontWeight: 700 }}>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>
                     {service.customer_name || service.customerName || 'Customer'}
                   </div>
-                  <div style={{ fontSize: 12, color: DARK.muted, marginTop: 3 }}>
+                  <div style={{ fontSize: 14, color: FIELD.muted, marginTop: 3 }}>
                     {status.replace(/_/g, ' ')}
                     {serviceWindowLabel(service) ? ` · ${serviceWindowLabel(service)}` : ''}
                   </div>
@@ -1397,9 +1397,9 @@ function TimecardSignoffCard({ techName }) {
     if (weekly.tech_signed_at) {
       return (
         <div style={{
-          background: DARK.card, border: `1px solid #22c55e44`, borderRadius: 12,
+          background: FIELD.card, border: `1px solid #d6d3d1`, borderRadius: 6,
           padding: 12, margin: '20px 0',
-          fontSize: 12, color: '#22c55e',
+          fontSize: 14, color: '#1c1917',
         }}>
           ✓ Last week signed{weekly.tech_signature ? ` as "${weekly.tech_signature}"` : ''} — awaiting admin approval.
         </div>
@@ -1441,21 +1441,21 @@ function TimecardSignoffCard({ techName }) {
 
   return (
     <div style={{
-      background: DARK.card, borderRadius: 12, border: `1px solid #f59e0b66`,
+      background: FIELD.card, borderRadius: 6, border: `1px solid #d6d3d1`,
       padding: 16, margin: '20px 0',
     }}>
-      <div style={{ fontSize: 13, fontWeight: 700, color: '#f59e0b', marginBottom: 4, fontFamily: "'Montserrat', sans-serif", textTransform: 'uppercase', letterSpacing: 1 }}>
+      <div style={{ fontSize: 14, fontWeight: 500, color: '#854d0e', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
         Sign Last Week's Timecard
       </div>
-      <div style={{ fontSize: 12, color: DARK.muted, marginBottom: 10 }}>
+      <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 10 }}>
         Week of {weekly.week_start ? String(weekly.week_start).split('T')[0] : weekStart} — review and attest these hours.
       </div>
-      <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 13, color: DARK.text }}>
-        <div><strong style={{ color: DARK.text }}>{hours}h</strong> <span style={{ color: DARK.muted }}>total</span></div>
-        <div><strong style={{ color: parseFloat(otHrs) > 0 ? '#f59e0b' : DARK.text }}>{otHrs}h</strong> <span style={{ color: DARK.muted }}>OT</span></div>
-        <div><strong>{weekly.job_count || 0}</strong> <span style={{ color: DARK.muted }}>jobs</span></div>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 14, color: FIELD.text }}>
+        <div><strong style={{ color: FIELD.text }}>{hours}h</strong> <span style={{ color: FIELD.muted }}>total</span></div>
+        <div><strong style={{ color: parseFloat(otHrs) > 0 ? '#854d0e' : FIELD.text }}>{otHrs}h</strong> <span style={{ color: FIELD.muted }}>OT</span></div>
+        <div><strong>{weekly.job_count || 0}</strong> <span style={{ color: FIELD.muted }}>jobs</span></div>
       </div>
-      <div style={{ fontSize: 11, color: DARK.muted, marginBottom: 4 }}>Type your name to sign:</div>
+      <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 4 }}>Type your name to sign:</div>
       <input
         value={signature}
         onChange={(e) => setSignature(e.target.value)}
@@ -1463,8 +1463,8 @@ function TimecardSignoffCard({ techName }) {
         style={{
           width: '100%', boxSizing: 'border-box',
           padding: '8px 10px', fontSize: 14,
-          background: '#0f1923', color: DARK.text,
-          border: `1px solid ${DARK.border}`, borderRadius: 6,
+          background: FIELD.card, color: FIELD.text,
+          border: `1px solid ${FIELD.border}`, borderRadius: 6,
           marginBottom: 10,
         }}
       />
@@ -1472,21 +1472,20 @@ function TimecardSignoffCard({ techName }) {
         onClick={handleSign}
         disabled={submitting || !signature.trim()}
         style={{
-          width: '100%', padding: '10px', fontSize: 14, fontWeight: 700,
-          background: '#22c55e', color: '#fff', border: 'none', borderRadius: 8,
+          width: '100%', padding: '10px', fontSize: 14, fontWeight: 500,
+          background: '#1c1917', color: '#fff', border: 'none', borderRadius: 4,
           cursor: submitting || !signature.trim() ? 'wait' : 'pointer',
           opacity: submitting || !signature.trim() ? 0.6 : 1,
-          fontFamily: "'Montserrat', sans-serif",
         }}
       >
         {submitting ? 'Signing…' : 'Sign Timecard'}
       </button>
       {feedback && (
         <div style={{
-          marginTop: 10, fontSize: 12, padding: '6px 10px', borderRadius: 6,
-          background: feedback.isError ? '#ef444422' : '#22c55e22',
-          border: `1px solid ${feedback.isError ? '#ef4444' : '#22c55e'}`,
-          color: feedback.isError ? '#ef4444' : '#22c55e',
+          marginTop: 10, fontSize: 14, padding: '6px 10px', borderRadius: 6,
+          background: feedback.isError ? '#fcebeb' : '#f5f5f4',
+          border: `1px solid ${feedback.isError ? '#a32d2d' : '#1c1917'}`,
+          color: feedback.isError ? '#a32d2d' : '#1c1917',
         }}>{feedback.message}</div>
       )}
     </div>
@@ -1678,10 +1677,10 @@ function RainOutSheet({ service, onClose, onDone }) {
   };
 
   const chip = (active) => ({
-    padding: '7px 12px', borderRadius: 16, fontSize: 13, fontWeight: 600,
-    border: `1px solid ${active ? DARK.teal : DARK.border}`,
-    background: active ? '#0ea5e922' : 'transparent',
-    color: active ? DARK.teal : DARK.text, cursor: 'pointer',
+    padding: '7px 12px', borderRadius: 4, fontSize: 14, fontWeight: 500,
+    border: `1px solid ${active ? FIELD.ink : FIELD.border}`,
+    background: active ? 'rgba(28, 25, 23, .06)' : 'transparent',
+    color: active ? FIELD.ink : FIELD.text, cursor: 'pointer',
   });
 
   return (
@@ -1697,40 +1696,40 @@ function RainOutSheet({ service, onClose, onDone }) {
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          background: DARK.card, borderRadius: '16px 16px 0 0', width: '100%',
+          background: FIELD.card, borderRadius: '6px 6px 0 0', width: '100%',
           maxWidth: 560, boxSizing: 'border-box', maxHeight: '85vh', overflowY: 'auto', padding: 20, paddingBottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
-          border: `1px solid ${DARK.border}`, borderBottom: 'none',
+          border: `1px solid ${FIELD.border}`, borderBottom: 'none',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-          <div style={{ fontSize: 17, fontWeight: 800, color: DARK.text, fontFamily: "'Montserrat', sans-serif" }}>
+          <div style={{ fontSize: 17, fontWeight: 500, color: FIELD.text }}>
             ⛈️ Quick Move Appointment
           </div>
           <button type="button" onClick={onClose} aria-label="Close" style={{
-            background: 'transparent', border: 'none', color: DARK.muted, fontSize: 24, cursor: 'pointer', padding: '0 6px',
+            background: 'transparent', border: 'none', color: FIELD.muted, fontSize: 24, cursor: 'pointer', padding: '0 6px',
           }}>×</button>
         </div>
-        <div style={{ fontSize: 13, color: DARK.muted, marginBottom: 14 }}>
+        <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 14 }}>
           {(service.customer_name || service.customerName || 'Customer')}
           {options?.today?.rainChance != null && ` · today ${options.today.rainChance}% rain`}
         </div>
 
         {error && (
           <div style={{
-            marginBottom: 12, fontSize: 13, padding: '8px 10px', borderRadius: 8,
-            background: '#ef444422', border: '1px solid #ef4444', color: '#ef4444',
+            marginBottom: 12, fontSize: 14, padding: '8px 10px', borderRadius: 4,
+            background: '#fcebeb', border: '1px solid #a32d2d', color: '#a32d2d',
           }}>
             {error}
           </div>
         )}
 
         {!options && !error && (
-          <div style={{ color: DARK.muted, fontSize: 13, padding: 20, textAlign: 'center' }}>Loading options…</div>
+          <div style={{ color: FIELD.muted, fontSize: 14, padding: 20, textAlign: 'center' }}>Loading options…</div>
         )}
 
         {options && (
           <>
-            <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>REASON</div>
+            <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>REASON</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
               {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => (
                 <button key={r.code} type="button" onClick={() => pickReason(r.code)} style={chip(reason === r.code)}>
@@ -1739,10 +1738,10 @@ function RainOutSheet({ service, onClose, onDone }) {
               ))}
             </div>
 
-            <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>MOVE TO</div>
+            <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>MOVE TO</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
               {visibleOptions.length === 0 && (
-                <div style={{ fontSize: 13, color: DARK.muted }}>No slots available — call dispatch.</div>
+                <div style={{ fontSize: 14, color: FIELD.muted }}>No slots available — call dispatch.</div>
               )}
               {visibleOptions.map((opt) => {
                 const key = keyOf(opt);
@@ -1753,27 +1752,27 @@ function RainOutSheet({ service, onClose, onDone }) {
                     type="button"
                     onClick={() => setSelectedKey(key)}
                     style={{
-                      textAlign: 'left', padding: '11px 13px', borderRadius: 10, fontSize: 14,
-                      border: `1px solid ${active ? DARK.teal : DARK.border}`,
-                      background: active ? '#0ea5e91a' : 'transparent', color: DARK.text,
+                      textAlign: 'left', padding: '11px 13px', borderRadius: 6, fontSize: 14,
+                      border: `1px solid ${active ? FIELD.ink : FIELD.border}`,
+                      background: active ? 'rgba(28, 25, 23, .06)' : 'transparent', color: FIELD.text,
                       cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     }}
                   >
                     <span>
                       {opt.kind === 'same_day' ? '⏱️ ' : '📅 '}{opt.display}
                       {opt.kind === 'same_day' && !EXTRA_REASON_CODES.has(reason) && (
-                        <span style={{ color: DARK.muted, fontSize: 12 }}> — storm may pass</span>
+                        <span style={{ color: FIELD.muted, fontSize: 14 }}> — storm may pass</span>
                       )}
                     </span>
                     {(conflictsFor(opt).length > 0 || opt.rainChance != null) && (
                       <span style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
                         {conflictsFor(opt).length > 0 && (
-                          <span style={{ fontSize: 12, fontWeight: 700, color: '#f59e0b' }}>overlaps</span>
+                          <span style={{ fontSize: 14, fontWeight: 500, color: '#854d0e' }}>overlaps</span>
                         )}
                         {opt.rainChance != null && (
                           <span style={{
-                            fontSize: 12, fontWeight: 700,
-                            color: opt.rainChance >= 50 ? '#f59e0b' : '#22c55e',
+                            fontSize: 14, fontWeight: 500,
+                            color: opt.rainChance >= 50 ? '#854d0e' : '#1c1917',
                           }}>
                             {opt.rainChance}% 🌧
                           </span>
@@ -1789,8 +1788,8 @@ function RainOutSheet({ service, onClose, onDone }) {
                 server's locked occupancy check rejects real overlaps. */}
             {selectedConflicts.length > 0 && (
               <div style={{
-                fontSize: 13, padding: '8px 10px', borderRadius: 8, marginTop: -8, marginBottom: 16,
-                background: '#f59e0b1a', border: '1px solid #f59e0b', color: '#f59e0b',
+                fontSize: 14, padding: '8px 10px', borderRadius: 4, marginTop: -8, marginBottom: 16,
+                background: 'rgba(133, 77, 14, .1)', border: '1px solid #854d0e', color: '#854d0e',
               }}>
                 {`⚠️ This time overlaps ${conflictLabel(selectedConflicts[0])}`}
                 {selectedConflicts.length > 1 && ` and ${selectedConflicts.length - 1} more`}
@@ -1800,7 +1799,7 @@ function RainOutSheet({ service, onClose, onDone }) {
 
             {options.remainingRouteCount > 0 && reason !== 'customer_noshow' && reason !== 'gate_locked' && (
               <>
-                <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>APPLY TO</div>
+                <div style={{ fontSize: 14, fontWeight: 500, color: FIELD.muted, marginBottom: 6 }}>APPLY TO</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
                   <button type="button" onClick={() => setScope('job')} style={chip(scope === 'job')}>
                     This stop only
@@ -1812,7 +1811,7 @@ function RainOutSheet({ service, onClose, onDone }) {
               </>
             )}
 
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: DARK.text, marginBottom: 16, cursor: 'pointer' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, color: FIELD.text, marginBottom: 16, cursor: 'pointer' }}>
               <input type="checkbox" checked={notify} onChange={(e) => setNotify(e.target.checked)} />
               Text customer{scope === 'route' ? 's' : ''} (includes reschedule + local forecast links)
             </label>
@@ -1822,8 +1821,8 @@ function RainOutSheet({ service, onClose, onDone }) {
               onClick={handleCommit}
               disabled={!selected || busy}
               style={{
-                width: '100%', padding: '13px 0', borderRadius: 10, border: 'none',
-                background: DARK.teal, color: '#fff', fontSize: 15, fontWeight: 700,
+                width: '100%', padding: '13px 0', borderRadius: 6, border: 'none',
+                background: FIELD.ink, color: '#fff', fontSize: 15, fontWeight: 500,
                 cursor: busy ? 'wait' : 'pointer', opacity: (!selected || busy) ? 0.6 : 1,
               }}
             >
