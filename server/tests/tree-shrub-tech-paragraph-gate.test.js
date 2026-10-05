@@ -85,7 +85,7 @@ describe('freezeTreeShrubTechParagraph', () => {
   test('gate off: no read, no build, no model call, nothing stored', async () => {
     GATES.forEach((g) => { delete process.env[g]; });
     const { knex, state } = fakeKnex();
-    expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex })).toBeNull();
+    expect(await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex })).toBeNull();
     expect(state.reads + state.updates).toBe(0);
     expect(loadLinkedTreeShrubAssessment).not.toHaveBeenCalled();
     expect(buildReportV1Data).not.toHaveBeenCalled();
@@ -95,7 +95,7 @@ describe('freezeTreeShrubTechParagraph', () => {
   test('a lawn visit does nothing even with the gate on', async () => {
     gatesOn();
     const { knex } = fakeKnex();
-    expect(await freezeTreeShrubTechParagraph({ service: { ...SERVICE, service_line: 'lawn' }, knex })).toBeNull();
+    expect(await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: { ...SERVICE, service_line: 'lawn' }, knex })).toBeNull();
     expect(loadLinkedTreeShrubAssessment).not.toHaveBeenCalled();
   });
 
@@ -103,7 +103,7 @@ describe('freezeTreeShrubTechParagraph', () => {
     gatesOn();
     loadLinkedTreeShrubAssessment.mockResolvedValue(null);
     const { knex, state } = fakeKnex();
-    expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex })).toBeNull();
+    expect(await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex })).toBeNull();
     expect(dispatchWithFallback).not.toHaveBeenCalled();
     expect(state.updates).toBe(0);
   });
@@ -111,13 +111,15 @@ describe('freezeTreeShrubTechParagraph', () => {
   test('freezes one validated paragraph under the assessment id and hands the entry back', async () => {
     gatesOn();
     const { knex, state } = fakeKnex({ other: 'kept' });
-    const out = await freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate: jest.fn(async () => GOOD), now: () => new Date('2026-10-05T12:00:00Z') } });
+    const out = await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate: jest.fn(async () => GOOD), now: () => new Date('2026-10-05T12:00:00Z') } });
     expect(Object.keys(out)).toEqual(['77']);
     expect(out['77']).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v2', assessmentId: '77', text: TEXT, slots: SLOTS });
     expect(state.notes.treeShrubTechParagraph['77'].text).toBe(TEXT);
     expect(state.notes.other).toBe('kept');
     // The report was built from the joined record and a token, then the inputs were gathered from it.
-    expect(ensureReportToken).toHaveBeenCalledWith('sr-1', knex);
+    // The completion's own token is used; none is minted here.
+    expect(ensureReportToken).not.toHaveBeenCalled();
+    expect(buildReportV1Data.mock.calls[0][1]).toBe('tok');
     expect(buildReportV1Data).toHaveBeenCalledTimes(1);
     // The input gather is side-effect free: the narrative lane is never dispatched from the build.
     expect(buildReportV1Data.mock.calls[0][3]).toEqual({ skipNarrativeGeneration: true });
@@ -128,7 +130,7 @@ describe('freezeTreeShrubTechParagraph', () => {
     gatesOn();
     const { knex } = fakeKnex({ treeShrubTechParagraph: { 77: ENTRY } });
     const generate = jest.fn();
-    expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate } })).toBeNull();
+    expect(await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate } })).toBeNull();
     expect(generate).not.toHaveBeenCalled();
     expect(buildReportV1Data).not.toHaveBeenCalled();
   });
@@ -137,15 +139,15 @@ describe('freezeTreeShrubTechParagraph', () => {
     gatesOn();
     const { knex, state } = fakeKnex();
     const rejected = jest.fn(async () => ({ ok: false, reason: 'rejected', problems: ['palm_crown'] }));
-    expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate: rejected } })).toBeNull();
+    expect(await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate: rejected } })).toBeNull();
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('rejected (palm_crown)'));
     gatherTreeShrubTechParagraphInputs.mockRejectedValueOnce(new Error('read failed'));
-    expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate: jest.fn() } })).toBeNull();
+    expect(await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate: jest.fn() } })).toBeNull();
     buildReportV1Data.mockRejectedValueOnce(new Error('build failed'));
     gatherTreeShrubTechParagraphInputs.mockResolvedValueOnce(null);
-    expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate: jest.fn() } })).toBeNull();
+    expect(await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate: jest.fn() } })).toBeNull();
     loadLinkedTreeShrubAssessment.mockRejectedValueOnce(new Error('db down'));
-    expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex })).toBeNull();
+    expect(await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex })).toBeNull();
     expect(state.updates).toBe(0);
   });
 
@@ -158,7 +160,7 @@ describe('freezeTreeShrubTechParagraph', () => {
     }));
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
     const { knex, state } = fakeKnex();
-    const out = await freezeTreeShrubTechParagraph({ service: SERVICE, knex });
+    const out = await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
     expect(dispatchWithFallback.mock.calls[0][1]).toMatchObject({ laneId: 'ts_tech_paragraph' });
     // The note was not read, so: the products line only. No observed line, no all-clear.
@@ -170,12 +172,57 @@ describe('freezeTreeShrubTechParagraph', () => {
     gatesOn();
     gatherTreeShrubTechParagraphInputs.mockResolvedValue(tech.normalizeInputs({ technicianNote: '', products: [{ name: 'Merit 2F' }], landscapeCondition: 'Excellent' }));
     const { knex } = fakeKnex();
-    const out = await freezeTreeShrubTechParagraph({ service: SERVICE, knex });
+    const out = await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
     expect(out['77'].text).toBe('Today we applied Merit 2F. Your landscape looked excellent today.');
   });
 });
 
+describe('the completion\'s report token', () => {
+  test('no token: no paragraph, no build, no model call, and nothing minted', async () => {
+    gatesOn();
+    const { knex, state } = fakeKnex();
+    const generate = jest.fn();
+    for (const reportToken of [null, undefined, '']) {
+      expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex, reportToken, deps: { generate } })).toBeNull();
+    }
+    expect(ensureReportToken).not.toHaveBeenCalled();
+    expect(buildReportV1Data).not.toHaveBeenCalled();
+    expect(generate).not.toHaveBeenCalled();
+    expect(state.updates).toBe(0);
+  });
+});
+
+describe('completion wiring', () => {
+  test('complete-scheduled-service passes its own report token (after the lawn gate may have recovered one)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const call = src.indexOf('await freezeTreeShrubTechParagraph({ service: record, knex: db, reportToken });');
+    expect(call).toBeGreaterThan(src.indexOf('adoptRecoveredReportToken({ reportToken, gateToken: gate.reportToken, portalUrl })'));
+  });
+});
+
+describe('a hung model call still freezes the deterministic lines inside the deadline', () => {
+  afterEach(() => jest.useRealTimers());
+
+  test('the model gets the deadline minus a 2 s reserve; the fallback build and freeze run in the reserve', async () => {
+    gatesOn();
+    jest.useFakeTimers();
+    gatherTreeShrubTechParagraphInputs.mockResolvedValue(tech.normalizeInputs({ technicianNote: 'Found scale on the hedges.', products: [{ name: 'Merit 2F' }], landscapeCondition: 'Good' }));
+    dispatchWithFallback.mockImplementation(() => new Promise(() => {}));
+    const { knex, state } = fakeKnex();
+    let out;
+    freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex }).then((v) => { out = v; });
+    await jest.advanceTimersByTimeAsync(12999);
+    expect(out).toBeUndefined();
+    expect(dispatchWithFallback.mock.calls[0][1].timeoutMs).toBeLessThanOrEqual(13000);
+    await jest.advanceTimersByTimeAsync(2);
+    // The model timer fired at 13 s; the deterministic lines froze before 15 s.
+    await jest.advanceTimersByTimeAsync(10);
+    expect(out && out['77'].text).toBe('Today we applied Merit 2F.');
+    expect(state.notes.treeShrubTechParagraph['77'].slots.observed).toEqual([]);
+    expect(state.notes.treeShrubTechParagraph['77'].slots.allClear).toBeNull();
+  });
+});
 describe('one deadline for the whole step (the technician is waiting at Complete)', () => {
   afterEach(() => jest.useRealTimers());
   const settled = (promise) => { const state = { done: false, value: undefined }; promise.then((v) => { state.done = true; state.value = v; }); return state; };
@@ -187,7 +234,7 @@ describe('one deadline for the whole step (the technician is waiting at Complete
     loadLinkedTreeShrubAssessment.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
     const { knex, state } = fakeKnex();
     const generate = jest.fn(async () => GOOD);
-    const out = settled(freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate } }));
+    const out = settled(freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate } }));
     await jest.advanceTimersByTimeAsync(14999);
     expect(out.done).toBe(false);
     await jest.advanceTimersByTimeAsync(1);
@@ -208,14 +255,15 @@ describe('one deadline for the whole step (the technician is waiting at Complete
     loadLinkedTreeShrubAssessment.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ id: 77 }), 6000)));
     const { knex } = fakeKnex();
     const generate = jest.fn(async () => GOOD);
-    const out = settled(freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate } }));
+    const out = settled(freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate } }));
     await jest.advanceTimersByTimeAsync(6000);
     await jest.advanceTimersByTimeAsync(10);
     expect(out.done).toBe(true);
     expect(generate).toHaveBeenCalledTimes(1);
     const budget = generate.mock.calls[0][1].budgetMs;
-    expect(budget).toBeLessThanOrEqual(9000);
-    expect(budget).toBeGreaterThan(8000);
+    // 15 s - 6 s spent on the lookup - the 2 s reserve for the fallback and the freeze.
+    expect(budget).toBeLessThanOrEqual(7000);
+    expect(budget).toBeGreaterThan(6000);
   });
 
   test('a lookup that leaves under a second runs nothing', async () => {
@@ -224,7 +272,7 @@ describe('one deadline for the whole step (the technician is waiting at Complete
     loadLinkedTreeShrubAssessment.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ id: 77 }), 14500)));
     const { knex } = fakeKnex();
     const generate = jest.fn(async () => GOOD);
-    const out = settled(freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate } }));
+    const out = settled(freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate } }));
     await jest.advanceTimersByTimeAsync(14500);
     await jest.advanceTimersByTimeAsync(10);
     expect(out.done).toBe(true);
@@ -235,43 +283,56 @@ describe('one deadline for the whole step (the technician is waiting at Complete
 
 describe('treeShrubTechParagraphPdfSignature', () => {
   const frozen = { treeShrubTechParagraph: { 77: ENTRY } };
+  const withNotes = (notes) => ({ ...SERVICE, structured_notes: JSON.stringify(notes) });
 
   test('empty while the gate is off, for another service line, with no assessment and with no paragraph', async () => {
     const { knex, state } = fakeKnex(frozen);
     GATES.forEach((g) => { delete process.env[g]; });
-    expect(await treeShrubTechParagraphPdfSignature(SERVICE, knex)).toBe('');
+    expect(await treeShrubTechParagraphPdfSignature(withNotes(frozen), knex)).toBe('');
     expect(state.reads).toBe(0);
     gatesOn();
-    expect(await treeShrubTechParagraphPdfSignature({ ...SERVICE, service_line: 'lawn' }, knex)).toBe('');
+    expect(await treeShrubTechParagraphPdfSignature({ ...withNotes(frozen), service_line: 'lawn' }, knex)).toBe('');
     loadLinkedTreeShrubAssessment.mockResolvedValueOnce(null);
-    expect(await treeShrubTechParagraphPdfSignature(SERVICE, knex)).toBe('');
-    expect(await treeShrubTechParagraphPdfSignature(SERVICE, fakeKnex({}).knex)).toBe('');
+    expect(await treeShrubTechParagraphPdfSignature(withNotes(frozen), knex)).toBe('');
+    expect(await treeShrubTechParagraphPdfSignature(withNotes({}), knex)).toBe('');
   });
 
   test('follows the frozen text while the gate is on', async () => {
     gatesOn();
-    const a = await treeShrubTechParagraphPdfSignature(SERVICE, fakeKnex(frozen).knex);
+    const { knex } = fakeKnex();
+    const a = await treeShrubTechParagraphPdfSignature(withNotes(frozen), knex);
     expect(a).toBe(tech.techParagraphSignature(frozen, 77));
     expect(a).toMatch(/^:tp=[0-9a-f]{8}$/);
     const slots = { ...SLOTS, products: ['Merit 2F', 'Palm Gro 8-2-12'] };
     const other = { treeShrubTechParagraph: { 77: { ...ENTRY, text: tech.render(slots), slots } } };
-    expect(await treeShrubTechParagraphPdfSignature(SERVICE, fakeKnex(other).knex)).not.toBe(a);
+    expect(await treeShrubTechParagraphPdfSignature(withNotes(other), knex)).not.toBe(a);
+  });
+
+  test('RACE: the key follows the snapshot the render uses, not a fresh read of the row', async () => {
+    gatesOn();
+    // The caller loaded `service` before the paragraph froze; the row now holds it.
+    const { knex, state } = fakeKnex(frozen);
+    const staleSnapshot = withNotes({});
+    expect(await treeShrubTechParagraphPdfSignature(staleSnapshot, knex)).toBe('');
+    expect(state.reads).toBe(0);
+    // And the reverse: the snapshot has it, the row (somehow) does not.
+    const fresh = fakeKnex({});
+    expect(await treeShrubTechParagraphPdfSignature(withNotes(frozen), fresh.knex)).toMatch(/^:tp=[0-9a-f]{8}$/);
+  });
+
+  test('a row loaded without structured_notes cannot be keyed: sentinel', async () => {
+    gatesOn();
+    expect(await treeShrubTechParagraphPdfSignature(SERVICE, fakeKnex().knex)).toMatch(/^:tp=err[0-9a-f]{8}$/);
   });
 
   test('a failed assessment lookup stamps a one-off sentinel, never the empty string (strict lookup)', async () => {
     gatesOn();
     loadLinkedTreeShrubAssessment.mockRejectedValue(new Error('db down'));
-    const a = await treeShrubTechParagraphPdfSignature(SERVICE, fakeKnex().knex);
-    const b = await treeShrubTechParagraphPdfSignature(SERVICE, fakeKnex().knex);
+    const svc = withNotes(frozen);
+    const a = await treeShrubTechParagraphPdfSignature(svc, fakeKnex().knex);
+    const b = await treeShrubTechParagraphPdfSignature(svc, fakeKnex().knex);
     expect(a).toMatch(/^:tp=err[0-9a-f]{8}$/);
     expect(a).not.toBe(b);
-    expect(loadLinkedTreeShrubAssessment).toHaveBeenCalledWith(SERVICE, expect.anything(), { strict: true });
-  });
-
-  test('a failed read of the record\'s notes stamps the sentinel too', async () => {
-    gatesOn();
-    loadLinkedTreeShrubAssessment.mockResolvedValue({ id: 77 });
-    const knex = () => ({ where() { return this; }, first: async () => { throw new Error('read failed'); } });
-    expect(await treeShrubTechParagraphPdfSignature(SERVICE, knex)).toMatch(/^:tp=err[0-9a-f]{8}$/);
+    expect(loadLinkedTreeShrubAssessment).toHaveBeenCalledWith(svc, expect.anything(), { strict: true });
   });
 });

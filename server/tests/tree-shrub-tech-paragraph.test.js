@@ -151,6 +151,10 @@ describe('verifyObservations: the note must support each item', () => {
     expect(verify('No scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
     expect(verify('Did not see scale.', obs('scale'))).toEqual([]);
     expect(verify('Possible scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
+    // Absence wording drops the item (fail safe), including "missing", which can mean damage.
+    for (const note of ['Scale absent on palms.', 'Absence of scale on the palms.', 'Scale gone from the palms.', 'Scale cleared on the palms.', 'Scale eliminated on the palms.', 'Palms clear of scale.', 'No sign of scale on the palms.', 'No evidence of scale on palms.', 'Palms free from scale.', 'Palms lack scale.', 'Palms lacking scale.', 'Scale missing on the palms.']) {
+      expect(verify(note, obs('scale', 'palms'))).toEqual([]);
+    }
     expect(verify('Looks like scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
     expect(verify('Scale on the palm crown.', obs('scale', 'palms'))).toEqual([]);
     expect(verify('Scale near the conk on one palm.', obs('scale', 'palms'))).toEqual([]);

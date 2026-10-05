@@ -26,15 +26,24 @@ const { detectServiceLine } = require('./service-line-configs');
  * @param {object} input
  * @param {object} input.service  the service_records row (needs id, service_line / service_type)
  * @param {object} input.knex
+ * @param {string|null} input.reportToken  the completion's own report token; never minted here (a
+ *   token this helper minted could not reach the completion flow, which would then withhold the
+ *   text for a missing token). No token: no paragraph.
  * @param {object} [input.deps]   test seams: { generate, now, callModel }
  * @returns {Promise<object|null>} { [assessmentId]: entry } for the caller's in-memory
  *   structured_notes, or null (nothing frozen; an already-frozen entry is not returned)
  */
-async function freezeTreeShrubTechParagraph({ service, knex, deps = {} } = {}) {
+async function freezeTreeShrubTechParagraph({
+  service, knex, reportToken, deps = {},
+} = {}) {
   if (!service || !service.id || !knex) return null;
   if (!featureGates.tsTechParagraphLive()) return null;
   const serviceLine = service.service_line || detectServiceLine(service.service_type);
   if (serviceLine !== 'tree_shrub') return null;
+  if (!reportToken) {
+    logger.info(`[ts-tech-paragraph] none for service_record ${service.id}: no_report_token`);
+    return null;
+  }
 
   const tech = require('./tree-shrub-tech-paragraph');
   const startedAt = Date.now();
@@ -69,14 +78,13 @@ async function freezeTreeShrubTechParagraph({ service, knex, deps = {} } = {}) {
         getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
         gatherInputs: async () => {
           const { buildReportV1Data } = require('./report-data');
-          const { loadServiceRecordForPdf, ensureReportToken } = require('./pdf-queue');
+          const { loadServiceRecordForPdf } = require('./pdf-queue');
           const joined = await loadServiceRecordForPdf(service.id, knex).catch(() => null);
           const record = joined || service;
-          const token = await ensureReportToken(service.id, knex);
           // Side-effect free: the build takes the cached treatment narrative or the
           // deterministic template and never dispatches the narrative lane, so this
           // step makes exactly one model call.
-          const data = await buildReportV1Data(record, token, knex, { skipNarrativeGeneration: true }).catch(() => null);
+          const data = await buildReportV1Data(record, reportToken, knex, { skipNarrativeGeneration: true }).catch(() => null);
           return require('./tree-shrub-tech-paragraph-inputs').gatherTreeShrubTechParagraphInputs({ record, data, knex });
         },
         knex,
@@ -110,9 +118,9 @@ async function freezeTreeShrubTechParagraph({ service, knex, deps = {} } = {}) {
  * cached before the paragraph existed is never served after it, and a changed
  * text re-keys. '' unless the gate is live, the visit is a tree & shrub visit
  * with a confirmed assessment, and a whole frozen entry exists, so every other
- * visit keeps its key byte for byte. Read from the record itself (a cache-lookup
- * caller's row may be partial). Any failed lookup or read (the assessment, the
- * record's notes) stamps a random sentinel (a fresh render, never a stale hit).
+ * visit keeps its key byte for byte. Derived from the `service` snapshot's own
+ * structured_notes (the render's snapshot). Any failed lookup (the assessment), or a
+ * row without the column, stamps a random sentinel (a fresh render, never a stale hit).
  */
 async function treeShrubTechParagraphPdfSignature(service, knex) {
   if (!featureGates.tsTechParagraphLive() || !service || !service.id || !knex) return '';
@@ -123,8 +131,12 @@ async function treeShrubTechParagraphPdfSignature(service, knex) {
     // Strict: a failed lookup throws into the sentinel below, never into "no paragraph".
     const assessment = await loadLinkedTreeShrubAssessment(service, knex, { strict: true });
     if (!assessment || assessment.id == null) return '';
-    const row = await knex('service_records').where({ id: service.id }).first('structured_notes');
-    return require('./tree-shrub-tech-paragraph').techParagraphSignature(row && row.structured_notes, assessment.id);
+    // The SAME structured_notes snapshot the render reads (the service object the
+    // caller hands buildReportV1Data), never a fresh read of the row: a paragraph
+    // frozen between the caller's load and this call must not key a PDF that was
+    // built without it. A caller whose row lacks the column cannot be keyed safely.
+    if (!Object.hasOwn(service, 'structured_notes')) throw new Error('structured_notes not loaded');
+    return require('./tree-shrub-tech-paragraph').techParagraphSignature(service.structured_notes, assessment.id);
   } catch {
     return `:tp=err${crypto.randomBytes(4).toString('hex')}`;
   }

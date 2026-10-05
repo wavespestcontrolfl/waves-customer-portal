@@ -130,7 +130,8 @@ const PROBLEM_HINT_RE = /\b(?:problem|issue|damage\w*|dying|dead|die[sd]?|diseas
 
 // ── Note checks ───────────────────────────────────────────────────────────
 
-const NEGATION_RE = /\b(?:no|not|none|never|without|nothing|zero|free\s+of|rule[sd]?\s+out|ruled\s+out)\b|n['’]t\b/i;
+// Absence wording drops the item (fail safe): "missing" can mean damage, so it drops too.
+const NEGATION_RE = /\b(?:no|not|none|never|without|nothing|zero|free\s+(?:of|from)|clear\s+of|rule[sd]?\s+out|ruled\s+out|absent|absence|gone|cleared|eliminated|eradicated|lack(?:s|ed|ing)?|missing|negative)\b|n['’]t\b/i;
 const HEDGE_RE = /\b(?:possible|possibly|may|might|could|maybe|perhaps|probably|likely|suspect\w*|unsure|uncertain|unclear|seems?|appears?|looks?\s+like|think|potential\w*|signs?\s+of)\b/i;
 // Owner rulings: never Ganoderma or a conk (10-03, #5836) or the other two
 // diagnosis-only palm diseases; photos are from the ground, so never a word about a
@@ -353,6 +354,9 @@ const engine = createTechParagraphEngine({
   frozenEntryProblem,
   // No note is not a miss here: the deterministic lines need no model.
   precheck: (inputs) => (inputs.technicianNote.length < 12 ? 'no_note' : null),
+  // The deterministic fallback (build + atomic freeze) after a hung or failed model
+  // call needs its own slice of the step's deadline.
+  reserveMs: 2000,
 });
 
 /**

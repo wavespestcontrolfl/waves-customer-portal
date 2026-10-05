@@ -49,11 +49,19 @@ function parseJsonObject(value) {
  * @param {Function} [cfg.frozenEntryProblem] (entry) => null | reason; replaces frozenTextProblem
  *   when the stored entry carries more than text (the T&S paragraph re-renders from its slots)
  * @param {Function} [cfg.precheck] (inputs) => null | reason; replaces the lawn rule (a note and a product)
+ * @param {number} [cfg.reserveMs] slice of the step's deadline the model call may not use (default 0)
  */
+// The lawn rule: a note and an applied product, or no call.
+function lawnPrecheck(inputs) {
+  if (!inputs.technicianNote || inputs.technicianNote.length < 12) return 'no_note';
+  return inputs.products.length ? null : 'no_products';
+}
+
 function createTechParagraphEngine(cfg) {
   const {
     logTag, laneId, promptVersion, freezeKey, freezeVersion, budgetMs: BUDGET_MS,
-    normalizeInputs, buildPrompt, validateParagraph, frozenTextProblem, frozenEntryProblem, precheck,
+    normalizeInputs, buildPrompt, validateParagraph, frozenTextProblem, frozenEntryProblem,
+    precheck = lawnPrecheck, reserveMs = 0,
   } = cfg;
 
   function inputsHash(inputs) {
@@ -68,16 +76,11 @@ function createTechParagraphEngine(cfg) {
    */
   async function generateTechParagraph(rawInputs, deps = {}) {
     const inputs = normalizeInputs(rawInputs);
-    if (typeof precheck === 'function') {
-      const reason = precheck(inputs);
-      if (reason) return { ok: false, reason };
-    } else {
-      if (!inputs.technicianNote || inputs.technicianNote.length < 12) return { ok: false, reason: 'no_note' };
-      if (!inputs.products.length) return { ok: false, reason: 'no_products' };
-    }
+    const missing = precheck(inputs);
+    if (missing) return { ok: false, reason: missing };
     // What is left of the step's one deadline (createAndFreezeTechParagraph passes it);
     // a call with under a second to run is not made.
-    const budgetMs = Number.isFinite(deps.budgetMs) ? Math.min(BUDGET_MS, deps.budgetMs) : BUDGET_MS;
+    const budgetMs = Math.min(BUDGET_MS, deps.budgetMs ?? BUDGET_MS);
     if (budgetMs < 1000) return { ok: false, reason: 'timeout' };
     const prompt = buildPrompt(inputs);
     const payload = {
@@ -233,7 +236,9 @@ function createTechParagraphEngine(cfg) {
       }
       if (!live()) return { status: 'timeout' };
       if (!inputs) return { status: 'no_inputs' };
-      const generated = await (deps.generate || generateTechParagraph)(inputs, { ...deps, budgetMs: remaining() });
+      // The model gets what is left minus cfg.reserveMs: a caller with a deterministic
+      // fallback keeps a slice of the deadline for its build and the atomic freeze.
+      const generated = await (deps.generate || generateTechParagraph)(inputs, { ...deps, budgetMs: remaining() - reserveMs });
       if (!live()) return { status: 'timeout' };
       if (!generated.ok) return { status: generated.reason || 'no_paragraph', problems: generated.problems };
       const entry = {
