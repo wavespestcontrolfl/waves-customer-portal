@@ -83,15 +83,16 @@ const ADDRESS_STATUS_LABELS = {
   unavailable: "Validation unavailable",
 };
 
-// One line: what the address itself is (Google Address Validation), then the
-// USPS flag when Google gave one, then the county roll's own answer. Absent
+// One line: what the address itself is (Google Address Validation), then
+// Google's own business / residential classification when it gave one (its
+// metadata, not USPS data), then the county roll's own answer. Absent
 // (null) when the lookup carried no status: the panel is unchanged.
 function addressStatusLine(status) {
   const label = status && ADDRESS_STATUS_LABELS[status.state];
   if (!label) return null;
   const parts = [status.state === "confirmed" && status.corrected ? `${label} (corrected by Google)` : label];
-  if (status.usps?.business === true) parts.push("USPS: business");
-  else if (status.usps?.residential === true) parts.push("USPS: residential");
+  if (status.use?.business === true) parts.push("Google: business address");
+  else if (status.use?.residential === true) parts.push("Google: residential address");
   if (status.countyRoll === "not_found") parts.push("Not on the county roll");
   return parts.join(" · ");
 }
