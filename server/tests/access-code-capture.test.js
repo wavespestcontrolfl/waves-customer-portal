@@ -216,6 +216,12 @@ describe('verifyItems', () => {
     expect(verify([item({ kind: 'pass', code: null, instructions: 'https://example.com/p/(abc)', quote: body })], body)).toEqual([]);
   });
 
+  test('a pass whose quote carries a link must keep the link', () => {
+    const body = 'Visitor pass. View your pass: https://example.com/p/abc';
+    expect(verify([item({ kind: 'pass', code: null, instructions: 'View your pass', quote: body })], body)).toEqual([]);
+    expect(verify([item({ kind: 'pass', code: null, instructions: 'View your pass: https://example.com/p/abc', quote: body })], body)).toHaveLength(1);
+  });
+
   test('instructions-only items hash the trimmed instructions', () => {
     const kept = verify([item({ kind: 'pass', code: null, instructions: ' Press 5 for Waves ', quote: 'press 5' })], 'at the box press 5 for Waves');
     expect(kept[0].value_hash).toBe(valueHash(null, 'Press 5 for Waves'));

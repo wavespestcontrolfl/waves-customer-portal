@@ -108,6 +108,11 @@ function applyCustomerSearchFilter(query, value) {
     if (phoneDigits.length >= 3) {
       this.orWhereRaw("regexp_replace(COALESCE(customers.phone, ''), '[^0-9]', '', 'g') LIKE ? ESCAPE '\\'", [`%${phoneDigits}%`]);
     }
+
+    // Any active home of the customer, not only the address on the customer
+    // row: a second home's street finds its owner too.
+    this.orWhereRaw(`EXISTS (SELECT 1 FROM customer_properties cp WHERE cp.customer_id = customers.id AND cp.active
+      AND CONCAT_WS(' ', cp.address_line1, cp.address_line2, cp.city, cp.zip) ILIKE ? ESCAPE '\\')`, [contains]);
   });
 }
 

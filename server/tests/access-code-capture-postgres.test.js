@@ -1838,7 +1838,9 @@ postgres('access codes section', () => {
       expect(rest).toEqual([]);
       expect(row).toMatchObject({
         customer_id: null, sender_phone: SENDER, suggested_customer_id: home.id, kind: 'pass', code: null,
-        instructions: `View your pass: ${LINK}`, status: 'found', source_type: 'sms', source_id: messageId, property_id: null,
+        instructions: `View your pass: ${LINK}`, status: 'found', source_type: 'sms', source_id: messageId,
+        // the home the text named, kept so the card shows its address
+        property_id: home.propertyIds[0],
       });
       expect((await receipts(messageId))[0]).toMatchObject({ status: 'ok', proposal_count: 1 });
       expect(await sweep(read)).toMatchObject({ scanned: 0, found: 0 });
@@ -2128,11 +2130,9 @@ postgres('access codes section', () => {
       await text(null, PASS_TEXT, { from: SENDER });
       await sweep(stub([passItem()]));
       const [row] = await unlinked();
-      // A linked multi-home row has no home yet: the office names it.
+      // Linked, the row keeps the home the text named (home a); the office can name another.
       let res = await call('POST', `/${row.id}/link`, { customerId: c.id });
-      expect([res.status, res.body.accessCode.propertyId]).toEqual([200, null]);
-      res = await call('POST', `/${row.id}/accept`, {}, { 'x-test-admin': ADMIN_ID });
-      expect([res.status, res.body.code]).toEqual([400, 'property_required']);
+      expect([res.status, res.body.accessCode.propertyId]).toEqual([200, a]);
       res = await call('POST', `/${row.id}/accept`, { propertyId: b }, { 'x-test-admin': ADMIN_ID });
       expect([res.status, res.body.accessCode.propertyId]).toEqual([200, b]);
       expect(await directoryRows()).toEqual([]);
@@ -2178,6 +2178,16 @@ postgres('access codes section', () => {
         await home('100 Main St N', 'Apt 5');
         const two = 'Pass for 100 Main St N, Apt 5, FL 34231 and 200 Oak St, FL 34202';
         expect(await access.suggestCustomer(trx, two)).toBeNull();
+      });
+      test('the suggestion keeps the home that matched, and the found list shows its address', async () => {
+        const c = await customer({ properties: 0 });
+        const main = randomUUID();
+        const second = randomUUID();
+        await trx('customer_properties').insert([
+          { id: main, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: true, address_line1: '9 Other Way', city: 'Bradenton', zip: '34202', active: true, address_key: randomUUID() },
+          { id: second, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false, address_line1: '100 Main St N', address_line2: 'Apt 5', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID() },
+        ]);
+        expect(await access.suggestedHome(trx, BODY)).toEqual({ customerId: c.id, propertyId: second });
       });
       test('a different directional or unit suggests nobody', async () => {
         await home('100 Main St S', 'Apt 4');

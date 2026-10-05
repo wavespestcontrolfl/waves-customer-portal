@@ -245,9 +245,11 @@ const trimLink = (u) => {
   }
   return link;
 };
-function linksAreWhole(instructions, bodyText) {
+// Every link in the directions is a whole link of the text, and a pass whose
+// quote carries a link keeps one (a pass without its link opens nothing).
+function linksAreWhole(instructions, bodyText, quote = '') {
   const links = (instructions.match(URL_RE) || []).map(trimLink);
-  if (!links.length) return true;
+  if (!links.length) return !/https?:\/\/[^\s<>"']+/i.test(quote);
   const whole = new Set((bodyText.match(URL_RE) || []).map(trimLink));
   return links.every((link) => whole.has(link));
 }
@@ -265,7 +267,7 @@ function verifyItem(item, bodyText, { refuse, phones }) {
   if (instructions && !bodyText.toLowerCase().includes(normalizeText(instructions).toLowerCase())) return null;
   // A pass link is kept verbatim: a link cropped part-way is a different
   // address, so every link in the directions must be a whole link of the text.
-  if (instructions && !linksAreWhole(instructions, bodyText)) return null;
+  if (instructions && !linksAreWhole(instructions, bodyText, item.kind === 'pass' ? quote : '')) return null;
   if (code) {
     // Whole token in the quote AND in the full text: a quote cropped to "4821"
     // out of "#4821" must not strip the symbol or shorten the code.
@@ -387,7 +389,8 @@ const SOURCE_COLUMNS = ['id', 'customer_id', 'direction', 'message_body', 'messa
 // question that asked for a code or the gate.
 async function priorOutboundAskedForCode(conn, message) {
   const prior = await excludeUnresolvedSendReservations(conn('sms_log'))
-    .where({ customer_id: message.customer_id, direction: 'outbound', to_phone: message.from_phone })
+    // the same conversation: our line the customer wrote to, and their number
+    .where({ customer_id: message.customer_id, direction: 'outbound', to_phone: message.from_phone, from_phone: message.to_phone })
     .where('created_at', '<', new Date(message.created_at))
     .where('created_at', '>=', new Date(new Date(message.created_at).getTime() - ASK_WINDOW_HOURS * 3600000))
     // Only a text that reached the customer can have asked them anything.
@@ -433,6 +436,16 @@ async function suggestCustomer(conn, body) {
       && (!a.unit || a.unit === unit) && (!a.zip || !zip || a.zip === zip));
   });
   return matches.length === 1 ? matches[0].customer_id : null;
+}
+
+// The home that produced the suggestion (its address is what the card shows).
+async function suggestedHome(conn, body) {
+  const customerId = await suggestCustomer(conn, body);
+  if (!customerId) return { customerId: null, propertyId: null };
+  const { addresses } = addressesIn(body);
+  const homes = await conn('customer_properties').where({ customer_id: customerId, active: true }).select('id', 'address_line1');
+  const match = homes.find((h) => addresses.some((a) => addressWords(stripTrailingUnit(h.address_line1))[0] === a.number));
+  return { customerId, propertyId: match ? match.id : null };
 }
 
 const canonicalLower = (v) => String(v || '').trim().replace(/\s+/g, '').toLowerCase();
@@ -523,9 +536,12 @@ async function fileUnlinkedItems(trx, message, items, receipt) {
   const toInsert = items.filter((item) => !filed.has(rowKey(item)));
   let inserted = 0;
   if (toInsert.length) {
-    const suggested = await suggestCustomer(trx, message.message_body);
+    // An unlinked row keeps the suggested home in property_id (no customer
+    // reads it until the row is linked), so the card shows that home's address.
+    const suggested = await suggestedHome(trx, message.message_body);
     const rows = await trx('customer_access_codes').insert(toInsert.map((item) => ({
-      customer_id: null, sender_phone: String(message.from_phone).trim(), suggested_customer_id: suggested,
+      customer_id: null, sender_phone: String(message.from_phone).trim(), suggested_customer_id: suggested.customerId,
+      property_id: suggested.propertyId,
       kind: item.kind, code: item.code, instructions: item.instructions, life: item.life, status: 'found',
       source_type: 'sms', source_id: message.id, source_quote: item.quote, source_at: new Date(message.created_at),
       value_hash: item.value_hash,
@@ -1121,8 +1137,10 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
     .leftJoin('customers as sc', function suggested() {
       this.on('sc.id', 'a.suggested_customer_id').andOnNull('sc.deleted_at');
     })
-    .joinRaw(`LEFT JOIN LATERAL (SELECT hp.address_line1, hp.city FROM customer_properties hp
-      WHERE hp.customer_id = sc.id AND hp.active ORDER BY hp.is_primary DESC, hp.id LIMIT 1) sp ON true`)
+    // the home that produced the suggestion, kept on the unlinked row
+    .leftJoin('customer_properties as sp', function suggestedHomeJoin() {
+      this.on('sp.id', 'a.property_id').andOn('sp.customer_id', 'a.suggested_customer_id');
+    })
     .select('a.*', 'c.first_name', 'c.last_name', 'c.company_name',
       'sc.first_name as sc_first', 'sc.last_name as sc_last', 'sc.company_name as sc_company',
       'sp.address_line1 as sc_address', 'sp.city as sc_city')
@@ -1348,7 +1366,8 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (!(await sourceStillSupports(trx, row))) return fail(409, 'source_changed');
       // The text's own code (not one the office typed) is rechecked against the
       // homes the customer has now.
-      if (row.source_type === 'sms' && next.code === row.code && await codeIsAddress(trx, row.customer_id, next.code)) return fail(409, 'code_is_address');
+      // Same digits as the text's code (a formatting edit such as #4455 → 4455) still counts as the text's code.
+      if (row.source_type === 'sms' && digitsOf(next.code) === digitsOf(row.code) && await codeIsAddress(trx, row.customer_id, next.code)) return fail(409, 'code_is_address');
       // A standing code's home is settled first: duplicates are per home.
       // (A one-visit code takes its visit's home, below.)
       const standingHome = next.life === 'standing'
@@ -1436,9 +1455,11 @@ async function link(conn, id, { customerId, adminUserId = null } = {}) {
         if (owner && owner.customer_id) return fail(409, 'source_moved');
       }
       if (await codeIsAddress(trx, customerId, row.code)) return fail(409, 'code_is_address');
-      const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).select('id');
+      const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
+      // The text's own home when it is one of this customer's; else the only home.
+      const home = homes.includes(row.property_id) ? row.property_id : (homes.length === 1 ? homes[0] : null);
       const [updated] = await trx('customer_access_codes').where({ id }).update({
-        customer_id: customerId, property_id: homes.length === 1 ? homes[0].id : null, sender_phone: null,
+        customer_id: customerId, property_id: home, sender_phone: null,
         suggested_customer_id: null, updated_at: trx.fn.now(),
       }).returning('*');
       await audit(trx, adminUserId, 'access_code.linked', id, {
@@ -1574,6 +1595,7 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
 }
 
 module.exports = {
+  suggestedHome,
   listForVisit,
   VERSION,
   KINDS,
