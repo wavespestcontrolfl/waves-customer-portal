@@ -5900,7 +5900,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { issuedCloseoutVisitRefusal } = require('../services/invoice-issued-closeout');
+            const { issuedCloseoutVisitRefusal, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
             // ONE rule for status and day, re-derived on the LOCKED row — the
             // same function the wrapper's unlocked resolver used (Codex round
             // 16 P2 #4131: a NULL status is live in both). An arrived
@@ -5925,6 +5925,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // completing over them.
             if (lockedRefusal) {
               throw Object.assign(new Error(`visit state changed during the issued-invoice closeout: ${lockedRefusal}`), { code: 'issued_visit_in_progress' });
+            }
+            // A job timer started on this visit since the wrapper's read: its
+            // technician is working it now, so it stays theirs. The closeout
+            // never ends or re-times a timer (GitHub r1 P1 ×3 #5886).
+            if (await visitJobTimerRunning(trx, svc.id)) {
+              throw Object.assign(new Error('visit job timer running during the issued-invoice closeout'), { code: 'issued_visit_in_progress' });
             }
             // The LOCKED status is the transition source (GitHub r10 P2
             // #4127): pending → confirmed between the unlocked read and this

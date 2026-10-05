@@ -157,7 +157,9 @@ describe('source contracts', () => {
     // profile re-resolve, through the ONE function the wrapper's resolver
     // uses (issuedCloseoutVisitRefusal — Codex round 16 P2 #4131 kept NULL
     // live in both; owner 2026-10-04 admits an arrived visit in both).
-    expect(completion).toMatch(/issuedCloseoutVisitRefusal\(lockedSvcRow\?\.status, lockedDay, \{[\s\S]{0,200}?trigger: issuedInvoiceCloseout\.trigger,[\s\S]{0,900}?code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,600}?if \(lockedRefusal\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,2350}?const lockedProfile = await resolveLockedProfile/);
+    expect(completion).toMatch(/issuedCloseoutVisitRefusal\(lockedSvcRow\?\.status, lockedDay, \{[\s\S]{0,200}?trigger: issuedInvoiceCloseout\.trigger,[\s\S]{0,900}?code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,600}?if \(lockedRefusal\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,3000}?const lockedProfile = await resolveLockedProfile/);
+    // …and a job timer started on the visit since the wrapper's read refuses under the same lock (r1 P1 #5886).
+    expect(completion).toMatch(/if \(await visitJobTimerRunning\(trx, svc\.id\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);\s*\}[\s\S]{0,800}?fromStatus = lockedSvcRow\.status;/);
   });
   test('the Stripe webhook runs the paid closeout for every settled invoice, BEFORE its review step (owner 2026-10-04: card and bank payments close the visit too)', () => {
     const webhook = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
@@ -518,6 +520,25 @@ postgres('invoice issued ⇒ visit completed through the canonical completion (P
     expect(result).toMatchObject({ status: 409, body: { code: 'issued_visit_in_progress' } });
     expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('en_route');
     expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+  });
+
+  test('a job timer started on the visit between the unlocked read and the record transaction refuses the closeout — and the timer is left exactly as it was (r1 P1 #5886)', async () => {
+    await fixture({ serviceType: 'Fixture Quarterly Pest Control Service' });
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const { ACTIVE_WRITE_GENERATION } = require('../constants/staff-time');
+    await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'on_site' });
+    const clockIn = new Date(Date.now() - 20 * 60000);
+    await mockPg('time_entries').insert({ id: randomUUID(), technician_id: f.techId, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(clockIn.getTime() - 60000) });
+    const timerId = randomUUID();
+    await mockPg('time_entries').insert({ id: timerId, technician_id: f.techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: clockIn, job_id: f.serviceId });
+    const before = await mockPg('time_entries').where({ id: timerId }).first();
+    const result = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
+      body: { visitOutcome: 'completed', backfill: true, sendCompletionSms: false, requestReview: false, invoiceAlreadySent: true, idempotencyKey: randomUUID() },
+      actor: { techRole: 'admin', technicianId: f.techId, technician: null }, issuedInvoiceCloseout: { invoiceId: f.invoiceId, trigger: 'sent' } });
+    expect(result).toMatchObject({ status: 409, body: { code: 'issued_visit_in_progress' } });
+    expect((await mockPg('scheduled_services').where({ id: f.serviceId }).first()).status).toBe('on_site');
+    expect(await mockPg('service_records').where({ scheduled_service_id: f.serviceId })).toHaveLength(0);
+    expect(await mockPg('time_entries').where({ id: timerId }).first()).toEqual(before);
   });
 
   // Owner ruling 2026-10-04. The GPS arrival sets on_site on nearly every

@@ -4448,6 +4448,10 @@ function initScheduledJobs() {
         // other retry (GitHub r10 P2 #4127); gated on its own flag inside.
         const sweep = await require('./invoice-issued-closeout').retrySettledStatementCloseouts();
         if (sweep.retried) logger.info(`Settled-statement closeout retry: ${sweep.retried} retried, ${sweep.closed} closed`);
+        // A paid invoice whose own closeout failed (card, bank, cash) has no
+        // other retry either (GitHub r1 P1 #5886); same gate inside.
+        const paidSweep = await require('./invoice-issued-closeout').retryFailedPaidInvoiceCloseouts();
+        if (paidSweep.retried) logger.info(`Paid-invoice closeout retry: ${paidSweep.retried} retried, ${paidSweep.closed} closed`);
       });
     } catch (err) {
       logger.error(`Payer statement dunning failed: ${err.message}`);

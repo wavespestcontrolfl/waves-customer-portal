@@ -506,65 +506,76 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ actor_type: 'technician', action: 'visit.completion_on_invoice_issued_refused', resource_id: bad.id, metadata: expect.objectContaining({ code: 'error' }) }));
     mockCompleteScheduledService.mockImplementation(async () => ({ status: 200, body: { success: true } }));
   });
-  test('closing an arrived visit ends THAT visit\'s running job timer; a refused closeout and another visit\'s timer are left running (GitHub r9 P1 #4127)', async () => {
+  test('a visit whose job timer is still running stays with its technician; once the timer stops the same invoice closes it — the closeout never writes time_entries (GitHub r9 P1 #4127, r1 P1 ×3 #5886)', async () => {
     const techId = randomUUID();
     await trx('technicians').insert({ id: techId, name: 'Fixture Tech' });
     const startedAt = new Date(Date.now() - 45 * 60000);
-    const shiftId = randomUUID();
-    await trx('time_entries').insert({ id: shiftId, technician_id: techId, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(startedAt.getTime() - 60000) });
-    const timer = async (jobId) => {
-      const id = randomUUID();
-      await trx('time_entries').insert({ id, technician_id: techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: startedAt, job_id: jobId });
-      return id;
-    };
+    await trx('time_entries').insert({ id: randomUUID(), technician_id: techId, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(startedAt.getTime() - 60000) });
     const arrived = await visit({ status: 'on_site', technician_id: techId });
-    const other = await visit({ status: 'on_site', technician_id: techId, date: '2040-03-02' });
-    const arrivedTimer = await timer(arrived.id);
-    const otherTimer = await timer(other.id);
-    // A refused closeout (en_route) ends nothing.
-    const enRoute = await visit({ status: 'en_route', technician_id: techId, date: '2040-03-01' });
-    const enRouteTimer = await timer(enRoute.id);
-    expect(await closeOutVisitForIssuedInvoice({ invoiceId: (await invoice({ scheduled_service_id: enRoute.id, date: '2040-03-01' })).id, trigger: 'paid', conn: trx, today: TODAY }))
-      .toMatchObject({ closed: false, reason: 'visit_en_route' });
-    expect((await trx('time_entries').where({ id: enRouteTimer }).first()).status).toBe('active');
+    const timerId = randomUUID();
+    await trx('time_entries').insert({ id: timerId, technician_id: techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: startedAt, job_id: arrived.id });
+    const inv = await invoice({ scheduled_service_id: arrived.id, status: 'paid' });
+    const before = await trx('time_entries').where({ id: timerId }).first();
 
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId: (await invoice({ scheduled_service_id: arrived.id })).id, trigger: 'sent', conn: trx, today: TODAY });
-    expect(out).toMatchObject({ closed: true, visitId: arrived.id });
-    const ended = await trx('time_entries').where({ id: arrivedTimer }).first();
-    expect(ended.status).toBe('completed');
-    expect(ended.clock_out).not.toBeNull();
-    expect(Number(ended.duration_minutes)).toBeGreaterThanOrEqual(44);
-    expect(Number(ended.duration_minutes)).toBeLessThanOrEqual(46);
-    // Keyed by the visit, never "the technician's active job".
-    expect((await trx('time_entries').where({ id: otherTimer }).first()).status).toBe('active');
-    expect((await trx('time_entries').where({ id: shiftId }).first()).status).toBe('active');
+    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid' })).toMatchObject({ svc: null, reason: 'visit_timer_running', visit: expect.objectContaining({ id: arrived.id }) });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_timer_running', visitId: arrived.id });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: arrived.id, action: 'visit.completion_on_invoice_issued_refused', metadata: expect.objectContaining({ code: 'visit_timer_running' }) }));
+    // Read-only: the running entry is exactly as it was.
+    expect(await trx('time_entries').where({ id: timerId }).first()).toEqual(before);
+
+    // An unstarted visit with a running timer is being worked too.
+    const unstarted = await visit({ technician_id: techId, date: '2040-03-01' });
+    await trx('time_entries').insert({ id: randomUUID(), technician_id: techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: startedAt, job_id: unstarted.id });
+    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: unstarted.id, date: '2040-03-01' }), { today: TODAY, trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_timer_running' });
+
+    // The technician stopped the timer (payroll's own write): the visit closes.
+    const stoppedAt = new Date();
+    await trx('time_entries').where({ id: timerId }).update({ status: 'completed', clock_out: stoppedAt, duration_minutes: 45 });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: true, visitId: arrived.id });
+    expect(await trx('time_entries').where({ id: timerId }).first()).toMatchObject({ status: 'completed', duration_minutes: expect.anything() });
+    // Another visit's running timer never blocks this one.
   });
 
-  test('a timer stop that failed after the visit closed is retried by the next closeout of the same invoice; a visit someone else completed keeps its timer (pre-push audit P1)', async () => {
-    const techId = randomUUID();
-    await trx('technicians').insert({ id: techId, name: 'Fixture Tech' });
-    const startedAt = new Date(Date.now() - 30 * 60000);
-    await trx('time_entries').insert({ id: randomUUID(), technician_id: techId, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(startedAt.getTime() - 60000) });
-    const timer = async (jobId) => {
-      const id = randomUUID();
-      await trx('time_entries').insert({ id, technician_id: techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: startedAt, job_id: jobId });
-      return id;
-    };
-    // The closeout completed this visit and its attempt succeeded, but the
-    // timer stop never ran (failure, or the process exited first).
-    const closed = await visit({ status: 'completed', technician_id: techId });
-    const inv = await invoice({ scheduled_service_id: closed.id, status: 'paid' });
-    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: closed.id, idempotency_key: `invoice-issued:${inv.id}`, status: 'succeeded', request_hash: 'x' });
-    const leftRunning = await timer(closed.id);
-    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_completed' });
-    expect((await trx('time_entries').where({ id: leftRunning }).first()).status).toBe('completed');
-    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+  test('paid-invoice retry: a card / cash payment whose closeout FAILED or was refused for the moment is retried; one that never ran, a real refusal, a statement child and an old payment are left alone (GitHub r1 P1 #5886)', async () => {
+    const { retryFailedPaidInvoiceCloseouts } = require('../services/invoice-issued-closeout');
+    const auditRow = (visitId, invoiceId, action, code) => trx('audit_log').insert({
+      actor_type: 'system', action, resource_type: 'scheduled_services', resource_id: visitId,
+      metadata: JSON.stringify({ invoiceId, trigger: 'paid', code }),
+    });
+    const refused = 'visit.completion_on_invoice_issued_refused';
+    const paid = (svc, rest = {}) => invoice({ status: 'paid', paid_at: new Date(), scheduled_service_id: svc.id, ...rest });
+    // 1. failed with an outage (the webhook ignored it and Stripe marked the event processed) → retried
+    const v1 = await visit({ status: 'on_site' }); const i1 = await paid(v1); await auditRow(v1.id, i1.id, refused, 'error');
+    // 2. paid before anyone arrived (visit_scheduled_today), the day has passed → retried
+    const v2 = await visit(); const i2 = await paid(v2); await auditRow(v2.id, i2.id, refused, 'visit_scheduled_today');
+    // 3. the job timer was running, it has stopped since → retried
+    const v3 = await visit({ status: 'on_site', date: TODAY }); const i3 = await paid(v3, { date: TODAY }); await auditRow(v3.id, i3.id, refused, 'visit_timer_running');
+    // 4. NEVER ran (no audit row): a prepayment whose day passed is not proof the visit happened → left alone
+    const v4 = await visit(); await paid(v4);
+    // 5. refused for a real reason → left alone
+    const v5 = await visit(); const i5 = await paid(v5); await auditRow(v5.id, i5.id, refused, 'grouped_visit');
+    // 6. unstarted TODAY, refused this morning → not a candidate yet
+    const v6 = await visit({ date: TODAY }); const i6 = await paid(v6, { date: TODAY }); await auditRow(v6.id, i6.id, refused, 'visit_scheduled_today');
+    // 7. paid outside the window → not a candidate
+    const v7 = await visit(); const i7 = await paid(v7, { paid_at: new Date(Date.now() - 30 * 86400000) }); await auditRow(v7.id, i7.id, refused, 'error');
+    // 8. completed, THIS closeout's own attempt still parked → resumed
+    const v8 = await visit({ status: 'completed' }); const i8 = await paid(v8);
+    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: v8.id, idempotency_key: `invoice-issued:${i8.id}`, status: 'side_effects_pending', request_hash: 'x' });
+    // 9. unpaid (sent) with an error row → not this sweep's
+    const v9 = await visit(); const i9 = await invoice({ scheduled_service_id: v9.id }); await auditRow(v9.id, i9.id, refused, 'error');
+    // 10. en_route → not a candidate
+    const v10 = await visit({ status: 'en_route' }); const i10 = await paid(v10); await auditRow(v10.id, i10.id, refused, 'error');
 
-    // Completed by its technician (no attempt of this closeout): untouched.
-    const theirs = await visit({ status: 'completed', technician_id: techId, date: '2040-03-01' });
-    const theirTimer = await timer(theirs.id);
-    expect(await closeOutVisitForIssuedInvoice({ invoiceId: (await invoice({ scheduled_service_id: theirs.id, date: '2040-03-01', status: 'paid' })).id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_completed' });
-    expect((await trx('time_entries').where({ id: theirTimer }).first()).status).toBe('active');
+    const out = await retryFailedPaidInvoiceCloseouts({ conn: trx, today: TODAY });
+    expect(out).toEqual({ candidates: 6, retried: 4, closed: 4 });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort()).toEqual([v1.id, v2.id, v3.id, v8.id].sort());
+    for (const [args] of mockCompleteScheduledService.mock.calls) {
+      expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
+      expect(args.issuedInvoiceCloseout.trigger).toBe('paid');
+    }
+    mockGate.on = false;
+    expect(await retryFailedPaidInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 0, retried: 0, closed: 0 });
   });
 
   test('a refused completion is reported, audited as refused, and never thrown', async () => {
