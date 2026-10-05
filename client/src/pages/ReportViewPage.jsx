@@ -1085,7 +1085,10 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
 function pestVisitResultLine(data = {}) {
   if (!data.pestReportV2) return null;
   const areas = data.treatmentPerformed === true && Array.isArray(data.applications)
-    ? data.applications.flatMap((app) => String(app?.applicationArea || '').split(',').map((area) => area.trim()))
+    // A station, cartridge or monitor row is a device checked, not a
+    // product applied (isProductApplication, the Products Applied rule).
+    ? data.applications.filter(isProductApplication)
+      .flatMap((app) => String(app?.applicationArea || '').split(',').map((area) => area.trim()))
     : [];
   const outside = areas.some((area) => TREATMENT_AREA_SCOPES.exterior.includes(area));
   const inside = areas.some((area) => TREATMENT_AREA_SCOPES.interior.includes(area));

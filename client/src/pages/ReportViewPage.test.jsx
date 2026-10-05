@@ -1347,6 +1347,15 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
         .toBe('We treated inside. Pest pressure: very low.');
     });
 
+    it('ignores a station or monitor row: a device checked is not an area treated', () => {
+      expect(smartStatusSummary(pestVisit({
+        applications: [
+          { applicationArea: 'Perimeter' },
+          { applicationArea: 'Garage', method: 'station_check', product: { name: 'Rodent Bait Station', category: 'rodent station' } },
+        ],
+      }), 'static').result).toBe('We treated outside. Pest pressure: very low.');
+    });
+
     it('makes no location claim from re-entry timers alone, or without the server\'s treatment verdict', () => {
       // An application with no recorded area keeps a default interior timer.
       expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: '' }] }), 'static').result)
