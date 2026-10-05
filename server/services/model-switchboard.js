@@ -66,10 +66,10 @@ const SELECTORS = [
   { key: 'EXTREME', env: 'MODEL_EXTREME', description: 'Explicit deep-audit opt-in; never automatic', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'WORKHORSE', env: 'MODEL_WORKHORSE', description: 'Drafting and content', accepts: { providers: ['anthropic'], cap: 'text' } },
   // deep: true — every call site reads past thinking blocks and floors
-  // max_tokens (llm/call.js#dispatch for the two routine* policies;
+  // max_tokens (llm/call.js#dispatch for the routineAnswer policy;
   // anthropicMaxTokens + anthropicText at the two direct sites), so the
   // Sonnet 5.5 default and the models like it are pickable. cap: 'vision' —
-  // hero alt text and vendor invoice PDFs send images / documents.
+  // vendor invoice PDFs send documents.
   // catalogOnly + allowedIds: the picker offers catalog models only and never
   // Fable / Mythos (ROUTINE_ALLOWED_IDS above); models.js refuses those ids too.
   { key: 'ROUTINE', env: 'MODEL_ROUTINE', description: 'Routine internal lanes moved off the flagship (owner 2026-10-04)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true, catalogOnly: true, allowedIds: ROUTINE_ALLOWED_IDS } },
@@ -160,7 +160,6 @@ const POLICY_SELECTOR = {
   contentDraft: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   highStakes: { primary: 'FLAGSHIP', fallback: 'OPENAI_REPORT_WRITER' },
   routineAnswer: { primary: 'ROUTINE', fallback: 'OPENAI_REPORT_WRITER' },
-  routineVision: { primary: 'ROUTINE', fallback: 'OPENAI_BALANCED' },
   adsAdvisor: { primary: 'ADS_ADVISOR', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
@@ -470,7 +469,7 @@ const LANES = [
   L('lawn_quality_gate', 'Lawn photo-quality gate', 'lawn-intelligence.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), T('VISION')),
   L('lawn_challenge', 'Lawn diagnostic · adversarial challenge', 'lawn-diagnostic-prompt.js', 'multimodal', T('LAWN_CHALLENGE')),
-  L('hero_alt', 'Hero image alt-text', 'content/hero-alt-vision.js', 'multimodal', P('routineVision', 'primary'), P('routineVision', 'fallback')),
+  L('hero_alt', 'Hero image alt-text', 'content/hero-alt-vision.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   // Generated-image screen (owner ruling 2026-09-25: Sol first, Claude
   // backup) — the blog image text/logo/uniform/van check, a separate call
   // from the hero_alt alt-text pass above (which stays on visionAnalysis).

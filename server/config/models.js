@@ -145,8 +145,8 @@ const DEFAULTS = Object.freeze({
   FLAGSHIP: 'claude-opus-4-8',
   WORKHORSE: 'claude-sonnet-5',
   // Routine internal lanes that used to ride the flagship (owner 2026-10-04):
-  // wiki Q&A, expense categories, vendor invoice PDFs, lead synopsis, hero
-  // alt text. Sonnet 5.5, not Sonnet 5: same list price, and it is in the
+  // staff wiki Q&A, expense categories, vendor invoice PDFs, lead synopsis.
+  // Hero alt text is published on the site, so it stays on VISION. Sonnet 5.5, not Sonnet 5: same list price, and it is in the
   // thinking floor below, so these lanes' short caps (200 to 2000 tokens)
   // are not spent on thinking. Roll back with MODEL_ROUTINE=claude-opus-4-8.
   // Not for Fable / Mythos: the two direct sites treat a refusal as a failed
@@ -537,8 +537,8 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
-  // highStakes / visionAnalysis with the ROUTINE tier on the Anthropic leg
-  // and the same OpenAI backup each had before: internal, low-risk lanes only
+  // highStakes with the ROUTINE tier on the Anthropic leg and the same
+  // OpenAI backup: internal, low-risk lanes only
   // (owner 2026-10-04). Nothing customer-facing belongs here: wiki Q&A uses
   // routineAnswer for staff sources only (wiki-qa.js) and keeps highStakes
   // for every customer-facing caller. ROUTINE_EFFORT (low on the Sonnet 5.5
@@ -549,11 +549,6 @@ const TEXT_POLICIES = Object.freeze({
     name: 'routineAnswer',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, ...(ROUTINE_EFFORT ? { effort: ROUTINE_EFFORT } : {}) }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
-  }),
-  routineVision: Object.freeze({
-    name: 'routineVision',
-    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, ...(ROUTINE_EFFORT ? { effort: ROUTINE_EFFORT } : {}) }),
-    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
   adsAdvisor: Object.freeze({
     name: 'adsAdvisor',

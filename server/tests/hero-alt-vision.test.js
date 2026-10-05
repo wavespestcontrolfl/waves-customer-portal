@@ -40,7 +40,7 @@ describe('describeHeroForAlt', () => {
 
     expect(alt).toBe('Large black-and-yellow orb weaver spider on its web outside a Florida home');
     const [policy, payload] = mockDispatch.mock.calls[0];
-    expect(policy).toBe(MODELS.TEXT_POLICIES.routineVision);
+    expect(policy).toBe(MODELS.TEXT_POLICIES.visionAnalysis);
     expect(payload.images).toEqual([{ data: PNG_BUFFER.toString('base64'), mimeType: 'image/webp' }]);
     expect(payload.jsonMode).toBe(false);
     expect(payload.text).toContain('Colorful Spiders in Southwest Florida');

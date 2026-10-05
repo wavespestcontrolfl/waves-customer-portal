@@ -73,7 +73,7 @@ async function describeHeroForAlt({ buffer, mimeType = 'image/webp', title, keyw
   try {
     // VISION first, OpenAI Terra on a miss; a two-leg miss (no key, provider
     // error) keeps the writer alt below.
-    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.routineVision, {
+    const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.visionAnalysis, {
       laneId: 'hero_alt',
       text: buildAltPrompt({ title, keyword }),
       images: [{ data: buffer.toString('base64'), mimeType }],

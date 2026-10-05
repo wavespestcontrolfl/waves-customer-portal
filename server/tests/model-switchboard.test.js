@@ -460,9 +460,9 @@ describe('model-switchboard', () => {
     expect(lane.fallback.model).toBe(MODELS.TEXT_POLICIES.imageScreen.fallback.model);
     expect(lane.fallback.provider).toBe('anthropic');
     expect(lane.continuity).toBe('verified');
-    // The alt-text pass on the same file rides the separate routineVision policy.
+    // The alt-text pass on the same file stays on the separate visionAnalysis policy.
     const heroAlt = lanes.find((l) => l.id === 'hero_alt');
-    expect(heroAlt.primary.model).toBe(MODELS.TEXT_POLICIES.routineVision.primary.model);
+    expect(heroAlt.primary.model).toBe(MODELS.TEXT_POLICIES.visionAnalysis.primary.model);
   });
 
   it('locks the lanes a generic picker must not move', () => {
@@ -536,16 +536,15 @@ describe('model-switchboard', () => {
     // its default (Opus 5.5) is itself a requires:'deep' model.
     // SMS_SCHEDULING_DECIDE: dispatched through llm/call.js like the
     // referees; its default (Sonnet 5.5) is a requires:'deep' model.
-    // ROUTINE: its default (Sonnet 5.5) is a requires:'deep' model; the two
-    // routine* policies go through llm/call.js and the two direct sites
+    // ROUTINE: its default (Sonnet 5.5) is a requires:'deep' model; the
+    // routineAnswer policy goes through llm/call.js and the two direct sites
     // (invoice PDFs, lead synopsis) floor max_tokens and read the first text block.
     expect(deepSafe).toEqual(['ADS_ADVISOR', 'DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE', 'ROUTINE', 'SMS_SCHEDULING_DECIDE']);
     // Low effort rides the always-thinking default only; an Opus 4.8 rollback sends none.
     expect(MODELS.ROUTINE_EFFORT).toBe(MODELS.anthropicThinkingAlwaysOn(MODELS.ROUTINE) ? 'low' : undefined);
     const routineLeg = { provider: 'anthropic', model: MODELS.ROUTINE, ...(MODELS.ROUTINE_EFFORT ? { effort: MODELS.ROUTINE_EFFORT } : {}) };
     expect(MODELS.TEXT_POLICIES.routineAnswer.primary).toEqual(routineLeg);
-    expect(MODELS.TEXT_POLICIES.routineVision.primary).toEqual(routineLeg);
-    for (const id of ['wiki_qa_staff', 'expense_categorize', 'hero_alt', 'invoice_pdf', 'lead_synopsis']) {
+    for (const id of ['wiki_qa_staff', 'expense_categorize', 'invoice_pdf', 'lead_synopsis']) {
       expect(lanes.find((l) => l.id === id).primary.selector).toBe('ROUTINE');
     }
     // The ROUTINE picker never offers Fable / Mythos, and the registry refuses a hand-set one.
@@ -567,6 +566,8 @@ describe('model-switchboard', () => {
     } finally {
       if (prevRoutine === undefined) delete process.env.MODEL_ROUTINE; else process.env.MODEL_ROUTINE = prevRoutine;
     }
+    // Published alt text is customer-visible: it stays on the vision policy.
+    expect(lanes.find((l) => l.id === 'hero_alt').primary.selector).toBe('VISION');
     // Customer-facing wiki answers stay on the flagship policy.
     expect(lanes.find((l) => l.id === 'wiki_qa').primary.selector).toBe('FLAGSHIP');
     expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');
