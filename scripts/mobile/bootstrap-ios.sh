@@ -245,6 +245,78 @@ else
   echo "==> WARN: could not attach PrivacyInfo.xcprivacy automatically — add it to the App target in Xcode (step below)."
 fi
 
+# UIScene life cycle. Apps built with the iOS 27 SDK (Xcode 27) quit at
+# launch without it: "UIScene life cycle is required for apps built with this
+# SDK" (found 2026-10-05 in the simulator; 1.7 build 2026100501 has this
+# bug). The Capacitor 7 template has no scene. Add a SceneDelegate that only
+# forwards links to Capacitor (UIKit now delivers them to the scene, not the
+# AppDelegate) and a scene manifest that keeps the Main storyboard. The
+# manifest is written only after the delegate is in the App target, so a
+# build never names a class it does not contain.
+SCENE_SWIFT="ios/App/App/SceneDelegate.swift"
+if [ ! -f "$SCENE_SWIFT" ]; then
+  cat > "$SCENE_SWIFT" <<'SWIFT'
+import UIKit
+import Capacitor
+
+// Written by scripts/mobile/bootstrap-ios.sh. Apps built with the iOS 27 SDK
+// must use the UIScene life cycle or they quit at launch. The Main storyboard
+// (UISceneStoryboardFile in Info.plist) still creates the window and
+// Capacitor's bridge view controller; this delegate only forwards links to
+// Capacitor, which UIKit now delivers to the scene instead of the AppDelegate.
+class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+        if let context = connectionOptions.urlContexts.first {
+            _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, open: context.url, options: [:])
+        }
+        if let activity = connectionOptions.userActivities.first {
+            _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, continue: activity, restorationHandler: { _ in })
+        }
+    }
+
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        for context in URLContexts {
+            _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, open: context.url, options: [:])
+        }
+    }
+
+    func scene(_ scene: UIScene, continue userActivity: NSUserActivity) {
+        _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, continue: userActivity, restorationHandler: { _ in })
+    }
+}
+SWIFT
+fi
+if [ -n "$POD_GEM_HOME" ] && (cd ios/App && GEM_HOME="$POD_GEM_HOME" ruby -e '
+  require "xcodeproj"
+  project = Xcodeproj::Project.open("App.xcodeproj")
+  target = project.targets.find { |t| t.name == "App" } or abort("no App target")
+  group = project.main_group.find_subpath("App", false) or abort("no App group")
+  ref = group.files.find { |f| f.path == "SceneDelegate.swift" } || group.new_reference("SceneDelegate.swift")
+  phase = target.source_build_phase
+  phase.add_file_reference(ref, true) unless phase.files_references.include?(ref)
+  project.save
+'); then
+  SCENE_KEY=":UIApplicationSceneManifest"
+  SCENE_CFG="$SCENE_KEY:UISceneConfigurations:UIWindowSceneSessionRoleApplication:0"
+  /usr/libexec/PlistBuddy -c "Delete $SCENE_KEY" "$PLIST" 2>/dev/null || true
+  /usr/libexec/PlistBuddy \
+    -c "Add $SCENE_KEY dict" \
+    -c "Add $SCENE_KEY:UIApplicationSupportsMultipleScenes bool false" \
+    -c "Add $SCENE_KEY:UISceneConfigurations dict" \
+    -c "Add $SCENE_KEY:UISceneConfigurations:UIWindowSceneSessionRoleApplication array" \
+    -c "Add $SCENE_CFG dict" \
+    -c "Add $SCENE_CFG:UISceneConfigurationName string Default Configuration" \
+    -c "Add $SCENE_CFG:UISceneDelegateClassName string \$(PRODUCT_MODULE_NAME).SceneDelegate" \
+    -c "Add $SCENE_CFG:UISceneStoryboardFile string Main" \
+    "$PLIST"
+  echo "==> UIScene life cycle: SceneDelegate in the App target, scene manifest in Info.plist ✓"
+else
+  echo "ERROR: could not add SceneDelegate.swift to the App target; an iOS 27 SDK build would quit at launch." >&2
+  exit 1
+fi
+
 # Universal links: portal.wavespestcontrol.com URLs open the installed app
 # directly. Needs (a) this Associated Domains entitlement in the binary and
 # (b) the server serving /.well-known/apple-app-site-association

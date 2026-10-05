@@ -48,6 +48,16 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(source.indexOf('IOS_MIN="15.0"')).toBeLessThan(source.indexOf('\nnpx cap sync ios'));
   });
 
+  test('bootstrap-ios adopts the UIScene life cycle that iOS 27 SDK builds require', () => {
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    expect(source).toContain('class SceneDelegate: UIResponder, UIWindowSceneDelegate');
+    expect(source).toContain('ApplicationDelegateProxy.shared.application(UIApplication.shared, open: context.url');
+    expect(source).toContain('$(PRODUCT_MODULE_NAME).SceneDelegate');
+    expect(source).toContain('UISceneStoryboardFile string Main');
+    // The manifest is written only after the delegate is in the target.
+    expect(source.indexOf('target.source_build_phase')).toBeLessThan(source.indexOf('Add $SCENE_KEY dict'));
+  });
+
   test('bootstrap-ios installs the tracked icon into a clean catalog repeatably', () => {
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'waves-ios-assets-'));
     const assetCatalog = path.join(fixture, 'Assets.xcassets');
