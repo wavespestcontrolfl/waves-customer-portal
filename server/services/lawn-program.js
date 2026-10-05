@@ -30,11 +30,14 @@ function lawnProtocols() {
 
 // A protocol version that can serve a visit: the published one, or the staged
 // v13 version (loaded by the migration, never active until the follow-up PR
-// retires the old program). Every reader that asked "status === 'active'" asks
-// this. It lives here, not in the operating layer, because suites mock that
-// module with partial objects.
-function isServingProtocolStatus(status) {
-  return status === 'active' || status === 'staged';
+// retires the old program) ONLY while GATE_LAWN_V13 is live. Unsetting the gate
+// fails closed for a visit pinned to v13: its recipe would be the old program
+// against v13 windows. Every reader that asked "status === 'active'" asks this.
+// It lives here, not in the operating layer, because suites mock that module
+// with partial objects.
+function isServingProtocol(protocol) {
+  if (protocol?.status === 'active') return true;
+  return protocol?.status === 'staged' && protocol.version === LAWN_V13_VERSION && featureGates.lawnV13Live?.() === true;
 }
 
-module.exports = { lawnProtocols, LAWN_V13_VERSION, isServingProtocolStatus };
+module.exports = { lawnProtocols, LAWN_V13_VERSION, isServingProtocol };

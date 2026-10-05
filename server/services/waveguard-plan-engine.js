@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const { lawnProtocols } = require('./lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION } = require('./lawn-program');
+const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
@@ -473,7 +474,20 @@ function resolveProtocolItems(lines, products, options = {}, context = {}) {
   });
 }
 
+// A whole-lawn product the v13 program limits to sunny turf (Tetrino): the share
+// of the lawn that is sunny, from the turf profile's sun exposure. No sun
+// exposure on file is the half the cost model assumed.
+// The staged v13 protocol's product rows by catalog id, only while GATE_LAWN_V13
+// is live and that version is the one resolved; empty otherwise.
+function v13ProtocolRows(structuredProtocol) {
+  if (featureGates.lawnV13Live?.() !== true || structuredProtocol?.version !== LAWN_V13_VERSION) return new Map();
+  return new Map((structuredProtocol.products || []).filter((row) => row.productId).map((row) => [String(row.productId), row]));
+}
+
+const SUNNY_TURF_SHARE = { full_sun: 1, partial_shade: 0.5, heavy_shade: 0 };
+
 function effectiveAreaFactor(line, property = {}) {
+  if (line?.scope === 'BROADCAST_FULL' && line.sunnyTurfOnly) return SUNNY_TURF_SHARE[property.sunExposure] ?? 0.5;
   if (line?.scope === 'BROADCAST_FULL' || line?.scope === 'BRANCH_ONE_OF') return 1;
   if (line?.scope === 'INSPECTION_ONLY') return 0;
   if (line?.scope === 'FIRST_YEAR_ONLY' && property.isFirstYear === false) return 0;
@@ -523,6 +537,12 @@ function derivedNutrientRate(product, nutrient, targetPer1000) {
 }
 
 function productRatePer1000(product, options = {}) {
+  // The matched staged v13 protocol row's own rate (GATE_LAWN_V13) comes first:
+  // a catalog row can carry no default rate (Stonewall 4FL) yet the program
+  // states one.
+  if (Number(options.protocolRate?.rate) > 0) {
+    return { rate: Number(options.protocolRate.rate), unit: options.protocolRate.unit || product?.rate_unit || null, source: 'protocol_rate' };
+  }
   const catalogRate = Number(product?.default_rate_per_1000 || 0);
   if (catalogRate > 0) {
     return {
@@ -614,10 +634,11 @@ function calculateProductAmount({
   areaFactor = 1,
   targetNPer1000 = null,
   targetKPer1000 = null,
+  protocolRate = null,
 } = {}) {
   const factor = Math.max(0, Number(areaFactor ?? 1));
   const treatedUnits = (Number(lawnSqft || 0) * factor) / 1000;
-  const rateInfo = productRatePer1000(product, { targetNPer1000, targetKPer1000 });
+  const rateInfo = productRatePer1000(product, { targetNPer1000, targetKPer1000, protocolRate });
   const rate = Number(rateInfo.rate || 0);
   const unit = rateInfo.unit || null;
   const amount = treatedUnits > 0 && rate > 0 ? Number((treatedUnits * rate).toFixed(3)) : null;
@@ -1440,8 +1461,12 @@ async function buildPlanForService(serviceId, options = {}) {
   const lawnSqft = completionContext
     ? Number(options.lawnSqft !== undefined ? options.lawnSqft : (completionContext.propertyMatchesProfile ? profile?.lawn_sqft : 0)) || 0
     : Number(profile?.lawn_sqft || 0);
+  // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
+  // own protocol row supplies its rate and its sunny-turf limit.
+  const v13Rows = v13ProtocolRows(structuredProtocol);
   const planItems = candidateItems.map((item) => {
     const substitution = item.product ? substitutions.get(String(item.product.id)) : null;
+    const v13Row = !substitution && item.product ? v13Rows.get(String(item.product.id)) : null;
     const plannedProduct = substitution
       ? {
           ...substitution.substitute,
@@ -1455,7 +1480,8 @@ async function buildPlanForService(serviceId, options = {}) {
       product: plannedProduct,
       lawnSqft,
       carrierGalPer1000: carrier,
-      areaFactor: effectiveAreaFactor(item, {
+      areaFactor: effectiveAreaFactor(v13Row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item, {
+        sunExposure: profile?.sun_exposure,
         plan: options.plan || service.waveguard_tier,
         weedPressure: options.weedPressure,
         conditionFlags: options.conditionFlags,
@@ -1464,6 +1490,7 @@ async function buildPlanForService(serviceId, options = {}) {
         isFirstYear: options.isFirstYear,
       }),
       ...nutrientTargets,
+      ...(v13Row && Number(v13Row.ratePer1000) > 0 ? { protocolRate: { rate: v13Row.ratePer1000, unit: v13Row.rateUnit } } : {}),
     }) : null;
     return {
       raw: item.raw,
@@ -1791,6 +1818,7 @@ module.exports = {
   parseVisitNutrientTargets,
   summarizeMaterialCost,
   effectiveAreaFactor,
+  v13ProtocolRows,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,

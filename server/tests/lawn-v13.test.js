@@ -13,7 +13,10 @@
 const protocolsJson = require('../config/protocols.json');
 const v13 = require('../config/lawn-protocol-v13.json');
 const featureGates = require('../config/feature-gates');
-const { lawnProtocols, LAWN_V13_VERSION, isServingProtocolStatus } = require('../services/lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, isServingProtocol } = require('../services/lawn-program');
+const { matchesLawnCompletionProtocol } = require('../services/lawn-completion-defaults');
+const auditScript = require('../scripts/audit-waveguard-protocol-material-costs');
+const fixMigration = require('../models/migrations/20261005130000_lawn_v13_catalog_rows_and_product_links');
 const engine = require('../services/waveguard-plan-engine');
 const { buildLawnCompletionDefaults } = require('../services/lawn-completion-defaults');
 const { getActiveLawnProtocol } = require('../services/lawn-protocol-operating-layer');
@@ -71,8 +74,19 @@ describe('gate and loader', () => {
     });
   });
 
-  test('staged serves; draft and archived do not', () => {
-    expect([isServingProtocolStatus('active'), isServingProtocolStatus('staged'), isServingProtocolStatus('draft'), isServingProtocolStatus('archived')]).toEqual([true, true, false, false]);
+  test('staged serves only for version 2026.10-v13 and only while the gate is on', () => {
+    const staged = { status: 'staged', version: LAWN_V13_VERSION };
+    expect(withGate('true', () => [isServingProtocol({ status: 'active', version: '2026.06' }), isServingProtocol(staged), isServingProtocol({ status: 'staged', version: '2099.01' }), isServingProtocol({ status: 'draft', version: LAWN_V13_VERSION }), isServingProtocol({ status: 'archived', version: '1' }), isServingProtocol(null)]))
+      .toEqual([true, true, false, false, false, false]);
+    // Gate unset: a staged v13 protocol no longer serves (fail closed), active still does.
+    expect(withGate(undefined, () => [isServingProtocol(staged), isServingProtocol({ status: 'active', version: '2026.06' })])).toEqual([false, true]);
+  });
+
+  test('a visit pinned to v13 fails closed when the gate is unset', () => {
+    const protocol = { status: 'staged', version: LAWN_V13_VERSION, protocolKey: 'k', grassTrack: 'bermuda', window: { key: 'w' } };
+    const assigned = { protocolKey: 'k', protocolVersion: LAWN_V13_VERSION, windowKey: 'w' };
+    expect(withGate('true', () => matchesLawnCompletionProtocol(protocol, assigned, 'bermuda'))).toBe(true);
+    expect(withGate(undefined, () => matchesLawnCompletionProtocol(protocol, assigned, 'bermuda'))).toBe(false);
   });
 });
 
@@ -247,9 +261,18 @@ describe('every v13 line resolves to its intended catalog row', () => {
 function makeKnex(db) {
   let counter = 0;
   const knex = (table) => {
-    const rowsOf = () => (db[table] = db[table] || []);
+    // 'lawn_protocol_products as p' joined to its window and protocol (the fix migration's read).
+    const joined = table === 'lawn_protocol_products as p';
+    const rowsOf = () => {
+      if (!joined) return (db[table] = db[table] || []);
+      return (db.lawn_protocol_products || []).map((p) => {
+        const w = db.lawn_protocol_windows.find((x) => x.id === p.lawn_protocol_window_id);
+        const l = db.lawn_protocols.find((x) => x.id === w.lawn_protocol_id);
+        return { ...p, 'l.version': l.version, protocol_id: l.id };
+      });
+    };
     const conds = [];
-    let insertRows = null; let isDel = false;
+    let insertRows = null; let isDel = false; let updatePatch = null;
     const test = (row, obj) => Object.entries(obj).every(([k, v]) => (row[k] ?? null) === v);
     const hit = (row) => conds.reduce((acc, c, i) => (i === 0 ? test(row, c.obj) : (c.or ? acc || test(row, c.obj) : acc && test(row, c.obj))), true);
     const run = () => {
@@ -258,12 +281,15 @@ function makeKnex(db) {
         rowsOf().push(...made);
         return made;
       }
+      if (updatePatch) { const hits = rowsOf().filter(hit); hits.forEach((r) => Object.assign(r, updatePatch)); return hits.length; }
       if (isDel) { const keep = rowsOf().filter((r) => !hit(r)); const n = rowsOf().length - keep.length; db[table] = keep; return n; }
       return rowsOf().filter(hit);
     };
     const b = {
-      where(obj) { conds.push({ obj }); return b; },
+      where(obj, val) { conds.push({ obj: typeof obj === 'string' ? { [obj]: val } : obj }); return b; },
       orWhere(obj) { conds.push({ obj, or: true }); return b; },
+      join() { return b; },
+      update(patch) { updatePatch = patch; return b; },
       first() { return Promise.resolve(run()[0]); },
       select() { return b; },
       del() { isDel = true; return Promise.resolve(run()); },
@@ -277,12 +303,14 @@ function makeKnex(db) {
     return b;
   };
   knex.schema = { hasTable: async (t) => t in db };
+  knex.fn = { now: () => 'now' };
   return knex;
 }
 
-function seedDb() {
+function seedDb({ without = [] } = {}) {
   const N = migration.NAMES;
-  const catalog = Object.values(N).map((name, i) => ({ id: `cat-${i}`, name: name === N.VEL ? 'Velista Fungicide' : name, active: true }));
+  const catalog = Object.values(N).filter((name) => !without.includes(name))
+    .map((name, i) => ({ id: `cat-${i}`, name: name === N.VEL ? 'Velista Fungicide' : name, active: true }));
   const db = {
     lawn_protocols: migration.TRACKS.map((t, i) => ({ id: `base-${i}`, protocol_key: t.key, version: '2026.06', status: 'active', grass_track: t.track })),
     lawn_protocol_windows: [], lawn_protocol_products: [],
@@ -546,5 +574,182 @@ describe('v13 safety rules reach the reference tab through the catalog payload',
       expect(v13[grass].safety_rules).toEqual(v13.st_augustine.safety_rules);
       expect(protocolsJson.lawn[grass].safety_rules).toBeUndefined();
     }
+  });
+});
+
+// ── Codex round 1 fixes ──────────────────────────────────────────────────────
+describe('migration 20261005130000: catalog rows, links and unread gate keys', () => {
+  const MISSING = fixMigration.PRODUCTS.slice(0, 4).map((p) => p.name);
+  const stage = async (db) => { await migration.up(makeKnex(db)); };
+
+  test('the four catalog rows carry the owner values', () => {
+    const byName = Object.fromEntries(fixMigration.PRODUCTS.map((p) => [p.name, p]));
+    expect(byName[migration.NAMES.NT]).toMatchObject({ category: 'fertilizer', formulation: 'liquid', container_size: '2.5 gal', unit_size_oz: 320, epa_reg_number: 'N/A', default_rate_per_1000: 12, min_label_rate_per_1000: 6, max_label_rate_per_1000: 16, rate_unit: 'fl oz' });
+    expect(byName[migration.NAMES.STW15]).toMatchObject({ category: 'fertilizer', formulation: 'granular', container_size: '50 lb', unit_size_oz: 800, epa_reg_number: '10404-89', default_rate_per_1000: 4.02, rate_unit: 'lb' });
+    expect(byName['LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer']).toMatchObject({ epa_reg_number: '10404-87', default_rate_per_1000: 2.78, max_label_rate_per_1000: 5.48, rate_unit: 'lb' });
+    expect(byName[migration.NAMES.DYL]).toMatchObject({ category: 'insecticide', formulation: 'granular', container_size: '30 lb', unit_size_oz: 480, epa_reg_number: '432-1308', default_rate_per_1000: 3, rate_unit: 'lb' });
+  });
+
+  test('every product the recipe names has a catalog row spec; an EPA number appears only where the owner gave one', () => {
+    const named = new Set();
+    for (const month of MONTHS) {
+      for (const line of [...lines(visitFor(month).primary), ...lines(visitFor(month).secondary)]) if (line.includes(' — ')) named.add(nameOfLine(line));
+    }
+    const specNames = fixMigration.PRODUCTS.map((p) => p.name);
+    for (const name of named) expect(specNames).toContain(name);
+    expect(new Set(specNames).size).toBe(specNames.length);
+    const withEpa = Object.fromEntries(fixMigration.PRODUCTS.filter((p) => p.epa_reg_number).map((p) => [p.name, p.epa_reg_number]));
+    expect(withEpa).toEqual({
+      'LESCO Nutra-TECH T&O Micronutrient Package': 'N/A',
+      'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer': '10404-89',
+      'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer': '10404-87',
+      'Dylox 6.2 G Granular Insecticide': '432-1308',
+      'Artavia 2 SC (Azoxy)': '91234-74',
+      'Certainty Turf Herbicide': '59639-226',
+      'Gravex 20 EW': '91234-283',
+      'LESCO 24-0-11 with PolyPlus OPTI': 'N/A',
+      'LESCO 90/10 Nonionic Surfactant': 'N/A',
+      'Celsius WG': '432-1507',
+    });
+  });
+
+  test('a repo-built catalog with only the recipe products absent from a bare database: all are inserted and linked', async () => {
+    const db = seedDb({ without: Object.values(migration.NAMES) });
+    await stage(db);
+    await fixMigration.up(makeKnex(db));
+    // Velista is covered by an alias row in this fixture, so it is not inserted.
+    for (const name of Object.values(migration.NAMES).filter((n) => n !== migration.NAMES.VEL)) expect(db.products_catalog.filter((c) => c.name === name)).toHaveLength(1);
+    expect(db.products_catalog.filter((c) => c.name === migration.NAMES.VEL)).toHaveLength(0);
+    expect(db.lawn_protocol_products.filter((r) => !r.product_id)).toEqual([]);
+  });
+
+  test('a repo-built catalog (the four rows absent): rows are inserted, every v13 row links, unread gate keys go', async () => {
+    const db = seedDb({ without: MISSING });
+    await stage(db);
+    expect(db.lawn_protocol_products.some((r) => r.product_id === null)).toBe(true);
+    const knex = makeKnex(db);
+    await fixMigration.up(knex);
+    for (const name of MISSING) expect(db.products_catalog.filter((c) => c.name === name)).toHaveLength(1);
+    expect(db.lawn_protocol_products.filter((r) => !r.product_id)).toEqual([]);
+    const nt = db.products_catalog.find((c) => c.name === migration.NAMES.NT);
+    expect(db.lawn_protocol_products.filter((r) => r.product_name === migration.NAMES.NT).every((r) => r.product_id === nt.id)).toBe(true);
+    // Tetrino keeps sunnyTurfOnly (read by the plan engine) and loses the keys nothing reads.
+    const tet = db.lawn_protocol_products.find((r) => r.product_name === migration.NAMES.TET);
+    expect(JSON.parse(tet.gates)).toEqual({ sunnyTurfOnly: true });
+    for (const row of db.lawn_protocol_products) {
+      const keys = Object.keys(typeof row.gates === 'string' ? JSON.parse(row.gates) : row.gates);
+      expect(keys.filter((k) => !fixMigration.KEPT_GATE_KEYS.has(k))).toEqual([]);
+    }
+    expect(db.lawn_protocol_audit_log.filter((a) => a.action === 'v13_link_fix')).toHaveLength(4);
+    // Idempotent.
+    const rows = db.products_catalog.length; const logs = db.lawn_protocol_audit_log.length;
+    await fixMigration.up(knex);
+    expect(db.products_catalog.length).toBe(rows);
+    expect(db.lawn_protocol_audit_log.length).toBe(logs);
+  });
+
+  test('a prod catalog that already has the rows is not touched or duplicated; an alias counts as present', async () => {
+    const db = seedDb();
+    db.products_catalog = db.products_catalog.filter((c) => c.name !== migration.NAMES.DYL);
+    db.product_aliases.push({ product_id: 'cat-existing', alias_name: migration.NAMES.DYL });
+    await stage(db);
+    const before = db.products_catalog.length;
+    await fixMigration.up(makeKnex(db));
+    // Only the two rows this fixture lacks (Blindside, the 18-0-10) are added: no Dylox row.
+    expect(db.products_catalog.length).toBe(before + 2);
+    expect(db.products_catalog.filter((c) => /Dylox 6\.2/.test(c.name))).toHaveLength(0);
+    expect(db.lawn_protocol_products.filter((r) => r.product_name === migration.NAMES.DYL).every((r) => r.product_id === 'cat-existing')).toBe(true);
+  });
+
+  test('a v13 product row naming something no spec covers fails the migration', async () => {
+    const db = seedDb();
+    await stage(db);
+    const row = db.lawn_protocol_products[0];
+    Object.assign(row, { product_id: null, product_name: 'Unlisted Product XYZ' });
+    await expect(fixMigration.up(makeKnex(db))).rejects.toThrow(/Unlisted Product XYZ/);
+  });
+
+  test('a database with no staged rows is a no-op (nothing to link, nothing thrown)', async () => {
+    const db = seedDb({ without: MISSING });
+    await expect(fixMigration.up(makeKnex(db))).resolves.toBeUndefined();
+  });
+
+  test('down restores the gates, nulls only the ids it wrote, removes its audit rows, keeps the catalog rows', async () => {
+    const db = seedDb({ without: MISSING });
+    await stage(db);
+    const gatesBefore = new Map(db.lawn_protocol_products.map((r) => [r.id, r.gates]));
+    const nullBefore = db.lawn_protocol_products.filter((r) => !r.product_id).map((r) => r.id).sort();
+    const knex = makeKnex(db);
+    await fixMigration.up(knex);
+    // A link made by someone else after the fact must survive down().
+    const other = db.lawn_protocol_products.find((r) => r.product_name === migration.NAMES.DYL);
+    other.product_id = 'manual-link';
+    await fixMigration.down(knex);
+    expect(db.lawn_protocol_audit_log.filter((a) => a.action === 'v13_link_fix')).toHaveLength(0);
+    for (const r of db.lawn_protocol_products) expect(JSON.stringify(typeof r.gates === 'string' ? JSON.parse(r.gates) : r.gates)).toBe(JSON.stringify(typeof gatesBefore.get(r.id) === 'string' ? JSON.parse(gatesBefore.get(r.id)) : gatesBefore.get(r.id)));
+    const nullAfter = db.lawn_protocol_products.filter((r) => !r.product_id).map((r) => r.id).sort();
+    expect(nullAfter).toEqual(nullBefore.filter((id) => id !== other.id));
+    expect(other.product_id).toBe('manual-link');
+    for (const name of MISSING) expect(db.products_catalog.filter((c) => c.name === name)).toHaveLength(1);
+  });
+});
+
+describe('plan engine reads the matched v13 protocol row', () => {
+  const noDefault = { id: 'stw', name: migration.NAMES.STW, default_rate_per_1000: null, rate_unit: null };
+
+  test('protocol rate beats a missing catalog rate; catalog and nutrient paths are unchanged without it', () => {
+    const withRate = engine.calculateProductAmount({ product: noDefault, lawnSqft: 10000, areaFactor: 1, protocolRate: { rate: 0.5, unit: 'fl oz' } });
+    expect(withRate).toMatchObject({ ratePer1000: 0.5, rateUnit: 'fl oz', rateSource: 'protocol_rate', amount: 5 });
+    expect(engine.calculateProductAmount({ product: noDefault, lawnSqft: 10000, areaFactor: 1 }).rateSource).toBe('missing_rate');
+    expect(engine.calculateProductAmount({ product: { ...noDefault, default_rate_per_1000: 2, rate_unit: 'oz' }, lawnSqft: 10000, areaFactor: 1 }).rateSource).toBe('catalog_default_rate');
+    // A protocol row with no rate (lb_n rows) does not override the nutrient derivation.
+    const fert = { id: 'f', name: migration.NAMES.F24, analysis_n: 24 };
+    expect(engine.calculateProductAmount({ product: fert, lawnSqft: 1000, areaFactor: 1, targetNPer1000: 0.75, protocolRate: { rate: null, unit: 'lb_n' } }).rateSource).toBe('target_n_analysis');
+  });
+
+  test('v13ProtocolRows is empty unless the gate is on and the structured protocol is v13', () => {
+    const structured = { version: LAWN_V13_VERSION, products: [{ productId: 'stw', ratePer1000: 0.5, rateUnit: 'fl oz', gates: {} }, { productId: null }] };
+    expect(withGate(undefined, () => engine.v13ProtocolRows(structured).size)).toBe(0);
+    expect(withGate('true', () => engine.v13ProtocolRows({ ...structured, version: '2026.06' }).size)).toBe(0);
+    expect(withGate('true', () => engine.v13ProtocolRows(null).size)).toBe(0);
+    expect(withGate('true', () => engine.v13ProtocolRows(structured).get('stw').ratePer1000)).toBe(0.5);
+  });
+
+  test('every rate the migration states for a whole-lawn product reaches the engine as a positive protocol rate', () => {
+    const stated = migration.PRODUCTS.filter(([, s]) => s[6] && s[3] != null).map(([, s]) => s[0]);
+    expect(stated).toEqual(expect.arrayContaining([migration.NAMES.STW, migration.NAMES.NT, migration.NAMES.DIM, migration.NAMES.TET, migration.NAMES.STW15]));
+  });
+
+  test('sunnyTurfOnly narrows a whole-lawn line by the profile sun exposure; no flag, no change', () => {
+    const [tetrino] = engine.parseProtocolLines(visitFor(5).primary, 'base', { exactName: true });
+    expect(tetrino.scope).toBe('BROADCAST_FULL');
+    const flagged = { ...tetrino, sunnyTurfOnly: true };
+    expect(engine.effectiveAreaFactor(flagged, { sunExposure: 'full_sun' })).toBe(1);
+    expect(engine.effectiveAreaFactor(flagged, { sunExposure: 'partial_shade' })).toBe(0.5);
+    expect(engine.effectiveAreaFactor(flagged, { sunExposure: 'heavy_shade' })).toBe(0);
+    expect(engine.effectiveAreaFactor(flagged, {})).toBe(0.5);
+    expect(engine.effectiveAreaFactor(tetrino, { sunExposure: 'heavy_shade' })).toBe(1);
+    // Only the Tetrino row asks for it.
+    const asking = migration.PRODUCTS.filter(([, s]) => s[7]?.sunnyTurfOnly).map(([, s]) => s[0]);
+    expect(asking).toEqual([migration.NAMES.TET]);
+  });
+});
+
+describe('the material-cost audit reads the gate-aware program', () => {
+  test('gate on: the default report covers the v13 tracks; gate off: protocols.json lawn', () => {
+    const catalog = [{ id: 'x', name: 'Synthetic', aliases: [], default_rate_per_1000: 1, rate_unit: 'oz' }];
+    const on = withGate('true', () => auditScript.buildCadenceReport(catalog));
+    const off = withGate(undefined, () => auditScript.buildCadenceReport(catalog));
+    const trackNames = (report) => [...new Set(report.rows.map((r) => r.track || r.trackKey))].sort();
+    expect(trackNames(off)).toEqual(expect.arrayContaining(['bahia', 'bermuda', 'st_augustine', 'zoysia']));
+    // The v13 visits carry no cost fields, which the old ones do: the two reports differ.
+    expect(JSON.stringify(on)).not.toBe(JSON.stringify(off));
+  });
+
+  test('analyzeVisit resolves a v13 line by its exact catalog name', () => {
+    const catalog = Object.values(migration.NAMES).map((name, i) => ({ id: `c${i}`, name, aliases: [], default_rate_per_1000: 1, rate_unit: 'oz', needs_pricing: true }))
+      .concat([{ id: 'dec', name: 'Dylox 420 SL T&O Insecticide', aliases: [], default_rate_per_1000: 1, rate_unit: 'oz', cost_per_unit: 9 }, { id: 'ace', name: 'Acelepryn Xtra', aliases: [], cost_per_unit: 9 }]);
+    const result = auditScript.analyzeVisit({ trackKey: 'bermuda', track: v13.bermuda, visit: visitFor(5), products: catalog, options: { plan: 'Platinum', includePremiumOnly: true, isFirstYear: true, weedPressure: 'normal' } });
+    expect(result.items.find((i) => i.raw.startsWith('Tetrino'))?.product?.name).toBe('Tetrino Insecticide');
   });
 });

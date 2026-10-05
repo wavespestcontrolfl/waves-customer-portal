@@ -5,7 +5,7 @@ require('../config/load-env')();
 
 const { parseArgs } = require('node:util');
 const db = require('../models/db');
-const protocols = require('../config/protocols.json');
+const { lawnProtocols } = require('../services/lawn-program');
 const { LAWN_MATERIAL_BUDGETS, MATERIAL_REFERENCE_SQFT } = require('@waves/lawn-cost-floor');
 const { unitDefinition } = require('../services/inventory-units');
 const { convertToOz, unitPriceBreakdown } = require('../services/product-costing');
@@ -79,9 +79,10 @@ async function getProtocolProducts() {
 }
 
 function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DEFAULT_LAWN_SQFT }) {
+  const exactName = track?.exact_catalog_names === true;
   const lines = [
-    ...parseProtocolLines(visit.primary, 'base'),
-    ...parseProtocolLines(visit.secondary, 'conditional'),
+    ...parseProtocolLines(visit.primary, 'base', { exactName }),
+    ...parseProtocolLines(visit.secondary, 'conditional', { exactName }),
   ];
   const nutrientTargets = parseVisitNutrientTargets(visit.notes);
   const items = resolveProtocolItems(lines, products, options, {
@@ -197,7 +198,7 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
 // This is the existing exposure audit's allowance normalization, not a new
 // scheduler: enhanced flags 12 windows while the sold cadence is 9 applications.
 // Keep the catalog-selected subtotal separate from unselected conditional work.
-function buildCadenceReport(products, lawn = protocols.lawn) {
+function buildCadenceReport(products, lawn = lawnProtocols()) {
   const rows = [];
   for (const trackKey of new Set([...Object.keys(lawn), ...Object.keys(LAWN_MATERIAL_BUDGETS)])) {
     const track = lawn[trackKey] || {};
@@ -367,7 +368,7 @@ async function main() {
     isFirstYear: true,
     weedPressure: 'normal',
   };
-  const tracks = Object.entries(protocols.lawn || {});
+  const tracks = Object.entries(lawnProtocols() || {});
   const results = [];
 
   for (const [trackKey, track] of tracks) {

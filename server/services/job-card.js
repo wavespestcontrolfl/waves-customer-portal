@@ -45,7 +45,7 @@ const { isSmsReaction } = require('./sms-intent');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { convertInventoryQuantity, normalizeInventoryUnit } = require('./inventory-units');
 const { parsePackSize } = require('./product-costing');
-const { isServingProtocolStatus } = require('./lawn-program');
+const { isServingProtocol } = require('./lawn-program');
 const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 
@@ -1098,7 +1098,7 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
     // a blocked plan shows its products but no amounts.
     const blocks = planBlocksOf(loaded);
     const structured = plan.protocol?.structured;
-    const procedure = isServingProtocolStatus(structured?.status) && structured.grassTrack === gate.trackKey && structured.window ? {
+    const procedure = isServingProtocol(structured) && structured.grassTrack === gate.trackKey && structured.window ? {
       name: structured.name,
       source: `Published protocol · version ${structured.version}`,
       title: structured.window.title,
