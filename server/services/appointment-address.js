@@ -22,6 +22,13 @@ async function planAppointmentAddress(conn, serviceId, propertyId, scope = 'seri
       if (parentId) q.orWhere('id', parentId).orWhere((children) => children
         .where('recurring_parent_id', parentId).whereNotIn('status', JOIN_INELIGIBLE_STATUSES));
     }).orderBy('id');
+  // A package visit 2 is the same treatment at the same property: an address
+  // correction on visit 1 carries to it (it is neither recurring nor grouped).
+  if (scope !== 'visit') {
+    const kids = await conn('scheduled_services').where({ customer_id: anchor.customer_id, parent_service_id: anchor.id,
+      source_action: 'package_followup_auto' }).whereIn('status', ['pending', 'confirmed']);
+    if (kids.length) rows = [...new Map([...rows, ...kids].map((row) => [row.id, row])).values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }
   const visitIds = [...new Set(rows.filter((row) => row.id === anchor.id || !JOIN_INELIGIBLE_STATUSES.includes(row.status))
     .map((row) => row.visit_id).filter(Boolean))];
   if (visitIds.length) {

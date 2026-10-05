@@ -533,14 +533,15 @@ async function transitionJobStatus({
     // Same cascade a cancel runs, package children only; a rebooked visit 1
     // books its own visit 2. Savepoint per child inside the helper; a
     // failure never blocks the transition.
+    // Runs AFTER the outermost commit, on its own connection, so a parent
+    // transition that rolls back retires nothing and emits nothing; the
+    // no-show replay branches re-run it if it fails.
     if (['skipped', 'no_show'].includes(String(toStatus || ''))) {
-      try {
-        await require('./call-booking-catalog').cancelCallFollowUpsForParentCancel({
-          conn: t, parentServiceId: jobId, actorId: transitionedBy || null, packageOnly: true,
-        });
-      } catch (cascadeErr) {
-        logger.warn(`[job-status] package visit 2 retire failed for ${jobId}: ${cascadeErr.message}`);
-      }
+      const runRetire = () => require('./call-booking-catalog').cancelCallFollowUpsForParentCancel({
+        conn: db, parentServiceId: jobId, actorId: transitionedBy || null, packageOnly: true,
+      }).catch((cascadeErr) => logger.warn(`[job-status] package visit 2 retire failed for ${jobId}: ${cascadeErr.code || cascadeErr.name || 'error'}`));
+      const committed = require('../utils/trx-commit-promise').commitPromiseOf(t);
+      if (committed) committed.then(runRetire, () => {}); else void runRetire();
     }
 
     // Consultation-outcomes: a no-showed Waves Assessment visit closes its
