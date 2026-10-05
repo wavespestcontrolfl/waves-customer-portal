@@ -143,10 +143,12 @@ function duplicateKey(vendorName, invoiceNumber) {
   return `expense-dup:${String(vendorName).toLowerCase()}:${invoiceNumber}`;
 }
 
-async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount) {
+// The invoice date is part of the identity: a vendor that reuses an invoice
+// number for the same amount on a later date is a new expense, not a copy.
+async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, invoiceDate) {
   if (!duplicateKey(vendorName, invoiceNumber)) return null;
   return conn('expenses')
-    .where({ vendor_name: String(vendorName).slice(0, 200), amount, description: expenseDescription(vendorName, invoiceNumber) })
+    .where({ vendor_name: String(vendorName).slice(0, 200), amount, expense_date: invoiceDate, description: expenseDescription(vendorName, invoiceNumber) })
     .first('id');
 }
 
@@ -297,7 +299,7 @@ async function processVendorInvoice(email, classification) {
       const outcome = await db.transaction(async (trx) => {
         if (key) {
           await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
-          const duplicate = await findDuplicateExpense(trx, vendorName, invoiceNumber, amount);
+          const duplicate = await findDuplicateExpense(trx, vendorName, invoiceNumber, amount, invoiceDate);
           if (duplicate) {
             await trx('emails').where({ id: email.id }).update({
               expense_id: duplicate.id,
