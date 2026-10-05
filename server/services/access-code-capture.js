@@ -382,6 +382,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
     let toInsert = [];
     if (items.length) {
       const prefs = await trx('property_preferences').where({ customer_id: customer.id }).first() || {};
+      const multiHome = liveProperties.length > 1;
       // A retired or dismissed value the customer sends again is news, and so is
       // a visit code whose visit has ended (the live list no longer shows it):
       // only a row still waiting or still live makes a new one redundant.
@@ -389,7 +390,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
         .leftJoin('scheduled_services as ss', 'ss.id', 'a.scheduled_service_id')
         .where('a.customer_id', customer.id).whereIn('a.status', ['found', 'active']).whereRaw(OWNED_SOURCE_SQL)
         .whereIn('a.value_hash', items.map((i) => i.value_hash))
-        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.instructions', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
+        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.instructions', 'a.property_id', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
         .filter((r) => isLive(r));
       // Only a live STANDING row makes a new item redundant. A visit row never
       // does: the same door code sent for a second appointment is evidence for
@@ -398,7 +399,10 @@ async function fileFoundItems(conn, { message }, items, receipt) {
       // too. One text still yields one row per kind and value (unique index).
       // Only a DECIDED (active) row covers: a waiting row from another text may
       // still be corrected away, and each text must keep its own evidence.
-      const covered = (item) => existing.some((r) => r.status === 'active' && r.kind === item.kind
+      // On a multi-home account a found code may be for another home: nothing
+      // already on file covers it, and the office picks its home.
+      const covered = (item) => !multiHome && existing.some((r) => r.status === 'active' && r.kind === item.kind
+        && !!r.property_id && r.property_id === liveProperties[0]?.id
         && r.value_hash === item.value_hash && r.life === 'standing' && item.life === 'standing'
         && normalizeText(r.instructions) === normalizeText(item.instructions));
       toInsert = items.filter((item) => {
@@ -407,7 +411,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
         const field = PROFILE_FIELD[item.kind];
         // Only a standing item is covered by the profile value; a visit-only code
         // for this visit still reaches the office.
-        return !(field && item.code && item.life === 'standing' && !item.instructions
+        return multiHome || !(field && item.code && item.life === 'standing' && !item.instructions
           && canonicalLower(prefs[field]) === canonicalLower(item.code));
       });
     }
@@ -593,10 +597,93 @@ async function listForCustomer(conn, customerId) {
   return {
     active: kept.filter((r) => r.status === 'active').map(serialize),
     found: kept.filter((r) => r.status === 'found').map(serialize),
+    properties: await homeChoices(conn, [customerId]).then((m) => m.get(customerId) || []),
+    // The visit picker's choices, with the home each visit is at.
+    visits: await conn('scheduled_services').where({ customer_id: customerId })
+      .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
+      .whereBetween('scheduled_date', [etDateString(new Date()), etDateString(addETDays(new Date(), VISIT_WINDOW_DAYS * 2))])
+      .select('id', conn.raw('scheduled_date::text AS scheduled_date'), 'status', 'service_type', 'property_id')
+      .orderBy('scheduled_date').orderBy('id'),
   };
 }
 
+// The customer's active homes, for the home picker a multi-home account needs.
+async function homeChoices(conn, customerIds) {
+  const ids = [...new Set(customerIds.filter(Boolean))];
+  const rows = ids.length ? await conn('customer_properties').whereIn('customer_id', ids).where({ active: true })
+    .select('id', 'customer_id', 'address_line1', 'address_line2', 'label', 'is_primary').orderBy('is_primary', 'desc').orderBy('address_line1') : [];
+  const out = new Map();
+  // Street, unit and the property's own name, so two units at one street differ.
+  const name = (r) => [r.address_line1, r.address_line2, r.label].map((v) => String(v || '').trim()).filter(Boolean).join(' · ') || 'Home';
+  for (const r of rows) out.set(r.customer_id, [...(out.get(r.customer_id) || []), { id: r.id, label: name(r) }]);
+  return out;
+}
+
+// A standing code of a multi-home account must name its home, or a technician
+// at one home would get another home's code. Returns { propertyId } or { error }.
+async function resolveHome(trx, customerId, { life, propertyId, current = null, explicitOnly = false }) {
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
+  if (propertyId !== undefined && propertyId !== null && propertyId !== '') {
+    if (!homes.includes(propertyId)) return { error: 'invalid_property' };
+    return { propertyId };
+  }
+  if (current && homes.includes(current)) return { propertyId: current };
+  // A found code that lost its home (or never had one) is never moved to
+  // whatever home is left: the office names it.
+  if (explicitOnly && life === 'standing') return { error: 'property_required' };
+  if (homes.length === 1) return { propertyId: homes[0] };
+  if (life === 'standing' && homes.length > 1) return { error: 'property_required' };
+  return { propertyId: null };
+}
+
 // Every customer's codes waiting for a decision, newest first.
+// The codes a technician needs at one stop: the customer's active standing
+// codes plus one-visit codes bound to this visit. A technician reaches only a
+// visit assigned to them inside the current access window; the office reaches
+// any visit. Returns { ok, codes } or a typed refusal.
+async function listForVisit(conn, req, visitId) {
+  const { technicianCurrentVisitFilter, isTechnicianRequest } = require('./technician-visit-scope');
+  const scoped = () => {
+    const q = conn('scheduled_services').where('scheduled_services.id', visitId);
+    technicianCurrentVisitFilter(req, q);
+    // A technician reads codes only around the visit day (yesterday through
+    // tomorrow) and only for a visit still to be done; post-visit paperwork
+    // scope is wider than what a door code needs.
+    if (isTechnicianRequest(req)) {
+      q.whereBetween('scheduled_services.scheduled_date', [etDateString(addETDays(new Date(), -1)), etDateString(addETDays(new Date(), 1))])
+        .whereRaw(`COALESCE(scheduled_services.status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES);
+    }
+    return q;
+  };
+  const visit = await scoped().first('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id');
+  if (!visit) {
+    if (isTechnicianRequest(req) && await conn('scheduled_services').where({ id: visitId }).first('id')) return fail(403, 'service_not_assigned');
+    return fail(404, 'not_found');
+  }
+  const { active } = await listForCustomer(conn, visit.customer_id);
+  // A code tied to one home is shown only at a visit to that home. A visit not
+  // stamped with a home matches a home-bound code only when the customer has
+  // that one active home.
+  const homes = await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id');
+  const visitHome = visit.property_id || (homes.length === 1 ? homes[0] : null);
+  // One rule, fail closed: a code shows at a visit only when it is tied to
+  // exactly that visit's home. A code with no home (an older row, a home since
+  // deleted) or a visit with no known home shows nothing until the office binds it.
+  const sameHome = (r) => !!r.propertyId && !!visitHome && r.propertyId === visitHome;
+  // The visit may have been reassigned or moved to another home while the
+  // codes were read: answer only if it is still in scope with the same home.
+  const again = await scoped().first('scheduled_services.property_id');
+  const homesNow = again ? await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id') : [];
+  const homeNow = again && (again.property_id || (homesNow.length === 1 ? homesNow[0] : null));
+  if (!again || (homeNow || null) !== (visitHome || null)) {
+    return fail(isTechnicianRequest(req) ? 403 : 409, isTechnicianRequest(req) ? 'service_not_assigned' : 'visit_changed');
+  }
+  // Only what a stop needs: never the customer's message, its source or who decided.
+  return { ok: true, codes: active.filter((r) => r.life === 'standing' || r.scheduledServiceId === visit.id)
+    .filter(sameHome)
+    .map((r) => ({ id: r.id, kind: r.kind, code: r.code, instructions: r.instructions, life: r.life, scheduledServiceId: r.scheduledServiceId })) };
+}
+
 async function listFound(conn, { limit = 50, offset = 0 } = {}) {
   const base = () => conn('customer_access_codes as a')
     .join('customers as c', 'c.id', 'a.customer_id')
@@ -610,12 +697,29 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
   const rows = await base()
     .select('a.*', 'c.first_name', 'c.last_name', 'c.company_name')
     .orderBy('a.created_at', 'desc').orderBy('a.id').limit(limit).offset(offset);
+  // The visit picker's choices for every row on the page, in one query: the
+  // customer's live visits from today through 14 days after the code was sent.
+  const today = etDateString(new Date());
+  const customerIds = [...new Set(rows.map((r) => r.customer_id).filter(Boolean))];
+  const visits = customerIds.length ? await conn('scheduled_services').whereIn('customer_id', customerIds)
+    .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
+    .where('scheduled_date', '>=', today)
+    .where('scheduled_date', '<=', etDateString(addETDays(new Date(), VISIT_WINDOW_DAYS)))
+    .select('id', 'customer_id', conn.raw('scheduled_date::text AS scheduled_date'), 'status', 'service_type', 'property_id')
+    .orderBy('scheduled_date').orderBy('id') : [];
+  const homes = await homeChoices(conn, customerIds);
   return {
     total: Number(count),
-    items: rows.map((r) => ({
-      ...serialize(r),
-      customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || r.company_name || null,
-    })),
+    items: rows.map((r) => {
+      const last = etDateString(addETDays(new Date(r.source_at || r.created_at), VISIT_WINDOW_DAYS));
+      return {
+        ...serialize(r),
+        customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || r.company_name || null,
+        propertyChoices: homes.get(r.customer_id) || [],
+        visitChoices: visits.filter((v) => v.customer_id === r.customer_id && v.scheduled_date <= last)
+          .map((v) => ({ id: v.id, scheduled_date: v.scheduled_date, status: v.status, service_type: v.service_type, property_id: v.property_id })),
+      };
+    }),
   };
 }
 
@@ -662,12 +766,19 @@ async function visitFor(trx, customerId, { from, chosenId }) {
   // only" code cannot be parked on an appointment months away.
   const live = () => trx('scheduled_services').where({ customer_id: customerId })
     .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
-    .whereBetween('scheduled_date', [etDateString(from), etDateString(addETDays(from, VISIT_WINDOW_DAYS))]);
+    // From today at the earliest: a visit day already past is not one a code can
+    // still open the door for, and the office picker lists upcoming visits only.
+    .whereBetween('scheduled_date', [[etDateString(from), etDateString(new Date())].sort()[1],
+      etDateString(addETDays(from, VISIT_WINDOW_DAYS))]);
   if (chosenId !== undefined && chosenId !== null) {
     if (!UUID_RE.test(String(chosenId))) return { error: 'invalid_visit' };
     // Locked, so the visit cannot end or move before this code commits.
     const chosen = await live().where({ id: chosenId }).forUpdate().first('id', 'property_id');
-    return chosen ? { id: chosen.id, propertyId: chosen.property_id || null } : { error: 'invalid_visit' };
+    if (!chosen) return { error: 'invalid_visit' };
+    // The visit names the code's home; a multi-home account's visit with no home cannot.
+    const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
+    const home = chosen.property_id || (homes.length === 1 ? homes[0] : null);
+    return home ? { id: chosen.id, propertyId: home } : { error: 'visit_home_unknown' };
   }
   const candidate = await live().first('id');
   return candidate ? { error: 'visit_required' } : { id: null, propertyId: null };
@@ -679,6 +790,10 @@ async function visitFor(trx, customerId, { from, chosenId }) {
 async function fillEmptyProfileField(trx, customerId, { kind, life, code }) {
   const field = PROFILE_FIELD[kind];
   if (life !== 'standing' || !field || !code) return null;
+  // Profile fields are customer-wide and every visit of the customer reads
+  // them: a multi-home account's code stays on its own home only.
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).count({ n: '*' }).first();
+  if (Number(homes?.n || 0) > 1) return null;
   const existing = await trx('property_preferences').where({ customer_id: customerId }).forUpdate().first('id', field);
   if (existing && String(existing[field] || '').trim() !== '') return null;
   const proposal = { scope_id: customerId, field, resource_id: existing ? existing.id : null };
@@ -701,9 +816,16 @@ async function visitTwin(trx, customerId, next, scheduledServiceId, exceptId = n
   return !!(await q.first('id'));
 }
 
-async function standingTwin(trx, customerId, { kind, life, value_hash: hash }, exceptId = null) {
+async function standingTwin(trx, customerId, { kind, life, value_hash: hash, property_id: home = null }, exceptId = null) {
   if (life !== 'standing') return null;
+  // The same code at another home of the customer is not a twin. On a one-home
+  // account an older row with no home is that home's code.
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).count({ n: '*' }).first();
   const q = trx('customer_access_codes').where({ customer_id: customerId, kind, value_hash: hash, status: 'active', life: 'standing' })
+    .where(function sameHome() {
+      this.whereRaw('property_id IS NOT DISTINCT FROM ?', [home]);
+      if (Number(homes?.n || 0) <= 1) this.orWhereNull('property_id');
+    })
     .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'));
   if (exceptId) q.whereNot('id', exceptId);
   return (await q.forUpdate().first('id', 'instructions')) || null;
@@ -750,7 +872,7 @@ async function officeTransaction(conn, work) {
 // Accept a found code (optionally edited by the office): it becomes active, a
 // visit-life code attaches to the customer's next visit, and a standing code
 // fills an empty profile field. Only a `found` row can be accepted.
-async function accept(conn, id, { adminUserId = null, kind, life, code, instructions, scheduledServiceId: chosenId, now = new Date() } = {}) {
+async function accept(conn, id, { adminUserId = null, kind, life, code, instructions, scheduledServiceId: chosenId, propertyId, now = new Date() } = {}) {
   if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
   const head = await conn('customer_access_codes').where({ id }).first('customer_id');
   if (!head) return fail(404, 'not_found');
@@ -765,6 +887,12 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
       if (!(await sourceStillOwned(trx, row))) return fail(409, 'source_moved');
       if (!(await sourceStillSupports(trx, row))) return fail(409, 'source_changed');
+      // A standing code's home is settled first: duplicates are per home.
+      // (A one-visit code takes its visit's home, below.)
+      const standingHome = next.life === 'standing'
+        ? await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id, explicitOnly: true }) : { propertyId: null };
+      if (standingHome.error) return fail(400, standingHome.error);
+      next.property_id = standingHome.propertyId;
       const refused = await supersedeOrRefuse(trx, row.customer_id, next, { exceptId: row.id, adminUserId });
       if (refused) return refused;
       // A one-visit candidate lives 14 days from the day it was sent; one past
@@ -777,13 +905,15 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (visit.error) return fail(400, visit.error);
       const scheduledServiceId = visit.id;
       if (await visitTwin(trx, row.customer_id, next, scheduledServiceId, row.id)) return fail(409, 'duplicate_active');
+      const home = next.life === 'standing' ? standingHome : { propertyId: visit.propertyId || null };
+      if (home.error) return fail(400, home.error);
       const profileField = await fillEmptyProfileField(trx, row.customer_id, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));
       const [updated] = await trx('customer_access_codes').where({ id }).update({
         kind: next.kind, life: next.life, code: next.code, instructions: next.instructions, value_hash: next.value_hash,
         scheduled_service_id: scheduledServiceId, status: 'active', decided_by: adminUserId || null,
-        // The named visit says which home the code is for.
-        ...(visit.propertyId ? { property_id: visit.propertyId } : {}),
+        // The named visit or the named home says which home the code is for.
+        property_id: home.propertyId,
         decided_at: trx.fn.now(), updated_at: trx.fn.now(),
       }).returning('*');
       await audit(trx, adminUserId, 'access_code.accepted', id, {
@@ -827,8 +957,12 @@ async function retireLocked(trx, row, { adminUserId = null, action }) {
       if (prefs && canonicalLower(prefs[field]) === canonicalLower(row.code)) {
         // Another active standing code of this kind takes the field over (the
         // newest one), so profile readers never lose a code the customer still has.
-        const heir = await trx('customer_access_codes')
+        // Shared profile fields are read at every visit of the customer: only a
+        // one-home account hands the field to another code; otherwise it is cleared.
+        const liveHomes = await trx('customer_properties').where({ customer_id: row.customer_id, active: true }).pluck('id');
+        const heir = liveHomes.length !== 1 ? null : await trx('customer_access_codes')
           .where({ customer_id: row.customer_id, kind: row.kind, status: 'active', life: 'standing' })
+          .where('property_id', liveHomes[0])
           .whereNot('id', row.id).whereNotNull('code')
           .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'))
           .orderBy('decided_at', 'desc').orderBy('created_at', 'desc').orderBy('id').first('code');
@@ -893,23 +1027,27 @@ async function retire(conn, id, { adminUserId = null } = {}) {
 }
 
 // The office adds a code itself: active at once.
-async function addByStaff(conn, { customerId, kind, life, code, instructions, scheduledServiceId: chosenId, adminUserId = null, now = new Date() } = {}) {
+async function addByStaff(conn, { customerId, kind, life, code, instructions, scheduledServiceId: chosenId, propertyId, adminUserId = null, now = new Date() } = {}) {
   if (!UUID_RE.test(String(customerId))) return fail(400, 'invalid_customer');
   const checked = validateFields({}, { kind, life, code, instructions });
   if (checked.error) return fail(400, checked.error);
   const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
   return officeTransaction(conn, async (trx) => {
     if (!(await lockCustomer(trx, customerId))) return fail(404, 'customer_not_found');
+    const standingHome = next.life === 'standing' ? await resolveHome(trx, customerId, { life: next.life, propertyId }) : null;
+    if (standingHome?.error) return fail(400, standingHome.error);
+    if (standingHome) next.property_id = standingHome.propertyId;
     const refused = await supersedeOrRefuse(trx, customerId, next, { adminUserId });
     if (refused) return refused;
-    const properties = await trx('customer_properties').where({ customer_id: customerId, active: true }).select('id');
     const visit = next.life === 'visit' ? await visitFor(trx, customerId, { from: now, chosenId }) : { id: null };
     if (visit.error) return fail(400, visit.error);
     const scheduledServiceId = visit.id;
     if (await visitTwin(trx, customerId, next, scheduledServiceId)) return fail(409, 'duplicate_active');
+    const home = standingHome || (visit.propertyId ? { propertyId: visit.propertyId } : await resolveHome(trx, customerId, { life: next.life, propertyId }));
+    if (home.error) return fail(400, home.error);
     const profileField = await fillEmptyProfileField(trx, customerId, next);
     const [row] = await trx('customer_access_codes').insert({
-      customer_id: customerId, property_id: visit.propertyId || (properties.length === 1 ? properties[0].id : null),
+      customer_id: customerId, property_id: home.propertyId,
       kind: next.kind, code: next.code, instructions: next.instructions, life: next.life,
       scheduled_service_id: scheduledServiceId, status: 'active', source_type: 'staff', source_at: trx.fn.now(),
       value_hash: next.value_hash, decided_by: adminUserId || null, decided_at: trx.fn.now(),
@@ -922,6 +1060,7 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
 }
 
 module.exports = {
+  listForVisit,
   VERSION,
   KINDS,
   LIVES,

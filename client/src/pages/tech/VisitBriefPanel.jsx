@@ -103,6 +103,9 @@ function LinkBtn({ href, icon, label, onClick, disabled = false }) {
 
 // The exact code rows the day payload never carries (redacted there by
 // design) — only non-null codes render.
+// The access-code kind each profile code field is (for the dedupe below).
+const PROFILE_CODE_KIND = { neighborhoodGate: 'neighborhood_gate', propertyGate: 'property_gate', garage: 'garage', lockbox: 'lockbox' };
+
 const CODE_LABELS = [
   ['neighborhoodGate', 'Neighborhood gate'],
   ['propertyGate', 'Property gate'],
@@ -255,6 +258,79 @@ function AccessSection({ alerts, access, gate = null }) {
         </p>
       ))}
       {gate && <GateAddCode actions={gateActions} />}
+    </>
+  );
+}
+
+// Access codes the customer gave (access codes section, read only): the
+// active standing codes plus one-visit codes tied to a visit of this stop.
+// Read per visit (owner 2026-10-05: a technician sees the codes of a visit
+// assigned to them); a section that is off answers 404 and the block hides.
+const ACCESS_KIND_LABELS = {
+  neighborhood_gate: 'Neighborhood gate', property_gate: 'Property gate', door: 'Door or lock',
+  lockbox: 'Lockbox', garage: 'Garage', call_box: 'Call box', pass: 'Visitor pass', other: 'Access code',
+};
+
+function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
+  // Rows are kept with the stop they were read for and shown only for that
+  // stop, so the first render of a new stop never shows the last stop's codes.
+  const [loaded, setLoaded] = useState({ key: '', rows: [] });
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const visitKey = visitIds.join(',');
+  const stopKey = `${customerId || ''}|${visitKey}`;
+  const rows = loaded.key === stopKey ? loaded.rows : [];
+  useEffect(() => {
+    if (!request || !customerId) return undefined;
+    let cancelled = false;
+    const ids = visitKey ? visitKey.split(',') : [];
+    setFailed(false);
+    // Off (404) or not this technician's visit (403) hides the block; any
+    // other failure says so, so a technician never takes "no codes" for an
+    // outage and can try again.
+    Promise.all(ids.map((id) => request(`/admin/access-codes/visits/${encodeURIComponent(id)}`)
+      .then((data) => (Array.isArray(data?.accessCodes) ? data.accessCodes : []))
+      .catch((err) => {
+        if (err && (err.status === 404 || err.status === 403)) return [];
+        throw err;
+      })))
+      .then((lists) => {
+        if (cancelled) return;
+        const seen = new Set();
+        setLoaded({ key: stopKey, rows: lists.flat().filter((r) => (seen.has(r.id) ? false : seen.add(r.id))) });
+      })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [request, customerId, visitKey, stopKey, attempt]);
+  const ids = visitKey ? visitKey.split(',') : [];
+  // Already shown above for the SAME access point; equal values at different
+  // points (a gate and a door both 1234) are both shown.
+  const shown = new Set(shownCodes.map(([kind, c]) => `${kind}:${String(c).trim().toLowerCase()}`));
+  const mine = rows.filter((r) => (r.life === 'standing' || ids.includes(r.scheduledServiceId))
+    && !(r.code && !r.instructions && shown.has(`${r.kind}:${String(r.code).trim().toLowerCase()}`)));
+  if (failed) {
+    return (
+      <>
+        <SectionLabel>Access codes</SectionLabel>
+        <p role="alert" style={factRowStyle}>
+          Could not load this stop's access codes.{' '}
+          <button type="button" onClick={() => setAttempt((n) => n + 1)}>Try again</button>
+        </p>
+      </>
+    );
+  }
+  if (!mine.length) return null;
+  return (
+    <>
+      <SectionLabel>Access codes</SectionLabel>
+      {mine.map((r) => (
+        <p key={r.id} style={factRowStyle}>
+          <span style={{ color: DARK.muted }}>{ACCESS_KIND_LABELS[r.kind] || 'Access code'}{r.life === 'visit' ? ' (this visit)' : ''}: </span>
+          {r.code && <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>{r.code}</span>}
+          {r.code && r.instructions ? ' · ' : ''}
+          {r.instructions}
+        </p>
+      ))}
     </>
   );
 }
@@ -1051,6 +1127,12 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         />
       )}
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
+      <VisitAccessCodes
+        request={request}
+        customerId={service.customer_id || service.customerId || null}
+        visitIds={stop.services.map((m) => m.id).filter(Boolean)}
+        shownCodes={CODE_LABELS.map(([key]) => [PROFILE_CODE_KIND[key], access?.codes?.[key]]).filter(([, v]) => Boolean(v))}
+      />
 
       <CustomerFlaggedSection
         serviceId={customerFlaggedMember?.service?.id}

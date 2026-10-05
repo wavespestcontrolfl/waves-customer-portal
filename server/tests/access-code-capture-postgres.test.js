@@ -78,7 +78,10 @@ postgres('access codes section', () => {
   };
   const found = async (customerId, extra = {}) => {
     const value = { kind: 'neighborhood_gate', code: '#4821', instructions: null, life: 'standing', ...extra };
+    // Filed like the sweep files it: tied to the customer's home when there is exactly one.
+    const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
     const [row] = await trx('customer_access_codes').insert({
+      property_id: homes.length === 1 ? homes[0] : null,
       customer_id: customerId, kind: value.kind, code: value.code, instructions: value.instructions, life: value.life,
       status: 'found', source_type: 'sms', source_id: randomUUID(), source_quote: 'q', source_at: NOW,
       value_hash: access.valueHash(value.code, value.instructions),
@@ -620,11 +623,12 @@ postgres('access codes section', () => {
       expect(await access.accept(trx, second.id, {})).toEqual({ ok: false, status: 409, code: 'duplicate_active' });
       // Same text, two found rows; editing one to the other's value hits the unique index.
       const sourceId = randomUUID();
+      const [home] = await trx('customer_properties').where({ customer_id: c.id }).pluck('id');
       const a = await trx('customer_access_codes').insert({
-        customer_id: c.id, kind: 'door', code: '3000', life: 'standing', status: 'found', source_type: 'sms', source_id: sourceId, value_hash: access.valueHash('3000'),
+        customer_id: c.id, property_id: home, kind: 'door', code: '3000', life: 'standing', status: 'found', source_type: 'sms', source_id: sourceId, value_hash: access.valueHash('3000'),
       }).returning('*');
       const b = await trx('customer_access_codes').insert({
-        customer_id: c.id, kind: 'door', code: '3001', life: 'standing', status: 'found', source_type: 'sms', source_id: sourceId, value_hash: access.valueHash('3001'),
+        customer_id: c.id, property_id: home, kind: 'door', code: '3001', life: 'standing', status: 'found', source_type: 'sms', source_id: sourceId, value_hash: access.valueHash('3001'),
       }).returning('*');
       expect(await access.accept(trx, b[0].id, { code: '3000' })).toEqual({ ok: false, status: 409, code: 'duplicate' });
       expect((await trx('customer_access_codes').where({ id: b[0].id }).first()).status).toBe('found');
@@ -722,6 +726,15 @@ postgres('access codes section', () => {
       expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('found');
       expect(await access.accept(trx, row.id, { scheduledServiceId: sameDay, now: NOW })).toMatchObject({ ok: false, code: 'invalid_visit' });
       expect((await access.accept(trx, row.id, { scheduledServiceId: later, now: NOW })).row.scheduledServiceId).toBe(later);
+    });
+
+    test('a visit day already past is not offered: yesterday\'s open visit does not require a choice', async () => {
+      const c = await customer();
+      const now = new Date();
+      await visit(c.id, etDateString(addETDays(now, -1)));
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      await trx('customer_access_codes').where({ id: row.id }).update({ source_at: new Date(now.getTime() - 2 * 86400000) });
+      expect(await access.accept(trx, row.id, { now })).toMatchObject({ ok: true, row: { scheduledServiceId: null } });
     });
 
     test('a visit code with no visit inside 14 days of the day it was sent binds to nothing', async () => {
@@ -1013,6 +1026,222 @@ postgres('access codes section', () => {
       await found(c.id);
       await trx('customers').where({ id: c.id }).update({ deleted_at: new Date() });
       expect((await access.listFound(trx, {})).total).toBe(0);
+    });
+  });
+
+  describe('technician visit read', () => {
+    const profile = (customerId) => trx('property_preferences').where({ customer_id: customerId }).first();
+    const tech = async () => {
+      const id = randomUUID();
+      await trx('technicians').insert({ id, name: 'Sample Tech' });
+      return id;
+    };
+
+    test('a standing code tied to one home is not shown at a visit to another home', async () => {
+      const c = await customer({ properties: 2 });
+      const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const atB = await visit(c.id, day(1));
+      await trx('scheduled_services').where({ id: atB }).update({ property_id: b.id });
+      const row = await found(c.id, { kind: 'door', code: '2468' });
+      await access.accept(trx, row.id, { propertyId: a.id });
+      const atHomeB = await found(c.id, { kind: 'garage', code: '1357' });
+      await access.accept(trx, atHomeB.id, { propertyId: b.id });
+      const out = await access.listForVisit(trx, { techRole: 'admin' }, atB);
+      expect(out.codes.map((r) => r.code)).toEqual(['1357']);
+    });
+
+    test('an unstamped visit of a two-home customer shows no home-bound code', async () => {
+      const c = await customer({ properties: 2 });
+      const [a] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const v = await visit(c.id, day(1));
+      const row = await found(c.id, { kind: 'door', code: '2468' });
+      await access.accept(trx, row.id, {});
+      await trx('customer_access_codes').where({ id: row.id }).update({ property_id: a.id });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes).toEqual([]);
+    });
+
+    test('on a multi-home account a code with no home is shown at no visit', async () => {
+      const c = await customer({ properties: 2 });
+      const [, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const v = await visit(c.id, day(1));
+      await trx('scheduled_services').where({ id: v }).update({ property_id: b.id });
+      const row = await found(c.id, { kind: 'door', code: '2468' });
+      await access.accept(trx, row.id, { propertyId: b.id });
+      await trx('customer_access_codes').where({ id: row.id }).update({ property_id: null });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes).toEqual([]);
+    });
+
+    test('a code with no home shows nowhere, even after the customer is down to one home', async () => {
+      const c = await customer({ properties: 1 });
+      const [a] = await trx('customer_properties').where({ customer_id: c.id }).select('id');
+      const v = await visit(c.id, day(1));
+      const row = await found(c.id, { kind: 'door', code: '2468' });
+      await access.accept(trx, row.id, {});
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes.map((r) => r.code)).toEqual(['2468']);
+      await trx('customer_access_codes').where({ id: row.id }).update({ property_id: null });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes).toEqual([]);
+      expect(a).toBeTruthy();
+    });
+
+    test('a one-visit code takes the visit\'s home; an unstamped visit of a two-home customer is refused', async () => {
+      const c = await customer({ properties: 2 });
+      const [, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const stamped = await visit(c.id, day(1));
+      const unstamped = await visit(c.id, day(2));
+      await trx('scheduled_services').where({ id: stamped }).update({ property_id: b.id });
+      const one = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      expect(await access.accept(trx, one.id, { scheduledServiceId: unstamped, now: NOW })).toMatchObject({ ok: false, code: 'visit_home_unknown' });
+      expect((await access.accept(trx, one.id, { scheduledServiceId: stamped, now: NOW })).row.propertyId).toBe(b.id);
+      await trx('scheduled_services').where({ id: stamped }).update({ property_id: null });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, stamped)).codes).toEqual([]);
+    });
+
+    test('on a one-home account an older home-less code still counts as a duplicate', async () => {
+      const c = await customer({ properties: 1 });
+      const old = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, old.id, {});
+      await trx('customer_access_codes').where({ id: old.id }).update({ property_id: null });
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468' })).toMatchObject({ ok: false, code: 'duplicate_active' });
+    });
+
+    test('retiring on a multi-home account clears the shared field instead of promoting another home\'s code', async () => {
+      const c = await customer({ properties: 1 });
+      const first = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, first.id, {});
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBe('2468');
+      const [p1] = await trx('customer_properties').where({ customer_id: c.id }).select('*');
+      const p2 = randomUUID();
+      await trx('customer_properties').insert({ ...p1, id: p2, address_line1: '9 Example Ct', is_primary: false, address_key: null });
+      await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '1357', propertyId: p2 });
+      expect(await access.retire(trx, first.id, {})).toMatchObject({ ok: true, promoted: false, clearedField: 'garage_code' });
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBeNull();
+    });
+
+    test('the customer list carries visits with their home', async () => {
+      const c = await customer({ properties: 2 });
+      const [, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const v = await visit(c.id, etDateString(addETDays(new Date(), 2)));
+      await trx('scheduled_services').where({ id: v }).update({ property_id: b.id });
+      expect((await access.listForCustomer(trx, c.id)).visits).toEqual([expect.objectContaining({ id: v, property_id: b.id })]);
+    });
+
+    test('on a multi-home account a texted code already on file for one home still reaches the office', async () => {
+      const c = await customer({ properties: 2 });
+      const [a] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '1234', propertyId: a.id });
+      await text(c.id, 'The door code is 1234');
+      expect(await sweep(stub([gateItem({ kind: 'door', code: '1234', quote: 'The door code is 1234' })]))).toMatchObject({ found: 1 });
+    });
+
+    test('back to one home, retire promotes only a code of that home', async () => {
+      const c = await customer({ properties: 2 });
+      const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const first = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: a.id });
+      await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '1357', propertyId: b.id });
+      await trx('customer_properties').where({ id: b.id }).update({ active: false });
+      await trx('property_preferences').insert({ customer_id: c.id, garage_code: '2468' }).onConflict('customer_id').merge();
+      expect(await access.retire(trx, first.row.id, {})).toMatchObject({ ok: true, promoted: false });
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBeNull();
+    });
+
+    test('a found code that lost its home is not moved to the home that is left', async () => {
+      const c = await customer({ properties: 2 });
+      const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const row = await found(c.id, { kind: 'door', code: '2468' });
+      await trx('customer_properties').where({ id: a.id }).update({ active: false });
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, code: 'property_required' });
+      expect((await access.accept(trx, row.id, { propertyId: b.id })).row.propertyId).toBe(b.id);
+    });
+
+    test('on a one-home account, a code on file for a home no longer active does not hide a new find', async () => {
+      const c = await customer({ properties: 2 });
+      const [a] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '1234', propertyId: a.id });
+      await trx('customer_properties').where({ id: a.id }).update({ active: false });
+      await text(c.id, 'The door code is 1234');
+      expect(await sweep(stub([gateItem({ kind: 'door', code: '1234', quote: 'The door code is 1234' })]))).toMatchObject({ found: 1 });
+    });
+
+    test('home choices name the unit and the property label', async () => {
+      const c = await customer({ properties: 2 });
+      const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      await trx('customer_properties').where({ id: a.id }).update({ address_line1: '10 Example Way', address_line2: 'Unit 1', label: null });
+      await trx('customer_properties').where({ id: b.id }).update({ address_line1: '10 Example Way', address_line2: 'Unit 2', label: 'Rental' });
+      const labels = (await access.listForCustomer(trx, c.id)).properties.map((h) => h.label).sort();
+      expect(labels).toEqual(['10 Example Way · Unit 1', '10 Example Way · Unit 2 · Rental']);
+    });
+
+    test('the found list carries each row\'s visit choices', async () => {
+      const c = await customer();
+      const soon = await visit(c.id, etDateString(addETDays(new Date(), 2)));
+      await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      await trx('customer_access_codes').where({ customer_id: c.id }).update({ source_at: new Date() });
+      const { items } = await access.listFound(trx, {});
+      expect(items.find((r) => r.customerId === c.id).visitChoices.map((v) => v.id)).toEqual([soon]);
+    });
+
+    test('a standing code of a multi-home customer must name its home', async () => {
+      const c = await customer({ properties: 2 });
+      const [a] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '2468' })).toMatchObject({ ok: false, code: 'property_required' });
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '2468', propertyId: randomUUID() })).toMatchObject({ ok: false, code: 'invalid_property' });
+      const ok = await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '2468', propertyId: a.id });
+      expect(ok).toMatchObject({ ok: true, row: { propertyId: a.id } });
+      const row = await found(c.id, { kind: 'garage', code: '1357' });
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, code: 'property_required' });
+      expect((await access.accept(trx, row.id, { propertyId: a.id })).row.propertyId).toBe(a.id);
+      expect((await access.listForCustomer(trx, c.id)).properties).toHaveLength(2);
+    });
+
+    test('a multi-home code never fills the customer-wide profile, and the same code at another home is not a duplicate', async () => {
+      const c = await customer({ properties: 2 });
+      const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: a.id })).toMatchObject({ ok: true, profileField: null });
+      expect(await profile(c.id)).toBeUndefined();
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: b.id })).toMatchObject({ ok: true });
+      expect(await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: b.id })).toMatchObject({ ok: false, code: 'duplicate_active' });
+    });
+
+    test('a technician sees only what a stop needs, and only around the visit day', async () => {
+      const c = await customer();
+      const techId = randomUUID();
+      await trx('technicians').insert({ id: techId, name: 'Sample Tech' });
+      const today = await visit(c.id, etDateString(new Date()));
+      const later = await visit(c.id, etDateString(addETDays(new Date(), 5)));
+      const done = await visit(c.id, etDateString(new Date()), 'completed');
+      await trx('scheduled_services').whereIn('id', [today, later, done]).update({ technician_id: techId });
+      const row = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, row.id, {});
+      const asTech = { techRole: 'technician', technicianId: techId };
+      const out = await access.listForVisit(trx, asTech, today);
+      expect(Object.keys(out.codes[0]).sort()).toEqual(['code', 'id', 'instructions', 'kind', 'life', 'scheduledServiceId']);
+      expect(await access.listForVisit(trx, asTech, later)).toMatchObject({ ok: false, status: 403 });
+      expect(await access.listForVisit(trx, asTech, done)).toMatchObject({ ok: false, status: 403 });
+    });
+
+    test('a technician reads the codes of a visit assigned to them, and only those', async () => {
+      const c = await customer();
+      const techId = await tech();
+      const other = await tech();
+      // Around the real visit day: a technician reads codes only yesterday through tomorrow.
+      const mine = await visit(c.id, etDateString(new Date()));
+      const theirs = await visit(c.id, etDateString(addETDays(new Date(), 1)));
+      await trx('scheduled_services').where({ id: mine }).update({ technician_id: techId });
+      await trx('scheduled_services').where({ id: theirs }).update({ technician_id: other });
+      const standing = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, standing.id, {});
+      const forMine = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      const forTheirs = await found(c.id, { kind: 'door', code: '#8080', life: 'visit' });
+      await trx('customer_access_codes').whereIn('id', [forMine.id, forTheirs.id]).update({ source_at: new Date() });
+      await access.accept(trx, forMine.id, { scheduledServiceId: mine });
+      await access.accept(trx, forTheirs.id, { scheduledServiceId: theirs });
+      const asTech = { techRole: 'technician', technicianId: techId };
+      const out = await access.listForVisit(trx, asTech, mine);
+      expect(out.ok).toBe(true);
+      expect(out.codes.map((r) => r.code).sort()).toEqual(['#9090', '2468']);
+      expect(await access.listForVisit(trx, asTech, theirs)).toMatchObject({ ok: false, status: 403, code: 'service_not_assigned' });
+      expect(await access.listForVisit(trx, asTech, randomUUID())).toMatchObject({ ok: false, status: 404 });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, theirs)).codes.map((r) => r.code).sort()).toEqual(['#8080', '2468']);
     });
   });
 
