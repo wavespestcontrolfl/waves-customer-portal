@@ -542,6 +542,20 @@ html[data-glass-theme] .waves-ask-form button { min-height: 48px !important; pad
 html[data-glass-theme] .waves-ask-list { display: grid !important; padding: 0 14px !important; border-radius: 10px !important; }
 html[data-glass-theme] .waves-ask-row { display: grid !important; grid-template-columns: minmax(0, 1fr) auto !important; align-items: center !important; gap: 12px !important; width: 100% !important; min-height: 44px !important; padding: 10px 0 !important; border: 0 !important; border-top: 1px solid rgba(4, 57, 94, 0.12) !important; border-radius: 0 !important; background: transparent !important; box-shadow: none !important; color: #04395E !important; font-size: 14px !important; font-weight: 500 !important; line-height: 1.35 !important; text-align: left !important; cursor: pointer; }
 html[data-glass-theme] .waves-ask-row[data-first] { border-top: 0 !important; }
+/* Service report on phones starts Ask Waves as the slim ask row — label,
+   input, Ask — and opens to the full card on first tap (owner pick B,
+   2026-10-03). Desktop keeps the full card. The input and Ask keep the
+   44px touch floor; the slim card's vertical padding gives the space back. */
+@media (max-width: 760px) {
+  html[data-glass-theme] .waves-ask-card[data-report-ask-slim] { grid-template-columns: auto minmax(0, 1fr) !important; align-items: center !important; gap: 8px !important; padding: 6px 8px 6px 12px !important; margin-top: 8px !important; }
+  html[data-glass-theme] .waves-ask-card[data-report-ask-slim] .waves-ask-eyebrow { margin: 0 !important; white-space: nowrap; }
+  html[data-glass-theme] .waves-ask-card[data-report-ask-slim] .waves-ask-title,
+  html[data-glass-theme] .waves-ask-card[data-report-ask-slim] .waves-ask-intro,
+  html[data-glass-theme] .waves-ask-card[data-report-ask-slim] .waves-ask-list { display: none !important; }
+  html[data-glass-theme] .waves-ask-card[data-report-ask-slim] .waves-ask-form { gap: 6px !important; }
+  html[data-glass-theme] .waves-ask-card[data-report-ask-slim] .waves-ask-form input { min-height: 44px !important; padding: 8px 10px !important; }
+  html[data-glass-theme] .waves-ask-card[data-report-ask-slim] .waves-ask-form button { min-height: 44px !important; padding: 0 14px !important; }
+}
 /* The card is interactive chrome: never print it (the sheet's display: grid !important would otherwise beat the page's print rule). */
 @media print { html[data-glass-theme] .waves-ask-card { display: none !important; } }
 html[data-glass-theme] .waves-ask-go { font-size: 14px !important; font-weight: 600 !important; color: #3F4A65 !important; }
