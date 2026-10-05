@@ -11,6 +11,7 @@
 // read as "next door".
 
 const { driveMin } = require('../auto-dispatch/geo');
+const { ARRIVAL_WINDOW_MINUTES } = require('../../utils/sms-time-format');
 
 // Visits the tech will not drive to.
 const NOT_A_STOP = new Set(['cancelled', 'skipped', 'no_show']);
@@ -28,6 +29,19 @@ function hasGeo(s) {
   return s?.lat != null && s?.lng != null && Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0;
 }
 
+// When a row's work is planned to end: its window end (the service-end
+// estimate), else start + stored duration, else one hour.
+function plannedEnd(s) {
+  const start = minutesOf(s.windowStart);
+  const end = minutesOf(s.windowEnd);
+  if (Number.isFinite(end) && end > start) return end;
+  const dur = Number(s.estimatedDuration);
+  return start + (Number.isFinite(dur) && dur > 0 ? dur : 60);
+}
+
+// Visits the tech has not reached yet: only these can still run late.
+const NOT_REACHED = new Set(['pending', 'confirmed', 'rescheduled']);
+
 function samePlace(a, b) {
   return hasGeo(a) && hasGeo(b) && a.lat === b.lat && a.lng === b.lng;
 }
@@ -42,7 +56,11 @@ function stopOrder(a, b) {
 
 /**
  * Sets `driveFromPrevMin` / `driveToNextMin` (number or null) and
- * `firstStop` / `lastStop` in place on one technician's services.
+ * `firstStop` / `lastStop` in place on one technician's services. Each leg
+ * in is also stamped once (`driveInShown`, on the stop's first card) with
+ * the stop it comes from (`drivePrevName`) and `driveLateMin`: the minutes
+ * past the customer's 2-hour arrival window (start + 120) the tech lands if
+ * the previous stop ends as planned, else null.
  */
 function attachDriveLegs(services) {
   // A stop with no start time (the grid's all-day strip) has no place in
@@ -53,6 +71,9 @@ function attachDriveLegs(services) {
     s.driveToNextMin = null;
     s.firstStop = false;
     s.lastStop = false;
+    s.driveInShown = false;
+    s.drivePrevName = null;
+    s.driveLateMin = null;
   }
   // A visit group is one stop wherever its rows sort (route-model.js
   // physicalStops groups every visit_id the same way): placed at its
@@ -94,6 +115,19 @@ function attachDriveLegs(services) {
     const leg = hasGeo(prev.anchor) && hasGeo(cur.anchor) ? Math.max(1, driveMin(prev.anchor, cur.anchor)) : null;
     prev.legs.forEach((s) => { s.driveToNextMin = leg; });
     cur.legs.forEach((s) => { s.driveFromPrevMin = leg; });
+    if (leg == null) continue;
+    const first = cur.legs[0];
+    first.driveInShown = true;
+    first.drivePrevName = String(prev.legs[0].customerName || '').trim() || null;
+    if (NOT_REACHED.has(first.status)) {
+      // The previous stop's work that runs before this one: a group member
+      // booked later than this stop does not hold the tech here.
+      const startMin = minutesOf(first.windowStart);
+      const before = prev.members.filter((m) => minutesOf(m.windowStart) <= startMin);
+      const arrive = Math.max(...(before.length ? before : prev.legs.slice(0, 1)).map(plannedEnd)) + leg;
+      const late = arrive - (startMin + ARRIVAL_WINDOW_MINUTES);
+      if (late > 0) first.driveLateMin = late;
+    }
   }
 }
 

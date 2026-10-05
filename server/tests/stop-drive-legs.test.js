@@ -97,4 +97,44 @@ describe('attachDriveLegs', () => {
     expect(by.allday).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null, firstStop: false, lastStop: false });
     expect(by.n).toMatchObject({ lastStop: true, driveFromPrevMin: by.g1.driveToNextMin });
   });
+
+  it('stamps each leg once with the stop it comes from', () => {
+    const services = [
+      stop('a', '08:00', A, { customerName: 'Sample A' }),
+      stop('b1', '10:00', B, { visitId: 'v1', customerName: 'Sample B' }),
+      stop('b2', '10:00', B, { visitId: 'v1', customerName: 'Sample B' }),
+      stop('c', '13:00', C, { customerName: 'Sample C' }),
+    ];
+    attachDriveLegs(services);
+    const by = Object.fromEntries(services.map((s) => [s.id, s]));
+    expect(by.a).toMatchObject({ driveInShown: false, drivePrevName: null });
+    expect(by.b1).toMatchObject({ driveInShown: true, drivePrevName: 'Sample A' });
+    expect(by.b2).toMatchObject({ driveInShown: false, drivePrevName: null });
+    expect(by.c).toMatchObject({ driveInShown: true, drivePrevName: 'Sample B' });
+  });
+
+  it('flags late only past the 2-hour arrival window, not the start time', () => {
+    const leg = Math.max(1, driveMin(A, C));
+    // Previous work ends at 12:00. A stop starting at 12:30 has a window to
+    // 14:30, so a leg that lands after 12:30 but before 14:30 is on time.
+    const onTime = [stop('a', '11:00', A, { windowEnd: '12:00' }), stop('c', '12:30', C)];
+    attachDriveLegs(onTime);
+    expect(leg).toBeGreaterThan(0);
+    expect(onTime[1].driveLateMin).toBeNull();
+    // The work ends late enough that the same leg misses the window.
+    const late = [stop('a', '11:00', A, { windowEnd: '14:25' }), stop('c', '12:30', C)];
+    attachDriveLegs(late);
+    expect(late[1].driveLateMin).toBe(14 * 60 + 25 + leg - (12 * 60 + 30 + 120));
+    // A visit the tech already reached is never flagged.
+    const reached = [stop('a', '11:00', A, { windowEnd: '14:25' }), stop('c', '12:30', C, { status: 'in_progress' })];
+    attachDriveLegs(reached);
+    expect(reached[1].driveLateMin).toBeNull();
+  });
+
+  it('uses duration, else one hour, when the previous stop has no window end', () => {
+    const services = [stop('a', '08:00', A, { estimatedDuration: 180 }), stop('c', '09:00', C)];
+    attachDriveLegs(services);
+    const leg = services[1].driveFromPrevMin;
+    expect(services[1].driveLateMin).toBe(8 * 60 + 180 + leg - (9 * 60 + 120));
+  });
 });
