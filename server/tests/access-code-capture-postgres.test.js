@@ -198,6 +198,28 @@ postgres('access codes section', () => {
       expect(await sweep(read)).toMatchObject({ found: 1 });
     });
 
+    test('a corrected text that adds directions to the same code replaces its waiting row', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'The gate code is #4821');
+      expect(await sweep(stub([gateItem()]))).toMatchObject({ found: 1 });
+      await trx('sms_log').where({ id }).update({ message_body: 'The gate code is #4821, press 2 first' });
+      const read = stub([gateItem({ instructions: 'press 2 first', quote: 'The gate code is #4821, press 2 first' })]);
+      expect(await sweep(read)).toMatchObject({ found: 1 });
+      const list = (await rows(c.id)).map((r) => [r.status, r.instructions]).sort();
+      expect(list).toEqual([['dismissed', null], ['found', 'press 2 first']]);
+    });
+
+    test('a house number added during the model call is refused at filing', async () => {
+      const c = await customer({ properties: 1 });
+      await text(c.id, 'The gate code is #7788');
+      const read = jest.fn(async () => {
+        await trx('customer_properties').where({ customer_id: c.id }).update({ address_line1: '7788 Example Way' });
+        return { items: [gateItem({ code: '#7788', quote: 'The gate code is #7788' })] };
+      });
+      expect(await sweep(read)).toMatchObject({ found: 0 });
+      expect(await rows(c.id)).toHaveLength(0);
+    });
+
     test('a text corrected after its receipt is read again', async () => {
       const c = await customer();
       const id = await text(c.id, 'See you Tuesday');

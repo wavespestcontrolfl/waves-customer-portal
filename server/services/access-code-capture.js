@@ -70,7 +70,6 @@ const THING_WORDS = /\b(?:gates?|doors?|garages?|lock\s?box(?:es)?|key\s?box(?:e
 const CREDENTIAL_WORDS = /\b(?:codes?|pass\s?codes?|passwords?|pins?|combos?|combinations?|access codes?|entry codes?)\b/i;
 const DEVICE_WORDS = /\b(?:clickers?|remotes?|openers?|fobs?|transponders?|qr|(?:visitor|guest|gate) pass(?:es)?)\b/i;
 const KEY_SYMBOLS = /(?<![A-Za-z0-9])[#*]\d{3,6}(?!\d)|(?<![A-Za-z0-9#*])\d{3,6}[#*]|\b(?:press|pound|star|dial)\b/i;
-const BARE_NUMBER = /^\s*[#*]?\s*\d{3,6}\s*[#*]?\s*$/;
 // A reply to our own code question that is one short token with a digit in it
 // ("4821", "#4821", "A12B"); only read when we just asked.
 const BARE_CREDENTIAL = /^\s*[#*]?\s*(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{3,6}\s*[#*]?\s*[.!]?\s*$/;
@@ -291,7 +290,7 @@ function isLive(r, now = new Date()) {
   return !from || new Date(from) >= addETDays(now, -VISIT_WINDOW_DAYS);
 }
 
-async function fileFoundItems(conn, { message, properties }, items, receipt) {
+async function fileFoundItems(conn, { message }, items, receipt) {
   return conn.transaction(async (trx) => {
     // The model call ran outside any lock. Before a write: the gate and its
     // activation time still hold, the customer is locked (the same order as
@@ -305,6 +304,14 @@ async function fileFoundItems(conn, { message, properties }, items, receipt) {
     if (!live || live.customer_id !== message.customer_id || live.direction !== 'inbound'
       || hashExtractionSource(live.message_body) !== receipt.source_hash) return 0;
     const customer = { id: message.customer_id };
+    // Re-read under the customer lock: a property added, moved or closed during
+    // the model call changes which home the code belongs to, and its house
+    // number or ZIP is never a code.
+    const liveProperties = await trx('customer_properties').where({ customer_id: customer.id, active: true })
+      .select('id', 'address_line1', 'zip');
+    const propertyId = liveProperties.length === 1 ? liveProperties[0].id : null;
+    const { refuse } = digitsToRefuse(message, liveProperties);
+    items = items.filter((item) => !item.code || !refuse.has(digitsOf(item.code)));
     let toInsert = [];
     if (items.length) {
       const prefs = await trx('property_preferences').where({ customer_id: customer.id }).first() || {};
@@ -334,12 +341,21 @@ async function fileFoundItems(conn, { message, properties }, items, receipt) {
           && canonicalLower(prefs[field]) === canonicalLower(item.code));
       });
     }
-    // Re-read under the customer lock: a property added or closed during the
-    // model call changes which home the code belongs to.
-    const liveProperties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
-    const propertyId = liveProperties.length === 1 ? liveProperties[0].id : null;
     let inserted = 0;
     if (toInsert.length) {
+      // A corrected text replaces what its earlier read filed and the office has
+      // not decided yet: the old waiting row of the same kind and code goes.
+      await trx('customer_access_codes')
+        .where({ customer_id: customer.id, source_type: 'sms', source_id: message.id, status: 'found' })
+        .where(function changed() {
+          for (const item of toInsert) {
+            this.orWhere(function same() {
+              this.where({ kind: item.kind, value_hash: item.value_hash })
+                .whereRaw("coalesce(instructions, '') <> ?", [item.instructions || '']);
+            });
+          }
+        })
+        .update({ status: 'dismissed', decided_at: trx.fn.now(), updated_at: trx.fn.now() });
       const rows = await trx('customer_access_codes').insert(toInsert.map((item) => ({
         customer_id: customer.id, property_id: propertyId, kind: item.kind, code: item.code,
         instructions: item.instructions, life: item.life, status: 'found', source_type: 'sms',
