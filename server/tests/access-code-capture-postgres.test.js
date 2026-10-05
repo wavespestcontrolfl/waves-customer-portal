@@ -880,6 +880,34 @@ postgres('access codes section', () => {
       expect((await trx('property_preferences').where({ customer_id: winner.id }).first()).garage_code).toBeNull();
     });
 
+    test('a text that is no longer an inbound text cannot be accepted', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'The gate code is #4821');
+      await sweep(stub([gateItem()]));
+      const [row] = await rows(c.id);
+      await trx('sms_log').where({ id }).update({ direction: 'outbound' });
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, code: 'source_changed' });
+    });
+
+    test('moved codes of deleted customers never hold up the cleanup of live ones', async () => {
+      const live = await customer();
+      const gone = await customer();
+      const other = await customer();
+      const mk = async (c, body, code) => {
+        const id = await text(c.id, body);
+        await sweep(stub([gateItem({ kind: 'garage', code, quote: body })]));
+        const [row] = (await rows(c.id)).filter((r) => r.code === code);
+        await access.accept(trx, row.id, {});
+        await trx('sms_log').where({ id }).update({ customer_id: other.id });
+        return row;
+      };
+      await mk(gone, 'The garage code is 1357', '1357');
+      await trx('customers').where({ id: gone.id }).update({ deleted_at: new Date() });
+      const keep = await mk(live, 'The garage code is 2468', '2468');
+      await sweep(stub([]));
+      expect((await trx('customer_access_codes').where({ id: keep.id }).first()).status).toBe('retired');
+    });
+
     test('a refused accept leaves the active twin untouched', async () => {
       const winner = await customer();
       const loser = await customer();

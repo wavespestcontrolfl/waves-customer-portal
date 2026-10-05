@@ -146,8 +146,8 @@ describe('verifyItems', () => {
     const second = [...properties, { id: 'p2', address_line1: '90 Other Court', zip: '34285' }];
     expect(verifyItems([item({ code: '90', quote: 'code 90' })], message('code 90'), { properties: second })).toEqual([]);
     expect(verifyItems([item({ code: '34285', quote: 'code 34285' })], message('code 34285'), { properties: second })).toEqual([]);
-    // A letter beside the house number's digits is still the house number's digits.
-    expect(verify([item({ code: 'A4455', quote: 'The gate code is A4455' })], 'The gate code is A4455')).toEqual([]);
+    // A letter beside the house number's digits makes it a code, not the address.
+    expect(verify([item({ code: 'A4455', quote: 'The gate code is A4455' })], 'The gate code is A4455')).toHaveLength(1);
   });
 
   test('drops a code that is the last ten digits of either phone on the message', () => {

@@ -122,6 +122,7 @@ const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // The model's code shape is the one storage and the staff path accept: up to
 // MAX_CODE characters, letters or digits ("WAVE", "12 34", "A5-B"), optional
 // # or * at either end.
+const NUMERIC_CODE = /^[#*]?[\d -]+[#*]?$/;
 const MODEL_CODE_SHAPE = /^[#*]?[A-Za-z0-9](?:[A-Za-z0-9 -]*[A-Za-z0-9])?[#*]?$/;
 
 // A code counts as quoted only as a whole token: the characters around it may
@@ -160,7 +161,8 @@ function verifyItem(item, bodyText, { refuse, phones }) {
     if (code.length > MAX_CODE || !MODEL_CODE_SHAPE.test(code) || !codeIsWholeTokenIn(code, quote)
       || !codeIsWholeTokenIn(code, bodyText)) return null;
     const digits = digitsOf(code);
-    if (refuse.has(digits)) return null;
+    // Only a numeric code can be a house number or ZIP; "A4455" is a code.
+    if (NUMERIC_CODE.test(code) && refuse.has(digits)) return null;
     // A phone number is never a code, with or without its country prefix: ten
     // or more digits are refused outright, and seven or more that end one of
     // the message's own numbers too.
@@ -365,7 +367,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
       .select('id', 'address_line1', 'zip');
     const propertyId = liveProperties.length === 1 ? liveProperties[0].id : null;
     const { refuse } = digitsToRefuse(message, liveProperties);
-    items = items.filter((item) => !item.code || !refuse.has(digitsOf(item.code)));
+    items = items.filter((item) => !item.code || !NUMERIC_CODE.test(item.code) || !refuse.has(digitsOf(item.code)));
     let toInsert = [];
     if (items.length) {
       const prefs = await trx('property_preferences').where({ customer_id: customer.id }).first() || {};
@@ -547,9 +549,10 @@ async function sourceStillOwned(trx, row) {
 // saved from a stale review page. The text row is locked until commit.
 async function sourceStillSupports(trx, row) {
   if (row.source_type !== 'sms' || !row.source_id) return true;
-  const source = await trx('sms_log').where({ id: row.source_id }).forUpdate().first('customer_id', 'message_body');
+  const source = await trx('sms_log').where({ id: row.source_id }).forUpdate().first(...SOURCE_COLUMNS);
   if (!source) return true;
-  if (source.customer_id !== row.customer_id) return false;
+  // Still a text the sweep would read: inbound, eligible, this owner's.
+  if (source.customer_id !== row.customer_id || source.direction !== 'inbound' || !eligibleMessage(source)) return false;
   // The sweep has read these exact words for this owner, and that read left
   // this row waiting (reconcile removes what it no longer supports), so its
   // code, directions and life are what the current text says.
@@ -819,6 +822,8 @@ async function retireLocked(trx, row, { adminUserId = null, action }) {
           .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'))
           .orderBy('decided_at', 'desc').orderBy('created_at', 'desc').orderBy('id').first('code');
         await trx('property_preferences').where({ id: prefs.id }).update({ [field]: heir ? heir.code : null, updated_at: trx.fn.now() });
+        // A pending text-extraction proposal for this field would now fail its before-value check.
+        await stalePendingExtractionProposals({ trx, scope_id: row.customer_id, field });
         clearedField = field;
         promoted = !!heir;
       }
@@ -839,6 +844,7 @@ async function retireLocked(trx, row, { adminUserId = null, action }) {
 // dispatch and visit readers stop showing it on the wrong account.
 async function retireMovedSources(conn, { limit = BATCH } = {}) {
   const moved = await conn('customer_access_codes as a')
+    .join('customers as owner', 'owner.id', 'a.customer_id').whereNull('owner.deleted_at')
     .where('a.status', 'active').where('a.source_type', 'sms').whereNotNull('a.source_id')
     .whereRaw(`NOT ${OWNED_SOURCE_SQL}`)
     .orderBy('a.updated_at').limit(limit).select('a.id', 'a.customer_id');
