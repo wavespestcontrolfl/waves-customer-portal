@@ -58,6 +58,47 @@ test('schedule defaults to today ET and reports a stamped destination with cover
   expect(result).toMatchObject({ has_more: false, returned_count: 1 });
 });
 
+test('schedule view confines itself to one customer when asked, inside the task read scope', async () => {
+  const one = 'abcdef01-0000-4000-8000-0000000000a1';
+  const other = 'abcdef01-0000-4000-8000-0000000000b2';
+  // The bound filter, as distinct from the customers join on the same column.
+  const ONE_CUSTOMER = /"scheduled_services"\."customer_id" = (\$\d+|\?)/;
+  // A brief names its customer: only that customer's visits are selected.
+  const brief = await executeTool('get_schedule_view', { customer_id: one, date_from: '2026-10-01', date_to: '2026-10-31' });
+  expect(brief.error).toBeUndefined();
+  expect(db.__queries[0].sql).toMatch(ONE_CUSTOMER);
+  expect(db.__queries[0].bindings).toContain(one);
+  expect(brief.coverage).toMatch(/one requested customer only/);
+  // Without the id the reader is date-wide, as before.
+  db.__queries = [];
+  const wide = await executeTool('get_schedule_view', { date: '2026-10-05' });
+  expect(db.__queries[0].sql).not.toMatch(ONE_CUSTOMER);
+  expect(wide.coverage).toBe('Requested date range; cancelled appointments excluded');
+  // Inside a customer-scoped task the id is ANDed with the task scope: an id
+  // from outside the task cannot widen the read to another account.
+  db.__queries = [];
+  const scoped = await executeTool('get_schedule_view', { customer_id: other, date: '2026-10-05' }, { readCustomerIds: [one] });
+  expect(db.__queries[0].sql).toContain('"scheduled_services"."customer_id" in ');
+  expect(db.__queries[0].sql).toMatch(ONE_CUSTOMER);
+  expect(db.__queries[0].bindings).toEqual(expect.arrayContaining([one, other]));
+  expect(scoped.coverage).toMatch(/task customer only/);
+  // A name in the id slot is a typed error, never a Postgres cast failure.
+  db.__queries = [];
+  const named = await executeTool('get_schedule_view', { customer_id: 'Avery Example' });
+  expect(named.error).toMatch(/customer UUID/);
+  expect(db.__queries).toHaveLength(0);
+});
+
+test('schedule view reports the whole arrival window, not the start alone', async () => {
+  db.__rows = () => [
+    { id: 'windowed', window_start: '09:00:00', window_end: '11:00:00' },
+    { id: 'open-ended', window_start: '13:00:00', window_end: null },
+    { id: 'untimed', window_start: null, window_end: null },
+  ];
+  const result = await executeTool('get_schedule_view', {});
+  expect(result.appointments.map(a => a.time_window)).toEqual(['09:00:00-11:00:00', '13:00:00', null]);
+});
+
 test('tech next stop skips skipped jobs and reads the rental destination', async () => {
   db.__rows = () => [
     { id: 'skip', status: 'skipped' },

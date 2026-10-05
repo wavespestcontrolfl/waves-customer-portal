@@ -752,6 +752,18 @@ test('an earlier explicit target survives a later communication clause referenci
   expect((await Context.validateRecordTarget({ customer_id: B }, task, { toolName: 'update_customer' })).code).toBe('target_clarification_required');
 });
 
+test('a scoped reader with an optional customer_id never inherits or refuses on the task customers', async () => {
+  // get_schedule_view takes customer_id as a narrower filter. The task read
+  // scope (readCustomerIds) already confines it, so a one-customer task does
+  // not stamp the id and a two-customer task is not asked to choose.
+  const schema = { properties: { customer_id: { type: 'string', format: 'uuid' }, date: { type: 'string' } } };
+  expect(await Context.prepareReadInput({ date: '2026-09-09' }, context(), { toolName: 'get_schedule_view', schema })).toEqual({ input: { date: '2026-09-09' } });
+  const two = { targets: [{ customer_id: A }, { customer_id: B }], page: { ids: {} } };
+  expect(await Context.prepareReadInput({ date: '2026-09-09' }, two, { toolName: 'get_schedule_view', schema })).toEqual({ input: { date: '2026-09-09' } });
+  // A record reader (not scoped) keeps inheriting the single task customer.
+  expect(await Context.prepareReadInput({}, context(), { toolName: 'get_customer_detail', schema })).toEqual({ input: { customer_id: A } });
+});
+
 test('verified city and technician words after "for" are filters, not customer names', async () => {
   rows.customers = [{ id: A, first_name: 'Synthetic', last_name: 'Person', city: 'Sarasota' }];
   rows.technicians = [{ name: 'Synthetic Tech' }];

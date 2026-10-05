@@ -130,7 +130,7 @@ Only returns active customers with prior service history in that category.`,
   },
   {
     name: 'get_schedule_view',
-    description: 'Get the schedule for a date or date range. Optionally filter by technician or zone/city.',
+    description: 'Get the schedule for a date or date range. Optionally filter by technician or zone/city. For ONE customer\'s visits (a customer brief, "when is their next visit") pass customer_id: without it the result lists every customer on those dates.',
     input_schema: {
       type: 'object',
       properties: {
@@ -140,6 +140,7 @@ Only returns active customers with prior service history in that category.`,
         date_to: { type: 'string', description: 'YYYY-MM-DD end of range' },
         technician_name: { type: 'string', description: 'Filter by technician name (as shown on the schedule)' },
         city: { type: 'string', description: 'Filter by customer city/zone' },
+        customer_id: { type: 'string', format: 'uuid', description: 'Only this customer\'s visits. Use it whenever the question is about one customer.' },
       },
     },
   },
@@ -869,8 +870,14 @@ async function getCustomerDetail(customerId) {
 // resolved customers so a date-wide read cannot expose other customers'
 // names, phones, addresses or notes to the model.
 async function getScheduleView(input, readCustomerIds = []) {
-  const { date = (!input.date_from && !input.date_to ? etDateString() : undefined), date_from, date_to, technician_name, city } = input;
+  const { date = (!input.date_from && !input.date_to ? etDateString() : undefined), date_from, date_to, technician_name, city, customer_id } = input;
   const offset = Math.max(0, Math.trunc(input.offset || 0));
+  // customer_id lands in a uuid-column comparison: a name-like value from the
+  // model would throw a Postgres cast error. Typed error instead (the same
+  // guard query_revenue uses).
+  if (customer_id && !UUID_RE.test(String(customer_id))) {
+    return { error: `customer_id must be a customer UUID, got "${customer_id}". Use query_customers to look the customer up, then retry with their id.` };
+  }
 
   let query = db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -889,6 +896,10 @@ async function getScheduleView(input, readCustomerIds = []) {
     )
     .whereNotIn('scheduled_services.status', ['cancelled']);
   if (readCustomerIds.length) query = query.whereIn('scheduled_services.customer_id', readCustomerIds);
+  // One customer's schedule (a brief). ANDed with the task scope above, so an
+  // id from outside a customer-scoped task returns nothing rather than
+  // another account's visits.
+  if (customer_id) query = query.where('scheduled_services.customer_id', customer_id);
 
   if (date) {
     query = query.where('scheduled_services.scheduled_date', date);
@@ -916,7 +927,9 @@ async function getScheduleView(input, readCustomerIds = []) {
       date: a.scheduled_date,
       service_type: a.service_type,
       status: a.status,
-      time_window: a.window_start || null,
+      // Start and end, the shape get_customer_detail returns: a start alone
+      // reads as an exact arrival time.
+      time_window: a.window_start ? (a.window_end ? `${a.window_start}-${a.window_end}` : a.window_start) : null,
       route_order: a.route_order,
       customer_id: a.customer_id,
       customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim(),
@@ -931,7 +944,8 @@ async function getScheduleView(input, readCustomerIds = []) {
     next_offset: fetched.length > 200 ? offset + 200 : null,
     date: date || null,
     coverage: readCustomerIds.length ? 'Requested date range for the task customer only; cancelled appointments excluded'
-      : 'Requested date range; cancelled appointments excluded',
+      : customer_id ? 'Requested date range for the one requested customer only; cancelled appointments excluded'
+        : 'Requested date range; cancelled appointments excluded',
   };
 }
 
