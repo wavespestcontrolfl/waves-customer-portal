@@ -19303,8 +19303,10 @@ const CallRecordingProcessor = {
                     } else {
                       // No new ask: the phone may already have said YES (an
                       // earlier call), so no YES will arrive for this booking —
-                      // the caller's demotion is applied now if it never was.
-                      await require('./recipient-optin').demoteCallerForConfirmedOnSite(customerId, phoneKey, svc.id);
+                      // its follow-up (caller demotion, and the confirmation
+                      // when no fan-out sends it: a reused booking) is re-armed
+                      // on this visit for the opt-in sweep.
+                      await require('./recipient-optin').rearmOnSiteFollowUp(customerId, phoneKey, svc.id);
                       await markOptinAsk(entry, 'not_sent:no_new_ask');
                     }
                   } catch (askErr) {
@@ -20514,6 +20516,14 @@ const CallRecordingProcessor = {
                           .first()
                           .catch(() => null);
                         if (recentDup) continue;
+                        // The on-site follow-up's replay (recipient-optin: this
+                        // contact answered YES while this booking was still
+                        // processing) already texted this visit's confirmation
+                        // to this phone: its body differs, so the content
+                        // dedupe above cannot see it.
+                        if (await require('./appointment-reminders').confirmationLoggedForVisitPhone({
+                          scheduledServiceId, phone: contact.phone, entryPoint: 'recipient_optin_confirmed_replay', sinceMs: 10 * 60 * 1000,
+                        }).catch(() => false)) continue;
                         if (!(await claimStillOwned())) return false;
                         const contactResult = await sendCustomerMessage({
                           to: contact.phone,
@@ -20541,6 +20551,8 @@ const CallRecordingProcessor = {
                           metadata: {
                             original_message_type: 'confirmation',
                             appointment_contact_role: contact.role,
+                            // The replay's per-visit dedupe reads this.
+                            scheduled_service_id: scheduledServiceId,
                           },
                         });
                         if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'

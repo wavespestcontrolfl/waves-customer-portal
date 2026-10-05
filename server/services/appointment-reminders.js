@@ -5878,6 +5878,30 @@ const REPLAY_DELIVERY_RESULT = Object.freeze({
   unknown: { sent: false, reason: 'delivery_uncertain' },
 });
 
+// Has a confirmation text for this visit been logged to this phone? The one
+// per-visit check shared by the replay below and the call pipeline's contact
+// fan-out (which stamps metadata.scheduled_service_id on its sends), so
+// neither sender repeats the other. Matches the phone on its last 10 digits
+// (sms_log holds the E.164 the sender normalized; a slot phone may be stored
+// formatted) and ignores a definitively failed attempt (it delivered nothing).
+// `entryPoint` narrows to one sender; `sinceMs` to a recent window (default:
+// the visit's lifetime — a reprocess days later must not resend). Throws on
+// an unreadable log: each caller picks its own failure posture.
+async function confirmationLoggedForVisitPhone({ scheduledServiceId, phone, entryPoint = null, sinceMs = null }) {
+  const contactKey = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (!scheduledServiceId || !contactKey) return false;
+  let q = db('sms_log')
+    .where({ message_type: 'confirmation' })
+    .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [contactKey])
+    .whereRaw('metadata::text like ?', [`%${scheduledServiceId}%`])
+    .whereRaw("coalesce(status, '') not in ('failed', 'undelivered', 'canceled')");
+  if (entryPoint) q = q.whereRaw('metadata::text like ?', [`%${entryPoint}%`]);
+  if (sinceMs) q = q.where('created_at', '>', new Date(Date.now() - sinceMs));
+  const priorSend = await q.first('id');
+  return !!priorSend;
+}
+AppointmentReminders.confirmationLoggedForVisitPhone = confirmationLoggedForVisitPhone;
+
 // Send ONE service contact the same appointment confirmation text the primary
 // got, for a visit that is still confirmed and ahead. Used when an on-site
 // recipient answers YES to the opt-in ask AFTER the booking confirmation went
@@ -5933,16 +5957,7 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
     const recipient = getAppointmentContacts(acct, prefs.raw).find((c) => String(c.phone).replace(/\D/g, '').slice(-10) === contactKey);
     const optin = await db('recipient_optin').where({ customer_id: customerId, phone_key: contactKey }).first('status');
     if (!recipient || optin?.status !== 'confirmed') return { sent: false, reason: 'not_a_recipient' };
-    const priorSend = await db('sms_log')
-      .where({ message_type: 'confirmation' })
-      // sms_log holds the E.164 the sender normalized; the slot phone may be
-      // stored formatted — compare last-10 digits.
-      .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [contactKey])
-      .whereRaw('metadata::text like ?', [`%${scheduledServiceId}%`])
-      // A definitively failed attempt delivered nothing: it does not count.
-      .whereRaw("coalesce(status, '') not in ('failed', 'undelivered', 'canceled')")
-      // Visit lifetime, not a window: a reprocess days later must not resend.
-      .first('id');
+    const priorSend = await confirmationLoggedForVisitPhone({ scheduledServiceId, phone: contactKey });
     if (priorSend) return { sent: false, reason: 'already_sent' };
     const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
     const body = await renderConfirmationBody({

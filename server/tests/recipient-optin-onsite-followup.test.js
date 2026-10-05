@@ -13,7 +13,7 @@ const OTHER = '5550100456';
 function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn = true, demoteGateOn = true } = {}) {
   jest.resetModules();
   const state = {
-    optin: rows.map((r) => ({ followup_claimed_at: null, followup_done_at: null, caller_demoted_at: null, ...r })),
+    optin: rows.map((r) => ({ followup_claimed_at: null, followup_done_at: null, followup_armed_at: null, caller_demoted_at: null, ...r })),
     customer: { id: 'c1', service_contacts_consent_at: new Date('2026-10-01T00:00:00Z'), service_preferences: {}, ...customer },
     prefs: [],
     visitState,
@@ -273,7 +273,7 @@ describe('on-site follow-up: caller demotion + confirmation replay', () => {
   test('GATE_ONSITE_CALLER_DEMOTE off (dark): a YES demotes nobody and replays nothing; the sweep closes the row so a later flip never acts on it', async () => {
     const { optin, state, sendReplay } = load({ rows: [row(), row({ phone_key: OTHER, visit_id: null })], customer: spouse(), demoteGateOn: false });
     expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(0);
-    expect(await optin.demoteCallerForConfirmedOnSite('c1', KEY, 'v1')).toBe('skipped');
+    expect(await optin.rearmOnSiteFollowUp('c1', KEY, 'v1')).toBe('skipped');
     expect(state.optin[0].followup_done_at).toBeNull();
     expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 0 });
     expect(sendReplay).not.toHaveBeenCalled();
@@ -351,20 +351,51 @@ describe('the YES drives the follow-up only AFTER it commits', () => {
   });
 });
 
-describe('demoteCallerForConfirmedOnSite: a phone that already said YES gets no new ask', () => {
-  test('demotes once when the booking is live and it never happened; skipped when already applied, not confirmed or the visit is not live', async () => {
-    const a = load({ rows: [row()], customer: spouse() });
-    expect(await a.optin.demoteCallerForConfirmedOnSite('c1', KEY, 'v2')).toBe('demoted');
-    expect(a.state.prefs).toHaveLength(1);
-    expect(await a.optin.demoteCallerForConfirmedOnSite('c1', KEY, 'v2')).toBe('skipped');
-    expect(a.state.prefs).toHaveLength(1);
-    expect(a.sendReplay).not.toHaveBeenCalled();
+describe('rearmOnSiteFollowUp: a phone that already said YES gets no new ask at a later booking', () => {
+  const settledLongAgo = () => row({ confirmed_at: new Date(Date.now() - 60 * 24 * 3600 * 1000), followup_done_at: new Date(Date.now() - 59 * 24 * 3600 * 1000) });
+
+  test('re-arms the confirmed row on the new visit; the sweep then demotes the caller once and replays the confirmation for that visit', async () => {
+    const { optin, state, sendReplay } = load({ rows: [settledLongAgo()], customer: spouse() });
+    expect(await optin.rearmOnSiteFollowUp('c1', KEY, 'v2')).toBe('armed');
+    // Nothing runs inline: the caller still gets this call's own confirmation first.
+    expect(state.prefs).toEqual([]);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.optin[0]).toMatchObject({ visit_id: 'v2', followup_done_at: null, followup_claimed_at: null });
+    // The 14-day cap runs from the re-arm, not from the 60-day-old YES.
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 1 });
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
+    expect(sendReplay).toHaveBeenCalledWith({ customerId: 'c1', scheduledServiceId: 'v2', phone: '+15550100123', inReplyToYes: false });
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+  });
+
+  test('a visit on an office-review hold at booking is retried by the sweep, not dropped', async () => {
+    const { optin, state, sendReplay } = load({ rows: [settledLongAgo()], customer: spouse(), visitState: 'wait' });
+    expect(await optin.rearmOnSiteFollowUp('c1', KEY, 'v2')).toBe('armed');
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].followup_done_at).toBeNull();
+    state.visitState = 'live';
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs).toHaveLength(1);
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+  });
+
+  test('a caller already demoted for this phone is not demoted again; a pending phone is not armed', async () => {
+    const again = load({ rows: [{ ...settledLongAgo(), caller_demoted_at: new Date() }], customer: spouse() });
+    expect(await again.optin.rearmOnSiteFollowUp('c1', KEY, 'v2')).toBe('armed');
+    await again.optin.sweepOnSiteFollowUps();
+    expect(again.state.prefs).toEqual([]);
+    expect(again.sendReplay).toHaveBeenCalledTimes(1);
 
     const pending = load({ rows: [row({ status: 'pending' })], customer: spouse() });
-    expect(await pending.optin.demoteCallerForConfirmedOnSite('c1', KEY, 'v2')).toBe('skipped');
-    const dead = load({ rows: [row()], customer: spouse(), visitState: 'dead' });
-    expect(await dead.optin.demoteCallerForConfirmedOnSite('c1', KEY, 'v2')).toBe('skipped');
-    expect(dead.state.prefs).toEqual([]);
+    expect(await pending.optin.rearmOnSiteFollowUp('c1', KEY, 'v2')).toBe('skipped');
+  });
+});
+
+describe('account-wide demotion', () => {
+  test('a saved property\'s own "send these to me too" choice is cleared with the demotion', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
+    expect(src).toContain(".where({ customer_id: customer.id, appointment_notify_primary: true })\n      .update({ appointment_notify_primary: null, updated_at: new Date() });");
   });
 });
 
@@ -373,11 +404,11 @@ describe('wiring', () => {
   const read = (p) => fs.readFileSync(require.resolve(p), 'utf8');
   test('the 15-minute sweep retries unfinished follow-ups; the booking site reconciles an already-confirmed phone', () => {
     expect(read('../index.js')).toContain('await sweepOnSiteFollowUps();');
-    expect(read('../services/call-recording-processor.js')).toContain('demoteCallerForConfirmedOnSite(customerId, phoneKey, svc.id)');
+    expect(read('../services/call-recording-processor.js')).toContain('rearmOnSiteFollowUp(customerId, phoneKey, svc.id)');
   });
   test('the replay claim is atomic on the row (one UPDATE ... RETURNING), never a read-then-write', () => {
     const src = read('../services/recipient-optin.js');
-    expect(src).toContain(".update({ followup_claimed_at: new Date() })\n    .returning(['phone_key', 'visit_id', 'confirmed_at', 'caller_demoted_at']);");
+    expect(src).toContain(".update({ followup_claimed_at: new Date() })\n    .returning(['phone_key', 'visit_id', 'confirmed_at', 'followup_armed_at', 'caller_demoted_at']);");
     expect(src).toContain(".whereNull('caller_demoted_at')");
   });
 });

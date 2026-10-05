@@ -939,10 +939,10 @@ describe('on-site contact opt-in ask', () => {
     expect(block).toContain("onSiteAskVisitState === 'wait' ? 'not_sent:awaiting_office_review' : 'not_sent:visit_check_retry'");
     expect(block).toContain("const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);");
     expect(block).toContain("return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');");
-    // An already-confirmed phone gets no new ask: its caller demotion is reconciled here
+    // An already-confirmed phone gets no new ask: its follow-up is re-armed on this visit
     // (the demotion itself lives in recipient-optin, driven by the row's visit_id; no
     // booking marker on the customer row).
-    expect(block).toContain('demoteCallerForConfirmedOnSite(customerId, phoneKey, svc.id)');
+    expect(block).toContain('rearmOnSiteFollowUp(customerId, phoneKey, svc.id)');
     expect(src).not.toContain('appointment_notify_primary: false');
     expect(src).not.toContain('demote_primary_on_optin');
     // The persistence loop no longer claims for the on-site path.
