@@ -596,7 +596,7 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
     .orderBy('updated_at', 'desc');
   if (lockShare) candidateQuery = candidateQuery.forShare().noWait();
   const candidates = await candidateQuery;
-  // A phone the customer typed on the accept card (PUT /:token/contact-phone, stamped with its provenance) proves
+  // A phone the customer typed on the accept card (PUT /:token/contact-phone; estimates.customer_phone_typed) proves
   // nothing about who typed it, so it NEVER resolves to an existing customer, however many share the number and
   // whatever their email or address: any candidate is a contradiction, and the standing B18 park answers it (nothing
   // created, no card captured, the office told). This is the one matcher every card and accept route reads, so the
@@ -12239,8 +12239,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // profile whose email/address uniquely matches — splitting the
         // estimate off the existing account. pickAcceptCustomerMatch needs the
         // full set to judge ambiguity.
-        // customer_phone_typed carries the accept-card provenance onto the snapshot (it has no estimate_data).
-        acceptedPhoneIdentity = { customer_phone: estimate.customer_phone, customer_email: estimate.customer_email, address: estimate.address, customer_phone_typed: phoneTypedByCustomer(estimate) };
+        // customer_phone_typed carries the accept-card provenance onto the snapshot.
+        acceptedPhoneIdentity = { customer_phone: estimate.customer_phone, customer_email: estimate.customer_email, address: estimate.address, customer_phone_typed: estimate.customer_phone_typed };
         const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(acceptedPhoneIdentity, trx, { authoritative: true, afterSiblingResolution: true });
         // B18: the card policy, hold auto-satisfy and prepay quote were decided on the PREFLIGHT identity. A
         // contradiction here the preflight did not see (the candidate or the phone's candidate set moved in
@@ -18875,7 +18875,37 @@ router.put('/:token/contact-phone', contactPhoneLimiter, async (req, res, next) 
       database: db,
       countCustomersWithPhone: async (phone) => (await matchAcceptCustomerByPhone({ customer_phone: phone }, db, { authoritative: true })).candidateCount,
       onExistingCustomerPhone: ({ typedPhone, candidateCount }) => raiseAcceptTypedPhoneMatchAlert({ estimate, typedPhone, candidateCount }),
+      // TOCTOU: the accept-active check above ran on a pre-read. The UPDATE itself refuses a row a concurrent accept,
+      // decline, archive, expiry or off-surface marker has since made ineligible: the same predicates the
+      // /preferences and /select-tier writes carry, plus the pre-read's updated_at (any concurrent write = reload).
+      guardUpdate: (qb) => {
+        qb.whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+          .whereNull('price_locked_at')
+          .whereNull('archived_at')
+          .whereRaw('(expires_at IS NULL OR expires_at >= NOW())')
+          .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+          .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+          .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+          .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+          .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL);
+        if (estimate.updated_at) {
+          qb.andWhere(db.raw(
+            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+            [estimate.updated_at],
+          ));
+        }
+      },
     });
+    if (outcome.zeroRows) {
+      // Nothing was written. Either a concurrent writer closed the gap (already on file), or the estimate stopped
+      // being eligible / changed under the request: the zero-row answer every atomic public write gives.
+      const fresh = await db('estimates').where({ id: estimate.id }).first('customer_id', 'customer_phone');
+      if (fresh && (fresh.customer_id || String(fresh.customer_phone || '').replace(/\D/g, '').length >= 10)) {
+        return res.json({ saved: false, alreadyOnFile: true });
+      }
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
+    }
     if (outcome.body.saved) logger.info(`[estimate-public] accept-card phone saved on estimate ${estimate.id}`);
     return res.status(outcome.status).json(outcome.body);
   } catch (err) { next(err); }

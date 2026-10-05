@@ -23,6 +23,7 @@
         "USE / (inline function#1fe36153)",
         "USE /api/ai/chat/report (inline function#6b8b71c2)",
         "USE /api/booking/preferred-time (inline function#7df2f03e)",
+        "USE /api/estimates (contactPhonePreGuard#69762e2c)",
         "USE /api/estimates (mapImagePreGuard#f8502fdf)",
         "USE /api/ops/digest (inline function#4a372dfc)",
         "USE /api/pay/statement (inline function#cf970c43)",

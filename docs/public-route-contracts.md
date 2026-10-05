@@ -1600,15 +1600,23 @@ the number already belongs to ANY live customer: NOTHING is written, and one
 Estimates bell (deduped per estimate) gives the office the typed number. A
 typed phone proves nothing about who typed it, so it never attaches the
 estimate, a saved card or a hold to an existing account, at the save or
-later. The save stamps its provenance in the same statement
-(`estimate_data.acceptContact = { phoneSource: 'customer_typed', phone }`),
-and `matchAcceptCustomerByPhone` — the one matcher every card and accept
+later. The save writes its provenance in the same statement
+(`estimates.customer_phone_typed`, migration
+`20261004230000_estimates_customer_phone_typed.js` — a column, never a key
+in `estimate_data`, because `/preferences`, `/select-tier` and `/bond`
+rewrite that whole blob from a pre-read snapshot) and advances `updated_at`,
+and the UPDATE carries the same eligibility predicates as those writes
+(status, `price_locked_at`, `archived_at`, expiry, the linkage / delivery /
+re-price / address markers, and the pre-read's `updated_at`), so a decline,
+archive, expiry or off-surface marker that lands after the pre-read refuses
+it (zero rows → the generic zero-row answer, 404 or 409 "no longer active").
+`matchAcceptCustomerByPhone` — the one matcher every card and accept
 route reads — treats ANY candidate as a contradiction while the estimate
 still carries that typed number (`phoneTypedByCustomer`): no match, and the
 standing B18 park answers it (`ACCEPT_NEEDS_OFFICE_REVIEW`, nothing created,
 no card captured, the office told). So a customer who acquires the number
 after the save is not reused either. A phone the office later puts on the
-estimate differs from the stamp and is trusted as before. A diff that lets a
+estimate differs from `customer_phone_typed` and is trusted as before. A diff that lets a
 typed phone resolve to an existing customer, or that writes it when it
 matches one, is a P0. `contactPhonePreGuard` (mounted on
 `/api/estimates` in `server/index.js` BEFORE the global `/api/` limiter, like

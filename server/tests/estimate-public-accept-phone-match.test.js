@@ -248,7 +248,7 @@ describe('acceptPhoneParkedVerdict (the preflight park decision)', () => {
 describe('a phone typed by the customer never resolves to an existing customer', () => {
   const typed = (overrides = {}) => janeEstimate({
     customer_phone: '+19415550142',
-    estimate_data: { acceptContact: { phoneSource: 'customer_typed', phone: '+19415550142' } },
+    customer_phone_typed: '+19415550142',
     ...overrides,
   });
 
@@ -279,15 +279,13 @@ describe('a phone typed by the customer never resolves to an existing customer',
     expect(res).toEqual({ match: null, candidateCount: 0 });
   });
 
-  it('the stamp reads from a JSON string, and from the accept transaction identity snapshot', async () => {
+  it('the accept transaction identity snapshot carries the column, so the in-transaction match refuses too', async () => {
     mockDbFixtures['customers:list'] = [{ ...BOB, email: 'jane@example.com' }];
-    const asString = typed({ estimate_data: JSON.stringify({ acceptContact: { phoneSource: 'customer_typed', phone: '+19415550142' } }) });
-    expect((await matchAcceptCustomerByPhone(asString)).contradicted).toBe(true);
-    const snapshot = { customer_phone: '+19415550142', customer_email: 'jane@example.com', address: '742 Evergreen Ter, Sarasota, FL 34236', customer_phone_typed: true };
+    const snapshot = { customer_phone: '+19415550142', customer_email: 'jane@example.com', address: '742 Evergreen Ter, Sarasota, FL 34236', customer_phone_typed: '+19415550142' };
     expect((await matchAcceptCustomerByPhone(snapshot)).contradicted).toBe(true);
   });
 
-  it('a phone the office later puts on the estimate is the office\'s: the stale stamp no longer applies', async () => {
+  it('a phone the office later puts on the estimate is the office\'s: the typed mark no longer applies', async () => {
     mockDbFixtures['customers:list'] = [{ ...BOB, phone: '(941) 555-0199', email: 'jane@example.com' }];
     const res = await matchAcceptCustomerByPhone(typed({ customer_phone: '9415550199' }));
     expect(res.match.id).toBe('cust-bob');
