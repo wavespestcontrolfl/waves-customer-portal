@@ -459,6 +459,17 @@ const heightProblem = (height) => height != null && !(height >= MIN_HEIGHT_IN &&
 // shows the in-flow button's busy text and is off. Anything else (a dictation
 // still running, the products, a typed value out of range) is no action: the
 // button keeps its label and stays off, as before.
+// What the footer button is right now. While a step the bar can do stands (and no
+// submit failed or awaits a retry) the button IS that step: its label and click,
+// with no reason held against it; a busy step shows its busy text as the disabled
+// button's label. Otherwise it is Complete, held by the reason as before.
+function footerFor({ barAction, missingReason, submission, submit }) {
+  const complete = { missingReason, reasonInButton: LABEL_REASONS.has(missingReason), label: 'Complete service', onSubmit: submit };
+  if (!barAction || !missingReason || submission.failure || submission.retryPending) return complete;
+  if (barAction.disabled) return { ...complete, missingReason: barAction.label, reasonInButton: true };
+  return { missingReason: null, reasonInButton: false, label: barAction.label, onSubmit: barAction.onClick };
+}
+
 function barActionFor({ missingReason, dictationPending, progress, block }) {
   if (dictationPending) return null;
   if (progress.analyzing) return { label: 'Analyzing...', disabled: true };
@@ -917,12 +928,8 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
       </div>
       <CompleteFooter
         submission={submission}
-        missingReason={missingReason}
-        reasonInButton={LABEL_REASONS.has(missingReason)}
-        barAction={barAction}
+        {...footerFor({ barAction, missingReason, submission, submit })}
         warn={!!stockRow}
-        label="Complete service"
-        onSubmit={submit}
         coverProps={picker.coverProps}
       >
         {(stockRow || submission.error === STOCK_LOCKOUT_MESSAGE) && !locked && (

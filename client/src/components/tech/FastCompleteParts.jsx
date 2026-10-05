@@ -394,27 +394,22 @@ export function useProductPicker({ products, commonProducts, rows, locked, isMob
 // a phone or beside an extra action (`children`, e.g. "Check stock").
 // `reasonInButton` (the lawn sheet): a short reason is the disabled button's
 // own label instead of a line above it.
-export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false, barAction = null }) {
-  // `barAction` (the lawn sheet, opt-in): a step the button can do itself while
-  // its reason stands, as { label, onClick, disabled }. It takes the button's
-  // label, click and disabled state in place of the reason; a failed or retried
-  // submit is the footer's own as ever. Without it nothing here changes.
-  const stepping = !!barAction && !!missingReason && !submission.failure && !submission.retryPending;
+export function CompleteFooter({ submission, missingReason, warn, label, onSubmit, coverProps, children, reasonInButton = false }) {
   return (
     <footer className="tech-visit-footer tech-visit-footer--stacked" {...coverProps}>
       {submission.error && <ActionFeedback error className="tech-visit-feedback tech-visit-error-banner">{submission.error}</ActionFeedback>}
-      {missingReason && !submission.failure && !reasonInButton && !stepping && (
+      {missingReason && !submission.failure && !reasonInButton && (
         <p className={cn('tech-visit-muted', warn && 'tech-visit-status--warn')} role="status">{missingReason}</p>
       )}
       <div className="tech-visit-actions">
         {children}
         <Button
           className="tech-visit-action tech-visit-complete tech-visit-wide"
-          onClick={stepping ? barAction.onClick : onSubmit}
+          onClick={onSubmit}
           loading={submission.submitting}
-          disabled={stepping ? !!barAction.disabled : submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
+          disabled={submission.failure === 'terminal' || (!!missingReason && !submission.retryPending)}
         >
-          {stepping ? barAction.label : submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : label}
+          {submission.retryPending ? 'Retry' : reasonInButton && missingReason && !submission.failure ? missingReason : label}
         </Button>
       </div>
     </footer>
