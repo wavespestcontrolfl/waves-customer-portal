@@ -51,14 +51,16 @@ const MIN_SUITE_SQFT = 150;
 const MAX_SUITE_SQFT = 100000;
 // Characters between the suite token (or the street number) and the figure.
 const UNIT_REACH = 80;
-const NUMBER_REACH = 160;
 // With a suite known, the typed street number must still precede the figure
 // within this many characters: the listing block for THIS property.
 const ADDRESS_REACH = 400;
 // Two figures within this fraction of each other are the same size.
 const SAME_SIZE_TOLERANCE = 0.1;
 
-const SIZE_RE = /(\d{1,3}(?:,\d{3})+|\d{3,6})(?:\s*(?:\+\/-|±|\+))?\s*(?:sf|sq\.?\s*ft\.?|square\s+feet|sqft)\b/gi;
+// Group 2 is an approximation mark between the number and the unit
+// ("1,350 ± SF", "1,350 +/- SF", "1,350+ SF"): matched so the figure is
+// seen whole, then refused as an estimate.
+const SIZE_RE = /(\d{1,3}(?:,\d{3})+|\d{3,6})(\s*(?:\+\/-|±|\+))?\s*(?:sf|sq\.?\s*ft\.?|square\s+feet|sqft)\b/gi;
 // "up to 2,400 SF", "from 1,350 SF", "approx. 1,400 SF": a bound or an
 // estimate, not the suite's area.
 const BOUND_BEFORE_RE = /\b(?:up\s+to|from|starting\s+at|as\s+low\s+as|as\s+much\s+as|minimum|maximum|min|max|approximately|approx\.?|about|around|roughly|nearly|over|under|less\s+than|more\s+than)\s*$|[~±]\s*$/i;
@@ -73,6 +75,9 @@ const UNIT_BEFORE_DASH_RE = /(?:suite|ste\.?|unit|bay|space|#)\s*#?\s*[A-Za-z]?\
 // ("1,350 sf"), a suite ("suite 103") or a range word is not an address.
 // A street is a word ("Other St") or an ordinal ("51st St", "9th Ave").
 const OTHER_ADDRESS_RE = /(^|[^0-9a-z,.])(\d{2,6})\s+(?:(?:n|s|e|w|ne|nw|se|sw)\s+)?(?!(?:sf|sq|sqft|square|suite|ste|unit|bay|space|to|and|or)\b)(?:[a-z]{2,}|\d{1,3}(?:st|nd|rd|th)\b)/gi;
+// A one-digit house number ("1 Main Street") is an address only with a
+// street-type word close behind it; "2 story", "3 units" are not.
+const SHORT_ADDRESS_RE = /(^|[^0-9a-z,.#])(\d)\s+(?:(?:n|s|e|w|ne|nw|se|sw)\s+)?(?:[a-z0-9]+\s+){1,3}(?:st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|way|ct|court|pkwy|parkway|hwy|highway|trl|trail|cir|circle|pl|place|ter|terrace|loop)\b/gi;
 // The street's own word must follow the street number this closely for the
 // pair to be THIS address ("4400 Test Commons Pkwy"), never the same number
 // on another street ("4400 Other Street … Test Commons Pkwy" elsewhere).
@@ -89,13 +94,18 @@ const DIRECTION_RE = /^(?:N|S|E|W|NE|NW|SE|SW)$/;
 const TOTAL_WORDS = '(?:building|bldg|total|gross|lot|land|site|parcel|gla|rba|rentable|acres?)';
 const TOTAL_BEFORE_RE = new RegExp(`\\b${TOTAL_WORDS}\\b[^.;|]{0,24}$`, 'i');
 // "25,000 SF total building area": the same words right after the figure.
-// After the figure, a center / plaza / complex is a total too ("located in
-// a 25,000 SF shopping center"); before it, only the explicit total words.
-const TOTAL_AFTER_WORDS = `(?:${TOTAL_WORDS.slice(3, -1)}|shopping|center|centre|plaza|complex|development|campus|mall|strip|park|property)`;
-// The total word must be the noun the figure modifies (at most two words
-// between: "25,000 SF shopping center", "60,000 SF retail center"); "1,350 SF
-// retail space in a plaza" keeps its figure.
-const TOTAL_AFTER_RE = new RegExp(`^\\s*(?:of\\s+)?(?:[a-z-]+\\s+){0,2}${TOTAL_AFTER_WORDS}\\b`, 'i');
+// After the figure, the NOUN PHRASE it modifies (everything up to the first
+// preposition or punctuation, however many modifiers: "25,000 SF grocery
+// anchored neighborhood shopping center") names a total when it holds a
+// total word or a center / plaza / complex noun. "1,350 SF retail space in a
+// plaza" keeps its figure: its phrase is "retail space".
+const TOTAL_AFTER_WORDS_RE = new RegExp(`\\b(?:${TOTAL_WORDS.slice(3, -1)}|shopping|center|centre|plaza|complex|development|campus|mall|strip|park|property|anchored)\\b`, 'i');
+const NOUN_PHRASE_END_RE = /[.,;:|()—–-]|\b(?:in|at|of|on|with|for|near|by|to|from|and|is|are|was|available|located|within)\b/i;
+function nounPhraseAfter(text) {
+  const head = String(text || '').replace(/^\s*(?:of\s+)?/i, '');
+  const end = head.search(NOUN_PHRASE_END_RE);
+  return (end >= 0 ? head.slice(0, end) : head).split(/\s+/).slice(0, 10).join(' ');
+}
 // "located in a 25,000 SF …", "part of a …", "within a …": the figure that
 // follows describes the surroundings, not the suite.
 const CONTEXT_BEFORE_RE = /\b(?:located\s+in|situated\s+in|part\s+of|within|inside|anchored\s+by|in)\s+(?:a|an|the)\s*$/i;
@@ -153,7 +163,7 @@ function addressAnchors(address = {}) {
   const streetDirections = new Set(streetWords.filter((w) => DIRECTION_RE.test(w)));
   streetWords = streetWords.filter((w) => !DIRECTION_RE.test(w));
   const zip = (String(address.zip || '').match(/\d{5}/) || [null])[0];
-  return { number, streetLine, streetWord, streetWords, streetDirections, unit, city: String(address.city || '').trim() || null, zip, businessName: null };
+  return { number, streetLine, streetWord, streetWords, streetDirections, unit, city: String(address.city || '').trim() || null, zip };
 }
 
 // Every suite/unit mention on the text: "Suite 103", "Ste. 103", "Unit B",
@@ -197,17 +207,17 @@ function wholeWordIndex(text, token) {
  *     bound; not a building / lot / center total) (figureIsPlain);
  *   - the postal ZIP, if any, from the anchor through the figure's block is
  *     the typed one (zipAgrees);
- *   - with a suite typed: the figure's block names exactly one suite and it
- *     is this one; with no suite typed: the staff-confirmed business's name
- *     introduces the block and it names at most one suite (blockOwnsFigure).
+ *   - a suite is typed, the figure's block names exactly one suite and it is
+ *     this one (blockOwnsFigure). With no suite typed there is no listing size.
  * @returns {number[]} square-foot values, in text order
  */
 function extractSuiteSizes(text, anchors) {
   const t = normalizeText(text);
   if (!t || !anchors) return [];
+  // A listing size needs a typed suite: with none, a figure on a page may be
+  // any tenant's, and a business-name match is not strong enough to price on.
   const wanted = anchors.unit ? anchors.unit.toUpperCase() : null;
-  const name = anchors.businessName ? anchors.businessName.toLowerCase() : null;
-  if (!wanted && !name) return [];
+  if (!wanted) return [];
   const numberPositions = addressAnchorPositions(t, anchors);
   if (!numberPositions.length) return [];
   const out = [];
@@ -216,12 +226,13 @@ function extractSuiteSizes(text, anchors) {
   while ((m = SIZE_RE.exec(t))) {
     const value = Number(m[1].replace(/,/g, ''));
     if (!(value >= MIN_SUITE_SQFT && value <= MAX_SUITE_SQFT)) continue;
+    if (m[2]) continue; // "1,350 ± SF": an estimate
     if (!figureIsPlain(t, m.index, m[0].length)) continue;
-    const addressAt = nearestAnchor(t, numberPositions, m.index, anchors, wanted ? ADDRESS_REACH : NUMBER_REACH);
+    const addressAt = nearestAnchor(t, numberPositions, m.index, anchors, ADDRESS_REACH);
     if (addressAt < 0) continue;
     const block = figureBlock(t, m.index);
     if (!zipAgrees(t, addressAt, m.index, block.end, anchors)) continue;
-    if (!blockOwnsFigure(t, block, m.index, { wanted, name })) continue;
+    if (!blockOwnsFigure(block, m.index, wanted)) continue;
     out.push(value);
   }
   return out;
@@ -255,7 +266,7 @@ function figureIsPlain(t, idx, len) {
   if (TOTAL_BEFORE_RE.test(t.slice(Math.max(0, idx - 48), idx))) return false;
   if (BOUND_BEFORE_RE.test(t.slice(Math.max(0, idx - 20), idx))) return false;
   if (CONTEXT_BEFORE_RE.test(t.slice(Math.max(0, idx - 20), idx))) return false;
-  if (TOTAL_AFTER_RE.test(t.slice(idx + len, idx + len + 40))) return false;
+  if (TOTAL_AFTER_WORDS_RE.test(nounPhraseAfter(t.slice(idx + len, idx + len + 120)))) return false;
   return true;
 }
 
@@ -287,19 +298,13 @@ function zipAgrees(t, addressAt, idx, blockEnd, anchors) {
   return !zipsIn(t.slice(addressAt, Math.max(idx, blockEnd)), anchors.number).some((z) => z !== anchors.zip);
 }
 
-// With a suite typed: the block names exactly one suite, this one, within
-// reach of the figure. With none: the business's name introduces the block
-// (before the figure) and the block names at most one suite.
-function blockOwnsFigure(t, block, idx, { wanted, name }) {
+// The block names exactly one suite, this one, within reach of the figure.
+function blockOwnsFigure(block, idx, wanted) {
   const mentions = unitMentions(block.text);
   const units = [...new Set(mentions.map((u) => u.unit))];
-  if (wanted) {
-    if (units.length !== 1 || units[0] !== wanted) return false;
-    const mention = mentions.find((u) => u.unit === wanted);
-    return Math.abs((block.start + mention.index) - idx) <= UNIT_REACH;
-  }
-  const nameAt = block.text.toLowerCase().indexOf(name);
-  return nameAt >= 0 && block.start + nameAt <= idx && units.length <= 1;
+  if (units.length !== 1 || units[0] !== wanted) return false;
+  const mention = mentions.find((u) => u.unit === wanted);
+  return Math.abs((block.start + mention.index) - idx) <= UNIT_REACH;
 }
 
 function sameSize(a, b) {
@@ -377,6 +382,8 @@ function zipsIn(text, ownNumber) {
 
 function otherAddressBetween(text, from, to, anchors) {
   const segment = text.slice(from, to);
+  SHORT_ADDRESS_RE.lastIndex = 0;
+  if (SHORT_ADDRESS_RE.test(segment)) return true;
   OTHER_ADDRESS_RE.lastIndex = 0;
   let m;
   while ((m = OTHER_ADDRESS_RE.exec(segment))) {
@@ -469,11 +476,8 @@ async function resolveViaListing(input = {}, opts = {}) {
   if (!lookupListingSizeLive()) return null;
   const anchors = addressAnchors(input.address);
   if (!anchors) return null;
-  // With no suite typed, the staff-confirmed business's name (a match hint,
-  // never stored) is the only way to tell THIS tenant's figure from a
-  // neighbor's on a page that lists several suites.
-  const hint = String(input.businessNameHint || '').trim();
-  if (hint.length >= 4) anchors.businessName = hint;
+  // No suite typed: no listing size (see extractSuiteSizes), and no search.
+  if (!anchors.unit) return null;
   const serp = opts.serp || ((keyword, { signal } = {}) => require('../seo/dataforseo').serpOrganic(keyword, 'Bradenton,Florida,United States', 'desktop', { signal }));
   const fetchText = opts.fetchText || defaultFetchText;
   const budgetMs = Math.min(opts.timeoutMs || DEFAULT_TIMEOUT_MS, remaining(opts.deadlineAt));

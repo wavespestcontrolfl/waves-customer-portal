@@ -1993,7 +1993,12 @@ function commercialSuiteSizeStampIsFresh(stamp, now = Date.now()) {
   // unsetting the kill switch must stop pricing from cached listing sizes
   // at once, not after the 90-day stamp age.
   if (stamp.source === 'listing_verified_text' && !lookupListingSizeLive()) return false;
-  const maxAge = SUITE_SIZE_STAMP_MAX_AGE_MS[stamp.source];
+  // A license-backed listing stamp carries the DBPR classification too
+  // (restaurant subtype, cadence): it ages on the LICENSE's 30 days, so a
+  // closed restaurant never keeps restaurant pricing for the listing's 90.
+  const maxAge = stamp.licenseBacked === true
+    ? Math.min(SUITE_SIZE_STAMP_MAX_AGE_MS[stamp.source] || Infinity, SUITE_SIZE_STAMP_MAX_AGE_MS.license_seats)
+    : SUITE_SIZE_STAMP_MAX_AGE_MS[stamp.source];
   if (!maxAge) return true;
   const resolvedAt = Date.parse(stamp.resolvedAt);
   if (!Number.isFinite(resolvedAt)) return false;

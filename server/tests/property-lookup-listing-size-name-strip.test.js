@@ -85,3 +85,12 @@ test('a license-backed listing size keeps the license\'s name and reads as a res
   expect(p.suiteSize).toMatchObject({ value: 1350, source: 'listing_verified_text', businessName: 'Example Taco Shop', licenseBacked: true });
   expect(p.commercialSubtype).toBe('restaurant');
 });
+
+test('a license-backed listing stamp ages on the license\'s 30 days, a plain listing stamp on 90', () => {
+  process.env.GATE_LOOKUP_LISTING_SIZE = 'true';
+  const at = (days) => new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
+  const base = { value: 1350, source: 'listing_verified_text', unitKey: '103' };
+  expect(commercialSuiteSizeStampIsFresh({ ...base, licenseBacked: true, resolvedAt: at(20) })).toBe(true);
+  expect(commercialSuiteSizeStampIsFresh({ ...base, licenseBacked: true, resolvedAt: at(31) })).toBe(false);
+  expect(commercialSuiteSizeStampIsFresh({ ...base, resolvedAt: at(31) })).toBe(true);
+});

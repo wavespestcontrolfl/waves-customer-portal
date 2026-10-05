@@ -84,6 +84,7 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Other properties: 9900 51st St Suite 103 2,000 SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Other properties: 9900 9th Ave E Suite 103 2,000 SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Other properties: 9900 N Other St Suite 103 2,000 SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Other properties: 1 Main Street Suite 103 2,000 SF', c)).toEqual([]);
     // A stated direction must be the typed one; an omitted one is fine.
     const e = P.addressAnchors({ street: '4400 Test St E', unit: '103', city: 'Bradenton' });
     expect(P.extractSuiteSizes('4400 Test St W Suite 103 2,000 SF', e)).toEqual([]);
@@ -120,28 +121,26 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 is located in a 25,000 SF shopping center', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103, part of a 60,000 SF retail center', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 within the 25,000 SF plaza', c)).toEqual([]);
+    // However many modifiers precede the center noun.
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 at Oak Plaza — 25,000 SF grocery anchored neighborhood shopping center', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 1,350 SF available now', c)).toEqual([1350]);
+    // An approximation mark between the number and the unit is an estimate.
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350 ± SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350 +/- SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350+ SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103. Total 25,000 SF plaza; Suite 103 1,350 SF', c)).toEqual([1350]);
   });
 
-  test('without a unit, only a figure the staff-confirmed business introduces counts; a bare figure may be any tenant\'s', () => {
+  test('with no suite typed there is no listing size at all, with or without a business name', () => {
     const b = P.addressAnchors({ street: '5805 Gentle Current Wy', city: 'Parrish' });
     expect(b.streetWord).toBe('Gentle');
     expect(P.extractSuiteSizes('5805 Gentle Current Way, Parrish FL — 2,314 sq ft', b)).toEqual([]);
-    expect(P.extractSuiteSizes('5805 Gentle Current Way, Parrish FL — Example Salon, 2,314 sq ft', { ...b, businessName: 'Example Salon' })).toEqual([2314]);
     const c = P.addressAnchors({ street: '4400 Test Commons Pkwy', city: 'Bradenton' });
-    expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Suite 105 2,000 SF', c)).toEqual([]);
-    expect(P.extractSuiteSizes('4400 Test Commons Pkwy. 2,000 SF Suite 105', c)).toEqual([]);
-    expect(P.extractSuiteSizes('4400 Test St. Other Shop — 2,000 SF retail space available.', { ...c, businessName: 'Example Salon' })).toEqual([]);
-    // The staff-confirmed business's name right before the figure identifies the tenant.
-    const named = { ...c, businessName: 'Example Salon' };
-    expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Example Salon, Suite 105 — 2,000 SF', named)).toEqual([2000]);
-    expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Example Salon — 2,000 SF', named)).toEqual([2000]);
-    expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Other Shop, Suite 101 — 1,800 SF. Example Salon, Suite 105 — 2,000 SF', named)).toEqual([2000]);
-    // The name must introduce the figure's own tenant block.
-    expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Example Salon, Suite 101, fully leased. Other Shop, Suite 105 — 2,000 SF', named)).toEqual([]);
-    expect(P.extractSuiteSizes(`5805 Gentle Current Way, Parrish FL. ${'x'.repeat(200)} 2,314 sq ft`, b)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Example Salon, Suite 105 — 2,000 SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy. Cavalli Pizza — 2,000 SF retail space', c)).toEqual([]);
     expect(P.addressAnchors({ street: 'Gentle Current Wy' })).toBeNull();
   });
+
   test('settleSizes: agreeing figures are one size, differing ones are a conflict', () => {
     expect(P.settleSizes([{ value: 1350, url: 'a' }, { value: 1400, url: 'b' }])).toEqual({ value: 1350, url: 'a', count: 2 });
     expect(P.settleSizes([{ value: 1350, url: 'a' }, { value: 2000, url: 'b' }])).toEqual({ conflict: 2 });
@@ -204,7 +203,7 @@ describe('resolveViaListing', () => {
       organic('https://www.google.com/maps/place/x', 'map', 'Suite 103 9,999 SF'),
     ]);
     const fetchText = jest.fn(async () => { throw new Error('must not fetch'); });
-    const out = await resolveViaListing({ address: ADDRESS, businessNameHint: 'Example Salon' }, { serp, fetchText });
+    const out = await resolveViaListing({ address: ADDRESS }, { serp, fetchText });
     expect(out).toMatchObject({ value: 1350, source: SOURCE, confidence: 'medium', url: 'https://www.loopnet.com/Listing/14617-SR-70-E-Bradenton-FL/123/' });
     expect(out.evidence[0]).toMatchObject({ source: SOURCE, url: out.url });
     expect(out.evidence[0].detail).toContain('suite 103');
@@ -241,6 +240,12 @@ describe('resolveViaListing', () => {
       organic('https://www.crexi.com/b', '14617 SR 70 E Bradenton', 'Suite 103 2,200 SF'),
     ]);
     expect(await resolveViaListing({ address: ADDRESS }, { serp, fetchText: jest.fn() })).toBeNull();
+  });
+
+  test('no suite typed: no search at all', async () => {
+    const serp = serpWith([organic('https://www.loopnet.com/a', '14617 SR 70 E', 'Example Salon 1,350 SF')]);
+    expect(await resolveViaListing({ address: { ...ADDRESS, unit: null }, businessNameHint: 'Example Salon' }, { serp, fetchText: jest.fn() })).toBeNull();
+    expect(serp).not.toHaveBeenCalled();
   });
 
   test('gate off, no street number, a vendor failure, or no budget: null with no search and no fetch', async () => {
