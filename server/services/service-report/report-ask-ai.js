@@ -151,7 +151,8 @@ function weatherFact(conditions = {}) {
   const parts = [];
   if (sky && sky.length <= 80) parts.push(sky);
   if (temp !== null) parts.push(`about ${Math.round(temp)}°F`);
-  if (humidity !== null) parts.push(`${Math.round(humidity)}% humidity`);
+  // In words, not a percent: the screen bans percentages as amounts.
+  if (humidity !== null) parts.push(humidity >= 70 ? 'humid' : humidity <= 40 ? 'dry air' : 'moderate humidity');
   if (wind !== null) parts.push(`wind about ${Math.round(wind)} mph`);
   if (rain !== null) {
     const inches = rain;
@@ -255,6 +256,8 @@ function productFacts(app = {}) {
     active_ingredient: cleanText(String(product.active_ingredient || product.activeIngredient || '')
       .replace(/\s*\d+(?:\.\d+)?\s*%/g, '')) || null,
     applied_where: placeOfApplication(app.applicationArea || app.area),
+    // How it went on (sprayed, baited, spot treated), as recorded.
+    how_applied: cleanText(app.methodLabel) || cleanText(String(app.method || '').replace(/_/g, ' ')) || null,
     what_it_does: whatItDoes ? clip(whatItDoes, 260) : null,
     labeled_for: cleanText(copy.also_labeled_for) || null,
     pets_and_kids_wording: reviewedLine(copy.pets_kids),
@@ -539,7 +542,8 @@ const ASK_BANNED = [
   [new RegExp(`\\b(?:\\d+|${NUM_WORD})\\s+${COUNT_NOUN}\\b`, 'i'), 'count'],
   [/\b(?:rate|rates|dilution|concentration|per\s+(?:gallon|1,?000)|ounces?\s+per)\b/i, 'rate'],
   [/https?:\/\/|www\./i, 'link'],
-  [/[*_#`>]{2,}|^\s*[-*•]\s/m, 'markdown'],
+  // Repeated markers, bullets, headings, numbered lists, paired emphasis.
+  [/[*_#`>]{2,}|^\s*[-*•]\s|^\s*#{1,6}\s|^\s*\d+[.)]\s|(^|\s)[*_][^*_\n]+[*_](?=\s|[.,!?]|$)/m, 'markdown'],
   [/—/, 'em dash'],
 ];
 

@@ -190,6 +190,16 @@ describe('buildReportAskFacts', () => {
     expect(facts.weather_during_visit).toBe('about 88°F');
   });
 
+  test('humidity is in words, the recorded method rides with the product, markdown forms are rejected', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', conditions: { humidity_pct: 82 }, applications: [{ product: { name: 'Taurus SC' }, applicationArea: 'Perimeter', method: 'perimeter_spray' }] } });
+    expect(facts.weather_during_visit).toBe('humid');
+    expect(facts.products[0].how_applied).toBe('perimeter spray');
+    for (const bad of ['# Treatment summary', '1. We treated the kitchen.', '*We treated the kitchen.*']) {
+      expect(screenAskAnswer(bad, { question: 'q', data: {} })).toBe('markdown');
+    }
+    expect(screenAskAnswer('We treated the kitchen and the bathrooms.', { question: 'q', data: {} })).toBeNull();
+  });
+
   test('reads a pg-hydrated DATE as its calendar date', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], serviceDate: new Date(2026, 9, 2) } });
     expect(facts.service_date).toBe('Friday, October 2, 2026');
