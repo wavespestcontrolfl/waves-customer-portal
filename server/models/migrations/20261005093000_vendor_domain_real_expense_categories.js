@@ -18,22 +18,9 @@ exports.up = async function up(knex) {
   }
 };
 
-// Two old labels map to one new one, so the down restores by seeded domain.
-const SEEDED = {
-  'siteone.com': 'Products & Chemicals',
-  'siteonelandscape.com': 'Products & Chemicals',
-  'lesco.com': 'Products & Chemicals',
-  'domyown.com': 'Products & Chemicals',
-  'arborjet.com': 'Products & Chemicals',
-  'twilio.com': 'Software & Services',
-  'anthropic.com': 'Software & Services',
-  'railway.app': 'Hosting & Infrastructure',
-  'namecheap.com': 'Hosting & Infrastructure',
-};
-
-exports.down = async function down(knex) {
-  for (const [domain, label] of Object.entries(SEEDED)) {
-    const to = MAP.find(([from]) => from === label)[1];
-    await knex('vendor_email_domains').where({ domain, expense_category: to }).update({ expense_category: label });
-  }
-};
+// Down is a deliberate no-op. The old labels name no expense category, and
+// up() cannot tell a row it changed from a row an admin had already set to
+// the same real name, so reverting could erase valid admin state. Rolling
+// back the code leaves real category names in place, which the old code
+// reads correctly.
+exports.down = async function down() {};
