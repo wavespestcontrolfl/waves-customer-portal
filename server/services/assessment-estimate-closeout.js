@@ -31,30 +31,16 @@ const UNSTARTED_STATUSES = ['pending', 'confirmed'];
 
 const AUDIT_CLOSED = 'visit.assessment_closed_on_estimate_sent';
 const AUDIT_REFUSED = 'visit.assessment_close_on_estimate_sent_refused';
-// The completion hashes its request and refuses a key reused with a
-// different one. What this module sends can change between two attempts on
-// the same visit — the posture (live on the visit day, backfill after), and
-// the identity it expects (staff correct the date or the customer after a
-// refused attempt). So the key is DERIVED from the request: the same request
-// always has the same key, and a different one never collides with an
-// earlier pre-commit attempt (pre-push audit P1 ×2 — the posture first, then
-// the identity; deriving the key closes the class). A committed attempt is
-// resumed under the key it was parked with, read back from the table.
+// The completion hashes its request, refuses a key reused with a different
+// request, and matches a committed attempt's resume on that hash. So what
+// this module sends is CONSTANT for a visit, apart from the posture (live on
+// the visit day, backfill after), and the posture is in the key: no visit
+// identity is sent (`expectedVisit`) — a date correction or a customer merge
+// between two attempts, or between a commit and its resume, would otherwise
+// change the hash and strand the retry (pre-push audit P1 ×3). Identity is
+// re-decided where it belongs: on the locked row, by lockedVisitGuard.
 const KEY_PREFIX = 'assessment-estimate:';
-function requestIdentity(visit) {
-  return {
-    customerId: visit.customer_id,
-    serviceType: visit.service_type,
-    scheduledDate: dateOnlyString(visit.scheduled_date),
-  };
-}
-function idempotencyKeyFor(visit, posture) {
-  const identity = requestIdentity(visit);
-  const digest = require('crypto').createHash('sha256')
-    .update([identity.customerId, identity.serviceType, identity.scheduledDate].join('|'))
-    .digest('hex').slice(0, 16);
-  return `${KEY_PREFIX}${visit.id}:${posture}:${digest}`;
-}
+const idempotencyKeyFor = (visitId, posture) => `${KEY_PREFIX}${visitId}:${posture}`;
 const postureOfKey = (key) => (String(key || '').split(':')[2] === 'backfill' ? 'backfill' : 'live');
 
 // How far back an estimate's send still closes an assessment, how old an
@@ -204,14 +190,12 @@ async function liveRefusal(conn, visit) {
 
 // The canonical completion, asked for nothing customer-facing. A past-day
 // visit closes in the backfill posture (its time on site stays unknown: the
-// span from a days-old arrival to now is not labor). `expectedVisit` makes
-// the completion refuse, under its own row lock, a visit that was moved,
-// reassigned to another customer or reclassified after this module read it.
+// span from a days-old arrival to now is not labor).
 async function closeAssessment(visit, { today, now, resumeKey = null }) {
   const { completeScheduledService } = require('./complete-scheduled-service');
   const resuming = Boolean(resumeKey);
   const pastDay = resuming ? postureOfKey(resumeKey) === 'backfill' : dateOnlyString(visit.scheduled_date) < today;
-  const key = resumeKey || idempotencyKeyFor(visit, pastDay ? 'backfill' : 'live');
+  const key = resumeKey || idempotencyKeyFor(visit.id, pastDay ? 'backfill' : 'live');
   const result = await completeScheduledService({
     serviceId: visit.id,
     idempotencyKey: key,
@@ -221,20 +205,25 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
       requestReview: false,
       idempotencyKey: key,
       ...(pastDay ? { backfill: true } : {}),
-      expectedVisit: requestIdentity(visit),
     },
     actor: { techRole: 'admin', technicianId: null, technician: null },
-    // The same decision once more, on the visit row the completion has
-    // LOCKED: a technician who arrived, a job timer that started, or a visit
-    // that moved after the reads above is not completed over. The estimate
-    // is re-read too (a send withdrawn back to draft no longer proves it).
+    // The WHOLE decision once more, on the visit row the completion has
+    // LOCKED, from that row alone: still an assessment, still on the side of
+    // midnight this request's posture assumes, an estimate sent to the
+    // customer the row names NOW, the rule, and no running timer or open
+    // group. A reschedule, a reclassification, a customer merge, an arrival
+    // or a timer start after this module's reads is therefore decided on
+    // what is true under the lock, never completed over.
     // A RESUME carries no guard: that attempt already committed the visit as
     // completed on evidence that was good then, and only its post-commit
     // work is owed.
     lockedVisitGuard: resuming ? null : async (trx, lockedVisit) => {
+      if (!(await isAssessmentBooking(lockedVisit, trx))) return 'not_assessment';
+      const lockedToday = etDateString();
+      if ((dateOnlyString(lockedVisit.scheduled_date) < lockedToday) !== pastDay) return 'visit_moved';
       const estimate = await newestSentEstimate(trx, lockedVisit.customer_id, { now });
       if (!estimate) return 'estimate_not_sent';
-      return assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: etDateString() })
+      return assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: lockedToday })
         || await liveRefusal(trx, lockedVisit);
     },
   });

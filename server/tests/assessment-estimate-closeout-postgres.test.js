@@ -366,7 +366,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     };
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
     const firstKeys = await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key');
-    expect(firstKeys).toEqual([expect.stringMatching(new RegExp(`^assessment-estimate:${visitId}:live:[0-9a-f]{16}$`))]);
+    expect(firstKeys).toEqual([`assessment-estimate:${visitId}:live`]);
     // Next day: the timer stopped and the visit day has passed → backfill
     // posture. The completion reads the real clock, so the day passing is
     // modeled by moving the fixture one day back (visit, stamps and send),
@@ -379,7 +379,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(closed.status).toBe('completed');
     expect(closed.service_time_minutes).toBeNull();
     expect((await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key')).sort())
-      .toEqual([expect.stringMatching(new RegExp(`^assessment-estimate:${visitId}:backfill:[0-9a-f]{16}$`)), firstKeys[0]]);
+      .toEqual([`assessment-estimate:${visitId}:backfill`, firstKeys[0]]);
   });
 
   test('a completion this closeout committed and left parked is resumed from its own posture — with no fresh estimate needed, no locked guard, and behind the open visits', async () => {
@@ -387,7 +387,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const parkedCustomer = await customer();
     const parked = await visit(parkedCustomer, { status: 'completed', day: YESTERDAY });
     await estimate(parkedCustomer, { status: 'draft', sentAt: null });
-    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: parked, idempotency_key: `assessment-estimate:${parked}:backfill:0123456789abcdef`, status: 'side_effects_pending', request_hash: 'x' });
+    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: parked, idempotency_key: `assessment-estimate:${parked}:backfill`, status: 'side_effects_pending', request_hash: 'x' });
     // Someone else's parked completion on a completed assessment is not this sweep's.
     const foreign = await visit(await customer(), { status: 'completed', day: YESTERDAY });
     await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: foreign, idempotency_key: randomUUID(), status: 'side_effects_pending', request_hash: 'x' });
@@ -401,14 +401,14 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const calls = Completion.completeScheduledService.mock.calls.map(([input]) => input);
     expect(calls.map((input) => input.serviceId)).toEqual([open, parked]);
     const resume = calls[1];
-    expect(resume.idempotencyKey).toBe(`assessment-estimate:${parked}:backfill:0123456789abcdef`);
-    expect(resume.body).toMatchObject({ backfill: true, idempotencyKey: `assessment-estimate:${parked}:backfill:0123456789abcdef` });
+    expect(resume.idempotencyKey).toBe(`assessment-estimate:${parked}:backfill`);
+    expect(resume.body).toMatchObject({ backfill: true, idempotencyKey: `assessment-estimate:${parked}:backfill` });
     expect(resume.lockedVisitGuard).toBeNull();
     expect(typeof calls[0].lockedVisitGuard).toBe('function');
     expect((await row(open)).status).toBe('completed');
   });
 
-  test('a refused attempt followed by a date correction in the same posture gets a new key — never idempotency_key_mismatch forever', async () => {
+  test('a refused attempt followed by a date correction or a customer merge retries cleanly — the request carries no visit identity, so its hash never changes', async () => {
     const customerId = await customer();
     const twoDaysAgo = etDateString(addETDays(new Date(), -2));
     const visitId = await visit(customerId, { day: twoDaysAgo, en_route_at: minutesAgo(60 * 50), arrived_at: minutesAgo(60 * 49), check_in_time: minutesAgo(60 * 49) });
@@ -420,15 +420,41 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
       await mockPg('time_entries').insert({ id: timerId, technician_id: visitRow.technician_id, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(), job_id: visitId });
     };
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
-    const [firstKey] = await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key');
-    // The office corrects the visit's day (still a past day → still backfill); the timer has stopped.
+    // The office corrects the visit's day (still past → same posture, same key) AND the customer is merged into another row; the timer has stopped.
     await mockPg('time_entries').where({ id: timerId }).update({ status: 'completed', clock_out: new Date(), duration_minutes: 1 });
-    await mockPg('scheduled_services').where({ id: visitId }).update({ scheduled_date: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
+    const winner = await customer();
+    await mockPg('estimates').where({ customer_id: customerId }).update({ customer_id: winner });
+    await mockPg('scheduled_services').where({ id: visitId }).update({ customer_id: winner, scheduled_date: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg, now: new Date(Date.now() + 7 * 3600000), today: TODAY })).toEqual({ candidates: 1, closed: 1 });
     expect((await row(visitId)).status).toBe('completed');
-    const keys = await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key');
-    expect(keys).toHaveLength(2);
-    expect(keys.filter((key) => key !== firstKey)[0]).toMatch(new RegExp(`^assessment-estimate:${visitId}:backfill:[0-9a-f]{16}$`));
+    expect(new Set(await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key'))).toEqual(new Set([`assessment-estimate:${visitId}:backfill`]));
+    const sent = Completion.completeScheduledService.mock.calls.map(([input]) => input.body);
+    for (const body of sent) expect(body).not.toHaveProperty('expectedVisit');
+    expect(sent[0]).toEqual(sent[1]);
+  });
+
+  test('the locked guard decides identity on the locked row: a visit reclassified, or moved across midnight, after the sweep read it is refused', async () => {
+    const pestCatalog = randomUUID();
+    await mockPg('services').insert({ id: pestCatalog, name: 'Fixture Quarterly Pest Control Service', service_key: `fixture_${pestCatalog.slice(0, 8)}`, category: 'pest_control', is_active: true });
+    const reclassified = await customer();
+    const reclassifiedVisit = await visit(reclassified);
+    await estimate(reclassified);
+    mockRace.beforeClaim = async () => {
+      await mockPg('scheduled_services').where({ id: reclassifiedVisit }).update({ service_type: 'Fixture Quarterly Pest Control Service', service_id: pestCatalog });
+    };
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
+    expect((await row(reclassifiedVisit)).status).toBe('on_site');
+    expect(await audits(reclassifiedVisit, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'not_assessment' }) })]);
+
+    const moved = await customer();
+    const movedVisit = await visit(moved, { day: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
+    await estimate(moved, { sentAt: minutesAgo(60 * 24) });
+    mockRace.beforeClaim = async () => {
+      await mockPg('scheduled_services').where({ id: movedVisit }).update({ scheduled_date: TODAY });
+    };
+    await closeAssessmentsWithSentEstimates({ conn: mockPg });
+    expect((await row(movedVisit)).status).toBe('on_site');
+    expect(await audits(movedVisit, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_moved' }) })]);
   });
 
   test('gate off: nothing is read and nothing closes', async () => {
