@@ -148,10 +148,17 @@ function matchesNaturalAccessCode({ field, value }, { messageBody = '', properti
   // The one number in the message, as the whole word the client wrote: its
   // key symbols stay ("#5550" never saves as "5550") and a longer credential
   // ("A5550", "5550-12", "5550 12") never saves as a part of itself.
-  const words = body.split(/\s+/).map((word) => word.replace(/^[("'“‘:]+|[.,;:!?)"'”’]+$/g, ''));
-  const numbered = words.map((word, index) => (/\d{3,}/.test(word) ? index : -1)).filter((index) => index >= 0);
-  if (numbered.length !== 1 || words[numbered[0]] !== candidate) return false;
-  if ([words[numbered[0] - 1], words[numbered[0] + 1]].some((word) => /\d/.test(word || ''))) return false;
+  const words = [...body.matchAll(/\S+/g)].map((match) => ({ raw: match[0], end: match.index + match[0].length,
+    word: match[0].replace(/^[("'“‘:]+|[.,;:!?)"'”’]+$/g, '') }));
+  const numbered = words.filter((entry) => /\d{3,}/.test(entry.word));
+  if (numbered.length !== 1 || numbered[0].word !== candidate) return false;
+  const at = words.indexOf(numbered[0]);
+  if (/\d/.test(words[at - 1]?.word || '')) return false;
+  // The code ends its sentence or its line. Words after it ("then press 2",
+  // "followed by pound", "or 5551") can be part of the credential, and no
+  // word list can name them all.
+  if (!/[.!?]["'”’)]*$/.test(numbered[0].raw) && !/^[ \t]*(?:\r?\n|$)/.test(body.slice(numbered[0].end))) return false;
+  if (/\b(?:press|pound|star|hash|asterisk)\b/i.test(body)) return false;
   if (CODE_HEDGE.test(body) || CODE_INVALIDATED.test(body) || isQuestionSource(body)) return false;
   // "Gate code is not 5550": a negation in the number's own sentence.
   const sentence = body.split(/(?<=[.!?])\s+|\n+/).find((part) => part.includes(candidate)) || body;
