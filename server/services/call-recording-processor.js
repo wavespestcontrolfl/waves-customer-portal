@@ -20531,7 +20531,7 @@ const CallRecordingProcessor = {
                         // visit's confirmation to this phone. Its body differs,
                         // so the content dedupe above cannot see it.
                         if (await require('./appointment-reminders').confirmationLoggedForVisitPhone({
-                          scheduledServiceId, phone: contact.phone, entryPoint: 'recipient_optin_confirmed_replay', sinceMs: 10 * 60 * 1000,
+                          scheduledServiceId, phone: contact.phone, entryPoint: 'recipient_optin_confirmed_replay',
                         }).catch(() => false)) {
                           await releaseFollowUpClaim();
                           continue;

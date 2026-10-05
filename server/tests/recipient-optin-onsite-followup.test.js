@@ -19,11 +19,13 @@ function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn
     visitState,
   };
   const make = (table) => {
-    const ctx = { filter: {}, nulls: [], notNulls: [], groupBy: null };
+    const ctx = { filter: {}, not: {}, nulls: [], notNulls: [], groupBy: null };
     const matches = (r) => Object.entries(ctx.filter).every(([k, v]) => r[k] === v)
+      && Object.entries(ctx.not).every(([k, v]) => r[k] !== v)
       && ctx.nulls.every((c) => r[c] == null) && ctx.notNulls.every((c) => r[c] != null);
     const q = {
       where: jest.fn((f) => { if (typeof f === 'function') f({ whereNull: () => ({ orWhere: () => {} }) }); else Object.assign(ctx.filter, f); return q; }),
+      whereNot: jest.fn((f) => { Object.assign(ctx.not, f); return q; }),
       whereNull: jest.fn((c) => { ctx.nulls.push(c); return q; }),
       whereNotNull: jest.fn((c) => { ctx.notNulls.push(c); return q; }),
       select: jest.fn(() => q),
@@ -36,6 +38,7 @@ function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn
       first: jest.fn(async () => {
         if (table === 'customers') return { ...state.customer };
         if (table === 'recipient_optin') { const r = state.optin.find(matches); return r ? { ...r } : undefined; }
+        if (table === 'notification_prefs') { const r = state.prefs.find((x) => x.customer_id === ctx.filter.customer_id); return r ? { ...r } : undefined; }
         return null;
       }),
       insert: jest.fn((row) => {
@@ -53,6 +56,7 @@ function load({ rows, customer, visitState = 'live', replay, prefsInsert, gateOn
           touched.forEach((r) => Object.assign(r, patch));
         }
         if (table === 'customers' && patch.service_contacts_consent_at) { Object.assign(state.customer, patch); touched = [state.customer]; }
+        if (table === 'notification_prefs') { touched = state.prefs.filter((r) => r.customer_id === ctx.filter.customer_id); touched.forEach((r) => Object.assign(r, patch)); }
         const done = Promise.resolve(touched.length);
         done.returning = async () => touched.map((r) => ({ ...r }));
         return done;
@@ -435,12 +439,49 @@ describe('one sender at a time: the call fan-out takes the replay\'s row claim',
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
     expect(src).toContain("claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);\n                        if (followUpClaim === 'busy') continue;");
     // The replay check runs AFTER the claim settles (a replay that finished in between is seen).
+    expect(src).toContain("scheduledServiceId, phone: contact.phone, entryPoint: 'recipient_optin_confirmed_replay',\n");
     expect(src.indexOf("entryPoint: 'recipient_optin_confirmed_replay'")).toBeGreaterThan(src.indexOf('claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId)'));
     // Re-arming is idempotent per visit and never clears an in-flight claim.
     const optinSrc = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
     expect(optinSrc).toContain(".whereRaw('NOT (visit_id IS NOT DISTINCT FROM ? AND followup_done_at IS NULL)', [visitId])\n      .update({ visit_id: visitId, followup_armed_at: new Date(), followup_done_at: null });");
     expect(src).toContain('}).finally(releaseFollowUpClaim);');
     expect(src).toContain('scheduled_service_id: scheduledServiceId,\n                          },\n                        }).finally(releaseFollowUpClaim);');
+  });
+});
+
+describe('the demoted contact stops being confirmed: the caller gets appointment texts back', () => {
+  test('a STOP after the demotion restores the caller and clears the marker; the sweep is the backstop', async () => {
+    const { optin, state } = load({ rows: [row()], customer: spouse() });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
+    state.optin[0].status = 'declined';
+    await optin.onRecipientDeclined(KEY);
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: true }]);
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+
+    const swept = load({ rows: [row({ status: 'declined', caller_demoted_at: new Date() })], customer: spouse(), demoteGateOn: false });
+    swept.state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await swept.optin.sweepOnSiteFollowUps();
+    expect(swept.state.prefs[0].appointment_notify_primary).toBe(true);
+    expect(swept.state.optin[0].caller_demoted_at).toBeNull();
+  });
+
+  test('a holder who had already switched their own texts off is not marked, so a STOP never switches them back on', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
+    state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+    state.optin[0].status = 'declined';
+    await optin.onRecipientDeclined(KEY);
+    expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
+  });
+
+  test('a confirmed contact is never restored by the sweep', async () => {
+    const { optin, state } = load({ rows: [row({ caller_demoted_at: new Date(), followup_done_at: new Date() })], customer: spouse() });
+    state.prefs.push({ customer_id: 'c1', appointment_notify_primary: false });
+    await optin.sweepOnSiteFollowUps();
+    expect(state.prefs[0].appointment_notify_primary).toBe(false);
   });
 });
 
