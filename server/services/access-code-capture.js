@@ -286,9 +286,13 @@ async function fileFoundItems(conn, { message, properties }, items, receipt) {
         .whereIn('a.value_hash', items.map((i) => i.value_hash))
         .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
         .filter((r) => isLive(r));
-      const taken = new Set(existing.map((r) => `${r.kind}:${r.value_hash}`));
+      // A live standing row covers the same value for any life; a live visit row
+      // covers only another visit item, so a code first given for one visit and
+      // then given for good still reaches the office.
+      const covered = (item) => existing.some((r) => r.kind === item.kind && r.value_hash === item.value_hash
+        && (r.life === 'standing' || r.life === item.life));
       toInsert = items.filter((item) => {
-        if (taken.has(`${item.kind}:${item.value_hash}`)) return false;
+        if (covered(item)) return false;
         // Already on the profile: the strict rule saved it, nothing is lost.
         const field = PROFILE_FIELD[item.kind];
         return !(field && item.code && canonicalLower(prefs[field]) === canonicalLower(item.code));

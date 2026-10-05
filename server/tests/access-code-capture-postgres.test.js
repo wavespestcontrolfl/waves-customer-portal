@@ -269,6 +269,17 @@ postgres('access codes section', () => {
       expect((await rows(c.id)).map((r) => r.status).sort()).toEqual(['dismissed', 'found']);
     });
 
+    test('a live visit code does not hide the same code sent later as a standing code', async () => {
+      const c = await customer();
+      await visit(c.id, day(2));
+      const visitRow = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      await access.accept(trx, visitRow.id, { now: NOW });
+      await text(c.id, 'The door code is always #9090');
+      const read = stub([gateItem({ kind: 'door', code: '#9090', life: 'standing', quote: 'The door code is always #9090' })]);
+      expect(await sweep(read)).toMatchObject({ found: 1 });
+      expect((await rows(c.id)).map((r) => [r.life, r.status]).sort()).toEqual([['standing', 'found'], ['visit', 'active']]);
+    });
+
     test('a retired value the customer sends again comes back as found', async () => {
       const c = await customer();
       const existing = await found(c.id);
