@@ -25,7 +25,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const featureGates = require('../config/feature-gates');
 const { resolveEligibility, recapServiceIdentity, RECAP_COMPARED_IDENTITY_KEYS } = require('./pest-recap');
-const { etCalendarDayOf } = require('../utils/datetime-et');
+const { etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
 const { ASSESSMENT_EXPERIENCE_KEYS } = require('../config/completion-lane-registry');
 const shotList = require('./lawn-photo-shots');
 
@@ -476,6 +476,92 @@ async function loadAssessmentPhotos(assessmentId, knex, readFailures) {
   }
 }
 
+// ── this month's protocol window ────────────────────────────────────────────
+
+// The product's application method as the completion records it: the
+// operating layer's explicit mode, else the catalog formulation decides
+// between a spreader granule and a tank mix (lawn-completion-defaults
+// completionMethod, the same rule the planned rows take).
+function protocolMethod(product, row) {
+  if (product.applicationMode === 'spot') return 'spot_treatment';
+  const formulation = String(row?.formulation || '').trim();
+  const dispersible = /water[- ]?(dispersible|soluble)|\b(WDG|WG|WSG|WP|SP|DF)\b/i.test(formulation);
+  const granular = /granul|\(G\)|^G$/i.test(formulation);
+  return granular && !dispersible ? 'granular_broadcast' : 'broadcast_spray';
+}
+
+// A protocol rate the sheet can figure an amount from: a number in a real
+// unit. 'label_rate' and 'lb_n' (a nutrient target) are not rates per 1,000.
+const RATE_UNIT_RE = /^(fl[ _]?oz|oz|lb|g|gal|tsp)$/i;
+function protocolRate(product) {
+  const rate = Number(product.ratePer1000);
+  const unit = String(product.rateUnit || '').trim();
+  return rate > 0 && RATE_UNIT_RE.test(unit) ? { ratePer1000: rate, rateUnit: unit.toLowerCase().replace(/\s+/g, '_') } : { ratePer1000: null, rateUnit: null };
+}
+
+/**
+ * The structured lawn protocol window for this visit's grass track and month,
+ * with the products it lists, so the sheet can offer them as one-tap add-ons
+ * ("Also in October's protocol"; owner 2026-10-05). `{ title, month, visitType,
+ * products }` or null when no protocol or window resolves. The read mirrors the
+ * plan engine's: the customer's active turf profile sets the track
+ * (selectProtocolVisit; St. Augustine when nothing is recorded, the engine's
+ * lenient read), an assigned protocol / window on the visit is honored, and the
+ * active protocol for the track otherwise. Every lawn visit type gets it: a
+ * one-time visit has no plan, so the window's defaults are add-ons there too
+ * (`defaultInPlan` says which; the sheet decides). Only products with a catalog
+ * row are listed (the sheet builds its row from the catalog). A failed read is
+ * advisory: null, with 'protocol_window' in readFailures.
+ */
+async function loadProtocolWindow(svc, knex, readFailures) {
+  try {
+    const profile = await knex('customer_turf_profiles').where({ customer_id: svc.customer_id, active: true }).first();
+    const serviceDate = parseETDateTime(`${etCalendarDayOf(svc.scheduled_date)}T12:00`);
+    const { selectProtocolVisit } = require('./waveguard-plan-engine');
+    const { getProtocolWindowContext } = require('./lawn-protocol-operating-layer');
+    const { trackKey } = selectProtocolVisit(profile, serviceDate, svc.lawn_type, { requireKnownGrass: false });
+    const context = await getProtocolWindowContext(knex, {
+      serviceDate,
+      grassTrack: trackKey || 'st_augustine',
+      region: 'swfl',
+      windowKey: svc.lawn_protocol_window_key || undefined,
+      protocolKey: svc.lawn_protocol_key || undefined,
+      protocolVersion: svc.lawn_protocol_version || undefined,
+      strict: true,
+    });
+    if (!context?.window) return null;
+    const listed = (context.products || []).filter((product) => product.product_id);
+    const rows = await loadCatalogRows(listed.map((product) => String(product.product_id)), knex);
+    const products = listed
+      .filter((product) => rows.has(String(product.product_id)))
+      .map((product) => {
+        const row = rows.get(String(product.product_id));
+        const gates = product.gates && typeof product.gates === 'object' ? product.gates : {};
+        return {
+          productId: product.product_id,
+          name: row.name,
+          role: product.role || null,
+          defaultInPlan: product.default_in_plan === true,
+          applicationMethod: protocolMethod({ applicationMode: product.application_mode }, row),
+          ...protocolRate({ ratePer1000: product.rate_per_1000, rateUnit: product.rate_unit }),
+          // The protocol's own words for when this product goes down.
+          trigger: typeof gates.trigger === 'string' ? gates.trigger : null,
+          tankMixWith: typeof gates.tankMixWith === 'string' ? gates.tankMixWith : null,
+        };
+      });
+    return {
+      title: context.window.title || null,
+      month: Number(context.window.month) || null,
+      visitType: context.window.visit_type || null,
+      products,
+    };
+  } catch (err) {
+    logger.warn(`[lawn-fast] protocol window unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    readFailures.add('protocol_window');
+    return null;
+  }
+}
+
 // ── planned products ────────────────────────────────────────────────────────
 
 /**
@@ -630,6 +716,7 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
   const { unavailable: plannedProductsUnavailable, ...plannedProducts } = await loadPlannedProducts(svc, knex, visitType, readFailures);
   const turfHeightCapture = typed ? false : await loadTurfHeightCapture(technicianId, knex, readFailures);
   const reCheck = await loadReCheckNote(svc, knex);
+  const protocolWindow = await loadProtocolWindow(svc, knex, readFailures);
 
   return {
     ok: true,
@@ -651,6 +738,9 @@ async function buildLawnFastContext(serviceId, { knex = db, technicianId = null 
     // The application methods a product row may take, the lawn re-service
     // sheet's own list ({ value, label, common, requiresSqft }).
     methods: require('./lawn-reservice-fast-context').lawnMethodChoices(),
+    // This month's protocol window and its products, for the sheet's add-on row
+    // (null when none resolves; see loadProtocolWindow).
+    protocolWindow,
     // The assessment must be CONFIRMED before the visit completes; the sheet
     // reads `confirmed` to enable Complete.
     assessment: {

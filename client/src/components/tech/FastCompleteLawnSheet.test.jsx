@@ -730,6 +730,73 @@ describe('products', () => {
     expect(completeCalls()[0].body.products.find((p) => p.productId === P_IRON)).toMatchObject({ applicationMethod: 'broadcast_spray', areaValue: 5000, areaUnit: 'sqft' });
   });
 
+  // ── "Also in October's protocol": the window's products as add-ons ────────
+  const P_ART = 'aaaaaaaa-0000-4000-8000-000000000004';
+  const WINDOW = () => ({
+    title: 'October Fall Feeding + Pre-Emergent (spreader)', month: 10, visitType: 'granular_production_plus_spots',
+    products: [
+      { productId: P_GRANULE, name: 'Green Granules', role: 'fall_pre_emergent_nutrition', defaultInPlan: true, applicationMethod: 'granular_broadcast', ratePer1000: 4.02, rateUnit: 'lb', trigger: null, tankMixWith: null },
+      { productId: P_ART, name: 'Artavia 2 SC', role: 'fungicide_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'mapped_large_patch_with_velista_and_take_all_fall_2', tankMixWith: null },
+      { productId: P_TALAK, name: 'Talak 7.9%', role: 'insecticide_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'chinch_20_to_25_per_sqft', tankMixWith: null },
+      { productId: P_IRON, name: 'Iron Plus', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'broadcast_spray', ratePer1000: 0.5, rateUnit: 'fl_oz', trigger: null, tankMixWith: 'Celsius WG' },
+      // Not in the catalog the sheet has: cannot be built, so not offered.
+      { productId: 'aaaaaaaa-0000-4000-8000-000000000099', name: 'Ghost', role: 'x', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: null, tankMixWith: null },
+    ],
+  });
+  const ARTAVIA = { id: P_ART, name: 'Artavia 2 SC', category: 'fungicide', formulation: 'SC' };
+  const addons = () => screen.getByRole('group', { name: "Also in October’s protocol" });
+
+  test('a recurring visit offers the window\'s opt-in products, not its plan default, each with its words, method and rate; the planned ones read On the sheet', async () => {
+    await openSheet({ request: makeRequest({ ctx: context({ protocolWindow: WINDOW() }) }), props: { catalog: [...CATALOG, ARTAVIA] } });
+    const row = addons();
+    expect(within(row).getByText('Spot work for this visit. Tap what you applied.')).toBeTruthy();
+    expect(within(row).queryByText('Green Granules')).toBeNull();
+    expect(within(row).queryByText('Ghost')).toBeNull();
+    expect(within(row).getByText('Mapped large patch (with Velista) or fall take-all · spot treatment')).toBeTruthy();
+    expect(within(row).getByRole('button', { name: 'Add Artavia 2 SC' }).disabled).toBe(false);
+    // Talak and Iron Plus are planned rows already.
+    expect(within(row).getAllByText('On the sheet')).toHaveLength(2);
+    expect(within(row).getByRole('button', { name: 'Talak 7.9% is on the sheet' }).disabled).toBe(true);
+  });
+
+  test('tapping Add puts the product on the sheet on the protocol\'s method, marked from the protocol, and the row then reads On the sheet', async () => {
+    await openSheet({ request: makeRequest({ ctx: context({ protocolWindow: WINDOW() }) }), props: { catalog: [...CATALOG, ARTAVIA] } });
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add Artavia 2 SC' }));
+    const artavia = editorFor('Artavia 2 SC');
+    expect(pressedMethod(artavia)).toBe('Spot treatment');
+    expect(within(artavia).getByText(/from the protocol/)).toBeTruthy();
+    expect(within(artavia).getByText('No amount entered. It is recorded without one.')).toBeTruthy();
+    expect(within(addons()).getByRole('button', { name: 'Artavia 2 SC is on the sheet' }).disabled).toBe(true);
+    await analyze();
+    await submit();
+    const sent = completeCalls()[0].body.products.find((p) => p.productId === P_ART);
+    expect(sent).toMatchObject({ applicationMethod: 'spot_treatment' });
+    expect(sent.rate).toBeUndefined();
+  });
+
+  test('a one-time visit offers every window product, the plan default included, and a protocol rate figures the amount on the lawn', async () => {
+    await openSheet({ request: makeRequest({ ctx: { ...ONE_TIME(), protocolWindow: WINDOW() } }), props: { catalog: [...CATALOG, ARTAVIA] } });
+    const row = addons();
+    expect(within(row).getByText('Green Granules')).toBeTruthy();
+    expect(within(row).getByText('Granular broadcast · 4.02 lb per 1,000 sq ft')).toBeTruthy();
+    expect(within(row).getByText('Weed spots · tank mix with Celsius WG · broadcast spray · 0.5 fl oz per 1,000 sq ft')).toBeTruthy();
+    fireEvent.click(within(row).getByRole('button', { name: 'Add Green Granules' }));
+    const granules = editorFor('Green Granules');
+    expect(pressedMethod(granules)).toBe('Granular broadcast');
+    // 4.02 lb per 1,000 on the 5,000 sq ft lawn.
+    expect(within(granules).getByLabelText('Green Granules').value).toBe('20.1');
+    expect(within(granules).getByLabelText('Unit for Green Granules').value).toBe('lb');
+    expect(within(granules).getByText('4.02 lb per 1,000 sq ft × 5,000 sq ft')).toBeTruthy();
+  });
+
+  test('no window, or a window with nothing the sheet can offer, shows no row', async () => {
+    await openSheet();
+    expect(screen.queryByRole('group', { name: /protocol$/ })).toBeNull();
+    cleanup();
+    await openSheet({ request: makeRequest({ ctx: context({ protocolWindow: { title: 'x', month: 10, products: [WINDOW().products[4]] } }) }) });
+    expect(screen.queryByRole('group', { name: /protocol$/ })).toBeNull();
+  });
+
   // ── the figured amount (owner 2026-10-05: nobody types one on a fast complete) ──
   const RATED = [{ ...CATALOG[0], default_rate_per_1000: 2, default_unit: 'fl_oz/1000sf' }, CATALOG[1], { ...CATALOG[2], default_rate_per_1000: 3, default_unit: 'lb' }];
 

@@ -21,6 +21,12 @@
 //     (`methods`), the lawn re-service sheet's own control read as a dropdown
 //     (owner 2026-10-05); a planned row starts on the protocol's own application
 //     mode, an added one on its category's default.
+//     Under the rows, "Also in October's protocol" (ProtocolAddOns): the month's
+//     protocol window products the sheet does not carry yet, one tap each
+//     (the context's `protocolWindow`; on a recurring visit the window's
+//     plan defaults are the planned rows, so only its opt-in products are
+//     offered; on any other visit every window product is). A tapped product
+//     opens on the protocol's own method and is figured at the protocol's rate.
 //     Nobody types an amount on a fast complete (owner 2026-10-05): a row with no
 //     plan quantity is figured from the catalog's rate per 1,000 sq ft times
 //     the area it goes down on (derivedAmount), and says so under the box; a
@@ -83,7 +89,7 @@ import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
-  SavedView, TipSection, VisitNote, methodChoicesOf, techTipsOf, unitLabel, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  SavedView, TipSection, VisitNote, methodChoicesOf, methodLabel, techTipsOf, unitLabel, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -185,7 +191,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
-  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null, methods: [],
+  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null, methods: [], protocolWindow: null,
   findingsType: null, stockAdvisory: undefined,
 };
 
@@ -198,6 +204,12 @@ function blockedReasonFor(data, service) {
 }
 
 const plannedItemsOf = (data) => (Array.isArray(data?.plannedProducts?.items) ? data.plannedProducts.items.filter((item) => item?.productId) : []);
+const protocolWindowOf = (data) => {
+  const window = data?.protocolWindow;
+  if (!window || typeof window !== 'object' || !Array.isArray(window.products)) return null;
+  const products = window.products.filter((item) => item?.productId);
+  return products.length ? { title: window.title || null, month: Number(window.month) || null, products } : null;
+};
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
 
 const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
@@ -268,6 +280,8 @@ function contextFrom(data, service) {
     assessment: assessmentOf(data),
     // The methods a row may take (the server's list; the common three when it has none).
     methods: methodChoicesOf(data),
+    // This month's protocol window ({ title, month, products }), or null.
+    protocolWindow: protocolWindowOf(data),
     ...optionalContextFields(data),
   };
 }
@@ -296,9 +310,10 @@ function useLawnFastContext({ base, request, service }) {
 // ── products ────────────────────────────────────────────────────────────────
 
 // A row for a catalog product. `planned` carries the plan's amount, unit and
-// method; an added product has none and starts on its own default method.
-function productRow(product, { planned = null, added = false }) {
-  const rawMethod = planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn');
+// method; `protocol` (an entry of the month's window, see ProtocolAddOns) its
+// method and rate; an added product has none and starts on its own default method.
+function productRow(product, { planned = null, added = false, protocol = null }) {
+  const rawMethod = planned?.applicationMethod || protocol?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn');
   // Held the way the server reads it, so the requirements table finds it.
   const method = normalizeApplicationMethod(rawMethod) || rawMethod;
   const own = productUnits(product, { method });
@@ -318,6 +333,8 @@ function productRow(product, { planned = null, added = false }) {
     name: product.name,
     added,
     planned: !!planned,
+    // The window entry this row came from, if any: its rate figures the amount.
+    protocol: protocol ? { ratePer1000: Number(protocol.ratePer1000) || null, rateUnit: protocol.rateUnit || null } : null,
     method,
     dimension,
     totalAmount: seeded.amount,
@@ -403,8 +420,9 @@ const areaOf = (row, wholeLawn) => {
 
 // The amount a row is figured at when nobody typed one and the plan gave none
 // (owner 2026-10-05: a fast complete never asks the tech to work this out):
-// the catalog's rate per 1,000 sq ft times the area the row goes down on, in
-// the rate's own unit (spoons for a small liquid dose, as every seeded amount).
+// the rate per 1,000 sq ft (the protocol's for a row from the month's window,
+// else the catalog's) times the area the row goes down on, in the rate's own
+// unit (spoons for a small liquid dose, as every seeded amount).
 // The area is the one the row submits (its sqft method's); a planned spot row
 // goes down on the plan's own area. No area, a per-basis rate (per gallon, per
 // acre, per spot), a rate in mL or a rate in another measure than the row's
@@ -414,7 +432,10 @@ function derivedAmount(row, lawnSqft) {
   if (row.amountPicked || row.fromPlan) return null;
   const area = requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (row.planned ? row.plannedSqft : null);
   if (!(area > 0)) return null;
-  const resolved = resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
+  // The protocol's own rate for a row from the month's window, else the catalog's.
+  const resolved = row.protocol?.ratePer1000 > 0 && row.protocol.rateUnit
+    ? { rate: row.protocol.ratePer1000, rateUnit: row.protocol.rateUnit }
+    : resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
   const rate = Number(resolved.rate);
   const rateUnit = String(resolved.rateUnit || '').trim();
   if (!(rate > 0) || !rateUnit || isPerBasisUnit(rateUnit) || isMlUnit(rateUnit)) return null;
@@ -477,10 +498,10 @@ function useProductRows(ctx, catalog) {
       };
     }));
   }, []);
-  const addProduct = useCallback((product) => {
+  const addProduct = useCallback((product, { protocol = null } = {}) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      productRow(product, { added: true }),
+      productRow(product, { added: true, protocol }),
     ]));
   }, []);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
@@ -935,7 +956,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               technicianNotes={form.note}
             />
           </section>
-          <ProductsSection ctx={ctx} rows={rows} products={products} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -1005,8 +1026,8 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ ctx, rows, products, lawnSqft, locked, other, popover, inlineSearch }) {
-  const { updateRow, removeRow } = products;
+function ProductsSection({ ctx, rows, products, catalog, lawnSqft, locked, other, popover, inlineSearch }) {
+  const { updateRow, removeRow, addProduct } = products;
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
@@ -1018,8 +1039,100 @@ function ProductsSection({ ctx, rows, products, lawnSqft, locked, other, popover
       {rows.map((row) => (
         <ProductEditor key={row.productId} row={row} methods={ctx.methods} lawnSqft={lawnSqft} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
       ))}
+      <ProtocolAddOns window={ctx.protocolWindow} visitType={ctx.visitType} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
+  );
+}
+
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+// The protocol's trigger key as the tech reads it: the known keys in plain
+// words, any other key with its underscores opened up.
+const TRIGGER_WORDS = {
+  active_large_patch: 'Active large patch',
+  gray_leaf_spot: 'Gray leaf spot',
+  gray_leaf_spot_second_product: 'Gray leaf spot, second product',
+  grubs_or_mole_crickets: 'Grubs or mole crickets',
+  chinch_20_to_25_per_sqft: 'Chinch bugs, 20 to 25 per sq ft',
+  chinch_second_product_or_caterpillars: 'Chinch bugs (second product) or caterpillars',
+  caterpillars: 'Caterpillars',
+  dry_spots: 'Dry spots',
+  repeat_sedge: 'Repeat sedge',
+  mapped_take_all_spring_1: 'Mapped take-all, first spring treatment',
+  mapped_take_all_spring_2: 'Mapped take-all, second spring treatment',
+  mapped_take_all_fall_1: 'Mapped take-all, first fall treatment',
+  mapped_large_patch: 'Mapped large patch',
+  mapped_large_patch_with_artavia: 'Mapped large patch, with Artavia',
+  mapped_large_patch_with_velista_and_take_all_fall_2: 'Mapped large patch (with Velista) or fall take-all',
+  large_patch_next_application_after_artavia: 'Large patch, the application after Artavia',
+};
+const triggerWords = (key) => {
+  if (!key) return '';
+  if (TRIGGER_WORDS[key]) return TRIGGER_WORDS[key];
+  const text = String(key).replace(/_/g, ' ').trim();
+  return text.charAt(0).toUpperCase() + text.slice(1);
+};
+// The role, for an entry with no trigger: "Weed spots" for a post-emergent spot.
+const ROLE_WORDS = {
+  post_emergent_spot: 'Weed spots', adjuvant_spot: 'With the weed spray', fungicide_spot: 'Fungus spots',
+  insecticide_spot: 'Insect spots', insect_curative: 'Insect curative', wetting_agent_spot: 'Dry spots',
+};
+const rateWords = (item) => (item.ratePer1000 > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '');
+
+// "Also in October's protocol": the month's window products the sheet does not
+// carry yet, one tap each. On a recurring visit the window's plan defaults are
+// the planned rows already, so only the opt-in products are offered; on any
+// other visit (no plan) every window product is. A product the catalog does not
+// list (inactive) cannot be added and is left out; one already on the sheet is
+// shown as such. Tapping adds the row on the protocol's method, figured at the
+// protocol's rate.
+function ProtocolAddOns({ window, visitType, rows, catalog, locked, onAdd }) {
+  const titleId = useId();
+  if (!window) return null;
+  const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
+  const items = window.products
+    .filter((item) => visitType !== 'recurring' || !item.defaultInPlan)
+    .map((item) => ({ ...item, product: byId.get(String(item.productId).toLowerCase()) || null }))
+    .filter((item) => item.product);
+  if (!items.length) return null;
+  const on = new Set(rows.map((row) => String(row.productId).toLowerCase()));
+  const month = window.month ? MONTH_NAMES[window.month - 1] : null;
+  return (
+    <div className="tech-protocol-addons" role="group" aria-labelledby={titleId}>
+      <div className="tech-protocol-addons-head">
+        <h4 id={titleId} className="tech-protocol-addons-title">{month ? `Also in ${month}’s protocol` : 'Also in this month’s protocol'}</h4>
+        <p className="tech-visit-muted">Spot work for this visit. Tap what you applied.</p>
+      </div>
+      {items.map((item) => {
+        const onSheet = on.has(String(item.productId).toLowerCase());
+        const joined = [
+          triggerWords(item.trigger) || ROLE_WORDS[item.role] || '',
+          item.tankMixWith ? `tank mix with ${item.tankMixWith}` : '',
+          methodLabel(item.applicationMethod).toLowerCase(),
+          rateWords(item),
+        ].filter(Boolean).join(' · ');
+        const why = joined.charAt(0).toUpperCase() + joined.slice(1);
+        return (
+          <div key={item.productId} className="tech-protocol-addon">
+            <span className="tech-protocol-addon-text">
+              <span className="tech-protocol-addon-name">{item.product.name}</span>
+              <span className="tech-visit-muted">{onSheet ? 'On the sheet' : why}</span>
+            </span>
+            <Button
+              type="button"
+              variant="secondary"
+              className="tech-visit-action tech-protocol-addon-add"
+              aria-label={onSheet ? `${item.product.name} is on the sheet` : `Add ${item.product.name}`}
+              disabled={locked || onSheet}
+              onClick={() => onAdd(item.product, { protocol: item })}
+            >
+              {onSheet ? '✓' : 'Add'}
+            </Button>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -1036,7 +1149,7 @@ function ProductEditor({ row, methods, lawnSqft, locked, onChange, onRemove }) {
     <div role="group" aria-labelledby={nameId} className="tech-product-editor">
       <div className="tech-product-editor-head">
         <h4 id={nameId} className="tech-product-editor-name">{row.name}</h4>
-        <span className="tech-visit-muted">{[categoryLabel(row.product), row.added ? 'added by you' : 'planned'].filter(Boolean).join(' · ')}</span>
+        <span className="tech-visit-muted">{[categoryLabel(row.product), row.protocol ? 'from the protocol' : row.added ? 'added by you' : 'planned'].filter(Boolean).join(' · ')}</span>
       </div>
       <MethodSection row={row} methods={methods} locked={locked} onChange={onChange} layout="select" />
       {areaText && <p className="tech-visit-muted">{areaText}</p>}

@@ -53,6 +53,11 @@ const CATALOG = [
   { id: IDS.dismiss, name: 'Dismiss NXT', category: 'herbicide', formulation: 'SC', inventory_on_hand: '60.0000', inventory_unit: 'fl_oz' },
   // Tagged rows: the lawn sheet lists the lawn-tagged insecticide and not the roach bait.
   { id: '77777777-7777-4777-8777-000000000001', name: 'Arena 50 WDG', category: 'insecticide', formulation: 'WDG', service_lines: ['lawn', 'pest'], default_rate_per_1000: 0.46, default_unit: 'oz/1000sf', inventory_on_hand: '40.0000', inventory_unit: 'oz' },
+  { id: '77777777-7777-4777-8777-000000000003', name: 'Artavia 2 SC (Azoxy)', category: 'fungicide', formulation: 'SC', service_lines: ['lawn'], inventory_on_hand: '64.0000', inventory_unit: 'fl_oz' },
+  { id: '77777777-7777-4777-8777-000000000004', name: 'Velista', category: 'fungicide', formulation: 'WDG', service_lines: ['lawn'], inventory_on_hand: '20.0000', inventory_unit: 'oz' },
+  { id: '77777777-7777-4777-8777-000000000005', name: 'Dylox 6.2 G Granular Insecticide', category: 'insecticide', formulation: 'granular', service_lines: ['lawn'], inventory_on_hand: '30.0000', inventory_unit: 'lb' },
+  { id: '77777777-7777-4777-8777-000000000006', name: 'Certainty Turf Herbicide', category: 'herbicide', formulation: 'WG', service_lines: ['lawn'], inventory_on_hand: '1.2500', inventory_unit: 'oz' },
+  { id: '77777777-7777-4777-8777-000000000007', name: 'LESCO 90/10 Nonionic Surfactant', category: 'surfactant', formulation: 'liquid', service_lines: ['lawn'], inventory_on_hand: '128.0000', inventory_unit: 'fl_oz' },
   { id: '77777777-7777-4777-8777-000000000002', name: 'Advion WDG Granular', category: 'insecticide', formulation: 'WDG', service_lines: ['pest'], inventory_on_hand: '10.0000', inventory_unit: 'oz' },
 ];
 const LAWN_SQFT = 5750;
@@ -131,6 +136,20 @@ const context = () => ({
     { value: 'soil_drench', label: 'Soil drench', common: false, requiresSqft: false },
     { value: 'foliar_spray', label: 'Foliar spray', common: false, requiresSqft: false },
   ],
+  // The October St. Augustine window (v13), less its plan default (Stonewall, which a recurring visit carries as a planned row).
+  protocolWindow: {
+    title: 'October Fall Feeding + Pre-Emergent (spreader)',
+    month: 10,
+    visitType: 'granular_production_plus_spots',
+    products: [
+      { productId: '77777777-7777-4777-8777-000000000003', name: 'Artavia 2 SC (Azoxy)', role: 'fungicide_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'mapped_large_patch_with_velista_and_take_all_fall_2', tankMixWith: null },
+      { productId: '77777777-7777-4777-8777-000000000004', name: 'Velista', role: 'fungicide_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: 'mapped_large_patch_with_artavia', tankMixWith: null },
+      { productId: '77777777-7777-4777-8777-000000000005', name: 'Dylox 6.2 G Granular Insecticide', role: 'insect_curative', defaultInPlan: false, applicationMethod: 'granular_broadcast', ratePer1000: null, rateUnit: null, trigger: 'grubs_or_mole_crickets', tankMixWith: null },
+      { productId: IDS.celsius, name: 'Celsius WG', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: 0.085, rateUnit: 'oz', trigger: null, tankMixWith: null },
+      { productId: '77777777-7777-4777-8777-000000000006', name: 'Certainty Turf Herbicide', role: 'post_emergent_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: 0.028, rateUnit: 'oz', trigger: null, tankMixWith: 'Celsius WG' },
+      { productId: '77777777-7777-4777-8777-000000000007', name: 'LESCO 90/10 Nonionic Surfactant', role: 'adjuvant_spot', defaultInPlan: false, applicationMethod: 'spot_treatment', ratePer1000: null, rateUnit: null, trigger: null, tankMixWith: 'Celsius WG' },
+    ],
+  },
   assessment: STATE === 'confirmed'
     ? { exists: true, id: ASSESSMENT.id, confirmed: true, unusableReason: null }
     : { exists: STATE === 'analyzed', id: STATE === 'analyzed' ? ASSESSMENT.id : null, confirmed: false },
