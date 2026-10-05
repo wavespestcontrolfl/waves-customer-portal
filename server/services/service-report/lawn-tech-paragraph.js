@@ -528,6 +528,7 @@ const CLASS_CLAIMS = [
   [/\bsupplements?\b|\bmicronutrients?\b|\biron\b/i, ['supplement', 'fertilizer']],
 ];
 
+const AREA_WORD_RE = /\b(?:front|back|rear|side|sides|corner|corners|edge|edges|driveway|walkway|sidewalk|street|curb|fence|fenceline|strip|bed|beds|section|sections|spot|spots|patch|patches|shade|shaded|left|right)\b/gi;
 const PRONOUN_OBJECT_RE = /\b(?:them|it|those|these|that\s+problem|the\s+problem|the\s+issue)\b/i;
 const TREAT_VERB_RE = /\b(?:treat\w*|handle\w*|address\w*|knock\w*|go\s+after|went\s+after|clear\w*|fight\w*|combat\w*)\b/i;
 
@@ -741,6 +742,14 @@ function validateParagraph(answer, rawInputs) {
       if (!prevCauses.length || !namedHere.some((p) => prevCauses.some((t) => productLicenses(p, t)))) { fail('pronoun_treatment_unresolved'); break; }
     }
     prevCauses = named.filter((t) => t.cause);
+    // The record holds no per-product area (the whole recorded lawn is the treated
+    // area). A clause that puts a product on a PART of the lawn needs that part in
+    // the technician's note; "whole lawn" needs nothing.
+    for (const clause of sentence.split(CLAUSE_BREAK_RE)) {
+      if (!inputs.products.some((p) => productNamedIn(p, clause))) continue;
+      const parts = [...clause.matchAll(AREA_WORD_RE)].map((m) => m[0].toLowerCase());
+      if (parts.some((w) => !new RegExp(`\\b${escapeRe(w)}\\b`, 'i').test(inputs.technicianNote || ''))) { fail('area_not_in_note'); break; }
+    }
     // Fail closed on an observation of something the vocabulary does not know:
     // "found nematodes" names no term, so nothing above checked it. Every clause
     // that says found / saw / there is must name a known condition.

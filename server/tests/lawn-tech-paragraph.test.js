@@ -171,6 +171,7 @@ describe('validator: rejects', () => {
     ['a target of one product claimed for another in the same sentence', 'Our technician found chinch bugs in the trouble spot. Arena 50 WDG went on the front yard, and LESCO 24-0-11 protects against white grubs.', 'product_not_for_condition:grub'],
     ['a direct treatment claim for the wrong product', 'Our technician found chinch bugs in the trouble spot. LESCO 24-0-11 went on the lawn to treat chinch bugs.', 'product_not_for_condition:chinch'],
     ['a treatment claim whose condition hides behind a pronoun', 'Our technician found chinch bugs in the trouble spot. LESCO 24-0-11 went on the lawn to treat them.', 'pronoun_treatment_unresolved'],
+    ['a product put on a part of the lawn the note never names', 'Our technician found chinch bugs in the trouble spot. We treated the back yard with Arena 50 WDG.', 'area_not_in_note'],
     ['a product class nothing applied', 'Our technician found chinch bugs in the trouble spot. We applied fungicide to the entire lawn.', 'class_not_applied'],
     ['a weed control nothing applied', 'Our technician found chinch bugs in the trouble spot. We put down weed control across the lawn.', 'class_not_applied'],
     ['a promise', 'Our technician found chinch bugs in the trouble spot. The lawn will recover on its own.', 'promise:will'],
@@ -271,7 +272,7 @@ describe('validator: negation and uncertainty in the technician note', () => {
   const noted = (technicianNote) => ({ ...FIXTURE, technicianNote });
   const NONE = noted('Applied Arena to the front and side yards. No chinch bugs found today, this was a preventive treatment. Also applied LESCO 24-0-11 to the whole yard.');
   const MAYBE = noted('Applied Arena to the front and side yards. May be chinch bugs in the trouble spot, not sure. Also applied LESCO 24-0-11 to the whole yard.');
-  const sentenceOf = (second, from) => answer(`Arena 50 WDG went on the front and side yards. ${second}`, [['note', 'product'], from]);
+  const sentenceOf = (second, from) => answer(`Arena 50 WDG went on the lawn. ${second}`, [['note', 'product'], from]);
 
   test('note says "no chinch bugs found" + Arena: "found chinch bugs" is rejected', () => {
     const a = sentenceOf('Our technician found chinch bugs in the trouble spot.', ['note']);
