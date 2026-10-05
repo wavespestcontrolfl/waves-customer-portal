@@ -192,7 +192,17 @@ async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, inv
 // is. These say money did NOT leave the business (a failed or declined
 // payment, a payout received, a renewal reminder, a bill still due), and the
 // classifier still prints an amount for them, so they are never booked.
-const NOT_A_CHARGE_SUBJECT = /\b(unsuccessful|not successful|failed|declined|did ?n[o']t go through|(could|can)(not|n't| not) (be )?(process(ed)?|charged?|recharged?|completed?|collect(ed)?)|unable to (process|charge|collect|complete)|problem with your payment|payment (issue|problem)|payout|will (be )?renew(ed|s)?|renewal notice|invoice due|payment due|past due|action required)\b/i;
+const NOT_A_CHARGE_SUBJECT = new RegExp([
+  // A failure word tied to payment wording, either order, within a few words.
+  String.raw`\b(payment|charge|transaction|card|recharge|auto-?recharge|renewal)\b.{0,40}\b(unsuccessful|not successful|failed|declined|did ?n[o']t go through)\b`,
+  String.raw`\b(unsuccessful|failed|declined)\b.{0,20}\b(payment|charge|transaction)\b`,
+  String.raw`\b(could|can)(not|n't| not) (be )?(process(ed)?|charged?|recharged?|completed?|collect(ed)?)\b`,
+  String.raw`\bunable to (process|charge|collect|complete) (your |the )?(payment|charge|card)\b`,
+  String.raw`\bproblem with your payment\b|\bpayment (issue|problem)\b`,
+  String.raw`\bpayout\b`,
+  String.raw`\bwill (be )?renew(ed|s)?\b|\brenewal notice\b`,
+  String.raw`\b(invoice|payment) (is )?(now )?due\b|\bpast due\b`,
+].join('|'), 'i');
 
 // The same email delivered twice (to two inboxes, or re-sent): an expense
 // already linked to an email from the same sender, received in the same
@@ -215,7 +225,10 @@ async function findSameNoticeExpense(conn, emailId, amount, description) {
     .whereNot('e.id', emailId)
     // Same second, not the same instant: Gmail keeps milliseconds.
     .whereRaw("date_trunc('second', e.received_at) = date_trunc('second', ?::timestamptz)", [me.received_at])
-    .whereRaw("md5(coalesce(e.body_text, '') || coalesce(e.body_html, '')) = (select md5(coalesce(body_text, '') || coalesce(body_html, '')) from emails where id = ?)", [emailId])
+    // Each body compared on its own: a concatenation could equate two emails
+    // that split the same characters differently between text and HTML.
+    .whereRaw("md5(coalesce(e.body_text, '')) = (select md5(coalesce(body_text, '')) from emails where id = ?)", [emailId])
+    .whereRaw("md5(coalesce(e.body_html, '')) = (select md5(coalesce(body_html, '')) from emails where id = ?)", [emailId])
     .whereRaw('x.amount = round(?::numeric, 2)', [String(amount)])
     .first('x.id');
 }
@@ -450,7 +463,14 @@ async function processVendorInvoice(email, classification) {
   // no total also falls back to the classifier.
   const amountFromClassifier = parsedInvoice?.total == null;
   const invoiceNumber = parsedInvoice?.invoice_number || classification.extracted?.invoice_number;
-  const rawInvoiceDate = parsedInvoice?.invoice_date || classification.extracted?.invoice_date;
+  // The classifier's date is untyped: an ISO-shaped impossible date
+  // (2026-02-31) would roll over to March 3 in new Date(), so it counts as no
+  // date. Other written forms are parsed as before.
+  const classifierDate = classification.extracted?.invoice_date;
+  const usableClassifierDate = typeof classifierDate === 'string' && /^\s*\d{4}-\d{2}-\d{2}/.test(classifierDate)
+    ? validCalendarDate(classifierDate.trim(), { allowTimeSuffix: true })
+    : classifierDate;
+  const rawInvoiceDate = parsedInvoice?.invoice_date || usableClassifierDate;
   const parsedDate = rawInvoiceDate ? new Date(rawInvoiceDate) : null;
   const invoiceDateValid = parsedDate && !Number.isNaN(parsedDate.getTime());
   // The classifier's own date is not calendar-checked upstream: a date

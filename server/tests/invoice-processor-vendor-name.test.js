@@ -179,7 +179,7 @@ test.each([
   'We could not process your payment of $12.00',
   'Your payment did not go through',
   'Your payment couldn\u2019t be processed',
-  'We didn\u2019t go through with your charge',
+  'Your card payment didn\u2019t go through',
   'We were unable to charge your card',
   'There was a problem with your payment',
   'URGENT: Your Example account couldn\'t be recharged',
@@ -259,4 +259,30 @@ test('an email with an attachment never takes the copy shortcut (distinct PDF in
   extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0025', invoice_date: '2026-01-15', total: 40 });
   await processVendorInvoice({ id: 'e25', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Your invoice' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 40 }));
+});
+
+test.each([
+  'Delivery failed \u2014 receipt for your $40 order',
+  'Action required: verify your email \u2014 receipt #12',
+])('a failure word without payment wording (%s) does not block a receipt', async (subject) => {
+  noPdf();
+  await processVendorInvoice({ id: 'e28', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject }, { extracted: { invoice_amount: '$40.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 40 }));
+});
+
+test('an impossible ISO classifier date is no date (today fallback, no roll-over)', async () => {
+  noPdf();
+  await processVendorInvoice({ id: 'e29', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' }, { extracted: { invoice_amount: '$10.06', invoice_date: '2026-02-31' } });
+  expect(inserted().expense_date).not.toBe('2026-03-03');
+});
+
+test('the copy check compares the text and HTML bodies separately', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Receipt' };
+  await processVendorInvoice({ id: 'e30', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'Batch Biller', subject: 'Receipt' },
+    { extracted: { invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
+  const md5 = mockState.copyRaws.map(([sql]) => sql).filter((sql) => /md5/.test(sql));
+  expect(md5).toHaveLength(2);
+  expect(md5.some((sql) => /body_text/.test(sql) && !/body_html/.test(sql))).toBe(true);
+  expect(md5.some((sql) => /body_html/.test(sql) && !/body_text/.test(sql))).toBe(true);
 });
