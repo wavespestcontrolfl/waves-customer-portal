@@ -93,10 +93,47 @@ function parseClaudeJson(text) {
   }
 }
 
+// The sender's domain and each parent domain down to two labels, most
+// specific first: receipts come from subdomains (mail.anthropic.com,
+// ec.siteone.com) while vendor_email_domains lists the company domain. An
+// exact-only match left 334 Anthropic receipts as "Unknown Vendor".
+// Only LEADING labels are dropped, so anthropic.com.evil.example never
+// becomes anthropic.com.
+function senderDomainCandidates(address) {
+  const domain = String(address || '').split('@')[1]?.trim().toLowerCase().replace(/\.$/, '');
+  if (!domain) return [];
+  const labels = domain.split('.').filter(Boolean);
+  const out = [];
+  for (let i = 0; i <= labels.length - 2; i++) out.push(labels.slice(i).join('.'));
+  return out;
+}
+
+async function vendorForSender(address) {
+  const candidates = senderDomainCandidates(address);
+  if (!candidates.length) return null;
+  const rows = await db('vendor_email_domains').whereIn('domain', candidates);
+  return candidates.map((d) => rows.find((r) => String(r.domain).toLowerCase() === d)).find(Boolean) || null;
+}
+
+// A usable display name from the parsed invoice or the classifier, else null.
+function nameOrNull(v) {
+  const s = typeof v === 'string' ? v.trim() : '';
+  return s && !/^(unknown|n\/a|null|none|string)$/i.test(s) ? s : null;
+}
+
+// Same vendor + invoice number + amount already booked: the same receipt
+// mailed twice (two inboxes, a forward, a re-send). Without an invoice
+// number there is nothing safe to match on, so no row is a duplicate.
+async function findDuplicateExpense(vendorName, invoiceNumber, amount) {
+  if (!invoiceNumber) return null;
+  return db('expenses')
+    .where({ vendor_name: String(vendorName).slice(0, 200), amount })
+    .where('description', 'like', `%Invoice #${String(invoiceNumber).replace(/[%_\\]/g, '\\$&')} %`)
+    .first('id');
+}
+
 async function processVendorInvoice(email, classification) {
-  const domain = email.from_address?.split('@')[1];
-  const vendor = domain ? await db('vendor_email_domains').where('domain', domain).first() : null;
-  const vendorName = vendor?.vendor_name || classification.extracted?.vendor_name || 'Unknown Vendor';
+  const vendor = await vendorForSender(email.from_address);
   const expenseCategory = vendor?.expense_category || 'Uncategorized';
 
   // Check for PDF attachment
@@ -179,6 +216,14 @@ async function processVendorInvoice(email, classification) {
     }
   }
 
+  // Vendor name: the domain mapping (deterministic), else the name printed on
+  // the invoice, else the classifier's, else "Unknown Vendor". Only a label:
+  // the tax category below still comes from the domain mapping alone.
+  const vendorName = vendor?.vendor_name
+    || nameOrNull(parsedInvoice?.vendor_name)
+    || nameOrNull(classification.extracted?.vendor_name)
+    || 'Unknown Vendor';
+
   // Create expense record
   // `??`, not `||`: a parsed total of 0 (a zero-total invoice or credit memo)
   // is the extraction's answer, not a missing one — `||` fell through to the
@@ -197,6 +242,16 @@ async function processVendorInvoice(email, classification) {
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
   if (amount > 0) {
+    const duplicate = await findDuplicateExpense(vendorName, invoiceNumber, amount);
+    if (duplicate) {
+      await db('emails').where({ id: email.id }).update({
+        expense_id: duplicate.id,
+        auto_action: `expense_duplicate:${amount}`,
+        updated_at: new Date(),
+      });
+      logger.info(`[invoice-processor] Duplicate of expense ${duplicate.id}: ${vendorName} $${amount} (#${invoiceNumber})`);
+      return;
+    }
     try {
       const { autoCategorizeExpense, categoryDeductibleAmount } = require('../expense-categorizer');
       // ONLY a deterministic vendor-domain mapping auto-sets the tax category.
@@ -264,4 +319,4 @@ async function processVendorInvoice(email, classification) {
   }
 }
 
-module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice };
+module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates };
