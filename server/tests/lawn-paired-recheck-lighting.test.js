@@ -12,7 +12,7 @@ const { recordPairedRecheck } = require('../services/service-report/lawn-visit-m
 const recheck = require('../services/lawn-paired-recheck');
 const shotList = require('../services/lawn-photo-shots');
 
-const GATES = ['GATE_LAWN_PAIRED_RECHECK', 'GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_LIGHTING'];
+const GATES = ['GATE_LAWN_PAIRED_RECHECK', 'GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_LAWN_LIGHTING', 'GATE_LAWN_VISIT_ASSESSMENT'];
 const saved = {};
 beforeAll(() => GATES.forEach((g) => { saved[g] = process.env[g]; }));
 afterAll(() => GATES.forEach((g) => { if (saved[g] === undefined) delete process.env[g]; else process.env[g] = saved[g]; }));
@@ -24,6 +24,7 @@ beforeEach(() => {
   process.env.GATE_LAWN_VISIT_MEMORY = 'true';
   process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
   delete process.env.GATE_LAWN_LIGHTING;
+  delete process.env.GATE_LAWN_VISIT_ASSESSMENT;
 });
 
 const CUR = 'as-cur';
@@ -105,7 +106,7 @@ describe('gate off: v2, byte for byte', () => {
 });
 
 describe('gate on: v3', () => {
-  beforeEach(() => { process.env.GATE_LAWN_LIGHTING = 'true'; });
+  beforeEach(() => { process.env.GATE_LAWN_LIGHTING = 'true'; process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true'; });
 
   test('the prompt is v2 plus the light rule, and the version is v3', () => {
     expect(recheck.LIGHTING_PROMPT_VERSION).toBe('lawn-paired-recheck-v3');

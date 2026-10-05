@@ -87,8 +87,9 @@ const SUN = { lighting: 'full_sun', hard_shadows: 'no' };
 const CLOUD = { lighting: 'overcast', hard_shadows: 'no' };
 
 const GATE = 'GATE_LAWN_LIGHTING';
-const saved = process.env[GATE];
-afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
+const ASSESS = 'GATE_LAWN_VISIT_ASSESSMENT';
+const saved = { [GATE]: process.env[GATE], [ASSESS]: process.env[ASSESS] };
+afterEach(() => { for (const name of [GATE, ASSESS]) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; } });
 
 async function context({ color = 74, runs = [], runsFail = false, baseline = false } = {}) {
   const knex = makeKnexStub({ customers: [CUSTOMER], linked: { ...row('a-today', '2026-07-28', color), is_baseline: baseline }, prior: row('a-prior', '2026-06-20', 64, 64), runs, runsFail });
@@ -107,7 +108,7 @@ describe('gate off', () => {
 });
 
 describe('gate on', () => {
-  beforeEach(() => { process.env[GATE] = 'true'; });
+  beforeEach(() => { process.env[GATE] = 'true'; process.env[ASSESS] = 'true'; });
 
   test('compatible light and a real move: the color delta is given, as before', async () => {
     const { text } = await context({ color: 74, runs: [run('a-today', 'pt', SUN), run('a-prior', 'pp', SUN)] });

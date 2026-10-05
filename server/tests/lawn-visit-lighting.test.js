@@ -23,9 +23,13 @@ const MODELS = require('../config/models');
 const { photo, answer, finding } = require('./helpers/lawn-visit-fixtures');
 
 const GATE = 'GATE_LAWN_LIGHTING';
-const saved = process.env[GATE];
-afterEach(() => { if (saved === undefined) delete process.env[GATE]; else process.env[GATE] = saved; });
-beforeEach(() => { dispatchWithFallback.mockReset(); delete process.env[GATE]; });
+const ASSESS = 'GATE_LAWN_VISIT_ASSESSMENT';
+const saved = { [GATE]: process.env[GATE], [ASSESS]: process.env[ASSESS] };
+const restore = (name) => { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; };
+afterEach(() => { restore(GATE); restore(ASSESS); });
+beforeEach(() => { dispatchWithFallback.mockReset(); delete process.env[GATE]; delete process.env[ASSESS]; });
+// The reader needs BOTH gates: the light is read only by the one-call visit assessment.
+const on = () => { process.env[GATE] = 'true'; process.env[ASSESS] = 'true'; };
 
 const sha = (...parts) => { const h = crypto.createHash('sha256'); for (const part of parts) h.update(part); return h.digest('hex'); };
 const lit = (rows) => rows.map(([photoNumber, quality, lighting, hardShadows]) => ({ photo: photoNumber, quality, issue: '', lighting, hard_shadows: hardShadows }));
@@ -33,13 +37,27 @@ const lightAnswer = () => answer({ photo_quality: lit([[1, 'adequate', 'full_sun
 const okOutcome = (json) => ({ ok: true, json, provider: 'gemini', model: MODELS.GEMINI_VISION_BEST, fallbackUsed: false, usage: null, failures: [] });
 
 describe('the gate', () => {
-  test('is dark: on only for exactly "true", read at call time', () => {
-    expect(lawnLightingLive()).toBe(false);
-    for (const value of ['1', 'on', 'TRUE', 'yes', '']) { process.env[GATE] = value; expect(lawnLightingLive()).toBe(false); }
-    process.env[GATE] = 'true';
+  test('is dark: on only for exactly "true" AND the visit assessment gate on, read at call time (truth table)', () => {
+    const cases = [
+      [undefined, undefined, false], ['true', undefined, false], [undefined, 'true', false], ['true', 'true', true],
+      ['true', 'on', true], ['true', '1', true], ['true', 'false', false], ['true', '', false],
+      ['1', 'true', false], ['on', 'true', false], ['TRUE', 'true', false], ['yes', 'true', false], ['', 'true', false],
+    ];
+    for (const [light, assess, expected] of cases) {
+      if (light === undefined) delete process.env[GATE]; else process.env[GATE] = light;
+      if (assess === undefined) delete process.env[ASSESS]; else process.env[ASSESS] = assess;
+      expect([light, assess, lawnLightingLive()]).toEqual([light, assess, expected]);
+    }
+    on();
     expect(lawnLightingLive()).toBe(true);
     delete process.env[GATE];
     expect(lawnLightingLive()).toBe(false);
+  });
+
+  test('without the visit assessment gate no effect can run: analyzeVisit reads the legacy variant even with GATE_LAWN_LIGHTING set', async () => {
+    process.env[GATE] = 'true';
+    dispatchWithFallback.mockResolvedValue(okOutcome(answer()));
+    expect((await analyzeVisit({ photos: [photo('YQ==')] })).promptVersion).toBe('lawn-visit-v1');
   });
 });
 
@@ -133,7 +151,7 @@ describe('gate on: the light read', () => {
   });
 
   test('analyzeVisit with the gate env on reads under the lighting variant, validates its shape, and stores a normalized read per photo', async () => {
-    process.env[GATE] = 'true';
+    on();
     dispatchWithFallback.mockResolvedValue(okOutcome(lightAnswer()));
     const out = await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==')] });
     const [, payload, options] = dispatchWithFallback.mock.calls[0];
@@ -158,7 +176,7 @@ describe('gate on: the light read', () => {
   });
 
   test('a shot-list capture reads under the shot-list lighting variant', async () => {
-    process.env[GATE] = 'true';
+    on();
     dispatchWithFallback.mockResolvedValue(okOutcome(lightAnswer()));
     const out = await analyzeVisit({ photos: [photo('YQ==', 'front'), photo('Yg==', 'back')], shotList: true });
     expect(dispatchWithFallback.mock.calls[0][1]).toMatchObject({ system: shotVariant.system, promptVersion: 'lawn-visit-v1-shot-list-lighting' });
@@ -166,7 +184,7 @@ describe('gate on: the light read', () => {
   });
 
   test('an explicit lighting argument wins over the env, so a caller can decide once', async () => {
-    process.env[GATE] = 'true';
+    on();
     dispatchWithFallback.mockResolvedValue(okOutcome(answer()));
     expect((await analyzeVisit({ photos: [photo('YQ==')], lighting: false })).promptVersion).toBe('lawn-visit-v1');
   });
@@ -212,6 +230,19 @@ describe('where the read is stored, and who sees it', () => {
   });
 });
 
+describe('the PDF document prints no color trend (so the trend rule needs no PDF cache stamp)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  test('mode=pdf renders ServiceReportDocument, which never mounts the lawn trends', () => {
+    const client = path.join(__dirname, '../../client/src');
+    const doc = fs.readFileSync(path.join(client, 'pages/ServiceReportDocument.jsx'), 'utf8');
+    const code = doc.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(code).not.toMatch(/LawnTrends|LawnReportV2Section|\.trends\b|reportV2\??\.trends/);
+    const view = fs.readFileSync(path.join(client, 'pages/ReportViewPage.jsx'), 'utf8');
+    expect(view).toMatch(/if \(mode === 'pdf'\) return <ServiceReportDocument data=\{data\} token=\{token\} \/>;/);
+  });
+});
+
 describe('every reader of the gate is listed in the public route contract', () => {
   const fs = require('fs');
   const path = require('path');
@@ -229,6 +260,7 @@ describe('every reader of the gate is listed in the public route contract', () =
       .sort();
     expect(readers).toEqual([
       'config/feature-gates.js',
+      'routes/lawn-health.js',
       'services/lawn-paired-recheck.js',
       'services/lawn-visit-assessment.js',
       'services/service-report/report-copy-context.js',

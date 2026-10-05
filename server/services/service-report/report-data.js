@@ -3330,7 +3330,7 @@ async function resolveLawnPhotoAssessmentIds(service, knex = db, options = {}) {
   return ids;
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures, photoFindings = false } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanAvailableAt, propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY'), lawnHistory, visitMemoryOut, readFailures, photoFindings = false, trendOut } = {}) {
   if (serviceLine !== 'lawn') return null;
   const { assessment, historyRows } = await resolveLawnAssessmentAndHistory(service, knex, { pinnedAssessmentId, propertyHistoryEnabled, lawnHistory });
   if (!assessment) return null;
@@ -3546,6 +3546,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     .where({ customer_id: service.customer_id })
     .first()
     .catch(() => { prefsReadFailed = true; if (readFailures) readFailures.add('property_preferences'); return null; });
+  // GATE_LAWN_LIGHTING: which visit each trend point is (internal; never the payload).
+  if (trendOut && typeof trendOut === 'object') {
+    trendOut.rows = historyRows.map((row) => ({ id: String(row.id), date: row.service_date, colorHealth: lawnScoreValue(row.color_health) }));
+  }
   const trend = historyRows.map((row) => ({
     date: row.service_date,
     overallScore: calculateLawnOverallScore(row),
@@ -4464,12 +4468,14 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
   // runs: no reads, no writes, no new payload key.
   const visitMemoryLive = serviceLine === 'lawn' && typeof featureGates.lawnVisitMemoryLive === 'function' && featureGates.lawnVisitMemoryLive();
   const visitMemoryOut = {};
+  const trendOut = {};
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex, {
     propertyHistoryEnabled, lawnHistory,
     pinnedAssessmentId: opts.pinnedLawnAssessmentId || null,
     // undefined = unpinned (live snapshot); null = the signature saw none.
     pinnedWeekPlanAvailableAt: opts.pinnedWeekPlanAvailableAt,
     ...(visitMemoryLive ? { visitMemoryOut } : {}),
+    trendOut,
     readFailures,
     // Opt-in: only the renders that print the block read the run (never /ask).
     photoFindings: opts.lawnPhotoFindings === true,
@@ -5727,6 +5733,37 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);
         if (banner) reportV2.banner = banner;
       }
+      // GATE_LAWN_LIGHTING (owner 2026-10-04), read at call time. The stored light of
+      // visits is read at most once per render (memoized) and ONLY for a caller that
+      // opted in (opts.lawnLighting, the /data render); /ask and the PDF builder read
+      // nothing and see every light as unknown. A failed read is unknown light.
+      const lightingGateOn = typeof featureGates.lawnLightingLive === 'function' && featureGates.lawnLightingLive();
+      const lightMemo = new Map();
+      const readVisitLights = async (ids) => {
+        if (!lightingGateOn || opts.lawnLighting !== true) return new Map();
+        const missing = ids.filter((id) => id != null && !lightMemo.has(String(id)));
+        if (missing.length) {
+          const loaded = await require('../lawn-lighting').loadVisitLights(knex, missing, { customerId: service.customer_id });
+          for (const [id, light] of loaded) lightMemo.set(id, light);
+        }
+        return lightMemo;
+      };
+      // The "Color & Vigor" trend states a latest-versus-previous color reading, so
+      // it stays only when those two visits are in known, compatible light (the
+      // series is never rebuilt or relabeled: it is whole or absent). The overall
+      // and the other category trends are raw readings and stay.
+      if (lightingGateOn && reportV2 && reportV2.trends && reportV2.trends.color) {
+        const lighting = require('../lawn-lighting');
+        let keep = false;
+        try {
+          const tail = lighting.colorTrendTail(trendOut.rows, require('./lawn-report-v2').monthLabel);
+          if (tail) {
+            const lights = await readVisitLights([tail.latestId, tail.previousId]);
+            keep = lighting.colorComparability(lights.get(tail.latestId), lights.get(tail.previousId)).comparable;
+          }
+        } catch { keep = false; }
+        if (!keep) delete reportV2.trends.color;
+      }
       // GATE_LAWN_VISIT_MEMORY (P12): freeze this visit's treatment memory
       // (first writer wins) from the deterministic pre-narrative reportV2 and
       // carry the PRIOR visit's frozen entry as sinceLast. Computed here, attached
@@ -5810,15 +5847,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // and it is not a render input anything stores: the lines it feeds are
           // live-view only, so the PDF key needs no stamp for this gate.
           let colorGuard = null;
-          if (typeof featureGates.lawnLightingLive === 'function' && featureGates.lawnLightingLive()) {
+          if (lightingGateOn) {
             colorGuard = { currentLight: null, priorLight: null };
-            if (opts.lawnLighting === true && opts.mode === 'live' && priorForProgress && lawnAssessment.assessmentId != null) {
+            if (opts.mode === 'live' && priorForProgress && lawnAssessment.assessmentId != null) {
               try {
-                const lights = await require('../lawn-lighting').loadVisitLights(
-                  knex,
-                  [lawnAssessment.assessmentId, priorForProgress.assessmentId],
-                  { customerId: service.customer_id },
-                );
+                const lights = await readVisitLights([lawnAssessment.assessmentId, priorForProgress.assessmentId]);
                 colorGuard = {
                   currentLight: lights.get(String(lawnAssessment.assessmentId)) ?? null,
                   priorLight: lights.get(String(priorForProgress.assessmentId)) ?? null,

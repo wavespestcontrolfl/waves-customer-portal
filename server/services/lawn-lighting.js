@@ -192,7 +192,27 @@ async function loadVisitLights(knex, assessmentIds, { customerId = null } = {}) 
   return lights;
 }
 
+/**
+ * The two visits behind a color TREND's latest and previous readings, as the chart
+ * draws them: the visits that carry a color score, in order, with consecutive
+ * visits sharing a label (the same day) collapsed to the later one.
+ * @param {Array<{id:string, date:*, colorHealth:number|null}>} rows history, oldest first
+ * @param {(date:*) => string} labelOf the chart's own point label
+ * @returns {{latestId:string, previousId:string}|null} null with fewer than two readings
+ */
+function colorTrendTail(rows, labelOf) {
+  const points = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || row.colorHealth == null) continue;
+    const label = labelOf(row.date);
+    if (points.length && points[points.length - 1].label === label) points[points.length - 1] = { label, id: row.id };
+    else points.push({ label, id: row.id });
+  }
+  return points.length < 2 ? null : { latestId: points[points.length - 1].id, previousId: points[points.length - 2].id };
+}
+
 module.exports = {
+  colorTrendTail,
   LIGHTING,
   HARD_SHADOWS,
   COLOR_NO_CHANGE_POINTS,

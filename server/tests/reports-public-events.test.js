@@ -661,8 +661,9 @@ describe('lawnLighting opt-in (lawn lighting-aware color, GATE_LAWN_LIGHTING)', 
     expect(queue).not.toMatch(/lawnLighting/);
   });
 
-  test('the builder reads the stored light only for an opted-in live render', () => {
-    expect(builder).toMatch(/opts\.lawnLighting === true && opts\.mode === 'live'/);
+  test('the builder reads the stored light only for an opted-in render', () => {
+    expect(builder).toMatch(/opts\.lawnLighting !== true\) return new Map\(\)/);
+    expect(builder).toMatch(/opts\.mode === 'live' && priorForProgress/);
   });
 });
 

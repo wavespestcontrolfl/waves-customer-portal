@@ -1132,7 +1132,7 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
 // only in known, compatible light, a failed read is unknown light, and the PDF
 // cache key does not move (the lines it feeds are live-view only).
 describe('GATE_LAWN_LIGHTING on the report builder', () => {
-  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_IRRIGATION_WEEK_PLAN', 'GATE_LAWN_LIGHTING'];
+  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_IRRIGATION_WEEK_PLAN', 'GATE_LAWN_LIGHTING', 'GATE_LAWN_VISIT_ASSESSMENT'];
   const saved = {};
   beforeEach(() => {
     ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
@@ -1182,6 +1182,7 @@ describe('GATE_LAWN_LIGHTING on the report builder', () => {
 
   test('gate on, live /data render: both visits\' stored light decides whether color may be compared', async () => {
     process.env.GATE_LAWN_LIGHTING = 'true';
+    process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true';
     const same = await render({ runs: [run('la-cur', SUN), run('la-prior', SUN)] });
     expect(same.tables.filter((t) => t === 'lawn_assessment_runs')).toHaveLength(1);
     expect(same.data.reportV2.progress.color).toEqual({ comparable: true, reason: null, band: 8 });
@@ -1198,19 +1199,78 @@ describe('GATE_LAWN_LIGHTING on the report builder', () => {
 
   test('a FAILED run read is unknown light (no claim), the report still builds, and nothing marks it healthy', async () => {
     process.env.GATE_LAWN_LIGHTING = 'true';
+    process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true';
     const { data } = await render({ runsFail: true });
     expect(data.reportV2.progress.color).toMatchObject({ comparable: false, reason: 'light_unknown' });
     expect(data.reportV2.sinceLast.priorAssessmentId).toBe('la-prior');
   });
 
-  test('the Q&A endpoint\'s build (no lawnLighting opt-in) and any non-live build read nothing and see both lights as unknown', async () => {
+  test('the Q&A endpoint\'s build and the PDF builder (no lawnLighting opt-in) read nothing and see both lights as unknown', async () => {
     process.env.GATE_LAWN_LIGHTING = 'true';
+    process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true';
     const runs = [run('la-cur', SUN), run('la-prior', SUN)];
-    for (const options of [{ mode: 'live' }, {}, { mode: 'pdf', lawnLighting: true }, { mode: 'live', lawnLighting: false }]) {
+    for (const options of [{ mode: 'live' }, {}, { mode: 'live', lawnLighting: false }]) {
       const { data, tables } = await render({ runs, options });
       expect(tables).not.toContain('lawn_assessment_runs');
       expect(data.reportV2.progress.color).toMatchObject({ comparable: false, reason: 'light_unknown' });
     }
+  });
+
+  describe('the "Color & Vigor" trend (reportV2.trends.color)', () => {
+    const trendsOf = async (input) => (await render(input)).data.reportV2.trends;
+
+    test('gate off: the series is there, and so are the other trends', async () => {
+      const trends = await trendsOf({ runs: [] });
+      expect(Object.keys(trends).sort()).toEqual(['color', 'coverage', 'overall', 'stress', 'weed']);
+      expect(trends.color).toHaveLength(2);
+    });
+
+    test('gate on, both visits in known compatible light: exactly the gate-off series', async () => {
+      const off = await trendsOf({ runs: [] });
+      process.env.GATE_LAWN_LIGHTING = 'true';
+      process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true';
+      const on = await trendsOf({ runs: [run('la-cur', SUN), run('la-prior', SUN)] });
+      expect(on).toEqual(off);
+    });
+
+    test('gate on, different / unknown / unreadable light, or no opt-in: ONLY the color series is gone; the rest is untouched, never rebuilt', async () => {
+      const off = await trendsOf({ runs: [] });
+      process.env.GATE_LAWN_LIGHTING = 'true';
+      process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true';
+      const { color, ...others } = off; // eslint-disable-line no-unused-vars
+      for (const input of [
+        { runs: [run('la-cur', CLOUD), run('la-prior', SUN)] },
+        { runs: [run('la-cur', SUN), run('la-prior', {})] },
+        { runs: [] },
+        { runsFail: true },
+        { runs: [run('la-cur', SUN), run('la-prior', SUN)], options: { mode: 'live' } },
+        { runs: [run('la-cur', SUN), run('la-prior', SUN)], options: { mode: 'pdf' } },
+      ]) {
+        const on = await trendsOf(input);
+        expect(on).toEqual(others);
+      }
+    });
+
+    test('property: over every light combination the gate-on trend keys are a subset of the gate-off keys, and every series kept is identical', async () => {
+      const off = await trendsOf({ runs: [] });
+      process.env.GATE_LAWN_LIGHTING = 'true';
+      process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true';
+      const lights = [SUN, CLOUD, { lighting: 'open_shade', hard_shadows: 'no' }, { lighting: 'mixed_sun_shade', hard_shadows: 'no' }, { lighting: 'full_sun', hard_shadows: 'yes' }, {}];
+      for (const a of lights) for (const b of lights) {
+        const on = await trendsOf({ runs: [run('la-cur', a), run('la-prior', b)] });
+        for (const key of Object.keys(on)) {
+          expect(Object.keys(off)).toContain(key);
+          expect(on[key]).toEqual(off[key]);
+        }
+      }
+    });
+
+    test('the lights are read once per render (the trend and the since-last block share the read)', async () => {
+      process.env.GATE_LAWN_LIGHTING = 'true';
+      process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true';
+      const { tables } = await render({ runs: [run('la-cur', SUN), run('la-prior', SUN)] });
+      expect(tables.filter((t) => t === 'lawn_assessment_runs')).toHaveLength(1);
+    });
   });
 
   test('the PDF cache key does not move with the gate and the signature read touches no run (the lines it feeds are live-view only)', async () => {
@@ -1227,6 +1287,7 @@ describe('GATE_LAWN_LIGHTING on the report builder', () => {
     };
     const off = await sig();
     process.env.GATE_LAWN_LIGHTING = 'true';
+    process.env.GATE_LAWN_VISIT_ASSESSMENT = 'true';
     const on = await sig();
     expect(on.signature).toBe(off.signature);
     expect(on.tables).not.toContain('lawn_assessment_runs');
