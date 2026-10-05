@@ -93,7 +93,11 @@ function assessmentEstimateCloseRefusal(visit, estimateSentAt, { today = etDateS
   // price, a recorded prepayment) is not the ordinary case and is left to a
   // person: this close never bills, so it must not be the one to decide that
   // nothing is owed. (A linked invoice is the third form: liveRefusal.)
-  if (Number(visit.estimated_price) > 0 || Number(visit.prepaid_amount) > 0) return 'assessment_has_charge';
+  // The visit's price is estimated_price, or — when that is unset — the
+  // structured primary_line_price the completion's invoice amount also reads
+  // (Codex r6 P2). An explicit estimated_price of 0 stays authoritative.
+  const price = visit.estimated_price != null ? Number(visit.estimated_price) : Number(visit.primary_line_price);
+  if (price > 0 || Number(visit.prepaid_amount) > 0) return 'assessment_has_charge';
   const sentTime = validTime(estimateSentAt);
   if (sentTime == null) return 'estimate_not_sent';
   const sentDay = etDateString(new Date(sentTime));
@@ -107,7 +111,13 @@ function assessmentEstimateCloseRefusal(visit, estimateSentAt, { today = etDateS
 // This closeout's own completion attempt, committed but not finished (the
 // canonical completion commits status='completed' before its post-commit
 // work and parks a crashed run under its idempotency key).
-const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempts a WHERE a.service_id = s.id AND a.idempotency_key LIKE 'assessment-estimate:' || s.id::text || ':%' AND a.status NOT IN ('succeeded', 'failed'))";
+// COMMITTED only (Codex r6 P1 #5903): a resume is owed when the completion
+// wrote its record and status and parked its post-commit work. A pre-commit
+// `pending` attempt committed nothing, so it is no proof this closeout
+// completed the visit — a visit completed by someone else must not be
+// finished through this quiet lane on its strength.
+const PARKED_STATUSES = ['side_effects_pending', 'side_effects_running'];
+const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempts a WHERE a.service_id = s.id AND a.idempotency_key LIKE 'assessment-estimate:' || s.id::text || ':%' AND a.status IN ('side_effects_pending', 'side_effects_running') AND a.service_record_id IS NOT NULL)";
 
 // The key this closeout's parked attempt was claimed under, so a resume sends
 // the request that attempt committed (its key and its posture).
@@ -115,7 +125,8 @@ async function parkedKey(conn, visitId) {
   const attempt = await conn('service_completion_attempts')
     .where({ service_id: visitId })
     .where('idempotency_key', 'like', `${KEY_PREFIX}${visitId}:%`)
-    .whereNotIn('status', ['succeeded', 'failed'])
+    .whereIn('status', PARKED_STATUSES)
+    .whereNotNull('service_record_id')
     .orderBy('updated_at', 'desc')
     .first('idempotency_key');
   return attempt ? attempt.idempotency_key : null;
@@ -168,7 +179,7 @@ function candidateVisits(conn, { today, now }) {
         })
         // Money is a person's: no visit price, no prepayment, no linked
         // invoice (a NULL invoice status is a live invoice).
-        .whereRaw('COALESCE(s.estimated_price, 0) <= 0 AND COALESCE(s.prepaid_amount, 0) <= 0')
+        .whereRaw('COALESCE(s.estimated_price, s.primary_line_price, 0) <= 0 AND COALESCE(s.prepaid_amount, 0) <= 0')
         .whereNotExists(function linkedInvoice() {
           this.select(conn.raw('1')).from('invoices as inv').whereRaw("inv.scheduled_service_id = s.id AND inv.status IS DISTINCT FROM 'void'");
         })

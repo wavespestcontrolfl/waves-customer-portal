@@ -202,6 +202,13 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
   // A REAL handoff by default: admin-estimates stamps deliveryState on every
   // delivery that reached the customer. `delivered: false` models a
   // suppressed send (sent_at stamped, nothing delivered).
+  // A committed completion's record, for a parked attempt fixture.
+  async function recordFor(visitId) {
+    const v = await mockPg('scheduled_services').where({ id: visitId }).first();
+    const id = randomUUID();
+    await mockPg('service_records').insert({ id, customer_id: v.customer_id, scheduled_service_id: visitId, service_date: v.scheduled_date, service_type: v.service_type });
+    return id;
+  }
   async function estimate(customerId, { status = 'sent', sentAt = minutesAgo(10), linkedVisitId = null, delivered = true, acceptedAt = null } = {}) {
     const id = randomUUID();
     await mockPg('estimates').insert({
@@ -437,10 +444,10 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const parkedCustomer = await customer();
     const parked = await visit(parkedCustomer, { status: 'completed', day: YESTERDAY });
     await estimate(parkedCustomer, { status: 'draft', sentAt: null });
-    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: parked, idempotency_key: `assessment-estimate:${parked}:backfill`, status: 'side_effects_pending', request_hash: 'x' });
+    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: parked, idempotency_key: `assessment-estimate:${parked}:backfill`, status: 'side_effects_pending', request_hash: 'x', service_record_id: await recordFor(parked) });
     // Someone else's parked completion on a completed assessment is not this sweep's.
     const foreign = await visit(await customer(), { status: 'completed', day: YESTERDAY });
-    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: foreign, idempotency_key: randomUUID(), status: 'side_effects_pending', request_hash: 'x' });
+    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: foreign, idempotency_key: randomUUID(), status: 'side_effects_pending', request_hash: 'x', service_record_id: await recordFor(foreign) });
     // An open, eligible assessment on a later day: it is asked first.
     const openCustomer = await customer();
     const open = await visit(openCustomer);
@@ -627,12 +634,33 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
   test('a parked completion still resumes after the completed visit was reclassified and fell outside the window', async () => {
     const customerId = await customer();
     const parked = await visit(customerId, { status: 'completed', day: etDateString(addETDays(new Date(), -40)), serviceType: 'Fixture Reclassified Service', serviceId: null });
-    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: parked, idempotency_key: `assessment-estimate:${parked}:backfill`, status: 'side_effects_pending', request_hash: 'x' });
+    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: parked, idempotency_key: `assessment-estimate:${parked}:backfill`, status: 'side_effects_pending', request_hash: 'x', service_record_id: await recordFor(parked) });
     await closeAssessmentsWithSentEstimates({ conn: mockPg });
     const calls = Completion.completeScheduledService.mock.calls.map(([input]) => input);
     expect(calls.map((input) => input.serviceId)).toEqual([parked]);
     expect(calls[0].idempotencyKey).toBe(`assessment-estimate:${parked}:backfill`);
     expect(calls[0].lockedVisitGuard).toBeNull();
+  });
+
+  test('only a COMMITTED attempt is resumed: a pre-commit pending attempt on a visit someone else completed is not finished through this lane', async () => {
+    const customerId = await customer();
+    const done = await visit(customerId, { status: 'completed', day: YESTERDAY });
+    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: done, idempotency_key: `assessment-estimate:${done}:backfill`, status: 'pending', request_hash: 'x' });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 0, closed: 0 });
+    expect(Completion.completeScheduledService).not.toHaveBeenCalled();
+  });
+
+  test('a structured primary_line_price counts as a charge when estimated_price is unset; an explicit 0 stays free', async () => {
+    const lined = await customer();
+    const linedVisit = await visit(lined, { primary_line_price: 49 });
+    await estimate(lined);
+    const zero = await customer();
+    const zeroVisit = await visit(zero, { estimated_price: 0, primary_line_price: 49 });
+    await estimate(zero);
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(linedVisit)).status).toBe('on_site');
+    expect((await row(zeroVisit)).status).toBe('completed');
+    expect(assessmentEstimateCloseRefusal({ status: 'on_site', scheduled_date: YESTERDAY, primary_line_price: '49.00' }, new Date(), { today: TODAY })).toBe('assessment_has_charge');
   });
 
   test('money is a person\'s: a priced assessment, a prepaid one and one with a linked invoice are never candidates', async () => {
