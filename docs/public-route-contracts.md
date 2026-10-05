@@ -345,8 +345,9 @@ technician rated the landscape Excellent or Good). No model text is ever printed
 (`freezeTreeShrubTechParagraph`, `tree-shrub-tech-paragraph-gate.js`), with at most
 one model call (lane `ts_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second
 deadline across the whole step) that only EXTRACTS closed-list `{ condition, plant }`
-ids from the technician's note; code verifies each against the note (not negated,
-not hedged, same clause for the plant) and drops a failing item. Inputs: the note,
+ids (plus a `seenToday` judgment that must be true) from the technician's note;
+code verifies each against the note (not negated, not hedged, no other visit past
+or planned, same clause for the plant) and drops a failing item. Inputs: the note,
 the applied products' names, the kept photo findings (a finding the technician hid
 or rewrote never enters) and the technician's landscape rating. The seasonal watch
 list (`GATE_TS_WATCH_LIST`), the last visit, the report headline and a product's

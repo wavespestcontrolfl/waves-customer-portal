@@ -40,7 +40,7 @@ function makeKnex() {
 }
 
 const structured = (entry) => JSON.stringify(entry === undefined ? {} : { treeShrubTechParagraph: { 77: entry } });
-const frozenEntry = (text = TEXT, extra = {}) => ({ v: 1, promptVersion: 'ts_tech_paragraph_v2', assessmentId: '77', text, slots: SLOTS, ...extra });
+const frozenEntry = (text = TEXT, extra = {}) => ({ v: 1, promptVersion: 'ts_tech_paragraph_v3', assessmentId: '77', text, slots: SLOTS, ...extra });
 
 const serviceOf = (structuredNotes) => ({
   id: 'svc-ts-1',

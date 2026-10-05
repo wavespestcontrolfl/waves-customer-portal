@@ -18,7 +18,7 @@ const { TS_SENTENCES, CONDITIONS, PLANTS, FINDING_LABELS } = tech;
 const NOTE = 'Found scale on the hedges and sooty mold on the ixora. Applied Merit and fed the palms.';
 const PRODUCTS = [{ name: 'Merit 2F' }, { name: 'Palm Gro 8-2-12' }];
 const inputs = (over = {}) => tech.normalizeInputs({ technicianNote: NOTE, products: PRODUCTS, findings: [], landscapeCondition: null, ...over });
-const obs = (condition, plant = 'none') => ({ condition, plant });
+const obs = (condition, plant = 'none', seenToday = true) => ({ condition, plant, seenToday });
 const slotsFor = (over, observations, opts) => {
   const i = inputs(over);
   return tech.buildSlots(i, tech.verifyObservations(observations, i.technicianNote), opts);
@@ -62,11 +62,11 @@ describe('TS_SENTENCES is the only source of words', () => {
 describe('Codex round 1 and 2 examples are impossible by construction', () => {
   // A hostile model answer: every field is either a closed-list id or ignored.
   const HOSTILE = [
-    { condition: 'It went on the palms.', plant: 'palms' },
-    { condition: 'pruning', plant: 'hedges' },
-    { condition: 'scale', plant: 'the front yard' },
-    { condition: 'imidacloprid', plant: 'none' },
-    { condition: 'scale', plant: 'none', text: 'Prune the hedge again.' },
+    { condition: 'It went on the palms.', plant: 'palms', seenToday: true },
+    { condition: 'pruning', plant: 'hedges', seenToday: true },
+    { condition: 'scale', plant: 'the front yard', seenToday: true },
+    { condition: 'imidacloprid', plant: 'none', seenToday: true },
+    { condition: 'scale', plant: 'none', seenToday: true, text: 'Prune the hedge again.' },
     { paragraph: 'The photos found scale. Prune the hedge.' },
   ];
 
@@ -117,7 +117,7 @@ describe('Codex round 1 and 2 examples are impossible by construction', () => {
     for (const id of Object.keys(CONDITIONS)) expect(prompt.system).toContain(id);
     for (const id of Object.keys(PLANTS)) expect(prompt.system).toContain(id);
     expect(prompt.system).not.toMatch(/ganoderma|\bconks?\b|lethal\s+bronzing|fusarium/i);
-    expect(prompt.promptVersion).toBe('ts_tech_paragraph_v2');
+    expect(prompt.promptVersion).toBe('ts_tech_paragraph_v3');
   });
 
   test('the schema is closed enums, nothing numeric, and the lawn source enum is gone', () => {
@@ -229,6 +229,27 @@ describe('deterministic lines', () => {
   });
 });
 
+describe('only what was seen on THIS visit (Codex r6)', () => {
+  const verify = (note, ...items) => tech.verifyObservations(items, note);
+  test('a note about another visit, past or planned, supports no item', () => {
+    for (const note of [
+      'Last visit we saw scale on the hedges.',
+      'Scale was on the hedges before.',
+      'Return next week to treat scale on the hedges.',
+      'Will recheck the scale on the hedges.',
+      'Scale on the hedges two weeks ago.',
+      'Follow up on scale on the hedges.',
+    ]) expect(verify(note, obs('scale', 'hedges'))).toEqual([]);
+  });
+  test('the model saying it was not seen today drops the item, even on a plain note', () => {
+    expect(verify('Found scale on the hedges.', obs('scale', 'hedges', false))).toEqual([]);
+    expect(verify('Found scale on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
+  });
+  test('a past mention beside a plain one: the plain sentence still supports it', () => {
+    expect(verify('Last visit we saw whitefly. Found scale on the hedges today.', obs('scale', 'hedges'), obs('whitefly'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
+  });
+});
+
 describe('every confirmed finding prints (Codex r4)', () => {
   test('all five confirmed categories appear, none dropped', () => {
     const findings = ['pest_activity', 'disease_leaf_spot', 'water_heat_mechanical_stress', 'leaf_color_vigor', 'foliage_fullness'].map((key) => ({ key, kind: 'confirmed' }));
@@ -261,7 +282,7 @@ describe('the model call (extraction only)', () => {
     expect(out.slots.observed).toEqual([{ condition: 'scale', plant: 'hedges' }, { condition: 'sooty_mold', plant: 'none' }]);
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
     expect(policy).toBe(MODELS.TEXT_POLICIES.report);
-    expect(payload).toMatchObject({ laneId: 'ts_tech_paragraph', promptVersion: 'ts_tech_paragraph_v2', jsonMode: true, timeoutMs: 15000 });
+    expect(payload).toMatchObject({ laneId: 'ts_tech_paragraph', promptVersion: 'ts_tech_paragraph_v3', jsonMode: true, timeoutMs: 15000 });
     expect(payload.jsonSchema).toEqual(tech.extractionSchema());
     expect(options).toMatchObject({ hardDeadline: true, reserveFallbackBudget: true });
     expect(options.validate({ ok: true, json: { paragraph: 'Prune the hedge.' } })).toMatch(/no_answer/);
@@ -281,8 +302,9 @@ describe('the model call (extraction only)', () => {
     expect(v([{ condition: 'made_up', plant: 'none' }])).toMatchObject({ ok: false, problems: ['malformed_item'] });
     expect(v([{}])).toMatchObject({ ok: false, problems: ['malformed_item'] });
     expect(v([{ condition: 'scale' }])).toMatchObject({ ok: false, problems: ['malformed_item'] });
-    expect(v([{ condition: 'scale', plant: 'hedges' }, { condition: 'scale', plant: 'lawn' }])).toMatchObject({ ok: false });
-    expect(v([{ condition: 'scale', plant: 'hedges' }])).toMatchObject({ ok: true });
+    expect(v([obs('scale', 'hedges'), obs('scale', 'lawn')])).toMatchObject({ ok: false });
+    expect(v([{ condition: 'scale', plant: 'hedges' }])).toMatchObject({ ok: false, problems: ['malformed_item'] });
+    expect(v([obs('scale', 'hedges')])).toMatchObject({ ok: true });
   });
 
   test('model failure, timeout or a malformed answer: deterministic lines only, and no all-clear (the note was not read)', async () => {
@@ -304,7 +326,7 @@ describe('the model call (extraction only)', () => {
   });
 
   test('a short note is still read: "Aphids." is a full observation (Codex r4)', async () => {
-    const callModel = jest.fn(async () => ({ ok: true, json: { observations: [{ condition: 'aphids', plant: 'none' }] } }));
+    const callModel = jest.fn(async () => ({ ok: true, json: { observations: [obs('aphids')] } }));
     const out = await tech.generateTechParagraph(inputs({ technicianNote: 'Aphids.' }), { callModel });
     expect(callModel).toHaveBeenCalledTimes(1);
     expect(out.paragraph).toMatch(/^Our technician saw aphids\./);
@@ -401,7 +423,7 @@ describe('freeze and read back', () => {
     const frozen = await run({ deps: { now: () => new Date('2026-10-05T12:00:00Z') } });
     expect(frozen.status).toBe('frozen');
     const entry = state.notes.treeShrubTechParagraph['77'];
-    expect(entry).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v2', assessmentId: '77', text: 'Our technician saw scale on the hedges. Today we applied Merit 2F and Palm Gro 8-2-12.' });
+    expect(entry).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v3', assessmentId: '77', text: 'Our technician saw scale on the hedges. Today we applied Merit 2F and Palm Gro 8-2-12.' });
     expect(entry.slots.observed).toEqual([{ condition: 'scale', plant: 'hedges' }]);
     expect(tech.readFrozenTechParagraph(state.notes, 77)).toBe(entry.text);
   });

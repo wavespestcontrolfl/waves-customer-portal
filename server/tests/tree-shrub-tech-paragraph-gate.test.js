@@ -113,7 +113,7 @@ describe('freezeTreeShrubTechParagraph', () => {
     const { knex, state } = fakeKnex({ other: 'kept' });
     const out = await freezeTreeShrubTechParagraph({ reportToken: 'tok', service: SERVICE, knex, deps: { generate: jest.fn(async () => GOOD), now: () => new Date('2026-10-05T12:00:00Z') } });
     expect(Object.keys(out)).toEqual(['77']);
-    expect(out['77']).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v2', assessmentId: '77', text: TEXT, slots: SLOTS });
+    expect(out['77']).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v3', assessmentId: '77', text: TEXT, slots: SLOTS });
     expect(state.notes.treeShrubTechParagraph['77'].text).toBe(TEXT);
     expect(state.notes.other).toBe('kept');
     // The report was built from the joined record and a token, then the inputs were gathered from it.
