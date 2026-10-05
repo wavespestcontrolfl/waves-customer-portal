@@ -33,7 +33,14 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(source).toContain('IOS_MIN="15.0"');
     expect(source).toMatch(/platform :ios, '\$\{IOS_MIN\}'/);
     expect(source).toContain('IPHONEOS_DEPLOYMENT_TARGET = ${IOS_MIN};');
-    expect(source).toContain('resources_build_phase.add_file_reference');
+    expect(source).toContain('phase.add_file_reference(ref, true) unless phase.files_references.include?(ref)');
+    // Pods targets take their floor from podspecs: post_install raises them too.
+    expect(source).toContain('waves: iOS floor');
+    expect(source).toContain('installer.pods_project.targets.each');
+    // A missing Homebrew wrapper must not end the script under pipefail.
+    expect(source).toMatch(/POD_GEM_HOME="\$\(.*\|\| true\)"/);
+    // The manual add step prints only when the automatic attach failed.
+    expect(source).toContain('if [ "${PRIVACY_ATTACHED:-0}" != "1" ]; then');
     // The floor is raised before `npx cap sync ios`, which runs pod install.
     expect(source.indexOf('IOS_MIN="15.0"')).toBeLessThan(source.indexOf('\nnpx cap sync ios'));
   });
