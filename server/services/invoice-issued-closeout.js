@@ -311,28 +311,27 @@ function retryableVisitFilter(q, today) {
     .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL));
 }
 
-// Refusals of the MOMENT, not of the visit: the day had not passed, the
-// technician's job timer was still running, or the visit changed under the
-// completion's row lock while the closeout was in flight (issued_visit_* —
-// a timer started, the technician set out, the day moved, the visit was
-// reassigned or reclassified). The candidate
-// filter and the next pass's own resolver decide whether the moment has
-// passed; a visit that is still not eligible is then refused by the resolver
-// with a code that is NOT in this list (visit_en_route, visit_in_future, …),
-// so nothing is retried forever.
-// `visit_on_site` is HISTORICAL: before 2026-10-04 every arrived visit was
-// refused with it. The rule now admits an arrived visit, so those rows are
-// refusals of an old moment, and the invoices behind them must not stay stuck.
-const TRANSIENT_REFUSAL_CODES = ['error', 'visit_scheduled_today', 'visit_on_site', 'visit_timer_running', 'issued_visit_in_progress', 'issued_visit_rescheduled', 'issued_visit_identity_changed'];
-
-// …and every 5xx the canonical completion RETURNED rather than threw (a
-// failed profile / prepay / setup-fee read answers 503 with its own code):
-// the audit row carries the HTTP status, and a server-side failure is an
-// outage whatever it is called, so no list of codes has to keep up with the
-// completion (pre-push audit P1). A 4xx is the completion's verdict on the
-// visit and is retried only when its code is listed above.
+// Which audited refusal a sweep may reconsider. The question is not "was
+// that refusal temporary" — that needed a list of codes, and the list kept
+// missing one (pre-push audit, five findings) — but "is it about the STATE
+// the visit, its timer or the system was in". State changes, and the
+// sweeps' candidate filters plus the closeout's own rule re-decide it on
+// current state, so a stale verdict costs one re-read and can never close
+// anything the rule does not admit:
+//  - every `visit_*` reason of issuedCloseoutVisitRefusal and the resolver
+//    (visit_in_future, visit_en_route, visit_scheduled_today, visit_prepaid,
+//    visit_timer_running, and the historical visit_on_site that every
+//    arrived visit got before 2026-10-04);
+//  - a race under the completion's row lock (`issued_visit_*`);
+//  - a failure: `error`, or any 5xx the completion RETURNED rather than
+//    threw (a failed profile / prepay read answers 503 with its own code).
+// NOT reconsidered — these are about what the visit IS, and stay until a
+// person changes it: grouped_visit, packet_owned, project_backed,
+// record_linked_only, invoice_void, and every 4xx verdict of the completion
+// with another code.
 function isTransientRefusal(meta) {
-  return TRANSIENT_REFUSAL_CODES.includes(meta?.code) || Number(meta?.status) >= 500;
+  const code = String(meta?.code || '');
+  return code === 'error' || code.startsWith('visit_') || code.startsWith('issued_visit_') || Number(meta?.status) >= 500;
 }
 
 // The latest closeout audit row for this (visit, invoice): `trigger` narrows
@@ -412,7 +411,12 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
 // one that is settled. A draft or scheduled invoice is neither.
 const DELIVERED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
 const SETTLED_INVOICE_STATUSES = ['paid', 'prepaid'];
-const ISSUED_AT_SQL = "COALESCE(i.paid_at, i.sent_at, i.sms_sent_at, i.email_sent_at)";
+// The SAME stamp invoiceIssuedDay reads, as SQL (pre-push audit P1): a
+// settled invoice's paid_at; otherwise the NEWEST delivery stamp (Postgres
+// GREATEST ignores NULLs). A settled row with no paid_at falls back to its
+// newest delivery so it is still windowed.
+const NEWEST_DELIVERY_SQL = 'GREATEST(i.sent_at, i.sms_sent_at, i.email_sent_at)';
+const ISSUED_AT_SQL = `CASE WHEN i.status IN ('paid', 'prepaid') THEN COALESCE(i.paid_at, ${NEWEST_DELIVERY_SQL}) ELSE ${NEWEST_DELIVERY_SQL} END`;
 const ISSUED_AFTER_SERVICE_DAY_SQL = settledAfterServiceDaySql(ISSUED_AT_SQL);
 
 // THE durable retry for every invoice outside a statement (GitHub r1 P1 and
