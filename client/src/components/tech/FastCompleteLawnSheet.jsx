@@ -907,6 +907,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               quiet
               library={tips}
               priorityTipIds={noteTipIds}
+              priorityOrdered
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
