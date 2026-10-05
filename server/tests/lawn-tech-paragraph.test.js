@@ -228,6 +228,14 @@ describe('validator: rejects', () => {
     expect(problemsOf(a)).toContain('product_unsourced');
   });
 
+  test('a last-visit product target is never a last-visit sighting', () => {
+    const inputs = { ...FIXTURE, prior: { ...FIXTURE.prior, watched: [], findings: [], products: [{ name: 'Prior Insecticide', kind: 'insecticide', targets: ['white grubs'] }] } };
+    const a = answer('Our technician found chinch bugs in the trouble spot. At our last visit we found white grubs in the lawn.', [['note'], ['prior']]);
+    expect(problemsOf(a, inputs)).toContain('target_stated_as_found:grub');
+    const b = answer('Our technician found chinch bugs in the trouble spot. Our last visit put down an insecticide to protect against white grubs.', [['note'], ['prior', 'product']]);
+    expect(problemsOf(b, inputs)).toEqual([]);
+  });
+
   test('a cause only the last visit carries is not today\'s finding', () => {
     const inputs = { ...FIXTURE, technicianNote: 'Applied Arena to the front yard and fertilizer to the whole yard today.', prior: { ...FIXTURE.prior, watched: ['chinch bug damage'] } };
     const a = answer('We found chinch bugs in the front yard. Arena 50 WDG went on to treat them.', [['prior'], ['product']]);

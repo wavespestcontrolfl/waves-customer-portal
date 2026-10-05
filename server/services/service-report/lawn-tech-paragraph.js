@@ -371,11 +371,13 @@ function haystacks(inputs) {
     note: inputs.technicianNote,
     findingHigh: j(inputs.findings.filter((f) => f.confidence === 'high' || f.confidence === 'moderate').map((f) => f.label)),
     findingLow: j(inputs.findings.filter((f) => f.confidence === 'low' || f.confidence === 'unknown').map((f) => f.label)),
+    // What the last visit OBSERVED (watch items, kept findings): may be recalled.
     prior: j([
-      ...inputs.prior ? inputs.prior.products.flatMap((p) => [p.name, p.activeIngredient, ...p.targets]) : [],
       ...inputs.prior ? inputs.prior.watched : [],
       ...inputs.prior ? inputs.prior.findings.map((f) => f.label) : [],
     ]),
+    // What the last visit's products were FOR: a purpose claim only, never a sighting.
+    priorTargets: j(inputs.prior ? inputs.prior.products.flatMap((p) => [p.name, p.activeIngredient, ...p.targets]) : []),
     progress: j(inputs.progressLines),
     fact: j([inputs.facts.headline, inputs.facts.watering]),
     targets: j(inputs.products.flatMap((p) => p.targets)),
@@ -422,7 +424,7 @@ function wordsOutsideVocabulary(text, inputs, hay) {
   // The technician's free text is NOT a source of words: a name typed there
   // must never reach the customer. Only system-built inputs count.
   const known = new Set(words([
-    hay.findingHigh, hay.findingLow, hay.prior, hay.progress, hay.fact, hay.targets,
+    hay.findingHigh, hay.findingLow, hay.prior, hay.priorTargets, hay.progress, hay.fact, hay.targets,
     ...inputs.products.flatMap((p) => [p.name, p.activeIngredient]),
   ].filter(Boolean).join(' ')));
   const out = [];
@@ -510,7 +512,7 @@ function provenanceOf(term, hay) {
     fact: has(hay.fact),
     // Targets and a product's role license a PURPOSE claim ("to protect against X")
     // and nothing else: never "found", "saw" or "there is".
-    purpose: has(hay.targets) || (!!term.generic && has(hay.role)) || noteStanceOf(term, hay.note) === 'purpose',
+    purpose: has(hay.targets) || has(hay.priorTargets) || (!!term.generic && has(hay.role)) || noteStanceOf(term, hay.note) === 'purpose',
   };
 }
 
