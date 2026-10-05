@@ -211,13 +211,19 @@ async function snapshotVisitArea(input, service, req, knex = db, { treatmentEvid
     throw fail('Review the area treated for this service.', 400);
   }
   const property = await loadAreaProperty({ serviceId: service.id, propertyId: input.propertyId }, req, knex);
-  if (input.version !== areaVersion(property, await primaryLawnArea(property, knex))) throw fail('Property areas changed. Reload and review the job coverage.', 409);
+  const lawnSqft = await primaryLawnArea(property, knex);
+  if (input.version !== areaVersion(property, lawnSqft)) throw fail('Property areas changed. Reload and review the job coverage.', 409);
   const measured = reviewedAreas(property)[kind];
+  // A lawn visit treats the whole recorded lawn, reviewed or not (the same
+  // legacy fallback readAreaMeasurements shows), so that is the default an
+  // untreated incomplete visit must not freeze. The snapshot itself stays
+  // honest: an unreviewed default records no property area or source.
+  const defaultSqft = measured?.sqft ?? (kind === 'lawn' ? (lawnSqft !== null ? lawnSqft : areaNumber(property.property_sqft)) : null);
   // An untreated (incomplete, no products) visit only records coverage the
   // tech set for this visit (explicitVisitArea, or a value that differs from
   // the reviewed default); it never freezes
   // the default as if it had been treated.
-  if (!treatmentEvidence && input.explicitVisitArea !== true && measured?.sqft === input.treatedSqft) return null;
+  if (!treatmentEvidence && input.explicitVisitArea !== true && defaultSqft === input.treatedSqft) return null;
   return { propertyId: property.id, kind, treatedSqft: input.treatedSqft,
     propertyAreaSqft: measured?.sqft ?? null, measurementSource: measured?.source ?? null,
     reviewedAt: measured?.reviewedAt ?? null };
