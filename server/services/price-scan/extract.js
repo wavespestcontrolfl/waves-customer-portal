@@ -621,6 +621,53 @@ function formulationCodes(name) {
   }
   return codes;
 }
+// Fertilizer analyses ("15-0-15", "0-0-7", "24-0-11") — N-P-K percentages written as three
+// dash-joined numbers. nameTokens drops every token under 3 characters, so an analysis
+// vanishes from the name overlap entirely and "Stonewall 15-0-15" verified against
+// "Stonewall 0-0-7" (2026-10-05 scan). Returns a Set of normalized "15-0-15" strings. The
+// lookarounds keep it off longer dash chains (EPA regs "55260-1-12345", dates, part numbers).
+function fertilizerAnalyses(name) {
+  const out = new Set();
+  const re = /(?<![\d.-])(\d{1,2}(?:\.\d+)?)-(\d{1,2}(?:\.\d+)?)-(\d{1,2}(?:\.\d+)?)(?![\d-]|\.\d)/g;
+  for (const m of String(name || '').matchAll(re)) out.add(`${Number(m[1])}-${Number(m[2])}-${Number(m[3])}`);
+  return out;
+}
+
+// Words that describe WHAT a product is or how it is packed, not WHICH product it is — so
+// "nonionic surfactant" or "(2.5 gal)" never counts as a brand/product-line token.
+const DESCRIPTOR_WORDS = new Set([
+  'nonionic', 'non', 'ionic', 'wetting', 'agent', 'agents', 'spreader', 'sticker', 'penetrant',
+  'micronutrient', 'micronutrients', 'package', 'packages', 'blend', 'extra', 'premium', 'brand',
+  'product', 'products', 'bottle', 'bottles', 'case', 'gallon', 'gallons', 'gal', 'ounce', 'ounces',
+  'pound', 'pounds', 'lbs', 'quart', 'pint', 'size', 'pack',
+]);
+
+// The brand / product-line tokens of a name: whatever is left after the category,
+// generic, descriptor and pure-number vocabularies are removed (LESCO, Induce, Soaker,
+// Celsius, Stonewall, 4fl, prodiamine ...).
+function brandKeyTokens(name) {
+  return new Set([...nameTokens(name)].filter((t) => !NAME_CATEGORY_WORDS.has(t)
+    && !GENERIC_WORDS.has(t) && !DESCRIPTOR_WORDS.has(t) && !/^\d+$/.test(t)));
+}
+
+// PURE: do the two names name DIFFERENT products even though they share generic words?
+//  - fertilizer analysis: when either name carries one, the expected analyses must all be
+//    in the scraped name ("15-0-15" vs "0-0-7" is a different fertilizer; an analysis on
+//    only one side is a different product too);
+//  - brand / product-line: both names have such tokens and share none ("LESCO 90/10
+//    Nonionic Surfactant" vs "Induce Nonionic Surfactant", "LESCO-Wet Plus" vs "Soaker
+//    Plus Wetting Agent" share only descriptors / generic words).
+// `expectedNames` is every name the catalog row carries (analysis may sit in only one).
+function namesConflict(scrapedName, expectedNames) {
+  const names = [].concat(expectedNames).filter(Boolean);
+  const scrAn = fertilizerAnalyses(scrapedName);
+  const expAn = new Set(names.flatMap((n) => [...fertilizerAnalyses(n)]));
+  if ((scrAn.size || expAn.size) && !(expAn.size && [...expAn].every((a) => scrAn.has(a)))) return true;
+  const scrKeys = brandKeyTokens(scrapedName);
+  const expKeys = new Set(names.flatMap((n) => [...brandKeyTokens(n)]));
+  return scrKeys.size > 0 && expKeys.size > 0 && ![...expKeys].some((t) => scrKeys.has(t));
+}
+
 // Normalize an EPA registration to its company-product key ("53883-279-1234" ->
 // "53883-279"). The first two segments identify the product; a trailing
 // distributor segment is dropped. Returns null if it isn't reg-shaped.
@@ -684,6 +731,9 @@ function verifyMatch(scraped = {}, expected = {}, opts = {}) {
       const scrCodes = formulationCodes(scraped.name);
       if (expCodes.size && ![...expCodes].every((c) => scrCodes.has(c))) signals.name = false;
     }
+    // Product-identity guard: a different fertilizer analysis, or no brand / product-line
+    // token in common, means a different product that merely shares generic words.
+    if (signals.name && namesConflict(scraped.name, [expName, expected.productName, expected.name])) signals.name = false;
   }
 
   // EPA evidence: distinguish the offer's OWN name (strongly tied to the selected
@@ -732,5 +782,7 @@ module.exports = {
   deriveNormalizedUnitPrice,
   tokenOverlap,
   verifyMatch,
+  fertilizerAnalyses,
+  namesConflict,
   epaKey,
 };

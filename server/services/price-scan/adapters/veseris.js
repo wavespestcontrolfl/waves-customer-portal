@@ -1,3 +1,4 @@
+/* global document, location */ // page.evaluate / waitForFunction callbacks run in the browser, not Node
 // Veseris (veseris.com) — professional pest/turf distributor, a DIRECT SiteOne competitor.
 // Magento storefront (same platform as Solutions), but pricing is behind a B2B LOGIN, so
 // this adapter authenticates first and then scrapes ACCOUNT pricing. Credentials live
@@ -9,6 +10,18 @@
 const { makeAdapter, searchQuery } = require('./base');
 
 const DEFAULT_LOGIN_URL = 'https://veseris.com/default/customer/account/login/';
+
+// Magento's wrong-password / locked-account banner on the login page.
+const LOGIN_ERROR_SELECTOR = '.message-error, div.message.error, [data-ui-id$="message-error"]';
+
+// The Veseris sign-in form is labelled "Username" ("If you have an account, sign in with your
+// username"), NOT email. The vendor row can carry both a login_username and a login_email
+// (often the account's contact address), and typing the email into that field is rejected as
+// "account sign-in was incorrect". So the username wins; the email is only the fallback for a
+// row that stores nothing else. PURE.
+function loginIdentifier(creds) {
+  return (creds && (creds.username || creds.email)) || '';
+}
 
 // SECURITY: the login URL is stored vendor data, and we type the decrypted password into the
 // page it loads. Only ever do that on HTTPS + a Veseris-owned host — a bad/tampered login_url
@@ -80,7 +93,7 @@ const adapter = makeAdapter({
           el.dispatchEvent(new Event('change', { bubbles: true }));
         }
         return 'ok';
-      }, { user: creds.email || creds.username, pw: creds.password });
+      }, { user: loginIdentifier(creds), pw: creds.password });
       if (filled !== 'ok') {
         throw new Error(`veseris login aborted: ${filled === 'offhost' ? 'navigation redirected off the trusted host' : 'login fields not found'}`);
       }
@@ -92,12 +105,19 @@ const adapter = makeAdapter({
       // field gone, off the login page, AND past the transient code-exchange state. Veseris
       // redirects through `?code=...&userState=AuthenticatedNotRegistered` while it finalizes
       // the session — and shows $0.00 prices until it does — so proceeding then yields a
-      // gated, unpriced scrape. Wait for that transient marker to clear.
-      await page.waitForFunction(() => {
+      // gated, unpriced scrape. Wait for that transient marker to clear. ALSO stop early when
+      // Magento answers with its error banner: a rejected sign-in must be reported at once,
+      // not waited out (45 s) and retried — every retry is another failed attempt on a
+      // lockout-protected account.
+      const settled = await page.waitForFunction((errSel) => {
         const pw = document.querySelector('input[name="login[password]"]');
         const transient = /[?&]code=|AuthenticatedNotRegistered/i.test(location.href);
-        return (!pw || !pw.offsetParent) && !/customer\/account\/login/i.test(location.href) && !transient;
-      }, { timeout: LOGIN_TIMEOUT }).catch(() => {});
+        if ((!pw || !pw.offsetParent) && !/customer\/account\/login/i.test(location.href) && !transient) return 'ok';
+        const err = document.querySelector(errSel);
+        if (err && (err.textContent || '').trim()) return 'rejected';
+        return false;
+      }, LOGIN_ERROR_SELECTOR, { timeout: LOGIN_TIMEOUT }).then((h) => h.jsonValue()).catch(() => 'timeout');
+      if (settled === 'rejected') return 'rejected';
       await page.waitForTimeout(2000);
       const stillPw = await page.locator('input[name="login[password]"]:visible').count();
       // Success requires the SAME conditions as the wait predicate (its timeout is swallowed,
@@ -107,21 +127,25 @@ const adapter = makeAdapter({
       const url = page.url();
       const transient = /[?&]code=|AuthenticatedNotRegistered/i.test(url);
       const onLoginPage = /customer\/account\/login/i.test(url);
-      return stillPw === 0 && !transient && !onLoginPage;
+      return stillPw === 0 && !transient && !onLoginPage ? 'ok' : 'stalled';
     };
-    let ok = false;
-    for (let i = 0; i < 3 && !ok; i += 1) {
-      if (i) await page.waitForTimeout(3000); // brief cooldown between attempts (transient redirect / rate-limit)
-      ok = await attempt();
+    // Retry only a STALLED login (transient redirect / rate-limit). A REJECTED one (wrong
+    // username or password, or a temporarily locked account) is final: retrying cannot fix it
+    // and each try counts toward Magento's failed-login lockout.
+    let outcome = 'stalled';
+    for (let i = 0; i < 3 && outcome === 'stalled'; i += 1) {
+      if (i) await page.waitForTimeout(3000); // brief cooldown between attempts
+      outcome = await attempt();
     }
-    if (!ok) {
-      const err = (await page.locator('.message-error, div.message.error').first().textContent().catch(() => '') || '')
-        .replace(/\s+/g, ' ').trim().slice(0, 120);
-      throw new Error(`veseris login failed${err ? `: ${err}` : ''}`);
+    if (outcome !== 'ok') {
+      const err = (await page.locator(LOGIN_ERROR_SELECTOR).first().textContent().catch(() => '') || '')
+        .replace(/\s+/g, ' ').trim().slice(0, 160);
+      throw new Error(`veseris login ${outcome === 'rejected' ? 'rejected' : 'failed'}${err ? `: ${err}` : ''}`);
     }
   },
 });
 
 // Exposed for unit testing the login-URL host guard.
 adapter.isTrustedVeserisLoginUrl = isTrustedVeserisLoginUrl;
+adapter.loginIdentifier = loginIdentifier;
 module.exports = adapter;
