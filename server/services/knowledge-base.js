@@ -265,6 +265,10 @@ function cogsTotalLine(terms) {
   return `Total COGS per application: ${parts.join(' + ')}${suffix}`;
 }
 
+// Tag on the four lawn protocol entries while they hold the v13 program.
+const LAWN_V13_TAG = 'lawn-v13';
+const LAWN_TRACK_SLUGS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'].map((trackId) => `protocol-${slugify(trackId)}`);
+
 const KnowledgeBaseService = {
   async create({ title, content, category, tags, source, confidence, metadata, status }) {
     const safeTitle = cleanText(title) || 'Knowledge Base Entry';
@@ -745,8 +749,12 @@ const KnowledgeBaseService = {
   // ══════════════════════════════════════════════════════════════
   // AUTO-SYNC — populate KB from live data sources
   // ══════════════════════════════════════════════════════════════
-  async autoSync() {
+  // lawnProtocolsOnly re-syncs just the four lawn protocol entries (what
+  // reconcileLawnProtocolKnowledge needs when GATE_LAWN_V13 changes); every
+  // other section is skipped.
+  async autoSync({ lawnProtocolsOnly = false } = {}) {
     let created = 0, updated = 0, skipped = 0;
+    const everything = !lawnProtocolsOnly;
 
     // Helper: upsert by slug
     async function upsert(slug, title, content, category, tags = []) {
@@ -798,7 +806,7 @@ const KnowledgeBaseService = {
     }
 
     // ── 1. PRODUCTS from products_catalog ──
-    try {
+    if (everything) try {
       const products = await db('products_catalog').where({ active: true }).orderBy('name');
       for (const p of products) {
         const lines = [`**${p.name}**`];
@@ -831,6 +839,7 @@ const KnowledgeBaseService = {
     try {
       const protocols = require('../config/protocols.json');
       const { lawnProtocols } = require('./lawn-program');
+      const featureGates = require('../config/feature-gates');
       const costLine = (v) => {
         const mc = Number(v.material_cost);
         const lc = Number(v.labor_cost);
@@ -857,18 +866,22 @@ const KnowledgeBaseService = {
         await upsert(slug, track.name || programKey, lines.join('\n'), 'protocols', tags);
       };
 
+      // The lawn entries carry a 'lawn-v13' tag while they hold the v13 program, so
+      // a sync after the gate flips either way replaces them (the tag is part of
+      // what upsert compares) and lawnKnowledgeStale can tell which program they hold.
+      const v13Tags = featureGates.lawnV13Live?.() === true ? [LAWN_V13_TAG] : [];
       for (const [trackId, track] of Object.entries(lawnProtocols() || {})) {
-        await syncProgram(trackId, track, ['lawn', trackId]);
+        await syncProgram(trackId, track, ['lawn', trackId, ...v13Tags]);
       }
       for (const [programKey, program] of Object.entries(protocols)) {
-        if (programKey === 'lawn') continue;
+        if (programKey === 'lawn' || !everything) continue;
         await syncProgram(programKey, program, [programKey]);
       }
       logger.info(`[kb-sync] Protocols synced (all categories)`);
     } catch (e) { logger.error(`[kb-sync] Protocols sync failed: ${e.message}`); }
 
     // ── 3. PRICING ENGINE snapshot ──
-    try {
+    if (everything) try {
       // Rendered from the LIVE engine constants after a DB sync — pricing is
       // DB-authoritative, and this doc's previous hardcoded copy drifted
       // (retired v1 cadence curve, invented tree/driveway adjustments that
@@ -924,7 +937,7 @@ const KnowledgeBaseService = {
     } catch (e) { logger.error(`[kb-sync] Pricing sync failed: ${e.message}`); }
 
     // ── 4. SERVICE COGS from service_product_usage ──
-    try {
+    if (everything) try {
       const usage = await db('service_product_usage')
         .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
         .select('service_product_usage.*', 'products_catalog.name as product_name',
@@ -956,6 +969,36 @@ const KnowledgeBaseService = {
 
     logger.info(`[kb-sync] Auto-sync complete: ${created} created, ${updated} updated, ${skipped} unchanged`);
     return { created, updated, skipped };
+  },
+
+  // True when a stored lawn protocol entry holds the other program than the one
+  // GATE_LAWN_V13 selects now (v13 stored with the gate off, or the old program
+  // stored with the gate on). No entry yet is not stale: the nightly sync creates it.
+  async lawnKnowledgeStale() {
+    const gateOn = require('../config/feature-gates').lawnV13Live?.() === true;
+    const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
+    return rows.some((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG) !== gateOn);
+  },
+
+  // Unsetting (or setting) GATE_LAWN_V13 must not wait for the 2:40 / 3:30 AM runs:
+  // the lawn protocol entries and the knowledge-index corpora built from them
+  // (protocol directly, kb through those entries) are rewritten from lawnProtocols()
+  // as soon as this notices they hold the other program. Cheap no-op otherwise.
+  // The index rows re-embed on the next nightly run; full-text search is current now.
+  async reconcileLawnProtocolKnowledge() {
+    if (!(await this.lawnKnowledgeStale())) return { stale: false };
+    const kb = await this.autoSync({ lawnProtocolsOnly: true });
+    const index = {};
+    if (await db('knowledge_embeddings').where({ source: 'protocol' }).first('id')) {
+      const { syncCorpus } = require('./knowledge-index/ingest');
+      const { CONNECTORS } = require('./knowledge-index/connectors');
+      // kb after the entries above, so the index never re-persists the old text.
+      for (const source of ['protocol', 'kb']) {
+        index[source] = await syncCorpus(CONNECTORS.find((connector) => connector.source === source));
+      }
+    }
+    logger.info(`[kb-sync] Lawn protocol knowledge reconciled: ${JSON.stringify({ kb, index })}`);
+    return { stale: true, kb, index };
   },
 };
 

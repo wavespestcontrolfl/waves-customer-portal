@@ -7621,6 +7621,22 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — GATE_LAWN_V13 knowledge reconcile: when the gate changes, the
+  // lawn protocol KB entries and their knowledge-index chunks follow within one
+  // tick instead of waiting for the 2:40 / 3:30 AM syncs. One indexed read when
+  // nothing changed.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await runExclusive('lawn-knowledge-reconcile', async () => {
+        await require('./knowledge-base').reconcileLawnProtocolKnowledge();
+      });
+    } catch (err) {
+      logger.error(`[kb-sync] lawn knowledge reconcile failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY FRIDAY 7 AM — AI Knowledge Base Audit ("Question Your Assumptions")
   // Reviews stale and low-confidence entries via Claude, flags anything outdated.
   // =========================================================================
