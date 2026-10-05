@@ -270,7 +270,8 @@ const LAWN_V13_TAG = 'lawn-v13';
 // Which program each index corpus last finished syncing ('v13' | 'legacy'), written to
 // system_settings only AFTER that corpus's sync succeeds. The four entry tags say what the
 // KB entries hold; these say what the index chunks hold, so a failure after the entries
-// were rewritten still reads as stale on the next tick. An absent marker reads 'legacy'.
+// were rewritten still reads as stale on the next tick. An absent marker is unknown and reads as stale
+// (the corpus may hold either program), so the first tick after deploy syncs it once.
 const LAWN_CORPUS_MARKERS = { protocol: 'lawn_knowledge.protocol_corpus', kb: 'lawn_knowledge.kb_corpus' };
 const LAWN_TRACK_SLUGS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'].map((trackId) => `protocol-${slugify(trackId)}`);
 
@@ -371,7 +372,7 @@ async function staleCorpora(gateOn) {
   const want = gateOn ? 'v13' : 'legacy';
   const keys = Object.values(LAWN_CORPUS_MARKERS);
   const stored = Object.fromEntries((await db('system_settings').whereIn('key', keys).select('key', 'value')).map((row) => [row.key, row.value]));
-  const stale = Object.keys(LAWN_CORPUS_MARKERS).filter((source) => (stored[LAWN_CORPUS_MARKERS[source]] || 'legacy') !== want);
+  const stale = Object.keys(LAWN_CORPUS_MARKERS).filter((source) => stored[LAWN_CORPUS_MARKERS[source]] !== want);
   if (!stale.length || !(await db('knowledge_embeddings').where({ source: 'protocol' }).first('id'))) return [];
   return stale;
 }

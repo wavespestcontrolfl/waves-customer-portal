@@ -236,6 +236,19 @@ describe('a corpus failure after the entries were rewritten is retried, not forg
     expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBe('legacy');
   });
 
+  test('an absent corpus marker is unknown, not legacy: gate off with the index in use and no marker is stale once, then settles', async () => {
+    // Codex r4 on #5996: a v13 rebuild whose marker write failed, then a gate rollback,
+    // must not read the unmarked corpus as already legacy.
+    const tables = {
+      knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'protocol', source_id: 'x', chunk_index: 0, content_hash: 'h' }],
+    };
+    makeDb(tables);
+    expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(true);
+    await withGate(undefined, () => KB.reconcileLawnProtocolKnowledge());
+    expect(tables.system_settings.find((r) => r.key === 'lawn_knowledge.protocol_corpus').value).toBe('legacy');
+    expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(false);
+  });
+
   test('the index not in use: markers are ignored (stale only by the entry tags)', async () => {
     const tables = { knowledge_base: [] };
     makeDb(tables);
