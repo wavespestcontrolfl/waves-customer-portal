@@ -10445,6 +10445,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     if (offerTier && offerTier.key === 'best' && annualPrepaySelected) {
       return res.status(400).json({ error: 'annual prepay is not available on the full-bundle option — pick pay_at_visit instead' });
     }
+    // A LIVE active member never takes a tier (the member ladder is the
+    // office's — the same strict, fail-closed check the /data projection
+    // and the slot routes make; stored evidence alone can miss a customer
+    // who became a member after the quote was built). Re-judged inside the
+    // money-bearing transaction below.
+    if (offerTier && estimate.customer_id) {
+      let liveMember = true;
+      try { liveMember = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
+      catch (_) { liveMember = true; }
+      if (liveMember) {
+        return res.status(400).json({ error: 'offer tiers are not available for this estimate', code: 'offer_tier_unavailable' });
+      }
+    }
     const keepCompanions = OfferTiers.offerTierKeepsCompanions(offerTier);
     const pricingBundle = OfferTiers.pricingBundleForOfferTier(pricingBundleAsOffered, offerTier);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
@@ -11912,6 +11925,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
         const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status');
+        // Offer tier (GATE_ESTIMATE_OFFER_TIERS): the live member exclusion,
+        // re-judged under the locked estimate row inside the transaction.
+        if (offerTier && estimate.customer_id) {
+          let liveMemberInTrx = true;
+          try { liveMemberInTrx = !!(await isActivePlanCustomer(trx, estimate.customer_id, { strict: true })); }
+          catch (_) { liveMemberInTrx = true; }
+          if (liveMemberInTrx) {
+            const err = new Error('offer tiers are not available for this estimate');
+            err.status = 409;
+            throw err;
+          }
+        }
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'

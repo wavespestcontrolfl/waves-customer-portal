@@ -71,7 +71,23 @@ const {
   estimateRendersMonthlyBilling,
   verifyEstimateAskToken,
 } = require('./estimate-public');
-const { normalizeSelectedOfferTier } = require('../services/estimate-offer-tiers');
+const { resolveBestOfferTierForSlots } = require('../services/estimate-offer-tiers');
+const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
+const featureGates = require('../config/feature-gates');
+
+// Offer tier (GATE_ESTIMATE_OFFER_TIERS): 'best' sizes the visit from every
+// quoted program, and only when the gate, the stored bundle and the live
+// member check all allow it (fail-closed). Anything else sizes as today.
+async function bestOfferTierForSlots(estimate, raw) {
+  return resolveBestOfferTierForSlots({
+    db,
+    estimateId: estimate?.id,
+    raw,
+    gateOn: featureGates.estimateOfferTiersLive(),
+    buildPricingBundle,
+    isActiveMember: (customerId) => isActivePlanCustomer(db, customerId, { strict: true }),
+  });
+}
 
 // Termite trenching review-before-booking 409 — mirrors the accept-time gate so a
 // slot hold or Stripe intent is never created for a priced trenching-only quote
@@ -459,9 +475,8 @@ router.get('/:token/available-slots', async (req, res) => {
     if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
       opts.selectedFrequency = req.query.selectedFrequency.trim();
     }
-    // Offer tier (GATE_ESTIMATE_OFFER_TIERS): only 'best' changes the visit
-    // profile (every quoted program); any other value sizes as today.
-    if (normalizeSelectedOfferTier(req.query.offerTier) === 'best') opts.offerTier = 'best';
+    const browseOfferTier = await bestOfferTierForSlots(estimate, req.query.offerTier);
+    if (browseOfferTier) opts.offerTier = browseOfferTier;
     // Bundle combo axes arrive JSON-encoded (?serviceCadences={"mosquito":
     // "seasonal9"}): the mosquito tier changes the seasonal filter/horizon
     // while selectedFrequency stays the pest cadence (codex r14 P1).
@@ -630,7 +645,7 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
       && !Array.isArray(req.body.serviceCadences)
       ? req.body.serviceCadences
       : undefined;
-    const findOfferTier = normalizeSelectedOfferTier(req.body?.offerTier) === 'best' ? 'best' : undefined;
+    const findOfferTier = (await bestOfferTierForSlots(estimate, req.body?.offerTier)) || undefined;
     try {
       const result = await findEstimateSlots(estimate.id, {
         query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences, offerTier: findOfferTier,
@@ -690,9 +705,6 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     && !Array.isArray(req.body.serviceCadences)) {
     slotOpts.serviceCadences = req.body.serviceCadences;
   }
-  // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a 'best' hold sizes the visit
-  // from every quoted program — the same profile the accept commits.
-  if (normalizeSelectedOfferTier(req.body?.offerTier) === 'best') slotOpts.offerTier = 'best';
 
   try {
     const estimate = await db('estimates')
@@ -712,6 +724,10 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     }
     const gatedReserve = rejectGatedSuppressionEstimate(res, estimate);
     if (gatedReserve) return gatedReserve;
+    // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a 'best' hold sizes the visit
+    // from every quoted program — the same profile the accept commits.
+    const reserveOfferTier = await bestOfferTierForSlots(estimate, req.body?.offerTier);
+    if (reserveOfferTier) slotOpts.offerTier = reserveOfferTier;
     if (isCommercialAutoEstimate(estimate)) {
       return res.status(409).json({
         error: 'Commercial service is scheduled by our team — no self-booking.',

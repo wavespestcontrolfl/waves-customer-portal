@@ -244,3 +244,24 @@ describe('slot profile for the best tier', () => {
     expect(better.offerTier).toBeNull();
   });
 });
+
+describe('resolveBestOfferTierForSlots (slot routes)', () => {
+  const row = { id: 'est-1', customer_id: null };
+  const dbFor = (found) => () => ({ where: () => ({ first: async () => (found ? row : null) }) });
+  const bundleWithBest = async () => ({ offerTiers: [{ key: 'good' }, { key: 'better' }, { key: 'best', frequencies: [] }] });
+
+  test("returns 'best' only with the gate on, a stored best tier and no live member; fails closed otherwise", async () => {
+    const base = { db: dbFor(true), estimateId: 'est-1', raw: 'best', gateOn: true, buildPricingBundle: bundleWithBest, isActiveMember: async () => false };
+    await expect(OfferTiers.resolveBestOfferTierForSlots(base)).resolves.toBe('best');
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, raw: 'better' })).resolves.toBeNull();
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, gateOn: false })).resolves.toBeNull();
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, buildPricingBundle: async () => ({ frequencies: [] }) })).resolves.toBeNull();
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: dbFor(false) })).resolves.toBeNull();
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, buildPricingBundle: async () => { throw new Error('boom'); } })).resolves.toBeNull();
+    // A linked customer: a live member, or an unreadable membership, withholds the tier.
+    const memberDb = () => ({ where: () => ({ first: async () => ({ ...row, customer_id: 'cust-1' }) }) });
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: memberDb, isActiveMember: async () => true })).resolves.toBeNull();
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: memberDb, isActiveMember: async () => { throw new Error('db'); } })).resolves.toBeNull();
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: memberDb, isActiveMember: async () => false })).resolves.toBe('best');
+  });
+});

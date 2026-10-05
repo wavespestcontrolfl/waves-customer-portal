@@ -6549,7 +6549,12 @@ companion exclusion drops (the pest-only list filters and the
 `estimate_data.customerSelection.offerTier`. `/available-slots` (query),
 `/find-slots` and `/reserve` (body) take `offerTier`; only `best` changes
 the visit profile (every quoted program; part of the slot-cache key), and
-the accept's reservation commit carries the same value.
+only when the live gate is on, the estimate's stored bundle offers that
+tier, and the linked customer is not a LIVE active member (`isActivePlanCustomer`,
+strict, fail-closed on any read error) — the same three facts the accept
+re-checks (before and again inside its transaction, 409) — so a hold can
+never size a visit the accept refuses; the accept's reservation commit
+carries the resolved value.
 
 The same PUT is the priced ADD rail under `GATE_ESTIMATE_SERVICE_ADD`
 (STRICT opt-in, needs the opt-out gate; off = the `/data` `addable` stamp is

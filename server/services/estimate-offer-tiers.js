@@ -166,8 +166,51 @@ function offerTierKeepsCompanions(tier) {
   return !!tier && tier.key === 'best';
 }
 
+/**
+ * Slot routes (`/available-slots`, `/find-slots`, `/reserve`): a requested
+ * 'best' changes the visit profile ONLY when the live gate is on, the
+ * estimate's stored bundle actually offers the tier, and the linked
+ * customer is not a LIVE active member — the same three facts the `/data`
+ * projection and the accept check, so a hold can never size a visit the
+ * accept will refuse. Fails closed on any read error. The slot handlers
+ * load a column subset, so the bundle is built from a fresh full read.
+ */
+const OFFER_TIER_ESTIMATE_COLUMNS = [
+  'id', 'status', 'source', 'category', 'customer_id', 'show_one_time_option',
+  'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'waveguard_tier',
+];
+
+async function resolveBestOfferTierForSlots({
+  db,
+  estimateId,
+  raw,
+  gateOn = false,
+  buildPricingBundle,
+  isActiveMember,
+} = {}) {
+  if (normalizeSelectedOfferTier(raw) !== 'best') return null;
+  if (!gateOn || !db || !estimateId || typeof buildPricingBundle !== 'function') return null;
+  try {
+    const row = await db('estimates').where({ id: estimateId }).first(...OFFER_TIER_ESTIMATE_COLUMNS);
+    if (!row) return null;
+    const bundle = await buildPricingBundle(row);
+    if (!offerTiersOf(bundle).some((tier) => tier && tier.key === 'best')) return null;
+    if (row.customer_id) {
+      let member = true;
+      try { member = typeof isActiveMember === 'function' ? !!(await isActiveMember(row.customer_id)) : true; }
+      catch (_) { member = true; }
+      if (member) return null;
+    }
+    return 'best';
+  } catch (_) {
+    return null;
+  }
+}
+
 module.exports = {
   OFFER_TIER_KEYS,
+  OFFER_TIER_ESTIMATE_COLUMNS,
+  resolveBestOfferTierForSlots,
   COMPANION_KEYS,
   DEFAULT_TIER_KEY,
   TIER_LABELS,
