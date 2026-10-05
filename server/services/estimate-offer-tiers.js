@@ -206,6 +206,8 @@ const OFFER_TIER_ESTIMATE_COLUMNS = [
   // The pricing cache keys on these (estimate-pricing-cache.js): without them
   // the slot read could serve another version's cached bundle.
   'updated_at', 'pricing_version',
+  // The member block judges the prospective phone match too (route helper).
+  'customer_phone', 'customer_phone_typed',
 ];
 
 async function resolveBestOfferTierForSlots({
@@ -214,7 +216,7 @@ async function resolveBestOfferTierForSlots({
   raw,
   gateOn = false,
   buildPricingBundle,
-  isActiveMember,
+  isBlockedMember,
 } = {}) {
   if (normalizeSelectedOfferTier(raw) !== 'best') return null;
   if (!gateOn || !db || !estimateId || typeof buildPricingBundle !== 'function') return null;
@@ -223,12 +225,12 @@ async function resolveBestOfferTierForSlots({
     if (!row) return null;
     const bundle = await buildPricingBundle(row);
     if (!offerTiersOf(bundle).some((tier) => tier && tier.key === 'best')) return null;
-    if (row.customer_id) {
-      let member = true;
-      try { member = typeof isActiveMember === 'function' ? !!(await isActiveMember(row.customer_id)) : true; }
-      catch (_) { member = true; }
-      if (member) return null;
-    }
+    // The same member judgement /data and the accept make (linked customer,
+    // else the prospective phone match); a missing judge reads as blocked.
+    let blocked = true;
+    try { blocked = typeof isBlockedMember === 'function' ? !!(await isBlockedMember(row)) : true; }
+    catch (_) { blocked = true; }
+    if (blocked) return null;
     return 'best';
   } catch (_) {
     return null;

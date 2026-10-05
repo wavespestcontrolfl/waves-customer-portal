@@ -6598,9 +6598,14 @@ member evidence, no manual discount) carries `pricing.offerTiers` on `/data`
 `pestOnly:false`, `services` as the key list, plus its own contract view for
 the page: `sections` (pricing sections), `combinedRecurring` and
 `waveGuardTier`) — plus `pricing.offerTierDefaultKey`. Served only on a
-live accept-active surface, never to a LIVE active member (fail-closed), and
-a tiered payload withholds the `serviceOptOut` block (no remove / add
-rails). `PUT /:token/accept` takes `selectedTier`: absent = today's
+live accept-active surface, never to a LIVE active member — judged the way the
+accept resolves the customer: the linked `customer_id`, else the prospective
+phone match (`offerTierMemberBlock`, strict, fail-closed) — and a tiered
+payload withholds the `serviceOptOut` block (no remove / add rails). A send
+snapshot or cached bundle frozen before the gate carries no tier verdict:
+under a live gate it is served with its prices untouched and the live v1
+build's tier fields grafted on (`offerTiersEvaluated` stamps a judged
+bundle so an ineligible estimate is not rebuilt on every read). `PUT /:token/accept` takes `selectedTier`: absent = today's
 behavior; an unknown value, a value on an estimate with no stored tiers, or
 a tier whose service mode disagrees with `serviceMode` is 400
 `offer_tier_unavailable`; `best` keeps the companion programs the toggle's
@@ -6614,11 +6619,13 @@ after the gate is turned off, so the recap keeps what was booked. `/available-sl
 `/find-slots` and `/reserve` (body) take `offerTier`; only `best` changes
 the visit profile (every quoted program; part of the slot-cache key), and
 only when the live gate is on, the estimate's stored bundle offers that
-tier, and the linked customer is not a LIVE active member (`isActivePlanCustomer`,
-strict, fail-closed on any read error) — the same three facts the accept
-re-checks (before and again inside its transaction, 409) — so a hold can
-never size a visit the accept refuses; the accept's reservation commit
-carries the resolved value.
+tier, and the customer the accept would land on is not a LIVE active member
+(the same `offerTierMemberBlock`, fail-closed on any read error) — the same
+three facts the accept re-checks (before and again inside its transaction,
+409) — and `/reserve` re-judges all three on the LOCKED row inside the
+reservation transaction (409 `offer_tier_unavailable` when the tier is gone or
+the customer became a member), so a hold can never size a visit the accept
+refuses; the accept's reservation commit carries the resolved value.
 
 The same PUT is the priced ADD rail under `GATE_ESTIMATE_SERVICE_ADD`
 (STRICT opt-in, needs the opt-out gate; off = the `/data` `addable` stamp is

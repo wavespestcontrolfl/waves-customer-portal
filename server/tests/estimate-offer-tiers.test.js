@@ -274,18 +274,20 @@ describe('resolveBestOfferTierForSlots (slot routes)', () => {
   const bundleWithBest = async () => ({ offerTiers: [{ key: 'good' }, { key: 'better' }, { key: 'best', frequencies: [] }] });
 
   test("returns 'best' only with the gate on, a stored best tier and no live member; fails closed otherwise", async () => {
-    const base = { db: dbFor(true), estimateId: 'est-1', raw: 'best', gateOn: true, buildPricingBundle: bundleWithBest, isActiveMember: async () => false };
+    const base = { db: dbFor(true), estimateId: 'est-1', raw: 'best', gateOn: true, buildPricingBundle: bundleWithBest, isBlockedMember: async () => false };
     await expect(OfferTiers.resolveBestOfferTierForSlots(base)).resolves.toBe('best');
     await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, raw: 'better' })).resolves.toBeNull();
     await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, gateOn: false })).resolves.toBeNull();
     await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, buildPricingBundle: async () => ({ frequencies: [] }) })).resolves.toBeNull();
     await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: dbFor(false) })).resolves.toBeNull();
     await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, buildPricingBundle: async () => { throw new Error('boom'); } })).resolves.toBeNull();
-    // A linked customer: a live member, or an unreadable membership, withholds the tier.
-    const memberDb = () => ({ where: () => ({ first: async () => ({ ...row, customer_id: 'cust-1' }) }) });
-    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: memberDb, isActiveMember: async () => true })).resolves.toBeNull();
-    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: memberDb, isActiveMember: async () => { throw new Error('db'); } })).resolves.toBeNull();
-    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, db: memberDb, isActiveMember: async () => false })).resolves.toBe('best');
+    // The member judge sees the whole row (linked customer or phone match);
+    // a block, an unreadable judgement, or no judge at all withholds the tier.
+    const seen = [];
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, isBlockedMember: async (r) => { seen.push(r); return true; } })).resolves.toBeNull();
+    expect(seen[0]).toEqual(row);
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, isBlockedMember: async () => { throw new Error('db'); } })).resolves.toBeNull();
+    await expect(OfferTiers.resolveBestOfferTierForSlots({ ...base, isBlockedMember: undefined })).resolves.toBeNull();
   });
 });
 
@@ -328,5 +330,50 @@ describe('palm-count stamp on the Best tier', () => {
     // No tree & shrub anywhere: byte-identical passthrough.
     const plain = { frequencies: [], offerTiers: [{ key: 'best', frequencies: [{ key: 'quarterly', perServiceTreatments: [{ service: 'pest_control' }] }] }] };
     expect(stampTreeShrubPalmCount(plain, 4)).toBe(plain);
+  });
+});
+
+describe('pre-gate send snapshots', () => {
+  const originalGate = process.env[GATE];
+  afterEach(() => {
+    if (originalGate === undefined) delete process.env[GATE];
+    else process.env[GATE] = originalGate;
+  });
+
+  test('gate on: a snapshot frozen without a tier verdict is served with its prices untouched and the live tiers grafted on', async () => {
+    process.env[GATE] = 'true';
+    const estimate = pestLawnOneTimeToggleEstimate({ id: 'snapshot-pre-gate' });
+    // Freeze today's served (pest-only) bundle as the send snapshot, with a
+    // deliberately distinctive quarterly monthly so a rebuild would show.
+    const live = await buildPricingBundle(estimate, { monthlyBilled: false });
+    const frozen = JSON.parse(JSON.stringify(live));
+    delete frozen.offerTiers; delete frozen.offerTierDefaultKey; delete frozen.offerTiersEvaluated;
+    frozen.frequencies = frozen.frequencies.map((f) => (f.key === 'quarterly' ? { ...f, monthly: 31.5, annual: 378 } : f));
+    // The snapshot fast path requires the row's totals to match a frozen entry.
+    estimate.monthly_total = 31.5;
+    estimate.annual_total = 378;
+    estimate.estimate_data.sendSnapshot = { pricingBundle: frozen };
+    const served = await buildPricingBundle({ ...estimate, id: 'snapshot-pre-gate-2' }, { monthlyBilled: false });
+    expect(served.snapshotHit).toBe(true);
+    expect(served.frequencies.find((f) => f.key === 'quarterly').monthly).toBe(31.5);
+    expect(served.offerTierDefaultKey).toBe('better');
+    expect(served.offerTiers.map((t) => t.key)).toEqual(['good', 'better', 'best']);
+    expect(served.offerTiers[2].sections.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
+    expect(served.offerTiersEvaluated).toBe(true);
+  });
+
+  test('gate off: the same snapshot is served byte-for-byte, no tier fields', async () => {
+    delete process.env[GATE];
+    const estimate = pestLawnOneTimeToggleEstimate({ id: 'snapshot-gate-off' });
+    const live = await buildPricingBundle(estimate, { monthlyBilled: false });
+    const frozen = JSON.parse(JSON.stringify(live));
+    const frozenQuarterly = frozen.frequencies.find((f) => f.key === 'quarterly');
+    estimate.monthly_total = frozenQuarterly.monthly;
+    estimate.annual_total = frozenQuarterly.annual;
+    estimate.estimate_data.sendSnapshot = { pricingBundle: frozen };
+    const served = await buildPricingBundle({ ...estimate, id: 'snapshot-gate-off-2' }, { monthlyBilled: false });
+    expect(served.snapshotHit).toBe(true);
+    expect(served.offerTiers).toBeUndefined();
+    expect(served.offerTiersEvaluated).toBeUndefined();
   });
 });

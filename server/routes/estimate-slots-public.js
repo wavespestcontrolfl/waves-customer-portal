@@ -70,24 +70,26 @@ const {
   resolveEstimateAcceptance,
   estimateRendersMonthlyBilling,
   verifyEstimateAskToken,
+  offerTierMemberBlock,
 } = require('./estimate-public');
 const { resolveBestOfferTierForSlots } = require('../services/estimate-offer-tiers');
-const { isActivePlanCustomer } = require('../services/waveguard-existing-services');
 const featureGates = require('../config/feature-gates');
 
 // Offer tier (GATE_ESTIMATE_OFFER_TIERS): 'best' sizes the visit from every
 // quoted program, and only when the gate, the stored bundle and the live
-// member check all allow it (fail-closed). Anything else sizes as today.
-async function bestOfferTierForSlots(estimate, raw) {
+// member judgement (linked customer, else the prospective phone match) all
+// allow it (fail-closed). Anything else sizes as today. `database` is the
+// reservation transaction when re-judged under the locked row.
+async function bestOfferTierForSlots(estimate, raw, database = db) {
   return resolveBestOfferTierForSlots({
-    db,
+    db: database,
     estimateId: estimate?.id,
     raw,
     gateOn: typeof featureGates.estimateOfferTiersLive === 'function'
       ? featureGates.estimateOfferTiersLive()
       : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true',
     buildPricingBundle,
-    isActiveMember: (customerId) => isActivePlanCustomer(db, customerId, { strict: true }),
+    isBlockedMember: (row) => offerTierMemberBlock(row, database),
   });
 }
 
@@ -757,7 +759,19 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // (an estimate that turned trenching-review or contact_review after the pre-transaction read must
         // not consume capacity).
         revalidateEstimate: async (row, trx) => {
-          return lockedContactReviewRefusal(row, trx);
+          const contactRefusal = await lockedContactReviewRefusal(row, trx);
+          if (contactRefusal) return contactRefusal;
+          // Offer tier (Codex #5921 r1 P2): a 'best' hold is re-judged on the
+          // LOCKED row inside the reservation transaction — an edit that
+          // removed the tier, or a customer who became a member meanwhile,
+          // must not mint a full-bundle hold the accept then refuses.
+          if (slotOpts.offerTier === 'best' && (await bestOfferTierForSlots(row, 'best', trx)) !== 'best') {
+            return {
+              status: 409,
+              body: { error: 'That plan option is no longer available — reload the page and pick again.', code: 'offer_tier_unavailable' },
+            };
+          }
+          return null;
         },
       });
       return res.status(201).json({
