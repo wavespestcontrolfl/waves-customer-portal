@@ -4451,6 +4451,25 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 10 MIN (:04, :14, …) — Estimate sent ⇒ Waves Assessment closed
+  // (GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT; returns before any read when off).
+  // Owner ruling 2026-10-04. A sweep over durable state — an open assessment
+  // visit and a sent estimate for the same customer — instead of a hook on
+  // every estimate send path. Reads a handful of rows; off the :00 / :05
+  // minutes the heavier jobs use.
+  // =========================================================================
+  cron.schedule('4-59/10 * * * *', async () => {
+    try {
+      await runExclusive('assessment-estimate-closeout', async () => {
+        const sweep = await require('./assessment-estimate-closeout').closeAssessmentsWithSentEstimates();
+        if (sweep.closed) logger.info(`Assessment closeout on estimate sent: ${sweep.closed} closed of ${sweep.candidates}`);
+      });
+    } catch (err) {
+      logger.error(`Assessment closeout on estimate sent failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 11:37AM — Invoice-issued visit closeout retry
   // (GATE_INVOICE_ISSUED_CLOSES_VISIT; a no-op when off). Every send and
   // payment rail runs the closeout once, best-effort; this is the only retry

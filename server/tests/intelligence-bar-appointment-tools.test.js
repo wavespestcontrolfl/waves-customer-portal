@@ -21,6 +21,9 @@
  *     release, customer tracker refresh
  */
 jest.mock('../models/db', () => jest.fn());
+// The package visit 2 refusal (package-followup-booking.hasLivePackageChild): none by default.
+const mockHasLivePackageChild = jest.fn(async () => false);
+jest.mock('../services/package-followup-booking', () => ({ hasLivePackageChild: (...a) => mockHasLivePackageChild(...a), assertNoLivePackageChildLocked: async () => {} }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/tech-status', () => ({
   clearTechCurrentJob: jest.fn().mockResolvedValue(null),
@@ -1365,6 +1368,20 @@ describe('reschedule_appointment', () => {
       appointment_id: 'svc-1', new_date: '2000-01-01',
     });
     expect(result.error).toMatch(/not in the past/);
+  });
+
+  test('a package visit 1 with a live visit 2 is refused: the card cannot show visit 2 (owner ruling 2026-10-04)', async () => {
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue(baseAppt) }), chain(), updateChain],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+    });
+    mockHasLivePackageChild.mockResolvedValueOnce(true);
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00', reason: 'customer asked',
+    });
+    expect(result.error).toMatch(/linked second treatment/);
+    expect(updateChain.update).not.toHaveBeenCalled();
   });
 
   test('moves the visit, refreshes the track-token expiry, and writes an admin_ib reschedule_log row', async () => {

@@ -2095,6 +2095,11 @@ async function commitReservation({
       .update(updates)
       .returning('*');
     if (capacityFit) await persistArrivalOrder(client, capacityFit, scheduledServiceId);
+    // Two-treatment package (cockroach / flea): graduating the hold IS the
+    // booking, so visit 2 books here for both estimate-accept branches and
+    // one-tap — gate-dark, savepoint-isolated, no-op for every other
+    // service (package-followup-booking.js).
+    await require('./package-followup-booking').ensurePackageFollowUpVisit({ trx: client, primary: updated });
     // Tech-facing "new visit" card (tech-visit-notifications.js): the hold
     // kept its technician, and graduating it IS the booking — no assignment
     // write follows to announce it. Rides `client` so it waits for the
