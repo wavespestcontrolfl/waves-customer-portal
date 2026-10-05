@@ -442,11 +442,16 @@ function derivedAmount(row, lawnSqft) {
   const base = rateUnit.split('/')[0].trim().toLowerCase();
   const unit = measureUnit(base, row.dimension);
   if (!unit) return null;
-  // Two decimals in the rate's unit, as the full form figures it (derivedTotalAmount).
-  const seeded = seededAmount(Math.round(rate * (area / 1000) * 100) / 100, unit);
-  if (!(seeded.amount > 0)) return null;
+  // Rounded ONCE, after the spoon conversion, to the precision the record
+  // keeps for the unit (three decimals for fl oz, as submittedAmount sends it;
+  // two for spoons and dry weights): a two-decimal pre-round in fl oz would
+  // zero a tiny dose (0.004 fl oz) and the record would disagree with the box.
+  const seeded = seededAmount(rate * (area / 1000), unit);
+  const places = seeded.unit === 'fl_oz' ? 1000 : 100;
+  const amount = Math.round(seeded.amount * places) / places;
+  if (!(amount > 0)) return null;
   return {
-    amount: seeded.amount,
+    amount,
     unit: seeded.unit,
     note: `${rate} ${unitLabel(base)} per 1,000 sq ft × ${area.toLocaleString('en-US')} sq ft`,
   };

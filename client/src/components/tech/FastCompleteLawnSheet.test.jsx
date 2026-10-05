@@ -833,6 +833,20 @@ describe('products', () => {
     expect(completeCalls()[0].body.products[0]).toMatchObject({ totalAmount: 0.5, amountUnit: 'fl_oz' });
   });
 
+  test('a tiny liquid dose is rounded once, to the record\'s precision, and still recorded (never zeroed by a two-decimal pre-round)', async () => {
+    // 0.0008 fl oz per 1,000 on 5,000 sq ft is 0.004 fl oz: no spoon reading
+    // (not an eighth of a teaspoon), so it stays in fl oz at three decimals.
+    await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: [{ ...RATED[0], default_rate_per_1000: 0.0008 }] } });
+    await addProductByName('Talak 7.9%');
+    const talak = editorFor('Talak 7.9%');
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('0.004');
+    expect(within(talak).getByLabelText('Unit for Talak 7.9%').value).toBe('fl_oz');
+    expect(within(talak).queryByText('No amount entered. It is recorded without one.')).toBeNull();
+    await analyze();
+    await submit();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ totalAmount: 0.004, amountUnit: 'fl_oz' });
+  });
+
   test('moved to Spot treatment, an added product has no area, so nothing is figured and the box is empty again', async () => {
     await openSheet({ request: makeRequest({ ctx: ONE_TIME() }), props: { catalog: RATED } });
     await addProductByName('Talak 7.9%');
