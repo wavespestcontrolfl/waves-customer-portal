@@ -545,6 +545,16 @@ function v13SelectedGateWarnings(selectedItems) {
   })));
 }
 
+// The apply-alone blocks for the SELECTED lines of a visit or a tank sheet, judged
+// before any quantity is computed so both can withhold the selection's amounts.
+// A line is { product, selected }; rowOf(line) is its staged v13 row, or null.
+function v13SelectionBlocks(lines, rowOf, gateContext) {
+  return v13ApplyAloneBlocks(lines.filter((line) => line.selected && line.product).map((line) => ({
+    product: line.product,
+    gateNotes: v13GateNotes(rowOf(line)?.gates, gateContext),
+  })));
+}
+
 function v13ApplyAloneBlocks(selectedItems) {
   return selectedItems
     .filter((item) => item.product && item.gateNotes?.some((note) => note.key === 'applyAlone')
@@ -1703,13 +1713,17 @@ async function buildPlanForService(serviceId, options = {}) {
     municipality: resolvedOrdinanceCity,
     productionMode: structuredProtocol?.window?.productionMode,
   };
+  // An apply-alone product selected beside any other product holds the mix: the plan
+  // blocks and withholds the selection's quantities (as the tank sheet does).
+  const v13RowOf = (item) => (substitutions.has(String(item.product.id)) ? null : v13Rows.get(String(item.product.id)));
+  const applyAloneBlocks = v13SelectionBlocks(candidateItems, v13RowOf, gateContext);
   const planItems = candidateItems.map((item) => {
     // One product per line: the approved substitute when one is on the visit,
     // else the matched catalog row. Only an unsubstituted match reads a v13 row.
     const substitution = item.product ? substitutions.get(String(item.product.id)) : null;
     const plannedProduct = substitution ? substitutedProduct(substitution) : item.product;
     const v13Row = !substitution && item.product ? v13Rows.get(String(item.product.id)) : null;
-    const mix = plannedProduct && (!v13Row || v13RowCalculates(v13Row)) ? calculateProductAmount({
+    const mix = plannedProduct && (!v13Row || v13RowCalculates(v13Row)) && !(applyAloneBlocks.length && item.selected) ? calculateProductAmount({
       product: plannedProduct,
       lawnSqft,
       carrierGalPer1000: carrier,
@@ -1761,7 +1775,6 @@ async function buildPlanForService(serviceId, options = {}) {
   // clear is a visible warning; an apply-alone product selected beside any other
   // product holds the mix.
   warnings.push(...v13SelectedGateWarnings(plannedItems));
-  const applyAloneBlocks = v13ApplyAloneBlocks(plannedItems);
   blocks.push(...applyAloneBlocks);
   if (completionDefaultsEnabled && !matchesLawnCompletionProtocol(structuredProtocol, {
     protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version, windowKey: service.lawn_protocol_window_key,
@@ -2020,6 +2033,7 @@ module.exports = {
   planLineFields,
   v13SelectedGateWarnings,
   v13ApplyAloneBlocks,
+  v13SelectionBlocks,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,

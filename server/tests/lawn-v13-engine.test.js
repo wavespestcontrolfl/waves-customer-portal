@@ -391,6 +391,21 @@ describe('plan engine reads the matched v13 protocol row', () => {
     expect(block({ trackKey: 'bermuda', structuredProtocol: null }, 'false')).toBeNull();
   });
 
+  describe('v13SelectionBlocks: the apply-alone hold, judged before any quantity', () => {
+    const rowOf = (rows) => (line) => rows[line.product.id];
+    const tet = { product: { id: 't', name: 'Tetrino Insecticide' }, selected: true };
+    const arena = { product: { id: 'a', name: 'Arena 50 WDG' }, selected: true };
+    const rows = { t: { gates: { applyAlone: true } }, a: { gates: {} } };
+    test('another selected product beside an apply-alone one is a block; alone, or the other unselected, is not', () => {
+      expect(engine.v13SelectionBlocks([tet, arena], rowOf(rows), {}).map((b) => b.code)).toEqual(['lawn_v13_apply_alone']);
+      expect(engine.v13SelectionBlocks([tet], rowOf(rows), {})).toEqual([]);
+      expect(engine.v13SelectionBlocks([tet, { ...arena, selected: false }], rowOf(rows), {})).toEqual([]);
+      expect(engine.v13SelectionBlocks([{ ...tet, selected: false }, arena], rowOf(rows), {})).toEqual([]);
+      expect(engine.v13SelectionBlocks([tet, arena], rowOf({ t: { gates: {} }, a: { gates: {} } }), {})).toEqual([]);
+      expect(engine.v13SelectionBlocks([tet, arena], () => null, {})).toEqual([]);
+    });
+  });
+
   describe('which v13 rows compute a quantity (v13RowCalculates)', () => {
     test('only a whole-lawn row that states a rate or a nutrient target', () => {
       const calc = (row) => engine.v13RowCalculates(row);

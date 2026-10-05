@@ -204,6 +204,11 @@ describeDb('the v13 plan through PostgreSQL', () => {
       expect(codes(result)).toContain('lawn_v13_apply_alone');
       expect(result.status).toBe('blocked');
       expect(result.mixingOrder).toEqual([]);
+      // The hold withholds the selection's quantities in the plan, as on the tank sheet.
+      expect(result.mixCalculator.items.map((i) => i.mix)).toEqual([null, null]);
+      expect(result.mixCalculator.items.every((i) => i.product.inventory.plannedAmount == null)).toBe(true);
+      expect(result.mixCalculator.materialCostSummary.pricedLineCount ?? 0).toBe(0);
+      expect(JSON.stringify(result.mixCalculator.nutrientProjection)).not.toMatch(/"amount":\s*[1-9]/);
     });
 
     test('gate off: the plan item carries no v13 gates or notes, and nothing is warned', async () => {
@@ -259,9 +264,16 @@ describeDb('the v13 plan through PostgreSQL', () => {
       }
       expect(result.mixCalculator.items.find((i) => i.product?.name === 'Celsius WG').spot.reference).toBe('Label rate 0.085 oz per 1,000 sq ft');
       expect(result.mixCalculator.items.find((i) => i.product?.name === 'LESCO 90/10 Nonionic Surfactant').spot.reference).toBe('Label concentration 0.25% v/v');
-      // The whole-lawn Tetrino still computes: 1.835 fl oz on the sunny half of 10,000 sq ft.
+      // Tetrino is apply-alone and these are selected beside it: the hold withholds its amount too.
+      expect(codes(result)).toContain('lawn_v13_apply_alone');
+      expect(tetrinoItem(result).mix).toBeNull();
+    });
+
+    test('the whole-lawn Tetrino still computes beside UNSELECTED spot options: 1.835 fl oz on the sunny half of 10,000 sq ft', async () => {
+      setGates();
+      const result = await plan(await plannedVisit());
+      expect(codes(result)).not.toContain('lawn_v13_apply_alone');
       expect(tetrinoItem(result).mix.amount).toBe(1.835);
-      expect(result.mixCalculator.materialCostSummary.pricedLineCount).toBeLessThanOrEqual(1);
     });
 
     test('unselected spot options carry no planned amount either', async () => {

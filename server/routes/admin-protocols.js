@@ -18,7 +18,7 @@ const {
   v13RowCalculates,
   planLineFields,
   v13SelectedGateWarnings,
-  v13ApplyAloneBlocks,
+  v13SelectionBlocks,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
@@ -922,9 +922,6 @@ function stripLawnMixItemPricing(item) {
   };
 }
 
-// Every quantity of a selected item, withheld while the sheet is blocked.
-const WITHHELD_MIXES = { jobMix: null, fullTankMix: null, plannedMix: null, plannedFullTankMix: null };
-
 // The catalog fields a tank-sheet row shows: [out, source, fallback, transform].
 // A fallback replaces a falsy value (null, [] ...); no fallback copies the value;
 // a transform runs instead of both.
@@ -992,24 +989,28 @@ router.get('/lawn-mix', async (req, res, next) => {
       if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
       throw err;
     }
-    const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1 || null };
+    // The rig, derived once: carrier, tank size, and the coverage one tank gives.
+    const [carrier, tankCapacity] = ['carrier_gal_per_1000', 'tank_capacity_gal'].map((key) => Number((calibration || {})[key] || 0));
+    const tankCoverageSqft = carrier ? (tankCapacity / carrier) * 1000 : 0;
+    const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1 };
     const areaContext = {
       plan: req.query.plan,
       weedPressure: req.query.weedPressure,
       conditionFlags: req.query.conditionFlags,
       propertyFlags: req.query.propertyFlags,
       includePremiumOnly: req.query.includePremiumOnly === 'true',
-      isFirstYear: req.query.isFirstYear == null ? undefined : req.query.isFirstYear !== 'false',
+      isFirstYear: req.query.isFirstYear !== 'false',
     };
-    const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
-    const tankCapacity = Number(calibration?.tank_capacity_gal || 0);
-    const tankCoverageSqft = carrier && tankCapacity ? (tankCapacity / carrier) * 1000 : 0;
+    // An apply-alone product selected beside another product is a block: judged
+    // first, so the sheet withholds every quantity of the selected products and
+    // offers no combined mixing order (the plan does the same).
+    const blocks = v13SelectionBlocks(resolvedLines, (line) => v13Rows.get(String(line.product.id)), gateContext);
     const items = resolvedLines.map((line) => {
       const { product, selected } = line;
       const v13Row = product ? v13Rows.get(String(product.id)) : null;
       // A spot or label-rate v13 row (Arena, Celsius, the surfactant, Dylox ...) gets
       // no quantity at all: the same chokepoint the plan uses (v13RowCalculates).
-      const canMix = Boolean(product && carrier && (!v13Row || v13RowCalculates(v13Row)));
+      const canMix = Boolean(product && carrier && (!v13Row || v13RowCalculates(v13Row)) && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
         product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Row),
       });
@@ -1046,14 +1047,6 @@ router.get('/lawn-mix', async (req, res, next) => {
         plannedFullTankMix,
       };
     });
-    // The plan's own v13 rules, from the shared helpers: an apply-alone product
-    // selected beside another product is a block. The sheet then withholds every
-    // quantity of the selected products and offers no combined mixing order.
-    const blocks = v13ApplyAloneBlocks(items.filter((item) => item.selected));
-    if (blocks.length) {
-      for (const item of items) if (item.selected) Object.assign(item, WITHHELD_MIXES);
-    }
-
     const selectedItems = items.filter((item) => item.selected);
     const materialCostSummary = summarizeMaterialCost(selectedItems.map((item) => ({
       selected: item.selected,
@@ -1101,11 +1094,9 @@ router.get('/lawn-mix', async (req, res, next) => {
         calibrationId: calibration.id,
         systemName: calibration.system_name,
         systemType: calibration.system_type,
-        carrierGalPer1000: Number(calibration.carrier_gal_per_1000),
-        tankCapacityGal: calibration.tank_capacity_gal ? Number(calibration.tank_capacity_gal) : null,
-        tankCoverageSqft: calibration.tank_capacity_gal && calibration.carrier_gal_per_1000
-          ? Math.round((Number(calibration.tank_capacity_gal) / Number(calibration.carrier_gal_per_1000)) * 1000)
-          : null,
+        carrierGalPer1000: carrier,
+        tankCapacityGal: tankCapacity || null,
+        tankCoverageSqft: tankCoverageSqft ? Math.round(tankCoverageSqft) : null,
         expiresAt: calibration.expires_at || null,
       } : null,
       areaSqft,
