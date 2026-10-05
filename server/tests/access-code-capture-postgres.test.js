@@ -1,0 +1,613 @@
+// Real PostgreSQL transactions (rolled back): the capture sweep with a stubbed
+// model read, the office's accept / dismiss / retire / add, and the admin
+// routes. All names, addresses, phones and codes are synthetic.
+const postgres = process.env.DATABASE_URL ? describe : describe.skip;
+let mockConnection;
+jest.mock('../models/db', () => new Proxy((...args) => mockConnection(...args), {
+  get(_target, key) {
+    const value = mockConnection?.[key];
+    return typeof value === 'function' ? value.bind(mockConnection) : value;
+  },
+}));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
+jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => work()) }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (req, _res, next) => { req.technicianId = req.headers['x-test-admin'] || null; next(); },
+  requireAdmin: (_req, _res, next) => next(),
+  requireTechOrAdmin: (_req, _res, next) => next(),
+}));
+
+const { randomUUID } = require('node:crypto');
+const express = require('express');
+const logger = require('../services/logger');
+const NotificationService = require('../services/notification-service');
+const numbers = require('../config/twilio-numbers');
+const { etDateString, addETDays } = require('../utils/datetime-et');
+const access = require('../services/access-code-capture');
+const router = require('../routes/admin-access-codes');
+
+jest.setTimeout(30000);
+postgres('access codes section', () => {
+  let database;
+  let trx;
+  let server;
+  let baseUrl;
+  const OLD_ENV = { gate: process.env.GATE_ACCESS_CODES_SECTION, since: process.env.GATE_ACCESS_CODES_SECTION_SINCE };
+  const SINCE = '2040-01-01T00:00:00Z';
+  const OUR_NUMBER = numbers.locations.parrish.number;
+  const ADMIN_ID = randomUUID();
+  const NOW = new Date('2040-03-10T16:00:00Z');
+  const day = (n) => etDateString(addETDays(NOW, n));
+
+  const customer = async ({ properties = 1, house = '4455', zip = '34202', prefs = null } = {}) => {
+    const id = randomUUID();
+    await trx('customers').insert({ id, first_name: 'Sample', last_name: 'Owner', phone: '+19415550142', email: `${id}@example.invalid` });
+    const propertyIds = [];
+    for (let i = 0; i < properties; i += 1) {
+      const propertyId = randomUUID();
+      propertyIds.push(propertyId);
+      await trx('customer_properties').insert({
+        id: propertyId, customer_id: id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: i === 0,
+        address_line1: i === 0 ? `${house} Example Lane` : `${700 + i} Other Court`, city: 'Lakewood Ranch', zip,
+        active: true, address_key: randomUUID(),
+      });
+    }
+    if (prefs) await trx('property_preferences').insert({ customer_id: id, ...prefs });
+    return { id, propertyIds };
+  };
+  const text = async (customerId, body, { at = '2040-03-10T15:00:00Z', direction = 'inbound', to = OUR_NUMBER, from = '+19415550142' } = {}) => {
+    const id = randomUUID();
+    await trx('sms_log').insert({
+      id, customer_id: customerId, direction, from_phone: direction === 'inbound' ? from : to,
+      to_phone: direction === 'inbound' ? to : from, message_body: body, created_at: new Date(at), status: direction === 'inbound' ? 'received' : 'sent',
+      message_type: direction === 'inbound' ? 'inbound' : 'manual',
+    });
+    return id;
+  };
+  const gateItem = (extra = {}) => ({ kind: 'neighborhood_gate', code: '#4821', instructions: null, life: 'standing', quote: 'The gate code is #4821', ...extra });
+  const stub = (items) => jest.fn(async () => ({ items }));
+  const sweep = (read) => access.runAccessCodeNet({ now: NOW, conn: trx, read });
+  const rows = (customerId) => trx('customer_access_codes').where({ customer_id: customerId }).orderBy('created_at').orderBy('id');
+  const receipts = (messageId) => trx('data_hygiene_source_extractions').where({ source_id: messageId, extractor_version: 'access-net-v1' });
+  const visit = async (customerId, date, status = 'confirmed') => {
+    const id = randomUUID();
+    await trx('scheduled_services').insert({ id, customer_id: customerId, scheduled_date: date, service_type: 'Pest Control', status });
+    return id;
+  };
+  const found = async (customerId, extra = {}) => {
+    const value = { kind: 'neighborhood_gate', code: '#4821', instructions: null, life: 'standing', ...extra };
+    const [row] = await trx('customer_access_codes').insert({
+      customer_id: customerId, kind: value.kind, code: value.code, instructions: value.instructions, life: value.life,
+      status: 'found', source_type: 'sms', source_id: randomUUID(), source_quote: 'q', source_at: new Date(),
+      value_hash: access.valueHash(value.code, value.instructions),
+    }).returning('*');
+    return row;
+  };
+  const call = async (method, path, body, headers = {}) => {
+    const res = await fetch(`${baseUrl}${path}`, {
+      method, headers: { 'content-type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, cache: res.headers.get('cache-control'), body: await res.json().catch(() => ({})) };
+  };
+
+  beforeAll(async () => {
+    const url = new URL(process.env.DATABASE_URL);
+    const privateQa = process.env.WAVES_DATABASE_ENVIRONMENT === 'test'
+      && /^\/waves_qa_[a-f0-9]{32}$/.test(url.pathname);
+    if (!['localhost', '127.0.0.1'].includes(url.hostname) && !privateQa) {
+      throw new Error('Use an isolated local/CI database or labeled private QA database');
+    }
+    database = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
+    const app = express();
+    app.use(express.json());
+    app.use('/api/admin/access-codes', router);
+    await new Promise((resolve) => { server = app.listen(0, '127.0.0.1', resolve); });
+    baseUrl = `http://127.0.0.1:${server.address().port}/api/admin/access-codes`;
+  });
+  beforeEach(async () => {
+    jest.clearAllMocks();
+    process.env.GATE_ACCESS_CODES_SECTION = 'true';
+    process.env.GATE_ACCESS_CODES_SECTION_SINCE = SINCE;
+    trx = await database.transaction();
+    mockConnection = trx;
+  });
+  afterEach(async () => {
+    await trx.rollback();
+    for (const [key, value] of [['GATE_ACCESS_CODES_SECTION', OLD_ENV.gate], ['GATE_ACCESS_CODES_SECTION_SINCE', OLD_ENV.since]]) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  afterAll(async () => {
+    await new Promise((resolve) => { server.close(resolve); });
+    await database.destroy();
+  });
+
+  describe('gate', () => {
+    test('off: the sweep reads nothing and every route answers 404 with no-store', async () => {
+      process.env.GATE_ACCESS_CODES_SECTION = 'false';
+      const c = await customer();
+      await text(c.id, 'The gate code is #4821');
+      const read = stub([gateItem()]);
+      expect(await sweep(read)).toEqual({ skipped: 'gate_off' });
+      expect(read).not.toHaveBeenCalled();
+      const probes = [
+        ['GET', `/?customerId=${c.id}`], ['GET', '/found'], ['POST', '/', {}],
+        ['POST', `/${randomUUID()}/accept`, {}], ['POST', `/${randomUUID()}/dismiss`], ['POST', `/${randomUUID()}/retire`],
+      ];
+      for (const [method, path, body] of probes) {
+        const res = await call(method, path, body);
+        expect([res.status, res.body, res.cache]).toEqual([404, { enabled: false }, 'no-store']);
+      }
+    });
+
+    test('on without a valid SINCE instant: the sweep waits for an activation time', async () => {
+      const read = stub([gateItem()]);
+      for (const bad of [undefined, '', '2040-01-01', '2040-01-01T00:00:00', 'soon']) {
+        if (bad === undefined) delete process.env.GATE_ACCESS_CODES_SECTION_SINCE; else process.env.GATE_ACCESS_CODES_SECTION_SINCE = bad;
+        expect(await sweep(read)).toEqual({ skipped: 'activation_time_required' });
+      }
+      expect(read).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('sweep', () => {
+    test('files a found row from a text, idempotently', async () => {
+      const c = await customer();
+      const messageId = await text(c.id, 'The gate code is #4821');
+      const read = stub([gateItem()]);
+      expect(await sweep(read)).toMatchObject({ scanned: 1, read: 1, found: 1, failed: 0 });
+      const [row, ...rest] = await rows(c.id);
+      expect(rest).toEqual([]);
+      expect(row).toMatchObject({
+        kind: 'neighborhood_gate', code: '#4821', instructions: null, life: 'standing', status: 'found', source_type: 'sms',
+        source_id: messageId, source_quote: 'The gate code is #4821', property_id: c.propertyIds[0], decided_by: null,
+        value_hash: access.valueHash('#4821', null),
+      });
+      expect(new Date(row.source_at).toISOString()).toBe('2040-03-10T15:00:00.000Z');
+      expect((await receipts(messageId))[0]).toMatchObject({ status: 'ok', proposal_count: 1 });
+      // A second pass has nothing left to read.
+      expect(await sweep(read)).toMatchObject({ scanned: 0, found: 0 });
+      expect(read).toHaveBeenCalledTimes(1);
+      // Even with the receipt gone, the same text files nothing twice.
+      await trx('data_hygiene_source_extractions').where({ source_id: messageId }).del();
+      expect(await sweep(read)).toMatchObject({ scanned: 1, found: 0, failed: 0 });
+      expect(await rows(c.id)).toHaveLength(1);
+    });
+
+    test('the unique index is the backstop for one text, one kind, one value', async () => {
+      const c = await customer();
+      const base = await found(c.id);
+      await expect(trx.transaction((sp) => sp('customer_access_codes').insert({
+        customer_id: c.id, kind: base.kind, code: base.code, life: 'standing', status: 'found', source_type: 'sms',
+        source_id: base.source_id, value_hash: base.value_hash,
+      }))).rejects.toMatchObject({ code: '23505' });
+      // Staff rows (no source) are not constrained.
+      const staffInsert = () => trx('customer_access_codes').insert({
+        customer_id: c.id, kind: 'door', code: '1', life: 'standing', status: 'active', source_type: 'staff', value_hash: access.valueHash('1'),
+      });
+      await staffInsert();
+      await staffInsert();
+    });
+
+    test('respects the SINCE instant and skips older texts', async () => {
+      const c = await customer();
+      await text(c.id, 'The gate code is #4821', { at: '2039-12-31T23:59:00Z' });
+      const read = stub([gateItem()]);
+      expect(await sweep(read)).toMatchObject({ scanned: 0, found: 0 });
+      expect(read).not.toHaveBeenCalled();
+      expect(await rows(c.id)).toEqual([]);
+    });
+
+    test('a text with no access words is receipted without a model call', async () => {
+      const c = await customer();
+      const messageId = await text(c.id, 'See you Tuesday, thanks!');
+      const read = stub([]);
+      expect(await sweep(read)).toMatchObject({ scanned: 1, read: 0, skipped: 1, found: 0 });
+      expect(read).not.toHaveBeenCalled();
+      expect((await receipts(messageId))[0]).toMatchObject({ status: 'no_fields' });
+    });
+
+    test('a bare number is read only after our last text asked for a code', async () => {
+      const asked = await customer();
+      await text(asked.id, 'What is the gate code?', { at: '2040-03-10T14:50:00Z', direction: 'outbound' });
+      const answer = await text(asked.id, '4821', { at: '2040-03-10T14:55:00Z' });
+      const cold = await customer();
+      await text(cold.id, 'Is the tech coming at 3?', { at: '2040-03-10T14:50:00Z', direction: 'outbound' });
+      const bare = await text(cold.id, '4821', { at: '2040-03-10T14:55:00Z' });
+      const read = jest.fn(async (context) => ({
+        items: context.message.customer_id === asked.id ? [gateItem({ code: '4821', quote: '4821' })] : [],
+      }));
+      expect(await sweep(read)).toMatchObject({ scanned: 2, read: 1, found: 1 });
+      expect(read).toHaveBeenCalledTimes(1);
+      expect((await rows(asked.id))[0]).toMatchObject({ code: '4821', status: 'found' });
+      expect(await rows(cold.id)).toEqual([]);
+      expect((await receipts(answer))[0].status).toBe('ok');
+      expect((await receipts(bare))[0].status).toBe('no_fields');
+    });
+
+    test('drops what the verifier rejects: a quote that is not in the text, a house number, outbound texts', async () => {
+      const c = await customer({ house: '4455' });
+      const messageId = await text(c.id, 'The gate code is 4455');
+      const read = stub([
+        gateItem({ code: '4455', quote: 'The gate code is 4455' }),
+        gateItem({ code: '9999', quote: 'The gate code is 9999' }),
+      ]);
+      expect(await sweep(read)).toMatchObject({ read: 1, found: 0, failed: 0 });
+      expect(await rows(c.id)).toEqual([]);
+      expect((await receipts(messageId))[0]).toMatchObject({ status: 'no_fields' });
+      // An outbound text is never a candidate.
+      await text(c.id, 'The gate code is #4821', { direction: 'outbound' });
+      const again = stub([gateItem()]);
+      expect(await sweep(again)).toMatchObject({ scanned: 0 });
+    });
+
+    test('skips a value already on the profile, but files a different value for the same field', async () => {
+      const c = await customer({ prefs: { neighborhood_gate_code: '# 4821', garage_code: '1357' } });
+      await text(c.id, 'The gate code is #4821 and the garage code is 2468');
+      const read = stub([
+        gateItem({ quote: 'The gate code is #4821' }),
+        gateItem({ kind: 'garage', code: '2468', quote: 'the garage code is 2468' }),
+        gateItem({ kind: 'door', code: '#4821', quote: 'The gate code is #4821' }),
+      ]);
+      expect(await sweep(read)).toMatchObject({ found: 2 });
+      const filed = (await rows(c.id)).map((r) => [r.kind, r.code]).sort();
+      expect(filed).toEqual([['door', '#4821'], ['garage', '2468']]);
+    });
+
+    test('skips a value with a live row for the customer, but a dismissed row does not block it', async () => {
+      const c = await customer();
+      const existing = await found(c.id);
+      await text(c.id, 'The gate code is #4821');
+      const read = stub([gateItem()]);
+      expect(await sweep(read)).toMatchObject({ found: 0 });
+      expect(await rows(c.id)).toHaveLength(1);
+      await trx('customer_access_codes').where({ id: existing.id }).update({ status: 'dismissed' });
+      await trx('data_hygiene_source_extractions').where({ extractor_version: 'access-net-v1' }).del();
+      expect(await sweep(read)).toMatchObject({ found: 1 });
+      expect((await rows(c.id)).map((r) => r.status).sort()).toEqual(['dismissed', 'found']);
+    });
+
+    test('property_id is set only for a customer with one active property', async () => {
+      const one = await customer({ properties: 1 });
+      const two = await customer({ properties: 2 });
+      await text(one.id, 'The gate code is #4821');
+      await text(two.id, 'The gate code is #4821');
+      expect(await sweep(stub([gateItem()]))).toMatchObject({ found: 2 });
+      expect((await rows(one.id))[0].property_id).toBe(one.propertyIds[0]);
+      expect((await rows(two.id))[0].property_id).toBeNull();
+    });
+
+    test('a failed read is receipted failed, retried, and never logs the text or the code', async () => {
+      const c = await customer();
+      const messageId = await text(c.id, 'The gate code is #4821');
+      const read = jest.fn(async () => { throw Object.assign(new Error('provider said #4821'), { code: 'ECONN' }); });
+      expect(await sweep(read)).toMatchObject({ read: 1, found: 0, failed: 1 });
+      expect((await receipts(messageId))[0]).toMatchObject({ status: 'failed', attempt_count: 1 });
+      expect(await rows(c.id)).toEqual([]);
+      const logged = JSON.stringify([...logger.warn.mock.calls, ...logger.error.mock.calls]);
+      expect(logged).toContain(messageId);
+      expect(logged).not.toContain('4821');
+      expect(logged).not.toContain('gate code');
+      // The next pass retries it (failed is not terminal), up to the retry cap.
+      expect(await sweep(read)).toMatchObject({ scanned: 1, failed: 1 });
+      expect(await sweep(read)).toMatchObject({ scanned: 1, failed: 1 });
+      expect((await receipts(messageId))[0].status).toBe('failed_max_retries');
+      expect(await sweep(read)).toMatchObject({ scanned: 0 });
+    });
+
+    test('never rings a bell', async () => {
+      const c = await customer();
+      await text(c.id, 'The gate code is #4821');
+      await sweep(stub([gateItem()]));
+      expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+      const bells = await trx('notifications').where({ recipient_type: 'admin' }).whereRaw("created_at > now() - interval '1 minute'");
+      expect(bells).toEqual([]);
+    });
+
+    test('a text over 600 characters is receipted without a read', async () => {
+      const c = await customer();
+      const messageId = await text(c.id, `The gate code is #4821 ${'x'.repeat(600)}`);
+      const read = stub([gateItem()]);
+      expect(await sweep(read)).toMatchObject({ read: 0, skipped: 1 });
+      expect((await receipts(messageId))[0].status).toBe('no_fields');
+    });
+  });
+
+  describe('accept', () => {
+    const profile = (customerId) => trx('property_preferences').where({ customer_id: customerId }).first();
+
+    test('fills an empty profile field, creating the preferences row when there is none', async () => {
+      const c = await customer();
+      const row = await found(c.id, { kind: 'lockbox', code: '5-5-5' });
+      const out = await access.accept(trx, row.id, { adminUserId: ADMIN_ID });
+      expect(out).toMatchObject({ ok: true, profileField: 'lockbox_code' });
+      expect(out.row).toMatchObject({ status: 'active', code: '5-5-5', decidedBy: ADMIN_ID });
+      expect((await profile(c.id)).lockbox_code).toBe('5-5-5');
+    });
+
+    test('never overwrites a filled field', async () => {
+      const c = await customer({ prefs: { neighborhood_gate_code: '#1111' } });
+      const row = await found(c.id);
+      const out = await access.accept(trx, row.id, { adminUserId: ADMIN_ID });
+      expect(out).toMatchObject({ ok: true, profileField: null });
+      expect(out.row.status).toBe('active');
+      expect((await profile(c.id)).neighborhood_gate_code).toBe('#1111');
+    });
+
+    test('an empty string in the field counts as empty, a space-only value too', async () => {
+      const c = await customer({ prefs: { garage_code: '  ' } });
+      const row = await found(c.id, { kind: 'garage', code: '2468' });
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: true, profileField: 'garage_code' });
+      expect((await profile(c.id)).garage_code).toBe('2468');
+    });
+
+    test('a door code and a visit code never touch the profile', async () => {
+      const c = await customer();
+      const door = await found(c.id, { kind: 'door', code: '7716' });
+      const visitOnly = await found(c.id, { kind: 'lockbox', code: '1212', life: 'visit' });
+      await access.accept(trx, door.id, {});
+      await access.accept(trx, visitOnly.id, {});
+      expect(await profile(c.id)).toBeUndefined();
+    });
+
+    test('office edits are re-validated and the hash is recomputed', async () => {
+      const c = await customer();
+      const row = await found(c.id);
+      const out = await access.accept(trx, row.id, { kind: 'property_gate', code: ' *99 12 ', instructions: 'Press 2 first' });
+      expect(out.row).toMatchObject({ kind: 'property_gate', code: '*99 12', instructions: 'Press 2 first' });
+      const stored = await trx('customer_access_codes').where({ id: row.id }).first();
+      expect(stored.value_hash).toBe(access.valueHash('*99 12', null));
+      expect((await profile(c.id)).property_gate_code).toBe('*99 12');
+    });
+
+    test.each([
+      ['an unknown kind', { kind: 'window' }, 'invalid_kind'],
+      ['an unknown life', { life: 'forever' }, 'invalid_life'],
+      ['a code over 40 characters', { code: 'x'.repeat(41) }, 'invalid_code'],
+      ['a non-text code', { code: 1234 }, 'invalid_code'],
+      ['instructions over 600 characters', { instructions: 'x'.repeat(601) }, 'invalid_instructions'],
+      ['no value left', { code: null, instructions: null }, 'value_required'],
+    ])('rejects %s without changing the row', async (_name, edit, code) => {
+      const c = await customer();
+      const row = await found(c.id);
+      expect(await access.accept(trx, row.id, edit)).toEqual({ ok: false, status: 400, code });
+      expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('found');
+    });
+
+    test('only a found row can be accepted', async () => {
+      const c = await customer();
+      const row = await found(c.id);
+      expect((await access.accept(trx, row.id, {})).ok).toBe(true);
+      expect(await access.accept(trx, row.id, {})).toEqual({ ok: false, status: 409, code: 'not_pending' });
+      const dismissed = await found(c.id, { code: '2222' });
+      await access.dismiss(trx, dismissed.id, {});
+      expect(await access.accept(trx, dismissed.id, {})).toEqual({ ok: false, status: 409, code: 'not_pending' });
+      expect(await access.accept(trx, randomUUID(), {})).toEqual({ ok: false, status: 404, code: 'not_found' });
+      expect(await access.accept(trx, 'nope', {})).toEqual({ ok: false, status: 404, code: 'not_found' });
+    });
+
+    test('refuses a second active standing row with the same value, and an edit that collides with a sibling', async () => {
+      const c = await customer();
+      const first = await found(c.id);
+      const second = await found(c.id);
+      await access.accept(trx, first.id, {});
+      expect(await access.accept(trx, second.id, {})).toEqual({ ok: false, status: 409, code: 'duplicate_active' });
+      // Same text, two found rows; editing one to the other's value hits the unique index.
+      const sourceId = randomUUID();
+      const a = await trx('customer_access_codes').insert({
+        customer_id: c.id, kind: 'door', code: '3000', life: 'standing', status: 'found', source_type: 'sms', source_id: sourceId, value_hash: access.valueHash('3000'),
+      }).returning('*');
+      const b = await trx('customer_access_codes').insert({
+        customer_id: c.id, kind: 'door', code: '3001', life: 'standing', status: 'found', source_type: 'sms', source_id: sourceId, value_hash: access.valueHash('3001'),
+      }).returning('*');
+      expect(await access.accept(trx, b[0].id, { code: '3000' })).toEqual({ ok: false, status: 409, code: 'duplicate' });
+      expect((await trx('customer_access_codes').where({ id: b[0].id }).first()).status).toBe('found');
+      expect((await trx('customer_access_codes').where({ id: a[0].id }).first()).status).toBe('found');
+    });
+
+    test('writes an audit event that carries no code, quote or instructions', async () => {
+      const c = await customer();
+      const row = await found(c.id, { code: '#6543', instructions: 'press two' });
+      await access.accept(trx, row.id, { adminUserId: ADMIN_ID });
+      const events = await trx('audit_log').where({ resource_id: row.id, action: 'access_code.accepted' });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ actor_type: 'admin', actor_id: ADMIN_ID, resource_type: 'customer_access_codes' });
+      expect(JSON.stringify(events[0])).not.toMatch(/6543|press two/);
+      expect(events[0].metadata).toMatchObject({ customer_id: c.id, kind: 'neighborhood_gate', profile_field: 'neighborhood_gate_code', edited: false });
+    });
+  });
+
+  describe('visit-life codes', () => {
+    test('attach to the next live visit within 14 days and leave the live list once it is completed', async () => {
+      const c = await customer();
+      const cancelled = await visit(c.id, day(1), 'cancelled');
+      const next = await visit(c.id, day(3));
+      const later = await visit(c.id, day(5));
+      const tooFar = await visit(c.id, day(30));
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      const out = await access.accept(trx, row.id, { now: NOW });
+      expect(out.row.scheduledServiceId).toBe(next);
+      expect([cancelled, later, tooFar]).not.toContain(out.row.scheduledServiceId);
+      let list = await access.listForCustomer(trx, c.id);
+      expect(list.active.map((r) => r.id)).toEqual([row.id]);
+      expect(list.active[0].scheduledDate).toBe(day(3));
+      await trx('scheduled_services').where({ id: next }).update({ status: 'completed' });
+      list = await access.listForCustomer(trx, c.id);
+      expect(list.active).toEqual([]);
+      // The row itself stays active in the table (history), only the live list drops it.
+      expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('active');
+    });
+
+    test('a cancelled visit also drops its code, and a standing code is unaffected by visits', async () => {
+      const c = await customer();
+      const next = await visit(c.id, day(2));
+      const visitRow = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      const standing = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, visitRow.id, { now: NOW });
+      await access.accept(trx, standing.id, { now: NOW });
+      await trx('scheduled_services').where({ id: next }).update({ status: 'cancelled' });
+      const list = await access.listForCustomer(trx, c.id);
+      expect(list.active.map((r) => r.id)).toEqual([standing.id]);
+    });
+
+    test('with no visit in the window the code stays attached to nothing and stays listed', async () => {
+      const c = await customer();
+      await visit(c.id, day(40));
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      const out = await access.accept(trx, row.id, { now: NOW });
+      expect(out.row.scheduledServiceId).toBeNull();
+      expect((await access.listForCustomer(trx, c.id)).active.map((r) => r.id)).toEqual([row.id]);
+    });
+
+    test('an office edit to visit life attaches the visit at accept time', async () => {
+      const c = await customer();
+      const next = await visit(c.id, day(2));
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'standing' });
+      const out = await access.accept(trx, row.id, { life: 'visit', now: NOW });
+      expect(out.row).toMatchObject({ life: 'visit', scheduledServiceId: next });
+    });
+  });
+
+  describe('listing', () => {
+    test('listForCustomer groups active and found, and listFound spans customers newest first', async () => {
+      const a = await customer();
+      const b = await customer();
+      const old = await found(a.id, { code: '1111' });
+      await trx('customer_access_codes').where({ id: old.id }).update({ created_at: new Date('2040-01-01T00:00:00Z') });
+      const mid = await found(b.id, { code: '2222' });
+      await trx('customer_access_codes').where({ id: mid.id }).update({ created_at: new Date('2040-02-01T00:00:00Z') });
+      const mine = await found(a.id, { code: '3333' });
+      await access.accept(trx, mine.id, {});
+      const forA = await access.listForCustomer(trx, a.id);
+      expect(forA.active.map((r) => r.code)).toEqual(['3333']);
+      expect(forA.found.map((r) => r.code)).toEqual(['1111']);
+      const all = await access.listFound(trx, { limit: 10, offset: 0 });
+      expect(all.items.map((r) => r.code)).toEqual(['2222', '1111']);
+      expect(all.total).toBe(2);
+      expect(all.items[0].customerName).toBe('Sample Owner');
+      const paged = await access.listFound(trx, { limit: 1, offset: 1 });
+      expect(paged.items.map((r) => r.code)).toEqual(['1111']);
+    });
+
+    test('a deleted customer is not listed for review', async () => {
+      const c = await customer();
+      await found(c.id);
+      await trx('customers').where({ id: c.id }).update({ deleted_at: new Date() });
+      expect((await access.listFound(trx, {})).total).toBe(0);
+    });
+  });
+
+  describe('dismiss, retire, add', () => {
+    test('dismiss moves found to dismissed and retire moves active to retired, each audited', async () => {
+      const c = await customer();
+      const toDismiss = await found(c.id);
+      const toRetire = await found(c.id, { code: '2222' });
+      expect((await access.dismiss(trx, toDismiss.id, { adminUserId: ADMIN_ID })).row).toMatchObject({ status: 'dismissed', decidedBy: ADMIN_ID });
+      await access.accept(trx, toRetire.id, {});
+      expect((await access.retire(trx, toRetire.id, { adminUserId: ADMIN_ID })).row.status).toBe('retired');
+      const actions = (await trx('audit_log').whereIn('resource_id', [toDismiss.id, toRetire.id]).select('action', 'metadata'))
+        .map((e) => e.action).sort();
+      expect(actions).toEqual(['access_code.accepted', 'access_code.dismissed', 'access_code.retired']);
+    });
+
+    test('the wrong state answers a typed conflict', async () => {
+      const c = await customer();
+      const row = await found(c.id);
+      expect(await access.retire(trx, row.id, {})).toEqual({ ok: false, status: 409, code: 'not_active' });
+      await access.accept(trx, row.id, {});
+      expect(await access.dismiss(trx, row.id, {})).toEqual({ ok: false, status: 409, code: 'not_pending' });
+      expect(await access.dismiss(trx, randomUUID(), {})).toEqual({ ok: false, status: 404, code: 'not_found' });
+    });
+
+    test('addByStaff creates an active staff row, fills an empty profile field and attaches a visit', async () => {
+      const c = await customer();
+      const next = await visit(c.id, day(2));
+      const gate = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', adminUserId: ADMIN_ID, now: NOW });
+      expect(gate.row).toMatchObject({ status: 'active', sourceType: 'staff', sourceId: null, decidedBy: ADMIN_ID, propertyId: c.propertyIds[0] });
+      expect(gate.profileField).toBe('garage_code');
+      const door = await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'visit', code: '#9090', instructions: 'Back door', now: NOW });
+      expect(door.row.scheduledServiceId).toBe(next);
+      const dupe = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '24 68' });
+      expect(dupe).toEqual({ ok: false, status: 409, code: 'duplicate_active' });
+      const pass = await access.addByStaff(trx, { customerId: c.id, kind: 'pass', life: 'standing', instructions: 'Show the QR from the HOA email' });
+      expect(pass.row).toMatchObject({ kind: 'pass', code: null });
+      const events = await trx('audit_log').where({ action: 'access_code.added' }).whereIn('resource_id', [gate.row.id, door.row.id]);
+      expect(JSON.stringify(events)).not.toMatch(/2468|9090|Back door/);
+    });
+
+    test.each([
+      ['no kind', { life: 'standing', code: '1' }, 400, 'invalid_kind'],
+      ['no life', { kind: 'door', code: '1' }, 400, 'invalid_life'],
+      ['no value', { kind: 'door', life: 'standing' }, 400, 'value_required'],
+      ['a bad customer id', { customerId: 'nope', kind: 'door', life: 'standing', code: '1' }, 400, 'invalid_customer'],
+      ['an unknown customer', { customerId: randomUUID(), kind: 'door', life: 'standing', code: '1' }, 404, 'customer_not_found'],
+    ])('addByStaff rejects %s', async (_name, input, status, code) => {
+      const c = await customer();
+      expect(await access.addByStaff(trx, { customerId: c.id, ...input })).toEqual({ ok: false, status, code });
+      expect(await rows(c.id)).toEqual([]);
+    });
+  });
+
+  describe('routes', () => {
+    test('the full office flow over HTTP, with no-store on every answer and the admin id on the decision', async () => {
+      const c = await customer();
+      const row = await found(c.id, { code: '#8080' });
+      let res = await call('GET', `/?customerId=${c.id}`);
+      expect([res.status, res.cache]).toEqual([200, 'no-store']);
+      expect(res.body.found.map((r) => r.id)).toEqual([row.id]);
+      res = await call('GET', '/found?limit=5');
+      expect(res.body).toMatchObject({ total: 1 });
+      expect(res.body.items[0]).toMatchObject({ id: row.id, customerName: 'Sample Owner' });
+      res = await call('POST', `/${row.id}/accept`, { instructions: 'Press 1' }, { 'x-test-admin': ADMIN_ID });
+      expect([res.status, res.cache]).toEqual([200, 'no-store']);
+      expect(res.body.accessCode).toMatchObject({ status: 'active', instructions: 'Press 1', decidedBy: ADMIN_ID });
+      expect(res.body.profileField).toBe('neighborhood_gate_code');
+      res = await call('POST', `/${row.id}/accept`, {});
+      expect([res.status, res.body.code]).toEqual([409, 'not_pending']);
+      res = await call('POST', `/${row.id}/retire`);
+      expect([res.status, res.body.accessCode.status]).toEqual([200, 'retired']);
+      res = await call('POST', '/', { customerId: c.id, kind: 'door', life: 'standing', code: '#4040' });
+      expect([res.status, res.body.accessCode.sourceType]).toEqual([200, 'staff']);
+      const added = res.body.accessCode.id;
+      res = await call('POST', `/${added}/dismiss`);
+      expect([res.status, res.body.code]).toEqual([409, 'not_pending']);
+    });
+
+    test('dismiss over HTTP', async () => {
+      const c = await customer();
+      const row = await found(c.id);
+      const res = await call('POST', `/${row.id}/dismiss`);
+      expect([res.status, res.body.accessCode.status]).toEqual([200, 'dismissed']);
+    });
+
+    test('validation errors are typed and never echo the submitted code', async () => {
+      const c = await customer();
+      const secret = 'x'.repeat(41);
+      let res = await call('POST', '/', { customerId: c.id, kind: 'door', life: 'standing', code: secret });
+      expect([res.status, res.body.code]).toEqual([400, 'invalid_code']);
+      expect(JSON.stringify(res.body)).not.toContain(secret);
+      res = await call('GET', '/?customerId=nope');
+      expect([res.status, res.body.code]).toEqual([400, 'invalid_customer']);
+      res = await call('GET', '/');
+      expect(res.status).toBe(400);
+      res = await call('POST', `/${randomUUID()}/accept`, {});
+      expect([res.status, res.body.code]).toEqual([404, 'not_found']);
+      res = await call('POST', '/not-a-uuid/accept', {});
+      expect([res.status, res.body.code]).toEqual([404, 'not_found']);
+      res = await call('POST', '/', ['not', 'an', 'object']);
+      expect([res.status, res.body.code]).toEqual([400, 'invalid_body']);
+    });
+
+    test('a failure is logged by error code only', async () => {
+      const spy = jest.spyOn(access, 'listFound').mockRejectedValue(Object.assign(new Error('secret #4821 binding'), { code: 'XX000' }));
+      const res = await call('GET', '/found');
+      spy.mockRestore();
+      expect([res.status, res.body.code]).toEqual([500, 'server_error']);
+      const logged = JSON.stringify(logger.error.mock.calls);
+      expect(logged).toContain('XX000');
+      expect(logged).not.toContain('4821');
+    });
+  });
+});

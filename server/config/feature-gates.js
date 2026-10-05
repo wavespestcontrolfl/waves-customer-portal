@@ -1169,6 +1169,15 @@ const gates = {
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
 
+  // Access codes section (server half): a text that states a gate, door,
+  // lockbox, garage, call-box or pass code is filed as a `found` row in
+  // customer_access_codes for the office to accept, dismiss or retire, and the
+  // admin API at /api/admin/access-codes serves them. Needs
+  // GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) for the sweep, so
+  // turning it on never reads history. Read at call time in
+  // services/access-code-capture.js; this entry is for logGateStatus only.
+  accessCodesSection: gateEnvValue('GATE_ACCESS_CODES_SECTION'),
+
   // Email asks + staff promises, same shape as the SMS lane above. Also
   // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
   // email-operational-actions.js; this entry is for logGateStatus only.
