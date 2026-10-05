@@ -1558,6 +1558,14 @@ describe('ReportViewPage — phone first screen (pick B)', () => {
     expect(card).not.toHaveAttribute('data-report-ask-slim');
   });
 
+  it('the phone report tools keep the 44px touch floor', () => {
+    const page = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/ReportViewPage.jsx'), 'utf8');
+    const block = page.match(/\.report-action-bar \.report-action-buttons > button \{([^}]*)\}/);
+    expect(block).not.toBeNull();
+    const [, px] = block[1].match(/min-height:\s*(\d+)px/);
+    expect(Number(px)).toBeGreaterThanOrEqual(44);
+  });
+
   it('the slim ask row keeps the 44px touch floor on phones', () => {
     const glassThemeCss = fs.readFileSync(path.resolve(process.cwd(), 'src/glass/glass-theme.css'), 'utf8');
     const slim = glassThemeCss.split('\n').filter((line) => line.includes('[data-report-ask-slim]') && line.includes('min-height'));

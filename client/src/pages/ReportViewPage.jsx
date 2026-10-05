@@ -9023,8 +9023,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
              and Today's result fit the first screen. Column
              auto-flow keeps the row full when Print is hidden in the app.
              The .report-action-bar prefix outranks the 374px single-column
-             rule; !important beats the buttons' inline docButton sizing. */
-          .report-action-bar[aria-label="Report tools"] { padding: 8px; }
+             rule; !important beats the buttons' inline docButton sizing. The
+             tools keep the 44px touch floor; the bar's padding gives it back. */
+          .report-action-bar[aria-label="Report tools"] { padding: 6px 8px; }
           .report-action-bar .report-action-buttons {
             grid-template-columns: none;
             grid-auto-flow: column;
@@ -9034,7 +9035,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           }
           .report-action-bar .report-action-buttons > a,
           .report-action-bar .report-action-buttons > button {
-            min-height: 40px !important;
+            min-height: 44px !important;
             padding: 0 4px !important;
             font-size: 14px !important;
           }
