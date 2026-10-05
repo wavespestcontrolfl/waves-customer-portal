@@ -4448,13 +4448,29 @@ function initScheduledJobs() {
         // other retry (GitHub r10 P2 #4127); gated on its own flag inside.
         const sweep = await require('./invoice-issued-closeout').retrySettledStatementCloseouts();
         if (sweep.retried) logger.info(`Settled-statement closeout retry: ${sweep.retried} retried, ${sweep.closed} closed`);
-        // A paid invoice whose own closeout failed (card, bank, cash) has no
-        // other retry either (GitHub r1 P1 #5886); same gate inside.
-        const paidSweep = await require('./invoice-issued-closeout').retryFailedPaidInvoiceCloseouts();
-        if (paidSweep.retried) logger.info(`Paid-invoice closeout retry: ${paidSweep.retried} retried, ${paidSweep.closed} closed`);
       });
     } catch (err) {
       logger.error(`Payer statement dunning failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 11:37AM — Invoice-issued visit closeout retry
+  // (GATE_INVOICE_ISSUED_CLOSES_VISIT; a no-op when off). Every send and
+  // payment rail runs the closeout once, best-effort; this is the only retry
+  // for a run that failed, never happened or was refused for the moment
+  // (GitHub r1 P1, r3 P1 ×2 + P2 #5886). Every day, on its own minute — not
+  // the Tue–Fri dunning tick — so a visit never waits out a weekend. Outside
+  // the 10am hour and its stagger plan; reads a handful of rows.
+  // =========================================================================
+  cron.schedule('37 11 * * *', async () => {
+    try {
+      await runExclusive('invoice-issued-closeout-retry', async () => {
+        const sweep = await require('./invoice-issued-closeout').retryIssuedInvoiceCloseouts();
+        if (sweep.retried) logger.info(`Invoice-issued closeout retry: ${sweep.retried} retried, ${sweep.closed} closed`);
+      });
+    } catch (err) {
+      logger.error(`Invoice-issued closeout retry failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -306,42 +306,23 @@ function isTransientRefusal(meta) {
   return TRANSIENT_REFUSAL_CODES.includes(meta?.code) || Number(meta?.status) >= 500;
 }
 
-// Shared retry loop. `retryWhenNeverRan`: a candidate with NO paid-trigger
-// audit row is retried too (statement children — their settlement is the only
-// trigger they get). Card and bank payments pass false: with no audit row
-// there is no evidence a closeout was ever owed and failed.
-async function retryCloseoutRows(rows, { conn, today, label, retryWhenNeverRan }) {
-  let retried = 0;
-  let closed = 0;
-  for (const row of rows) {
-    let last = null;
-    if (!row.own_attempt_parked) {
-      try {
-        last = await conn('audit_log')
-          .where({ resource_type: 'scheduled_services', resource_id: row.visit_id })
-          .whereIn('action', CLOSEOUT_AUDIT_ACTIONS)
-          .whereRaw("metadata->>'invoiceId' = ?", [String(row.invoice_id)])
-          .whereRaw("metadata->>'trigger' = 'paid'")
-          .orderBy('created_at', 'desc')
-          .first('action', 'metadata');
-      } catch (err) {
-        logger.error(`[invoice-issued-closeout] ${label}: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
-        continue;
-      }
-      if (!last && !retryWhenNeverRan) continue;
-      if (last) {
-        let meta = last.metadata;
-        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
-        if (last.action !== 'visit.completion_on_invoice_issued_refused' || !isTransientRefusal(meta)) continue;
-      }
-    }
-    retried += 1;
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today });
-    if (out?.closed) closed += 1;
-  }
-  if (retried) logger.info(`[invoice-issued-closeout] ${label}: ${rows.length} candidate(s), ${retried} retried, ${closed} closed`);
-  return { candidates: rows.length, retried, closed };
+// The latest closeout audit row for this (visit, invoice): `trigger` narrows
+// it to one trigger, null reads any. Returns { action, meta } or null; throws
+// on a failed read (the caller skips the row and the next pass re-reads).
+async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null }) {
+  const query = conn('audit_log')
+    .where({ resource_type: 'scheduled_services', resource_id: visitId })
+    .whereIn('action', CLOSEOUT_AUDIT_ACTIONS)
+    .whereRaw("metadata->>'invoiceId' = ?", [String(invoiceId)]);
+  if (trigger) query.whereRaw("metadata->>'trigger' = ?", [trigger]);
+  const last = await query.orderBy('created_at', 'desc').first('action', 'metadata');
+  if (!last) return null;
+  let meta = last.metadata;
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = {}; } }
+  return { action: last.action, meta: meta || {} };
 }
+
+const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
 
 async function retrySettledStatementCloseouts({ conn = db, today = etDateString(), sinceDays = 7 } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { candidates: 0, retried: 0, closed: 0 };
@@ -359,37 +340,107 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
     logger.error(`[invoice-issued-closeout] settled-statement retry: candidate lookup failed: ${err.message}`);
     return { candidates: 0, retried: 0, closed: 0 };
   }
-  return retryCloseoutRows(rows, { conn, today, label: 'settled-statement retry', retryWhenNeverRan: true });
+  let retried = 0;
+  let closed = 0;
+  for (const row of rows) {
+    if (!row.own_attempt_parked) {
+      let last;
+      try {
+        last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id, trigger: 'paid' });
+      } catch (err) {
+        logger.error(`[invoice-issued-closeout] settled-statement retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
+        continue;
+      }
+      // Never ran (the settlement is the only trigger a child gets), or
+      // refused for the moment; a real refusal is left alone.
+      if (last && !refusedForTheMoment(last)) continue;
+    }
+    retried += 1;
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today });
+    if (out?.closed) closed += 1;
+  }
+  if (retried) logger.info(`[invoice-issued-closeout] settled-statement retry: ${rows.length} open linked child(ren), ${retried} retried, ${closed} closed`);
+  return { candidates: rows.length, retried, closed };
 }
 
-// The durable retry for a PAID invoice outside a statement (GitHub r1 P1
-// #5886). The Stripe webhook, the cash / check / reconcile routes and the
-// prepaid route run the closeout once, best-effort, after the money commits;
-// a transient failure there is audited (code 'error') and then has no
-// reachable retry — the payment already happened, and nothing sends that
-// invoice again. Same daily tick as the statement sweep. Retried: a recently
-// paid, visit-linked invoice whose LATEST paid-trigger closeout audit is a
-// failure or a refusal of the moment (TRANSIENT_REFUSAL_CODES), or whose own
-// completion attempt is parked. NOT retried: an invoice with no paid-trigger
-// audit row — a prepayment whose visit day simply passed is not evidence the
-// visit happened, and this sweep must not complete it on its own.
-async function retryFailedPaidInvoiceCloseouts({ conn = db, today = etDateString(), sinceDays = 7 } = {}) {
-  if (!isEnabled('invoiceIssuedClosesVisit')) return { candidates: 0, retried: 0, closed: 0 };
+// Statuses of an invoice the customer HAS (delivered, not yet settled), and of
+// one that is settled. A draft or scheduled invoice is neither.
+const DELIVERED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
+const SETTLED_INVOICE_STATUSES = ['paid', 'prepaid'];
+const ISSUED_AT_SQL = "COALESCE(i.paid_at, i.sent_at, i.sms_sent_at, i.email_sent_at)";
+
+// THE durable retry for every invoice outside a statement (GitHub r1 P1 and
+// r3 P1 ×2 #5886). Every rail — the Stripe webhook, cash / check / reconcile,
+// the prepaid route, each send path — runs the closeout once, best-effort,
+// after the delivery or the money commits. Whatever stops that one run (a
+// transient failure, a process that died first, an audit row that could not
+// be written, a job timer that was still running) has no reachable retry:
+// nothing sends or settles that invoice a second time. So this sweep does not
+// reconstruct what each rail did. It reads the durable state — a delivered or
+// settled invoice still linked to an OPEN visit — and asks the closeout
+// again, with the trigger the invoice's own state proves ('paid' when
+// settled, else 'sent'). Runs daily (scheduler: invoice-issued-closeout-retry).
+//
+// Two tiers, by how much the state itself proves:
+//  - ARRIVED (on_site): the technician was there and the invoice is out. That
+//    is the whole rule, so the visit is retried whether or not a closeout ever
+//    ran — never-ran, unaudited and refused-for-the-moment alike.
+//  - UNSTARTED (pending / confirmed / NULL), past day: nobody is known to have
+//    gone. A prepayment whose day simply passed is NOT proof the visit
+//    happened (it may have been rained out and never moved), so this sweep
+//    never completes one on its own: it retries only a closeout that RAN on an
+//    eligible day and failed (an audited error, 5xx or under-the-lock race).
+//    `visit_scheduled_today` does not count — that row says "prepaid before
+//    anyone arrived", which is exactly the case to leave to a person.
+// A visit already completed with this closeout's own attempt parked is
+// resumed. A real refusal (grouped, packet-owned, project-backed, en_route)
+// carries a non-transient audit row and is left alone.
+async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), sinceDays = 7 } = {}) {
+  const none = { candidates: 0, retried: 0, closed: 0 };
+  if (!isEnabled('invoiceIssuedClosesVisit')) return none;
   let rows = [];
   try {
     rows = await conn('invoices as i')
       .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
       .whereNull('i.payer_statement_id')
-      .whereIn('i.status', ['paid', 'prepaid'])
-      .where('i.paid_at', '>=', new Date(Date.now() - sinceDays * 86400000))
-      .where((q) => retryableVisitFilter(q, today))
+      .whereIn('i.status', [...SETTLED_INVOICE_STATUSES, ...DELIVERED_INVOICE_STATUSES])
+      .whereRaw(`${ISSUED_AT_SQL} >= ?`, [new Date(Date.now() - sinceDays * 86400000)])
+      .where((q) => q
+        // The same rule as issuedCloseoutVisitRefusal, as SQL: an unstarted
+        // visit closes on a past day; an arrived one on a past day, or today
+        // when the invoice is settled.
+        .where((unstarted) => unstarted.where((live) => live.whereIn('s.status', OPEN_VISIT_STATUSES).orWhereNull('s.status')).where('s.scheduled_date', '<', today))
+        .orWhere((arrived) => arrived.whereIn('s.status', ARRIVED_VISIT_STATUSES)
+          .where((day) => day.where('s.scheduled_date', '<', today)
+            .orWhere((sameDay) => sameDay.where('s.scheduled_date', '=', today).whereIn('i.status', SETTLED_INVOICE_STATUSES))))
+        .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
       .orderBy('i.id')
-      .select('i.id as invoice_id', 's.id as visit_id', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
+      .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
   } catch (err) {
-    logger.error(`[invoice-issued-closeout] paid-invoice retry: candidate lookup failed: ${err.message}`);
-    return { candidates: 0, retried: 0, closed: 0 };
+    logger.error(`[invoice-issued-closeout] issued-invoice retry: candidate lookup failed: ${err.message}`);
+    return none;
   }
-  return retryCloseoutRows(rows, { conn, today, label: 'paid-invoice retry', retryWhenNeverRan: false });
+  let retried = 0;
+  let closed = 0;
+  for (const row of rows) {
+    if (!row.own_attempt_parked) {
+      let last;
+      try {
+        last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id });
+      } catch (err) {
+        logger.error(`[invoice-issued-closeout] issued-invoice retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
+        continue;
+      }
+      if (last && !refusedForTheMoment(last)) continue;
+      if (!isArrivedVisitStatus(row.visit_status) && (!last || last.meta.code === 'visit_scheduled_today')) continue;
+    }
+    retried += 1;
+    const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today });
+    if (out?.closed) closed += 1;
+  }
+  if (retried) logger.info(`[invoice-issued-closeout] issued-invoice retry: ${rows.length} candidate(s), ${retried} retried, ${closed} closed`);
+  return { candidates: rows.length, retried, closed };
 }
 
 // One audit row per linked-visit outcome — completed, refused with the
@@ -597,7 +648,7 @@ module.exports = {
   issuedCloseoutOwnsRecord,
   closeOutVisitsForStatement,
   retrySettledStatementCloseouts,
-  retryFailedPaidInvoiceCloseouts,
+  retryIssuedInvoiceCloseouts,
   visitJobTimerRunning,
   OPEN_VISIT_STATUSES,
   ARRIVED_VISIT_STATUSES,

@@ -640,65 +640,85 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     }));
     // The audit module is mocked here; write the row it would have written, then sweep.
     await trx('audit_log').insert({ actor_type: 'system', action: 'visit.completion_on_invoice_issued_refused', resource_type: 'scheduled_services', resource_id: svc.id, metadata: JSON.stringify({ invoiceId: inv.id, trigger: 'paid', code: 'error' }) });
-    const { retryFailedPaidInvoiceCloseouts } = require('../services/invoice-issued-closeout');
-    expect(await retryFailedPaidInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 1, retried: 1, closed: 1 });
+    const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
+    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 1, retried: 1, closed: 1 });
     expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId)).toEqual([svc.id]);
   });
 
-  test('paid-invoice retry: a card / cash payment whose closeout FAILED or was refused for the moment is retried; one that never ran, a real refusal, a statement child and an old payment are left alone (GitHub r1 P1 #5886)', async () => {
-    const { retryFailedPaidInvoiceCloseouts } = require('../services/invoice-issued-closeout');
-    const auditRow = (visitId, invoiceId, action, code) => trx('audit_log').insert({
-      actor_type: 'system', action, resource_type: 'scheduled_services', resource_id: visitId,
-      metadata: JSON.stringify({ invoiceId, trigger: 'paid', code }),
-    });
+  test('issued-invoice retry: an ARRIVED visit with a delivered or settled invoice is retried whether or not a closeout ever ran; an UNSTARTED one only after a closeout that ran and failed; real refusals, prepayments, statement children and old invoices are left alone (GitHub r1 P1, r3 P1 ×2 #5886)', async () => {
+    const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
     const refused = 'visit.completion_on_invoice_issued_refused';
+    const auditRow = (visitId, invoiceId, code, { trigger = 'paid', status = null, action = refused } = {}) => trx('audit_log').insert({
+      actor_type: 'system', action, resource_type: 'scheduled_services', resource_id: visitId,
+      metadata: JSON.stringify({ invoiceId, trigger, code, ...(status ? { status } : {}) }),
+    });
     const paid = (svc, rest = {}) => invoice({ status: 'paid', paid_at: new Date(), scheduled_service_id: svc.id, ...rest });
-    // 1. failed with an outage (the webhook ignored it and Stripe marked the event processed) → retried
-    const v1 = await visit({ status: 'on_site' }); const i1 = await paid(v1); await auditRow(v1.id, i1.id, refused, 'error');
-    // 2. paid before anyone arrived (visit_scheduled_today), the day has passed → retried
-    const v2 = await visit(); const i2 = await paid(v2); await auditRow(v2.id, i2.id, refused, 'visit_scheduled_today');
-    // 3. the job timer was running, it has stopped since → retried
-    const v3 = await visit({ status: 'on_site', date: TODAY }); const i3 = await paid(v3, { date: TODAY }); await auditRow(v3.id, i3.id, refused, 'visit_timer_running');
-    // 4. NEVER ran (no audit row): a prepayment whose day passed is not proof the visit happened → left alone
-    const v4 = await visit(); await paid(v4);
-    // 5. refused for a real reason → left alone
-    const v5 = await visit(); const i5 = await paid(v5); await auditRow(v5.id, i5.id, refused, 'grouped_visit');
-    // 6. unstarted TODAY, refused this morning → not a candidate yet
-    const v6 = await visit({ date: TODAY }); const i6 = await paid(v6, { date: TODAY }); await auditRow(v6.id, i6.id, refused, 'visit_scheduled_today');
-    // 7. paid outside the window → not a candidate
-    const v7 = await visit(); const i7 = await paid(v7, { paid_at: new Date(Date.now() - 30 * 86400000) }); await auditRow(v7.id, i7.id, refused, 'error');
-    // 8. completed, THIS closeout's own attempt still parked → resumed
-    const v8 = await visit({ status: 'completed' }); const i8 = await paid(v8);
-    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: v8.id, idempotency_key: `invoice-issued:${i8.id}`, status: 'side_effects_pending', request_hash: 'x' });
-    // 9. unpaid (sent) with an error row → not this sweep's
-    const v9 = await visit(); const i9 = await invoice({ scheduled_service_id: v9.id }); await auditRow(v9.id, i9.id, refused, 'error');
-    // 10. en_route → not a candidate
-    const v10 = await visit({ status: 'en_route' }); const i10 = await paid(v10); await auditRow(v10.id, i10.id, refused, 'error');
+    const sent = (svc, rest = {}) => invoice({ status: 'sent', sent_at: new Date(), scheduled_service_id: svc.id, ...rest });
+    const expectRetried = [];
+    const want = (svc, trigger) => { expectRetried.push([svc.id, trigger]); return svc; };
 
-    // 11. refused UNDER THE LOCK because a timer started mid-closeout (issued_visit_in_progress); it has stopped → retried
-    const v11 = await visit({ status: 'on_site' }); const i11 = await paid(v11); await auditRow(v11.id, i11.id, refused, 'issued_visit_in_progress');
-    // 12. refused under the lock because the day moved (issued_visit_rescheduled); it is eligible now → retried
-    const v12 = await visit(); const i12 = await paid(v12); await auditRow(v12.id, i12.id, refused, 'issued_visit_rescheduled');
+    // ── ARRIVED (on_site): the state itself is the proof ──
+    // A1. paid, NEVER ran (the process died after the payment committed, or a cash rail ignored an unaudited failure) → retried
+    const a1 = want(await visit({ status: 'on_site' }), 'paid'); await paid(a1);
+    // A2. paid TODAY, never ran → retried (a payment closes an arrived visit on its own day)
+    const a2 = want(await visit({ status: 'on_site', date: TODAY }), 'paid'); await paid(a2, { date: TODAY });
+    // A3. SENT (unpaid), past day, never ran → retried with the 'sent' trigger
+    const a3 = want(await visit({ status: 'on_site' }), 'sent'); await sent(a3);
+    // A4. sent, refused while its job timer ran (audited with trigger 'sent'); the timer has stopped → retried
+    const a4 = want(await visit({ status: 'on_site' }), 'sent'); const ia4 = await sent(a4); await auditRow(a4.id, ia4.id, 'visit_timer_running', { trigger: 'sent' });
+    // A5. sent, the completion RETURNED a 503 → retried
+    const a5 = want(await visit({ status: 'on_site' }), 'sent'); const ia5 = await sent(a5); await auditRow(a5.id, ia5.id, 'completion_profile_lookup_failed', { trigger: 'sent', status: 503 });
+    // A6. paid, failed with an outage → retried
+    const a6 = want(await visit({ status: 'on_site' }), 'paid'); const ia6 = await paid(a6); await auditRow(a6.id, ia6.id, 'error');
+    // A7. paid, refused under the lock (timer started / reassigned mid-closeout) → retried
+    const a7 = want(await visit({ status: 'on_site' }), 'paid'); const ia7 = await paid(a7); await auditRow(a7.id, ia7.id, 'issued_visit_identity_changed');
+    // A8. viewed (delivered, unpaid) → the same as sent
+    const a8 = want(await visit({ status: 'on_site' }), 'sent'); await invoice({ status: 'viewed', sent_at: new Date(), scheduled_service_id: a8.id });
+    // A9. SENT today → not a candidate: a send never closes a same-day visit
+    const a9 = await visit({ status: 'on_site', date: TODAY }); await sent(a9, { date: TODAY });
+    // A10. refused for a real reason → left alone, never re-audited
+    const a10 = await visit({ status: 'on_site' }); const ia10 = await paid(a10); await auditRow(a10.id, ia10.id, 'grouped_visit');
+    // A11. the completion's own verdict (a 409 with an unlisted code) → left alone
+    const a11 = await visit({ status: 'on_site' }); const ia11 = await paid(a11); await auditRow(a11.id, ia11.id, 'project_required_completion', { status: 409 });
+    // A12. a DRAFT invoice (never delivered) → not a candidate
+    const a12 = await visit({ status: 'on_site' }); await invoice({ status: 'draft', scheduled_service_id: a12.id });
+    // A13. issued outside the window → not a candidate
+    const a13 = await visit({ status: 'on_site' }); await paid(a13, { paid_at: new Date(Date.now() - 30 * 86400000) });
+    // A14. a statement child → the statement sweep's, not this one's
+    const [payerId] = await trx('payers').insert({ display_name: 'Fixture Bill-To' }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const [statementId] = await trx('payer_statements').insert({ payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status: 'paid', terms_snapshot: 'net30', token: randomUUID().replace(/-/g, ''), paid_at: new Date() }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const a14 = await visit({ status: 'on_site' }); await paid(a14, { payer_statement_id: statementId });
+    // A15. en_route → not a candidate
+    const a15 = await visit({ status: 'en_route' }); await paid(a15);
 
-    // 13. refused under the lock because the visit was reassigned / reclassified mid-closeout (issued_visit_identity_changed) → retried on a fresh read
-    const v13 = await visit({ status: 'on_site' }); const i13 = await paid(v13); await auditRow(v13.id, i13.id, refused, 'issued_visit_identity_changed');
+    // ── UNSTARTED (pending / confirmed), past day: nobody is known to have gone ──
+    // U1. paid, NEVER ran → left alone: a prepayment whose day passed is not proof the visit happened
+    const u1 = await visit(); await paid(u1);
+    // U2. paid before anyone arrived (visit_scheduled_today), the day has passed → STILL left alone
+    const u2 = await visit(); const iu2 = await paid(u2); await auditRow(u2.id, iu2.id, 'visit_scheduled_today');
+    // U3. a closeout that RAN on an eligible day and failed → retried
+    const u3 = want(await visit(), 'paid'); const iu3 = await paid(u3); await auditRow(u3.id, iu3.id, 'error');
+    // U4. …also for a send
+    const u4 = want(await visit({ status: 'pending' }), 'sent'); const iu4 = await sent(u4); await auditRow(u4.id, iu4.id, 'issued_visit_rescheduled', { trigger: 'sent' });
+    // U5. sent, never ran → left alone
+    const u5 = await visit(); await sent(u5);
+    // U6. unstarted TODAY with an error row → not a candidate today
+    const u6 = await visit({ date: TODAY }); const iu6 = await paid(u6, { date: TODAY }); await auditRow(u6.id, iu6.id, 'error');
 
-    // 14. the completion RETURNED a 503 (a failed profile read, its own code) → retried: any 5xx is an outage
-    const v14 = await visit({ status: 'on_site' }); const i14 = await paid(v14);
-    await trx('audit_log').insert({ actor_type: 'system', action: refused, resource_type: 'scheduled_services', resource_id: v14.id, metadata: JSON.stringify({ invoiceId: i14.id, trigger: 'paid', status: 503, code: 'completion_profile_lookup_failed' }) });
-    // 15. the completion returned a 409 with an unlisted code → its verdict on the visit, left alone
-    const v15 = await visit({ status: 'on_site' }); const i15 = await paid(v15);
-    await trx('audit_log').insert({ actor_type: 'system', action: refused, resource_type: 'scheduled_services', resource_id: v15.id, metadata: JSON.stringify({ invoiceId: i15.id, trigger: 'paid', status: 409, code: 'project_required_completion' }) });
+    // ── COMPLETED with this closeout's own attempt parked → resumed ──
+    const c1 = want(await visit({ status: 'completed' }), 'paid'); const ic1 = await paid(c1);
+    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: c1.id, idempotency_key: `invoice-issued:${ic1.id}`, status: 'side_effects_pending', request_hash: 'x' });
+    // …a completed visit with nothing parked is not a candidate
+    const c2 = await visit({ status: 'completed' }); await paid(c2);
 
-    const out = await retryFailedPaidInvoiceCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 11, retried: 8, closed: 8 });
-    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort()).toEqual([v1.id, v2.id, v3.id, v8.id, v11.id, v12.id, v13.id, v14.id].sort());
-    for (const [args] of mockCompleteScheduledService.mock.calls) {
-      expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
-      expect(args.issuedInvoiceCloseout.trigger).toBe('paid');
-    }
+    const out = await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY });
+    expect(out).toEqual({ candidates: 16, retried: 11, closed: 11 });
+    const calls = mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout.trigger]);
+    expect(calls.sort()).toEqual(expectRetried.sort());
+    // A retry is nobody's action: the system is the actor.
+    for (const [args] of mockCompleteScheduledService.mock.calls) expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
     mockGate.on = false;
-    expect(await retryFailedPaidInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 0, retried: 0, closed: 0 });
+    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 0, retried: 0, closed: 0 });
   });
 
   test('a refused completion is reported, audited as refused, and never thrown', async () => {

@@ -184,6 +184,11 @@ describe('source contracts', () => {
     const closeoutCalls = webhook.match(/await closeOutVisitAfterPaidInvoice\(/g) || [];
     expect(closeoutCalls).toHaveLength(reviewCalls.length);
   });
+  test('the issued-invoice retry sweep runs EVERY day on its own cron, under its own lock — never on the Tue–Fri dunning tick (GitHub r3 P2 #5886)', () => {
+    const scheduler = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(scheduler).toMatch(/cron\.schedule\('37 11 \* \* \*', async \(\) => \{\s*try \{\s*await runExclusive\('invoice-issued-closeout-retry', async \(\) => \{\s*const sweep = await require\('\.\/invoice-issued-closeout'\)\.retryIssuedInvoiceCloseouts\(\);/);
+    expect(scheduler.match(/retryIssuedInvoiceCloseouts\(/g)).toHaveLength(1);
+  });
   test('the issued-invoice recheck locks the invoice FIRST — behind the mint advisory lock, ahead of the customer and visit rows (invoice → customer, the reversal paths\' order; GitHub r6 P2)', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     const persistAt = source.indexOf('const persistRecord = async (trx) => {');
