@@ -154,4 +154,17 @@ describe('OfferTierPicker', () => {
     expect(good).not.toHaveTextContent('30-day callback');
     expect(better).not.toHaveTextContent('Waves Guarantee');
   });
+
+  it('promises the saving only for programs the server discounted', () => {
+    const undiscountedLawn = { ...bestFrequency, perServiceTreatments: [
+      { service: 'pest_control', label: 'Pest Control (Quarterly)', perTreatment: 107, displayPrice: 96.3, visitsPerYear: 4 },
+      { service: 'lawn_care', label: 'Lawn Care', perTreatment: 77, displayPrice: 77, visitsPerYear: 9, waveGuardDiscountEligible: false },
+    ] };
+    const partial = tiers.map((t) => (t.key === 'best' ? { ...t, frequencies: [undiscountedLawn] } : t));
+    renderPicker({ tiers: partial, selectedKey: 'best' });
+    const best = screen.getAllByRole('radio')[2];
+    expect(best).not.toHaveTextContent('Save 10% on both');
+    expect(best).toHaveTextContent('Save 10% on eligible programs');
+    expect(best).toHaveTextContent('WaveGuard Silver');
+  });
 });

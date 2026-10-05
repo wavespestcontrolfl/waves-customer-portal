@@ -175,9 +175,20 @@ function tileModel(tier, tiers, pricing, estimate = null) {
     .filter((n) => n != null);
   const pct = discountPctFor(tier);
   const chips = [];
-  if (pct > 0) {
-    chips.push({ tone: 'green', text: `Save ${pct}% on ${tierServiceKeys(tier).length > 2 ? 'all' : 'both'}` });
-    if (tier.waveGuardTier) chips.push({ tone: 'metal', text: `WaveGuard ${String(tier.waveGuardTier).replace(/^WaveGuard\s+/i, '')}`, tier: tier.waveGuardTier });
+  // The saving is promised only for programs the server actually discounted
+  // (a row whose net per-application figure sits below its list figure, or
+  // that the server marks eligible); a program excluded from the percentage
+  // (margin guard, excluded family) must not be promised the nominal rate.
+  const discountedRows = rows.filter((r) => (Number(r?.displayPrice) > 0 && Number(r?.perTreatment) > 0
+    ? Number(r.displayPrice) < Number(r.perTreatment)
+    : r?.waveGuardDiscountEligible === true));
+  if (pct > 0 && rows.length > 0 && discountedRows.length === rows.length) {
+    chips.push({ tone: 'green', text: `Save ${pct}% on ${rows.length > 2 ? 'all' : 'both'}` });
+  } else if (pct > 0 && discountedRows.length > 0) {
+    chips.push({ tone: 'green', text: `Save ${pct}% on eligible programs` });
+  }
+  if (pct > 0 && tier.waveGuardTier) {
+    chips.push({ tone: 'metal', text: `WaveGuard ${String(tier.waveGuardTier).replace(/^WaveGuard\s+/i, '')}`, tier: tier.waveGuardTier });
   }
   return {
     eyebrow: 'BEST',
