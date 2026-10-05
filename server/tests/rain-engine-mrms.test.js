@@ -192,4 +192,66 @@ describe('fetchMrmsDailyRain payload handling', () => {
     global.fetch = jest.fn().mockRejectedValue(new Error('boom'));
     expect(await fetchMrmsDailyRain({ latitude: 27, longitude: -82, start: '2026-07-24', end: '2026-07-26' })).toBeNull();
   });
+
+  // IEM caches a multiday response for an hour per ~8-mile cell, so a nearby
+  // property can be handed the first requester's rain (2026-09-28: 22 of 31
+  // Monday watering emails). The response names the 1 km cell it was read at.
+  const HOME = { latitude: 27.5773, longitude: -82.429, start: '2026-09-28', end: '2026-09-29' };
+  const HOME_CELL = { mrms_iemre_grid_i: 4357, mrms_iemre_grid_j: 457 };
+  const NEIGHBOR_CELL = { mrms_iemre_grid_i: 4344, mrms_iemre_grid_j: 450 };
+  const startOf = (url) => url.split('/multiday/')[1].split('/')[0];
+
+  test("a neighbor's cached response is re-requested under another window and never returned", async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ...NEIGHBOR_CELL, data: [{ date: '2026-09-28', mrms_precip_in: 0.91 }, { date: '2026-09-29', mrms_precip_in: 0.5 }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ...HOME_CELL,
+          data: [
+            { date: '2026-09-20', mrms_precip_in: 2 },
+            { date: '2026-09-28', mrms_precip_in: 0.39 },
+            { date: '2026-09-29', mrms_precip_in: 0 },
+          ],
+        }),
+      });
+    const out = await fetchMrmsDailyRain(HOME);
+    expect(out).toEqual({ days: [{ date: '2026-09-28', inches: 0.39 }, { date: '2026-09-29', inches: 0 }], complete: true });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const [first, second] = global.fetch.mock.calls.map(([url]) => url);
+    expect(startOf(first)).toBe('2026-09-28');
+    expect(startOf(second) < '2026-09-28').toBe(true);
+    expect(second.endsWith('/2026-09-29/27.5773/-82.4290/json')).toBe(true);
+  });
+
+  test('another cell on every attempt yields null (the caller falls back), each attempt under its own window', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ...NEIGHBOR_CELL, data: [{ date: '2026-09-28', mrms_precip_in: 0.91 }] }),
+    });
+    expect(await fetchMrmsDailyRain(HOME)).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(new Set(global.fetch.mock.calls.map(([url]) => startOf(url))).size).toBe(3);
+  });
+
+  test('the matching cell is taken on the first request; a cell-edge coordinate accepts either side', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ...HOME_CELL, data: [{ date: '2026-09-28', mrms_precip_in: 0.1 }, { date: '2026-09-29', mrms_precip_in: 0 }] }),
+    });
+    expect((await fetchMrmsDailyRain(HOME)).complete).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    // 27.52 / -82.53 sit exactly on a 0.01 degree line on both axes.
+    for (const cell of [{ mrms_iemre_grid_i: 4346, mrms_iemre_grid_j: 451 }, { mrms_iemre_grid_i: 4347, mrms_iemre_grid_j: 452 }]) {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ ...cell, data: [{ date: '2026-09-28', mrms_precip_in: 0.1 }, { date: '2026-09-29', mrms_precip_in: 0 }] }),
+      });
+      expect(await fetchMrmsDailyRain({ ...HOME, latitude: 27.52, longitude: -82.53 })).not.toBeNull();
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    }
+  });
 });
