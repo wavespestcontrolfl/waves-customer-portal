@@ -181,6 +181,21 @@ describe('on-site follow-up: caller demotion + confirmation replay', () => {
     expect(state.optin[0].followup_claimed_at).toBeNull();
   });
 
+  test('two new slot phones: the first YES waits (consent not stamped yet) and is not closed; it goes out once the account is covered', async () => {
+    const { optin, state, sendReplay } = load({
+      rows: [row()],
+      customer: spouse({ service_contact2_phone: '+15550100456', service_contacts_consent_at: null }),
+    });
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(0);
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.optin[0].followup_done_at).toBeNull();
+    expect(state.optin[0].followup_claimed_at).toBeNull();
+    state.customer.service_contacts_consent_at = new Date();
+    expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 1 });
+    expect(sendReplay).toHaveBeenCalledTimes(1);
+    expect(state.prefs).toEqual([]);
+  });
+
   test('a phone on the unconsented hold is not a recipient: nobody is demoted', async () => {
     const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse({ service_preferences: { unconsented_slot_phone_keys: [KEY] } }) });
     await optin.settleOnSiteFollowUps(['c1']);

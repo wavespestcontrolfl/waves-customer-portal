@@ -318,8 +318,13 @@ async function settleCustomerFollowUps(customerId, { replyPhoneKey = null } = {}
       // account's consent covers it (another slot phone's YES still to come)
       // the claim is released for the sweep.
       if (demoted === 'not_recipient') { await finish(false); continue; }
-      const slot = require('./customer-contact').SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === row.phone_key);
+      const { SERVICE_CONTACT_SLOTS, getAppointmentContacts } = require('./customer-contact');
+      const slot = SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === row.phone_key);
       if (!slot) { await finish(true); continue; }
+      // Still in a slot but not textable yet, whatever the demotion said (two
+      // new slot phones: the account's consent is stamped only at the second
+      // YES): wait for the sweep, never end it as 'not_a_recipient'.
+      if (!getAppointmentContacts(customer, { appointment_notify_primary: false }).some((c) => recipientPhoneKey(c.phone) === row.phone_key)) { await finish(false); continue; }
       const result = await require('./appointment-reminders').sendConfirmationToServiceContact({
         customerId, scheduledServiceId: row.visit_id, phone: customer[slot.phone], inReplyToYes: !!replyPhoneKey && row.phone_key === replyPhoneKey,
       });
