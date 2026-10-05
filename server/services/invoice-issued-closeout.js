@@ -160,13 +160,23 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // has reached today.
   const refusedByState = issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger });
   if (refusedByState) return leaveOpen(refusedByState);
-  if (await visitJobTimerRunning(conn, svc.id)) return leaveOpen('visit_timer_running');
-  if (svc.visit_id) {
-    const { openMembers } = require('./visit-groups');
-    if ((await openMembers(conn, svc.visit_id)).length >= 2) return leaveOpen('grouped_visit');
+  // Every read from here on is against a visit already in hand: a failed
+  // one is an outage of THIS visit's closeout, rethrown carrying the visit
+  // (`linkedVisit`) so the caller audits it as a failure (code 'error') —
+  // the row the retry sweeps look for. Without the visit the failure had
+  // nothing to be audited against and no sweep could ever retry it
+  // (pre-push audit P1; probeVisitRefusal already did this for its two reads).
+  try {
+    if (await visitJobTimerRunning(conn, svc.id)) return leaveOpen('visit_timer_running');
+    if (svc.visit_id) {
+      const { openMembers } = require('./visit-groups');
+      if ((await openMembers(conn, svc.visit_id)).length >= 2) return leaveOpen('grouped_visit');
+    }
+    const refusal = await probeVisitRefusal(conn, svc);
+    return refusal ? leaveOpen(refusal) : { svc, reason: null, visit: svc };
+  } catch (err) {
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
   }
-  const refusal = await probeVisitRefusal(conn, svc);
-  return refusal ? leaveOpen(refusal) : { svc, reason: null, visit: svc };
 }
 
 // The canonical completion commits status='completed' before its post-commit

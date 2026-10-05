@@ -537,6 +537,28 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // Another visit's running timer never blocks this one.
   });
 
+  test('a failed timer lookup is audited as an error against the visit, so the paid-invoice sweep can retry it (pre-push audit P1)', async () => {
+    const svc = await visit({ status: 'on_site' });
+    const inv = await invoice({ scheduled_service_id: svc.id, status: 'paid', paid_at: new Date() });
+    // A connection whose time_entries read fails; every other table reads through.
+    const flaky = Object.assign((table) => {
+      if (table === 'time_entries') throw new Error('time_entries lookup reset');
+      return trx(table);
+    }, { raw: (...a) => trx.raw(...a) });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: flaky, today: TODAY });
+    expect(out).toMatchObject({ closed: false, reason: 'error', visitId: svc.id });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'visit.completion_on_invoice_issued_refused', resource_id: svc.id,
+      metadata: expect.objectContaining({ invoiceId: inv.id, trigger: 'paid', code: 'error' }),
+    }));
+    // The audit module is mocked here; write the row it would have written, then sweep.
+    await trx('audit_log').insert({ actor_type: 'system', action: 'visit.completion_on_invoice_issued_refused', resource_type: 'scheduled_services', resource_id: svc.id, metadata: JSON.stringify({ invoiceId: inv.id, trigger: 'paid', code: 'error' }) });
+    const { retryFailedPaidInvoiceCloseouts } = require('../services/invoice-issued-closeout');
+    expect(await retryFailedPaidInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 1, retried: 1, closed: 1 });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId)).toEqual([svc.id]);
+  });
+
   test('paid-invoice retry: a card / cash payment whose closeout FAILED or was refused for the moment is retried; one that never ran, a real refusal, a statement child and an old payment are left alone (GitHub r1 P1 #5886)', async () => {
     const { retryFailedPaidInvoiceCloseouts } = require('../services/invoice-issued-closeout');
     const auditRow = (visitId, invoiceId, action, code) => trx('audit_log').insert({
