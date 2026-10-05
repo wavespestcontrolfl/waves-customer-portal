@@ -266,7 +266,9 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
     // transaction: no lock is held across a model call.
     const key = duplicateKey(vendorName, invoiceNumber, vendorSource, dateFromInvoice);
     const outcome = await db.transaction(async (trx) => {
-      if (!parsedInvoice) {
+      // Same clipping guard as duplicateKey: a clipped description is no identity.
+      const fullDescriptionFits = fullExpenseDescription(vendorName, invoiceNumber).length <= 300 && String(vendorName).length <= 200;
+      if (!parsedInvoice && fullDescriptionFits) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`expense-notice:${String(email.from_address || '').toLowerCase()}`]);
         const copy = await findSameNoticeExpense(trx, email.id, amount, expenseDescription(vendorName, invoiceNumber));
         if (copy) {

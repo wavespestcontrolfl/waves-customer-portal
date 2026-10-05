@@ -210,3 +210,12 @@ test('the notice-copy check requires the same description, so different invoice 
     { extracted: { invoice_number: 'TEST-0019', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
   expect(mockState.copyFilter).toEqual(expect.objectContaining({ 'x.description': 'Batch Biller Invoice #TEST-0019 — via email' }));
 });
+
+test('the notice-copy check skips a vendor name too long for its column', async () => {
+  noPdf();
+  mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z') };
+  mockState.copy = { id: 'exp-clipped-copy' };
+  await processVendorInvoice({ id: 'e20', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'B'.repeat(250), subject: 'Receipt' },
+    { extracted: { invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 25 }));
+});
