@@ -138,6 +138,18 @@ describe('queueContactReportTexts', () => {
     expect(inserts().map((r) => r.message_body.split('!')[0])).toEqual(['Hello Riley', 'Hello there']);
   });
 
+  test('a contact renamed on the same phone between the render and the lock is never greeted by the old name: the queue retries', async () => {
+    const renamed = { ...CUSTOMER, service_contact_name: 'Jordan Newtenant' };
+    // First try: unlocked read (Riley), locked read (Jordan) -> throws. Retry: both reads see Jordan.
+    queue('customers', CUSTOMER, renamed, renamed, renamed);
+    queue('scheduled_services', { service_address_line1: '12 Example Way' }, { service_address_line1: '12 Example Way' });
+    renderSmsTemplate.mockImplementation(async (_key, vars) => `Hello ${vars.first_name}! The Waves service report for ${vars.street_address} is ready: ${vars.report_url}`);
+    await expect(ContactReportText.queueContactReportTexts(ARGS)).rejects.toMatchObject({ code: 'CONTACT_RENAMED' });
+    expect(inserts()).toHaveLength(0);
+    expect(await ContactReportText.notifyContactsReportReady(ARGS, { delaysMs: [0, 0] })).toBe(2);
+    expect(inserts()[0].message_body).toMatch(/^Hello Jordan!/);
+  });
+
   test('the body is rendered before the transaction opens (the template read uses the root pool)', async () => {
     queueReads();
     renderSmsTemplate.mockImplementation(async () => { expect(db.transaction).not.toHaveBeenCalled(); return BODY; });
@@ -419,6 +431,55 @@ describe('the approved wording and the hooks', () => {
   test('no second delivery mechanism: no ledger table, no sweep', () => {
     expect(read('services/contact-report-text.js')).not.toMatch(/contact_report_texts|sendCustomerMessage/);
     expect(read('index.js')).not.toMatch(/contact-report-text/);
+  });
+});
+
+describe('wording follow-up migration: allowlist on every row, seeded variants swapped', () => {
+  const followup = require('../models/migrations/20261004091000_contact_report_ready_house_voice_followup');
+  const voice = require('../models/migrations/20261004090000_contact_report_ready_house_voice');
+
+  function fakeKnex({ templates, variants }) {
+    const updates = [];
+    const knex = (table) => {
+      const rows = table === 'sms_templates' ? templates : variants;
+      let cond = {};
+      const q = {
+        where(c) { cond = { ...cond, ...c }; return q; },
+        select: async () => rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v)),
+        update: async (patch) => {
+          const hit = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
+          hit.forEach((r) => Object.assign(r, patch));
+          updates.push({ table, cond, patch });
+          return hit.length;
+        },
+      };
+      return q;
+    };
+    knex.schema = { hasTable: async (name) => name !== 'audit_log' };
+    knex.fn = { now: () => 'now' };
+    knex.updates = updates;
+    return knex;
+  }
+
+  test('an admin-edited row keeps its body and gains first_name; a seeded variant gets the new body; an edited variant is kept', async () => {
+    const templates = [{ id: 't1', template_key: 'contact_report_ready', body: 'Edited by an admin: {report_url}', variables: JSON.stringify(['street_address', 'report_url']) }];
+    const variants = [
+      { id: 'v1', template_key: 'contact_report_ready', body: voice.SEEDED_BODY },
+      { id: 'v2', template_key: 'contact_report_ready', body: 'An edited variant {report_url}' },
+      { id: 'v3', template_key: 'another_template', body: voice.SEEDED_BODY },
+    ];
+    const knex = fakeKnex({ templates, variants });
+    await followup.up(knex);
+    expect(templates[0].body).toBe('Edited by an admin: {report_url}');
+    expect(JSON.parse(templates[0].variables)).toEqual(['first_name', 'street_address', 'report_url']);
+    expect(variants.map((v) => v.body)).toEqual([voice.BODY, 'An edited variant {report_url}', voice.SEEDED_BODY]);
+  });
+
+  test('a row that already lists first_name is not written again', async () => {
+    const templates = [{ id: 't1', template_key: 'contact_report_ready', body: voice.BODY, variables: ['first_name', 'street_address', 'report_url'] }];
+    const knex = fakeKnex({ templates, variants: [] });
+    await followup.up(knex);
+    expect(knex.updates).toHaveLength(0);
   });
 });
 

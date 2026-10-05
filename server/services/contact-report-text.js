@@ -104,7 +104,8 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
   const { firstNameFrom, getServiceContactSlots } = require('./customer-contact');
   // The slot's OWN name: the contact list falls back to the account holder's
   // name for a nameless slot, and a contact must not be greeted by it.
-  const slotName = (phone) => getServiceContactSlots(profile).find((slot) => phoneKey(slot.phone) === phoneKey(phone))?.name || '';
+  const slotNameIn = (row, phone) => getServiceContactSlots(row).find((slot) => phoneKey(slot.phone) === phoneKey(phone))?.name || '';
+  const slotName = (phone) => slotNameIn(profile, phone);
   const street = await streetAddress(db, scheduledServiceId, profile);
   // One body per slot contact (the greeting names the CONTACT, never the
   // account holder), keyed by phone. A template read that fails throws; a
@@ -135,6 +136,12 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
       // (they were not a contact when this visit's text went out).
       const body = bodyByPhone.get(phoneKey(contact.phone));
       if (!body) continue;
+      // The greeting was rendered from the unlocked read. A save that kept
+      // the phone but changed the person since then would get the previous
+      // name: throw, and the retry renders from the saved contact.
+      if (firstNameFrom(slotNameIn(customer, contact.phone)) !== firstNameFrom(slotName(contact.phone))) {
+        throw Object.assign(new Error('contact renamed during the queue'), { code: 'CONTACT_RENAMED' });
+      }
       const reportKey = `${sourceKey}:${phoneKey(contact.phone)}`;
       const existing = await trx('sms_log')
         .where({ customer_id: customerId, message_type: MESSAGE_TYPE })
