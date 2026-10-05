@@ -233,12 +233,12 @@ describe('service report PDF Pest Pressure cache config', () => {
     expect(mockGetHealthyStoredReportPdf).not.toHaveBeenCalled();
     expect(result.rendered).toBe(true);
     expect(mockReportPdfStorageKey).toHaveBeenCalledWith('service-1', {
-      visibilitySignature: expect.stringContaining('-tsreview2'),
+      visibilitySignature: expect.stringContaining('-tsreview3'),
     });
     expect(mockPutReportPdf).toHaveBeenCalledWith('service-1', expect.any(Buffer), {
-      visibilitySignature: expect.stringContaining('-tsreview2'),
+      visibilitySignature: expect.stringContaining('-tsreview3'),
     });
-    expect(result.key).toContain('-tsreview2');
+    expect(result.key).toContain('-tsreview3');
   });
 
   describe('GATE_TS_TECH_FINDINGS_COPY joins the tree PDF identity', () => {
@@ -251,11 +251,11 @@ describe('service report PDF Pest Pressure cache config', () => {
     test('gate off keeps today\'s exact signature (no mass invalidation while dark); gate on adds the gate and a content revision', () => {
       const { treeShrubReviewPdfSignature } = jest.requireActual('../services/service-report/pdf-storage');
       delete process.env.GATE_TS_TECH_FINDINGS_COPY;
-      expect(treeShrubReviewPdfSignature(tree)).toBe('-tsreview2');
+      expect(treeShrubReviewPdfSignature(tree)).toBe('-tsreview3');
       process.env.GATE_TS_TECH_FINDINGS_COPY = 'false';
-      expect(treeShrubReviewPdfSignature(tree)).toBe('-tsreview2');
+      expect(treeShrubReviewPdfSignature(tree)).toBe('-tsreview3');
       process.env.GATE_TS_TECH_FINDINGS_COPY = 'true';
-      expect(treeShrubReviewPdfSignature(tree)).toBe('-tsreview2-tsfind1');
+      expect(treeShrubReviewPdfSignature(tree)).toBe('-tsreview3-tsfind1');
     });
 
     test('flipping the gate changes the stored-PDF key; other service lines never change', () => {
@@ -265,8 +265,8 @@ describe('service report PDF Pest Pressure cache config', () => {
       process.env.GATE_TS_TECH_FINDINGS_COPY = 'true';
       const on = reportPdfStorageKey('service-1', { visibilitySignature: treeShrubReviewPdfSignature(tree) });
       expect(on).not.toBe(off);
-      expect(off).toContain('-tsreview2');
-      expect(on).toContain('-tsreview2-tsfind1');
+      expect(off).toContain('-tsreview3');
+      expect(on).toContain('-tsreview3-tsfind1');
       expect(treeShrubReviewPdfSignature({ service_line: 'lawn' })).toBe('');
     });
   });

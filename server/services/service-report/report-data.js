@@ -2686,7 +2686,10 @@ class PinnedAssessmentUnavailable extends Error {
 // approved expectation row's sentence, and the cross-season notes lost their
 // "greens back up / recovers as it warms" promise. Lawn PDFs and renders that
 // carry the old sentences must re-key (lawn only: no fleet-wide PDF bust).
-const LAWN_RENDER_STRATEGY = 'p9-lawn-seasonal-timing-20261003';
+// p10: the lawn PDF no longer prints the "Hold irrigation until" product-advisory
+// line or a clean-visit "No lawn issues" row beside a finding, and the v6 "What
+// to expect" block drops repeated sentences. Cached lawn PDFs must re-key.
+const LAWN_RENDER_STRATEGY = 'p10-lawn-report-consistency-20261005';
 
 // ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
 // pairs the render would use. Reads the record itself, so a partial row from a
