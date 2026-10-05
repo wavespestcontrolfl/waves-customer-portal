@@ -229,6 +229,16 @@ describe('deterministic lines', () => {
   });
 });
 
+describe('mites stay generic (Codex r8)', () => {
+  const verify = (note, ...items) => tech.verifyObservations(items, note);
+  test('"mites" renders "mites"; only "spider mites" in the note renders "spider mites"', () => {
+    expect(verify('Found mites on the hedges.', obs('spider_mites', 'hedges'))).toEqual([]);
+    expect(verify('Found mites on the hedges.', obs('mites', 'hedges'))).toEqual([{ condition: 'mites', plant: 'hedges' }]);
+    expect(verify('Found spider mites on the hedges.', obs('spider_mites', 'hedges'))).toEqual([{ condition: 'spider_mites', plant: 'hedges' }]);
+    expect(textFor({ technicianNote: 'Found mites on the hedges.', products: [] }, [obs('mites', 'hedges')])).toBe('Our technician saw mites on the hedges.');
+  });
+});
+
 describe('a sighting, never a treatment target (Codex r7)', () => {
   const verify = (note, ...items) => tech.verifyObservations(items, note);
   test('a treatment or its purpose supports no "saw" line', () => {
@@ -429,10 +439,20 @@ describe('freeze and read back', () => {
   });
 
   test('createAndFreeze stores { text, slots, version }; a rejected or already-frozen step spends nothing', async () => {
+    const markerDb = fakeKnex();
+    const runOn = (db) => (extra = {}) => tech.createAndFreezeTechParagraph({ serviceRecordId: 's1', assessmentId: 77, structuredNotes: extra.structuredNotes || '{}', knex: db.knex, gatherInputs: async () => inputs(), deps: extra.deps });
+    expect((await runOn(markerDb)({ deps: { generate: async () => ({ ok: false, reason: 'nothing_to_say' }) } })).status).toBe('nothing_to_say');
+    // Nothing to say still writes a text-less marker (Codex r8), so a resumed
+    // completion spends no second call; it never prints.
+    expect(markerDb.state.updates).toBe(1);
     const { knex, state } = fakeKnex();
-    const run = (extra = {}) => tech.createAndFreezeTechParagraph({ serviceRecordId: 's1', assessmentId: 77, structuredNotes: extra.structuredNotes || '{}', knex, gatherInputs: async () => inputs(), deps: extra.deps });
-    expect((await run({ deps: { generate: async () => ({ ok: false, reason: 'nothing_to_say' }) } })).status).toBe('nothing_to_say');
-    expect(state.updates).toBe(0);
+    const run = runOn({ knex });
+    const marker = { treeShrubTechParagraph: { 77: { v: 1, assessmentId: '77', text: '', nothingToSay: true } } };
+    const again = jest.fn();
+    expect((await run({ structuredNotes: JSON.stringify(marker), deps: { generate: again } })).status).toBe('already_frozen');
+    expect(again).not.toHaveBeenCalled();
+    expect(tech.readFrozenTechParagraph(marker, 77)).toBeNull();
+    expect(tech.techParagraphSignature(marker, 77)).toBe('');
     const generate = jest.fn();
     expect((await run({ structuredNotes: notes(), deps: { generate } })).status).toBe('already_frozen');
     expect(generate).not.toHaveBeenCalled();

@@ -71,7 +71,10 @@ const CONDITIONS = Object.freeze({
   scale: { display: 'scale', re: /\bscale(?:\s+(?:insects?|crawlers?))?\b/i },
   whitefly: { display: 'whitefly', re: /\bwhite[\s-]?(?:fly|flies)\b/i },
   aphids: { display: 'aphids', re: /\baphids?\b/i },
-  spider_mites: { display: 'spider mites', re: /\b(?:spider\s+)?mites?\b/i },
+  // "Mites" alone stays "mites": the customer copy never adds a species the
+  // technician did not name (Codex r8).
+  mites: { display: 'mites', re: /\bmites?\b/i },
+  spider_mites: { display: 'spider mites', re: /\bspider\s+mites?\b/i },
   caterpillars: { display: 'caterpillars', re: /\bcaterpillars?\b|\b(?:web|bag|army)worms?\b/i },
   thrips: { display: 'thrips', re: /\bthrips\b/i },
   mealybugs: { display: 'mealybugs', re: /\bmealy\s*bugs?\b/i },
@@ -380,6 +383,9 @@ const engine = createTechParagraphEngine({
   // The deterministic fallback (build + atomic freeze) after a hung or failed model
   // call needs its own slice of the step's deadline.
   reserveMs: 2000,
+  // A visit with nothing to say still records that the step ran, so a resumed
+  // completion makes no second model call (Codex r8).
+  freezeNothing: true,
 });
 
 /**

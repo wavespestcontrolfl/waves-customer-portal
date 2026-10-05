@@ -50,6 +50,7 @@ function parseJsonObject(value) {
  *   when the stored entry carries more than text (the T&S paragraph re-renders from its slots)
  * @param {Function} [cfg.precheck] (inputs) => null | reason; replaces the lawn rule (a note and a product)
  * @param {number} [cfg.reserveMs] slice of the step's deadline the model call may not use (default 0)
+ * @param {boolean} [cfg.freezeNothing] also freeze a text-less marker when the step has nothing to say, so a retried completion spends no second call (default false)
  */
 // The lawn rule: a note and an applied product, or no call.
 function lawnPrecheck(inputs) {
@@ -61,7 +62,7 @@ function createTechParagraphEngine(cfg) {
   const {
     logTag, laneId, promptVersion, freezeKey, freezeVersion, budgetMs: BUDGET_MS,
     normalizeInputs, buildPrompt, validateParagraph, frozenTextProblem, frozenEntryProblem,
-    precheck = lawnPrecheck, reserveMs = 0,
+    precheck = lawnPrecheck, reserveMs = 0, freezeNothing = false,
   } = cfg;
 
   function inputsHash(inputs) {
@@ -225,8 +226,10 @@ function createTechParagraphEngine(cfg) {
     const run = async () => {
       const notes = typeof getStructuredNotes === 'function' ? await getStructuredNotes() : structuredNotes;
       if (!live()) return { status: 'timeout' };
-      // First writer wins and a retry must not spend a second call.
-      if (storedTechParagraphFor(notes, assessmentId)) return { status: 'already_frozen' };
+      // First writer wins and a retry must not spend a second call. Any entry under
+      // the key counts (a text-less "nothing to say" marker too), the same test the
+      // freeze's UPDATE predicate uses.
+      if (parseJsonObject(parseJsonObject(notes)[freezeKey])[assessmentId] != null) return { status: 'already_frozen' };
       let inputs;
       try {
         inputs = await gatherInputs();
@@ -240,6 +243,14 @@ function createTechParagraphEngine(cfg) {
       // fallback keeps a slice of the deadline for its build and the atomic freeze.
       const generated = await (deps.generate || generateTechParagraph)(inputs, { ...deps, budgetMs: remaining() - reserveMs });
       if (!live()) return { status: 'timeout' };
+      if (!generated.ok && freezeNothing && generated.reason === 'nothing_to_say') {
+        // A marker, never printed (storedTechParagraphFor needs text): the step ran.
+        await freezeTechParagraph(serviceRecordId, {
+          v: freezeVersion, promptVersion, assessmentId: String(assessmentId), text: '', nothingToSay: true,
+          frozenAt: (deps.now ? deps.now() : new Date()).toISOString(),
+        }, knex);
+        return { status: 'nothing_to_say' };
+      }
       if (!generated.ok) return { status: generated.reason || 'no_paragraph', problems: generated.problems };
       const entry = {
         v: freezeVersion,
