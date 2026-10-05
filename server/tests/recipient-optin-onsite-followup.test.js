@@ -97,7 +97,7 @@ const spouse = (extra = {}) => ({
 describe('on-site follow-up: caller demotion + confirmation replay', () => {
   test('a YES on a live visit demotes the caller once and replays the confirmation, answering the YES', async () => {
     const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
-    expect(await optin.settleOnSiteFollowUps(['c1'], { inReplyToYes: true })).toBe(1);
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(1);
     expect(state.prefs).toEqual([{ customer_id: 'c1', appointment_notify_primary: false }]);
     expect(state.optin[0].caller_demoted_at).toBeInstanceOf(Date);
     expect(sendReplay).toHaveBeenCalledWith({ customerId: 'c1', scheduledServiceId: 'v1', phone: '+15550100123', inReplyToYes: true });
@@ -107,8 +107,8 @@ describe('on-site follow-up: caller demotion + confirmation replay', () => {
 
   test('a repeated / duplicate YES never sends twice or demotes again (a holder who turned texts back on stays on)', async () => {
     const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
-    await optin.settleOnSiteFollowUps(['c1'], { inReplyToYes: true });
-    await optin.settleOnSiteFollowUps(['c1'], { inReplyToYes: true });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
     await optin.sweepOnSiteFollowUps();
     expect(sendReplay).toHaveBeenCalledTimes(1);
     expect(state.prefs).toHaveLength(1);
@@ -119,7 +119,7 @@ describe('on-site follow-up: caller demotion + confirmation replay', () => {
       .mockResolvedValueOnce({ sent: false, reason: 'not_sent' })
       .mockResolvedValueOnce({ sent: true });
     const { optin, state } = load({ rows: [row()], customer: spouse(), replay });
-    await optin.settleOnSiteFollowUps(['c1'], { inReplyToYes: true });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
     expect(state.optin[0].followup_done_at).toBeNull();
     expect(state.optin[0].followup_claimed_at).toBeNull();
     expect(state.optin[0].caller_demoted_at).toBeInstanceOf(Date);
@@ -241,9 +241,29 @@ describe('on-site follow-up: caller demotion + confirmation replay', () => {
     expect(sendReplay).not.toHaveBeenCalled();
   });
 
+  test('only the phone that said YES answers as a reply; another contact\'s unfinished row on the same run honors the send window', async () => {
+    const { optin, sendReplay } = load({
+      rows: [row(), row({ phone_key: OTHER })],
+      customer: spouse({ service_contact2_phone: '+15550100456' }),
+    });
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(2);
+    const byPhone = Object.fromEntries(sendReplay.mock.calls.map(([a]) => [a.phone, a.inReplyToYes]));
+    expect(byPhone).toEqual({ '+15550100123': true, '+15550100456': false });
+  });
+
+  test('dark: the YES itself closes its visit-bound row, so a flip before the next sweep acts on nothing', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row(), row({ phone_key: OTHER })], customer: spouse(), demoteGateOn: false });
+    await optin.onRecipientConfirmed(KEY);
+    expect(state.optin[0].followup_done_at).toBeInstanceOf(Date);
+    // Another phone's row is not this YES's to close.
+    expect(state.optin[1].followup_done_at).toBeNull();
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.prefs).toEqual([]);
+  });
+
   test('GATE_ONSITE_CALLER_DEMOTE off (dark): a YES demotes nobody and replays nothing; the sweep closes the row so a later flip never acts on it', async () => {
     const { optin, state, sendReplay } = load({ rows: [row(), row({ phone_key: OTHER, visit_id: null })], customer: spouse(), demoteGateOn: false });
-    expect(await optin.settleOnSiteFollowUps(['c1'], { inReplyToYes: true })).toBe(0);
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(0);
     expect(await optin.demoteCallerForConfirmedOnSite('c1', KEY, 'v1')).toBe('skipped');
     expect(state.optin[0].followup_done_at).toBeNull();
     expect(await optin.sweepOnSiteFollowUps()).toEqual({ settled: 0 });

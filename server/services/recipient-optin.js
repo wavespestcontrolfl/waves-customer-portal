@@ -164,6 +164,16 @@ async function onRecipientConfirmed(phoneKey, { dbh = db } = {}) {
       const stamp = await applyConfirmedPhone(h, customerId, phoneKey);
       if (stamp) outcomes.push({ customerId, stamp });
     }
+    // Dark (GATE_ONSITE_CALLER_DEMOTE off): this YES owes no follow-up. Its
+    // visit-bound rows are closed with the YES itself, so a flip at any later
+    // moment never demotes a caller or replays a confirmation for it.
+    if (!isOnSiteFollowUpLive()) {
+      await h('recipient_optin')
+        .where({ phone_key: phoneKey, status: 'confirmed' })
+        .whereNotNull('visit_id')
+        .whereNull('followup_done_at')
+        .update({ followup_done_at: new Date(), followup_claimed_at: null });
+    }
   });
   for (const { customerId, stamp } of outcomes) {
     await bestEffort(dbh, (h) => updateCaptureCard(h, phoneKey, {
@@ -175,7 +185,7 @@ async function onRecipientConfirmed(phoneKey, { dbh = db } = {}) {
   // (settleOnSiteFollowUps never throws: a failure there never touches the
   // consent already recorded, and the sweep retries it).
   if (outcomes.length) {
-    const settle = () => settleOnSiteFollowUps(outcomes.map((o) => o.customerId), { inReplyToYes: true });
+    const settle = () => settleOnSiteFollowUps(outcomes.map((o) => o.customerId), { replyPhoneKey: phoneKey });
     if (dbh && dbh.isTransaction) {
       const committed = commitPromiseOf(dbh);
       if (committed) committed.then(settle, () => {});
@@ -246,7 +256,10 @@ async function demoteCallerForPhone(customer, phoneKey) {
   return won ? 'demoted' : 'already';
 }
 
-async function settleCustomerFollowUps(customerId, { inReplyToYes = false } = {}) {
+// `replyPhoneKey` is the phone whose YES triggered this run: only ITS replay
+// answers a message that person just sent (another contact's unfinished row
+// rides the same run but honors the send window like a sweep retry).
+async function settleCustomerFollowUps(customerId, { replyPhoneKey = null } = {}) {
   const claimed = await db('recipient_optin')
     .where({ customer_id: customerId, status: 'confirmed' })
     .whereNotNull('visit_id')
@@ -285,7 +298,7 @@ async function settleCustomerFollowUps(customerId, { inReplyToYes = false } = {}
       const slot = require('./customer-contact').SERVICE_CONTACT_SLOTS.find((sl) => recipientPhoneKey(customer[sl.phone]) === row.phone_key);
       if (!slot) { await finish(true); continue; }
       const result = await require('./appointment-reminders').sendConfirmationToServiceContact({
-        customerId, scheduledServiceId: row.visit_id, phone: customer[slot.phone], inReplyToYes,
+        customerId, scheduledServiceId: row.visit_id, phone: customer[slot.phone], inReplyToYes: !!replyPhoneKey && row.phone_key === replyPhoneKey,
       });
       const final = result.sent || REPLAY_TERMINAL_REASONS.has(result.reason);
       // A demotion that errored retries too (the replay's own dedupe stops a resend).
@@ -322,8 +335,9 @@ async function settleOnSiteFollowUps(customerIds = [], opts = {}) {
 async function sweepOnSiteFollowUps({ limit = 25 } = {}) {
   if (!isDoubleOptinEnabled()) return { settled: 0 };
   if (!isOnSiteFollowUpLive()) {
-    // Dark: a YES recorded now owes no follow-up. Its row is closed here so a
-    // later flip never demotes a caller or replays a confirmation for an old YES.
+    // Dark: a YES closes its own row when it is recorded (onRecipientConfirmed).
+    // This is the backstop for a row confirmed any other way, so a later flip
+    // never demotes a caller or replays a confirmation for an old YES.
     await db('recipient_optin')
       .where({ status: 'confirmed' })
       .whereNotNull('visit_id')
