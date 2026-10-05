@@ -665,8 +665,14 @@ describe('approvedMatcher: what each sender must be about to deliver to match th
     expect(m({ ...plan, optedOut: true })(email('pat@example.com'))).toBe(false);
     expect(m(plan)({ ...email('pat@example.com'), optedOut: null })).toBe(false);
     expect(m(plan)({ channel: 'email', to: 'pat@example.com', amount: '129.00' })).toBe(false);
-    // The text and app legs honor the opt-out themselves, so they are not bound to it.
     expect(m(plan)({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(true);
+  });
+
+  test('a card that showed the opt-out promised no text or app notification: both refused even after an opt-in', () => {
+    const optedOut = m({ email: 'pat@example.com', optedOut: true });
+    expect(optedOut({ channel: 'sms', to: '9415550100', amount: '129.00' })).toBe(false);
+    expect(optedOut({ channel: 'app', to: null, amount: '129.00' })).toBe(false);
+    expect(optedOut({ ...email('pat@example.com'), optedOut: true })).toBe(true);
   });
 
   test('amount: formatting does not matter, value does', () => {

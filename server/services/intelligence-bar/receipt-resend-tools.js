@@ -93,6 +93,9 @@ function reach(who, via) {
 }
 
 const VALID_VIA = ['email', 'sms', 'both'];
+const VIA_BY = { email: ' by email', sms: ' by text', both: '' };
+// Why a non-opted-out receipt cannot go on the chosen channel (both: receiptRecipients already refused nobody).
+const UNREACHABLE = { email: 'no receipt email on file', sms: 'no phone on file', both: 'no recipient on file', payer: 'a payer-billed receipt is never texted' };
 const blocked = (reason, code, invoiceId) => ({ error: reason, code, ...(invoiceId ? { invoice_id: invoiceId } : {}) });
 
 // Eligibility: the invoice, who the receipt reaches, and that the chosen channel has someone to reach.
@@ -111,14 +114,13 @@ async function checkEligibility(input, ownClaimToken) {
   if (who.blocker) {
     return blocked(`A receipt cannot be sent: ${who.blocker}.`, who.blocker === 'invoice not found' ? 'invoice_not_found' : 'resend_blocked', target.id);
   }
-  if (via === 'email' && !who.email) return blocked('A receipt cannot be sent by email: no receipt email on file.', 'resend_blocked', target.id);
-  // An opted-out customer is reached by the manual email only: sendReceipt honors the same opt-out for
-  // the text and app legs (receipt_texts_opted_out), so a send with no email leg would send nothing.
-  if (who.optedOut && (via === 'sms' || !who.email)) {
-    return blocked(`A receipt cannot be sent: the customer opted out of payment receipts, so only an email can reach them, and ${via === 'sms' ? 'this send has no email' : 'no receipt email is on file'}.`, 'resend_blocked', target.id);
-  }
-  if (via === 'sms' && (who.payerBilled || !(who.phone || who.app))) {
-    return blocked(`A receipt cannot be sent by text: ${who.payerBilled ? 'a payer-billed receipt is never texted' : 'no phone on file'}.`, 'resend_blocked', target.id);
+  // Who the chosen channels can reach. An opted-out customer is reached by the manual email only:
+  // sendReceipt honors the same opt-out for the text and app legs (receipt_texts_opted_out).
+  const canText = !who.payerBilled && !who.optedOut && Boolean(who.phone || who.app);
+  if (!{ email: Boolean(who.email), sms: canText, both: Boolean(who.email) || canText }[via]) {
+    const why = who.optedOut ? `the customer opted out of payment receipts, so only an email can reach them, and ${via === 'sms' ? 'this send has no email' : 'no receipt email is on file'}`
+      : UNREACHABLE[via === 'email' || !who.payerBilled ? via : 'payer'];
+    return blocked(`A receipt cannot be sent${VIA_BY[via]}: ${why}.`, 'resend_blocked', target.id);
   }
   return { via, memo, who };
 }
@@ -236,8 +238,10 @@ function approvedMatcher({ who, via }) {
       case 'email': return via !== 'sms' && Boolean(who.email) && (facts.paid ?? null) === paidKey(who.invoice)
         && facts.optedOut === (who.optedOut === true)
         && sameReach({ email: normalizeReceiptEmail(facts.to) });
-      case 'sms': return via !== 'email' && !who.payerBilled && Boolean(who.phone) && sameReach({ phone: facts.to });
-      case 'app': return via !== 'email' && !who.payerBilled && who.app === true;
+      // A card that showed the opt-out promised no text and no app notification: an opt-in landing after
+      // the last re-check must not let either through.
+      case 'sms': return via !== 'email' && !who.payerBilled && !who.optedOut && Boolean(who.phone) && sameReach({ phone: facts.to });
+      case 'app': return via !== 'email' && !who.payerBilled && !who.optedOut && who.app === true;
       default: return false;
     }
   };
