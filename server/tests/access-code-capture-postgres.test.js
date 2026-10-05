@@ -1046,6 +1046,16 @@ postgres('access codes section', () => {
       expect(out.codes.map((r) => r.code)).toEqual(['1357']);
     });
 
+    test('an unstamped visit of a two-home customer shows no home-bound code', async () => {
+      const c = await customer({ properties: 2 });
+      const [a] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const v = await visit(c.id, day(1));
+      const row = await found(c.id, { kind: 'door', code: '2468' });
+      await access.accept(trx, row.id, {});
+      await trx('customer_access_codes').where({ id: row.id }).update({ property_id: a.id });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes).toEqual([]);
+    });
+
     test('the found list carries each row\'s visit choices', async () => {
       const c = await customer();
       const soon = await visit(c.id, etDateString(addETDays(new Date(), 2)));

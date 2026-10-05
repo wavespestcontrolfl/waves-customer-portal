@@ -611,8 +611,12 @@ async function listForVisit(conn, req, visitId) {
     return fail(404, 'not_found');
   }
   const { active } = await listForCustomer(conn, visit.customer_id);
-  // A code tied to one home is shown only at a visit to that home.
-  const sameHome = (r) => !r.propertyId || !visit.property_id || r.propertyId === visit.property_id;
+  // A code tied to one home is shown only at a visit to that home. A visit not
+  // stamped with a home matches a home-bound code only when the customer has
+  // that one active home.
+  const homes = await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id');
+  const visitHome = visit.property_id || (homes.length === 1 ? homes[0] : null);
+  const sameHome = (r) => !r.propertyId || (!!visitHome && r.propertyId === visitHome);
   return { ok: true, codes: active.filter((r) => (r.life === 'standing' && sameHome(r)) || r.scheduledServiceId === visit.id) };
 }
 
