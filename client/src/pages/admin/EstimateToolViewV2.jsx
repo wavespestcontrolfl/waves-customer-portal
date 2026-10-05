@@ -1884,6 +1884,10 @@ export default function EstimateToolViewV2({
   const [leadSearchStatus, setLeadSearchStatus] = useState("idle");
   // The lead picked from that list, for the "Linked to lead" line.
   const [linkedLead, setLinkedLead] = useState(null);
+  // The three contact boxes stay closed until asked for (owner 2026-10-04).
+  const [contactOpen, setContactOpen] = useState(false);
+  const contactSummary = [form.customerName, form.customerPhone, form.customerEmail]
+    .map((value) => String(value || "").trim()).filter(Boolean).join(" · ");
   // Contact provenance: the phone and email the LAST search pick (customer or
   // lead) put in the form. A field still holding that value belongs to that
   // person, not to the operator's typing, and it outlives an unlink: the next
@@ -5122,17 +5126,6 @@ export default function EstimateToolViewV2({
           <div className="space-y-6 min-w-0">
             <section tabIndex={-1} id="estimate-customer" className="estimate-workflow-section space-y-4" aria-label="Customer and property">
             <h2 className="text-18 font-medium">Customer & property</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-3">
-              <Field label="Customer name" id="estimate-customerName" className="mb-4">
-                <InputV2 k="customerName" />
-              </Field>
-              <Field label="Phone" id="estimate-customerPhone" className="mb-4">
-                <InputV2 k="customerPhone" type="tel" />
-              </Field>
-              <Field label="Email" className="mb-4 sm:col-span-2" id="estimate-customerEmail">
-                <InputV2 k="customerEmail" type="email" />
-              </Field>
-            </div>
             {/* Customer Lookup */}
             <div>
               {" "}
@@ -5207,6 +5200,35 @@ export default function EstimateToolViewV2({
                   </div>
                 </div>
               )}
+            </div>
+            {/* Contact on the estimate. Owner 2026-10-04: nobody types these to start
+                an estimate, the search fills them. They stay closed behind one line
+                that says who the estimate goes to, and open on request (a person who
+                is in no list yet, or a correction). Kept mounted while closed so a
+                pick, a prefill and a saved draft all still write to them. */}
+            <div>
+              <div className="mb-3 text-14 text-zinc-900 flex flex-wrap items-center gap-x-3 gap-y-1 min-w-0">
+                <span className="min-w-0 max-w-full [overflow-wrap:anywhere]" data-testid="estimate-contact-summary">
+                  {contactSummary
+                    ? <>Estimate goes to: <strong>{contactSummary}</strong></>
+                    : "No one is selected yet."}
+                </span>
+                <button data-ui-text-action type="button" aria-expanded={contactOpen} aria-controls="estimate-contact-fields"
+                  onClick={() => setContactOpen((open) => !open)} className="text-14 underline cursor-pointer max-w-full text-left whitespace-normal">
+                  {contactOpen ? "Hide contact details" : contactSummary ? "Edit contact details" : "Add a person by hand"}
+                </button>
+              </div>
+              <div id="estimate-contact-fields" hidden={!contactOpen} className={contactOpen ? "grid grid-cols-1 sm:grid-cols-2 gap-x-3" : "hidden"}>
+                <Field label="Customer name" id="estimate-customerName" className="mb-4">
+                  <InputV2 k="customerName" />
+                </Field>
+                <Field label="Phone" id="estimate-customerPhone" className="mb-4">
+                  <InputV2 k="customerPhone" type="tel" />
+                </Field>
+                <Field label="Email" className="mb-4 sm:col-span-2" id="estimate-customerEmail">
+                  <InputV2 k="customerEmail" type="email" />
+                </Field>
+              </div>
             </div>
             {/* Property Lookup */}
             <div>
