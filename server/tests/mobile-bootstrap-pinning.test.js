@@ -17,6 +17,17 @@ describe('native customer-app bootstrap reproducibility', () => {
     });
   }
 
+  test('the iOS app lists the portal as its app-bound domain so the offline copy installs', () => {
+    const config = JSON.parse(fs.readFileSync(path.join(root, 'client/capacitor.config.json'), 'utf8'));
+    expect(config.ios.limitsNavigationsToAppBoundDomains).toBe(true);
+    expect(new URL(config.server.url).hostname).toBe('portal.wavespestcontrol.com');
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    // The plist domain is derived from server.url, not typed a second time.
+    expect(source).toContain('Add :WKAppBoundDomains array');
+    expect(source).toContain('new URL(c.server.url).hostname');
+    expect(source).not.toMatch(/WKAppBoundDomains:0 string portal\./);
+  });
+
   test('bootstrap-ios installs the tracked icon into a clean catalog repeatably', () => {
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'waves-ios-assets-'));
     const assetCatalog = path.join(fixture, 'Assets.xcassets');
