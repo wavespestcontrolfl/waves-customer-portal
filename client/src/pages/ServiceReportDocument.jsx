@@ -914,11 +914,15 @@ export default function ServiceReportDocument({ data, token }) {
   // the clear ones (healthy / strong / stable / good / tracking / unknown):
   // watch, needs_attention and urgent. Same idea as the server's
   // todays_result_overclaims_clear reconciliation, plus any other recorded finding.
+  // Only lawn and tree & shrub: their no_activity row speaks for the whole visit.
+  // A pest report's no_activity rows are per zone ("no entry points in the
+  // garage") and stand beside activity elsewhere.
   const V2_CLEAR_STATUSES = ['healthy', 'strong', 'stable', 'good', 'tracking', 'unknown', ''];
   const v2IssueStatus = (status) => !V2_CLEAR_STATUSES.includes(String(status || '').toLowerCase());
-  const issueRecorded = (Array.isArray(data.findings) ? data.findings : []).some((f) => f && f.category !== 'no_activity' && String(f.title || '').trim())
+  const wholeVisitLine = data.serviceLine === 'lawn' || data.serviceLine === 'tree_shrub';
+  const issueRecorded = wholeVisitLine && ((Array.isArray(data.findings) ? data.findings : []).some((f) => f && f.category !== 'no_activity' && String(f.title || '').trim())
     || (Array.isArray(v2?.insights) ? v2.insights : []).some((i) => i && v2IssueStatus(i.status))
-    || v2IssueStatus(v2?.snapshot?.status);
+    || v2IssueStatus(v2?.snapshot?.status));
   const recordFindings = (Array.isArray(data.findings) ? data.findings : [])
     .filter((finding) => finding && String(finding.title || '').trim())
     .filter((finding) => !(issueRecorded && finding.category === 'no_activity'))

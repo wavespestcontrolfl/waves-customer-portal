@@ -133,4 +133,15 @@ describe('tree & shrub PDF "No issues" row', () => {
     const clear = { category: 'overall', status: 'stable', priority: 9, headline: 'Plants look steady', whatWeSaw: 'No problems seen.' };
     expect(text(tsData([clear], 'stable'), 'tok-t3')).toContain(TS_NO_ISSUES);
   });
+
+  it('a pest report keeps its per-zone no_activity row beside activity elsewhere', () => {
+    const data = lawnData({
+      serviceLine: 'pest', reportV2: null,
+      findings: [
+        { id: 'p1', title: 'Ant activity at the exterior', category: 'pest_activity', severity: 'info', detail: 'Trails along the back slab.' },
+        { id: 'p2', title: 'No entry points found', category: 'no_activity', severity: 'info', detail: 'Garage checked, nothing found.' },
+      ],
+    });
+    expect(text(data, 'tok-p1')).toContain('No entry points found');
+  });
 });
