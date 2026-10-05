@@ -52,7 +52,9 @@ const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { optinHeldPhoneKeys } = require('../services/recipient-optin');
 const ContactReportText = require('../services/contact-report-text');
 
-const BODY = 'Waves Pest Control: The service report for 12 Example Way is ready: https://portal.example/report/tok';
+// What the renderer returns: the one render carries the name marker.
+const RENDERED = 'Hello __CONTACT_FIRST_NAME__! The Waves service report for 12 Example Way is ready: https://portal.example/report/tok\n\nQuestions or requests? Reply here.';
+const BODY = RENDERED.replace('__CONTACT_FIRST_NAME__', 'Riley');
 const CUSTOMER = {
   id: 'cust-1', first_name: 'Dana', phone: '+19415550100', address_line1: '99 Profile Rd',
   service_contact_name: 'Riley Tenant', service_contact_phone: '(941) 555-0123',
@@ -80,7 +82,7 @@ beforeEach(() => {
   db.mockState.calls = [];
   logger.error.mockClear();
   logger.warn.mockClear();
-  renderSmsTemplate.mockReset().mockResolvedValue(BODY);
+  renderSmsTemplate.mockReset().mockResolvedValue(RENDERED);
   optinHeldPhoneKeys.mockReset().mockResolvedValue(new Map());
 });
 afterAll(() => { delete process.env.GATE_CONTACT_REPORT_TEXT; });
@@ -124,15 +126,47 @@ describe('queueContactReportTexts', () => {
     expect(meta.refresh_customer_phone).toBeUndefined();
     expect(meta.useCustomerChannel).toBeUndefined();
     expect(renderSmsTemplate).toHaveBeenCalledWith('contact_report_ready',
-      { street_address: '12 Example Way', report_url: 'https://portal.example/report/tok' }, expect.any(Object),
+      { first_name: '__CONTACT_FIRST_NAME__', street_address: '12 Example Way', report_url: 'https://portal.example/report/tok' }, expect.any(Object),
       { throwOnError: true, requiredVars: ['report_url'] });
+    // One render (one template and variant selection) for the whole queue.
+    expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+    expect(rows[1].message_body).toMatch(/^Hello Morgan! The Waves service report/);
     // A worker that predates the registry entry refuses the row.
     expect(meta.requires_registered_dispatch).toBe(true);
+    // The greeted name rides the row for the send-time recheck.
+    expect(meta.contact_report_first_name).toBe('Riley');
+    expect(JSON.parse(rows[1].metadata).contact_report_first_name).toBe('Morgan');
+  });
+
+  test('each contact is greeted by their own first name; a nameless contact is never greeted by the account holder\'s', async () => {
+    queueReads({ ...CUSTOMER, service_contact2_name: null });
+    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(2);
+    expect(inserts().map((r) => r.message_body.split('!')[0])).toEqual(['Hello Riley', 'Hello there']);
+    expect(inserts().map((r) => JSON.parse(r.metadata).contact_report_first_name)).toEqual(['Riley', 'there']);
+  });
+
+  test('the name comes from the lock-held row: a rename on the same phone before the lock is greeted by the saved name', async () => {
+    // The unlocked read sees Riley; the locked read sees the saved contact.
+    queue('customers', CUSTOMER, { ...CUSTOMER, service_contact_name: 'Jordan Newtenant' });
+    queue('scheduled_services', { service_address_line1: '12 Example Way' });
+    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(2);
+    expect(inserts()[0].message_body).toMatch(/^Hello Jordan!/);
+    expect(JSON.parse(inserts()[0].metadata).contact_report_first_name).toBe('Jordan');
+  });
+
+  test('an edited body without a name carries no name to recheck: a later rename does not drop it', async () => {
+    queueReads();
+    renderSmsTemplate.mockResolvedValue('Waves: your service report is ready: https://portal.example/report/tok');
+    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(2);
+    const meta = JSON.parse(inserts()[0].metadata);
+    expect(meta.contact_report_first_name).toBeUndefined();
+    queue('customers', { ...CUSTOMER, service_contact_name: 'Jordan Newtenant' });
+    expect(await ContactReportText.recheckContactReportText({ ...meta, customer_id: 'cust-1', to_phone: '(941) 555-0123' })).toEqual({ eligible: true });
   });
 
   test('the body is rendered before the transaction opens (the template read uses the root pool)', async () => {
     queueReads();
-    renderSmsTemplate.mockImplementation(async () => { expect(db.transaction).not.toHaveBeenCalled(); return BODY; });
+    renderSmsTemplate.mockImplementation(async () => { expect(db.transaction).not.toHaveBeenCalled(); return RENDERED; });
     await ContactReportText.queueContactReportTexts(ARGS);
     expect(db.transaction).toHaveBeenCalledTimes(1);
   });
@@ -263,6 +297,17 @@ describe('recheckContactReportText: is the queued text still right to send', () 
     expect(await ContactReportText.recheckContactReportText(META)).toEqual({ eligible: false, reason: 'contact-removed' });
   });
 
+  test('the phone saved under another name since the queue: the text that greets the old name is dropped', async () => {
+    const meta = { ...META, contact_report_first_name: 'Riley' };
+    queue('customers', CUSTOMER);
+    expect(await ContactReportText.recheckContactReportText(meta)).toEqual({ eligible: true });
+    queue('customers', { ...CUSTOMER, service_contact_name: 'Jordan Newtenant' });
+    expect(await ContactReportText.recheckContactReportText(meta)).toEqual({ eligible: false, reason: 'contact-renamed' });
+    // A nameless slot was greeted "there"; a name added later is a change too.
+    queue('customers', { ...CUSTOMER, service_contact_name: null });
+    expect(await ContactReportText.recheckContactReportText({ ...meta, contact_report_first_name: 'there' })).toEqual({ eligible: true });
+  });
+
   test('a contact who replied STOP to the opt-in ask since the queue gets nothing', async () => {
     queue('customers', CUSTOMER);
     optinHeldPhoneKeys.mockResolvedValue(new Map([['cust-1', new Set(['9415550123'])]]));
@@ -364,13 +409,16 @@ describe('registry entry contact_report_ready_deferred', () => {
 describe('the approved wording and the hooks', () => {
   const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 
-  test('the template is the owner-approved text, GSM-7, with no STOP line', () => {
-    const { TEMPLATE } = require('../models/migrations/20261003150000_contact_report_ready_template');
-    expect(TEMPLATE.body).toBe('Waves Pest Control: The service report for {street_address} is ready: {report_url}');
-    expect(TEMPLATE.variables).toEqual(['street_address', 'report_url']);
-     
-    expect(TEMPLATE.body).toMatch(/^[\x00-\x7F]+$/);
-    expect(TEMPLATE.body).not.toMatch(/STOP/);
+  test('the template is in the house voice: "Hello {first_name}!", "Waves", the link, the standard closing; no STOP line', () => {
+    const seed = require('../models/migrations/20261003150000_contact_report_ready_template');
+    const voice = require('../models/migrations/20261004100000_contact_report_ready_house_voice');
+    expect(voice.BODY).toBe('Hello {first_name}! The Waves service report for {street_address} is ready: {report_url}\n\nQuestions or requests? Reply here.');
+    expect(voice.VARIABLES).toEqual(['first_name', 'street_address', 'report_url']);
+    // GSM-7: plain ASCII only.
+    expect([...voice.BODY].every((ch) => ch.charCodeAt(0) < 128)).toBe(true);
+    expect(voice.BODY).not.toMatch(/STOP|Pest Control/);
+    // Only the seeded wording is replaced (an admin edit is kept).
+    expect(voice.SEEDED_BODY).toBe(seed.TEMPLATE.body);
   });
 
   test('the closeout queues it only with a real report link, on sent, on a send-window hold and in the accepted-send recovery', () => {
@@ -397,6 +445,75 @@ describe('the approved wording and the hooks', () => {
   test('no second delivery mechanism: no ledger table, no sweep', () => {
     expect(read('services/contact-report-text.js')).not.toMatch(/contact_report_texts|sendCustomerMessage/);
     expect(read('index.js')).not.toMatch(/contact-report-text/);
+  });
+});
+
+describe('wording migration: seeded bodies swapped on the base row and variants, the allowlist widened on every base row', () => {
+  const voice = require('../models/migrations/20261004100000_contact_report_ready_house_voice');
+
+  function fakeKnex({ templates, variants }) {
+    const updates = [];
+    const knex = (table) => {
+      const rows = table === 'sms_templates' ? templates : variants;
+      let cond = {};
+      const match = () => rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
+      const q = {
+        where(c) { cond = { ...cond, ...c }; return q; },
+        select: async () => match(),
+        update: async (patch) => {
+          const hit = match();
+          hit.forEach((r) => Object.assign(r, patch));
+          updates.push({ table, cond, patch });
+          return hit.length;
+        },
+      };
+      return q;
+    };
+    knex.schema = { hasTable: async (name) => name !== 'audit_log' };
+    knex.fn = { now: () => 'now' };
+    knex.updates = updates;
+    return knex;
+  }
+
+  test('seeded base row and seeded variant get the new body; edited ones keep theirs; other templates are untouched', async () => {
+    const templates = [
+      { id: 't1', template_key: 'contact_report_ready', body: voice.SEEDED_BODY, variables: JSON.stringify(['street_address', 'report_url']) },
+      { id: 't2', template_key: 'another_template', body: voice.SEEDED_BODY, variables: '[]' },
+    ];
+    const variants = [
+      { id: 'v1', template_key: 'contact_report_ready', body: voice.SEEDED_BODY },
+      { id: 'v2', template_key: 'contact_report_ready', body: 'An edited variant {report_url}' },
+    ];
+    await voice.up(fakeKnex({ templates, variants }));
+    expect(templates[0].body).toBe(voice.BODY);
+    expect(JSON.parse(templates[0].variables)).toEqual(['first_name', 'street_address', 'report_url']);
+    expect(templates[1]).toMatchObject({ body: voice.SEEDED_BODY, variables: '[]' });
+    expect(variants.map((v) => v.body)).toEqual([voice.BODY, 'An edited variant {report_url}']);
+  });
+
+  test('an admin-edited base row keeps its body and still gains first_name in its allowlist', async () => {
+    const templates = [{ id: 't1', template_key: 'contact_report_ready', body: 'Edited by an admin: {report_url}', variables: ['street_address', 'report_url', 'custom'] }];
+    await voice.up(fakeKnex({ templates, variants: [] }));
+    expect(templates[0].body).toBe('Edited by an admin: {report_url}');
+    expect(JSON.parse(templates[0].variables)).toEqual(['first_name', 'street_address', 'report_url', 'custom']);
+  });
+
+  test('a second run changes nothing; down is a no-op that keeps the widened allowlist', async () => {
+    const templates = [{ id: 't1', template_key: 'contact_report_ready', body: voice.SEEDED_BODY, variables: '["street_address","report_url"]' }];
+    const knex = fakeKnex({ templates, variants: [] });
+    await voice.up(knex);
+    const writes = knex.updates.length;
+    await voice.up(knex);
+    await voice.down(knex);
+    expect(knex.updates).toHaveLength(writes);
+    expect(JSON.parse(templates[0].variables)).toContain('first_name');
+  });
+
+  test('every changed row records an audit event with the before and after', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'models/migrations/20261004100000_contact_report_ready_house_voice.js'), 'utf8');
+    expect(source).toMatch(/if \(changed\) await audit\(table, row\.id, \{ before: SEEDED_BODY, after: BODY \}\);/);
+    expect(source).toMatch(/await audit\('sms_templates', row\.id, \{ variables_before: before, variables_after: after \}\);/);
+    expect(source).toMatch(/critical: true, trx: knex,/);
   });
 });
 
