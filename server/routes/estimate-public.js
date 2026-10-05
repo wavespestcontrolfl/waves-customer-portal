@@ -4290,6 +4290,9 @@ function recurringServicesWithSupplements(estResult = {}) {
         // never renders/sends the auto-priced line without it.
         detail: item.detail || item.disclaimer || null,
         disclaimer: item.disclaimer || null,
+        // Lethal bronzing injection disclosure (owner 2026-10-05): the card
+        // and the rendered page show it under the treatment row.
+        ...(key === 'palm_injection' && item.scopeNote ? { scopeNote: String(item.scopeNote) } : {}),
         mo: monthly || null,
         monthly: monthly || null,
         annual: annual || (monthly ? Math.round(monthly * 12 * 100) / 100 : null),
@@ -4359,6 +4362,7 @@ function recurringServicesWithSupplements(estResult = {}) {
       visitsPerYear: appsPerYear,
       cadenceLabel: resultStats.injection?.treatmentLabel || 'Palm treatment',
       detail: resultStats.injection?.detail || null,
+      ...(resultStats.injection?.scopeNote ? { scopeNote: String(resultStats.injection.scopeNote) } : {}),
       waveGuardDiscountEligible: false,
       tierLabel: 'Recurring service',
     });
