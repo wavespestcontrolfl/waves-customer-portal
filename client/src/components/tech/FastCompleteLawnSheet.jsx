@@ -16,9 +16,11 @@
 //  3. Products used: the plan's products, each with its method and amount
 //     (change the method or the amount, remove, or add one from the catalog: an
 //     inline "Search products" box, one tap adds the row; the box lists lawn
-//     products only). The method is the common three as chips (Spot treatment,
-//     Broadcast spray, Granular broadcast) and the rest under "More methods",
-//     offered by the context (`methods`), the lawn re-service sheet's own control.
+//     products only). The method is one dropdown, the common three first (Spot
+//     treatment, Broadcast spray, Granular broadcast), offered by the context
+//     (`methods`), the lawn re-service sheet's own control read as a dropdown
+//     (owner 2026-10-05); a planned row starts on the protocol's own application
+//     mode, an added one on its category's default.
 //     Nobody types an amount on a fast complete (owner 2026-10-05): a row with no
 //     plan quantity is figured from the catalog's rate per 1,000 sq ft times
 //     the area it goes down on (derivedAmount), and says so under the box; a
@@ -1036,7 +1038,7 @@ function ProductEditor({ row, methods, lawnSqft, locked, onChange, onRemove }) {
         <h4 id={nameId} className="tech-product-editor-name">{row.name}</h4>
         <span className="tech-visit-muted">{[categoryLabel(row.product), row.added ? 'added by you' : 'planned'].filter(Boolean).join(' · ')}</span>
       </div>
-      <MethodSection row={row} methods={methods} locked={locked} onChange={onChange} />
+      <MethodSection row={row} methods={methods} locked={locked} onChange={onChange} layout="select" />
       {areaText && <p className="tech-visit-muted">{areaText}</p>}
       <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
       {row.derivedNote && <p className="tech-visit-muted">{row.derivedNote}</p>}

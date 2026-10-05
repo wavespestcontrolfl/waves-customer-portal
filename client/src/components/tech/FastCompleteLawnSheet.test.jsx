@@ -223,9 +223,13 @@ const completeButton = () => document.querySelector('.tech-visit-footer .tech-vi
 const completeCalls = () => requests.filter((r) => r.path.endsWith('/complete'));
 const confirmCalls = () => requests.filter((r) => r.path.endsWith('/lawn-assessment/confirm'));
 const editorFor = (name) => screen.getByRole('group', { name });
-// The method chip pressed on a product card ("How"), or null.
-const pressedMethod = (editor) => within(within(editor).getByRole('group', { name: 'How' })).getAllByRole('button').find((b) => b.getAttribute('aria-pressed') === 'true')?.textContent ?? null;
-const pickMethod = (editor, label) => fireEvent.click(within(within(editor).getByRole('group', { name: 'How' })).getByRole('button', { name: label }));
+// The product card's method dropdown ("How"), its selected label, and a pick by label.
+const methodSelect = (editor) => within(editor).getByRole('combobox', { name: /^Method for / });
+const pressedMethod = (editor) => { const sel = methodSelect(editor); return sel.value ? sel.options[sel.selectedIndex].textContent : null; };
+const pickMethod = (editor, label) => {
+  const sel = methodSelect(editor);
+  fireEvent.change(sel, { target: { value: [...sel.options].find((o) => o.textContent === label).value } });
+};
 const footerNote = () => document.querySelector('.tech-visit-footer [role="status"]')?.textContent || '';
 
 async function submit() {
@@ -670,20 +674,24 @@ describe('products', () => {
     expect(screen.queryByLabelText(/label max/)).toBeNull();
   });
 
-  test('the method is the context\'s list: the common three as chips under How, the rest under More methods', async () => {
+  test('the method is one dropdown from the context\'s list, the common three first, no chips and no More methods box', async () => {
     await openSheet();
     const talak = editorFor('Talak 7.9%');
-    expect(within(within(talak).getByRole('group', { name: 'How' })).getAllByRole('button').map((b) => b.textContent)).toEqual(['Spot treatment', 'Broadcast spray', 'Granular broadcast']);
-    const more = within(talak).getByLabelText('More methods for Talak 7.9%');
-    expect([...more.options].map((o) => o.textContent)).toEqual(['More methods', 'Soil drench']);
+    expect([...methodSelect(talak).options].map((o) => o.textContent)).toEqual(['Spot treatment', 'Broadcast spray', 'Granular broadcast', 'Soil drench']);
+    expect(within(talak).queryByRole('group', { name: 'How' })).toBeNull();
+    expect(within(talak).queryByLabelText('More methods for Talak 7.9%')).toBeNull();
     expect(within(talak).queryByText('Perimeter spray? Use Full form.')).toBeNull();
+  });
+
+  test('a planned row starts on the protocol\'s own application mode', async () => {
+    await openSheet();
+    expect(pressedMethod(editorFor('Talak 7.9%'))).toBe('Broadcast spray');
+    expect(pressedMethod(editorFor('Iron Plus'))).toBe('Spot treatment');
   });
 
   test('an older context with no methods still offers the common three', async () => {
     await openSheet({ request: makeRequest({ ctx: context({ methods: undefined }) }) });
-    const talak = editorFor('Talak 7.9%');
-    expect(within(within(talak).getByRole('group', { name: 'How' })).getAllByRole('button')).toHaveLength(3);
-    expect(within(talak).queryByLabelText('More methods for Talak 7.9%')).toBeNull();
+    expect([...methodSelect(editorFor('Talak 7.9%')).options].map((o) => o.textContent)).toEqual(['Spot treatment', 'Broadcast spray', 'Granular broadcast']);
   });
 
   test('moving a planned broadcast row to Spot treatment drops its area and the plan\'s rate; the amount stays', async () => {
@@ -808,12 +816,11 @@ describe('products', () => {
     expect(within(editorFor('Talak 7.9%')).getByText('No amount entered. It is recorded without one.')).toBeTruthy();
   });
 
-  test('a method from More methods is sent as is', async () => {
+  test('a method past the common three is sent as is', async () => {
     await openSheet();
     const talak = editorFor('Talak 7.9%');
-    fireEvent.change(within(talak).getByLabelText('More methods for Talak 7.9%'), { target: { value: 'soil_drench' } });
-    expect(pressedMethod(talak)).toBeNull();
-    expect(within(talak).getByLabelText('More methods for Talak 7.9%').value).toBe('soil_drench');
+    pickMethod(talak, 'Soil drench');
+    expect(pressedMethod(talak)).toBe('Soil drench');
     await analyze();
     await submit();
     expect(completeCalls()[0].body.products.find((p) => p.productId === P_TALAK)).toMatchObject({ applicationMethod: 'soil_drench' });

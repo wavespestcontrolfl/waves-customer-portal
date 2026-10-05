@@ -384,6 +384,8 @@
 .tech-lawn-sheet .tech-product-editor { padding: 16px; border: 0.5px solid #e5e5e5; border-radius: 16px; background: #ffffff; }
 .tech-lawn-sheet .tech-product-editor-name { font-size: 16px; }
 .tech-lawn-sheet .tech-visit-card, .tech-lawn-sheet .tech-visit-light-card { border: 0.5px solid #e5e5e5; border-radius: 16px; background: #ffffff; }
+/* The amount row's unit box: wide enough for "fl oz" beside the 16px padding and the chevron. */
+.tech-lawn-sheet .tech-visit-amount-row { grid-template-columns: minmax(0, 1fr) 96px 104px; }
 /* Inputs: the page's mInput (48px, 12px radius, 1px hairline, 16px). */
 .tech-lawn-sheet .ui-control.tech-visit-control { min-height: 48px; padding: 0 16px; border: 1px solid #e5e5e5; border-radius: 12px; background: #ffffff; color: #111111; font-size: 16px; font-weight: 400; }
 .tech-lawn-sheet textarea.ui-control.tech-visit-control { padding: 14px; }
@@ -398,10 +400,6 @@
 .tech-lawn-sheet .ui-action.tech-visit-action { min-height: 44px; border: 1px solid #111111; border-radius: 999px; background: transparent; color: #111111; font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase; }
 .tech-lawn-sheet .ui-action.tech-visit-action:hover:where(:not(:disabled)) { background: #f5f5f5; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-product-remove { color: #111111; }
-/* The method chips size to their words and wrap, so "Granular broadcast" is
-   one pill on its own line, not a two-line tile in a half-width column. */
-.tech-lawn-sheet .tech-product-methods { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.tech-lawn-sheet .tech-product-methods .ui-action.tech-visit-action { width: auto; min-height: 44px; padding: 0 16px; }
 /* Catalog search results stay a plain list inside one hairline card: the pill
    rule above would otherwise give each row its own ink pill and uppercase it. */
 .tech-lawn-sheet .tech-product-list { border: 1px solid #e5e5e5; border-radius: 12px; }

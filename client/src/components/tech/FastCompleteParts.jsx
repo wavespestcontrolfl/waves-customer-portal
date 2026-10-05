@@ -294,11 +294,34 @@ export function methodChoicesOf(data) {
   return offered.length ? offered : COMMON_LAWN_METHODS;
 }
 
-// How a product went down: the common methods as chips under "How", the rest
-// in a "More methods" select. Shared by the lawn sheet and the lawn re-service
-// sheet. `footnote` is the sheet's own line under the chips, if it has one.
-export function MethodSection({ row, methods, locked, onChange, footnote = null }) {
+// How a product went down. Two readings, shared by the two lawn sheets:
+// `layout="chips"` (the lawn re-service sheet) puts the common methods as chips
+// under "How" and the rest in a "More methods" select; `layout="select"` (the
+// lawn sheet, owner 2026-10-05) is one dropdown with every method, the common
+// ones first. `footnote` is the sheet's own line under the control, if any.
+export function MethodSection({ row, methods, locked, onChange, footnote = null, layout = 'chips' }) {
   const methodId = useId();
+  if (layout === 'select') {
+    const ordered = [...methods.filter((choice) => choice.common), ...methods.filter((choice) => !choice.common)];
+    const known = ordered.some((choice) => choice.value === row.method);
+    return (
+      <div>
+        <label htmlFor={methodId} className="tech-product-editor-label">How</label>
+        <Select
+          id={methodId}
+          aria-label={`Method for ${row.name}`}
+          className="tech-visit-control"
+          disabled={locked}
+          value={known ? row.method : ''}
+          onChange={(e) => { if (e.target.value) onChange({ method: e.target.value }); }}
+        >
+          {!known && <option value="">Choose a method</option>}
+          {ordered.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+        </Select>
+        {footnote && <p className="tech-visit-muted">{footnote}</p>}
+      </div>
+    );
+  }
   // An older context without `common` shows every method as a button.
   const hasCommon = methods.some((choice) => choice.common);
   const common = hasCommon ? methods.filter((choice) => choice.common) : methods;
@@ -306,7 +329,7 @@ export function MethodSection({ row, methods, locked, onChange, footnote = null 
   return (
     <div>
       <span id={methodId} className="tech-product-editor-label">How</span>
-      <div role="group" aria-labelledby={methodId} className="tech-visit-tile-grid tech-product-methods">
+      <div role="group" aria-labelledby={methodId} className="tech-visit-tile-grid">
         {common.map((choice) => (
           <Chip disabled={locked} key={choice.value} label={choice.label} pressed={row.method === choice.value} onClick={() => onChange({ method: choice.value })} />
         ))}
