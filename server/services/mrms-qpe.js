@@ -157,7 +157,6 @@ async function fetchMrmsDailyRain({ latitude, longitude, start, end, signal } = 
   const lon = Number(longitude);
   if (!Number.isFinite(lat) || !Number.isFinite(lon) || !start || !end) return null;
   try {
-    if (!(end >= start)) return null;
     const cell = expectedMrmsCell(lat, lon);
     // A year whose request fails leaves its days as gaps; the other year's
     // observations still stand.
