@@ -138,31 +138,27 @@ function accessCodeKind(text) {
   return kinds.length === 1 ? kinds[0] : null;
 }
 
-// The client's own wording: one kind of code, one number in the whole message,
-// and that number is the value. A house number, a ZIP, a phone number, a second
-// number or a hedge leaves the field empty for a person.
+// The client's own wording, as a closed rule set over the WHOLE message (four
+// audit rounds each found a new phrase a sentence-level rule missed):
+//  - the code is the only word in the message that holds a digit, so no second
+//    number, phone number, address or "then press 2" can sit beside it;
+//  - it equals the value with the key symbols the client wrote;
+//  - it ends its sentence or its line;
+//  - the message has no negation, hedge, dead-code report, question, or word
+//    that continues a credential (then, press, pound, star);
+//  - the message names one kind of code.
+// Anything else leaves the field empty for a person.
+const CODE_BLOCKERS = /\b(?:not|never|no|then|followed|plus|press|pound|star|hash|asterisk)\b|n['’]t/i;
 function matchesNaturalAccessCode({ field, value }, { messageBody = '', properties = [] } = {}) {
   const candidate = String(value || '').trim();
   const body = String(messageBody || '');
   if (!/^[#*]?\d{3,8}[#*]?$/.test(candidate)) return false;
-  // The one number in the message, as the whole word the client wrote: its
-  // key symbols stay ("#5550" never saves as "5550") and a longer credential
-  // ("A5550", "5550-12", "5550 12") never saves as a part of itself.
   const words = [...body.matchAll(/\S+/g)].map((match) => ({ raw: match[0], end: match.index + match[0].length,
     word: match[0].replace(/^[("'“‘:]+|[.,;:!?)"'”’]+$/g, '') }));
-  const numbered = words.filter((entry) => /\d{3,}/.test(entry.word));
+  const numbered = words.filter((entry) => /\d/.test(entry.word));
   if (numbered.length !== 1 || numbered[0].word !== candidate) return false;
-  const at = words.indexOf(numbered[0]);
-  if (/\d/.test(words[at - 1]?.word || '')) return false;
-  // The code ends its sentence or its line. Words after it ("then press 2",
-  // "followed by pound", "or 5551") can be part of the credential, and no
-  // word list can name them all.
   if (!/[.!?]["'”’)]*$/.test(numbered[0].raw) && !/^[ \t]*(?:\r?\n|$)/.test(body.slice(numbered[0].end))) return false;
-  if (/\b(?:press|pound|star|hash|asterisk)\b/i.test(body)) return false;
-  if (CODE_HEDGE.test(body) || CODE_INVALIDATED.test(body) || isQuestionSource(body)) return false;
-  // "Gate code is not 5550": a negation in the number's own sentence.
-  const sentence = body.split(/(?<=[.!?])\s+|\n+/).find((part) => part.includes(candidate)) || body;
-  if (/\b(?:not|never|no)\b|n['’]t/i.test(sentence)) return false;
+  if (CODE_BLOCKERS.test(body) || CODE_HEDGE.test(body) || CODE_INVALIDATED.test(body) || isQuestionSource(body)) return false;
   const digits = candidate.replace(/\D/g, '');
   if (properties.some((property) => (String(property.address_line1 || '').match(/^\s*(\d+)/) || [])[1] === digits
     || String(property.zip || '').slice(0, 5) === digits)) return false;

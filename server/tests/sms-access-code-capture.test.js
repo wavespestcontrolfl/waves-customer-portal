@@ -28,7 +28,7 @@ describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)',
 
   const natural = [
     ['neighborhood_gate_code', 'Gate code is 5550', '5550'],
-    ['neighborhood_gate_code', 'Gate code for Example Creek is 5 digits.\n\n#55501', '#55501'],
+    ['neighborhood_gate_code', 'Gate code for Example Creek is below.\n\n#55501', '#55501'],
     ['neighborhood_gate_code', 'Hello our gate code for the example is #5550.  I forgot to mention that.', '#5550'],
     ['property_gate_code', 'I have a gate code for the left gate to get to the backyard: 5550', '5550'],
     ['lockbox_code', 'The key box on the door opens with 5550', '5550'],
@@ -75,18 +75,16 @@ describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)',
     ['a code with a spelled key after it', 'neighborhood_gate_code', 'Gate code is 5550 followed by pound', '5550'],
     ['a code with a spelled key before it', 'neighborhood_gate_code', 'Gate code is star 5550', '5550'],
     ['a code with more words in its sentence', 'neighborhood_gate_code', 'Gate code is 5550 at the second keypad', '5550'],
+    ['a negation on the line before the code', 'neighborhood_gate_code', 'Gate code is not\n5550', '5550'],
+    ['a negation in another sentence', 'neighborhood_gate_code', 'Sorry I did not answer. Gate code is 5550', '5550'],
+    ['a short number on the next line', 'neighborhood_gate_code', 'Gate code is 5550\n12', '5550'],
+    ['a short number anywhere else', 'neighborhood_gate_code', 'Gate code for Example Creek is 5 digits.\n\n#55501', '#55501'],
+    ['a continuation on the next line', 'neighborhood_gate_code', 'Gate code is 5550\nthen the bell', '5550'],
   ])('gate on still refuses %s', (_name, field, quote, value) => {
     process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
     const item = codeFact(field, quote, value);
     expect(ground(item).facts).toEqual([]);
     expect(verdict(item)).not.toBe('apply');
-  });
-
-  test('a negation in another sentence does not block the code', () => {
-    process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
-    const item = codeFact('neighborhood_gate_code', 'Sorry I did not answer. Gate code is 5550', '5550');
-    expect(ground(item).facts).toEqual([item]);
-    expect(verdict(item)).toBe('apply');
   });
 
   test('the strict sentence form still saves with the gate on', () => {
