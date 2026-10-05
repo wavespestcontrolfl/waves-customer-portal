@@ -206,8 +206,10 @@ const OFFER_TIER_ESTIMATE_COLUMNS = [
   // The pricing cache keys on these (estimate-pricing-cache.js): without them
   // the slot read could serve another version's cached bundle.
   'updated_at', 'pricing_version',
-  // The member block judges the prospective phone match too (route helper).
-  'customer_phone', 'customer_phone_typed',
+  // The member block judges the prospective phone match too (route helper):
+  // the matcher reads the phone, the typed-phone mark and the identity
+  // fields it compares a lone candidate against (email, address).
+  'customer_phone', 'customer_phone_typed', 'customer_email', 'address',
 ];
 
 async function resolveBestOfferTierForSlots({
