@@ -966,27 +966,14 @@
       }
     },
     "W7-dev-04": {
-      "outcome": "fail",
-      "point": "read_back",
-      "code": "queued_text_not_canceled",
-      "failures": [
-        {
-          "point": "read_back",
-          "code": "queued_text_not_canceled",
-          "detail": "the scheduled sms_log row no longer exists (deleted, not canceled)"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_outbound_row_added",
-          "detail": "a case whose manifest says sends 0: outbound sms rows 1 -> 0, messaging audit rows 0 -> 0"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
         "first_tool_result_ms": 8,
-        "verified_completion_ms": 1551
+        "verified_completion_ms": 1537
       },
       "notes": [
-        "queued listing {\"customer_id\":\"d4c1c210-ad4f-44a1-a073-59edb1f50bbe\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"38ed42f8-c8a7-4817-bf52-8a984e9ee7c0\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"38ed42f8-c8a7-4817-bf52-8a984e9ee7c0\",\"customer_id\":\"d4c1c210-ad4f-44"
+        "queued listing {\"customer_id\":\"445db724-4195-46dc-b36b-1674e705b5b1\",\"customer_name\":\"Quill Fennimore\",\"messages\":[{\"message_id\":\"925b8359-a8a3-4586-9577-9757ea6d37ef\",\"channe; cancel {\"proposal\":true,\"channel\":\"sms\",\"message_id\":\"925b8359-a8a3-4586-9577-9757ea6d37ef\",\"customer_id\":\"445db724-4195-46"
       ],
       "strength": null,
       "contract_calls": 1

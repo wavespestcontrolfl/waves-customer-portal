@@ -3244,3 +3244,30 @@ The `--tfx-*` palettes in the visit brief, visual notes and the three tool
 pages keep their tokens but fall back to the same light values (the page
 that needed the navy fallbacks was deleted). Visual only: same data, same
 actions.
+
+## 2026-10-05 — `/admin/today` uses the normal Waves Admin bars, and notices never cover the page
+
+Owner 2026-10-05 (phone screenshots): "the floating notice cards cover the
+whole screen and the technician cannot scroll", and "the main bottom icons
+should stay, this lane should follow the other sections UI protocol". Two
+changes, both visual and placement only: same data, same polling, same
+"Got it" and dismiss calls, same auto-dismiss timers.
+
+1. Admin chrome. On a phone `/admin/today` keeps the admin top bar and the
+   admin bottom tab bar, with the normal main padding, like `/admin/schedule`.
+   The layout state that hid them is gone. The workspace drops its own
+   "waves tech" header and its fixed Today / Tools / More / Menu bar. A
+   page-level tab row at the top of the workspace (Today, Tools, More) takes
+   their place, as links that keep `?visit=` and hold while a save is in
+   flight. There is no Menu link: the admin bar is there. The page scrolls in
+   the admin main area. The admin top bar, tab bar, sidebar and palette still
+   hold while the workspace's navigation lock is busy.
+2. Notices. `GeofenceArrivalPrompt` takes a `placement`. On the Today overview
+   (no open visit) every card renders in the page flow at the top: no fixed
+   position, no overlay, no height cap; the existing card caps and "N more
+   notices" lines stay. On Tools, More and an open visit only the
+   time-critical arrival cards still float (arrival reminder, arrival
+   selector, timer started, timer stopped). Every other card (visit, photo,
+   text, tracking, open-visits nudge, storm) waits on Today, stays unread, and
+   one in-page line at the top, "N notices on Today", links there. Review on a
+   storm card still opens Quick Move, on Today.

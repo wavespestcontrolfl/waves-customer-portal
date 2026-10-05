@@ -747,6 +747,7 @@ async function commitCancelSms(input, preview, technicianId) {
     expectedBodyDigest: fresh._version.body_digest,
     expectedCustomerId: fresh.customer_id,
     simpleOnly: true,
+    keepRow: true, // the row stays with status 'canceled' (workflow contract W7), never deleted
   });
   if (result.outcome !== 'ok' || !result.cancelled) {
     // 'forbidden' cannot happen (techRole is always 'admin' here); 'not_found'
@@ -869,6 +870,45 @@ async function getUnansweredThreads(input) {
 }
 
 
+// What a stored sms_log status means for "did the customer get this text".
+// A kept cancelled text (cancel_queued_message keeps its row) and a still-queued
+// or failed one must never read as a sent Waves message in a thread or search
+// result, or the model could tell the operator "we already texted them that".
+// Sent-like statuses and inbound rows carry the plain status only.
+function deliveryLabel(row) {
+  const status = String(row.status || '').toLowerCase();
+  const out = { status: row.status || null };
+  if (row.direction !== 'outbound') return out;
+  if (status === 'canceled' || status === 'cancelled') {
+    return { ...out, canceled: true, note: 'Scheduled text, cancelled before it was sent. The customer never received it.' };
+  }
+  // 'sending' means a worker claimed it and the provider outcome is unknown. A
+  // 'scheduled' row that carries a prior-attempt marker was requeued after a
+  // send attempt (smsIneligibilityReason reads the same markers), so the
+  // provider may already have accepted it. Only a never-attempted scheduled row
+  // is definitely unsent.
+  if (status === 'sending' || (status === 'scheduled' && hasPriorSendAttempt(row.metadata))) {
+    return { ...out, delivery_uncertain: true, note: 'A send was attempted and the outcome is not known. The customer may have received it.' };
+  }
+  if (status === 'scheduled') {
+    return { ...out, not_sent_yet: true, note: 'Scheduled text, not sent yet. The customer has not received it.' };
+  }
+  if (['failed', 'undelivered', 'blocked'].includes(status)) {
+    return { ...out, not_delivered: true, note: 'This text did not reach the customer.' };
+  }
+  return out;
+}
+
+// The prior-attempt evidence smsIneligibilityReason refuses on: finalize_only
+// (already reached the provider), a review-ask reservation or exhausted
+// uncertain delivery, or any worker-claim / stale-recovery / provider-retry key.
+function hasPriorSendAttempt(metadata) {
+  const meta = parseSmsMetadata(metadata);
+  const flag = (v) => v === true || v === 'true';
+  return flag(meta.finalize_only) || flag(meta.review_ask_reservation) || flag(meta.review_delivery_uncertain_exhausted)
+    || Object.keys(meta).some((k) => PRIOR_ATTEMPT_KEY_RE.test(k));
+}
+
 async function getConversationThread(input) {
   const { limit: rawLimit } = input;
   const limit = Math.max(1, Math.min(Math.trunc(rawLimit || 20), 50));
@@ -899,13 +939,14 @@ async function getConversationThread(input) {
     // Unresolved review-ask reservations excluded BEFORE the limit (Codex
     // #4331 P2): the in-flight placeholder must not displace a real message
     // out of this bounded conversation window — a resolved row still shows.
-    .modify(excludeUnresolvedSendReservations)
+    // A cancelled-and-kept text stays visible here on purpose, labelled below.
+    .modify((qb) => excludeUnresolvedSendReservations(qb, 'sms_log', { keepNeverSent: true }))
     // Recruiting rows stay out of the Intelligence Bar (Codex #4623 r29 P1).
     .modify((qb) => excludeRecruitingSmsLog(qb))
     .select(
       'sms_log.id', 'sms_log.direction', 'sms_log.message_body',
       'sms_log.from_phone', 'sms_log.to_phone',
-      'sms_log.message_type', 'sms_log.created_at',
+      'sms_log.message_type', 'sms_log.created_at', 'sms_log.status', 'sms_log.metadata',
       'customers.first_name', 'customers.last_name',
     )
     .orderBy('sms_log.created_at', 'desc')
@@ -925,6 +966,7 @@ async function getConversationThread(input) {
       type: m.message_type,
       time: m.created_at,
       from: m.direction === 'inbound' ? (customerName || m.from_phone) : 'Waves',
+      ...deliveryLabel(m),
     })),
     returned_count: messages.length,
     has_more: fetched.length > limit,
@@ -951,7 +993,7 @@ async function searchMessages(input) {
   // Unresolved review-ask reservations excluded BEFORE the limit (Codex
   // #4331 P2): a still in-flight placeholder must not surface here as a
   // real sent message — a resolved row still shows.
-  let query = excludeRecruitingSmsLog(excludeUnresolvedSendReservations(db('sms_log')))
+  let query = excludeRecruitingSmsLog(excludeUnresolvedSendReservations(db('sms_log'), 'sms_log', { keepNeverSent: true }))
     .where('sms_log.created_at', '>=', since)
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
     .select(
@@ -997,6 +1039,7 @@ async function searchMessages(input) {
       customer: m.first_name ? `${m.first_name} ${m.last_name}` : null,
       phone: m.direction === 'inbound' ? m.from_phone : m.to_phone,
       time: m.created_at,
+      ...deliveryLabel(m),
     })),
     search_params: { search, direction, message_type, days_back },
   };

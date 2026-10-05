@@ -162,6 +162,19 @@ function isUnresolvedSendReservation(row, now = Date.now()) {
   return !Number.isFinite(createdAt) || createdAt >= now - REPLY_RESERVATION_HOLD_MS;
 }
 
+// A text a person or a workflow cancelled before it went out (the Intelligence
+// Bar's cancel_queued_message keeps its sms_log row with status 'canceled', and
+// Twilio reports 'canceled' for a message it dropped). It never reached the
+// customer, so no general reader may present it as delivered contact: the
+// excludeUnresolvedSendReservations guard below hides these rows exactly like an
+// unresolved reservation. Only a reader whose job is to SHOW cancelled texts and
+// label them (the bar's thread and search reads) selects them on purpose, and so
+// does not call the guard.
+const NEVER_SENT_STATUSES = ['canceled', 'cancelled'];
+function isNeverSentSms(row) {
+  return NEVER_SENT_STATUSES.includes(String(row?.status || '').toLowerCase());
+}
+
 // Excludes every unresolved send reservation at the SQL level (metadata is
 // jsonb) — apply this to a query BEFORE any LIMIT/ORDER-then-slice so an
 // unresolved placeholder can never displace a real row out of a bounded
@@ -169,11 +182,15 @@ function isUnresolvedSendReservation(row, now = Date.now()) {
 // qualify the column; default matches a bare `db('sms_log')` query. Mirrors
 // isUnresolvedSendReservation exactly: the review-ask arm is unconditional
 // (any age) across every unresolved status, the reply arm stays scoped to
-// 'sending' within its 24h hold.
-function excludeUnresolvedSendReservations(query, table = 'sms_log') {
+// 'sending' within its 24h hold. Rows in NEVER_SENT_STATUSES are hidden too,
+// unless the caller passes { keepNeverSent: true } because it exists to SHOW
+// cancelled texts and labels them (the bar's thread and search reads).
+function excludeUnresolvedSendReservations(query, table = 'sms_log', { keepNeverSent = false } = {}) {
   const replyMarkers = REPLY_RESERVATION_MARKERS.map(marker => `COALESCE(${table}.metadata->>'${marker}', 'false') = 'true'`).join(' OR ');
+  const neverSent = keepNeverSent ? '' : `COALESCE(${table}.status, '') IN (${NEVER_SENT_STATUSES.map(status => `'${status}'`).join(', ')}) OR `;
   return query.whereRaw(
-    `NOT ((COALESCE(${table}.metadata->>'${REVIEW_ASK_MARKER}', 'false') = 'true'`
+    `NOT (${neverSent}`
+      + `(COALESCE(${table}.metadata->>'${REVIEW_ASK_MARKER}', 'false') = 'true'`
       + ` AND ${table}.status NOT IN ('sent', 'delivered')`
       + ` AND COALESCE(${table}.metadata->>'finalize_only', 'false') <> 'true')`
       + ` OR (${table}.status = 'sending'`
@@ -493,6 +510,8 @@ async function releasePending({ trx } = {}) {
 module.exports = {
   isUnresolvedReviewAskReservation,
   isUnresolvedSendReservation,
+  isNeverSentSms,
+  NEVER_SENT_STATUSES,
   excludeUnresolvedSendReservations,
   preserveSoleAcceptedReplyReceipts,
   SEND_RESERVATION_MARKERS,

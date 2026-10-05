@@ -1,3 +1,4 @@
+/* global document */ // page.evaluate callbacks below run in the browser, not Node
 // Base vendor adapter. A concrete adapter is just a config object (search-URL
 // builder + CSS selectors); makeAdapter wraps it with the shared Playwright flow:
 //
@@ -127,74 +128,103 @@ function collectSnapshot(sel) {
   // without serializing the entire page back to Node.
   const body = (document.body && document.body.innerText) || '';
 
-  // Size-explicit variants (Magento jsonConfig): each purchasable child carries its own
-  // size label + price, which the page-level JSON-LD/title omit. Opt-in (sel.magentoVariants)
-  // so only Magento adapters pay for it. Self-contained — runs in page.evaluate. Pulls
-  // `optionPrices` (price per child) and joins the size label from `optionPrices[id].size`
-  // or, as a fallback, from `attributes[*].options[].label` via the `index` child->option map.
-  let variants = [];
-  if (sel.magentoVariants) {
-    for (const s of document.querySelectorAll('script[type="text/x-magento-init"], script[type="application/json"]')) {
-      let parsed;
-      try { parsed = JSON.parse(s.textContent || ''); } catch (e) { continue; }
-      // Walk to the nested config object that holds optionPrices.
-      let cfg = null;
-      const stack = [parsed];
-      while (stack.length && !cfg) {
-        const cur = stack.pop();
-        if (cur && typeof cur === 'object') {
-          if (cur.optionPrices && typeof cur.optionPrices === 'object') cfg = cur;
-          else for (const k in cur) if (cur[k] && typeof cur[k] === 'object') stack.push(cur[k]);
-        }
+  // One-line text of an element (whitespace collapsed), '' for no element.
+  const squash = (el) => (el ? String(el.textContent || '').replace(/\s+/g, ' ').trim() : '');
+  const OUT_OF_STOCK_RE = /out of stock|sold out|unavailable|backorder/i;
+
+  // Size-explicit VARIANT sources, tried in order, first one that yields variants wins. Each
+  // returns [{ size, price, availabilityRaw }] and is opt-in via its own selector option, so a
+  // store only pays for the source it configured. All self-contained (page.evaluate).
+
+  // Magento jsonConfig (sel.magentoVariants): each purchasable child carries its own size
+  // label + price, which the page-level JSON-LD/title omit. Pulls `optionPrices` (price per
+  // child); the size label comes from `optionPrices[id].size` or, as a fallback, from
+  // `attributes[*].options[].label` via the `index` child->option map.
+  const findOptionConfig = (root) => {
+    const stack = [root];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (cur && typeof cur === 'object') {
+        if (cur.optionPrices && typeof cur.optionPrices === 'object') return cur;
+        Object.keys(cur).forEach((k) => stack.push(cur[k]));
       }
-      if (!cfg) continue;
-      // Per-child stock: Magento lists salable children as salable[attrId][optionId] =
-      // [productIds]. A child is in stock iff its own id appears under its option. Returns
-      // null when the config carries no salable map (unknown), true/false otherwise — so a
-      // sold-out target size is reported out_of_stock, NOT promoted from page-level text.
-      const salableOf = (pid) => {
-        if (!cfg.salable || !cfg.index || !cfg.index[pid]) return null;
-        const idx = cfg.index[pid];
-        for (const aid in idx) {
-          const arr = cfg.salable[aid] && cfg.salable[aid][idx[aid]];
-          if (Array.isArray(arr) && arr.map(String).indexOf(String(pid)) !== -1) return true;
-        }
-        return false;
-      };
-      for (const pid in cfg.optionPrices) {
+    }
+    return null;
+  };
+  // Per-child stock: Magento lists salable children as salable[attrId][optionId] =
+  // [productIds]. A child is in stock iff its own id appears under its option. null when the
+  // config carries no salable map (unknown), true/false otherwise — so a sold-out target size
+  // is reported out_of_stock, NOT promoted from page-level text.
+  const salableOf = (cfg, pid) => {
+    const idx = cfg.salable && cfg.index && cfg.index[pid];
+    if (!idx) return null;
+    return Object.keys(idx).some((aid) => {
+      const arr = cfg.salable[aid] && cfg.salable[aid][idx[aid]];
+      return Array.isArray(arr) && arr.map(String).indexOf(String(pid)) !== -1;
+    });
+  };
+  const magentoSizeOf = (cfg, pid) => {
+    const own = cfg.optionPrices[pid] && cfg.optionPrices[pid].size;
+    const idx = cfg.attributes && cfg.index && cfg.index[pid];
+    if (own || !idx) return own;
+    const labels = Object.keys(cfg.attributes).map((aid) => ((cfg.attributes[aid] && cfg.attributes[aid].options) || [])
+      .find((o) => String(o.id) === String(idx[aid])));
+    const hit = labels.find((o) => o && o.label);
+    return hit ? hit.label : own;
+  };
+  const fromMagento = () => {
+    if (!sel.magentoVariants) return [];
+    const scripts = document.querySelectorAll('script[type="text/x-magento-init"], script[type="application/json"]');
+    for (const s of scripts) {
+      let cfg = null;
+      try { cfg = findOptionConfig(JSON.parse(s.textContent || '')); } catch (e) { cfg = null; }
+      const out = cfg ? Object.keys(cfg.optionPrices).map((pid) => {
         const op = cfg.optionPrices[pid];
         const price = op && op.finalPrice && op.finalPrice.amount;
-        if (price == null) continue;
-        let size = op && op.size;
-        if (!size && cfg.attributes && cfg.index && cfg.index[pid]) {
-          for (const aid in cfg.attributes) {
-            const optId = cfg.index[pid][aid];
-            const opt = ((cfg.attributes[aid] && cfg.attributes[aid].options) || [])
-              .find((o) => String(o.id) === String(optId));
-            if (opt && opt.label) { size = opt.label; break; }
-          }
-        }
-        if (size == null || !String(size).trim()) continue;
-        const salable = salableOf(pid);
-        const availabilityRaw = salable === true ? 'InStock' : salable === false ? 'OutOfStock' : null;
-        variants.push({ size: String(size), price: Number(price), availabilityRaw });
-      }
-      if (variants.length) break;
+        const size = magentoSizeOf(cfg, pid);
+        if (price == null || size == null || !String(size).trim()) return null;
+        const salable = salableOf(cfg, pid);
+        return { size: String(size), price: Number(price), availabilityRaw: salable == null ? null : (salable ? 'InStock' : 'OutOfStock') };
+      }).filter(Boolean) : [];
+      if (out.length) return out;
     }
+    return [];
+  };
+
+  // Per-size ROWS in the page DOM (sel.variantRows: { line, name, price }): storefronts like
+  // Forestry Distributing (nopCommerce grouped product) list each size as a "product variant"
+  // line whose name carries the size ("Bifen I/T Insecticide, 1 Pt.") and whose price sits in
+  // a schema.org price element.
+  const fromRows = () => {
+    const vr = sel.variantRows;
+    if (!vr || !vr.line) return [];
+    return Array.from(document.querySelectorAll(vr.line)).slice(0, 24).map((line) => {
+      const nameText = squash(vr.name && line.querySelector(vr.name));
+      const priceEl = vr.price && line.querySelector(vr.price);
+      const price = Number(String(readValue(priceEl, PRICE_VALUE_ATTRS)).replace(/[^0-9.]/g, ''));
+      if (!nameText || !Number.isFinite(price) || price <= 0) return null;
+      return { size: nameText, price, availabilityRaw: OUT_OF_STOCK_RE.test(squash(line)) ? 'OutOfStock' : null };
+    }).filter(Boolean);
+  };
+
+  let variants = [];
+  for (const source of [fromMagento, fromRows]) {
+    variants = source();
+    if (variants.length) break;
   }
 
   // Option-card variants (opt-in via adapter optionCardSelector): storefronts like DoMyOwn
   // render each size as a card "<label> (<size>) $<price>". Collect the raw card text only;
   // extract.variantsFromOptionCards (pure, Node-side) parses size+price from it.
-  let optionCardTexts = [];
-  if (sel.optionCardSelector) {
-    optionCardTexts = Array.from(document.querySelectorAll(sel.optionCardSelector))
-      .map((e) => (e.textContent || '').replace(/\s+/g, ' ').trim())
-      .filter(Boolean)
-      .slice(0, 24);
-  }
+  const optionCardTexts = !sel.optionCardSelector ? []
+    : Array.from(document.querySelectorAll(sel.optionCardSelector)).map(squash).filter(Boolean).slice(0, 24);
 
-  return { jsonLd, title, priceTexts, availabilityText, bodyText: body.slice(0, 4000), variants, optionCardTexts };
+  // A spec-table cell (opt-in via adapter sizeHintSelector) that states the pack size when
+  // the product title does not (DIY Pest Control: title "QP Bifenthrin I/T 7.9% F
+  // Insecticide", spec row "Packaging: 1 Gallon , Quali-Pro (Mfg. Number: ...)").
+  const sizeHint = squash(sel.sizeHintSelector && document.querySelector(sel.sizeHintSelector)).slice(0, 80);
+
+  return { jsonLd, title, priceTexts, availabilityText, bodyText: body.slice(0, 4000), variants, optionCardTexts, sizeHint };
 }
 
 // Find the first product link on a search-results page. Returns an absolute URL
@@ -335,6 +365,17 @@ async function collectResultLinks(page, config) {
   }, sels);
 }
 
+// PURE: when the page title carries no pack size but the adapter's spec cell did, append the
+// spec text to the title so the downstream size gate (JSON-LD single-offer check) and the
+// quantity read can tie the price to that pack. A title that already states a size is left
+// alone. Mutates and returns the snapshot.
+function applySizeHint(snapshot) {
+  if (snapshot && snapshot.sizeHint && !extractSizeToken(snapshot.title)) {
+    snapshot.title = `${snapshot.title || ''} ${snapshot.sizeHint}`.trim();
+  }
+  return snapshot;
+}
+
 function makeAdapter(config) {
   const timeout = config.timeout || DEFAULT_TIMEOUT;
 
@@ -355,8 +396,11 @@ function makeAdapter(config) {
       availabilitySelector: config.availabilitySelector,
       magentoVariants: !!config.magentoVariants, // capture per-variant size+price (Magento jsonConfig)
       optionCardSelector: config.optionCardSelector || null, // capture option-card size+price text (DoMyOwn)
+      variantRows: config.variantRows, // capture DOM size rows (Forestry Distributing)
+      sizeHintSelector: config.sizeHintSelector, // spec-table pack size when the title omits it (DIY Pest)
     };
     const snapshot = await page.evaluate(collectSnapshot, sel);
+    applySizeHint(snapshot);
 
     // Size-aware JSON-LD first; DOM fallback only when JSON-LD carried no offers
     // (offerFromSnapshot enforces the size gate so a default variant can't be
@@ -446,7 +490,12 @@ function makeAdapter(config) {
     // serial multi-product run. waitForSelector returns as soon as a link appears, so a
     // successful dynamic search is still fast; only a genuine no-match waits it out.
     if (config.searchWaitMs) {
-      const waitSel = (config.productLinkSelectors && config.productLinkSelectors[0]) || 'a.product-link';
+      // Wait for ANY configured link selector (comma-joined = CSS "or"): a store whose search
+      // sometimes lands on a server-rendered listing instead of the widget (DIY Pest) must not
+      // burn the full wait when its links are already there.
+      const waitSel = (config.productLinkSelectors && config.productLinkSelectors.length)
+        ? config.productLinkSelectors.join(', ')
+        : 'a.product-link';
       await page.waitForSelector(waitSel, { timeout: config.searchWaitMs }).catch(() => {});
     }
 
@@ -508,6 +557,6 @@ function makeAdapter(config) {
 }
 
 module.exports = {
-  makeAdapter, collectSnapshot, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
+  makeAdapter, collectSnapshot, applySizeHint, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
   searchQuery, targetOzOf, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
 };

@@ -2733,6 +2733,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // "no trace judged", so the trace neither shows on the report nor
       // counts as an outside treatment zone (Codex P2 on #5633).
       traceShown,
+      // The photo descriptions the Fast Complete report was written from
+      // (photoCaptionsOf) — OPTIONAL. Undefined (every other caller) skips
+      // the check. Re-checked under the visit row lock, which a description
+      // change takes too (service-photos.js lockStagedPhotoForChange).
+      photoCaptionsSeen,
     } = completionInput.body;
     const traceJudgedSeen = traceShown === false ? null : (traceSeen ?? null);
     // The field already exists for older clients; retain numeric-string input,
@@ -5904,6 +5909,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               throw Object.assign(new Error('trace changed during completion'), { code: 'trace_changed' });
             }
           }
+          // The photo descriptions the report was written from (Codex P2 on
+          // #5701): one changed, added or removed from another device after
+          // Write would send the old report beside the new description.
+          // Read under this row lock, which a description change takes
+          // first, so the change either committed and is seen here or waits.
+          if (photoCaptionsSeen !== undefined && lockedSvcRow) {
+            const ServicePhotos = require('./service-photos');
+            const captionsNow = await trx.transaction((sp) => ServicePhotos.stagedReportPhotoCaptions(sp, svc.id));
+            if (!ServicePhotos.photoCaptionsSeenMatches(photoCaptionsSeen, captionsNow)) {
+              throw Object.assign(new Error('photo descriptions changed during completion'), { code: 'photo_captions_changed' });
+            }
+          }
           // The sheet said the saved trace is one this report never shows
           // (traceShown false). That verdict was read when the sheet opened
           // and depends on the visit's add-ons, which can change before Send,
@@ -8201,6 +8218,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'The trace changed since you checked it. Close this visit and reopen it to review the trace before completing.',
             code: 'trace_changed',
+          } });
+        }
+        if (err && err.code === 'photo_captions_changed') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'A photo description changed after this report was written. Close this visit and reopen it, then write the report again.',
+            code: 'photo_captions_changed',
           } });
         }
         if (err && err.code === 'issued_visit_rescheduled') {
