@@ -942,7 +942,11 @@ const FIRST_PERSON_RE = /\b(?:i|i'm|i've|i'd|me|my|mine)\b/i;
 function notTechVoice(body, techName) {
   if (OFFICE_NARRATION_RE.test(body) || COMPANY_NARRATION_RE.test(body)) return true;
   const names = (String(techName || "").match(/[A-Za-z'-]+/g) || []).filter((n) => n.length > 1);
-  const introduces = names.some((n) => new RegExp(`\\b(?:it'?s|this is)\\s+${n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(body));
+  // "Adam here." introduces too (the fact check's INTRO_RE accepts it).
+  const introduces = names.some((n) => {
+    const esc = n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b(?:it'?s|this is)\\s+${esc}\\b|\\b${esc}\\s+here\\b`, "i").test(body);
+  });
   // The first person must narrate the visit, not only the review request
   // ("A Google review would help me" alone does not make it the tech's voice).
   const narration = String(body).split(/(?<=[.!?])\s+/).filter((sent) => !isAskOnlySentence(sent, new Set())).join(" ");
@@ -1103,17 +1107,14 @@ function legCapture() {
 }
 
 // Words that state nothing a record line could back: courtesy ("sorry",
-// "glad"), light verbs ("went ahead", "got", "let me know") and the visit
-// itself by its cadence ("your quarterly visit": the record's Service line,
-// which the checker reads). They are left out of clause coverage like
-// When a quote does not carry one of them it is not counted against the
-// clause, so the half-of-the-content-words rule below weighs the words that
-// do claim something (replay 2026-10-03: "Sorry I missed you at the house
-// today" failed it against "so I missed them"). One a quote does carry still
-// counts for the clause, as before.
-const NO_CLAIM_STEMS = new Set(`sorry glad good great nice happy know knew let letting went going ahead make made
-  came come took take said say done visit service treatment appointment quarterly monthly weekly yearly
-  annual`.split(/\s+/).map(termStem).filter(Boolean));
+// "glad"), light verbs ("went ahead", "let me know") and the visit itself
+// ("your visit", "the service"). The cadence is NOT one of them: "monthly"
+// against a quarterly record is a wrong fact and must be carried by a quote. They are left out of clause coverage like
+// The half-of-the-content-words rule below may weigh the clause without
+// them (replay 2026-10-03: "Sorry I missed you at the house today" failed it
+// against "so I missed them").
+const NO_CLAIM_STEMS = new Set(`sorry glad know knew let letting went going ahead make made
+  came come took take said say done visit service treatment appointment`.split(/\s+/).map(termStem).filter(Boolean));
 const isFiller = (w, nameStems) => isStop(w) || nameStems.has(w) || GREETING_STEMS.has(w) || ASK_STEMS.has(w) || TIME_STEMS.has(w);
 
 function quoteSharesContent(sentence, quote, names) {
@@ -1130,10 +1131,15 @@ function quoteSharesContent(sentence, quote, names) {
   // judges meaning, this is the floor under it.)
   if (words.some((w) => GROUNDED_TERMS.has(w) && !quoteWords.has(w))) return false;
   const shared = words.filter((w) => quoteWords.has(w)).length;
-  const unbacked = words.filter((w) => !quoteWords.has(w) && !NO_CLAIM_STEMS.has(w)).length;
-  // Always at least one word a quote carries: a clause of nothing but
-  // no-claim words ("Glad you came.") is not waved through.
-  return shared >= 1 && shared >= unbacked;
+  // The rule as it was: at least half of the content words are in the quotes.
+  if (shared >= 1 && shared * 2 >= words.length) return true;
+  // Or the same half rule over the words that claim something, with the
+  // no-claim words left out on BOTH sides: one that a quote happens to carry
+  // ("service") never pays for a claim the quotes do not carry ("monthly").
+  // A clause with no claim word at all gets no second way through.
+  const claims = words.filter((w) => !NO_CLAIM_STEMS.has(w));
+  const backed = claims.filter((w) => quoteWords.has(w)).length;
+  return backed >= 1 && backed * 2 >= claims.length;
 }
 
 // The record words a checker quote copies, as a list of runs, or null when it
@@ -1300,11 +1306,19 @@ function sentenceVerdictReject(j, sentence, { names, techNames, recordLines = []
   const copied = cited.map((q) => recordWordsOf(q, normRecord));
   if (copied.some((q) => !q)) return "unsupported_sentence";
   const quotes = copied.flat();
+  // For timing, a quote of several runs stands for the ONE record line that
+  // holds all of them (its timestamp and its words together), so a repeat of
+  // the same words in an older message is never taken for it.
+  const normLines = recordLines.map(normalizeForMatch);
+  const timed = copied.flatMap((runs) => {
+    const line = runs.length > 1 ? normLines.find((l) => runs.every((run) => l.includes(run))) : null;
+    return line ? [line] : runs;
+  });
   // Every clause must be backed: each one shares a content word (not filler,
   // not a name) with a cited quote, so "ants and your new baby" cannot ride
   // on a quote about the ants alone.
   if (!sentenceClauses(sentence, names).every((clause) => quoteSharesContent(clause, quotes.join(" "), names))) return "unsupported_sentence";
-  return timingUnsupported(sentence, quotes, recordLines, visitDay) ? "timing_unsupported" : null;
+  return timingUnsupported(sentence, timed, recordLines, visitDay) ? "timing_unsupported" : null;
 }
 
 // A sentence's clauses, for per-claim evidence. Clauses with no content words

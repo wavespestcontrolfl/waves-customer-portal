@@ -481,6 +481,13 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(isGreetingOnlySentence("Kevin, it's Adam with the new deck.", names, tech)).toBe(false);
   });
 
+  test('#5893 r2: "Adam here." is the technician speaking for the first-pass check too', () => {
+    const { notTechVoice } = Drafter.__private;
+    expect(notTechVoice('Adam here. Good catching up in person. A Google review would help: {review_url}', 'Adam')).toBe(false);
+    expect(notTechVoice('Good catching up in person. A Google review would help: {review_url}', 'Adam')).toBe(true);
+    expect(notTechVoice('Adam is here. A Google review would help: {review_url}', 'Adam')).toBe(true);
+  });
+
   test('replay 10-04: a checker quote counts by the record runs it copies, whatever frames them', () => {
     const { recordWordsOf } = Drafter.__private;
     const norm = (t) => String(t).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -520,13 +527,18 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const covered = (sentence, quote) => sentenceClauses(sentence, names).every((clause) => quoteSharesContent(clause, quote, names));
     // plain sentences the replay refused
     expect(covered('Sorry I missed you at the house today.', 'The customer was not home, so I missed them.')).toBe(true);
-    expect(covered('Good catching up in person today.', 'I talked with them in person; we spoke during the visit.')).toBe(true);
+    expect(covered('Good talking with you in person today.', 'I talked with them in person; we spoke during the visit.')).toBe(true);
+    // an opinion of how it went is a claim, never a no-claim word
+    expect(covered('Glad your visit went great.', 'we spoke during the visit')).toBe(false);
     expect(covered('Cockroaches were my focus on this quarterly visit.', 'We focused on ants, spiders, and cockroaches')).toBe(true);
     expect(covered("Thanks for letting me know you're out of town.", 'I am out of town but you can do the outside')).toBe(true);
     // #5893 r1: a clause of nothing but no-claim words is not waved through
     expect(covered('Glad you came.', 'so I missed them at the house')).toBe(false);
     expect(covered('I missed you at the house, glad you said so.', 'so I missed them at the house')).toBe(false);
     expect(covered('I had full access to the property and got your monthly service done.', 'I had full access to the property. We completed your monthly pest service today')).toBe(true);
+    // #5893 r2: the cadence is a fact; the wrong one is not carried by "service" alone
+    expect(covered('Glad I got your monthly service done.', 'We completed your quarterly pest service today')).toBe(false);
+    expect(covered('Glad I got your quarterly service done.', 'We completed your quarterly pest service today')).toBe(true);
     // #5524 r3 / r4: a detail the quotes do not carry still fails its clause
     expect(covered("I saw ants in your new baby's nursery.", 'We focused on ants')).toBe(false);
     expect(covered('You mentioned the ants and your new puppies.', 'I keep seeing ants in the kitchen')).toBe(false);
@@ -551,6 +563,14 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
         { sentence: 'You mentioned ants by the door today.', ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes: ['[customer, 2026-10-05 09:00 ET] ... ants by the door'] },
         'You mentioned ants by the door today.', { names, techNames: names, recordLines: dated.split('\n'), visitDay: '2026-10-05' },
         dated.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim())).toBeNull();
+      // #5893 r2: the same words in an older message are not taken for the cited one
+      const twice = `Today: 2026-10-05.\n- [customer, 2026-09-20 09:00 ET] ants by the door\n- [customer, 2026-10-05 09:00 ET] ants by the door`;
+      const today = (quotes) => sentenceVerdictReject(
+        { sentence: 'You mentioned ants by the door today.', ask_only: false, greeting_only: false, off_limits: false, supported: true, quotes },
+        'You mentioned ants by the door today.', { names, techNames: names, recordLines: twice.split('\n'), visitDay: '2026-10-05' },
+        twice.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim());
+      expect(today(['[customer, 2026-10-05 09:00 ET] ... ants by the door'])).toBeNull();
+      expect(today(['[customer, 2026-09-20 09:00 ET] ... ants by the door'])).toBe('timing_unsupported');
     } finally { jest.useRealTimers(); }
     expect(verdict([])).toBe('unsupported_sentence');
   });
