@@ -17330,9 +17330,9 @@ export function CompletionPanel({
         // An untouched pest default area follows the method (Codex P2 #5978):
         // spot treatment never keeps "Perimeter" it did not choose.
         if (field === "applicationMethod" && isRegularPestVisit && p.applicationAreaDefault) {
-          const area = pestRowDefaultArea(value);
-          next.applicationArea = area;
-          next.applicationAreaDefault = Boolean(area);
+          // The mark stays until the tech edits the area itself, so a method
+          // switched away and back restores "Perimeter" (Codex P2 #5978 r2).
+          next.applicationArea = pestRowDefaultArea(value);
         }
         // The row the tech typed into owns its gallons from here on, and the
         // first such row owns the tank.

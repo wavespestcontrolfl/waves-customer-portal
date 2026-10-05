@@ -275,6 +275,18 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
     expect(changed.applicationArea ?? null).toBeNull();
   });
 
+  it('restores Perimeter when the tech switches the method away and back without touching the area', async () => {
+    const onSubmit = await mount(regularPest());
+    await screen.findByText('Taurus SC');
+    const methodSelect = [...document.querySelectorAll('select')].find((el) => el.value === 'perimeter_spray');
+    fireEvent.change(methodSelect, { target: { value: 'spot_treatment' } });
+    fireEvent.change(methodSelect, { target: { value: 'perimeter_spray' } });
+    fillLinearFeet();
+    await act(async () => { fireEvent.click(submitButton()); });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0][1].products.map((p) => p.applicationArea)).toEqual(['Perimeter', 'Perimeter', 'Perimeter']);
+  });
+
   it('keeps an area the tech changed, and a row the tech cleared stays clear', async () => {
     const onSubmit = await mount(regularPest());
     const pickers = await screen.findAllByText('Treatment areas');
