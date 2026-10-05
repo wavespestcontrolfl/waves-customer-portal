@@ -200,11 +200,11 @@ async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, inv
 }
 
 // A receipt whose amount comes from the classifier (no PDF total) is booked
-// unless the classifier says the email does NOT confirm a payment. Failed
+// only when the classifier says the email confirms money was paid. Failed
 // or declined payments, payouts, renewal reminders and unpaid bills all
 // print an amount too; a phrase list on the subject could not tell them
-// apart reliably (Codex rounds 2-5 on #5932). A classification made before
-// payment_status existed (no field) books exactly as it did before.
+// apart reliably (Codex rounds 2-5 on #5932). Fail closed: a missing or
+// unknown status is not "paid" (json mode does not force the field).
 const PAID = 'paid';
 
 // The same email delivered twice (to two inboxes, or re-sent): an expense
@@ -249,17 +249,17 @@ function inColumnRange(n) {
 // The expense date: the parsed invoice's date, else the classifier's, else
 // today (ET). dateFromInvoice is false for the today fallback, so it never
 // drives a duplicate match.
-// - The classifier's date is untyped. Only a string counts (new Date(20260231)
-//   is a 1970 instant), and an ISO-shaped impossible date (2026-02-31) would
-//   roll over to March 3 in new Date(), so it counts as no date.
+// - The classifier's date counts only as a real YYYY-MM-DD calendar date:
+//   new Date() turns 20260231 into 1970 and "February 31, 2026" into March 3.
 // - A date taxPeriodFor cannot place (e.g. year 0012) falls back to today,
 //   date and tax period together, instead of throwing before the email
 //   outcome is recorded (Codex r20 on #4884).
 function receiptDate(parsedInvoice, classifierDate) {
-  const usableClassifierDate = typeof classifierDate !== 'string' ? null
-    : /^\s*\d{4}-\d{2}-\d{2}/.test(classifierDate)
-      ? validCalendarDate(classifierDate.trim(), { allowTimeSuffix: true })
-      : classifierDate;
+  // The classifier is asked for YYYY-MM-DD; anything else (a number, a
+  // written date new Date() would roll over) counts as no date.
+  const usableClassifierDate = typeof classifierDate === 'string'
+    ? validCalendarDate(classifierDate.trim(), { allowTimeSuffix: true })
+    : null;
   const raw = parsedInvoice?.invoice_date || usableClassifierDate;
   const parsed = raw ? new Date(raw) : null;
   const candidate = parsed && !Number.isNaN(parsed.getTime()) ? parsed.toISOString().split('T')[0] : null;
@@ -502,7 +502,7 @@ async function processVendorInvoice(email, classification) {
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
   const paymentStatus = classification.extracted?.payment_status;
-  if (amount > 0 && amountFromClassifier && typeof paymentStatus === 'string' && paymentStatus.trim().toLowerCase() !== PAID) {
+  if (amount > 0 && amountFromClassifier && String(paymentStatus || '').trim().toLowerCase() !== PAID) {
     await db('emails').where({ id: email.id }).update({
       auto_action: 'invoice_detected:not_paid',
       updated_at: new Date(),

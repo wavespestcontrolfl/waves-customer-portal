@@ -174,7 +174,7 @@ test('a receipt with no printed date (today fallback) never drives a duplicate m
   expect(mockState.lastDuplicateFilter).toBeUndefined();
 });
 
-test.each([['failed'], ['due'], ['none']])('a classifier-amount receipt with payment_status %p is never booked', async (status) => {
+test.each([['failed'], ['due'], ['none'], [undefined], [null]])('a classifier-amount receipt with payment_status %p is never booked', async (status) => {
   noPdf();
   await processVendorInvoice({ id: 'e16', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Your payment' },
     { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15', ...(status ? { payment_status: status } : {}) } });
@@ -274,12 +274,6 @@ test('a non-string classifier date is no date (no 1970 instant)', async () => {
   expect(inserted().expense_date).not.toMatch(/^1970/);
 });
 
-test('a classification with no payment_status (made before the field existed) books as before', async () => {
-  noPdf();
-  await processVendorInvoice({ id: 'e32', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' }, { extracted: { invoice_amount: '412.50', invoice_date: '2026-01-15' } });
-  expect(inserted()).toEqual(expect.objectContaining({ amount: 412.5 }));
-});
-
 test('vendor keys try the exact sender address before the domains', () => {
   expect(senderVendorKeys('Billing+Acct_1@Pay-Platform.example')).toEqual(['billing+acct_1@pay-platform.example', 'pay-platform.example']);
   expect(senderVendorKeys('nobody')).toEqual([]);
@@ -303,4 +297,10 @@ test('the notice-copy check skips a description too long for its column', async 
   await processVendorInvoice({ id: 'e33', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'B'.repeat(250), subject: 'Receipt' },
     { extracted: { payment_status: 'paid', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 25 }));
+});
+
+test.each(['02/31/2026', 'February 31, 2026', 'September 30, 2026'])('a classifier date not in YYYY-MM-DD form (%s) is no date', async (d) => {
+  noPdf();
+  await processVendorInvoice({ id: 'e34', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' }, { extracted: { payment_status: 'paid', invoice_amount: '$10.06', invoice_date: d } });
+  expect(inserted().expense_date).not.toMatch(/^2026-0(3-03|9-30)$/);
 });
