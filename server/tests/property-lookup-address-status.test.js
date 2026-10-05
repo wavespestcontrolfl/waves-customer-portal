@@ -42,6 +42,8 @@ describe('a county reverse-geocode failure is a provider gap, not an address ver
   test('confirmed premise with no county reads unavailable and is asked again, never cached as needs confirmation', async () => {
     const noCounty = av({ status: 'confirm_needed', county: null, inServiceArea: null });
     expect(addressStatusFromValidation(noCounty).state).toBe(STATES.UNAVAILABLE);
+    // Unit-only missing with no county: the building cannot be called confirmed either.
+    expect(addressStatusFromValidation(av({ status: 'ambiguous', county: null, inServiceArea: null, missingComponents: ['subpremise'] })).state).toBe(STATES.UNAVAILABLE);
     // A genuinely unconfirmed address with no county still needs confirmation.
     expect(addressStatusFromValidation(av({ status: 'confirm_needed', county: null, inServiceArea: null, hasUnconfirmed: true })).state).toBe(STATES.NEEDS_CONFIRMATION);
     const validate = jest.fn().mockResolvedValueOnce(noCounty).mockResolvedValueOnce(av());

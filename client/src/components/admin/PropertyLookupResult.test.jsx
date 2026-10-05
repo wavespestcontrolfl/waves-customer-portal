@@ -217,6 +217,11 @@ describe("PropertyLookupResult — address status line", () => {
     expect(screen.queryByText(/The county roll has no record/)).not.toBeInTheDocument();
     expect(screen.getByText(/The property record found may be for a different house number/)).toBeInTheDocument();
     cleanup();
+    // The roll never answered: neither "no record" nor a mismatch, and no "Not on the county roll".
+    renderPanel({ profile: flagged, form: { address: "1010 Example Loop" }, meta: meta({ state: "confirmed", use: {}, countyRoll: "unknown" }) });
+    expect(screen.getByText(/The county roll did not answer for this address/)).toBeInTheDocument();
+    expect(screen.queryByText(/Not on the county roll/)).not.toBeInTheDocument();
+    cleanup();
     // No status at all (gate off): the copy is exactly what it was.
     renderPanel({ profile: flagged, form: { address: "1010 Example Loop" } });
     expect(screen.getByText(/We could not confirm this address/)).toBeInTheDocument();

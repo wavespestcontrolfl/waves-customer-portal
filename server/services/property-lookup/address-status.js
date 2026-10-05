@@ -75,9 +75,13 @@ const missingOf = (av) => (Array.isArray(av.missingComponents) ? av.missingCompo
 // That is a provider gap, not an address problem — unavailable, so it is
 // not remembered and the next lookup asks again. (The call pipeline keeps
 // its own fail-closed confirm_needed for this case; nothing there changes.)
+// The same holds when the only missing component is the unit: with no
+// county the building cannot be called confirmed either.
 function isCountyGap(av) {
-  return av.status === 'confirm_needed' && av.county == null && av.inServiceArea == null
-    && av.hasUnconfirmed !== true && isPremise(av) && missingOf(av).length === 0;
+  const missing = missingOf(av);
+  const nothingElseMissing = missing.length === 0 || (missing.length === 1 && missing[0] === 'subpremise');
+  return av.county == null && av.inServiceArea == null && av.hasUnconfirmed !== true && isPremise(av) && nothingElseMissing
+    && (av.status === 'confirm_needed' || av.status === 'ambiguous' || av.status === 'missing_component');
 }
 
 // The building resolved to a premise and the ONLY thing Google misses is
@@ -85,7 +89,7 @@ function isCountyGap(av) {
 function isUnitOnlyMissing(av) {
   const missing = missingOf(av);
   return isPremise(av) && missing.length === 1 && missing[0] === 'subpremise'
-    && av.hasUnconfirmed !== true && av.inServiceArea !== false;
+    && av.hasUnconfirmed !== true && av.inServiceArea === true;
 }
 
 /**

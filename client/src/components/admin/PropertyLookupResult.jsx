@@ -116,6 +116,9 @@ function addressIssueCopy(status) {
   // The address flag also goes up when a record WAS found but may belong to
   // another house number (a snapped match): say "no record" only when the
   // lookup itself found none.
+  if (status.countyRoll === "unknown") {
+    return "The county roll did not answer for this address. Check the house number, street suffix, direction, and ZIP before using property measurements.";
+  }
   if (status.countyRoll !== "not_found") {
     return "The property record found may be for a different house number. Check the house number, street suffix, direction, and ZIP before using property measurements.";
   }

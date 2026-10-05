@@ -1361,9 +1361,13 @@ router.post('/property-lookup', async (req, res) => {
     if (addressStatus) {
       // The county roll's own answer rides beside it, never folded into it:
       // an address Google confirms can still be missing from the roll.
+      // 'not_found' only when the roll ANSWERED and has no row (the profile's
+      // addressVerdict 'audited'); a roll that never answered (outage,
+      // out-of-area) is 'unknown', never a miss.
       const record = result.propertyRecord;
       const onRoll = Boolean(record && (record._parcel?.parcelId || record._parcel?.paoParcelId || record._raw?.parcelId || hasCountyEvidence(record)));
-      result.meta.addressStatus = { ...addressStatus, countyRoll: onRoll ? 'found' : 'not_found' };
+      const rollAnswered = result.enriched?.addressVerdict === 'audited';
+      result.meta.addressStatus = { ...addressStatus, countyRoll: onRoll ? 'found' : (rollAnswered ? 'not_found' : 'unknown') };
     }
     // A whole-property (association) lookup skips the business check. The
     // tool is told so it can ask for a fresh lookup if the business type
