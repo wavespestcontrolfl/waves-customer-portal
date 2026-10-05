@@ -401,35 +401,6 @@ describe('MobileDispatchList drive legs', () => {
     expect(screen.queryByText(/driving/)).toBeNull();
   });
 
-  it('turns the line red with the 2-hour window when the tech would land late', () => {
-    render(
-      <MobileDispatchList
-        mode="day"
-        date="2026-07-15"
-        services={[
-          { ...SERVICE, id: 'svc-late', customerName: 'Sample Late', windowStart: '12:30', windowEnd: '13:00', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 45, driveLateMin: 15 },
-        ]}
-        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
-      />,
-    );
-    const line = screen.getByText('~45 min drive from Sample One · ~15 min past the 2-hour arrival window');
-    expect(line.parentElement.className).toContain('text-alert-fg');
-  });
-
-  it('drops the red once the stop is en route', () => {
-    render(
-      <MobileDispatchList
-        mode="day"
-        date="2026-07-15"
-        services={[
-          { ...SERVICE, id: 'svc-late', status: 'en_route', customerName: 'Sample Late', windowStart: '12:30', windowEnd: '13:00', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 45, driveLateMin: 15 },
-        ]}
-        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
-      />,
-    );
-    const line = screen.getByText('~45 min drive from Sample One');
-    expect(line.parentElement.className).not.toContain('text-alert-fg');
-  });
 });
 
 describe('MobileDispatchList open hours with a windowless visit', () => {

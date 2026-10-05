@@ -167,26 +167,19 @@ function headerLabel(dateStr) {
 // The drive into a stop, drawn as a thin line above its card (owner
 // 2026-10-05): "~59 min drive from <previous stop>". The server stamps each
 // leg on one card only (driveInShown) and names the stop it comes from, so
-// the line stays right when techs' stops interleave. Red when the tech would
-// land past the customer's 2-hour arrival window (driveLateMin). Absent
-// fields (week view, older payload) and a leg without coordinates render
-// nothing, never "~0 min".
+// the line stays right when techs' stops interleave. Absent fields (week
+// view, older payload) and a leg without coordinates render nothing, never
+// "~0 min".
 function DriveLine({ service }) {
   if (!service.driveInShown || !Number.isFinite(service.driveFromPrevMin)) return null;
-  // Only a stop the tech has not reached can run late: marking it en route
-  // updates the status before the next refresh clears driveLateMin.
-  const late = canMarkEnRoute(service) && Number.isFinite(service.driveLateMin) && service.driveLateMin > 0;
   const from = service.drivePrevName ? ` from ${service.drivePrevName}` : '';
   return (
     <div
-      className={'flex items-center u-nums border-b border-hairline ' + 'border-zinc-200 ' + (late ? 'bg-alert-bg text-alert-fg font-medium' : 'bg-zinc-50 text-ink-tertiary')}
+      className="flex items-center u-nums border-b border-hairline border-zinc-200 bg-zinc-50 text-ink-tertiary"
       style={{ fontSize: 14, padding: '5px 14px 5px 22px', gap: 8 }}
     >
-      <span aria-hidden style={{ width: 2, height: 14, borderRadius: 1, background: 'currentColor', opacity: late ? 1 : 0.4, flexShrink: 0 }} />
-      <span className="min-w-0">
-        ~{service.driveFromPrevMin} min drive{from}
-        {late && ` · ~${service.driveLateMin} min past the 2-hour arrival window`}
-      </span>
+      <span aria-hidden style={{ width: 2, height: 14, borderRadius: 1, background: 'currentColor', opacity: 0.4, flexShrink: 0 }} />
+      <span className="min-w-0">~{service.driveFromPrevMin} min drive{from}</span>
     </div>
   );
 }
