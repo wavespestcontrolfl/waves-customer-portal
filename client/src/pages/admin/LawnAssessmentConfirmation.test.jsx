@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import LawnAssessmentPanel from './LawnAssessmentPanel';
 import { CompletionPanel } from './SchedulePage';
 
@@ -173,6 +173,33 @@ it.each([null, 0])('shows an unavailable or genuinely zero score on reload and p
   fireEvent.click(confirm);
   await screen.findByText(message);
   expect(confirmPosts()[0]).toEqual({});
+});
+
+// Codex r1 P2 on #5904: a held press that ends off the button fires no click,
+// so the "swallow the post-hold click" flag must reset, or the next tap on any
+// step button is discarded.
+it('a hold that is dragged off the button, or cancelled, does not swallow the next tap', async () => {
+  vi.useFakeTimers();
+  try {
+    render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
+    await vi.waitFor(() => screen.getByRole('button', { name: 'Confirm assessment' }));
+    const density = screen.getByLabelText('Density score');
+    const raise = screen.getByRole('button', { name: 'Raise Density score' });
+    fireEvent.pointerDown(raise);
+    act(() => { vi.advanceTimersByTime(450 + 120 * 2 + 10); });
+    expect(Number(density.value)).toBeGreaterThan(80);
+    const held = Number(density.value);
+    fireEvent.pointerLeave(raise);
+    fireEvent.click(screen.getByRole('button', { name: 'Lower Density score' }));
+    expect(density.value).toBe(String(held - 1));
+    fireEvent.pointerDown(raise);
+    act(() => { vi.advanceTimersByTime(450 + 10); });
+    fireEvent.pointerCancel(raise);
+    fireEvent.click(raise);
+    expect(density.value).toBe(String(held + 1));
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 // Owner ruling 2026-10-05: each score has a - and a + beside its number (this

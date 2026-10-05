@@ -519,6 +519,13 @@ export default function LawnAssessmentCompletionBlock({
     clearInterval(holdRef.current.timer);
     holdRef.current.timer = null;
   }
+  // A press that ends off the button (drag away, cancelled touch) fires no
+  // click, so the "swallow the post-hold click" flag must not survive it, or
+  // the next tap on any step button would be discarded (Codex r1 P2).
+  function cancelHold() {
+    stopHold();
+    holdRef.current.repeated = false;
+  }
   useEffect(() => stopHold, []);
   // Handlers for a step button: a tap (or Enter/Space) steps once; holding the
   // press steps again every 120ms after a short pause, and the click that ends
@@ -539,8 +546,8 @@ export default function LawnAssessmentCompletionBlock({
         }, 450);
       },
       onPointerUp: stopHold,
-      onPointerLeave: stopHold,
-      onPointerCancel: stopHold,
+      onPointerLeave: cancelHold,
+      onPointerCancel: cancelHold,
     };
   }
 
