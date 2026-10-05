@@ -303,10 +303,8 @@ describe('gate on', () => {
     expect((await run()).enriched.serviceScopeSuggestion).toBeNull();
   });
 
-  test('a county parcel listed under several addresses (a plaza) suggests one space, unless the roll calls it a mobile-home park', async () => {
+  test('several addresses on one county parcel alone suggest nothing (not proof of one shared building, and the park status may be unknown)', async () => {
     lookupPropertyFromAITrio.mockImplementation(async () => ({ ...noCountyRecord(), _raw: { ...(noCountyRecord()._raw || {}), multiSitusParcel: { situsCount: 24 } } }));
-    expect((await run()).enriched).toMatchObject({ serviceScopeDecision: 'scope_unresolved', serviceScopeSuggestion: 'suite' });
-    lookupPropertyFromAITrio.mockImplementation(async () => ({ ...noCountyRecord(), _raw: { ...(noCountyRecord()._raw || {}), multiSitusParcel: { situsCount: 24, parkConfirmed: true } } }));
     expect((await run()).enriched.serviceScopeSuggestion).toBeNull();
     lookupPropertyFromAITrio.mockImplementation(async () => noCountyRecord());
   });
