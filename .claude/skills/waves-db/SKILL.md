@@ -57,8 +57,12 @@ Rules:
   from the ET helper on the side you are on — `server/utils/datetime-et.js`
   (`etParts`, `formatET*`) on the server, `etDateString()`
   (`client/src/lib/timezone.js`) in React — and never import the server
-  module into the Vite bundle. Formatting a real `date` column this way is
-  correct and not a finding.
+  module into the Vite bundle. ET conversion is for real instants ONLY: a
+  `date` column deserializes as `'YYYY-MM-DD'` or a UTC-midnight `Date`,
+  and `etDateString` on either shifts it to the PREVIOUS Eastern day (UTC
+  midnight is 7–8 PM ET the night before), so route date-only values
+  through `etCalendarDayOf` — or `dateOnlyString` for a known date column
+  — from `server/utils/datetime-et.js`.
 
 ## 3. Local DB access — Codex uses dev/preview only
 

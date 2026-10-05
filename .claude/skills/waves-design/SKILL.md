@@ -50,6 +50,10 @@ V1 page components, the per-flag gates (`DashboardGate` / `DispatchGate` /
 DispatchPageV2 under tabs); `/admin/schedule` redirects to
 `/admin/dispatch?tab=schedule`. The admin shell is `AdminLayoutV2`.
 
+`KnowledgePage.jsx` and its `pages/admin/knowledge/*` slices are Tier 1 as
+well (Tailwind + `components/ui`, spec §5.7) — review a Knowledge change as
+Tier 1, and never introduce a `D` palette there.
+
 **Retained V1 modules (named-export only, no V1 page route):**
 `SchedulePage.jsx`, `CustomersPage.jsx`, `EstimatePage.jsx`,
 `CommunicationsPage.jsx` are shared-utility modules — they export constants
@@ -60,7 +64,11 @@ and sub-components consumed by V2 (`CompletionPanel` / `RescheduleModal` /
 `DECLINE_REASONS` / `classifyEstimate` / `getUrgencyIndicator` /
 `detectCompetitor` / `ALL_NUMBERS` / `NUMBER_LABEL_MAP` /
 `PRODUCT_DESCRIPTIONS` / `TRACK_SAFETY_RULES` / `stripLegacyBoilerplate`).
-This list is the one AGENTS.md points at — keep it complete. The
+AGENTS.md points here for this inventory, but it is NOT exhaustive —
+`SchedulePage.jsx` also exports `completionResumeOwed`/`…Key`/`…Error`,
+`ZoneMarkingStep` and `StationMarkingStep`, and `EstimatePage.jsx` exports
+`declinePayload`, all consumed by V2. Grep for real importers before
+calling any export here dead. The
 `export default function ...Page()` component is gone from each — do not
 resurrect it, and do not delete these files as "dead code".
 
