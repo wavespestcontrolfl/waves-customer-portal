@@ -13,7 +13,7 @@ const path = require('path');
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { reportPhotoCaptionsOf, stagedReportPhotoCaptions } = require('../services/service-photos');
+const { reportPhotoCaptionsOf, stagedReportPhotoCaptions, photoCaptionsSeenMatches } = require('../services/service-photos');
 
 describe('the descriptions the report writer reads', () => {
   test('first five non-empty descriptions, trimmed, 200 characters each, as the sheet derives them', () => {
@@ -56,6 +56,31 @@ describe('the descriptions the report writer reads', () => {
   });
 });
 
+describe('the sheet\'s list against the staged photos', () => {
+  test('unchanged descriptions match, so the send goes through', () => {
+    expect(photoCaptionsSeenMatches(['Counter edge', 'Garage door sweep'], ['Counter edge', 'Garage door sweep'])).toBe(true);
+    expect(photoCaptionsSeenMatches([], [])).toBe(true);
+  });
+
+  test('a changed, added, removed or reordered description refuses', () => {
+    expect(photoCaptionsSeenMatches(['Counter edge'], ['Counter edge, sealed'])).toBe(false);
+    expect(photoCaptionsSeenMatches([], ['Counter edge'])).toBe(false);
+    expect(photoCaptionsSeenMatches(['Counter edge'], [])).toBe(false);
+    expect(photoCaptionsSeenMatches(['a', 'b'], ['b', 'a'])).toBe(false);
+  });
+
+  test('anything but a list of strings refuses', () => {
+    expect(photoCaptionsSeenMatches(null, [])).toBe(false);
+    expect(photoCaptionsSeenMatches('Counter edge', ['Counter edge'])).toBe(false);
+    expect(photoCaptionsSeenMatches([{ caption: 'Counter edge' }], ['Counter edge'])).toBe(false);
+  });
+
+  test('the sheet\'s own derivation of the staged rows matches them', () => {
+    const rows = [{ caption: ' Counter edge ' }, { caption: null }, { caption: 'Garage door sweep' }];
+    expect(photoCaptionsSeenMatches(reportPhotoCaptionsOf(rows), reportPhotoCaptionsOf(rows))).toBe(true);
+  });
+});
+
 // Pinned by source: the completion function is too large for a unit harness,
 // like the trace check beside it (tech-treatment-zone-property-fence.test.js).
 describe('the completion re-checks the descriptions under the visit lock', () => {
@@ -69,8 +94,8 @@ describe('the completion re-checks the descriptions under the visit lock', () =>
     expect(check).toBeGreaterThan(lock);
     expect(check).toBeLessThan(block.indexOf("trx('service_records').insert(recordInsert)"));
     const body = block.slice(check, check + 700);
-    expect(body).toContain('.stagedReportPhotoCaptions(sp, svc.id)');
-    expect(body).toContain('!Array.isArray(photoCaptionsSeen) || JSON.stringify(seen) !== JSON.stringify(captionsNow)');
+    expect(body).toContain('ServicePhotos.stagedReportPhotoCaptions(sp, svc.id)');
+    expect(body).toContain('if (!ServicePhotos.photoCaptionsSeenMatches(photoCaptionsSeen, captionsNow)) {');
     expect(body).toContain("code: 'photo_captions_changed'");
   });
 

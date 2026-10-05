@@ -746,6 +746,14 @@ function reportPhotoCaptionsOf(photos) {
     .map((caption) => caption.slice(0, 200));
 }
 
+// Whether the sheet's photoCaptionsSeen (already derived by photoCaptionsOf:
+// a list of strings) is still what the staged photos say. Anything that is
+// not a list of strings never matches.
+function photoCaptionsSeenMatches(seen, captionsNow) {
+  if (!Array.isArray(seen) || !seen.every((caption) => typeof caption === 'string')) return false;
+  return seen.length === captionsNow.length && seen.every((caption, i) => caption === captionsNow[i]);
+}
+
 async function stagedReportPhotoCaptions(knex, scheduledServiceId) {
   const staged = await knex('scheduled_service_photo_staging')
     .where({ scheduled_service_id: scheduledServiceId })
@@ -878,6 +886,7 @@ module.exports = {
   updateStagedServicePhotoCaption,
   reportPhotoCaptionsOf,
   stagedReportPhotoCaptions,
+  photoCaptionsSeenMatches,
   deleteStagedServicePhoto,
   promoteStagedServicePhotos,
   promoteStagedPhotosForCompletedVisit,

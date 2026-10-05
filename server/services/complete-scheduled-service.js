@@ -5915,10 +5915,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // Read under this row lock, which a description change takes
           // first, so the change either committed and is seen here or waits.
           if (photoCaptionsSeen !== undefined && lockedSvcRow) {
-            const seen = require('./service-photos').reportPhotoCaptionsOf(photoCaptionsSeen);
-            const captionsNow = await trx.transaction((sp) => require('./service-photos')
-              .stagedReportPhotoCaptions(sp, svc.id));
-            if (!Array.isArray(photoCaptionsSeen) || JSON.stringify(seen) !== JSON.stringify(captionsNow)) {
+            const ServicePhotos = require('./service-photos');
+            const captionsNow = await trx.transaction((sp) => ServicePhotos.stagedReportPhotoCaptions(sp, svc.id));
+            if (!ServicePhotos.photoCaptionsSeenMatches(photoCaptionsSeen, captionsNow)) {
               throw Object.assign(new Error('photo descriptions changed during completion'), { code: 'photo_captions_changed' });
             }
           }
