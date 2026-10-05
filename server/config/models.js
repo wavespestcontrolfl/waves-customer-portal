@@ -144,6 +144,14 @@ function anthropicThinkingAlwaysOn(model) {
 const DEFAULTS = Object.freeze({
   FLAGSHIP: 'claude-opus-4-8',
   WORKHORSE: 'claude-sonnet-5',
+  // Routine internal lanes that used to ride the flagship (owner 2026-10-04):
+  // staff wiki Q&A, expense categories, vendor invoice PDFs, lead synopsis.
+  // Hero alt text is published on the site, so it stays on VISION. Sonnet 5.5, not Sonnet 5: same list price, and it is in the
+  // thinking floor below, so these lanes' short caps (200 to 2000 tokens)
+  // are not spent on thinking. Roll back with MODEL_ROUTINE=claude-opus-4-8.
+  // Not for Fable / Mythos: the two direct sites treat a refusal as a failed
+  // read, with no second provider.
+  ROUTINE: 'claude-sonnet-5-5',
   FAST: 'claude-sonnet-5',
   VOICE: 'claude-sonnet-5',
   VISION: 'claude-opus-4-8',
@@ -225,6 +233,15 @@ const DEFAULTS = Object.freeze({
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || DEFAULTS.FLAGSHIP;
 const WORKHORSE = process.env.MODEL_WORKHORSE || DEFAULTS.WORKHORSE;
+// Fable / Mythos are refused here, in the registry: two ROUTINE call sites use
+// the SDK directly and have no second provider for a refusal, so a hand-set
+// MODEL_ROUTINE naming one of them falls back to the default.
+const ROUTINE_EXCLUDED_RE = /^claude-(fable|mythos)/;
+const ROUTINE   = (!ROUTINE_EXCLUDED_RE.test(process.env.MODEL_ROUTINE || '') && process.env.MODEL_ROUTINE) || DEFAULTS.ROUTINE;
+// Low effort only while ROUTINE is an always-thinking model (the Sonnet 5.5
+// default). A rollback to MODEL_ROUTINE=claude-opus-4-8 sends no per-lane
+// effort, so those lanes get back the model AND the reasoning they had.
+const ROUTINE_EFFORT = anthropicThinkingAlwaysOn(ROUTINE) ? 'low' : undefined;
 const FAST      = process.env.MODEL_FAST      || DEFAULTS.FAST;
 const VOICE     = process.env.MODEL_VOICE     || DEFAULTS.VOICE;
 // Owner 2026-07-21 (T&S report dry-run): photo scoring drives customer-facing
@@ -520,6 +537,19 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
+  // highStakes with the ROUTINE tier on the Anthropic leg and the same
+  // OpenAI backup: internal, low-risk lanes only
+  // (owner 2026-10-04). Nothing customer-facing belongs here: wiki Q&A uses
+  // routineAnswer for staff sources only (wiki-qa.js) and keeps highStakes
+  // for every customer-facing caller. ROUTINE_EFFORT (low on the Sonnet 5.5
+  // default): staff wiki Q&A is interactive and the rest are short lookups,
+  // so the always-thinking default must not think at the global
+  // MODEL_ANTHROPIC_EFFORT.
+  routineAnswer: Object.freeze({
+    name: 'routineAnswer',
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, ...(ROUTINE_EFFORT ? { effort: ROUTINE_EFFORT } : {}) }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
   adsAdvisor: Object.freeze({
     name: 'adsAdvisor',
     // Daily Google Ads advisor (campaign-advisor.js) — owner ruling
@@ -700,6 +730,9 @@ module.exports = {
   EXTREME,
   FLAGSHIP,
   WORKHORSE,
+  ROUTINE,
+  ROUTINE_EFFORT,
+  ROUTINE_EXCLUDED_RE,
   FAST,
   VOICE,
   VISION,
