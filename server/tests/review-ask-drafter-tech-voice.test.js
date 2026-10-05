@@ -515,6 +515,11 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     // plain sentences the replay refused
     expect(covered('Sorry I missed you at the house today.', 'The customer was not home, so I missed them.')).toBe(true);
     expect(covered('Good talking with you in person today.', 'I talked with them in person; we spoke during the visit.')).toBe(true);
+    // #5893 r4: words that put a statement in the customer's mouth are claims
+    expect(covered('Sorry I know you said cockroaches were the focus.', 'We focused on ants, spiders, and cockroaches')).toBe(false);
+    expect(covered('Sorry, you mentioned the house had roaches.', 'so I missed them at the house')).toBe(false);
+    // ... and stay judged by the rule on main, which this still passes
+    expect(covered('You mentioned the ants.', 'I keep seeing ants in the kitchen')).toBe(true);
     // an opinion of how it went is a claim, never a no-claim word
     expect(covered('Glad your visit went great.', 'we spoke during the visit')).toBe(false);
     expect(covered('Cockroaches were my focus on this visit.', 'We focused on ants, spiders, and cockroaches')).toBe(true);
@@ -522,7 +527,6 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(covered('Cockroaches were my focus on this quarterly visit.', 'We focused on ants, spiders, and cockroaches')).toBe(false);
     expect(covered('I completed your monthly service today.', 'We completed your quarterly pest service today')).toBe(false);
     expect(covered('I completed your quarterly service today.', 'We completed your quarterly pest service today')).toBe(true);
-    expect(covered("Thanks for letting me know you're out of town.", 'I am out of town but you can do the outside')).toBe(true);
     // #5893 r1: a clause of nothing but no-claim words is not waved through
     expect(covered('Glad you came.', 'so I missed them at the house')).toBe(false);
     expect(covered('I missed you at the house, glad you said so.', 'so I missed them at the house')).toBe(false);

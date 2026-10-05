@@ -1102,13 +1102,17 @@ function legCapture() {
 
 // Words that state nothing a record line could back: courtesy ("sorry",
 // "glad"), light verbs ("went ahead", "let me know") and the visit itself
-// ("your visit", "the service"). The cadence is NOT one of them: "monthly"
-// against a quarterly record is a wrong fact and must be carried by a quote. They are left out of clause coverage like
+// ("your visit", "the service"). NOT among them: the cadence ("monthly"
+// against a quarterly record is a wrong fact), opinions of how it went, and
+// words that put a statement in the customer's mouth ("you said", "I know
+// you ..."), which a quote must carry like any other claim. They are left out of clause coverage like
 // The half-of-the-content-words rule below may weigh the clause without
 // them (replay 2026-10-03: "Sorry I missed you at the house today" failed it
 // against "so I missed them").
-const NO_CLAIM_STEMS = new Set(`sorry glad know knew let letting went going ahead make made
-  came come took take said say done visit service treatment appointment`.split(/\s+/).map(termStem).filter(Boolean));
+const NO_CLAIM_STEMS = new Set(`sorry glad let letting went going ahead make made
+  came come took take done visit service treatment appointment`.split(/\s+/).map(termStem).filter(Boolean));
+const ATTRIBUTION_STEMS = new Set(`said say says told tell mention mentioned ask asked know knew heard hear
+  think thought feel felt want wanted`.split(/\s+/).map(termStem).filter(Boolean));
 // How often the service comes is a fact about the account: like a pest or a
 // place, it must be in the quotes whatever else the clause shares with them.
 const CADENCE_STEMS = new Set(`quarterly monthly weekly yearly annual annually`.split(/\s+/).map(termStem).filter(Boolean));
@@ -1133,7 +1137,10 @@ function quoteSharesContent(sentence, quote, names) {
   // Or the same half rule over the words that claim something, with the
   // no-claim words left out on BOTH sides: one that a quote happens to carry
   // ("service") never pays for a claim the quotes do not carry ("monthly").
-  // A clause with no claim word at all gets no second way through.
+  // A clause with no claim word at all gets no second way through, and
+  // neither does one that puts a statement in the customer's mouth ("you
+  // said", "I know you ..."): that is judged by the rule above only.
+  if (words.some((w) => ATTRIBUTION_STEMS.has(w))) return false;
   const claims = words.filter((w) => !NO_CLAIM_STEMS.has(w));
   const backed = claims.filter((w) => quoteWords.has(w)).length;
   return backed >= 1 && backed * 2 >= claims.length;
