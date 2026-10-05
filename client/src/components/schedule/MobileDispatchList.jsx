@@ -164,11 +164,6 @@ function headerLabel(dateStr) {
   });
 }
 
-// "8:30 AM" from minutes after midnight.
-function minutesLabel(mins) {
-  return formatTimeLabel(`${Math.floor(mins / 60)}:${String(mins % 60).padStart(2, '0')}`);
-}
-
 // The drive into a stop, drawn as a thin line above its card (owner
 // 2026-10-05): "~59 min drive from <previous stop>". The server stamps each
 // leg on one card only (driveInShown) and names the stop it comes from, so
@@ -181,8 +176,6 @@ function DriveLine({ service }) {
   // Only a stop the tech has not reached can run late: marking it en route
   // updates the status before the next refresh clears driveLateMin.
   const late = canMarkEnRoute(service) && Number.isFinite(service.driveLateMin) && service.driveLateMin > 0;
-  // The promise missed: a later visit at the stop can be the late one.
-  const start = parseHHMM(service.driveLateWindowStart || service.windowStart);
   const from = service.drivePrevName ? ` from ${service.drivePrevName}` : '';
   return (
     <div
@@ -192,7 +185,7 @@ function DriveLine({ service }) {
       <span aria-hidden style={{ width: 2, height: 14, borderRadius: 1, background: 'currentColor', opacity: late ? 1 : 0.4, flexShrink: 0 }} />
       <span className="min-w-0">
         ~{service.driveFromPrevMin} min drive{from}
-        {late && start != null && ` · ~${service.driveLateMin} min past the ${minutesLabel(start)}–${minutesLabel(start + 120)} window`}
+        {late && ` · ~${service.driveLateMin} min past the 2-hour arrival window`}
       </span>
     </div>
   );

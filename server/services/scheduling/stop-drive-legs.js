@@ -142,7 +142,7 @@ function lateByStop(stops, legs) {
     piecesOf.set(st.legs[0].id, []);
     stopPieces(st.members).forEach((p, j) => {
       const id = `${i}:${j}`;
-      piecesOf.get(st.legs[0].id).push({ id, start: p.start });
+      piecesOf.get(st.legs[0].id).push(id);
       if (j === 0 && i > 0) legIn.set(id, legs[i - 1]);
       const hh = String(Math.floor(p.start / 60)).padStart(2, '0');
       const mm = String(p.start % 60).padStart(2, '0');
@@ -165,15 +165,7 @@ function lateByStop(stops, legs) {
     legMinutes: (_prev, stop) => legIn.get(stop.id) ?? 0,
   });
   const lateById = new Map((sim?.arrivals || []).map((a) => [a.id, a.lateMinutes]));
-  // The latest-missed piece, with the window it missed (the line names it).
-  return new Map([...piecesOf].map(([cardId, pieces]) => {
-    let worst = { min: 0, start: null };
-    for (const p of pieces) {
-      const min = lateById.get(p.id) || 0;
-      if (min > worst.min) worst = { min, start: p.start };
-    }
-    return [cardId, worst];
-  }));
+  return new Map([...piecesOf].map(([cardId, ids]) => [cardId, Math.max(0, ...ids.map((id) => lateById.get(id) || 0))]));
 }
 
 // Visits the tech has not reached yet: only these can still run late.
@@ -212,7 +204,6 @@ function attachDriveLegs(services) {
     s.driveInShown = false;
     s.drivePrevName = null;
     s.driveLateMin = null;
-    s.driveLateWindowStart = null;
     s.driveLegUnknown = false;
   }
   // A visit group is one stop wherever its rows sort (route-model.js
@@ -267,12 +258,8 @@ function attachDriveLegs(services) {
   const late = stops.length > 1 && hasGeo(stops[0].anchor) ? lateByStop(stops, legs) : new Map();
   for (const st of stops.slice(1)) {
     const first = st.legs[0];
-    const worst = late.get(first.id);
-    if (NOT_REACHED.has(first.status) && worst?.min > 0) {
-      first.driveLateMin = worst.min;
-      // "HH:MM" of the promise missed: a later visit at the stop can be it.
-      first.driveLateWindowStart = `${String(Math.floor(worst.start / 60)).padStart(2, '0')}:${String(worst.start % 60).padStart(2, '0')}`;
-    }
+    const min = late.get(first.id);
+    if (NOT_REACHED.has(first.status) && min > 0) first.driveLateMin = min;
   }
 }
 

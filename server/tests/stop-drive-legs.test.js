@@ -321,7 +321,6 @@ describe('attachDriveLegs', () => {
     // z ends 09:00, g1 arrives 09:00 + leg and works 7 hours; g2's 13:00
     // window closes at 15:00.
     expect(services[0].driveLateMin).toBe(9 * 60 + leg + 420 - (13 * 60 + 120));
-    expect(services[0].driveLateWindowStart).toBe('13:00');
   });
 
   it('names the customer the tech leaves last at a shared pin', () => {
