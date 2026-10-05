@@ -247,6 +247,17 @@ it("Dismiss posts dismiss, and a one-visit code offers the visits that came with
   await waitFor(() => expect(rawAdminFetch.mock.calls.some(([p]) => p === "/admin/access-codes/f1/dismiss")).toBe(true));
 });
 
+it("a failed first load keeps the tab with a retry", async () => {
+  let calls = 0;
+  rawAdminFetch.mockImplementation((path, init) => (path.startsWith("/admin/access-codes/found")
+    ? (++calls === 1 ? response({ error: "Server error" }, { ok: false, status: 500 }) : response({ total: 1, items: [FOUND_ROW] }))
+    : foundRoutes()(path, init)));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: /Found in messages/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /Try again|Retry/ }));
+  expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
+});
+
 it("shows the server's message when a save is refused", async () => {
   rawAdminFetch.mockImplementation((path, init) => (init?.method === "POST"
     ? response({ error: "That customer already has this code", code: "duplicate_active" }, { ok: false, status: 409 })

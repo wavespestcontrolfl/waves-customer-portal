@@ -251,7 +251,8 @@ export default function NeighborhoodGateCodesPage() {
     } catch (err) {
       if (seq !== foundSeq.current) return;
       if (err.status === 404 || err.status === 403) setFound({ available: false, items: [], total: 0, loading: false, error: "" });
-      else setFound((f) => ({ ...f, loading: false, error: err.message || "Could not load found codes" }));
+      // Any other failure keeps the tab, so its error and Try again stay reachable.
+      else setFound((f) => ({ ...f, available: true, loading: false, error: err.message || "Could not load found codes" }));
     }
   }, []);
 
