@@ -546,6 +546,11 @@ function mentionProblem(term, sentence, mention, prov, from, inputs) {
     if (prov.noteStance === 'affirmed' || prov.findingHigh) return `negation_contradicts_record:${key}`;
     return `absence_not_in_record:${key}`;
   }
+  // Any clause that names a product beside a condition binds them: the named
+  // product must be FOR that condition by its own targets or role, whatever the
+  // verb ("to treat", "went on for", "handles"). The fertilizer never gets Arena's bugs.
+  const namedHere = inputs.products.filter((p) => productNamedIn(p, mention.clause));
+  if (namedHere.length && !namedHere.some((p) => productLicenses(p, term))) return `product_not_for_condition:${key}`;
   const purposeOnly = PURPOSE_CUE_RE.test(mention.clause) && !OBSERVED_CUE_RE.test(mention.clause);
   if (purposeOnly && !prov.purpose && prov.priorPurpose) {
     // A past product's purpose needs an explicit last-visit reference and the prior source.
@@ -554,8 +559,6 @@ function mentionProblem(term, sentence, mention, prov, from, inputs) {
   if (purposeOnly && prov.purpose) {
     // A purpose claim that names a product must match THAT product's own targets
     // or role: Arena's chinch bugs never become the fertilizer's.
-    const named = inputs.products.filter((p) => productNamedIn(p, mention.clause));
-    if (named.length && !named.some((p) => productLicenses(p, term))) return `purpose_not_this_product:${key}`;
     return from.includes('product') || (prov.noteStance === 'purpose' && from.includes('note')) ? null : `purpose_without_product_source:${key}`;
   }
   // From here the paragraph says the condition is (or may be) PRESENT.
