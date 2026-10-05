@@ -168,7 +168,7 @@ async function liveChildOf(trx, primaryId) {
 // (the call writer leaves an unpriced child billable, which would let its
 // completion bill or owe a third visit) and the full treatment block from
 // its agreed start (the call writer books a bare hour).
-async function promotePendingCallChild(sp, child, { primary, catalogRow }) {
+async function promotePendingCallChild(sp, child, { primary, catalogRow, outerTrx }) {
   const { CALL_FOLLOWUP_SOURCE_ACTION } = require('./call-booking-source-actions');
   if (child.source_action !== CALL_FOLLOWUP_SOURCE_ACTION || child.status !== 'pending' || child.customer_confirmed) return child;
   await require('./job-status').transitionJobStatus({
@@ -190,7 +190,28 @@ async function promotePendingCallChild(sp, child, { primary, catalogRow }) {
     const curEnd = toMin(child.window_end);
     if (curEnd == null || endMin > curEnd) patch.window_end = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
   }
+  // A wider window takes the same advisory checks a new child does: the
+  // bounded day fence, then the overlap probe on the promoted window, with
+  // the Schedule card after commit on a clash or a missed fence.
+  let fenceMissed = false;
+  if (patch.window_end) {
+    const day = dateOnly(child.scheduled_date);
+    try {
+      const { fenceBookingDay } = require('./scheduling/occupancy');
+      const fence = await sp.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: day, techId: child.technician_id || null }));
+      fenceMissed = !fence || !fence.acquired;
+    } catch (fenceErr) {
+      fenceMissed = true;
+      logger.warn(`[package-followup] day fence failed for promoted visit 2 ${child.id}: ${fenceErr.message}`);
+    }
+  }
   await sp('scheduled_services').where({ id: child.id }).update(patch);
+  if (patch.window_end) {
+    await warnOnOverlap(sp, {
+      child: { ...child, window_end: patch.window_end, scheduled_date: dateOnly(child.scheduled_date), parent_service_id: primary.id },
+      customerId: primary.customer_id, outerTrx, fenceMissed,
+    });
+  }
   logger.info(`[package-followup] pending call-booked visit 2 ${child.id} confirmed with its package visit 1`);
   return { ...child, status: 'confirmed', source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION };
 }
@@ -318,7 +339,7 @@ async function bookInSavepoint(sp, outerTrx, primary, cols, { promotePendingCall
   const catalogRow = await resolvePackageCatalogRow(sp, primary);
   if (!catalogRow) return null;
   const existing = await liveChildOf(sp, primary.id);
-  if (existing) return promotePendingCallFollowUp ? promotePendingCallChild(sp, existing, { primary, catalogRow }) : existing;
+  if (existing) return promotePendingCallFollowUp ? promotePendingCallChild(sp, existing, { primary, catalogRow, outerTrx }) : existing;
   const date = packageFollowUpDate(primary.scheduled_date, catalogRow.follow_up_interval_days);
   if (!date) return null;
   const columns = cols || await sp('scheduled_services').columnInfo();

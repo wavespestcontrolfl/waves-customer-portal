@@ -262,6 +262,9 @@ describe('ensurePackageFollowUpVisit', () => {
       source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION, estimated_price: 0, followup_included: true, create_invoice_on_complete: false, window_end: '15:00',
     }) }]);
     expect(out).toMatchObject({ id: 'child-call', status: 'confirmed', source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION });
+    // The widened window is fenced and probed like a new child.
+    expect(fenceBookingDay).toHaveBeenCalledWith(expect.anything(), { date: '2026-10-19', techId: 'tech-1' });
+    expect(findConflictingVisits).toHaveBeenCalledWith(expect.objectContaining({ date: '2026-10-19', windowStart: '13:00', windowEnd: '15:00', excludeServiceIds: ['child-call'] }));
     expect(createScheduledService).not.toHaveBeenCalled();
   });
 
