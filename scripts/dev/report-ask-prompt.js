@@ -4,9 +4,12 @@
 /**
  * Prints the exact prompt the service report's "Ask Waves" AI answer would
  * send to the model (GATE_REPORT_ASK_AI), as JSON { system, user, topic,
- * requiredLines, ruleAnswer }: the prompt, the rule router's topic, the
- * recorded instructions the AI answer must repeat word for word, and the
- * fixed-rule answer the customer gets when the gate is off or the AI misses.
+ * requiredLines, ruleAnswerOnlyBecause, ruleAnswer }: the prompt, the rule
+ * router's topic, the recorded instructions ({ text, source }) the AI answer
+ * must repeat word for word, why the question would skip the model (a service
+ * line the AI does not cover, a typed or companion report, a technician-typed
+ * required line; null when the model answers), and the fixed-rule answer the
+ * customer gets when the gate is off or the AI misses.
  * No server, no database, no model call: it reads a saved report payload and
  * a question.
  *
@@ -46,16 +49,18 @@ function main(argv) {
   const nextAppointment = (wrapped && parsed.nextAppointment) || nextAppointmentFor(data);
   // Keep stdout pure JSON: the portal logger prints module-load warnings there.
   process.env.LOG_LEVEL = 'error';
-  const { buildReportAskPrompt } = require('../../server/services/service-report/report-ask-ai');
+  const { buildReportAskPrompt, ruleAnswerReason } = require('../../server/services/service-report/report-ask-ai');
   const { routeServiceReportQuestion } = require('../../server/services/service-report/report-assistant');
   const routed = routeServiceReportQuestion({ question, data, nextAppointment });
   const prompt = buildReportAskPrompt({
-    question, data, nextAppointment, requiredLines: routed.requiredLines,
+    question, data, nextAppointment, requiredLines: routed.requiredLines.map((line) => line.text),
   });
   process.stdout.write(`${JSON.stringify({
     ...prompt,
     topic: routed.topic,
     requiredLines: routed.requiredLines,
+    // Null: the model answers. A reason: the customer gets ruleAnswer, no model call.
+    ruleAnswerOnlyBecause: ruleAnswerReason(data, routed.requiredLines),
     ruleAnswer: routed.answer,
   }, null, 2)}\n`);
   return 0;

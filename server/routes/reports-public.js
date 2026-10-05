@@ -2063,11 +2063,13 @@ router.post('/:token/ask', async (req, res, next) => {
     const { topic } = routed;
     let { answer } = routed;
     // GATE_REPORT_ASK_AI (dark): Claude Sonnet 5.5 writes the answer from the
-    // report's own facts (report-ask-ai.js), for every service line and every
-    // topic. The recorded instructions the fixed-rule answer states (watering
-    // holds and tasks, pet precautions with their waits, technician
-    // recommendations) ride along as requiredLines and must appear in the AI
-    // answer word for word. Any miss (model failure, ~8 s timeout, an empty,
+    // report's own facts (report-ask-ai.js), on pest, lawn and tree & shrub
+    // reports only (any other line, a typed or companion report, or a question
+    // whose required lines include technician-typed text keeps the rule
+    // answer: ruleAnswerReason). The recorded instructions the fixed-rule
+    // answer states (watering holds and tasks, pet precautions with their
+    // waits) ride along as requiredLines and must appear in the AI answer
+    // word for word. Any miss (model failure, ~8 s timeout, an empty,
     // rejected or required-line-dropping answer) keeps the fixed-rule answer
     // above, so the reply shape and the recorded event are the same either
     // way. Off = the fixed-rule answer alone, no model call.

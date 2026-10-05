@@ -24,6 +24,11 @@ const {
 const { routeServiceReportQuestion } = require('../services/service-report/report-assistant');
 
 const route = (question, data, nextAppointment = null) => routeServiceReportQuestion({ question, data, nextAppointment });
+// requiredLines entries are { text, source }: 'system' for text the portal
+// wrote, 'tech' for text a person typed or approved.
+const texts = (routed) => routed.requiredLines.map((line) => line.text);
+const system = (...lines) => lines.map((text) => ({ text, source: 'system' }));
+const tech = (...lines) => lines.map((text) => ({ text, source: 'tech' }));
 
 const HOLD_LINE = 'Skip your turf watering until Thu 3 PM.';
 const HOLD_AFTERCARE = {
@@ -97,56 +102,57 @@ describe('requiredLines from the rule functions', () => {
     });
     const routed = route('When can my dog go back outside?', data);
     expect(routed.topic).toBe('reentry');
-    expect(routed.requiredLines).toEqual(['Keep pets off treated zones until dry.', 'Treated areas are ready for normal use.']);
+    expect(routed.requiredLines).toEqual(system('Keep pets off treated zones until dry.', 'Treated areas are ready for normal use.'));
   });
 
   test('re-entry without a ready-at summary: the once-dry line and the pet precaution', () => {
     const withWindow = pestData({ advisory: { exterior_reentry_min: 30, pet_advisory: 'Keep pets inside until dry.' } });
     expect(route('Is it ok for the kids to go outside?', withWindow).requiredLines)
-      .toEqual(['Keep pets inside until dry.', 'Give treated areas time to fully dry before normal use.']);
+      .toEqual(system('Keep pets inside until dry.', 'Give treated areas time to fully dry before normal use.'));
     // No timer recorded: the rule answer's "no timer" sentence is not an instruction.
     const noWindow = pestData({ advisory: { pet_advisory: 'Keep pets inside until dry.' } });
-    expect(route('Is it ok for the kids to go outside?', noWindow).requiredLines).toEqual(['Keep pets inside until dry.']);
+    expect(route('Is it ok for the kids to go outside?', noWindow).requiredLines).toEqual(system('Keep pets inside until dry.'));
     expect(route('Is it ok for the kids to go outside?', pestData()).requiredLines).toEqual([]);
   });
 
   test('watering with a product hold: the hold, the plan title and the plan detail', () => {
     const routed = route('Can I turn my sprinklers back on?', lawnData());
     expect(routed.topic).toBe('watering');
-    expect(routed.requiredLines).toContain(HOLD_AFTERCARE.watering);
-    expect(routed.requiredLines).toContain(RAW_PLAN.title);
-    expect(routed.requiredLines).toContain(RAW_PLAN.detail);
+    expect(texts(routed)).toEqual(expect.arrayContaining([HOLD_AFTERCARE.watering, RAW_PLAN.title, RAW_PLAN.detail]));
+    // Aftercare and plan text are system-written.
+    expect(routed.requiredLines.every((line) => line.source === 'system')).toBe(true);
     // Every required line is a piece of the rule answer.
-    for (const line of routed.requiredLines) expect(routed.answer).toContain(line);
+    for (const line of texts(routed)) expect(routed.answer).toContain(line);
   });
 
   test('watering with a "not before" overlay uses the overlay, not the raw plan', () => {
     const afterHold = { title: RAW_PLAN.title, detail: `${RAW_PLAN.detail} Not before Thu 3 PM.` };
     const data = lawnData({ reportV2: { water: { weekPlan: { ...RAW_PLAN, afterHold } }, aftercare: { ...HOLD_AFTERCARE } } });
     const routed = route('Should I water after today’s treatment?', data);
-    expect(routed.requiredLines).toEqual([HOLD_AFTERCARE.watering, afterHold.title, afterHold.detail]);
+    expect(routed.requiredLines).toEqual(system(HOLD_AFTERCARE.watering, afterHold.title, afterHold.detail));
   });
 
   test('watering with only a weekly plan: the plan title and detail', () => {
     const data = lawnData({ reportV2: { water: { weekPlan: { ...RAW_PLAN } }, aftercare: {} } });
     const routed = route('How long should I run the sprinklers?', data);
     expect(routed.topic).toBe('watering');
-    expect(routed.requiredLines).toEqual([RAW_PLAN.title, RAW_PLAN.detail]);
+    expect(routed.requiredLines).toEqual(system(RAW_PLAN.title, RAW_PLAN.detail));
   });
 
   test('next steps: the water-in task, the recommendation cards', () => {
     const data = lawnData({ reportV2: { water: { weekPlan: null }, aftercare: { ...WATER_IN_AFTERCARE } } });
     const routed = route('What should I do next?', data);
     expect(routed.topic).toBe('next_steps');
-    expect(routed.requiredLines).toEqual([WATER_IN_AFTERCARE.watering, 'Keep mowing at 3.5 inches.']);
-    for (const line of routed.requiredLines) expect(routed.answer).toContain(line);
+    // The water-in task is system text; a recommendation card is approved free text.
+    expect(routed.requiredLines).toEqual([...system(WATER_IN_AFTERCARE.watering), ...tech('Keep mowing at 3.5 inches.')]);
+    for (const line of texts(routed)) expect(routed.answer).toContain(line);
   });
 
   test('next steps: a watering hold task outranks watering advice and stays required', () => {
     const data = lawnData();
     const routed = route('What should I do next?', data);
-    expect(routed.requiredLines[0]).toBe(HOLD_LINE);
-    expect(routed.requiredLines).toContain('Keep mowing at 3.5 inches.');
+    expect(routed.requiredLines[0]).toEqual({ text: HOLD_LINE, source: 'system' });
+    expect(routed.requiredLines).toContainEqual({ text: 'Keep mowing at 3.5 inches.', source: 'tech' });
   });
 
   test('next steps on a pest report: the technician recommendation, the re-entry line, the rinse caution', () => {
@@ -159,15 +165,16 @@ describe('requiredLines from the rule functions', () => {
     });
     const routed = route('What should I do next?', data);
     expect(routed.topic).toBe('next_steps');
-    expect(routed.requiredLines).toEqual(['Trim the shrubs back from the wall.', 'Treated areas are ready for normal use.']);
+    // The recommendation is technician text; the re-entry summary is system text.
+    expect(routed.requiredLines).toEqual([...tech('Trim the shrubs back from the wall.'), ...system('Treated areas are ready for normal use.')]);
     // Generic filler and the product-target watch line are never required.
-    expect(routed.requiredLines.join(' ')).not.toMatch(/Text Waves|Watch for|Follow the re-entry/);
+    expect(texts(routed).join(' ')).not.toMatch(/Text Waves|Watch for|Follow the re-entry/);
   });
 
   test('next steps fallback: the rinse caution is required, generic filler is not', () => {
     const data = pestData({ applications: [{ product: { name: 'Test Spray' }, method: 'spray', methodLabel: 'Spray', applicationArea: 'Foundation perimeter' }] });
     const routed = route('What should I do next?', data);
-    expect(routed.requiredLines).toEqual(['Avoid rinsing, pressure-washing, or disturbing the treated perimeter today unless Waves gives different instructions.']);
+    expect(routed.requiredLines).toEqual(system('Avoid rinsing, pressure-washing, or disturbing the treated perimeter today unless Waves gives different instructions.'));
   });
 
   test('findings: each shown finding recommendation; with no findings, the recommendations', () => {
@@ -176,9 +183,9 @@ describe('requiredLines from the rule functions', () => {
     });
     const found = route('What did you find?', withFindings);
     expect(found.topic).toBe('findings');
-    expect(found.requiredLines).toEqual(['Trim the shrubs back from the wall.']);
+    expect(found.requiredLines).toEqual(tech('Trim the shrubs back from the wall.'));
     const onlyRecs = pestData({ recommendations: ['Seal the gap by the garage door.'] });
-    expect(route('What did you find?', onlyRecs).requiredLines).toEqual(['Seal the gap by the garage door.']);
+    expect(route('What did you find?', onlyRecs).requiredLines).toEqual(tech('Seal the gap by the garage door.'));
   });
 
   test.each([
@@ -234,52 +241,17 @@ describe('the fact sheet and prompt carry required lines', () => {
     expect(JSON.stringify(facts)).not.toMatch(/14 days|10-14/);
   });
 
-  test('typed visits: the result and the observation chips', () => {
+  test('typed visits carry no result or observation facts', () => {
     const data = pestData({
       serviceLine: 'termite',
       typedReport: {
         todaysResult: { headline: 'Stations checked', body: 'All stations were inspected.' },
-        findings: [{ customerLabel: 'Stations checked', customerValueLabel: 'Yes' }, { customerLabel: 'Activity', customerValueLabel: 'None seen' }],
+        findings: [{ customerLabel: 'Stations checked', customerValueLabel: 'Yes' }],
       },
     });
-    expect(buildReportAskFacts({ data }).visit_result).toEqual({
-      result_headline: 'Stations checked',
-      result: 'All stations were inspected.',
-      observations: ['Stations checked: Yes', 'Activity: None seen'],
-    });
-  });
-
-  test('typed visits: station, trap and capture counts are not carried', () => {
-    const data = pestData({
-      serviceLine: 'termite',
-      typedReport: {
-        todaysResult: { headline: 'Station check', body: 'No termite activity was found.' },
-        findings: [
-          { fieldKey: 'total_stations', customerLabel: 'Total stations on property', customerValueLabel: 'Yes' },
-          { fieldKey: 'stations_checked', customerLabel: 'Stations checked', customerValueLabel: '12' },
-          { fieldKey: 'stations_with_activity', customerLabel: 'Stations with termite activity', customerValueLabel: '0' },
-          { fieldKey: 'traps_checked', customerLabel: 'Traps checked', customerValueLabel: '6' },
-          { fieldKey: 'captures', customerLabel: 'Captures', customerValueLabel: '2' },
-          { fieldKey: 'mystery_reading', customerLabel: 'Reading', customerValueLabel: '14' },
-          { fieldKey: 'activity_level', customerLabel: 'Activity', customerValueLabel: 'None seen' },
-        ],
-      },
-    });
-    expect(buildReportAskFacts({ data }).visit_result.observations).toEqual(['Activity: None seen']);
-  });
-
-  test('typed visits: a recommendation after the eighth field is still carried, within a total budget', () => {
-    const fields = Array.from({ length: 9 }, (_, i) => ({ fieldKey: `note_${i}`, customerLabel: `Check ${i + 1}`, customerValueLabel: 'Done' }));
-    fields.push({ fieldKey: 'recommendations', customerLabel: 'Recommendation', customerValueLabel: 'Seal the gap at the garage door.' });
-    const data = pestData({ serviceLine: 'rodent_trapping', typedReport: { findings: fields } });
-    const rows = buildReportAskFacts({ data }).visit_result.observations;
-    expect(rows).toHaveLength(10);
-    expect(rows[9]).toBe('Recommendation: Seal the gap at the garage door.');
-
-    const many = Array.from({ length: 80 }, (_, i) => ({ fieldKey: `f_${i}`, customerLabel: `Long label ${i}`, customerValueLabel: 'x'.repeat(150) }));
-    const bounded = buildReportAskFacts({ data: pestData({ typedReport: { findings: many } }) }).visit_result.observations;
-    expect(bounded.length).toBeGreaterThan(8);
-    expect(bounded.join('').length).toBeLessThanOrEqual(1600);
+    const text = JSON.stringify(buildReportAskFacts({ data }));
+    expect(buildReportAskFacts({ data }).visit_result).toBeUndefined();
+    expect(text).not.toMatch(/Stations checked|inspected/);
   });
 
   describe('tree & shrub facts', () => {
@@ -420,7 +392,7 @@ describe('the screen and required lines', () => {
 
 describe('answerReportQuestionWithAI with required lines', () => {
   const lines = ['Keep pets off treated zones until dry.'];
-  const base = { question: 'Can my dog go out?', data: pestData(), requiredLines: lines };
+  const base = { question: 'Can my dog go out?', data: pestData(), requiredLines: system(...lines) };
   const ok = (answer) => ({ ok: true, json: { answer }, provider: 'anthropic' });
 
   test('an answer with every line verbatim is returned; the hook screens the same way', async () => {
@@ -449,11 +421,11 @@ describe('answerReportQuestionWithAI with required lines', () => {
   test('a lawn watering hold: the AI answer must carry the hold and the plan word for word', async () => {
     const data = lawnData();
     const routed = route('Can I turn my sprinklers back on?', data);
-    const good = `Not yet. ${routed.requiredLines.join(' ')}`;
+    const good = `Not yet. ${texts(routed).join(' ')}`;
     const callModel = jest.fn().mockResolvedValue(ok(good));
     const out = await answerReportQuestionWithAI({ question: 'Can I turn my sprinklers back on?', data, requiredLines: routed.requiredLines }, { callModel });
     expect(out.answer).toBe(good);
-    const dropped = jest.fn().mockResolvedValue(ok(`Not yet. ${routed.requiredLines[0]}`));
+    const dropped = jest.fn().mockResolvedValue(ok(`Not yet. ${routed.requiredLines[0].text}`));
     expect(await answerReportQuestionWithAI({ question: 'Can I turn my sprinklers back on?', data, requiredLines: routed.requiredLines }, { callModel: dropped })).toBeNull();
   });
 
@@ -466,7 +438,7 @@ describe('answerReportQuestionWithAI with required lines', () => {
 
     test.each(personal)('a line the scrub changes keeps the rule answer, with no model call: %s', async (line) => {
       const callModel = jest.fn().mockResolvedValue(ok(line));
-      const out = await answerReportQuestionWithAI({ question: 'What next?', data: pestData(), requiredLines: [line] }, { callModel });
+      const out = await answerReportQuestionWithAI({ question: 'What next?', data: pestData(), requiredLines: system(line) }, { callModel });
       expect(out).toBeNull();
       expect(callModel).not.toHaveBeenCalled();
     });
@@ -479,9 +451,76 @@ describe('answerReportQuestionWithAI with required lines', () => {
     test('a plain line with a short number goes through unchanged and is checked as written', async () => {
       const line = 'Rinse the lanai screens within 2 days.';
       const callModel = jest.fn().mockResolvedValue(ok(`Sure. ${line}`));
-      const out = await answerReportQuestionWithAI({ question: 'What next?', data: pestData(), requiredLines: [line] }, { callModel });
+      const out = await answerReportQuestionWithAI({ question: 'What next?', data: pestData(), requiredLines: system(line) }, { callModel });
       expect(out.answer).toBe(`Sure. ${line}`);
       expect(callModel.mock.calls[0][0].text).toContain(line);
     });
+  });
+});
+
+describe('which questions reach the model', () => {
+  const ok = (answer) => ({ ok: true, json: { answer }, provider: 'anthropic' });
+  const ask = (data, question, requiredLines, answer = 'We took care of it on this visit.') => {
+    const callModel = jest.fn().mockResolvedValue(ok(answer));
+    return answerReportQuestionWithAI({ question, data, requiredLines }, { callModel }).then((out) => ({ out, callModel }));
+  };
+
+  test.each(['termite', 'rodent', 'mosquito', 'specialty'])('a %s report keeps the rule answer, with no model call', async (serviceLine) => {
+    const { out, callModel } = await ask(pestData({ serviceLine }), 'What did you do today?', []);
+    expect(out).toBeNull();
+    expect(callModel).not.toHaveBeenCalled();
+  });
+
+  test('a report a typed snapshot drives keeps the rule answer, even on a pest line', async () => {
+    const typed = pestData({ typedReport: { type: 'cockroach_service', todaysResult: { headline: 'Done' } } });
+    const { out, callModel } = await ask(typed, 'What did you do today?', []);
+    expect(out).toBeNull();
+    expect(callModel).not.toHaveBeenCalled();
+  });
+
+  test('a pest report with a customer-visible companion section keeps the rule answer', async () => {
+    const withCompanion = pestData({ companionReports: [{ type: 'rodent_trapping', internalOnly: false }] });
+    const { out, callModel } = await ask(withCompanion, 'What did you do today?', []);
+    expect(out).toBeNull();
+    expect(callModel).not.toHaveBeenCalled();
+    // A companion only staff can see is not displayed, so it does not block.
+    const internalOnly = pestData({ companionReports: [{ type: 'rodent_trapping', internalOnly: true }] });
+    expect((await ask(internalOnly, 'What did you do today?', [])).callModel).toHaveBeenCalledTimes(1);
+  });
+
+  test('a required line from a technician recommendation keeps the rule answer, with no model call', async () => {
+    const data = pestData({ recommendations: ['Seal the gap by the garage door.'] });
+    const routed = route('What did you find?', data);
+    expect(routed.requiredLines).toEqual(tech('Seal the gap by the garage door.'));
+    const { out, callModel } = await ask(data, 'What did you find?', routed.requiredLines, 'Seal the gap by the garage door.');
+    expect(out).toBeNull();
+    expect(callModel).not.toHaveBeenCalled();
+  });
+
+  test('a required line with no source is treated as technician text', async () => {
+    const { out, callModel } = await ask(pestData(), 'What next?', [{ text: 'Trim the hedge.' }]);
+    expect(out).toBeNull();
+    expect(callModel).not.toHaveBeenCalled();
+  });
+
+  test('a system-written pet line still goes to the model and must appear verbatim', async () => {
+    const data = pestData({ dynamicContext: { reentry: { customerSummary: 'Treated areas are ready for normal use.', petAdvisory: 'Keep pets off treated zones until dry.' } } });
+    const routed = route('When can my dog go back outside?', data);
+    expect(routed.requiredLines.every((line) => line.source === 'system')).toBe(true);
+    const good = `Soon. ${texts(routed).join(' ')}`;
+    const { out, callModel } = await ask(data, 'When can my dog go back outside?', routed.requiredLines, good);
+    expect(out.answer).toBe(good);
+    expect(callModel).toHaveBeenCalledTimes(1);
+    const dropped = await ask(data, 'When can my dog go back outside?', routed.requiredLines, 'Soon, once it is dry.');
+    expect(dropped.out).toBeNull();
+  });
+
+  test('a lawn report and a tree & shrub report still use the model', async () => {
+    const lawn = await ask(lawnData({ reportV2: { water: { weekPlan: null }, aftercare: {} } }), 'How is my lawn doing?', []);
+    expect(lawn.callModel).toHaveBeenCalledTimes(1);
+    expect(lawn.out.answer).toBe('We took care of it on this visit.');
+    const tree = await ask(pestData({ serviceLine: 'tree_shrub', reportV2: { snapshot: { overallScore: 72, statusHeadline: 'Mostly healthy' } } }), 'How are my shrubs?', []);
+    expect(tree.callModel).toHaveBeenCalledTimes(1);
+    expect(tree.callModel.mock.calls[0][0].text).toContain('plant_health_score_out_of_100');
   });
 });

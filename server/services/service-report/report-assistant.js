@@ -221,10 +221,23 @@ function sentenceJoin(values) {
 // can never drop an instruction the fixed-rule answer would have given. The
 // collector never changes what the function returns; with no `required` the
 // answer is byte for byte what it was.
+//
+// Each line carries its source: 'system' for text the portal wrote from a
+// fixed template or a product record (pet and re-entry summaries, the rinse
+// caution, aftercare and weekly-plan text), 'tech' for anything a person
+// typed or approved (recommendations, the primary move, a finding's
+// recommendation, recommendation cards). A customer's name cannot be detected
+// in prose, so the AI never sees a 'tech' line: a question whose required
+// lines include one keeps the fixed-rule answer. The default is 'tech', so a
+// call site that forgets to say fails toward the rule answer. A line named
+// twice keeps 'tech' if either call says so.
 function requiredCollector(required) {
-  return (text) => {
+  return (text, source = 'tech') => {
     const line = cleanText(text);
-    if (required && line && !required.includes(line)) required.push(line);
+    if (!required || !line) return text;
+    const seen = required.find((entry) => entry.text === line);
+    if (!seen) required.push({ text: line, source });
+    else if (source === 'tech') seen.source = 'tech';
     return text;
   };
 }
@@ -477,7 +490,7 @@ function answerNextSteps({ data = {}, nextAppointment, required } = {}) {
       ? `Visible improvement usually takes ${expected.minDays}-${expected.maxDays} days, depending on irrigation, mowing, rainfall, and site conditions.`
       : '';
     return [
-      need(wateringTask),
+      need(wateringTask, 'system'),
       cardLines.length ? `Recommended next step: ${need(cardLines[0])}` : '',
       cardLines.length > 1 ? `Also noted: ${cardLines.slice(1).map((line) => need(line)).join(' ')}` : '',
       watchItems.length ? `What we are watching: ${watchItems.slice(0, 2).join(' ')}` : '',
@@ -501,10 +514,10 @@ function answerNextSteps({ data = {}, nextAppointment, required } = {}) {
 
   if (primaryMove || recommendations.length) {
     return [
-      need(wateringTask),
+      need(wateringTask, 'system'),
       primaryMove ? `Priority next step: ${need(primaryMove)}` : `Recommended next step: ${need(recommendations[0])}`,
       recommendations.length > 1 ? `Also noted: ${recommendations.slice(1, 3).map((line) => need(line)).join(' ')}` : '',
-      reentry ? `Re-entry: ${need(reentry)}` : '',
+      reentry ? `Re-entry: ${need(reentry, 'system')}` : '',
       nextAppointment ? `Next scheduled visit: ${serviceDateText(nextAppointment.scheduled_date)}.` : '',
     ].filter(Boolean).join('\n');
   }
@@ -522,10 +535,10 @@ function answerNextSteps({ data = {}, nextAppointment, required } = {}) {
     : '';
 
   return [
-    need(wateringTask) || 'No special repair or prep was flagged for you on this report.',
+    need(wateringTask, 'system') || 'No special repair or prep was flagged for you on this report.',
     scopeLine,
-    reentry ? `Re-entry: ${need(reentry)}` : '',
-    need(rinseLine),
+    reentry ? `Re-entry: ${need(reentry, 'system')}` : '',
+    need(rinseLine, 'system'),
     // Background, not an instruction: stays in the rule answer, never a
     // required line for the AI answer.
     weather,
@@ -541,8 +554,8 @@ function answerReentry({ data = {}, required } = {}) {
   // The visit's recorded pet precaution (with any fixed wait it names). The
   // AI answer must carry it word for word even where the rule answer states
   // only the ready-at summary.
-  need(dynamic.reentry?.petAdvisory || advisory.pet_advisory);
-  if (dynamic.reentry?.customerSummary) return need(dynamic.reentry.customerSummary);
+  need(dynamic.reentry?.petAdvisory || advisory.pet_advisory, 'system');
+  if (dynamic.reentry?.customerSummary) return need(dynamic.reentry.customerSummary, 'system');
   // Owner rule (site-compliance): customer surfaces never phrase re-entry as
   // a minute count. Ready-at times come from dynamic.reentry above; without
   // that anchor this fallback speaks in "once dry" terms only, matching
@@ -553,7 +566,7 @@ function answerReentry({ data = {}, required } = {}) {
   // an explicit way to confirm it's safe rather than leaving them with a
   // bare "not recorded" and nothing to do next.
   const base = hasWindow
-    ? need('Give treated areas time to fully dry before normal use.')
+    ? need('Give treated areas time to fully dry before normal use.', 'system')
     : `No re-entry timer was recorded for this report — call or text ${WAVES_PHONE_DISPLAY} and we'll confirm the timing for your treated areas.`;
   return `${base}${advisory.pet_advisory ? ` ${advisory.pet_advisory}` : ''}`;
 }
@@ -650,8 +663,8 @@ function answerWateringAftercare({ data, weekPlan, aftercare, required }) {
       || (weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === false))
     ? weekPlan : null;
   const shownPlan = reduced || planBeside;
-  need(aftercare.watering);
-  if (shownPlan) { need(shownPlan.title); need(shownPlan.detail); }
+  need(aftercare.watering, 'system');
+  if (shownPlan) { need(shownPlan.title, 'system'); need(shownPlan.detail, 'system'); }
   return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : (planBeside ? `${planBeside.title}. ${planBeside.detail}` : null)].filter(Boolean).join(' ');
 }
 
@@ -664,9 +677,9 @@ function answerConditionalWateringPlan({ weekPlan, aftercare, required }) {
   const card = overlay || weekPlan;
   const plan = card?.title ? [card.title, card.detail].filter(Boolean).join('. ') : '';
   const condition = overlay ? null : wateringPlanCondition(aftercare, weekPlan);
-  need(aftercare.watering);
-  need(condition);
-  if (card?.title) { need(card.title); need(card.detail); }
+  need(aftercare.watering, 'system');
+  need(condition, 'system');
+  if (card?.title) { need(card.title, 'system'); need(card.detail, 'system'); }
   return [aftercare.watering, condition, plan].filter(Boolean).join(' ');
 }
 
@@ -715,8 +728,8 @@ function questionRoutingRules({
       topic: 'watering',
       answer: () => {
         const need = requiredCollector(required);
-        need(weekPlan.title);
-        need(weekPlan.detail);
+        need(weekPlan.title, 'system');
+        need(weekPlan.detail, 'system');
         return [weekPlan.title, weekPlan.detail].filter(Boolean).join(' ');
       },
     },

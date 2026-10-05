@@ -632,7 +632,29 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  test.each(['lawn', 'tree_shrub', 'mosquito', 'termite', 'rodent'])('gate on, a %s report reaches the AI for a plain question', async (line) => {
+  // Termite, rodent, mosquito and specialty reports, a typed-snapshot report
+  // and a report with a visible companion section keep the rule answer.
+  test.each([
+    ['termite', { serviceLine: 'termite' }],
+    ['rodent', { serviceLine: 'rodent' }],
+    ['mosquito', { serviceLine: 'mosquito' }],
+    ['specialty', { serviceLine: 'specialty' }],
+    ['typed pest', { serviceLine: 'pest', typedReport: { type: 'cockroach_service' } }],
+    ['pest with a companion section', { serviceLine: 'pest', companionReports: [{ type: 'rodent_trapping', internalOnly: false }] }],
+  ])('gate on, a %s report keeps the fixed-rule answer, no model call', async (_label, extra) => {
+    process.env.GATE_REPORT_ASK_AI = 'true';
+    const report = { applications: [], ...extra };
+    buildReportV1Data.mockResolvedValue(report);
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { status, body } = await ask(baseUrl, QUESTION);
+      expect(status).toBe(200);
+      expect(body).toEqual({ answer: routeServiceReportQuestion({ question: QUESTION, data: report }).answer });
+    });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test.each(['lawn', 'tree_shrub'])('gate on, a %s report reaches the AI for a plain question', async (line) => {
     process.env.GATE_REPORT_ASK_AI = 'true';
     buildReportV1Data.mockResolvedValue({ serviceLine: line, applications: [] });
     dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { answer: 'No products were recorded on this report.' }, provider: 'anthropic' });

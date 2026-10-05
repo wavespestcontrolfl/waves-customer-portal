@@ -33,8 +33,11 @@
  * and the screen rejects any answer that does not repeat every one verbatim,
  * so the AI answer can add words around an instruction but never drop or
  * reword one. A required line that itself trips the screen, or any miss,
- * keeps the fixed-rule answer. This is what lets every service line and every
- * topic use the AI.
+ * keeps the fixed-rule answer. Each line carries its source: a line the portal
+ * wrote from a template or product record ('system') may go to the model; a
+ * line a technician typed ('tech') never does, because a customer's name in
+ * prose cannot be detected, so that question keeps the fixed-rule answer.
+ * Only pest, lawn and tree & shrub reports use the AI (ruleAnswerReason).
  *
  * Pure builders (buildReportAskFacts, buildReportAskPrompt) take the report
  * data and return plain objects, so scripts/dev/report-ask-prompt.js can show
@@ -378,52 +381,6 @@ function lawnAssessmentFacts(data = {}, keep = () => true) {
   return Object.keys(kept).length ? kept : null;
 }
 
-// Typed visits (termite, mosquito, rodent, tree & shrub, specialty): the
-// customer-facing result and the recorded observation chips. Station maps,
-// counts of stations, traps, bait and captures, and per-product detail are not
-// carried: a count field is dropped by its key (and a bare number by its
-// value), so the model can never repeat one.
-const COUNT_FIELD_KEY = /(?:^|_)(?:stations?|traps?|captures?|baits?)(?:_|$)|_(?:count|total|serviced)$/;
-const BARE_NUMBER = /^\d+(?:\.\d+)?$/;
-// Every customer-visible observation stays (a recommendation or follow-up can
-// sit anywhere in the list); the prompt stays bounded by this total budget.
-const OBSERVATIONS_CHAR_BUDGET = 1600;
-
-function observationRows(findings, text) {
-  let spent = 0;
-  const rows = [];
-  for (const item of asArray(findings)) {
-    const label = cleanText(item?.customerLabel);
-    const value = cleanText(item?.customerValueLabel);
-    const row = label && value && !COUNT_FIELD_KEY.test(cleanText(item.fieldKey)) && !BARE_NUMBER.test(value)
-      ? text(`${label}: ${value}`, 200)
-      : null;
-    if (row && spent + row.length <= OBSERVATIONS_CHAR_BUDGET) {
-      spent += row.length;
-      rows.push(row);
-    }
-  }
-  return rows;
-}
-
-function typedReportFacts(data = {}, keep = () => true) {
-  const typed = data.typedReport;
-  if (!typed || typeof typed !== 'object') return null;
-  const today = typed.todaysResult || {};
-  const text = (value, max) => {
-    const out = clip(value, max);
-    return out && keep(out) ? out : null;
-  };
-  const observations = observationRows(typed.findings, text);
-  const row = {
-    result_headline: text(today.headline, 160),
-    result: text(today.body, 400),
-    observations: observations.length ? observations : null,
-  };
-  const kept = Object.fromEntries(Object.entries(row).filter(([, value]) => value !== null));
-  return Object.keys(kept).length ? kept : null;
-}
-
 // Tree & shrub reports keep their customer-visible read in data.reportV2
 // (tree-shrub-report-v2.js): the plant-health score out of 100, what we are
 // watching, the homeowner's one task and the insight cards. Not carried: the
@@ -504,7 +461,6 @@ function buildReportAskFacts({
     visit_summary: sections.length || !keep(summary) ? null : summary,
     findings,
     lawn_assessment: lawnAssessmentFacts(data, keep),
-    visit_result: typedReportFacts(data, keep),
     tree_shrub_report: treeShrubFacts(data, keep),
     // A report with no findings rows can still carry its recommendations.
     recommendations,
@@ -626,7 +582,7 @@ function leaksTargetList(text, {
   const approvedWording = asArray(facts?.products).map((product) => [product.what_it_does, product.labeled_for]);
   const allowed = stemmedTerms([
     question, data.customerConcern, facts?.report_sections, facts?.findings, facts?.recommendations,
-    facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.visit_result, facts?.tree_shrub_report,
+    facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.tree_shrub_report,
     approvedWording, requiredLines,
   ]
     .map((part) => (typeof part === 'string' ? part : JSON.stringify(part)))
@@ -718,18 +674,47 @@ function defaultCallModel(payload, options) {
   return dispatchWithFallback(MODELS.TEXT_POLICIES.reportAsk, payload, options);
 }
 
+// Which reports the AI answers at all. Pest, lawn and tree & shrub only: every
+// other line (termite, rodent, mosquito, specialty) and any report a typed
+// snapshot drives (`data.typedReport`) or that shows a companion section keeps
+// the fixed-rule answer. Those pages have several sources of truth (the
+// reconciled termite dashboard, count-bearing results, typed detail fields,
+// companion sections) that the fact sheet does not reproduce, so the AI could
+// state something the page does not. Narrowed on purpose (owner/lead
+// 2026-10-05) until a line's facts are proven equal to what its page shows.
+const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
+
+// The reason a question keeps the fixed-rule answer with no model call, or
+// null when the AI may answer it. A required line a technician typed (a
+// recommendation, the primary move, a finding's recommendation) must be
+// repeated word for word, and a customer's name in prose cannot be detected,
+// so it never reaches the model.
+function ruleAnswerReason(data = {}, requiredLines = []) {
+  if (!AI_SERVICE_LINES.has(data.serviceLine)) return 'service_line';
+  if (data.typedReport) return 'typed_report';
+  if (asArray(data.companionReports).some((companion) => companion && companion.internalOnly !== true)) return 'companion_reports';
+  if (asArray(requiredLines).some((line) => line?.source !== 'system')) return 'technician_line';
+  return null;
+}
+
 /**
  * Ask the model. Resolves { answer } on a screened answer, or null on ANY miss
  * (model failure, timeout, empty, unparseable, rejected by the screen). Never
  * throws; the caller falls back to the fixed-rule answer on null. The question
- * text is never logged.
+ * text is never logged. `requiredLines` is the rule router's list of
+ * { text, source } entries (report-assistant.js requiredCollector).
  */
 async function answerReportQuestionWithAI({
   question, data, nextAppointment, requiredLines: rawRequiredLines, now,
 } = {}, deps = {}) {
   const callModel = deps.callModel || defaultCallModel;
   try {
-    const requiredLines = cleanLines(rawRequiredLines);
+    const skipped = ruleAnswerReason(data, rawRequiredLines);
+    if (skipped) {
+      logger.info(`[report-ask] fixed-rule answer (${skipped}); no model call`);
+      return null;
+    }
+    const requiredLines = cleanLines(asArray(rawRequiredLines).map((line) => line.text));
     const facts = buildReportAskFacts({
       question, data, nextAppointment, requiredLines, now,
     });
@@ -801,5 +786,6 @@ module.exports = {
   screenAskAnswer,
   screenRequiredLines,
   placeOfApplication,
+  ruleAnswerReason,
   answerReportQuestionWithAI,
 };
