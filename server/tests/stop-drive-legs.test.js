@@ -179,4 +179,24 @@ describe('attachDriveLegs', () => {
     // Two 90-minute jobs leave at 12:00; the 10:00 window closes at 12:00.
     expect(services[2].driveLateMin).toBe(12 * 60 + leg - (10 * 60 + 120));
   });
+
+  it('counts a real 60-minute estimate but not the feed\'s 60 fill', () => {
+    const real = [
+      stop('r1', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: 60, windowEnd: '09:30' }),
+      stop('r2', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: 60, windowEnd: '09:30' }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(real);
+    const leg = real[2].driveFromPrevMin;
+    const lateReal = 11 * 60 + leg - (9 * 60 + 120);
+    expect(real[2].driveLateMin).toBe(lateReal > 0 ? lateReal : null);
+    const filled = [
+      stop('r1', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: null, windowEnd: '09:30' }),
+      stop('r2', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: null, windowEnd: '09:30' }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(filled);
+    const lateFilled = 9 * 60 + 30 + leg - (9 * 60 + 120);
+    expect(filled[2].driveLateMin).toBe(lateFilled > 0 ? lateFilled : null);
+  });
 });

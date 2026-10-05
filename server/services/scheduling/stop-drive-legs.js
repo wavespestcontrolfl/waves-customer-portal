@@ -40,11 +40,13 @@ function workMinutes(s) {
 }
 
 // A row's real work estimate, 0 when it has none. The day feed fills a
-// missing estimate with the legacy 60 (planning-minutes.js
-// LEGACY_DEFAULT_MINUTES), so 60 reads as no estimate.
+// missing estimate with 60 for display, so it also sends the stored value
+// (rawEstimateMinutes); only that counts (coVisitWork's raw_estimate_minutes
+// rule). A row without the field uses estimatedDuration as stored.
 function realEstimate(s) {
-  const dur = Number(s.estimatedDuration);
-  return Number.isFinite(dur) && dur > 0 && dur !== 60 ? dur : 0;
+  const raw = 'rawEstimateMinutes' in s ? s.rawEstimateMinutes : s.estimatedDuration;
+  const dur = Number(raw);
+  return Number.isFinite(dur) && dur > 0 ? dur : 0;
 }
 
 // When the tech leaves a stop. A visit group's rows run one after another

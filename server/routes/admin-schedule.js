@@ -6401,6 +6401,9 @@ router.get('/', async (req, res, next) => {
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
         estimatedDuration: s.estimated_duration_minutes || 60,
+        // The stored estimate before the 60 fill: the drive-line late check
+        // sums real estimates only (stop-drive-legs.js).
+        rawEstimateMinutes: s.estimated_duration_minutes ?? null,
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
