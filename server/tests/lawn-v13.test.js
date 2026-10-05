@@ -17,6 +17,9 @@ const { lawnProtocols, LAWN_V13_VERSION, isServingProtocol } = require('../servi
 const { matchesLawnCompletionProtocol } = require('../services/lawn-completion-defaults');
 const auditScript = require('../scripts/audit-waveguard-protocol-material-costs');
 const fixMigration = require('../models/migrations/20261005130000_lawn_v13_catalog_rows_and_product_links');
+const round2 = require('../models/migrations/20261005140000_lawn_v13_round2_fixes');
+const outlineService = require('../services/lawn-service-outline');
+const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
 const engine = require('../services/waveguard-plan-engine');
 const { buildLawnCompletionDefaults } = require('../services/lawn-completion-defaults');
 const { getActiveLawnProtocol } = require('../services/lawn-protocol-operating-layer');
@@ -72,6 +75,7 @@ describe('gate and loader', () => {
       const isolated = require('../services/lawn-program');
       expect(isolated.lawnProtocols()).toBe(require('../config/protocols.json').lawn);
     });
+    jest.dontMock('../config/feature-gates');
   });
 
   test('staged serves only for version 2026.10-v13 and only while the gate is on', () => {
@@ -196,7 +200,9 @@ describe('the v13 recipe', () => {
 });
 
 // ── Every line resolves to the intended catalog row ──────────────────────────
-const CATALOG_NAMES = Object.values(migration.NAMES);
+// Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
+const BLINDSIDE = 'Blindside Herbicide';
+const CATALOG_NAMES = [...Object.values(migration.NAMES), BLINDSIDE];
 const DECOYS = ['Dylox 420 SL T&O Insecticide', 'LESCO 24-2-11 with PolyPlus OPTI', 'Talstar P', 'Prodiamine 65 WDG', 'Acelepryn Xtra', 'Celsius WG Herbicide Pack', 'Velista Pro Kit', 'Three-Way Herbicide'];
 function buildCatalog(price) {
   // price(name) -> { cost_per_unit, needs_pricing }
@@ -379,7 +385,8 @@ describe('staged migration 20261005120000', () => {
       const spots = rowsForWindow.filter((s) => !s[6]).map((s) => s[0]);
       const visit = visitFor(month);
       expect(whole.sort()).toEqual(lines(visit.primary).filter((l) => / — /.test(l)).map(nameOfLine).sort());
-      expect(spots.sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].sort());
+      // The staged rows of 120000 carry no Blindside; 140000 adds them (tested below).
+      expect(spots.sort()).toEqual([...new Set(lines(visit.secondary).map(nameOfLine))].filter((n) => n !== BLINDSIDE).sort());
       // Spot products are application_mode spot except the granular Dylox; broadcast only for the tool.
       for (const s of rowsForWindow) {
         if (s[6]) expect(s[2]).toBe('broadcast');
@@ -751,5 +758,216 @@ describe('the material-cost audit reads the gate-aware program', () => {
       .concat([{ id: 'dec', name: 'Dylox 420 SL T&O Insecticide', aliases: [], default_rate_per_1000: 1, rate_unit: 'oz', cost_per_unit: 9 }, { id: 'ace', name: 'Acelepryn Xtra', aliases: [], cost_per_unit: 9 }]);
     const result = auditScript.analyzeVisit({ trackKey: 'bermuda', track: v13.bermuda, visit: visitFor(5), products: catalog, options: { plan: 'Platinum', includePremiumOnly: true, isFirstYear: true, weedPressure: 'normal' } });
     expect(result.items.find((i) => i.raw.startsWith('Tetrino'))?.product?.name).toBe('Tetrino Insecticide');
+  });
+});
+
+// ── Codex round 2 ────────────────────────────────────────────────────────────
+describe('migration 20261005140000: rollback order, EPA numbers, Blindside rows', () => {
+  const MISSING_ALL = fixMigration.PRODUCTS.map((p) => p.name);
+  async function build({ catalogExtras = [] } = {}) {
+    const db = seedDb({ without: MISSING_ALL });
+    db.products_catalog.push(...catalogExtras);
+    const knex = makeKnex(db);
+    await migration.up(knex);
+    await fixMigration.up(knex);
+    await round2.up(knex);
+    return { db, knex };
+  }
+  const v13Protocols = (db) => db.lawn_protocols.filter((p) => p.version === LAWN_V13_VERSION);
+  const rowsOf = (db, protocolId) => db.lawn_protocol_products.filter((r) => db.lawn_protocol_windows.find((w) => w.id === r.lawn_protocol_window_id).lawn_protocol_id === protocolId);
+
+  test('up hands the link lists to this migration, so 130000.down finds none', async () => {
+    const { db, knex } = await build();
+    expect(db.lawn_protocol_audit_log.filter((a) => a.action === 'v13_link_fix')).toHaveLength(0);
+    expect(db.lawn_protocol_audit_log.filter((a) => a.action === round2.LINK_FIX_HELD)).toHaveLength(4);
+    // 130000.down alone now changes nothing.
+    const before = JSON.stringify(db.lawn_protocol_products.map((r) => [r.id, r.product_id]));
+    await fixMigration.down(knex);
+    expect(JSON.stringify(db.lawn_protocol_products.map((r) => [r.id, r.product_id]))).toBe(before);
+    expect(db.lawn_protocol_products.filter((r) => !r.product_id)).toEqual([]);
+  });
+
+  test('full rollback, nothing references v13: every v13 protocol, link and audit row goes', async () => {
+    const { db, knex } = await build();
+    await round2.down(knex); await fixMigration.down(knex); await migration.down(knex);
+    expect(v13Protocols(db)).toHaveLength(0);
+    expect(db.lawn_protocol_audit_log.filter((a) => /v13/.test(a.action))).toHaveLength(0);
+    expect(db.lawn_protocols.filter((p) => p.status === 'active')).toHaveLength(4);
+  });
+
+  test('full rollback with a scheduled visit on one key: that key keeps every link, the others go', async () => {
+    const { db, knex } = await build();
+    db.scheduled_services.push({ id: 'v1', lawn_protocol_key: 'swfl_zoysia_10_10', lawn_protocol_version: LAWN_V13_VERSION });
+    const zoysia = v13Protocols(db).find((p) => p.protocol_key === 'swfl_zoysia_10_10');
+    const zoysiaBefore = rowsOf(db, zoysia.id).map((r) => [r.id, r.product_id]);
+    await round2.down(knex); await fixMigration.down(knex); await migration.down(knex);
+    expect(v13Protocols(db).map((p) => p.protocol_key)).toEqual(['swfl_zoysia_10_10']);
+    expect(rowsOf(db, zoysia.id).map((r) => [r.id, r.product_id])).toEqual(zoysiaBefore);
+    expect(rowsOf(db, zoysia.id).filter((r) => !r.product_id)).toEqual([]);
+    // The referenced key keeps its Blindside rows and its audit trail too.
+    expect(rowsOf(db, zoysia.id).filter((r) => r.product_name === 'Blindside Herbicide')).toHaveLength(6);
+    expect(db.lawn_protocols.filter((p) => p.status === 'active')).toHaveLength(4);
+  });
+
+  test('a completion row also counts as a reference', async () => {
+    const { db, knex } = await build();
+    const bahia = v13Protocols(db).find((p) => p.protocol_key === 'swfl_bahia_10_10');
+    db.lawn_protocol_service_completions.push({ id: 'c1', lawn_protocol_id: bahia.id });
+    await round2.down(knex); await fixMigration.down(knex); await migration.down(knex);
+    expect(v13Protocols(db).map((p) => p.protocol_key)).toEqual(['swfl_bahia_10_10']);
+    expect(rowsOf(db, bahia.id).filter((r) => !r.product_id)).toEqual([]);
+  });
+
+  test('the verified EPA numbers fill only empty values and never overwrite', async () => {
+    const extras = Object.keys(round2.EPA_NUMBERS).map((name, i) => ({ id: `x${i}`, name, active: true, epa_reg_number: name === 'Dismiss 64 oz' ? 'EXISTING-1' : (i % 2 ? '' : null) }));
+    const { db } = await build({ catalogExtras: extras });
+    const epaOf = (name) => db.products_catalog.find((c) => c.name === name).epa_reg_number;
+    for (const [name, epa] of Object.entries(round2.EPA_NUMBERS)) expect(epaOf(name)).toBe(name === 'Dismiss 64 oz' ? 'EXISTING-1' : epa);
+    // Stonewall 4FL has no verified number: it is not in the map and stays empty.
+    expect(Object.keys(round2.EPA_NUMBERS)).not.toContain(migration.NAMES.STW);
+    expect(db.products_catalog.find((c) => c.name === migration.NAMES.STW).epa_reg_number ?? null).toBeNull();
+  });
+
+  test('EPA numbers come back out on rollback only while no v13 protocol is referenced', async () => {
+    const extras = Object.keys(round2.EPA_NUMBERS).map((name, i) => ({ id: `x${i}`, name, active: true, epa_reg_number: null }));
+    const free = await build({ catalogExtras: extras });
+    await round2.down(free.knex);
+    expect(free.db.products_catalog.filter((c) => round2.EPA_NUMBERS[c.name] && c.epa_reg_number)).toEqual([]);
+    const held = await build({ catalogExtras: extras.map((e) => ({ ...e, id: `y${e.id}` })) });
+    held.db.scheduled_services.push({ id: 'v1', lawn_protocol_key: 'swfl_bermuda_10_10', lawn_protocol_version: LAWN_V13_VERSION });
+    await round2.down(held.knex);
+    expect(held.db.products_catalog.find((c) => c.name === 'Tetrino Insecticide').epa_reg_number).toBe('432-1591');
+  });
+
+  test('Blindside: a conditional spot row beside Celsius in every window that lists it, mirroring the recipe', async () => {
+    const { db, knex } = await build();
+    for (const protocol of v13Protocols(db)) {
+      const rows = rowsOf(db, protocol.id);
+      const byWindow = new Map();
+      for (const r of rows) byWindow.set(r.lawn_protocol_window_id, [...(byWindow.get(r.lawn_protocol_window_id) || []), r]);
+      for (const group of byWindow.values()) {
+        const hasCelsius = group.some((r) => r.product_name === migration.NAMES.CEL);
+        const blind = group.filter((r) => r.product_name === BLINDSIDE);
+        expect(blind).toHaveLength(hasCelsius ? 1 : 0);
+        for (const b of blind) {
+          expect(b).toMatchObject({ role: 'post_emergent_spot', application_mode: 'spot', default_in_plan: false });
+          expect(JSON.parse(b.gates)).toEqual({ trigger: 'celsius_annual_cap_reached' });
+          expect(b.product_id).toBeTruthy();
+          expect(b.sort_order).toBeGreaterThan(Math.max(...group.filter((r) => r !== b).map((r) => r.sort_order)));
+        }
+      }
+    }
+    // The windows that list Blindside are exactly the recipe months that list it.
+    const recipeMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith(BLINDSIDE)));
+    const celsiusMonths = MONTHS.filter((m) => lines(visitFor(m).secondary).some((l) => l.startsWith('Celsius WG')));
+    expect(recipeMonths).toEqual(celsiusMonths);
+    const protocol = v13Protocols(db)[0];
+    const monthsWithBlindside = db.lawn_protocol_windows.filter((w) => w.lawn_protocol_id === protocol.id && db.lawn_protocol_products.some((r) => r.lawn_protocol_window_id === w.id && r.product_name === BLINDSIDE)).map((w) => w.month).sort((a, b) => a - b);
+    expect(monthsWithBlindside).toEqual(recipeMonths);
+    // Idempotent.
+    const count = db.lawn_protocol_products.length;
+    await round2.up(knex);
+    expect(db.lawn_protocol_products.length).toBe(count);
+    expect(db.lawn_protocol_audit_log.filter((a) => a.action === 'v13_round2')).toHaveLength(4);
+  });
+});
+
+describe('lb_n nutrition rows derive from the visit target (v13)', () => {
+  const f24 = { id: 'f24', name: migration.NAMES.F24, analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb' };
+  const stw15 = { id: 's15', name: migration.NAMES.STW15, analysis_n: 15, analysis_k: 15, default_rate_per_1000: 4.02, rate_unit: 'lb' };
+  const rowFor = (windowMonth, name) => {
+    const [, windowKey] = migration.WINDOWS.find((w) => w[0] === windowMonth);
+    const [, spec] = migration.PRODUCTS.find(([key, s]) => key === windowKey && s[0] === name);
+    return { ratePer1000: spec[3], rateUnit: spec[4] };
+  };
+  const amountFor = (product, month, row) => engine.calculateProductAmount({
+    product, lawnSqft: 1000, areaFactor: 1, ...engine.parseVisitNutrientTargets(visitFor(month).notes), ...engine.v13RateOptions(row),
+  });
+
+  test.each([[2, 3.125], [4, 2.083], [11, 3.125], [12, 2.083]])('24-0-11 in month %i is %f lb per 1,000 sq ft', (month, lb) => {
+    const result = amountFor(f24, month, rowFor(month, migration.NAMES.F24));
+    expect(result).toMatchObject({ rateSource: 'target_n_analysis', rateUnit: 'lb' });
+    expect(result.amount).toBeCloseTo(lb, 3);
+  });
+
+  test('October Stonewall 15-0-15 is its stated 4.02 lb', () => {
+    const result = amountFor(stw15, 10, rowFor(10, migration.NAMES.STW15));
+    expect(result).toMatchObject({ rateSource: 'protocol_rate', amount: 4.02 });
+  });
+
+  test('without a v13 row (gate off or no match) the catalog default still applies, unchanged', () => {
+    const result = amountFor(f24, 4, null);
+    expect(result).toMatchObject({ rateSource: 'catalog_default_rate', amount: 4.2 });
+    expect(engine.v13RateOptions(null)).toEqual({});
+    expect(engine.v13RateOptions({ ratePer1000: null, rateUnit: 'label_rate' })).toEqual({});
+  });
+
+  test('a lb_n row with no target falls back to the catalog default instead of a zero', () => {
+    const result = engine.calculateProductAmount({ product: f24, lawnSqft: 1000, areaFactor: 1, ...engine.v13RateOptions({ ratePer1000: null, rateUnit: 'lb_n' }) });
+    expect(result.rateSource).toBe('catalog_default_rate');
+  });
+});
+
+describe('v13 program line follows the visit\'s resolved protocol version', () => {
+  const OLD_VERSION = '2026.06';
+  test('gate on: unpinned or v13 gets v13 copy; a visit pinned to an older version keeps the old copy', () => {
+    withGate('true', () => {
+      const input = { programVisit: true, grassType: 'bermuda', month: 10 };
+      expect(buildProgramLine(input)).toBe(PROGRAM_LINES_V13[10].line);
+      expect(buildProgramLine({ ...input, protocolVersion: LAWN_V13_VERSION })).toBe(PROGRAM_LINES_V13[10].line);
+      expect(buildProgramLine({ ...input, protocolVersion: OLD_VERSION })).toBe(PROGRAM_LINES.bermuda[10].line);
+    });
+  });
+
+  test('gate off: the pinned version changes nothing', () => {
+    withGate(undefined, () => {
+      for (const protocolVersion of [null, OLD_VERSION, LAWN_V13_VERSION]) {
+        expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 10, protocolVersion })).toBe(PROGRAM_LINES.bermuda[10].line);
+      }
+    });
+  });
+
+  test('buildLawnReportV2 passes the pinned version through to the season note', () => {
+    const assessment = {
+      assessmentDate: '2026-10-14',
+      scores: { turfDensity: 73, weedSuppression: 81, colorHealth: 77, stressDamage: 35, fungusControl: 95, overallScore: 68, season: 'shoulder' },
+      overwateringSignal: false, droughtStress: 'minor', turfProfile: { grassType: 'bermuda' }, observations: 'Synthetic observation.',
+      waterContext: { rainfallInches7d: 0.9, irrigationInchesPerWeek: 0.7, effectiveInches7d: 1.6, targetInchesPerWeek: 1.25, irrigationAdvice: { status: 'balanced', rainKnown: true, profileMissing: false, recommendedInchesPerWeek: 1.25 } },
+      trend: [{ date: '2026-10-14', overallScore: 68, turfDensity: 73, weedSuppression: 81, colorHealth: 77, stressDamage: 35, season: 'shoulder' }],
+    };
+    const saved = process.env.GATE_LAWN_EXPECTATIONS;
+    process.env.GATE_LAWN_EXPECTATIONS = 'true';
+    try {
+      const note = (protocolVersion) => withGate('true', () => buildLawnReportV2({ lawnAssessment: assessment, programVisit: true, ...(protocolVersion ? { protocolVersion } : {}) }).snapshot.seasonalNote);
+      expect(note(null)).toBe(PROGRAM_LINES_V13[10].line);
+      expect(note('2026.06')).toBe(PROGRAM_LINES.bermuda[10].line);
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_EXPECTATIONS; else process.env.GATE_LAWN_EXPECTATIONS = saved;
+    }
+  });
+});
+
+describe('service outline protocol stamp', () => {
+  test('gate off stamps lawn-v4; the v13 program stamps lawn-v13', () => {
+    expect(withGate(undefined, () => outlineService.protocolVersion())).toBe('lawn-v4');
+    expect(withGate('true', () => outlineService.protocolVersion())).toBe('lawn-v13');
+    expect(outlineService.PROTOCOL_VERSION).toBeUndefined();
+  });
+});
+
+describe('Blindside in the recipe', () => {
+  test('every Celsius spot window lists Blindside by its exact catalog name, after the Celsius lines, and the line stays a spot line', () => {
+    for (const month of MONTHS) {
+      const secondary = lines(visitFor(month).secondary);
+      const hasCelsius = secondary.some((l) => l.startsWith('Celsius WG'));
+      const blind = secondary.filter((l) => l.startsWith(`${BLINDSIDE} — `));
+      expect(blind).toHaveLength(hasCelsius ? 1 : 0);
+      if (!hasCelsius) continue;
+      expect(secondary.indexOf(blind[0])).toBeGreaterThan(secondary.findIndex((l) => l.startsWith('Celsius WG')));
+      const [parsed] = engine.parseProtocolLines(blind[0], 'conditional', { exactName: true });
+      expect(parsed.scope).toBe('SPOT_ALLOWANCE');
+      expect(parsed.conditional).toBe(true);
+    }
+    expect(JSON.stringify(v13)).not.toMatch(/Blindside WDG/);
   });
 });

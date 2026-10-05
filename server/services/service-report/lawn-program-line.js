@@ -27,6 +27,7 @@
 
 const protocols = require('../../config/protocols.json');
 const featureGates = require('../../config/feature-gates');
+const { LAWN_V13_VERSION } = require('../lawn-program');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -277,7 +278,8 @@ async function resolveProgramVisit({ serviceData = null, scheduledService = null
 }
 
 /**
- * @param {{ grassType?: string|null, month?: number|null, applications?: object[], nitrogenApplied?: boolean|null, programVisit?: boolean }} input
+ * @param {{ grassType?: string|null, month?: number|null, applications?: object[], nitrogenApplied?: boolean|null, programVisit?: boolean, protocolVersion?: string|null }} input
+ *   protocolVersion is the visit's pinned lawn protocol version, when it has one (GATE_LAWN_V13 copy only for none or 2026.10-v13).
  *   programVisit must be true (a recurring lawn plan visit, see resolveProgramVisit);
  *   anything else, including omitted, returns null.
  *   nitrogenApplied is the caller's catalog-backed answer (report-data reads
@@ -287,12 +289,15 @@ async function resolveProgramVisit({ serviceData = null, scheduledService = null
  *   (not a plan visit, no valid month, a month the grass's protocol has no visit
  *   for, or a Jun-Sep visit that applied nitrogen).
  */
-function buildProgramLine({ grassType = null, month = null, applications = [], nitrogenApplied = null, programVisit = false } = {}) {
+function buildProgramLine({ grassType = null, month = null, applications = [], nitrogenApplied = null, programVisit = false, protocolVersion = null } = {}) {
   if (programVisit !== true) return null;
   const m = Number(month);
   if (!Number.isInteger(m) || m < 1 || m > 12) return null;
   if (NO_NITROGEN_MONTHS.has(m) && (nitrogenApplied === null ? appliedNitrogen(applications) : nitrogenApplied === true)) return null;
-  if (featureGates.lawnV13Live?.()) return PROGRAM_LINES_V13[m].line;
+  // v13 copy only for a visit that resolved to v13: no pinned version (the
+  // unpinned lookup takes v13 while the gate is live) or the v13 version. A visit
+  // pinned to an older version keeps its own program's sentences.
+  if (featureGates.lawnV13Live?.() && (!protocolVersion || protocolVersion === LAWN_V13_VERSION)) return PROGRAM_LINES_V13[m].line;
   const grassKey = grassKeyFor(grassType);
   if (grassKey) {
     if (!protocolMonths(grassKey).has(m)) return null;

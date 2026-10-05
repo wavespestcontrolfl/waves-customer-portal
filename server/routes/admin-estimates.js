@@ -78,7 +78,7 @@ const {
 const {
   CONTENT_LIBRARY_VERSION,
   PRODUCT_REGISTRY_VERSION,
-  PROTOCOL_VERSION,
+  protocolVersion,
   TEMPLATE_VERSION,
 } = require('../services/lawn-service-outline');
 
@@ -3746,7 +3746,7 @@ router.get('/', async (req, res, next) => {
           const stats = outlineEventStats.get(row.id) || {};
           const staleReasons = [
             row.content_library_version !== CONTENT_LIBRARY_VERSION ? 'content library updated' : null,
-            row.protocol_version !== PROTOCOL_VERSION ? 'protocol updated' : null,
+            row.protocol_version !== protocolVersion() ? 'protocol updated' : null,
             row.product_registry_version !== PRODUCT_REGISTRY_VERSION ? 'product facts updated' : null,
             row.template_version !== TEMPLATE_VERSION ? 'template updated' : null,
           ].filter(Boolean);
@@ -3770,7 +3770,7 @@ router.get('/', async (req, res, next) => {
             productRegistryVersion: row.product_registry_version,
             templateVersion: row.template_version,
             currentContentLibraryVersion: CONTENT_LIBRARY_VERSION,
-            currentProtocolVersion: PROTOCOL_VERSION,
+            currentProtocolVersion: protocolVersion(),
             currentProductRegistryVersion: PRODUCT_REGISTRY_VERSION,
             currentTemplateVersion: TEMPLATE_VERSION,
             stale: staleReasons.length > 0,

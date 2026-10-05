@@ -12,10 +12,14 @@ const {
   parseProtocolLines,
   resolveProtocolItems,
   summarizeMaterialCost,
+  v13ProtocolRows,
+  v13RateOptions,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
-const { gateEnvValue } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+
+const { gateEnvValue } = featureGates;
 const { treeShrubFieldGuide } = require('../services/tree-shrub-field-guide');
 const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { scopeFromText } = require('../services/service-report/action-scope');
@@ -913,6 +917,16 @@ function stripLawnMixItemPricing(item) {
   };
 }
 
+// GATE_LAWN_V13: the staged v13 protocol's product rows for one track and month,
+// by catalog id (empty gate off), so the tank sheet uses the same stated rates
+// and nutrient-target derivation buildPlanForService does.
+async function v13RowsForMonth(trackKey, monthName) {
+  if (featureGates.lawnV13Live?.() !== true) return new Map();
+  const serviceDate = new Date(Date.UTC(2026, MONTH_ABBR.indexOf(monthName), 15, 16));
+  const context = await getProtocolWindowContext(db, { serviceDate, grassTrack: trackKey });
+  return v13ProtocolRows(summarizeProtocolContext(context));
+}
+
 router.get('/lawn-mix', async (req, res, next) => {
   try {
     const trackKey = TRACK_MAP[req.query.track] || req.query.track || 'st_augustine';
@@ -943,9 +957,11 @@ router.get('/lawn-mix', async (req, res, next) => {
       includePremiumOnly: req.query.includePremiumOnly === 'true',
     });
 
+    const v13Rows = await v13RowsForMonth(trackKey, month);
     const items = resolvedLines.map((line) => {
       const product = line.product;
       const selected = line.selected;
+      const rateOptions = v13RateOptions(product ? v13Rows.get(String(product.id)) : null);
       const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
       const areaContext = {
         plan: req.query.plan,
@@ -957,7 +973,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       };
       const areaFactor = effectiveAreaFactor(line, areaContext);
       const jobMix = selected && product && carrier
-        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets })
+        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...rateOptions })
         : null;
       // plannedMix mirrors jobMix for unselected conditionals: the mix a tech
       // would put down if the line's trigger fired (rescue threshold met,
@@ -968,15 +984,15 @@ router.get('/lawn-mix', async (req, res, next) => {
         ? areaFactor
         : effectiveAreaFactor({ ...line, selected: true }, { ...areaContext, includePremiumOnly: true });
       const plannedMix = jobMix || (product && carrier && plannedAreaFactor > 0
-        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor: plannedAreaFactor, ...nutrientTargets })
+        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor: plannedAreaFactor, ...nutrientTargets, ...rateOptions })
         : null);
       const tankCapacity = Number(calibration?.tank_capacity_gal || 0);
       const tankCoverageSqft = carrier && tankCapacity ? (tankCapacity / carrier) * 1000 : 0;
       const fullTankMix = selected && product && carrier && tankCoverageSqft
-        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets })
+        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets, ...rateOptions })
         : null;
       const plannedFullTankMix = fullTankMix || (product && carrier && tankCoverageSqft && plannedAreaFactor > 0
-        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets })
+        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets, ...rateOptions })
         : null);
 
       return {

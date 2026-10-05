@@ -556,7 +556,7 @@ const ISSUE_TOPIC = {
  *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, photoLimit = 6 } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6 } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -749,7 +749,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // export) means off, never a crash in a report build. Only recurring lawn
   // plan visits (`programVisit`, resolved by the caller) get the line.
   const programLine = typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()
-    ? buildProgramLine({ grassType: lawnAssessment.turfProfile?.grassType, month: assessMonth, applications, nitrogenApplied, programVisit })
+    ? buildProgramLine({ grassType: lawnAssessment.turfProfile?.grassType, month: assessMonth, applications, nitrogenApplied, programVisit, protocolVersion })
     : null;
   const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
 

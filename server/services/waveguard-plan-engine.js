@@ -484,6 +484,16 @@ function v13ProtocolRows(structuredProtocol) {
   return new Map((structuredProtocol.products || []).filter((row) => row.productId).map((row) => [String(row.productId), row]));
 }
 
+// How a matched staged v13 protocol row sets the planned rate: its own stated
+// rate, else (a lb_n / lb_k nutrition row) the visit's nutrient target. Spread
+// into calculateProductAmount; {} for no row (gate off, or no v13 match).
+function v13RateOptions(row) {
+  if (!row) return {};
+  if (Number(row.ratePer1000) > 0) return { protocolRate: { rate: row.ratePer1000, unit: row.rateUnit } };
+  if (/^lb_[nk]/i.test(String(row.rateUnit || ''))) return { deriveNutrientFirst: true };
+  return {};
+}
+
 const SUNNY_TURF_SHARE = { full_sun: 1, partial_shade: 0.5, heavy_shade: 0 };
 
 function effectiveAreaFactor(line, property = {}) {
@@ -543,8 +553,13 @@ function productRatePer1000(product, options = {}) {
   if (Number(options.protocolRate?.rate) > 0) {
     return { rate: Number(options.protocolRate.rate), unit: options.protocolRate.unit || product?.rate_unit || null, source: 'protocol_rate' };
   }
+  // A v13 nutrition row (rate unit lb_n / lb_k) states a nutrient target, not a
+  // bag rate: derive from the visit's N / K target before any catalog default
+  // (the catalog's 4.2 lb default is one bag rate, not every month's target).
+  const deriveFirst = options.deriveNutrientFirst === true;
   const catalogRate = Number(product?.default_rate_per_1000 || 0);
-  if (catalogRate > 0) {
+  if (catalogRate > 0 && !(deriveFirst && (derivedNutrientRate(product, 'analysis_n', options.targetNPer1000) != null
+    || derivedNutrientRate(product, 'analysis_k', options.targetKPer1000) != null))) {
     return {
       rate: catalogRate,
       unit: product?.rate_unit || null,
@@ -635,10 +650,11 @@ function calculateProductAmount({
   targetNPer1000 = null,
   targetKPer1000 = null,
   protocolRate = null,
+  deriveNutrientFirst = false,
 } = {}) {
   const factor = Math.max(0, Number(areaFactor ?? 1));
   const treatedUnits = (Number(lawnSqft || 0) * factor) / 1000;
-  const rateInfo = productRatePer1000(product, { targetNPer1000, targetKPer1000, protocolRate });
+  const rateInfo = productRatePer1000(product, { targetNPer1000, targetKPer1000, protocolRate, deriveNutrientFirst });
   const rate = Number(rateInfo.rate || 0);
   const unit = rateInfo.unit || null;
   const amount = treatedUnits > 0 && rate > 0 ? Number((treatedUnits * rate).toFixed(3)) : null;
@@ -1490,7 +1506,7 @@ async function buildPlanForService(serviceId, options = {}) {
         isFirstYear: options.isFirstYear,
       }),
       ...nutrientTargets,
-      ...(v13Row && Number(v13Row.ratePer1000) > 0 ? { protocolRate: { rate: v13Row.ratePer1000, unit: v13Row.rateUnit } } : {}),
+      ...v13RateOptions(v13Row),
     }) : null;
     return {
       raw: item.raw,
@@ -1819,6 +1835,7 @@ module.exports = {
   summarizeMaterialCost,
   effectiveAreaFactor,
   v13ProtocolRows,
+  v13RateOptions,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,
