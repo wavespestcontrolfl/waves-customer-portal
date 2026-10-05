@@ -133,8 +133,11 @@ function tileModel(tier, tiers, pricing, estimate = null) {
       eyebrow: 'GOOD',
       name: 'One-time visit',
       price: fmtMoney(tier.oneTimeTotal),
-      unit: 'one visit',
-      caption: noGuarantee ? 'No plan, no commitment' : 'No plan, no commitment · 30-day callback',
+      // "per application" is the estimate surface's one price unit
+      // (AGENTS.md "Per application price copy"); the one-visit nature of
+      // the tier is description, kept in the caption.
+      unit: '/ application',
+      caption: noGuarantee ? 'One application · no plan, no commitment' : 'One application · no plan, no commitment · 30-day callback',
       chips: [],
     };
   }
@@ -179,12 +182,27 @@ function tileModel(tier, tiers, pricing, estimate = null) {
   // (a row whose net per-application figure sits below its list figure, or
   // that the server marks eligible); a program excluded from the percentage
   // (margin guard, excluded family) must not be promised the nominal rate.
-  const discountedRows = rows.filter((r) => (Number(r?.displayPrice) > 0 && Number(r?.perTreatment) > 0
-    ? Number(r.displayPrice) < Number(r.perTreatment)
-    : r?.waveGuardDiscountEligible === true));
-  if (pct > 0 && rows.length > 0 && discountedRows.length === rows.length) {
+  // Corroborated per row, the way the price card does (±$0.06 rounding
+  // budget): a row counts as getting the nominal rate only when its actual
+  // reduction equals list × pct. A floor-clamped row is reduced by LESS than
+  // the rate; any such row, or a row whose figures cannot be checked, drops
+  // the percentage promise entirely (the metal tier chip still shows).
+  const rowReduction = (r) => {
+    const list = Number(r?.perTreatment);
+    const net = Number(r?.displayPrice);
+    if (!(list > 0) || !(net > 0)) return null;
+    return Math.round((list - net) * 100) / 100;
+  };
+  const rowAtNominalRate = (r) => {
+    const reduction = rowReduction(r);
+    if (reduction == null) return false;
+    return Math.abs(reduction - Math.round(Number(r.perTreatment) * pct) / 100) <= 0.06;
+  };
+  const fullRows = rows.filter(rowAtNominalRate);
+  const untouchedRows = rows.filter((r) => rowReduction(r) === 0);
+  if (pct > 0 && rows.length > 0 && fullRows.length === rows.length) {
     chips.push({ tone: 'green', text: `Save ${pct}% on ${rows.length > 2 ? 'all' : 'both'}` });
-  } else if (pct > 0 && discountedRows.length > 0) {
+  } else if (pct > 0 && fullRows.length > 0 && fullRows.length + untouchedRows.length === rows.length) {
     chips.push({ tone: 'green', text: `Save ${pct}% on eligible programs` });
   }
   if (pct > 0 && tier.waveGuardTier) {

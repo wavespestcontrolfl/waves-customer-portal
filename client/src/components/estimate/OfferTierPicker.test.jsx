@@ -64,7 +64,11 @@ describe('OfferTierPicker', () => {
     renderPicker();
     const good = screen.getAllByRole('radio')[0];
     expect(good).toHaveTextContent('$264.00');
-    expect(good).toHaveTextContent('one visit');
+    // Per application is the estimate surface's one price unit; the one-visit
+    // nature of the tier is caption copy, never the unit.
+    expect(good).toHaveTextContent('/ application');
+    expect(good).toHaveTextContent('One application');
+    expect(good).not.toHaveTextContent('one visit');
     expect(good).not.toHaveTextContent('Most popular');
   });
 
@@ -96,7 +100,12 @@ describe('OfferTierPicker', () => {
   });
 
   it('prefers the discount the server stamped, and shows no saving chip at 0%', () => {
-    const stamped = tiers.map((t) => (t.key === 'best' ? { ...t, combinedRecurring: { waveGuardDiscountPct: 0.15 }, waveGuardTier: 'Gold' } : t));
+    // Rows reduced by the stamped 15% (the chip is corroborated per row).
+    const goldFrequency = { ...bestFrequency, perServiceTreatments: [
+      { service: 'pest_control', label: 'Pest Control (Quarterly)', perTreatment: 107, displayPrice: 90.95, visitsPerYear: 4 },
+      { service: 'lawn_care', label: 'Lawn Care', perTreatment: 77, displayPrice: 65.45, visitsPerYear: 9 },
+    ] };
+    const stamped = tiers.map((t) => (t.key === 'best' ? { ...t, frequencies: [goldFrequency], combinedRecurring: { waveGuardDiscountPct: 0.15 }, waveGuardTier: 'Gold' } : t));
     const { unmount } = renderPicker({ tiers: stamped });
     expect(screen.getAllByRole('radio')[2]).toHaveTextContent('Save 15% on both');
     unmount();
@@ -150,7 +159,7 @@ describe('OfferTierPicker', () => {
   it('a no-guarantee estimate drops the callback and Waves Guarantee wording from the tiles', () => {
     renderPicker({ estimate: { noGuaranteeClaims: true } });
     const [good, better] = screen.getAllByRole('radio');
-    expect(good).toHaveTextContent('No plan, no commitment');
+    expect(good).toHaveTextContent('no plan, no commitment');
     expect(good).not.toHaveTextContent('30-day callback');
     expect(better).not.toHaveTextContent('Waves Guarantee');
   });
@@ -165,6 +174,19 @@ describe('OfferTierPicker', () => {
     const best = screen.getAllByRole('radio')[2];
     expect(best).not.toHaveTextContent('Save 10% on both');
     expect(best).toHaveTextContent('Save 10% on eligible programs');
+    expect(best).toHaveTextContent('WaveGuard Silver');
+  });
+
+  it('drops the percentage promise when a program is reduced by less than the tier rate (a floor-clamped row)', () => {
+    const clampedLawn = { ...bestFrequency, perServiceTreatments: [
+      { service: 'pest_control', label: 'Pest Control (Quarterly)', perTreatment: 107, displayPrice: 96.3, visitsPerYear: 4 },
+      // Reduced, but only 4% — not the 10% the tier names.
+      { service: 'lawn_care', label: 'Lawn Care', perTreatment: 77, displayPrice: 73.92, visitsPerYear: 9 },
+    ] };
+    const clamped = tiers.map((t) => (t.key === 'best' ? { ...t, frequencies: [clampedLawn] } : t));
+    renderPicker({ tiers: clamped, selectedKey: 'best' });
+    const best = screen.getAllByRole('radio')[2];
+    expect(best).not.toHaveTextContent('Save 10%');
     expect(best).toHaveTextContent('WaveGuard Silver');
   });
 });

@@ -199,6 +199,10 @@ describe('EstimateViewPage Good / Better / Best', () => {
   // so their wiring is pinned from source like the sibling accept pins.
   it('sends the tier on the accept and Best on the reserve, and never offers prepay on Best', () => {
     expect(pageSource).toMatch(/selectedTier: tiered \? offerTierKey : undefined,/);
+    // A refused tier leaves review and reloads (accept 400 / 409, reserve 409):
+    // retrying from review would resend the same tier forever.
+    expect(pageSource.match(/body\.code === 'offer_tier_unavailable'/g)).toHaveLength(2);
+    expect(pageSource).toMatch(/That plan option is no longer available\. We refreshed your estimate/);
     expect(pageSource).toMatch(/if \(serviceModeForAttempt !== 'one_time' && bestOfferActive\) \{\s*reservePayload\.offerTier = 'best';/);
     expect(pageSource).toMatch(/offerTier=\{bestOfferActive && serviceMode !== 'one_time' \? 'best' : null\}/);
     expect(pageSource).toMatch(/const annualPrepayEligibleEffective = \(\(\) => \{\s*\/\/ [^\n]*\n\s*if \(bestOfferActive\) return false;/);

@@ -7352,6 +7352,17 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           return;
         }
         const message = body.error || 'Unable to reserve this slot.';
+        if (body.code === 'offer_tier_unavailable') {
+          // Good / Better / Best: the tier is gone (nothing was reserved) —
+          // reload so the page re-derives its choices instead of retrying it.
+          setPaymentPreference(null);
+          setSelectedSlotId(null);
+          setSelectedSlotMeta(null);
+          setCtaPhase('configure');
+          await loadEstimate();
+          setError('That plan option is no longer available. We refreshed your estimate — please choose again.');
+          return;
+        }
         if (body.code === 'CUSTOMER_BUSY_RETRY') {
           // The matched customer row was being updated for a moment (nothing was reserved): retryable, with the
           // server's own sentence - the customer's picked slot and payment choice stay, so they just tap again.
@@ -7740,6 +7751,37 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           setPrepayChargeQuote(null);
           setPrepayConsentChecked(false);
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
+        }
+        if (body.code === 'offer_tier_unavailable') {
+          // Good / Better / Best: the tier this tab sent is no longer offered
+          // (gate turned off, or the customer became a member) — the server
+          // answers 400 before its transaction and 409 inside it. Retrying
+          // from review would resend the same tier forever, so leave review:
+          // drop the capture and the hold made for that plan, and reload so
+          // the page re-derives its choices (the picker disappears when the
+          // payload no longer carries tiers).
+          const tierHold = reservationRef.current;
+          const tierHeldId = tierHold?.scheduledServiceId && !tierHold?.existingAppointmentId
+            ? tierHold.scheduledServiceId
+            : null;
+          recurringCardSetupIntentIdRef.current = null;
+          setInlineCardIntent(null);
+          prepayChargeAckRef.current = null;
+          setPrepayChargeQuote(null);
+          setPrepayConsentChecked(false);
+          if (tierHeldId) {
+            let released = await releaseHeldReservation(tierHeldId);
+            if (!released) released = await releaseHeldReservation(tierHeldId);
+            if (!released) pendingRecoveryHoldRef.current = tierHeldId;
+          }
+          setCtaPhase('configure');
+          setReservation(null);
+          setSelectedSlotId(null);
+          setSelectedSlotMeta(null);
+          setPaymentPreference(null);
+          await loadEstimate();
+          setError('That plan option is no longer available. We refreshed your estimate — please choose again.');
+          return;
         }
         if (r.status === 409) {
           if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
