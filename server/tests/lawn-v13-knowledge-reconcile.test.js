@@ -72,7 +72,7 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
 
   test('gate on then off: entries and index chunks go v13, then back to the old program with no v13 text left', async () => {
     const tables = {
-      knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'protocol', source_id: 'x', chunk_index: 0, content_hash: 'h' }],
+      knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'protocol', source_id: 'x', chunk_index: 0, content_hash: 'h' }, { id: 'seed-kb', source: 'kb', source_id: 'y', chunk_index: 0, content_hash: 'h' }],
     };
     makeDb(tables);
     // Gate on with the index in use and no corpus marker yet: stale, so the first reconcile
@@ -124,7 +124,7 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
 
 describe('a corpus failure after the entries were rewritten is retried, not forgotten', () => {
   const ingest = require('../services/knowledge-index/ingest');
-  const seeded = () => ({ knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'protocol', source_id: 'x', chunk_index: 0, content_hash: 'h' }] });
+  const seeded = () => ({ knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'protocol', source_id: 'x', chunk_index: 0, content_hash: 'h' }, { id: 'seed-kb', source: 'kb', source_id: 'y', chunk_index: 0, content_hash: 'h' }] });
   const marker = (tables, key) => (tables.system_settings || []).find((r) => r.key === key)?.value;
 
   afterEach(() => jest.restoreAllMocks());
@@ -247,6 +247,17 @@ describe('a corpus failure after the entries were rewritten is retried, not forg
     await withGate(undefined, () => KB.reconcileLawnProtocolKnowledge());
     expect(tables.system_settings.find((r) => r.key === 'lawn_knowledge.protocol_corpus').value).toBe('legacy');
     expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(false);
+  });
+
+  test('each corpus is checked on its own: kb chunks with no protocol chunks still make a stale kb marker count', async () => {
+    // Codex r5 on #5996: the nightly can leave the kb corpus populated and the protocol corpus empty.
+    const tables = {
+      knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'kb', source_id: 'x', chunk_index: 0, content_hash: 'h' }],
+    };
+    makeDb(tables);
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
+    await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+    expect(tables.system_settings.find((r) => r.key === 'lawn_knowledge.kb_corpus').value).toBe('v13');
   });
 
   test('the index not in use: markers are ignored (stale only by the entry tags)', async () => {

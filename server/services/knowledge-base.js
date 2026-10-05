@@ -367,14 +367,16 @@ function lawnProtocolEntries() {
     .filter(Boolean);
 }
 
-// The index corpora still on the other program (empty while the index is not in use).
+// The index corpora still on the other program (a corpus with no chunks is never stale).
 async function staleCorpora(gateOn) {
   const want = gateOn ? 'v13' : 'legacy';
   const keys = Object.values(LAWN_CORPUS_MARKERS);
   const stored = Object.fromEntries((await db('system_settings').whereIn('key', keys).select('key', 'value')).map((row) => [row.key, row.value]));
   const stale = Object.keys(LAWN_CORPUS_MARKERS).filter((source) => stored[LAWN_CORPUS_MARKERS[source]] !== want);
-  if (!stale.length || !(await db('knowledge_embeddings').where({ source: 'protocol' }).first('id'))) return [];
-  return stale;
+  // A corpus is checked only while it has chunks; each source on its own (the nightly can
+  // leave one corpus populated and the other empty after a connector failure).
+  const inUse = await Promise.all(stale.map((source) => db('knowledge_embeddings').where({ source }).first('id')));
+  return stale.filter((_, i) => inUse[i]);
 }
 
 const KnowledgeBaseService = {
