@@ -186,3 +186,70 @@ it("a malformed ?neighborhood= is ignored: everything lists, no control", async 
   expect(rawAdminFetch.mock.calls[0][0]).not.toContain("neighborhood=");
   expect(screen.queryByText("Showing one neighborhood")).toBeNull();
 });
+
+// ---- Found in messages (access codes section) ----
+
+const FOUND_ROW = {
+  id: "f1", customerId: "cust-1", customerName: "Pat Sample", kind: "door", code: "9876", instructions: null,
+  life: "standing", scheduledServiceId: null, scheduledDate: null, status: "found", sourceType: "sms",
+  sourceQuote: "Door code is 9876", sourceAt: "2026-10-03T15:00:00.000Z",
+};
+
+function foundRoutes(over = {}) {
+  return (path, init = {}) => {
+    if (path.startsWith("/admin/access-codes/found")) return over.found ? over.found() : response({ total: 1, items: [FOUND_ROW] });
+    if (path.startsWith("/admin/access-codes/")) return response({ accessCode: { ...FOUND_ROW, status: "active" } });
+    if (path.startsWith("/admin/customers/cust-1")) return response({ upcomingScheduled: [{ id: "v1", scheduled_date: "2026-10-08", service_type: "Pest control", status: "confirmed" }] });
+    return response(ALL);
+  };
+}
+
+it("has no Found in messages tab when the access codes section is off (404)", async () => {
+  rawAdminFetch.mockImplementation((path) => (path.startsWith("/admin/access-codes/found")
+    ? response({ enabled: false }, { ok: false, status: 404 })
+    : response(ALL)));
+  renderPage();
+  expect(await screen.findByText("Synthetic Oaks")).toBeInTheDocument();
+  await waitFor(() => expect(rawAdminFetch.mock.calls.some(([p]) => p.startsWith("/admin/access-codes/found"))).toBe(true));
+  expect(screen.queryByRole("button", { name: /Found in messages/ })).toBeNull();
+});
+
+it("lists found codes with the customer linked, the client sentence and the code; Save posts accept", async () => {
+  let items = [FOUND_ROW];
+  rawAdminFetch.mockImplementation((path, init) => {
+    if (path.startsWith("/admin/access-codes/found")) return response({ total: items.length, items });
+    if (init?.method === "POST") { items = []; return response({ accessCode: {} }); }
+    return foundRoutes()(path, init);
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Pat Sample" })).toHaveAttribute("href", "/admin/customers?customerId=cust-1");
+  expect(screen.getByLabelText("Code")).toHaveValue("9876");
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(screen.getByText("No codes are waiting.")).toBeInTheDocument());
+  const post = rawAdminFetch.mock.calls.find(([, init]) => init?.method === "POST");
+  expect(post[0]).toBe("/admin/access-codes/f1/accept");
+  expect(JSON.parse(post[1].body)).toEqual({ kind: "door", life: "standing", code: "9876", instructions: null });
+});
+
+it("Dismiss posts dismiss, and a one-visit code loads that customer's visits for the picker", async () => {
+  rawAdminFetch.mockImplementation(foundRoutes());
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  await screen.findByText("Door code is 9876");
+  fireEvent.click(screen.getByRole("button", { name: "This visit only" }));
+  expect(await screen.findByRole("option", { name: "Thu, Oct 8 · Pest control" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+  await waitFor(() => expect(rawAdminFetch.mock.calls.some(([p]) => p === "/admin/access-codes/f1/dismiss")).toBe(true));
+});
+
+it("shows the server's message when a save is refused", async () => {
+  rawAdminFetch.mockImplementation((path, init) => (init?.method === "POST"
+    ? response({ error: "That customer already has this code", code: "duplicate_active" }, { ok: false, status: 409 })
+    : foundRoutes()(path, init)));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Save" }));
+  expect(await screen.findByText("That customer already has this code")).toBeInTheDocument();
+});

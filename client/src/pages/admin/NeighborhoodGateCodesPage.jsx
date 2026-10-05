@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { KeyRound } from "lucide-react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   ActionFeedback, Badge, Button, Card, CardBody, Field, Input, Select, Textarea, UiSurface,
 } from "../../components/ui";
 import { adminFetch as rawAdminFetch } from "../../lib/adminFetch";
+import { FoundCodeCard } from "../../components/admin/AccessCodePanels";
 
 const PAGE_SIZE = 100;
 const SEARCH_DEBOUNCE_MS = 250;
@@ -164,6 +165,50 @@ function EntryRow({ entry, busyKey, editing, formError, onAction, onEdit, onCanc
   );
 }
 
+// Codes found in customers' texts, waiting for a one-tap office save. The
+// owner (the page) reads the first page to learn whether the section is on.
+const FOUND_PAGE_SIZE = 50;
+
+function FoundInMessages({ items, total, loading, error, visitsByCustomer, onNeedVisits, onRetry, onMore, onSave, onDismiss }) {
+  return (
+    <div>
+      <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
+        Access codes customers sent in a text. Save one to make it usable on the customer&apos;s page, or
+        dismiss it. Nothing here is saved until you decide.
+      </div>
+      {error && <ActionFeedback error onRetry={onRetry} className="mb-3">{error}</ActionFeedback>}
+      {loading && !items.length && (
+        <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">Loading codes…</div>
+      )}
+      {!loading && !error && items.length === 0 && (
+        <div className="px-3 py-8 text-center text-ui-body text-ink-secondary">No codes are waiting.</div>
+      )}
+      <div className="grid gap-3">
+        {items.map((row) => (
+          <FoundCodeCard
+            key={row.id}
+            row={row}
+            visits={visitsByCustomer[row.customerId] || []}
+            onNeedVisits={onNeedVisits}
+            onSave={onSave}
+            onDismiss={onDismiss}
+            renderHeading={(r) => (
+              r.customerId
+                ? <Link className="underline underline-offset-2 hover:no-underline u-focus-ring" to={`/admin/customers?customerId=${encodeURIComponent(r.customerId)}`}>{r.customerName || "Customer"}</Link>
+                : (r.customerName || "Customer")
+            )}
+          />
+        ))}
+      </div>
+      {items.length > 0 && items.length < total && (
+        <div className="mt-3 text-center">
+          <Button variant="secondary" disabled={loading} onClick={onMore}>Show more ({total - items.length} left)</Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export default function NeighborhoodGateCodesPage() {
@@ -185,6 +230,51 @@ export default function NeighborhoodGateCodesPage() {
   const [editingId, setEditingId] = useState("");
   const [addingTo, setAddingTo] = useState("");
   const [formError, setFormError] = useState("");
+
+  // "Found in messages": codes customers texted, waiting for the office. The
+  // tab exists only when the access codes section answers (404 = off).
+  const [tab, setTab] = useState("neighborhoods");
+  const [found, setFound] = useState({ available: false, items: [], total: 0, loading: false, error: "" });
+  const [visitsByCustomer, setVisitsByCustomer] = useState({});
+  const foundSeq = useRef(0);
+  const loadFound = useCallback(async ({ offset = 0 } = {}) => {
+    const seq = ++foundSeq.current;
+    setFound((f) => ({ ...f, loading: true, error: "" }));
+    try {
+      const data = await api(`/admin/access-codes/found?limit=${FOUND_PAGE_SIZE}&offset=${offset}`);
+      if (seq !== foundSeq.current) return;
+      setFound((f) => ({
+        available: true,
+        items: offset ? [...f.items, ...(data.items || [])] : data.items || [],
+        total: data.total || 0,
+        loading: false,
+        error: "",
+      }));
+    } catch (err) {
+      if (seq !== foundSeq.current) return;
+      if (err.status === 404 || err.status === 403) setFound({ available: false, items: [], total: 0, loading: false, error: "" });
+      else setFound((f) => ({ ...f, loading: false, error: err.message || "Could not load found codes" }));
+    }
+  }, []);
+
+  // The customer's upcoming visits for the visit picker (the customer record
+  // the Customer 360 page reads), fetched once per customer on demand.
+  const askedVisits = useRef(new Set());
+  const needVisits = useCallback(async (customerId) => {
+    if (!customerId || askedVisits.current.has(customerId)) return;
+    askedVisits.current.add(customerId);
+    try {
+      const data = await api(`/admin/customers/${encodeURIComponent(customerId)}`);
+      setVisitsByCustomer((m) => ({ ...m, [customerId]: Array.isArray(data?.upcomingScheduled) ? data.upcomingScheduled : [] }));
+    } catch {
+      askedVisits.current.delete(customerId);
+    }
+  }, []);
+
+  const foundDecision = async (path, body) => {
+    await api(`/admin/access-codes${path}`, { method: "POST", body: JSON.stringify(body || {}) });
+    await loadFound();
+  };
 
   useEffect(() => {
     const t = setTimeout(() => setQuery(search.trim()), SEARCH_DEBOUNCE_MS);
@@ -231,6 +321,8 @@ export default function NeighborhoodGateCodesPage() {
   }, [query, filter, onlyNeighborhood]);
 
   useEffect(() => { load(); }, [load]);
+  // After the neighborhood read, so that stays the first request the page makes.
+  useEffect(() => { loadFound(); }, [loadFound]);
   // A save that finishes after the search or filter changed reloads the
   // CURRENT view, never the one it started under.
   const loadRef = useRef(load);
@@ -287,6 +379,33 @@ export default function NeighborhoodGateCodesPage() {
   return (
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
       <AdminCommandHeader variant="workspace" title="Neighborhood gate codes" icon={KeyRound} />
+
+      {found.available && (
+        <div className="mb-3 flex items-center gap-2" role="group" aria-label="Gate codes view">
+          <Button size="sm" variant={tab === "neighborhoods" ? "primary" : "secondary"} aria-pressed={tab === "neighborhoods"} onClick={() => setTab("neighborhoods")}>
+            Neighborhoods
+          </Button>
+          <Button size="sm" variant={tab === "found" ? "primary" : "secondary"} aria-pressed={tab === "found"} onClick={() => setTab("found")}>
+            {`Found in messages${found.total ? ` (${found.total})` : ""}`}
+          </Button>
+        </div>
+      )}
+
+      {found.available && tab === "found" ? (
+        <FoundInMessages
+          items={found.items}
+          total={found.total}
+          loading={found.loading}
+          error={found.error}
+          visitsByCustomer={visitsByCustomer}
+          onNeedVisits={needVisits}
+          onRetry={() => loadFound()}
+          onMore={() => loadFound({ offset: found.items.length })}
+          onSave={(row, body) => foundDecision(`/${row.id}/accept`, body)}
+          onDismiss={(row) => foundDecision(`/${row.id}/dismiss`)}
+        />
+      ) : (
+      <>
 
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
         Shared access for each neighborhood: gate codes and gate instructions every stop there can
@@ -421,6 +540,8 @@ export default function NeighborhoodGateCodesPage() {
             </div>
           )}
         </>
+      )}
+      </>
       )}
     </UiSurface>
   );

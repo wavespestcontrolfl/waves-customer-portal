@@ -275,6 +275,47 @@ function AccessSection({ alerts, access, gate = null }) {
   );
 }
 
+// Access codes the customer gave (access codes section, read only): the
+// active standing codes plus one-visit codes tied to a visit of this stop.
+// Read through the office's access-codes list, so a viewer without office
+// access, or a section that is off, gets nothing and the block stays hidden.
+const ACCESS_KIND_LABELS = {
+  neighborhood_gate: 'Neighborhood gate', property_gate: 'Property gate', door: 'Door or lock',
+  lockbox: 'Lockbox', garage: 'Garage', call_box: 'Call box', pass: 'Visitor pass', other: 'Access code',
+};
+
+function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
+  const [rows, setRows] = useState([]);
+  const visitKey = visitIds.join(',');
+  useEffect(() => {
+    if (!request || !customerId) return undefined;
+    let cancelled = false;
+    Promise.resolve()
+      .then(() => request(`/admin/access-codes?customerId=${encodeURIComponent(customerId)}`))
+      .then((data) => { if (!cancelled) setRows(Array.isArray(data?.active) ? data.active : []); })
+      .catch(() => { if (!cancelled) setRows([]); });
+    return () => { cancelled = true; };
+  }, [request, customerId]);
+  const ids = visitKey ? visitKey.split(',') : [];
+  const shown = new Set(shownCodes.map((c) => String(c).trim().toLowerCase()));
+  const mine = rows.filter((r) => (r.life === 'standing' || ids.includes(r.scheduledServiceId))
+    && !(r.code && !r.instructions && shown.has(String(r.code).trim().toLowerCase())));
+  if (!mine.length) return null;
+  return (
+    <>
+      <SectionLabel>Access codes</SectionLabel>
+      {mine.map((r) => (
+        <p key={r.id} style={factRowStyle}>
+          <span style={{ color: DARK.muted }}>{ACCESS_KIND_LABELS[r.kind] || 'Access code'}{r.life === 'visit' ? ' (this visit)' : ''}: </span>
+          {r.code && <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>{r.code}</span>}
+          {r.code && r.instructions ? ' · ' : ''}
+          {r.instructions}
+        </p>
+      ))}
+    </>
+  );
+}
+
 // Customer photos sent before the visit (PR 3a, GATE_VISIT_PREP_PHOTOS —
 // facts.customerFlagged). Stop-level, not per-member: deterministicVisitFacts
 // resolves the CURRENT stop membership server-side, so every member's own
@@ -1079,6 +1120,12 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       {address && <p style={{ ...factMutedStyle, marginTop: 8 }}>{address}</p>}
 
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
+      <VisitAccessCodes
+        request={request}
+        customerId={service.customer_id || service.customerId || null}
+        visitIds={stop.services.map((m) => m.id).filter(Boolean)}
+        shownCodes={CODE_LABELS.map(([key]) => access?.codes?.[key]).filter(Boolean)}
+      />
 
       <CustomerFlaggedSection
         serviceId={customerFlaggedMember?.service?.id}
