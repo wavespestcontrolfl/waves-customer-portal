@@ -11,7 +11,7 @@ const mockTableRows = {};
 jest.mock('../models/db', () => {
   const makeChain = (table) => {
     const chain = { _table: table, _selected: [], _where: [] };
-    for (const m of ['leftJoin', 'orderBy', 'whereNotNull', 'whereRaw', 'whereNotIn', 'groupBy', 'groupByRaw']) {
+    for (const m of ['leftJoin', 'orderBy', 'whereNotNull', 'whereRaw', 'whereIn', 'whereNotIn', 'groupBy', 'groupByRaw']) {
       chain[m] = jest.fn((...args) => { chain._where.push([m, ...args]); return chain; });
     }
     chain.where = jest.fn((...args) => { chain._where.push(['where', ...args]); return chain; });
@@ -37,6 +37,9 @@ jest.mock('../models/db', () => {
 const mockAheadDays = { days: [] };
 jest.mock('../services/scheduling/day-quality', () => ({
   getScheduleQualityMeasurements: jest.fn(async () => ({ days: mockAheadDays.days })),
+  dayStopSelect: jest.fn(() => ['scheduled_services.visit_id']),
+  // Stand-in for the scheduler's stop total: the sum of the members' estimates.
+  coVisitOnSiteMinutes: jest.fn((rows) => rows.reduce((sum, r) => sum + Number(r.estimated_duration_minutes || 0), 0)),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/time-tracking', () => ({}));
@@ -152,6 +155,25 @@ describe('efficiency math', () => {
     const [t] = math.buildEfficiencyByTech(rows, [{ technician_id: 't1', tech_name: 'Tech A', total_shift: 120 }]);
     expect(t).toEqual(expect.objectContaining({ budget_minutes: 60, job_minutes: 45, jobs: 1, jobs_with_budget: 1, efficiency_pct: 50 }));
   });
+  test('a grouped visit budgets the whole visit, and two timers on its members are one stop', () => {
+    const rows = math.applyVisitGroupMinutes([
+      entry({ ss_visit_id: 'v1', ss_estimated_duration_minutes: 25, duration_minutes: 30 }),
+      entry({ ss_visit_id: 'v1', ss_id: 's2', job_id: 's2', ss_estimated_duration_minutes: 20, duration_minutes: 10 }),
+    ], new Map([['v1', 45]]));
+    const [t] = math.buildEfficiencyByTech(rows, [{ technician_id: 't1', tech_name: 'Tech A', total_shift: 90 }]);
+    expect(t).toEqual(expect.objectContaining({ budget_minutes: 45, job_minutes: 40, jobs: 1, jobs_with_budget: 1, efficiency_pct: 50 }));
+  });
+  test('the route resolves a grouped visit from every live member', async () => {
+    mockTableRows.time_entries = [entry({ ss_visit_id: 'v1', ss_estimated_duration_minutes: 25 })];
+    mockTableRows.scheduled_services = [
+      { visit_id: 'v1', estimated_duration_minutes: 25 },
+      { visit_id: 'v1', estimated_duration_minutes: 20 },
+    ];
+    mockTableRows.time_entries_shift = [{ technician_id: 't1', tech_name: 'Tech A', duration_minutes: '90', clock_in: '2026-10-06T12:00:00Z', status: 'completed' }];
+    const { body } = await get('/analytics');
+    expect(body.efficiencyByTech[0]).toEqual(expect.objectContaining({ budget_minutes: 45, efficiency_pct: 50 }));
+    expect(body.serviceTypeStats[0].avg_estimated).toBe(45);
+  });
   test('live shift minutes: a closed shift uses its duration, an open one runs to now', () => {
     const now = new Date('2026-10-07T16:00:00Z');
     const rows = math.buildLiveShiftRows([
@@ -213,6 +235,7 @@ describe('loadAhead', () => {
     const { body } = await get('/analytics');
     expect(body.loadAhead.weeks).toHaveLength(3);
     expect(body.loadAhead.weeks[0].week_start).toBe(math.loadAheadWeekStarts(new Date())[0]);
-    expect(body.loadAhead.trailing).toEqual(expect.objectContaining({ weeks: 4, avg_job_minutes_per_week: 1500, avg_shift_minutes_per_week: 3000 }));
+    // Two weeks of data over the FOUR calendar weeks: 3000 / 4 and 6000 / 4.
+    expect(body.loadAhead.trailing).toEqual(expect.objectContaining({ weeks: 4, weeks_with_data: 2, avg_job_minutes_per_week: 750, avg_shift_minutes_per_week: 1500 }));
   });
 });

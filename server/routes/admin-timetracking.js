@@ -428,6 +428,7 @@ function jobEntriesWithPlan(start, end, { requireJob = true } = {}) {
       'time_entries.service_type',
       'time_entries.duration_minutes',
       'scheduled_services.id as ss_id',
+      'scheduled_services.visit_id as ss_visit_id',
       'scheduled_services.service_type as ss_service_type',
       'scheduled_services.is_recurring as ss_is_recurring',
       'scheduled_services.is_callback as ss_is_callback',
@@ -435,6 +436,29 @@ function jobEntriesWithPlan(start, end, { requireJob = true } = {}) {
       'scheduled_services.window_end as ss_window_end',
       'scheduled_services.estimated_duration_minutes as ss_estimated_duration_minutes',
     );
+}
+
+// A grouped visit runs on one timer tied to its primary member, so its planned
+// minutes must come from EVERY live member, totalled the way the scheduler
+// totals a stop (day-quality's coVisitOnSiteMinutes). Completed members count
+// (the work was done); cancelled / skipped / rescheduled / no-show ones do not.
+async function withVisitGroupMinutes(entryRows) {
+  const visitIds = [...new Set(entryRows.map((r) => r.ss_visit_id).filter((id) => id != null))];
+  if (!visitIds.length) return entryRows;
+  const { dayStopSelect, coVisitOnSiteMinutes } = require('../services/scheduling/day-quality');
+  const { NOT_A_ROUTE_STOP_STATUSES } = require('../services/stops-ahead');
+  const members = await db('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .whereIn('scheduled_services.visit_id', visitIds)
+    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+    .select(...dayStopSelect(db));
+  const byVisit = new Map();
+  for (const m of members) {
+    if (!byVisit.has(m.visit_id)) byVisit.set(m.visit_id, []);
+    byVisit.get(m.visit_id).push(m);
+  }
+  const minutesByVisit = new Map([...byVisit].map(([id, rows]) => [id, coVisitOnSiteMinutes(rows)]));
+  return analyticsMath.applyVisitGroupMinutes(entryRows, minutesByVisit);
 }
 
 // ---------------------------------------------------------------------------
@@ -451,7 +475,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
     // column that does not exist on scheduled_services).
     let entryQuery = jobEntriesWithPlan(start, end);
     if (technicianId) entryQuery = entryQuery.where('time_entries.technician_id', technicianId);
-    const entryRows = await entryQuery;
+    const entryRows = await withVisitGroupMinutes(await entryQuery);
     const serviceTypeStats = analyticsMath.buildServiceTypeStats(entryRows);
 
     // Utilization by tech
@@ -576,7 +600,7 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
     const { startDate, endDate } = req.query;
     const { start, end } = staffAnalyticsDateRange({ startDate, endDate });
 
-    const rows = await jobEntriesWithPlan(start, end, { requireJob: false });
+    const rows = await withVisitGroupMinutes(await jobEntriesWithPlan(start, end, { requireJob: false }));
     const comparison = analyticsMath.buildComparison(rows);
 
     res.json(comparison);

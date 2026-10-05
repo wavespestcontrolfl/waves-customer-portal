@@ -58,8 +58,13 @@ function efficiencyBand(pct) {
 // Entry rows come from time_entries LEFT JOIN scheduled_services with the
 // scheduled_services columns aliased ss_*. ss_id is null when the entry has
 // no linked scheduled row.
+// A grouped visit (visit_id) runs on ONE timer whose job_id is the primary
+// member, so the budget is the whole visit's on-site minutes
+// (ss_group_minutes, resolved by the route from every live member with
+// day-quality's coVisitOnSiteMinutes), not the primary member's alone.
 function entryPlanned(row) {
   if (row.ss_id == null) return null;
+  if (row.ss_group_minutes != null) return num(row.ss_group_minutes);
   return plannedMinutes({
     service_type: row.ss_service_type,
     is_recurring: row.ss_is_recurring,
@@ -142,7 +147,9 @@ function buildEfficiencyByTech(entryRows, shiftRows) {
     // A stop worked in two segments (stop, then restart) is two time_entries
     // rows on ONE job_id: it is one job with one budget, and both segments'
     // minutes. An entry with no job_id is its own job.
-    const jobKey = entry.job_id != null ? `job:${entry.job_id}` : null;
+    // Two timers on different members of one grouped visit are still one stop.
+    const jobKey = entry.ss_visit_id != null ? `visit:${entry.ss_visit_id}`
+      : (entry.job_id != null ? `job:${entry.job_id}` : null);
     if (jobKey == null || !t.seenJobs.has(jobKey)) {
       t.row.jobs += 1;
       if (jobKey) t.seenJobs.add(jobKey);
@@ -188,6 +195,20 @@ function buildLiveShiftRows(shiftEntries, now = new Date()) {
     byTech.set(e.technician_id, t);
   }
   return [...byTech.values()];
+}
+
+/**
+ * Stamp ss_group_minutes onto entry rows from Map(visit_id -> minutes).
+ * Rows with no visit_id, or a visit with no resolved members, are left alone
+ * and keep their own row's planned minutes.
+ */
+function applyVisitGroupMinutes(entryRows, minutesByVisit) {
+  for (const row of entryRows) {
+    if (row.ss_visit_id == null) continue;
+    const minutes = minutesByVisit.get(row.ss_visit_id);
+    if (minutes != null && minutes > 0) row.ss_group_minutes = minutes;
+  }
+  return entryRows;
 }
 
 /** The next LOAD_AHEAD_WEEKS ET Monday date strings, starting with this week. */
@@ -247,8 +268,11 @@ function buildTrailing(weeklyRows) {
   return {
     weeks: TRAILING_WEEKS,
     weeks_with_data: n,
-    avg_job_minutes_per_week: n ? Math.round(sum('job') / n) : null,
-    avg_shift_minutes_per_week: n ? Math.round(sum('shift') / n) : null,
+    // Over the full TRAILING_WEEKS calendar weeks: a week nobody clocked (a
+    // closure) is a zero week, not a missing one, or the average overstates
+    // a normal week. Null only when there is no data at all.
+    avg_job_minutes_per_week: n ? Math.round(sum('job') / TRAILING_WEEKS) : null,
+    avg_shift_minutes_per_week: n ? Math.round(sum('shift') / TRAILING_WEEKS) : null,
   };
 }
 
@@ -263,6 +287,7 @@ module.exports = {
   buildComparison,
   buildEfficiencyByTech,
   buildLiveShiftRows,
+  applyVisitGroupMinutes,
   loadAheadWeekStarts,
   buildLoadAhead,
   buildTrailing,
