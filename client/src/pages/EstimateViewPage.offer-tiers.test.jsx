@@ -9,7 +9,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import WavesShell from '../components/brand/WavesShell';
 import { setGlassDefault } from '../lib/estimate-glass-copy';
-import EstimateViewPage, { pricingViewForOfferTier } from './EstimateViewPage';
+import EstimateViewPage, { carryPestCadenceAcrossTiers, pricingViewForOfferTier } from './EstimateViewPage';
 import pageSource from './EstimateViewPage.jsx?raw';
 
 const routerState = vi.hoisted(() => ({ token: 'tiered-token' }));
@@ -206,5 +206,20 @@ describe('EstimateViewPage Good / Better / Best', () => {
     expect(pageSource).toMatch(/if \(serviceModeForAttempt !== 'one_time' && bestOfferActive\) \{\s*reservePayload\.offerTier = 'best';/);
     expect(pageSource).toMatch(/offerTier=\{bestOfferActive && serviceMode !== 'one_time' \? 'best' : null\}/);
     expect(pageSource).toMatch(/const annualPrepayEligibleEffective = \(\(\) => \{\s*\/\/ [^\n]*\n\s*if \(bestOfferActive\) return false;/);
+  });
+
+  it('carries the chosen pest cadence across a tier switch even though the pest section changes key', () => {
+    const ladder = [{ key: 'quarterly' }, { key: 'monthly' }];
+    const bestServices = [{ key: 'pest_control', frequencies: ladder }, { key: 'lawn_care', frequencies: [{ key: 'enhanced' }] }];
+    const betterServices = [{ key: 'bundle', frequencies: ladder }];
+    // Better (bundle: monthly) -> Best: the pest_control section takes monthly.
+    expect(carryPestCadenceAcrossTiers(bestServices, { pest_control: 'quarterly', lawn_care: 'enhanced' }, 'monthly'))
+      .toEqual({ pest_control: 'monthly', lawn_care: 'enhanced' });
+    // Best -> Better: the bundle section takes it back.
+    expect(carryPestCadenceAcrossTiers(betterServices, { bundle: 'quarterly' }, 'monthly')).toEqual({ bundle: 'monthly' });
+    // A cadence the new section does not offer, or none chosen, leaves the defaults.
+    const defaults = { bundle: 'quarterly' };
+    expect(carryPestCadenceAcrossTiers(betterServices, defaults, 'bi_monthly')).toBe(defaults);
+    expect(carryPestCadenceAcrossTiers(betterServices, defaults, null)).toBe(defaults);
   });
 });

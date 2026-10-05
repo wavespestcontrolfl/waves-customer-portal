@@ -297,6 +297,19 @@ export function offerTiersOfPricing(pricing) {
   return Array.isArray(pricing?.offerTiers) ? pricing.offerTiers : [];
 }
 
+// The pest cadence survives a tier switch even though the pest-bearing
+// section changes key (the pest-only view serves one 'bundle' section, the
+// Best view a 'pest_control' section): seed the new section with the cadence
+// the customer already chose when that section offers it.
+export function carryPestCadenceAcrossTiers(nextServices = [], nextSelected = {}, carriedKey = null) {
+  if (!carriedKey) return nextSelected;
+  const pestSection = nextServices.find((section) => section?.key === 'pest_control')
+    || nextServices.find((section) => section?.key === 'bundle')
+    || nextServices.find((section) => section?.isPest === true);
+  if (!pestSection || !(pestSection.frequencies || []).some((frequency) => frequency?.key === carriedKey)) return nextSelected;
+  return { ...nextSelected, [pestSection.key]: carriedKey };
+}
+
 export function pricingViewForOfferTier(pricing, tierKey) {
   if (!pricing || tierKey !== 'best') return pricing;
   const best = offerTiersOfPricing(pricing).find((tier) => tier?.key === 'best');
@@ -6476,10 +6489,17 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const onSelectOfferTier = useCallback((key) => {
     if (ctaPhaseRef.current === 'submitting') return;
     if (!offerTiers.some((tier) => tier?.key === key)) return;
+    // Read the cadence in force BEFORE the tier (and its section keys) change.
+    const currentServices = pricingServices(pricingViewForOfferTier(data?.pricing, offerTierKeyRef.current));
+    const carriedPestKey = primarySelectedFrequencyKey(currentServices, selectedRef.current);
     offerTierKeyRef.current = key;
     setOfferTierKey(key);
     const nextServices = pricingServices(pricingViewForOfferTier(data?.pricing, key));
-    const nextSelected = defaultSelectedForServices(nextServices, selectedRef.current, true);
+    const nextSelected = carryPestCadenceAcrossTiers(
+      nextServices,
+      defaultSelectedForServices(nextServices, selectedRef.current, true),
+      carriedPestKey,
+    );
     setSelected(nextSelected);
     setSelectedAddOns(selectedAddOnsForServices(nextServices, nextSelected));
     resetForServiceModeChange(key === 'good' ? 'one_time' : 'recurring');
