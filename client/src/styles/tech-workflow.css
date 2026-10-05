@@ -267,7 +267,8 @@
 /* Inline product search in the Products section: no dialog gutter, the icon pinned to the box (the results list sits under it). */
 .tech-product-search--inline { padding: 0; margin-top: 8px; }
 .tech-product-search--inline > svg { left: 14px; top: 24px; }
-.tech-product-search--inline .tech-product-inline-results { margin-top: 8px; }
+/* About five rows (56px each) and a half, so a longer list shows it scrolls; the list scrolls inside itself. */
+.tech-product-search--inline .tech-product-inline-results { margin-top: 8px; max-height: 308px; overflow-y: auto; overscroll-behavior: contain; }
 .tech-product-picker-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 12px; padding: 10px 18px 12px; }
 .tech-product-group-title { margin: 0 0 4px; color: var(--tech-muted); font-size: 14px; font-weight: 500; letter-spacing: 0.04em; line-height: 1.25; text-transform: uppercase; }
 .tech-product-list { display: flex; flex-direction: column; overflow: hidden; border: 0.5px solid var(--tech-border); border-radius: 6px; background: var(--tech-card); }
@@ -363,7 +364,8 @@
 .tech-lawn-sheet .tech-lawn-details-spacer { flex-shrink: 0; width: 36px; height: 36px; }
 .tech-lawn-sheet .tech-lawn-back:disabled, .tech-lawn-sheet .tech-lawn-details:disabled { opacity: .5; cursor: not-allowed; }
 /* Page body and the customer block. */
-.tech-lawn-sheet .tech-visit-body { padding: 8px 20px 20px; background: #fafafa; }
+/* Bottom padding clears the bar, so the last rows (the inline product results) can scroll fully clear of it. */
+.tech-lawn-sheet .tech-visit-body { padding: 8px 20px 96px; background: #fafafa; }
 .tech-lawn-sheet .tech-lawn-contact { margin-bottom: 20px; line-height: 1.5; }
 .tech-lawn-sheet .tech-lawn-contact a { display: block; margin-top: 2px; color: #111111; font-size: 14px; text-decoration: underline; }
 .tech-lawn-sheet .tech-lawn-contact .tech-lawn-name { margin: 0 0 4px; color: #111111; font-size: 16px; font-weight: 500; }
