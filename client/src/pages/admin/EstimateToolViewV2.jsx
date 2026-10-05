@@ -2645,6 +2645,15 @@ export default function EstimateToolViewV2({
   // lead list is not offered and the link line is read-only.
   const canChangeLeadLink = canUnlink && !savedId;
 
+  // The contact boxes close whenever the tool turns to another estimate, by
+  // any path: a loaded or saved estimate (editMode id), a multi-property
+  // group's Edit or "Add another property" (group anchor), next estimate.
+  // Keyed on the identity, not on each handler, so a new path cannot miss it.
+  const contactIdentityKey = `${editMode?.id || ""}|${groupAnchorId || ""}`;
+  useEffect(() => {
+    setContactOpen(false);
+  }, [contactIdentityKey]);
+
   // Drops the linked customer but keeps the typed contact fields, so a wrong
   // link (address suggestion, deep link, or a mis-click) is one tap to undo.
   function unlinkCustomer() {
