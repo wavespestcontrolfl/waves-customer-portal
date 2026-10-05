@@ -190,6 +190,14 @@ function petPrecautionFact(data = {}) {
 // stay on the fixed rules: they carry recorded instructions word for word.
 const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'next_visit', 'unrouted']);
 
+// A pressure reading, or null for a missing one: Number(null) is 0, and a
+// made-up zero would contradict the report (pre-push audit P1).
+function readingOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function productFacts(app = {}) {
   const product = app.product || {};
   const copy = product.report_copy || {};
@@ -260,12 +268,12 @@ function buildReportAskFacts({ question = '', data = {}, nextAppointment = null,
     ? {
       label: cleanText(data.pestPressure.label),
       trend: cleanText(data.pestPressure.trend) || null,
-      score_out_of_5: Number.isFinite(Number(data.pestPressure.score)) ? Number(data.pestPressure.score) : null,
+      score_out_of_5: readingOrNull(data.pestPressure.score),
       what_it_means: cleanText(data.pestPressure.howCalculated) || null,
     }
     : null;
   const trendSummary = clip(data.dynamicContext?.pressureTrend?.customerSummary, 300) || null;
-  const bareIndex = Number.isFinite(Number(data.pressureIndex)) ? Number(data.pressureIndex) : null;
+  const bareIndex = readingOrNull(data.pressureIndex);
   const pressure = labeled
     ? { ...labeled, trend_summary: trendSummary }
     : (trendSummary || bareIndex !== null

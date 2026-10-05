@@ -140,6 +140,12 @@ describe('buildReportAskFacts', () => {
     expect(facts.pest_pressure).toEqual({ label: null, trend: null, score_out_of_5: 2.4, what_it_means: null, trend_summary: 'Pressure is down from your last visit.' });
   });
 
+  test('a missing pressure reading stays missing, never zero', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], pressureIndex: null, pestPressure: { label: 'Low', score: null } } });
+    expect(facts.pest_pressure.score_out_of_5).toBeNull();
+    expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], pressureIndex: null } }).pest_pressure).toBeUndefined();
+  });
+
   test('reads a pg-hydrated DATE as its calendar date', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], serviceDate: new Date(2026, 9, 2) } });
     expect(facts.service_date).toBe('Friday, October 2, 2026');
