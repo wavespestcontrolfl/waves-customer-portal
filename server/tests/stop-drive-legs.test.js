@@ -137,4 +137,16 @@ describe('attachDriveLegs', () => {
     const leg = services[1].driveFromPrevMin;
     expect(services[1].driveLateMin).toBe(8 * 60 + 180 + leg - (9 * 60 + 120));
   });
+
+  it('runs a group\'s rows one after another before the next drive', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', windowEnd: '10:00' }),
+      stop('g2', '09:00', A, { visitId: 'v1', windowEnd: '10:00' }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // Two 60-minute rows leave at 11:00, not 10:00.
+    expect(services[2].driveLateMin).toBe(11 * 60 + leg - (9 * 60 + 120));
+  });
 });

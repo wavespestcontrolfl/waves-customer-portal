@@ -349,6 +349,7 @@ describe('MobileDispatchList open hours with two techs', () => {
     const nine = screen.getByRole('button', { name: 'Book open hour 9–10 AM' });
     // Two techs work the day: the block names who is free.
     expect(nine).toHaveAttribute('title', 'Free: B Tech');
+    expect(nine).toHaveTextContent('BT');
     expect(screen.getByRole('button', { name: 'Book open hour 10–11 AM' })).toHaveAttribute('title', 'Free: A Tech, B Tech');
     fireEvent.click(nine);
     expect(onCreateSlot).toHaveBeenCalledWith(expect.objectContaining({ windowStart: '09:00', techId: 'tech-b' }));
@@ -396,6 +397,21 @@ describe('MobileDispatchList drive legs', () => {
     );
     const line = screen.getByText('~45 min drive from Sample One · ~15 min past the 12:30 PM–2:30 PM window');
     expect(line.parentElement.className).toContain('text-alert-fg');
+  });
+
+  it('drops the red once the stop is en route', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[
+          { ...SERVICE, id: 'svc-late', status: 'en_route', customerName: 'Sample Late', windowStart: '12:30', windowEnd: '13:00', driveInShown: true, drivePrevName: 'Sample One', driveFromPrevMin: 45, driveLateMin: 15 },
+        ]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    const line = screen.getByText('~45 min drive from Sample One');
+    expect(line.parentElement.className).not.toContain('text-alert-fg');
   });
 });
 

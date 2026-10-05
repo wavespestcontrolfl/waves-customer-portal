@@ -29,14 +29,24 @@ function hasGeo(s) {
   return s?.lat != null && s?.lng != null && Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0;
 }
 
-// When a row's work is planned to end: its window end (the service-end
-// estimate), else start + stored duration, else one hour.
-function plannedEnd(s) {
+// A row's planned work: its window span (window end is the service-end
+// estimate), else its stored duration, else one hour.
+function workMinutes(s) {
   const start = minutesOf(s.windowStart);
   const end = minutesOf(s.windowEnd);
-  if (Number.isFinite(end) && end > start) return end;
+  if (Number.isFinite(end) && end > start) return end - start;
   const dur = Number(s.estimatedDuration);
-  return start + (Number.isFinite(dur) && dur > 0 ? dur : 60);
+  return Number.isFinite(dur) && dur > 0 ? dur : 60;
+}
+
+// When the tech leaves a stop: one crew works its rows one after another
+// (arrival-route.js groupRouteStops sums a visit's work the same way), so
+// two 60-minute rows booked at 09:00 leave at 11:00, not 10:00.
+function departure(rows) {
+  const starts = rows.map((m) => minutesOf(m.windowStart));
+  const summed = Math.min(...starts) + rows.reduce((sum, m) => sum + workMinutes(m), 0);
+  const latest = Math.max(...rows.map((m, i) => starts[i] + workMinutes(m)));
+  return Math.max(summed, latest);
 }
 
 // Visits the tech has not reached yet: only these can still run late.
@@ -124,7 +134,7 @@ function attachDriveLegs(services) {
       // booked later than this stop does not hold the tech here.
       const startMin = minutesOf(first.windowStart);
       const before = prev.members.filter((m) => minutesOf(m.windowStart) <= startMin);
-      const arrive = Math.max(...(before.length ? before : prev.legs.slice(0, 1)).map(plannedEnd)) + leg;
+      const arrive = departure(before.length ? before : prev.legs.slice(0, 1)) + leg;
       const late = arrive - (startMin + ARRIVAL_WINDOW_MINUTES);
       if (late > 0) first.driveLateMin = late;
     }

@@ -178,13 +178,15 @@ function minutesLabel(mins) {
 // nothing, never "~0 min".
 function DriveLine({ service }) {
   if (!service.driveInShown || !Number.isFinite(service.driveFromPrevMin)) return null;
-  const late = Number.isFinite(service.driveLateMin) && service.driveLateMin > 0;
+  // Only a stop the tech has not reached can run late: marking it en route
+  // updates the status before the next refresh clears driveLateMin.
+  const late = canMarkEnRoute(service) && Number.isFinite(service.driveLateMin) && service.driveLateMin > 0;
   const start = parseHHMM(service.windowStart);
   const from = service.drivePrevName ? ` from ${service.drivePrevName}` : '';
   return (
     <div
       className={'flex items-center u-nums border-b border-hairline ' + 'border-zinc-200 ' + (late ? 'bg-alert-bg text-alert-fg font-medium' : 'bg-zinc-50 text-ink-tertiary')}
-      style={{ fontSize: 13, padding: '5px 14px 5px 22px', gap: 8 }}
+      style={{ fontSize: 14, padding: '5px 14px 5px 22px', gap: 8 }}
     >
       <span aria-hidden style={{ width: 2, height: 14, borderRadius: 1, background: 'currentColor', opacity: late ? 1 : 0.4, flexShrink: 0 }} />
       <span className="min-w-0">
@@ -193,6 +195,12 @@ function DriveLine({ service }) {
       </span>
     </div>
   );
+}
+
+// "AT" for Alex Tech: two techs sharing a first initial still read apart.
+function techInitials(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  return parts.map((p) => p[0]).join('').slice(0, 3).toUpperCase() || '?';
 }
 
 // The day's drive, each leg counted once: "~2h 10m".
@@ -463,10 +471,10 @@ function OpenHourRow({ hour, onBook, free }) {
             {free.slice(0, 3).map((t) => (
               <span
                 key={t.id}
-                className="inline-flex items-center justify-center rounded-full bg-zinc-900 text-white font-medium"
-                style={{ width: 20, height: 20, fontSize: 11 }}
+                className="inline-flex items-center justify-center rounded-full bg-zinc-900 text-white font-medium u-nums"
+                style={{ minWidth: 24, height: 22, padding: '0 5px', fontSize: 11 }}
               >
-                {String(t.name || '?').trim().charAt(0).toUpperCase()}
+                {techInitials(t.name)}
               </span>
             ))}
             {free.length > 3 && <span className="text-ink-tertiary" style={{ fontSize: 12 }}>+{free.length - 3}</span>}
