@@ -70,11 +70,17 @@ async function loadCustomer(customerId, conn = db, { forUpdate = false } = {}) {
 }
 
 // The consent-stamped slot contacts of this customer row. The account holder
-// is never in this list.
+// is never in this list, and neither is an occupant the report is withheld
+// from (a tenant, or an on-site contact on a property-manager account).
 function slotContacts(customer) {
-  const { getAppointmentContacts, isServiceContactRole } = require('./customer-contact');
+  const {
+    getAppointmentContacts, getServiceContactSlots, isServiceContactRole, slotWithheldFromReports,
+  } = require('./customer-contact');
+  const withheld = new Set(getServiceContactSlots(customer)
+    .filter((slot) => slotWithheldFromReports(customer, slot))
+    .map((slot) => slot.role));
   return getAppointmentContacts(customer, { appointment_notify_primary: false })
-    .filter((c) => isServiceContactRole(c.role));
+    .filter((c) => isServiceContactRole(c.role) && !withheld.has(c.role));
 }
 
 // The contacts who get the report text, by the appointment-text rule. An

@@ -264,6 +264,23 @@ function serviceReportEmailOptedOut(prefs) {
   return prefs?.email_enabled === false || prefs?.service_completed === false;
 }
 
+// Service contacts who never get the visit's findings (reports, report
+// links): a contact recorded as a tenant, and every on-site contact on a
+// property-manager account unless that contact is recorded as a manager or
+// landlord. A manager reports findings to the owner, not the occupant
+// (property-manager vendor agreements require it). Slots added by hand carry
+// no role, so on a manager account they count as occupants; a manager-side
+// copy goes through the billing recipient instead. Appointment texts are
+// unchanged: an occupant still needs to know when the tech arrives.
+const REPORT_ALLOWED_ROLES_ON_MANAGED_ACCOUNT = new Set(['property_manager', 'landlord']);
+
+function slotWithheldFromReports(customer, slot) {
+  const role = String(slot?.contactRole || '').trim().toLowerCase();
+  if (role === 'tenant') return true;
+  const accountRole = String(customer?.contact_role || '').trim().toLowerCase();
+  return accountRole === 'property_manager' && !REPORT_ALLOWED_ROLES_ON_MANAGED_ACCOUNT.has(role);
+}
+
 function getServiceReportEmailRecipients(customer, prefs = {}) {
   if (!customer) return [];
   // This resolver previously only consulted
@@ -281,7 +298,7 @@ function getServiceReportEmailRecipients(customer, prefs = {}) {
 
   for (const slot of getServiceContactSlots(customer)) {
     const distinct = !!slot.email && !sameEmail(slot.email, primary.email);
-    if (!distinct) continue;
+    if (!distinct || slotWithheldFromReports(customer, slot)) continue;
     recipients.push({
       phone: slot.phone || primary.phone,
       email: slot.email,
@@ -417,6 +434,7 @@ module.exports = {
   getServiceContactSmsRecipient,
   getServiceContactSlots,
   isServiceContactRole,
+  slotWithheldFromReports,
   getBillingContact,
   getAppointmentContacts,
   getInvoiceEmailRecipients,
