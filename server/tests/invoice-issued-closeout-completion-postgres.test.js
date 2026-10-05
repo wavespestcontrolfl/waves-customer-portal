@@ -235,7 +235,7 @@ describe('source contracts', () => {
     // r11: identity / assignment drift under the lock refuses; the quiet closeout writes no tech-attributed activity or job_complete push.
     expect(completion).toMatch(/fromStatus = lockedSvcRow\.status;[\s\S]{0,1200}?const driftedField = ISSUED_CLOSEOUT_IDENTITY_FIELDS\.find\([\s\S]{0,300}?\{ code: 'issued_visit_identity_changed' \}\);/);
     expect(completion).toMatch(/if \(err && err\.code === 'issued_visit_identity_changed'\) \{\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
-    expect(completion).toMatch(/if \(\(!resumingCommittedCompletion \|\| packetEffects\) && !issuedInvoiceCloseout\) \{\s*try \{\s*const writeActivity = async/);
+    expect(completion).toMatch(/if \(\(!resumingCommittedCompletion \|\| packetEffects\) && !quietCloseoutActivity\) \{\s*try \{\s*const writeActivity = async/);
     // r12: a settled issued invoice releases a live card hold instead of parking it; the referral credit posts quietly; the card mint runs on the silent backfill path.
     expect(completion).toMatch(/\} else if \(isBackfillCompletion\) \{[\s\S]{0,1600}?if \(liveHold && issuedInvoiceCloseout && \['paid', 'prepaid'\]\.includes\(String\(invoice\.status\)\)\) \{\s*const release = await CardHolds\.releaseCardHold\(\{ scheduledServiceId: svc\.id, reason: 'issued_invoice_settled' \}\);/);
     expect(completion).toMatch(/const referralVisitPerformed = closedDealVisitPerformed && \(!isBackfillCompletion \|\| !!issuedInvoiceCloseout\);[\s\S]{0,400}?creditReferralOnFirstService\(\{ customerId: svc\.customer_id, serviceId: svc\.id, notify: !issuedInvoiceCloseout \}\)/);

@@ -1299,6 +1299,21 @@ const handoffOrder = (conn, after, until = null) => {
   return conn.raw(`LEAST(${inWindow(OWN_HANDOFF_SQL)}, ${inWindow(FIRST_HANDOFF_SQL)}, ${history}, ${inWindow(ANCHOR_HANDOFF_SQL)}, ${inWindow(ACCEPT_WITNESS_SQL)}) asc`, [...bind, ...bind, ...bind, ...bind, ...bind]);
 };
 const HANDOFF_COLS = (conn) => ["id", "sent_at", "status", "accepted_at", conn.raw(`${OWN_HANDOFF_SQL} as handed_off_at`), conn.raw(`${FIRST_HANDOFF_SQL} as first_handed_off_at`), conn.raw(`${DELIVERIES_SQL} as delivered_at_history`), conn.raw(`${ANCHOR_HANDOFF_SQL} as anchor_handed_off_at`), conn.raw(`${ACCEPT_WITNESS_SQL} as accept_witness_at`)];
+// The LATEST real-handoff witness on an estimate row, as SQL (GREATEST
+// ignores NULLs): its last real delivery, its first one, its group anchor's,
+// or the customer's own acceptance. Null when nothing ever reached the
+// customer — a suppressed send (SMS gate or template off) stamps sent_at but
+// no delivery. lastDeliveredAt is the newest entry of the delivery history,
+// so the history needs no separate term. Expects the table as `estimates`.
+const LATEST_HANDOFF_SQL = `GREATEST(${OWN_HANDOFF_SQL}, ${FIRST_HANDOFF_SQL}, ${ANCHOR_HANDOFF_SQL}, ${ACCEPT_WITNESS_SQL})`;
+// The same, on a row fetched with HANDOFF_COLS.
+const latestHandoffAt = (row) => {
+  const history = Array.isArray(row.delivered_at_history) ? row.delivered_at_history : [];
+  const times = [row.handed_off_at, row.first_handed_off_at, ...history, row.anchor_handed_off_at, row.accept_witness_at]
+    .map((t) => (t ? new Date(t).getTime() : NaN))
+    .filter(Number.isFinite);
+  return times.length ? new Date(Math.max(...times)) : null;
+};
 // The EARLIEST post-boundary witness time on a fetched row, or null.
 const witnessAt = (row, after) => {
   const history = Array.isArray(row.delivered_at_history) ? row.delivered_at_history : [];
@@ -3575,6 +3590,8 @@ module.exports = {
   handoffOrder,
   HANDOFF_COLS,
   witnessAt,
+  LATEST_HANDOFF_SQL,
+  latestHandoffAt,
   directEstimatesSentAfter,
   implicitDueAt,
   effectiveDueSql,

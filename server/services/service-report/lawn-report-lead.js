@@ -54,7 +54,10 @@ const LEAD_WORD_BUDGET = 250;
 // `whatToExpect` after applied, since it is the only place an approved
 // expectation sentence appears. "Since your last visit" goes last of all: it
 // is the only place the customer sees it.
-const BUDGET_DROP_ORDER = ['why', 'watching', 'applied', 'whatToExpect', 'sinceLast'];
+// "From your technician" (GATE_LAWN_TECH_PARAGRAPH) goes FIRST: it is additive,
+// so a region that runs over budget gives it up before any fixed sentence, and
+// gate on never costs a gate-off field its place.
+const BUDGET_DROP_ORDER = ['techParagraph', 'why', 'watching', 'applied', 'whatToExpect', 'sinceLast'];
 // Per-field word caps. Model-written copy (the narrative overlay, a generated
 // treatment narrative) reaches these fields unbounded, so any one field over
 // its cap is left out of the lead rather than cut mid-sentence; the same
@@ -65,13 +68,15 @@ const BUDGET_DROP_ORDER = ['why', 'watching', 'applied', 'whatToExpect', 'sinceL
 // since-last block (40 + its label) is kept whenever that still fits and
 // given up, last, when it does not.
 const FIELD_WORD_CAPS = {
-  headline: 12, why: 40, applied: 60, yourPart: 30, next: 30, sinceLast: 40, whatToExpect: 42, watching: 20,
+  headline: 12, why: 40, applied: 60, yourPart: 30, next: 30, sinceLast: 40, whatToExpect: 42, watching: 20, techParagraph: 70,
 };
 // The client's "Since your last visit, <Mon D>", "What to expect" and
 // "Watching" labels, each counted only when its block renders.
 const SINCE_LAST_LABEL_WORDS = 6;
 const WHAT_TO_EXPECT_LABEL_WORDS = 3;
 const WATCHING_LABEL_WORDS = 1;
+// "From your technician".
+const TECH_PARAGRAPH_LABEL_WORDS = 3;
 // Every lead field and the strings it puts on screen: the one list the word
 // count and the budget read, so a new field is one row here.
 const LEAD_FIELDS = {
@@ -79,13 +84,14 @@ const LEAD_FIELDS = {
   why: (lead) => [lead.why],
   sinceLast: (lead) => lead.sinceLastBudgetLines || (lead.sinceLast && Array.isArray(lead.sinceLast.lines) ? lead.sinceLast.lines : []),
   applied: (lead) => [lead.applied],
+  techParagraph: (lead) => [lead.techParagraph],
   whatToExpect: (lead) => [lead.whatToExpect],
   watching: (lead) => [lead.watching],
   yourPart: (lead) => (Array.isArray(lead.yourPart) ? lead.yourPart : []),
   next: (lead) => [lead.next],
 };
 // Fields that are absent, not null, when they have nothing to say.
-const OPTIONAL_FIELDS = new Set(['sinceLast', 'whatToExpect', 'watching']);
+const OPTIONAL_FIELDS = new Set(['sinceLast', 'whatToExpect', 'watching', 'techParagraph']);
 
 // The retired follow-up card's stock line. It is a placeholder, not a task.
 const STOCK_NO_ACTION = /^no action is needed\b/i;
@@ -196,6 +202,9 @@ function v6CopyOf(copyV6) {
  * @param {object} [extras]
  * @param {{priorDate:string, lines:string[]}|null} [extras.sinceLast] the
  *   "Since your last visit" block (lawn-since-last-copy.js), when its gate is live
+ * @param {string|null} [extras.techParagraph] the frozen "From your technician"
+ *   paragraph (lawn-tech-paragraph.js), when GATE_LAWN_TECH_PARAGRAPH is live and
+ *   one was written at completion; printed as given, never composed here
  * @param {{line: string}|null} [extras.rainfastWatch] the live view's rainfast
  *   breach sentence (lawn-rainfast-watch.js), when GATE_LAWN_RAINFAST_WATCH is live
  * @param {{headline, whatWeDid, whatToExpect, watching}|null} [extras.copyV6] the
@@ -207,7 +216,7 @@ function v6CopyOf(copyV6) {
  *   whatToExpect?: string, watching?: string } | null}
  *   null when there is no snapshot to lead with.
  */
-function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null, rainfastWatch = null } = {}) {
+function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null, rainfastWatch = null, techParagraph = null } = {}) {
   const snapshot = reportV2 && reportV2.snapshot;
   if (!snapshot || typeof snapshot !== 'object') return null;
   const bannerPresent = bannerHasWateringLines(reportV2.banner);
@@ -245,6 +254,11 @@ function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null, rainfastWat
       if (text && countWords(text) <= FIELD_WORD_CAPS[field]) lead[field] = text;
     }
   }
+  // GATE_LAWN_TECH_PARAGRAPH: the frozen paragraph, already screened where it was
+  // written and again where it was read. Only the key's presence differs from a
+  // lead without it; a text over the cap is left out whole, never cut.
+  const tech = clean(techParagraph);
+  if (tech && countWords(tech) <= FIELD_WORD_CAPS.techParagraph) lead.techParagraph = tech;
   // GATE_LAWN_RAINFAST_WATCH (P31, live view only): the one fixed sentence joins
   // the Watching line, after the writer's own sentence. Only the exact module
   // sentence is accepted. It gives no watering advice, so the banner-ownership
@@ -307,6 +321,7 @@ function leadWords(reportV2) {
     ? (LEAD_FIELDS.sinceLast(lead).length ? SINCE_LAST_LABEL_WORDS : 0)
       + (LEAD_FIELDS.whatToExpect(lead)[0] ? WHAT_TO_EXPECT_LABEL_WORDS : 0)
       + (LEAD_FIELDS.watching(lead)[0] ? WATCHING_LABEL_WORDS : 0)
+      + (LEAD_FIELDS.techParagraph(lead)[0] ? TECH_PARAGRAPH_LABEL_WORDS : 0)
     : 0;
   return parts.reduce((sum, part) => sum + countWords(part), 0) + dateWords + labelWords + STATIC_LABEL_WORDS;
 }

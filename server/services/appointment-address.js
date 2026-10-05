@@ -22,6 +22,14 @@ async function planAppointmentAddress(conn, serviceId, propertyId, scope = 'seri
       if (parentId) q.orWhere('id', parentId).orWhere((children) => children
         .where('recurring_parent_id', parentId).whereNotIn('status', JOIN_INELIGIBLE_STATUSES));
     }).orderBy('id');
+  // A package visit 2 is the same treatment at the same property: an address
+  // correction on visit 1 carries to it in every scope (it is neither
+  // recurring nor grouped), including one parked 'rescheduled' by a customer
+  // request, which is rebooked later from this row.
+  const kids = await conn('scheduled_services').where({ customer_id: anchor.customer_id, parent_service_id: anchor.id,
+    source_action: 'package_followup_auto' }).whereIn('status', ['pending', 'confirmed', 'rescheduled']);
+  const packageChildIds = kids.filter((row) => row.source_action === 'package_followup_auto').map((row) => row.id);
+  if (packageChildIds.length) rows = [...new Map([...rows, ...kids.filter((row) => packageChildIds.includes(row.id))].map((row) => [row.id, row])).values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
   const visitIds = [...new Set(rows.filter((row) => row.id === anchor.id || !JOIN_INELIGIBLE_STATUSES.includes(row.status))
     .map((row) => row.visit_id).filter(Boolean))];
   if (visitIds.length) {
@@ -34,7 +42,7 @@ async function planAppointmentAddress(conn, serviceId, propertyId, scope = 'seri
   const stopKeys = [...new Set(rows.flatMap((row) => [row.property_id, propertyId].map((id) => stopBaseKey({
     propertyId: id, customerId: row.customer_id, scheduledDate: row.scheduled_date,
   }))).concat(visits.map((visit) => visit.stop_base_key)))].sort();
-  return { anchor, parentId, propertyId, scope, rows, visits, stopKeys };
+  return { anchor, parentId, propertyId, scope, rows, visits, stopKeys, packageChildIds };
 }
 
 // Called after occupancy, tech-day, maintenance and comms locks, before stop/appointment rows.
@@ -66,7 +74,8 @@ async function applyAppointmentAddress(trx, plan, actorId) {
   }
   const locked = await trx('scheduled_services').whereIn('id', plan.rows.map((row) => row.id)).orderBy('id').forUpdate();
   if (fingerprint({ rows: locked }) !== fingerprint(plan)) throw retry();
-  const addressRows = locked.filter((row) => row.id === plan.anchor.id || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
+  const addressRows = locked.filter((row) => row.id === plan.anchor.id || (fresh.packageChildIds || []).includes(row.id)
+    || !JOIN_INELIGIBLE_STATUSES.includes(row.status));
   for (const visit of fresh.visits) {
     const verdict = await frozenVisitVerdict(trx, visit.id);
     // A retained historical member must never be left at a different property
