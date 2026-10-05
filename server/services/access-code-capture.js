@@ -374,7 +374,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
       // only a row still waiting or still live makes a new one redundant.
       const existing = (await trx('customer_access_codes as a')
         .leftJoin('scheduled_services as ss', 'ss.id', 'a.scheduled_service_id')
-        .where('a.customer_id', customer.id).whereIn('a.status', ['found', 'active'])
+        .where('a.customer_id', customer.id).whereIn('a.status', ['found', 'active']).whereRaw(OWNED_SOURCE_SQL)
         .whereIn('a.value_hash', items.map((i) => i.value_hash))
         .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.instructions', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
         .filter((r) => isLive(r));
@@ -648,7 +648,8 @@ async function fillEmptyProfileField(trx, customerId, { kind, life, code }) {
 // The active standing row that already holds this kind and value, if any.
 async function standingTwin(trx, customerId, { kind, life, value_hash: hash }, exceptId = null) {
   if (life !== 'standing') return null;
-  const q = trx('customer_access_codes').where({ customer_id: customerId, kind, value_hash: hash, status: 'active', life: 'standing' });
+  const q = trx('customer_access_codes').where({ customer_id: customerId, kind, value_hash: hash, status: 'active', life: 'standing' })
+    .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'));
   if (exceptId) q.whereNot('id', exceptId);
   return (await q.forUpdate().first('id', 'instructions')) || null;
 }

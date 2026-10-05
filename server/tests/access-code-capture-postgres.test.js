@@ -783,6 +783,19 @@ postgres('access codes section', () => {
       expect((await rows(second.id)).map((r) => r.status)).toEqual(['found']);
     });
 
+    test('a hidden code whose text moved away never blocks a new find or a staff add', async () => {
+      const winner = await customer();
+      const loser = await customer();
+      const id = await text(winner.id, 'The door code is 2468');
+      await sweep(stub([gateItem({ kind: 'door', code: '2468', quote: 'The door code is 2468' })]));
+      await access.accept(trx, (await rows(winner.id))[0].id, {});
+      await trx('sms_log').where({ id }).update({ customer_id: loser.id });
+      await text(winner.id, 'Door code 2468', { at: '2040-03-10T15:30:00Z' });
+      await sweep(stub([gateItem({ kind: 'door', code: '2468', quote: 'Door code 2468' })]));
+      expect((await rows(winner.id)).filter((r) => r.status === 'found')).toHaveLength(1);
+      expect(await access.addByStaff(trx, { customerId: winner.id, kind: 'door', life: 'standing', code: '2468' })).toMatchObject({ ok: true });
+    });
+
     test('a refused accept leaves the active twin untouched', async () => {
       const winner = await customer();
       const loser = await customer();
