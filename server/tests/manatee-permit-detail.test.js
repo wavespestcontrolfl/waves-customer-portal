@@ -644,7 +644,7 @@ function helperStub(results) {
   const queries = [];
   db.mockImplementation((table) => {
     const q = { table, wheres: [], then: null };
-    for (const m of ['where', 'whereRaw', 'orderByRaw', 'orderBy', 'first']) {
+    for (const m of ['where', 'whereRaw', 'orderByRaw', 'orderBy', 'first', 'limit']) {
       q[m] = jest.fn((...a) => { q.wheres.push([m, ...a]); return q; });
     }
     q.where = jest.fn((...a) => { q.wheres.push(['where', ...a]); if (typeof a[0] === 'function') a[0](q); return q; });
@@ -665,11 +665,34 @@ const FACT_ROW = {
 };
 
 describe('findPermitBuildingFacts', () => {
+  test('address tier with a street check: the newest candidate on another street never hides this address\'s own older permit', async () => {
+    const newerOtherStreet = { ...FACT_ROW, permit_no: 'BLD9902-0002', issued_date: '2026-07-01', address_raw: '100 SAMPLE WAY  PARRISH 34219', conditioned_sqft: 3400 };
+    const olderOwn = { ...FACT_ROW, permit_no: 'BLD9902-0001', issued_date: '2026-01-15', address_raw: '100 SAMPLE TRL  PARRISH 34219' };
+    const queries = helperStub([[newerOtherStreet, olderOwn]]);
+    const matches = jest.fn((raw) => raw === '100 SAMPLE TRL  PARRISH 34219');
+    const out = await findPermitBuildingFacts({ looseKey: '100sample34219', addressMatches: matches });
+    expect(out).toMatchObject({ matchedBy: 'address', permitNo: 'BLD9902-0001', addressRaw: '100 SAMPLE TRL  PARRISH 34219', conditionedSqft: 2240 });
+    expect(matches.mock.calls.map(([raw]) => raw)).toEqual(['100 SAMPLE WAY  PARRISH 34219', '100 SAMPLE TRL  PARRISH 34219']);
+    // Candidates are read newest-first in one bounded query, never `.first()`.
+    expect(queries).toHaveLength(1);
+    expect(queries[0].wheres.some(([m, n]) => m === 'limit' && n === 10)).toBe(true);
+    expect(queries[0].wheres.some(([m]) => m === 'first')).toBe(false);
+    // No candidate passes: nothing on file (never the newest row by default).
+    helperStub([[newerOtherStreet]]);
+    expect(await findPermitBuildingFacts({ looseKey: '100sample34219', addressMatches: () => false })).toBeNull();
+    // Without a street check the address tier keeps its old shape (.first()).
+    const plain = helperStub([FACT_ROW]);
+    expect(await findPermitBuildingFacts({ looseKey: '100sample34219' })).toMatchObject({ matchedBy: 'address', permitNo: 'BLD9801-1201' });
+    expect(plain[0].wheres.some(([m]) => m === 'first')).toBe(true);
+  });
+
   test('parcel tier first; returns the newest ok row with source and fetch date', async () => {
     const queries = helperStub([FACT_ROW]);
     const out = await findPermitBuildingFacts({ parcelPin: '1234567890', looseKey: '100sample34219' });
     expect(out).toEqual({
       source: 'manatee_permit_detail',
+      matchedBy: 'parcel',
+      addressRaw: null,
       permitNo: 'BLD9801-1201',
       typeOfWork: 'New Single Family',
       issuedAt: '2026-03-02',

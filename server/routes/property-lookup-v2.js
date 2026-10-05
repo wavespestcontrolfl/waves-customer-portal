@@ -25,6 +25,8 @@ const { lookupPoolPermitsByParcel } = require('../services/property-lookup/count
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
 const { commercialSuiteSizingLive, lookupBusinessIdentityLive } = require('../config/feature-gates');
+// Own line so gate PRs never conflict on the shared import.
+const { lookupPermitFactsLive } = require('../config/feature-gates');
 const {
   identifyBusinessAtAddress,
   timeoutMsFromEnv: businessIdentityTimeoutMs,
@@ -576,6 +578,16 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
           cached.property_record._constructionActivity = await findConstructionActivity({ parcelPin, looseKey });
         } catch { /* fail-open: table missing or DB blip = no signal */ }
       }
+      // Permit building facts (address-match R2-B, GATE_LOOKUP_PERMIT_FACTS)
+      // are recomputed on every non-cache-only hit for the same reason as
+      // the construction read above: the weekly detail sync learns a plan's
+      // size AFTER the row was cached. Not limited by the row's county: the
+      // no-county-record row (the new-plat miss this exists for) carries
+      // none, and the permit table is Manatee-only, so a foreign address
+      // simply finds no row. Fail-open; off = the record is untouched.
+      if (!cacheOnly && cached.property_record && lookupPermitFactsLive()) {
+        await stampPermitBuildingFacts(cached.property_record, address);
+      }
       // House-number-audit backfill, same pattern: record-bearing rows cached
       // before the audit shipped have no _addressAudit key, so the panel's
       // typo hint would stay dark until the 180-day TTL. Audit once on hit
@@ -772,6 +784,17 @@ async function performPropertyLookupCore(address, options = {}, attemptId) {
       } catch (err) {
         result.errors.push({ source: 'construction-permits', message: err?.message || String(err) });
       }
+    }
+
+    // The home's own building permit (address-match R2-B): conditioned and
+    // under-roof square footage and stories off the Manatee permit detail
+    // sync, for the new home the county roll has not posted yet. Stamped on
+    // the record like _subdivisionMedian (rides the cache; recomputed on
+    // hits); the enriched profile exposes it only beside an EMPTY home sqft,
+    // and never as a measurement. One indexed local query; fail-open; off =
+    // no read and no stamp.
+    if (lookupPermitFactsLive()) {
+      await stampPermitBuildingFacts(result.propertyRecord, address, result.errors);
     }
 
     // Unassessed vacant parcel (plat filed, roll not posted — the LWR /
@@ -1849,6 +1872,97 @@ function subdivisionMedianEstimate(rc) {
   };
 }
 
+// Permit building facts (address-match R2-B). Reads the Manatee permit detail
+// table for the record's parcel (Manatee pin only — pin formats collide across
+// counties) and the typed address's loose key, and stamps the newest permit's
+// building facts on the record as _permitBuildingFacts. null = checked, no
+// permit on file (tells a later reader the row was checked); the key is left
+// absent when the read could not run. Fail-open: a missing table or a DB
+// blip is "no signal" (recorded on the lookup's errors when given).
+async function stampPermitBuildingFacts(record, address, errors = null) {
+  if (!record) return;
+  try {
+    const { looseKeyFromFreeform } = require('../services/property-lookup/manatee-permit-sync');
+    const { findPermitBuildingFacts } = require('../services/property-lookup/manatee-permit-detail');
+    const parcel = record._parcel;
+    const parcelPin = parcel?.county === 'Manatee' && parcel.paoParcelId ? String(parcel.paoParcelId) : null;
+    const looseKey = looseKeyFromFreeform(address);
+    if (!parcelPin && !looseKey) return;
+    // The address tier matches on the LOOSE key only (house number, first
+    // street word, ZIP), which two streets can share ("100 Oak St" / "100
+    // Oak Ln"). The reader holds every address-tier candidate to a full
+    // street-line match against the permit's own job address, same
+    // normalization as the county audit (suffixes, route aliases, units
+    // stripped), newest match first; a permit with no address on file never
+    // matches. A parcel-tier hit is the parcel's own permit.
+    const facts = await findPermitBuildingFacts({
+      parcelPin,
+      looseKey,
+      addressMatches: (permitAddressRaw) => permitStreetMatchesTyped(address, permitAddressRaw),
+    });
+    record._permitBuildingFacts = facts || null;
+  } catch (err) {
+    if (Array.isArray(errors)) errors.push({ source: 'permit-facts', message: err?.message || String(err) });
+  }
+}
+
+// Full street-line equality between the typed address and a permit's one-line
+// job address ("200 SAMPLE TRL  PARRISH 34219"): house number + canonical
+// street name, city/ZIP/state and unit designators removed on both sides.
+// Fail closed: no permit address, or either side without a house number,
+// is not a match.
+function permitStreetMatchesTyped(typedAddress, permitAddressRaw) {
+  if (!typedAddress || !permitAddressRaw) return false;
+  try {
+    const { normalizeCountyStreetLine, _private: { stripUnitDesignators } } = require('../services/property-lookup/ai-property-lookup');
+    const key = (s) => stripUnitDesignators(normalizeCountyStreetLine(String(s).split(/\s{2,}/)[0]));
+    const typed = key(typedAddress);
+    const permit = key(permitAddressRaw);
+    return /^\d+\s+\S/.test(typed) && typed === permit;
+  } catch {
+    return false;
+  }
+}
+
+// Plausible conditioned area for one new dwelling; a value outside this is a
+// parse slip on the permit page, not a home.
+const PERMIT_PLAN_SQFT_MIN = 400;
+const PERMIT_PLAN_SQFT_MAX = 15000;
+
+// Permit-plan size estimate off the stamped _permitBuildingFacts. Read-side
+// gate, like subdivisionMedianEstimate: the estimate exists ONLY while the
+// record itself carries no home size — the moment the roll posts the home or
+// a tech verifies it, the plan figure steps aside — and only while the gate is
+// live (kill = unset: stamped rows stop exposing it at once). The plan's
+// conditioned area is this house, not its neighbors, so it outranks the plat
+// median; it is still an estimate (what was permitted, not measured), and
+// every consumer flags it for confirmation.
+function permitBuildingFactsEstimate(rc) {
+  const stamped = rc?._permitBuildingFacts;
+  if (!stamped || !lookupPermitFactsLive()) return null;
+  if (rc.squareFootage) return null;
+  const positive = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Math.round(Number(v)) : null);
+  const conditionedSqft = positive(stamped.conditionedSqft);
+  if (!conditionedSqft || conditionedSqft < PERMIT_PLAN_SQFT_MIN || conditionedSqft > PERMIT_PLAN_SQFT_MAX) return null;
+  const permitNo = stamped.permitNo ? String(stamped.permitNo) : null;
+  const storiesRaw = Number(stamped.stories);
+  const stories = Number.isInteger(storiesRaw) && storiesRaw >= 1 && storiesRaw <= 4 ? storiesRaw : null;
+  const issued = stamped.issuedAt ? new Date(stamped.issuedAt) : null;
+  const issuedLabel = issued && !Number.isNaN(issued.getTime())
+    ? issued.toLocaleDateString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' }) : null;
+  return {
+    conditionedSqft,
+    underRoofSqft: positive(stamped.underRoofSqft),
+    stories,
+    bedrooms: positive(stamped.bedrooms),
+    bathrooms: Number.isFinite(Number(stamped.bathrooms)) && Number(stamped.bathrooms) > 0 ? Number(stamped.bathrooms) : null,
+    permitNo,
+    issuedAt: stamped.issuedAt || null,
+    coIssuedAt: stamped.coIssuedAt || null,
+    sourceLabel: `Manatee building permit${permitNo ? ` ${permitNo}` : ''}${issuedLabel ? `, issued ${issuedLabel}` : ''}`,
+  };
+}
+
 // Commercial suite sizing (owner ruling 2026-09-25,
 // server/services/commercial-suite-size/): resolveCommercialSubtype reads
 // the WHOLE building's/parcel's text, which for a plaza suite falls through
@@ -2547,6 +2661,15 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup });
+  // Permit building facts for the profile (R2-B): undefined = no stamp,
+  // null = withheld (unit lookup, commercial, unconfirmed address, size
+  // known, gate off), object = usable estimate. A permit story count fills
+  // an EMPTY record count only, so a looked-up or verified count never moves.
+  const permitFacts = rc?._permitBuildingFacts === undefined
+    ? undefined
+    : ((unitLookup || commercialProfile || fieldVerifyFlags.some((flag) => flag?.field === 'address'))
+      ? null : permitBuildingFactsEstimate(rc));
+  const permitStories = !(Number(rc?.stories) > 0) && Number(permitFacts?.stories) >= 1 ? Number(permitFacts.stories) : null;
   if (residentialCondoUnitLookup) {
     // One propertyType flag per profile: win/loss tallies every flag, so a
     // source-conflict warning on the same field would double-count (codex
@@ -2796,15 +2919,21 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       ? undefined
       : ((unitLookup || commercialProfile || fieldVerifyFlags.some((flag) => flag?.field === 'address'))
         ? null : subdivisionMedianEstimate(rc)),
+    // The home's own building permit (address-match R2-B): same three states
+    // and the same withholding as subdivisionMedian. The admin tool prefills
+    // from it ahead of the plat median; the engine prices it as a fallback
+    // source (yellow lane). Only ever beside an EMPTY homeSqFt.
+    permitBuildingFacts: permitFacts,
     // Machine-readable twin of the parkParcel verify flag (multi-situs master
     // parcel — land-lease mobile-home park or similar; the roll vouches for
     // the address but not for any per-unit dimension).
     multiSitusMasterParcel: detectMultiSitusMasterParcel(rc) ? true : undefined,
-    stories: rc?.stories || 1,
+    stories: rc?.stories || permitStories || 1,
     // Provenance for the `stories` value so the client can decide whether to
     // amber-nudge the estimator to eyeball the photos. 'ai' = verified public
-    // record/search source; 'default' = nobody knew, we fell back to 1.
-    storiesSource: rc?._storiesSource || (rc?.stories ? 'ai' : 'default'),
+    // record/search source; 'permit' = the home's own building permit filled
+    // an empty count (R2-B); 'default' = nobody knew, we fell back to 1.
+    storiesSource: permitStories ? 'permit' : (rc?._storiesSource || (rc?.stories ? 'ai' : 'default')),
     footprint: resolvedCommercialSuiteSize ? resolvedCommercialSuiteSize.value : (aggregateStoriesUnknown ? 0 : footprintSf),
     // Machine-readable twin of the HIGH footprint flag: BOTH the estimator's
     // termite autofill and calculatePropertyProfile re-derive a footprint
@@ -4663,7 +4792,23 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
 
   // Home sq ft has no source (client + lead automation fall back to a flat
   // 2,000 sq ft default — there is no lot-size estimator, so say so).
-  if (rc && !rc.squareFootage && rc.lotSize) {
+  // The home's own building permit (R2-B) names the plan's size: the flag
+  // says where the prefill came from. Same gates as the plat median below
+  // (unit lookup, unconfirmed address, commercial), and it does not need a
+  // lot size — the new-plat miss this serves has no county record at all.
+  const permitPlan = rc && !rc.squareFootage && !residentialUnitLookup
+    && !flags.some((flag) => flag?.field === 'address') && detectCategory(rc, ai || {}) !== 'COMMERCIAL'
+    ? permitBuildingFactsEstimate(rc) : null;
+  if (permitPlan) {
+    const parts = [`${permitPlan.conditionedSqft.toLocaleString('en-US')} sq ft conditioned`];
+    if (permitPlan.underRoofSqft) parts.push(`${permitPlan.underRoofSqft.toLocaleString('en-US')} sq ft under roof`);
+    if (permitPlan.stories) parts.push(`${permitPlan.stories} ${permitPlan.stories === 1 ? 'story' : 'stories'}`);
+    flags.push({
+      field: 'homeSqFt',
+      reason: `Home sq ft not on the county roll yet (new construction). Prefilled from ${permitPlan.sourceLabel}: ${parts.join(', ')} — the permitted plan, not a measurement; confirm the size with the customer before pricing`,
+      priority: 'HIGH',
+    });
+  } else if (rc && !rc.squareFootage && rc.lotSize) {
     // Same gate as the profile's subdivisionMedian: an unconfirmed address
     // (address flags are pushed above) gets the median-free copy too.
     const platMedian = vacantParcel && !residentialUnitLookup && !flags.some((flag) => flag?.field === 'address')
@@ -6187,6 +6332,8 @@ module.exports._private = {
   cachedAggregateResolvesToOwnUnit,
   cachedUnitFolioStale,
   subdivisionMedianEstimate,
+  permitBuildingFactsEstimate,
+  permitStreetMatchesTyped,
   inFlightLookups,
   lookupCoalesceKey,
   applyParcelTurfBound,

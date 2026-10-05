@@ -29,6 +29,12 @@ const SQFT_SOURCES = {
   COUNTY_ASSESSED: 'county_assessed',
   PROFILE: 'customer_profile',
   SUBDIVISION_MEDIAN: 'subdivision_median',
+  // The home's own building permit's conditioned area (address-match R2-B,
+  // GATE_LOOKUP_PERMIT_FACTS; the lookup exposes it as
+  // enriched.permitBuildingFacts only beside an empty home sqft). This
+  // house, not its neighbors, so it outranks the plat median — but it is
+  // what was PERMITTED, not measured, so it stays a fallback source.
+  PERMIT_PLAN: 'permit_plan',
   LOOKUP_ESTIMATE: 'property_lookup_estimate',
   // Commercial-suite sizing (owner ruling 2026-09-25,
   // server/services/commercial-suite-size/): resolved by index.js AFTER
@@ -86,8 +92,9 @@ function countyLooksUnassessed(parcel) {
  *   (customers.property_sqft is treated LAWN area — never a home-sqft source)
  *   isCommercial   — composer/extraction commercial signal
  *   subdivisionMedian — { medianSqft, sampleCount } | null (pre-fetched)
+ *   permitFacts    — { conditionedSqft, permitNo } | null (the lookup's permitBuildingFacts)
  */
-function resolveHomeSqft({ extraction, parcel, lookupSqft, isCommercial, subdivisionMedian }) {
+function resolveHomeSqft({ extraction, parcel, lookupSqft, isCommercial, subdivisionMedian, permitFacts = null }) {
   const rejected = [];
   const stated = callerStatedSqft(extraction);
   const county = positive(parcel?.livingAreaSqft);
@@ -134,6 +141,20 @@ function resolveHomeSqft({ extraction, parcel, lookupSqft, isCommercial, subdivi
   // NOTE: customers.property_sqft is deliberately NOT a home-sqft source —
   // the schema defines it as TREATED LAWN AREA, not living area (it feeds
   // the engine as measuredTurfSf instead; see buildEngineInput).
+
+  // New construction: the home's own building permit lists the plan's
+  // conditioned area. Above the plat median (this house, not its neighbors),
+  // below county and the caller; the lookup only exposes it when the record
+  // carries no home size, so no county figure is ever overridden here.
+  if (positive(permitFacts?.conditionedSqft)) {
+    return {
+      value: Math.round(Number(permitFacts.conditionedSqft)),
+      source: SQFT_SOURCES.PERMIT_PLAN,
+      confidence: 'medium',
+      permitNo: permitFacts.permitNo || null,
+      rejected,
+    };
+  }
 
   // New construction / unassessed parcel: median of already-assessed homes
   // in the same subdivision phase.
@@ -199,6 +220,7 @@ function pricingSafePropertyType(value) {
 // Sources that mean "we measured nothing real" — downstream lane logic
 // treats any of these as an automatic yellow (or red when unresolved).
 const FALLBACK_SQFT_SOURCES = new Set([
+  SQFT_SOURCES.PERMIT_PLAN,
   SQFT_SOURCES.SUBDIVISION_MEDIAN,
   SQFT_SOURCES.LOOKUP_ESTIMATE,
   SQFT_SOURCES.NONE,
@@ -280,7 +302,7 @@ function normalizeParcelView(propertyRecord) {
  * pre-normalized `parcelView` (index.js builds one so the subdivision-median
  * dig and arbitration read the same view).
  */
-function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommercial, subdivisionMedian, parcelView }) {
+function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommercial, subdivisionMedian, parcelView, permitFacts = null }) {
   const parcel = parcelView || normalizeParcelView(propertyRecord);
   const home = resolveHomeSqft({
     extraction,
@@ -290,6 +312,7 @@ function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommerci
     lookupSqft: parcel?.livingAreaSqft ? null : propertyRecord?.squareFootage,
     isCommercial,
     subdivisionMedian,
+    permitFacts,
   });
   const lot = resolveLotSqft({
     extraction,
@@ -315,6 +338,9 @@ function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommerci
     propertyRecord?.propertyType || extraction?.property?.property_type,
   );
 
+  if (home.source === SQFT_SOURCES.PERMIT_PLAN) {
+    logger.info('[estimator-engine] home sqft resolved from the building permit plan');
+  }
   if (home.source === SQFT_SOURCES.SUBDIVISION_MEDIAN) {
     logger.info('[estimator-engine] home sqft resolved from subdivision median', {
       sampleCount: home.sampleCount || 0,

@@ -97,6 +97,34 @@ describe('publicEnrichedProfile — plat median stays out of the public payload'
     expect(plain.fieldVerifyFlags).toBe(enriched.fieldVerifyFlags);
   });
 
+  it('drops permitBuildingFacts, resets a permit-filled story count and scrubs the homeSqFt flag (R2-B)', () => {
+    const enriched = {
+      homeSqFt: 0,
+      stories: 2,
+      storiesSource: 'permit',
+      permitBuildingFacts: { conditionedSqft: 2314, underRoofSqft: 3102, stories: 2, permitNo: 'BLD2503-01234', issuedAt: '2025-03-14T00:00:00.000Z', sourceLabel: 'Manatee building permit BLD2503-01234, issued Mar 2025' },
+      fieldVerifyFlags: [
+        { field: 'homeSqFt', priority: 'HIGH', reason: 'Prefilled from Manatee building permit BLD2503-01234, issued Mar 2025: 2,314 sq ft conditioned, 2 stories' },
+        { field: 'yearBuilt', priority: 'MEDIUM', reason: 'Year built missing' },
+      ],
+    };
+    const out = publicEnrichedProfile(enriched);
+    expect('permitBuildingFacts' in out).toBe(false);
+    expect(out.stories).toBe(1);
+    expect(out.storiesSource).toBe('default');
+    expect(JSON.stringify(out)).not.toMatch(/BLD2503|2,314|3,102|permit/i);
+    expect(out.fieldVerifyFlags[0]).toEqual({ field: 'homeSqFt', priority: 'HIGH', reason: VACANT_SQFT_FLAG_COPY });
+    expect(out.fieldVerifyFlags[1]).toEqual(enriched.fieldVerifyFlags[1]);
+    // Never mutates the lookup result the admin path also reads.
+    expect(enriched.stories).toBe(2);
+    expect(enriched.storiesSource).toBe('permit');
+    expect(enriched.permitBuildingFacts.permitNo).toBe('BLD2503-01234');
+    // A null (withheld) block is dropped too, and leaves the flags alone.
+    const withheld = publicEnrichedProfile({ homeSqFt: 2300, stories: 1, storiesSource: 'ai', permitBuildingFacts: null, fieldVerifyFlags: enriched.fieldVerifyFlags });
+    expect('permitBuildingFacts' in withheld).toBe(false);
+    expect(withheld.fieldVerifyFlags).toBe(enriched.fieldVerifyFlags);
+  });
+
   it('passes null / non-object profiles through as null', () => {
     expect(publicEnrichedProfile(null)).toBeNull();
     expect(publicEnrichedProfile(undefined)).toBeNull();

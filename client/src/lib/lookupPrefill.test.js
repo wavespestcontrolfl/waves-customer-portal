@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { palmPrefillAllowed, subdivisionMedianPrefillSqFt, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "./lookupPrefill";
+import { palmPrefillAllowed, subdivisionMedianPrefillSqFt, permitPlanPrefillSqFt, lookupHomeSqFtPrefill, homeSqFtIsUnverifiedPlatMedian, lookupLotIsUnitParcel, scopeUnitParcelProfile, scrubReopenedEstimateForm } from "./lookupPrefill";
 
 describe("palm-count prefill gate", () => {
   it("prefills a server-trusted count", () => {
@@ -115,6 +115,75 @@ describe("plat-median prefill never saves as tech-verified", () => {
     expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2980", _homeSqFtEdited: false }, { ...VACANT_WITH_MEDIAN, homeSqFt: 2980 })).toBe(false);
     expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2980" }, { homeSqFt: 2980 })).toBe(false);
     expect(homeSqFtIsUnverifiedPlatMedian(null, VACANT_WITH_MEDIAN)).toBe(false);
+  });
+});
+
+// New-construction lot with the home's own Manatee building permit: the
+// server exposes the permit facts beside an EMPTY homeSqFt (same as the median).
+const PERMIT_FACTS = {
+  conditionedSqft: 2314, underRoofSqft: 3102, stories: 2, bedrooms: 4, bathrooms: 2.5,
+  permitNo: "BLD2503-01234", issuedAt: "2025-03-14T00:00:00.000Z", coIssuedAt: null,
+  sourceLabel: "Manatee building permit BLD2503-01234, issued Mar 2025",
+};
+const VACANT_WITH_PERMIT = { ...VACANT_WITH_MEDIAN, permitBuildingFacts: PERMIT_FACTS };
+
+describe("building-permit plan home sq ft prefill", () => {
+  it("prefills the permit's conditioned area and beats the plat median", () => {
+    expect(permitPlanPrefillSqFt(VACANT_WITH_PERMIT)).toBe(2314);
+    expect(lookupHomeSqFtPrefill(VACANT_WITH_PERMIT)).toBe("2314");
+    // The median helper itself is untouched.
+    expect(subdivisionMedianPrefillSqFt(VACANT_WITH_PERMIT)).toBe(3071);
+  });
+
+  it("works without a median, and rounds a fractional area", () => {
+    expect(lookupHomeSqFtPrefill({ homeSqFt: 0, permitBuildingFacts: PERMIT_FACTS })).toBe("2314");
+    expect(permitPlanPrefillSqFt({ homeSqFt: 0, permitBuildingFacts: { ...PERMIT_FACTS, conditionedSqft: 2313.6 } })).toBe(2314);
+  });
+
+  it("a real record value always wins over the permit plan", () => {
+    const built = { ...VACANT_WITH_PERMIT, homeSqFt: 2980 };
+    expect(permitPlanPrefillSqFt(built)).toBeNull();
+    expect(lookupHomeSqFtPrefill(built)).toBe("2980");
+  });
+
+  it("falls back to the median for an absent, withheld or unusable permit", () => {
+    expect(lookupHomeSqFtPrefill(VACANT_WITH_MEDIAN)).toBe("3071");
+    expect(lookupHomeSqFtPrefill({ ...VACANT_WITH_MEDIAN, permitBuildingFacts: null })).toBe("3071");
+    expect(lookupHomeSqFtPrefill({ ...VACANT_WITH_MEDIAN, permitBuildingFacts: { ...PERMIT_FACTS, conditionedSqft: null } })).toBe("3071");
+    expect(lookupHomeSqFtPrefill({ ...VACANT_WITH_MEDIAN, permitBuildingFacts: { ...PERMIT_FACTS, conditionedSqft: 0 } })).toBe("3071");
+    expect(permitPlanPrefillSqFt({ homeSqFt: 0, permitBuildingFacts: null })).toBeNull();
+    expect(permitPlanPrefillSqFt({ homeSqFt: 0 })).toBeNull();
+    expect(permitPlanPrefillSqFt(undefined)).toBeNull();
+    expect(lookupHomeSqFtPrefill({ homeSqFt: 0, permitBuildingFacts: null })).toBe("");
+  });
+
+  it("never prefills for an unconfirmed address", () => {
+    const flagged = { ...VACANT_WITH_PERMIT, fieldVerifyFlags: [{ field: "address", priority: "HIGH", reason: "house number mismatch" }] };
+    expect(permitPlanPrefillSqFt(flagged)).toBeNull();
+    expect(lookupHomeSqFtPrefill(flagged)).toBe("");
+    expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2314" }, flagged)).toBe(false);
+  });
+
+  it("a reopened saved estimate (homeSqFt = the prefill) still reads as the permit estimate", () => {
+    const reopened = { ...VACANT_WITH_PERMIT, homeSqFt: 2314 };
+    expect(permitPlanPrefillSqFt(reopened)).toBe(2314);
+    expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2314" }, reopened)).toBe(true);
+    // A different size typed before saving stays verifiable.
+    expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2400" }, { ...VACANT_WITH_PERMIT, homeSqFt: 2400 })).toBe(false);
+    expect(permitPlanPrefillSqFt({ ...VACANT_WITH_PERMIT, homeSqFt: 2400 })).toBeNull();
+  });
+});
+
+describe("building-permit prefill never saves as tech-verified", () => {
+  it("blocks the verify save while the prefill is untouched", () => {
+    expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2314", _homeSqFtEdited: false }, VACANT_WITH_PERMIT)).toBe(true);
+    // The median is still blocked too when the permit is absent.
+    expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "3071" }, VACANT_WITH_MEDIAN)).toBe(true);
+  });
+
+  it("clears once the operator has typed a size", () => {
+    expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2314", _homeSqFtEdited: true }, VACANT_WITH_PERMIT)).toBe(false);
+    expect(homeSqFtIsUnverifiedPlatMedian({ homeSqFt: "2500", _homeSqFtEdited: false }, VACANT_WITH_PERMIT)).toBe(false);
   });
 });
 
