@@ -2584,6 +2584,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
         {
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
+          // …and the package visit 2 retire (job-status.js no-show cascade),
+          // whose per-child failure the original transition swallowed.
+          void require('../services/call-booking-catalog').cancelCallFollowUpsForParentCancel({
+            conn: db, parentServiceId: svc.id, packageOnly: true,
+          }).catch(() => {});
         }
         // The invoice-void + credit-reversal seam can also have been lost
         // to a crash between the status commit and the post-success block

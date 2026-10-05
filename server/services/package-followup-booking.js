@@ -146,7 +146,8 @@ function primaryEligible(primary) {
   if (primary.reservation_expires_at) return false; // an estimate slot hold, not a booking yet
   if (primary.is_recurring === true || primary.recurring_parent_id) return false;
   if (primary.is_callback === true) return false;
-  if (primary.followup_included === true || primary.followup_source_service_id) return false; // never chain off visit 2
+  // Never chain off a child: visit 2, or any row linked to a parent.
+  if (primary.followup_included === true || primary.followup_source_service_id || primary.parent_service_id) return false;
   if (TERMINAL_PRIMARY_STATUSES.includes(String(primary.status || ''))) return false;
   return true;
 }
@@ -433,7 +434,9 @@ async function mirrorPrimaryAddressOntoPackageChildren({ database, estimateId } 
             OR c.service_address_line1 IS DISTINCT FROM p.service_address_line1
             OR c.service_address_line2 IS DISTINCT FROM p.service_address_line2
             OR c.service_address_city IS DISTINCT FROM p.service_address_city
-            OR c.service_address_zip IS DISTINCT FROM p.service_address_zip)
+            OR c.service_address_zip IS DISTINCT FROM p.service_address_zip
+            OR c.lat IS DISTINCT FROM p.lat
+            OR c.lng IS DISTINCT FROM p.lng)
           AND c.status NOT IN ('completed', 'cancelled', 'canceled', 'skipped', 'no_show')`,
       [PACKAGE_FOLLOWUP_SOURCE_ACTION, estimateId],
     );

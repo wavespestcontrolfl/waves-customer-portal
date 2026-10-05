@@ -17725,11 +17725,14 @@ const CallRecordingProcessor = {
                   // this writer keeps the pending shape for it.
                   const packageFollowUp = require('../config/feature-gates').packageFollowupAutobookLive()
                     && require('./package-followup-booking').isPackageFollowUpServiceKey(callBookingCatalogRow?.service_key)
-                    && !isPendingOutboundReviewBooking(primaryRow);
+                    // isUnreviewedDispatchOwned, not only the pending shape: a
+                    // voice booking the rebooker moved stays 'confirmed' with
+                    // customer_confirmed false and is still unreviewed.
+                    && !require('./call-booking-source-actions').isUnreviewedDispatchOwned(primaryRow);
                   // …and a visit 2 nobody discussed is not written at all
                   // until then: a pending child still arms reminders through
                   // the sweep, for a treatment the office has not approved.
-                  if (callFollowUpPlan.packageOnly && isPendingOutboundReviewBooking(primaryRow)) return null;
+                  if (callFollowUpPlan.packageOnly && require('./call-booking-source-actions').isUnreviewedDispatchOwned(primaryRow)) return null;
                   const primaryActualDate = callBookingDateOnly(primaryRow.scheduled_date);
                   if (primaryActualDate && primaryActualDate !== scheduledDate) {
                     fuPlan = resolveCallFollowUpPlan({

@@ -131,6 +131,7 @@ describe('mirrorPrimaryAddressOntoPackageChildren (estimate accept stamps visit 
     // Any difference from the parent's stamp is mirrored, not only an empty child (codex #5896 r3 P1).
     expect(sql).toMatch(/c\.property_id IS DISTINCT FROM p\.property_id/);
     expect(sql).toMatch(/c\.service_address_line1 IS DISTINCT FROM p\.service_address_line1/);
+    expect(sql).toMatch(/c\.lat IS DISTINCT FROM p\.lat/);
     expect(sql).toMatch(/p\.source_estimate_id = \?/);
     database.raw.mockRejectedValueOnce(new Error('boom'));
     expect(await mirrorPrimaryAddressOntoPackageChildren({ database, estimateId: 'est-1' })).toBe(0);
@@ -231,6 +232,7 @@ describe('ensurePackageFollowUpVisit', () => {
     ['re-service callback', { is_callback: true }],
     ['an included follow-up itself (visit 2 never chains a visit 3)', { followup_included: true }],
     ['a row already linked as a follow-up child', { followup_source_service_id: 'other' }],
+    ['a row linked to a parent (manual Schedule follow-up)', { parent_service_id: 'other' }],
     ['completed primary', { status: 'completed' }],
     ['cancelled primary', { status: 'cancelled' }],
     ['no customer', { customer_id: null }],
