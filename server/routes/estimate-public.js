@@ -157,6 +157,25 @@ function offerTiersGateOn() {
     ? featureGates.estimateOfferTiersLive()
     : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
 }
+// A LIVE active member never takes an offer tier (the member ladder is the
+// office's). "Member" is judged the way the accept will resolve the customer:
+// the linked customer_id when there is one, otherwise the prospective PHONE
+// match the accept lands on (matchAcceptCustomerByPhone) — an unlinked
+// estimate whose phone belongs to a member must not see the picker, reserve
+// a Best hold, or set up payment only to be refused at accept (Codex #5921 r1
+// P1). Strict and fail-closed: any read error reads as "member".
+async function offerTierMemberBlock(estimate, database = db) {
+  if (!estimate) return true;
+  try {
+    if (estimate.customer_id) {
+      return !!(await isActivePlanCustomer(database, estimate.customer_id, { strict: true }));
+    }
+    const { match } = await matchAcceptCustomerByPhone(estimate, database);
+    return !!match && match.active !== false && isMembershipCustomerRow(match);
+  } catch (_) {
+    return true;
+  }
+}
 const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
@@ -10457,13 +10476,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // and the slot routes make; stored evidence alone can miss a customer
     // who became a member after the quote was built). Re-judged inside the
     // money-bearing transaction below.
-    if (offerTier && estimate.customer_id) {
-      let liveMember = true;
-      try { liveMember = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
-      catch (_) { liveMember = true; }
-      if (liveMember) {
-        return res.status(400).json({ error: 'offer tiers are not available for this estimate', code: 'offer_tier_unavailable' });
-      }
+    if (offerTier && await offerTierMemberBlock(estimate, db)) {
+      return res.status(400).json({ error: 'offer tiers are not available for this estimate', code: 'offer_tier_unavailable' });
     }
     const keepCompanions = OfferTiers.offerTierKeepsCompanions(offerTier);
     const pricingBundle = OfferTiers.pricingBundleForOfferTier(pricingBundleAsOffered, offerTier);
@@ -28023,7 +28037,31 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
     : addMissingBilledPerApplicationFlags(bundle);
 }
 
-async function buildPricingBundleInner(estimate) {
+// Offer tiers (Codex #5921 r1 P1): a bundle frozen while the gate was dark
+// (every send snapshot of an already-sent quote, and any cached payload from
+// before the flip) carries no tier verdict. The gate is read at call time, so
+// such a bundle is AUGMENTED on read: the live v1 build decides the tiers and
+// only its tier fields are grafted on — the frozen prices themselves stay
+// exactly as sent. A bundle built under the gate is stamped
+// offerTiersEvaluated so an ineligible estimate is not rebuilt on every read.
+function offerTiersVerdictMissing(bundle, estimate) {
+  return offerTiersGateOn()
+    && !!estimate?.show_one_time_option
+    && bundle && typeof bundle === 'object'
+    && bundle.offerTiersEvaluated !== true
+    && !Array.isArray(bundle.offerTiers);
+}
+function offerTierFieldsFrom(liveBundle) {
+  if (!liveBundle || typeof liveBundle !== 'object') return { offerTiersEvaluated: true };
+  return {
+    offerTiersEvaluated: true,
+    ...(Array.isArray(liveBundle.offerTiers) && liveBundle.offerTiers.length
+      ? { offerTiers: liveBundle.offerTiers, offerTierDefaultKey: liveBundle.offerTierDefaultKey }
+      : {}),
+  };
+}
+
+async function buildPricingBundleInner(estimate, { liveOnly = false } = {}) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
@@ -28132,7 +28170,13 @@ async function buildPricingBundleInner(estimate) {
     // builders — fast-pathing them would bill the undiscounted row a
     // discounted quote displayed. Already-netted legacy snapshots pass.
     && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate)
+    && !liveOnly
   ) {
+    // Offer tiers: graft the live tier verdict onto a pre-gate snapshot
+    // (prices untouched — see offerTiersVerdictMissing).
+    const offerTierGraft = offerTiersVerdictMissing(snapshotBundle, estimate)
+      ? offerTierFieldsFrom(await buildPricingBundleInner(estimate, { liveOnly: true }))
+      : {};
     // Chokepoint stamp AFTER finalizePricingBundle (Codex r5 P0 on #4789):
     // attachPublicPricingContract rebuilds services[] split cards there and
     // would drop an earlier stamp. Never a price field, never written back;
@@ -28140,6 +28184,7 @@ async function buildPricingBundleInner(estimate) {
     // corrected on every read.
     return stampTreeShrubPalmCount(finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
+      ...offerTierGraft,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
     })), estimate, estData), treeShrubPalmCountForEstData(estData) ?? stampedTreeShrubPalmCountInBundle(snapshotBundle));
@@ -28159,12 +28204,14 @@ async function buildPricingBundleInner(estimate) {
     if (hasRodentTrapping) clearEstimatePricingCache(estimate);
   }
 
-  const cached = getEstimatePricingCache(estimate);
+  const cached = liveOnly ? null : getEstimatePricingCache(estimate);
   // Same missing-fee guard as the snapshot fast path: a cached bundle built
   // before the fee rule (or restored oddly) must not serve a first-visit
-  // total the converter won't bill.
+  // total the converter won't bill. A cached bundle with no offer-tier
+  // verdict under a live gate rebuilds (offerTiersVerdictMissing).
   if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData)
-    && !pricingBundleLacksManualDiscountNetting(cached, estData, estimate)) {
+    && !pricingBundleLacksManualDiscountNetting(cached, estData, estimate)
+    && !offerTiersVerdictMissing(cached, estimate)) {
     // Stamped after finalize for the same reason as the snapshot path; a
     // cache entry written before this deploy must never serve a stale count.
     return stampTreeShrubPalmCount(
@@ -28356,6 +28403,7 @@ async function buildPricingBundleInner(estimate) {
     });
     const payload = stampTreeShrubPalmCount(finalizePricingBundle(withManualDiscount({
       frequencies: finalFreqs,
+      ...(pestOnlyChoice && offerTiersGateOn() ? { offerTiersEvaluated: true } : {}),
       ...offerTierFields,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice,
@@ -30041,9 +30089,8 @@ async function composeEstimateDataPayload(estimate, {
     // add stamp; a lookup error withholds the tiers). The bundle may carry
     // them (it is cached and send-snapshotted); this projection decides.
     let offerTiersBlockedByMembership = false;
-    if (Array.isArray(pricingBundle?.offerTiers) && estimate.customer_id) {
-      try { offerTiersBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
-      catch (_) { offerTiersBlockedByMembership = true; }
+    if (Array.isArray(pricingBundle?.offerTiers)) {
+      offerTiersBlockedByMembership = await offerTierMemberBlock(estimate, db);
     }
     const offerTiersServed = offerTiersGateOn()
       && Array.isArray(pricingBundle?.offerTiers)
@@ -31256,5 +31303,6 @@ module.exports.treeShrubFrequenciesFromResultStats = treeShrubFrequenciesFromRes
 module.exports.treeShrubPalmCountForEstData = treeShrubPalmCountForEstData;
 module.exports.shapeFromV1 = shapeFromV1;
 module.exports.stampTreeShrubPalmCount = stampTreeShrubPalmCount;
+module.exports.offerTierMemberBlock = offerTierMemberBlock;
 module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBundle;
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;

@@ -846,7 +846,12 @@ postgres('membership dues — serialization, reconciled shape, locked month (B08
   // billed the month on B must not bring A back or put its stamp back.
   test('a preserving edit paused before its transaction cannot revive A after A was voided and B billed the month (void → replacement B → edit resumes)', async () => {
     const f = await seedMember();
-    // Pause the NEXT BEGIN (the preserving edit's transaction); every other BEGIN passes.
+    // Pause the preserving edit's BEGIN; every other BEGIN passes. The edit runs
+    // inside editScope, so a BEGIN from work the completion route left running
+    // in the background is never the one paused (that left the edit unpaused,
+    // and it resolved against a still-live A).
+    const { AsyncLocalStorage } = require('async_hooks');
+    const editScope = new AsyncLocalStorage();
     const driver = Object.getPrototypeOf(mockPg.client);
     const originalQuery = driver._query;
     let release;
@@ -854,7 +859,7 @@ postgres('membership dues — serialization, reconciled shape, locked month (B08
     let armed = false;
     let paused = false;
     driver._query = function patched(connection, obj) {
-      if (armed && /^\s*begin/i.test(String(obj?.sql || ''))) {
+      if (armed && editScope.getStore() && /^\s*begin/i.test(String(obj?.sql || ''))) {
         armed = false;
         paused = true;
         return gate.then(() => originalQuery.call(this, connection, obj));
@@ -865,7 +870,7 @@ postgres('membership dues — serialization, reconciled shape, locked month (B08
       const a = await mintDues(f, 'Lawn Care');
       const renamed = a.invoice.line_items.map((li) => (li.membership_dues_month ? { ...li, description: 'Lawn Care (renamed)' } : li));
       armed = true;
-      const preserving = InvoiceService.update(a.invoice.id, { line_items: renamed });
+      const preserving = editScope.run(true, () => InvoiceService.update(a.invoice.id, { line_items: renamed }));
       for (let i = 0; i < 40 && !paused; i += 1) await sleep(50);
       expect(paused).toBe(true);
       // Meanwhile: A is voided, and a completion bills the month on B.

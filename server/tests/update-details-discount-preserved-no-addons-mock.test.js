@@ -39,6 +39,8 @@ jest.mock('../middleware/admin-auth', () => {
   };
 });
 jest.mock('../models/db', () => jest.fn());
+// No package visit 2 on these rows (the service-change refusal reads it).
+jest.mock('../services/package-followup-booking', () => ({ hasLivePackageChild: async () => false }));
 jest.mock('../utils/customer-comms-lock', () => ({
   lockCustomerComms: jest.fn(async () => {}),
   tryLockCustomerComms: jest.fn(async () => true),
