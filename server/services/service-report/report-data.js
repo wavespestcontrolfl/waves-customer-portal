@@ -5896,6 +5896,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           findingsText: lawnAssessment.observations || lawnAssessment.customerSummary || '',
           photoSummary: reportV2.photoSummary || '',
           knex,
+          skipGeneration: opts.skipNarrativeGeneration === true,
         });
         reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
         treatmentNarrativeRenderedSignature = narrative?.signature || null;
@@ -6265,6 +6266,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             findingsText: reportV2.photoSummary || '',
             photoSummary: reportV2.photoSummary || '',
             knex,
+            skipGeneration: opts.skipNarrativeGeneration === true,
           });
           reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
           // Signature of the EXACT text rendered — PDF stores key off this,

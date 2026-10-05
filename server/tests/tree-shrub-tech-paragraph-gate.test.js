@@ -117,6 +117,8 @@ describe('freezeTreeShrubTechParagraph', () => {
     // The report was built from the joined record and a token, then the inputs were gathered from it.
     expect(ensureReportToken).toHaveBeenCalledWith('sr-1', knex);
     expect(buildReportV1Data).toHaveBeenCalledTimes(1);
+    // The input gather is side-effect free: the narrative lane is never dispatched from the build.
+    expect(buildReportV1Data.mock.calls[0][3]).toEqual({ skipNarrativeGeneration: true });
     expect(gatherTreeShrubTechParagraphInputs).toHaveBeenCalledWith(expect.objectContaining({ data: { reportV2: {} }, knex }));
   });
 
@@ -150,13 +152,70 @@ describe('freezeTreeShrubTechParagraph', () => {
     gatherTreeShrubTechParagraphInputs.mockResolvedValue({
       technicianNote: 'Found scale on the back hedge and treated the hedges with Merit.',
       products: [{ name: 'Merit 2F', kind: 'systemic', targets: ['scale'] }],
-      findings: [{ label: 'scale', confidence: 'high', source: 'seen' }],
+      findings: [{ label: 'pest pressure signals', confidence: 'low' }],
     });
     dispatchWithFallback.mockResolvedValue({ ok: false, reason: 'all_providers_failed' });
     const { knex, state } = fakeKnex();
     expect(await freezeTreeShrubTechParagraph({ service: SERVICE, knex })).toBeNull();
     expect(dispatchWithFallback.mock.calls[0][1]).toMatchObject({ laneId: 'ts_tech_paragraph' });
     expect(state.updates).toBe(0);
+  });
+});
+
+describe('one deadline for the whole step (the technician is waiting at Complete)', () => {
+  afterEach(() => jest.useRealTimers());
+  const settled = (promise) => { const state = { done: false, value: undefined }; promise.then((v) => { state.done = true; state.value = v; }); return state; };
+
+  test('a stalled assessment lookup cannot hold the completion past 15 s, and nothing runs after it', async () => {
+    gatesOn();
+    jest.useFakeTimers();
+    let release;
+    loadLinkedTreeShrubAssessment.mockImplementation(() => new Promise((resolve) => { release = resolve; }));
+    const { knex, state } = fakeKnex();
+    const generate = jest.fn(async () => GOOD);
+    const out = settled(freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate } }));
+    await jest.advanceTimersByTimeAsync(14999);
+    expect(out.done).toBe(false);
+    await jest.advanceTimersByTimeAsync(1);
+    expect(out.done).toBe(true);
+    expect(out.value).toBeNull();
+    // The lookup answering late starts nothing: no build, no model call, no write.
+    release({ id: 77 });
+    await jest.advanceTimersByTimeAsync(1000);
+    expect(generate).not.toHaveBeenCalled();
+    expect(buildReportV1Data).not.toHaveBeenCalled();
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(state.updates).toBe(0);
+  });
+
+  test('a slow lookup shortens the engine\'s budget by what it spent', async () => {
+    gatesOn();
+    jest.useFakeTimers();
+    loadLinkedTreeShrubAssessment.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ id: 77 }), 6000)));
+    const { knex } = fakeKnex();
+    const generate = jest.fn(async () => GOOD);
+    const out = settled(freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate } }));
+    await jest.advanceTimersByTimeAsync(6000);
+    await jest.advanceTimersByTimeAsync(10);
+    expect(out.done).toBe(true);
+    expect(generate).toHaveBeenCalledTimes(1);
+    const budget = generate.mock.calls[0][1].budgetMs;
+    expect(budget).toBeLessThanOrEqual(9000);
+    expect(budget).toBeGreaterThan(8000);
+  });
+
+  test('a lookup that leaves under a second runs nothing', async () => {
+    gatesOn();
+    jest.useFakeTimers();
+    loadLinkedTreeShrubAssessment.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ id: 77 }), 14500)));
+    const { knex } = fakeKnex();
+    const generate = jest.fn(async () => GOOD);
+    const out = settled(freezeTreeShrubTechParagraph({ service: SERVICE, knex, deps: { generate } }));
+    await jest.advanceTimersByTimeAsync(14500);
+    await jest.advanceTimersByTimeAsync(10);
+    expect(out.done).toBe(true);
+    expect(out.value).toBeNull();
+    expect(generate).not.toHaveBeenCalled();
   });
 });
 

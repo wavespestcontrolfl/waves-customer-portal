@@ -494,10 +494,12 @@ first person plural. It is written ONCE, at completion
 (`freezeTreeShrubTechParagraph`, `tree-shrub-tech-paragraph-gate.js`), by one model
 call (lane `ts_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second deadline across
 the whole step) from the technician's note (verbatim), the products applied with
-their stored targets, the watch-list items the technician marked Seen (never a
-refer-only item, never a trunk conk), the kept photo findings (symptom labels with a
-confidence; a finding the technician hid or rewrote never reaches the model) and
-the last visit's products and seen items. It never reads the raw photo-read text, a
+their stored targets and the kept photo findings (symptom labels with a
+confidence; a finding the technician hid or rewrote never reaches the model). The
+seasonal watch list (`GATE_TS_WATCH_LIST`) is NOT an input and stays tech-facing;
+neither is the last visit, the report's headline or a product's active ingredient.
+The input gather builds the report with `skipNarrativeGeneration`, so it never
+dispatches the treatment-narrative lane. It never reads the raw photo-read text, a
 price, an address or any customer name. The text freezes first-writer-wins under
 `structured_notes.treeShrubTechParagraph[assessmentId]`; a render only reads it from
 the record the build already loaded. The key is absent when no paragraph was written
@@ -505,9 +507,11 @@ the record the build already loaded. The key is absent when no paragraph was wri
 rejection). Code rejects the WHOLE paragraph, and stores nothing, on the lawn
 paragraph's rules (`validateParagraph` with a tree & shrub profile: unapplied or
 unknown product, a pest, disease or condition no input carries or the note negates
-or doubts, a number, date, promise, timing, watering advice, any comparison with the
-last visit, "the photos confirmed", a word outside the closed vocabulary, the
-customer-copy screens) plus the palm rules: never Ganoderma, a conk or the other
+or doubts, a number, date, promise, timing, watering advice, any reference to an
+earlier visit or comparison, "the photos confirmed", a word outside the closed
+vocabulary, the customer-copy screens) plus: no care instruction to the customer, no
+active-ingredient name that is not part of a listed product name, no sentence that
+names an applied product and also a plant group or place, and the palm rules: never Ganoderma, a conk or the other
 diagnosis-only palm diseases, never crown, spear leaf or newest fronds. The web
 report prints it under "What we applied today" as "From your technician"; the PDF
 prints the same text under the same label. The text is screened again where it is

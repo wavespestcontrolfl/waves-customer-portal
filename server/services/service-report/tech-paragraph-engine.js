@@ -197,12 +197,15 @@ function createTechParagraphEngine(cfg) {
    * Returns { status, entry? }; entry is the frozen entry, for the caller's in-memory notes.
    */
   async function createAndFreezeTechParagraph({
-    serviceRecordId, assessmentId, structuredNotes, getStructuredNotes, gatherInputs, knex, deps = {},
+    serviceRecordId, assessmentId, structuredNotes, getStructuredNotes, gatherInputs, knex, deps = {}, budgetMs,
   }) {
     if (!serviceRecordId || !assessmentId || typeof gatherInputs !== 'function') return { status: 'skipped' };
+    // A caller that spent part of the step's one deadline before this point (the T&S
+    // assessment lookup) passes what is left; the default is the whole budget.
+    const budget = Number.isFinite(budgetMs) ? Math.min(BUDGET_MS, budgetMs) : BUDGET_MS;
     const startedAt = Date.now();
     let expired = false;
-    const remaining = () => BUDGET_MS - (Date.now() - startedAt);
+    const remaining = () => budget - (Date.now() - startedAt);
     const live = () => !expired && remaining() > 0;
 
     const run = async () => {
@@ -238,7 +241,7 @@ function createTechParagraphEngine(cfg) {
 
     let timer;
     const deadline = new Promise((resolve) => {
-      timer = setTimeout(() => { expired = true; resolve({ status: 'timeout' }); }, BUDGET_MS);
+      timer = setTimeout(() => { expired = true; resolve({ status: 'timeout' }); }, Math.max(0, budget));
       if (typeof timer.unref === 'function') timer.unref();
     });
     const stepping = run().catch((err) => {

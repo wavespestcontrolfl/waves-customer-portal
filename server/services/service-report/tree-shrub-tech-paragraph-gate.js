@@ -7,10 +7,12 @@
  * throws, never blocks the completion beyond the paragraph's own 15 second
  * deadline, and stores nothing on any miss.
  *
- * The record read, the report build (the same object the customer report
- * renders), the input gather, the one model call, the validation and the freeze
- * all run inside the engine's ONE deadline (tech-paragraph-engine.js), because
- * the technician is waiting at Complete.
+ * ONE deadline covers the whole step, from the first read: the assessment
+ * lookup, the report build (the same object the customer report renders, built
+ * without any model call), the input gather, the one model call, the validation
+ * and the freeze, because the technician is waiting at Complete. The lookup is
+ * raced here; the rest runs inside the engine's deadline
+ * (tech-paragraph-engine.js), which gets only what is left.
  *
  * Gate off, or not a tree & shrub visit: returns before any read or call.
  */
@@ -31,47 +33,75 @@ const { detectServiceLine } = require('./service-line-configs');
 async function freezeTreeShrubTechParagraph({ service, knex, deps = {} } = {}) {
   if (!service || !service.id || !knex) return null;
   if (!featureGates.tsTechParagraphLive()) return null;
-  try {
-    const serviceLine = service.service_line || detectServiceLine(service.service_type);
-    if (serviceLine !== 'tree_shrub') return null;
+  const serviceLine = service.service_line || detectServiceLine(service.service_type);
+  if (serviceLine !== 'tree_shrub') return null;
 
-    const { loadLinkedTreeShrubAssessment } = require('../tree-shrub-assessment');
-    const tech = require('./tree-shrub-tech-paragraph');
-    // The paragraph belongs to the visit's confirmed assessment (the one the report
-    // reads). No assessment row yet (the photo scoring is still running or failed)
-    // means no report to sit in, so no paragraph.
-    const assessment = await loadLinkedTreeShrubAssessment(service, knex);
-    if (!assessment || assessment.id == null) {
-      logger.info(`[ts-tech-paragraph] none for service_record ${service.id}: no_assessment`);
+  const tech = require('./tree-shrub-tech-paragraph');
+  const startedAt = Date.now();
+  const remaining = () => tech.BUDGET_MS - (Date.now() - startedAt);
+  const TIMEOUT = Symbol('timeout');
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(TIMEOUT), tech.BUDGET_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+  });
+
+  const work = (async () => {
+    try {
+      const { loadLinkedTreeShrubAssessment } = require('../tree-shrub-assessment');
+      // The paragraph belongs to the visit's confirmed assessment (the one the report
+      // reads). No assessment row yet (the photo scoring is still running or failed)
+      // means no report to sit in, so no paragraph.
+      const assessment = await loadLinkedTreeShrubAssessment(service, knex);
+      if (!assessment || assessment.id == null) {
+        logger.info(`[ts-tech-paragraph] none for service_record ${service.id}: no_assessment`);
+        return null;
+      }
+      const assessmentId = String(assessment.id);
+      if (remaining() < 1000) return TIMEOUT;
+
+      const outcome = await tech.createAndFreezeTechParagraph({
+        serviceRecordId: service.id,
+        assessmentId,
+        budgetMs: remaining(),
+        // The row's CURRENT notes, read inside the step's one deadline: a retried
+        // completion finds the freeze and spends no second call.
+        getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
+        gatherInputs: async () => {
+          const { buildReportV1Data } = require('./report-data');
+          const { loadServiceRecordForPdf, ensureReportToken } = require('./pdf-queue');
+          const joined = await loadServiceRecordForPdf(service.id, knex).catch(() => null);
+          const record = joined || service;
+          const token = await ensureReportToken(service.id, knex);
+          // Side-effect free: the build takes the cached treatment narrative or the
+          // deterministic template and never dispatches the narrative lane, so this
+          // step makes exactly one model call.
+          const data = await buildReportV1Data(record, token, knex, { skipNarrativeGeneration: true }).catch(() => null);
+          return require('./tree-shrub-tech-paragraph-inputs').gatherTreeShrubTechParagraphInputs({ record, data, knex });
+        },
+        knex,
+        deps,
+      });
+      if (outcome.status !== 'frozen' && outcome.status !== 'already_frozen') {
+        logger.info(`[ts-tech-paragraph] none for service_record ${service.id}: ${outcome.status}${outcome.problems && outcome.problems.length ? ` (${outcome.problems.join(', ')})` : ''}`);
+      }
+      return outcome.entry ? { [assessmentId]: outcome.entry } : null;
+    } catch (err) {
+      logger.warn(`[ts-tech-paragraph] step failed for service_record ${service.id}: ${err.message}`);
       return null;
     }
-    const assessmentId = String(assessment.id);
+  })();
+  work.catch(() => {}); // a late settle after the deadline is never an unhandled rejection
 
-    const outcome = await tech.createAndFreezeTechParagraph({
-      serviceRecordId: service.id,
-      assessmentId,
-      // The row's CURRENT notes, read inside the step's one deadline: a retried
-      // completion finds the freeze and spends no second call.
-      getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
-      gatherInputs: async () => {
-        const { buildReportV1Data } = require('./report-data');
-        const { loadServiceRecordForPdf, ensureReportToken } = require('./pdf-queue');
-        const joined = await loadServiceRecordForPdf(service.id, knex).catch(() => null);
-        const record = joined || service;
-        const token = await ensureReportToken(service.id, knex);
-        const data = await buildReportV1Data(record, token, knex).catch(() => null);
-        return require('./tree-shrub-tech-paragraph-inputs').gatherTreeShrubTechParagraphInputs({ record, data, knex });
-      },
-      knex,
-      deps,
-    });
-    if (outcome.status !== 'frozen' && outcome.status !== 'already_frozen') {
-      logger.info(`[ts-tech-paragraph] none for service_record ${service.id}: ${outcome.status}${outcome.problems && outcome.problems.length ? ` (${outcome.problems.join(', ')})` : ''}`);
+  try {
+    const result = await Promise.race([work, deadline]);
+    if (result === TIMEOUT) {
+      logger.info(`[ts-tech-paragraph] none for service_record ${service.id}: timeout`);
+      return null;
     }
-    return outcome.entry ? { [assessmentId]: outcome.entry } : null;
-  } catch (err) {
-    logger.warn(`[ts-tech-paragraph] step failed for service_record ${service && service.id}: ${err.message}`);
-    return null;
+    return result;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

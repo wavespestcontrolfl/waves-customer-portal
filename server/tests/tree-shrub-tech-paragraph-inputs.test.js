@@ -1,9 +1,8 @@
 // Inputs for the tree & shrub "From your technician" paragraph
 // (GATE_TS_TECH_PARAGRAPH): what the model may see, under the technician's
 // decisions. A hidden or rewritten finding never enters, a confirmed one enters
-// at high confidence, an unreviewed flagged one at low; Seen watch items enter
-// as the technician's own findings; refer-only items and the trunk conk never
-// enter. Synthetic data only.
+// at high confidence, an unreviewed flagged one at low. The watch list, the last
+// visit and the report headline are not inputs. Synthetic data only.
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -23,9 +22,9 @@ const DIAGNOSIS = [
 describe('kept photo findings', () => {
   test('a flagged finding nobody reviewed enters at low confidence', () => {
     expect(keptPhotoFindings(DIAGNOSIS, [])).toEqual([
-      { label: 'pest pressure signals', confidence: 'low', source: 'photo' },
-      { label: 'leaf spot signals', confidence: 'low', source: 'photo' },
-      { label: 'off-color leaves', confidence: 'low', source: 'photo' },
+      { label: 'pest pressure signals', confidence: 'low' },
+      { label: 'leaf spot signals', confidence: 'low' },
+      { label: 'off-color leaves', confidence: 'low' },
     ]);
   });
 
@@ -34,7 +33,7 @@ describe('kept photo findings', () => {
       { key: 'pest_activity', action: 'hidden', detail: null },
       { key: 'disease_leaf_spot', action: 'edit', detail: 'Only dust spots on the leaves.' },
     ];
-    expect(keptPhotoFindings(DIAGNOSIS, decisions)).toEqual([{ label: 'off-color leaves', confidence: 'low', source: 'photo' }]);
+    expect(keptPhotoFindings(DIAGNOSIS, decisions)).toEqual([{ label: 'off-color leaves', confidence: 'low' }]);
     // The technician's edit text itself never reaches the model.
     expect(JSON.stringify(keptPhotoFindings(DIAGNOSIS, decisions))).not.toContain('dust');
   });
@@ -42,13 +41,13 @@ describe('kept photo findings', () => {
   test('a confirmed finding enters at high confidence, even on a row the photo read left clean', () => {
     const decisions = [{ key: 'pest_activity', action: 'confirmed', detail: null }, { key: 'foliage_fullness', action: 'confirmed', detail: null }];
     const out = keptPhotoFindings(DIAGNOSIS, decisions);
-    expect(out).toContainEqual({ label: 'pest pressure signals', confidence: 'high', source: 'photo' });
-    expect(out).toContainEqual({ label: 'thin foliage', confidence: 'high', source: 'photo' });
+    expect(out).toContainEqual({ label: 'pest pressure signals', confidence: 'high' });
+    expect(out).toContainEqual({ label: 'thin foliage', confidence: 'high' });
   });
 
   test('a monitor decision keeps the finding low; a tracking row is nothing', () => {
     const out = keptPhotoFindings(DIAGNOSIS, [{ key: 'leaf_color_vigor', action: 'monitor' }]);
-    expect(out).toContainEqual({ label: 'off-color leaves', confidence: 'low', source: 'photo' });
+    expect(out).toContainEqual({ label: 'off-color leaves', confidence: 'low' });
     expect(out.map((f) => f.label)).not.toContain('heat or pruning stress');
   });
 });
@@ -95,39 +94,23 @@ describe('gatherTreeShrubTechParagraphInputs', () => {
     return { knex, calls };
   }
 
-  test('assembles the note, products, kept findings, headline and the defense list; the watch list is not an input', async () => {
-    const { knex } = fakeKnex();
+  test('assembles the note, products, kept findings and the defense list; watch list, headline and last visit are not inputs', async () => {
+    const { knex, calls } = fakeKnex();
     const out = await gatherTreeShrubTechParagraphInputs({ record: RECORD, data: { reportV2: REPORT }, knex });
     expect(out.technicianNote).toBe(RECORD.technician_notes);
     expect(out.products.map((p) => [p.name, p.kind, p.targets])).toEqual([['Merit 2F', 'insecticide', ['scale', 'whitefly']], ['Palm Gro 8-2-12', 'fertilizer', []]]);
     // The unreviewed flagged findings only: the hidden pest finding is gone, and
     // the Seen watch items (tech-facing storage only) never enter.
     expect(out.findings).toEqual([
-      { label: 'leaf spot signals', confidence: 'low', source: 'photo' },
-      { label: 'off-color leaves', confidence: 'low', source: 'photo' },
+      { label: 'leaf spot signals', confidence: 'low' },
+      { label: 'off-color leaves', confidence: 'low' },
     ]);
     expect(JSON.stringify(out)).not.toMatch(/conk|400 sq|ignored/i);
-    expect(out.facts.headline).toBe('Healthy — monitoring pest pressure');
+    expect(out.facts.headline).toBeNull();
+    expect(out.prior).toBeNull();
     expect(out.knownProductNames).toEqual(['Merit 2F', 'Celsius WG']);
-    expect(out.prior).toBeNull();
-  });
-
-  test('the last completed visit at this property supplies its products, never its watch items', async () => {
-    const last = {
-      id: 'sr-last', service_date: '2026-08-12',
-      structured_notes: { treeShrubWatchItems: [{ key: 'whitefly', state: 'seen' }, { key: 'declining_palms', state: 'seen' }] },
-    };
-    const { knex } = fakeKnex({ last, lastProducts: [{ product_name: 'Safari 20 SG' }, { product_name: null }] });
-    const out = await gatherTreeShrubTechParagraphInputs({ record: RECORD, data: { reportV2: REPORT }, knex });
-    expect(out.prior).toMatchObject({ date: '2026-08-12', watched: [] });
-    expect(out.prior.products.map((p) => p.name)).toEqual(['Safari 20 SG']);
-  });
-
-  test('an unresolved property gives no prior visit and reads no earlier record', async () => {
-    const { knex, calls } = fakeKnex({ property: { property_id: null } });
-    const out = await gatherTreeShrubTechParagraphInputs({ record: RECORD, data: { reportV2: REPORT }, knex });
-    expect(out.prior).toBeNull();
-    expect(calls.some((t) => String(t).startsWith('service_records'))).toBe(false);
+    // No earlier visit is read at all.
+    expect(calls).toEqual(['products_catalog']);
   });
 
   test('no report build, or no record, means no inputs; a failed read propagates (the step stores nothing)', async () => {

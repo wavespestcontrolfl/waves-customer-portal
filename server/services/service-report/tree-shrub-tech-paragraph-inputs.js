@@ -4,8 +4,7 @@
  * Inputs for the tree & shrub "From your technician" paragraph
  * (tree-shrub-tech-paragraph.js), read once at completion from the report data
  * the completion step has just built (the same object the customer report
- * renders) plus the record's own frozen technician decisions and one small read
- * of the last visit.
+ * renders) plus the record's own frozen technician decisions.
  *
  * Fail closed: a read that throws propagates, and the caller stores no
  * paragraph. A read that succeeds and finds nothing is an empty input.
@@ -22,14 +21,16 @@
  *  - the seasonal watch list (the frozen watch items) is NOT an
  *    input: it stays tech-facing storage only (GATE_TS_WATCH_LIST) until the
  *    owner approves customer wording for a confirmed watch item. A watch item
- *    the technician wants the customer to hear about goes in the note.
+ *    the technician wants the customer to hear about goes in the note;
+ *  - the last visit is NOT an input, and neither is the report's headline (a
+ *    headline built from a low-confidence photo read would otherwise license the
+ *    very condition the paragraph must hedge).
  *
  * What it never passes on: any customer name, an address, a price, the raw photo
  * list, the photo read's free text, the technician's edit text.
  */
 
 const { normalizeTechFindings } = require('./tree-shrub-tech-findings');
-const { etCalendarDayOf } = require('../../utils/datetime-et');
 const { normalizeInputs } = require('./tree-shrub-tech-paragraph');
 
 const FINDING_KEYS = ['pest_activity', 'disease_leaf_spot', 'water_heat_mechanical_stress', 'leaf_color_vigor', 'foliage_fullness'];
@@ -67,42 +68,10 @@ function keptPhotoFindings(diagnosis, decisions) {
     const decision = byKey.get(key);
     if (decision && (decision.action === 'hidden' || decision.action === 'edit')) continue;
     const row = rows.get(key);
-    if (decision && decision.action === 'confirmed') out.push({ label: FINDING_LABEL[key], confidence: 'high', source: 'photo' });
-    else if (row && FLAGGED.has(row.status)) out.push({ label: FINDING_LABEL[key], confidence: 'low', source: 'photo' });
+    if (decision && decision.action === 'confirmed') out.push({ label: FINDING_LABEL[key], confidence: 'high' });
+    else if (row && FLAGGED.has(row.status)) out.push({ label: FINDING_LABEL[key], confidence: 'low' });
   }
   return out;
-}
-
-// The last completed tree & shrub visit at THIS property (an unresolved
-// property proves nothing about which address an earlier visit was at, so it
-// gives no prior): its date and product names. null when none.
-async function readLastVisit(record, knex) {
-  if (!record.scheduled_service_id || !record.customer_id) return null;
-  const sched = await knex('scheduled_services').where({ id: record.scheduled_service_id }).first('property_id');
-  if (!sched || !sched.property_id) return null;
-  const last = await knex('service_records as sr')
-    .join('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
-    .where('sr.customer_id', record.customer_id)
-    .where('sr.service_line', 'tree_shrub')
-    .where('sr.status', 'completed')
-    .where('sr.service_date', '<', record.service_date)
-    .whereNot('sr.id', record.id)
-    .where('ss.property_id', sched.property_id)
-    .orderBy('sr.service_date', 'desc')
-    .orderBy('sr.created_at', 'desc')
-    .orderBy('sr.id', 'desc')
-    .first('sr.id', 'sr.service_date');
-  if (!last) return null;
-  const rows = await knex('service_products')
-    .where({ service_record_id: last.id })
-    .orderBy('created_at')
-    .select('product_name');
-  return {
-    date: etCalendarDayOf(last.service_date),
-    products: (rows || []).map((r) => ({ name: r && r.product_name })).filter((p) => p.name),
-    watched: [],
-    findings: [],
-  };
 }
 
 /**
@@ -127,15 +96,12 @@ async function gatherTreeShrubTechParagraphInputs({ record, data, knex }) {
     targets: p.targets,
   }));
 
-  const prior = await readLastVisit(record, knex);
   const catalogRows = await knex('products_catalog').select('name');
 
   return normalizeInputs({
     technicianNote: record.technician_notes,
     products,
     findings: keptPhotoFindings(reportV2.diagnosis, decisions),
-    prior,
-    facts: { headline: reportV2.snapshot && reportV2.snapshot.statusHeadline },
     knownProductNames: (catalogRows || []).map((row) => row && row.name),
   });
 }

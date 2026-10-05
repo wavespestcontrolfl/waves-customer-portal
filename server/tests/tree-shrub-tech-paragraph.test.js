@@ -20,11 +20,8 @@ const INPUTS = {
     { name: 'Palm Gro 8-2-12', activeIngredient: null, kind: 'fertilizer', method: 'broadcast', targets: [] },
   ],
   findings: [
-    { label: 'scale', confidence: 'high', source: 'seen' },
-    { label: 'pest pressure signals', confidence: 'low', source: 'photo' },
+    { label: 'pest pressure signals', confidence: 'low' },
   ],
-  prior: { date: '2026-08-12', products: [{ name: 'Safari 20 SG' }], watched: ['whitefly'], findings: [] },
-  facts: { headline: 'Healthy — monitoring pest pressure' },
   knownProductNames: ['Merit 2F', 'Palm Gro 8-2-12', 'Safari 20 SG', 'Celsius WG'],
 };
 
@@ -37,12 +34,12 @@ const check = (a, inputs = INPUTS) => tech.validateParagraph(a, inputs);
 const problemsOf = (a, inputs) => check(a, inputs).problems;
 
 const GOOD_1 = answer(
-  'Our technician found scale on the hedge along the back fence, with some sooty mold on a few leaves. We treated the hedges with Merit 2F to protect against scale. We also fed the palms with Palm Gro 8-2-12.',
-  [['note', 'finding'], ['note', 'product'], ['note', 'product']],
+  'Our technician found scale on the hedge along the back fence, with some sooty mold on a few leaves. We applied Merit 2F to protect against scale. We also applied Palm Gro 8-2-12.',
+  [['note'], ['note', 'product'], ['note', 'product']],
 );
 const GOOD_2 = answer(
-  'Our technician found scale on the hedge along the back fence. Merit 2F went on the hedges, and Palm Gro 8-2-12 went on the palms. We are keeping an eye on pest pressure.',
-  [['note', 'finding'], ['note', 'product'], ['finding', 'fact']],
+  'Our technician found scale on the hedge along the back fence. We applied Merit 2F and Palm Gro 8-2-12. We are keeping an eye on possible pest pressure.',
+  [['note'], ['note', 'product'], ['finding']],
 );
 
 describe('prompt and schema', () => {
@@ -50,22 +47,24 @@ describe('prompt and schema', () => {
 
   test('the user message carries the note verbatim and every labeled input, and nothing private', () => {
     expect(prompt.text).toContain(INPUTS.technicianNote);
-    for (const label of ['PRODUCTS APPLIED TODAY', 'SEEN BY OUR TECHNICIAN', 'PHOTO FINDINGS THE TECHNICIAN KEPT', 'LAST VISIT', 'WHAT THE REPORT ALREADY SAYS']) {
+    for (const label of ['PRODUCTS APPLIED TODAY', 'PHOTO FINDINGS THE TECHNICIAN KEPT']) {
       expect(prompt.text).toContain(label);
     }
     expect(prompt.text).toContain('Merit 2F');
-    expect(prompt.text).toContain('- scale');
     expect(prompt.text).toContain('pest pressure signals (low confidence)');
-    expect(prompt.text).toContain('Safari 20 SG');
-    // The catalog defense list, scores and progress lines never reach the model.
-    expect(prompt.text).not.toContain('Celsius WG');
+    // The watch list, the last visit, the headline, scores, progress lines, the
+    // catalog defense list and active ingredients never reach the model.
+    for (const absent of ['SEEN BY OUR TECHNICIAN', 'LAST VISIT', 'WHAT THE REPORT ALREADY SAYS', 'Safari 20 SG', 'Celsius WG', 'imidacloprid', 'active:']) {
+      expect(prompt.text).not.toContain(absent);
+    }
     expect(prompt.text).not.toMatch(/SCORES|PROGRESS|\$\d/);
   });
 
   test('the system prompt carries the owner rules the code then enforces', () => {
-    for (const phrase of ['the note wins', 'never as something the photos showed', 'targets list', 'No numbers of any kind', 'never "will"', 'no better, worse', 'HUMAN PROSE RULES', 'PHOTO REACH']) {
+    for (const phrase of ['the note wins', 'never as something the photos showed', 'targets list', 'No numbers of any kind', 'never "will"', 'no better, worse', 'HUMAN PROSE RULES', 'PHOTO REACH', 'never where it went', 'No instructions to the customer']) {
       expect(prompt.system.toLowerCase()).toContain(phrase.toLowerCase());
     }
+    expect(prompt.system).not.toMatch(/SEEN BY OUR TECHNICIAN|watch list|headline/i);
     expect(prompt.system).toContain('Waves Pest Control');
     expect(prompt.promptVersion).toBe(tech.PROMPT_VERSION);
     expect(prompt.promptVersion).toBe('ts_tech_paragraph_v1');
@@ -80,13 +79,18 @@ describe('prompt and schema', () => {
     expect(JSON.stringify(prompt.jsonSchema)).not.toMatch(/"(minimum|maximum|minLength|maxLength|minItems|maxItems)"/);
   });
 
-  test('normalizeInputs folds product kinds, tags each finding, drops lawn-only fields and is idempotent', () => {
-    const once = tech.normalizeInputs({ ...INPUTS, scores: { overall: 90 }, progressLines: ['Thickness is on track.'], facts: { headline: 'Looking healthy', watering: 'Water the lawn.' } });
+  test('normalizeInputs folds product kinds, drops the last visit, headline and lawn-only fields, and is idempotent', () => {
+    const once = tech.normalizeInputs({
+      ...INPUTS,
+      scores: { overall: 90 },
+      progressLines: ['Thickness is on track.'],
+      prior: { date: '2026-08-12', products: [{ name: 'Safari 20 SG' }], watched: ['whitefly'], findings: [] },
+      facts: { headline: 'Healthy — monitoring pest pressure', watering: 'Water the lawn.' },
+    });
     expect(once.products.map((p) => p.kind)).toEqual(['insecticide', 'fertilizer']);
-    expect(once.findings).toEqual([
-      { label: 'scale', confidence: 'high', source: 'seen' },
-      { label: 'pest pressure signals', confidence: 'low', source: 'photo' },
-    ]);
+    expect(once.findings).toEqual([{ label: 'pest pressure signals', confidence: 'low' }]);
+    expect(once.prior).toBeNull();
+    expect(once.facts).toEqual({ headline: null, watering: null });
     expect(once.progressLines).toEqual([]);
     expect(once.scores).toEqual({ overall: null, rows: [] });
     expect(once.facts.watering).toBeNull();
@@ -106,11 +110,8 @@ describe('validator: accepts', () => {
     expect(verdict.paragraph.split(/\s+/).length).toBeLessThanOrEqual(70);
   });
 
-  test('last visit may be mentioned for what we watched', () => {
-    const a = answer(
-      'Our technician saw sooty mold on a few leaves, and the scale along the back fence. We treated the hedges with Merit 2F. At our last visit we watched for whitefly.',
-      [['note'], ['note', 'product'], ['prior']],
-    );
+  test('a sentence may name a plant group or the finding when no product is named in it', () => {
+    const a = answer('Our technician saw scale on the hedges. We applied Merit 2F.', [['note'], ['note', 'product']]);
     expect(problemsOf(a)).toEqual([]);
   });
 });
@@ -133,9 +134,11 @@ describe('validator: rejects', () => {
     expect(problemsOf(a)).toContain('word_not_in_inputs');
   });
 
-  test('any comparison with the last visit (tree & shrub has no progress line)', () => {
+  test('any reference to an earlier visit or comparison with one (no prior visit is an input)', () => {
     const a = answer('Our technician found scale on the hedge. The hedge looks healthier than at our last visit.', [['note'], ['prior']]);
-    expect(problemsOf(a)).toContain('comparison_without_progress');
+    expect(problemsOf(a)).toEqual(expect.arrayContaining(['prior_visit', 'comparison_without_progress']));
+    const b = answer('Our technician found scale on the hedge. At our last visit we treated for whitefly.', [['note'], ['prior']]);
+    expect(problemsOf(b)).toContain('prior_visit');
     const withLine = { ...INPUTS, progressLines: ['Thickness is on track.'] };
     expect(problemsOf(answer('Our technician found scale on the hedge. Thickness is on track since our last visit.', [['note'], ['prior']]), withLine)).toContain('comparison_without_progress');
   });
@@ -154,9 +157,9 @@ describe('validator: rejects', () => {
 
   test('a low-confidence photo finding stated as fact, and the same finding hedged', () => {
     const inputs = { ...INPUTS, technicianNote: 'Treated the hedges with Merit and fed the palms with the palm fertilizer.', findings: [{ label: 'leaf spot signals', confidence: 'low', source: 'photo' }] };
-    const stated = answer('We treated the hedges with Merit 2F. We found leaf spot on the leaves.', [['product'], ['finding']]);
+    const stated = answer('We applied Merit 2F. We found leaf spot on the leaves.', [['product'], ['finding']]);
     expect(problemsOf(stated, inputs)).toContain('low_confidence_stated_as_fact:leaf_spot');
-    const hedged = answer('We treated the hedges with Merit 2F. We are keeping an eye on possible leaf spot on the leaves.', [['product'], ['finding']]);
+    const hedged = answer('We applied Merit 2F. We are keeping an eye on possible leaf spot on the leaves.', [['product'], ['finding']]);
     expect(problemsOf(hedged, inputs)).toEqual([]);
   });
 
@@ -170,6 +173,64 @@ describe('validator: rejects', () => {
     const inputs = { ...INPUTS, technicianNote: 'Treated the hedges with Merit and fed the palms with the palm fertilizer.', findings: [], prior: null };
     const a = answer('Our technician found whitefly on the hedges. We treated the hedges with Merit 2F.', [['note'], ['product']]);
     expect(problemsOf(a, inputs)).toContain('target_stated_as_found:whitefly');
+  });
+});
+
+describe('Codex round 1 on #5968', () => {
+  const NOTE_ONLY = { ...INPUTS, technicianNote: 'Treated the hedges with Merit and fed the palms with the palm fertilizer.' };
+
+  test('an active ingredient the model supplies from memory is rejected; the listed product name is not', () => {
+    const named = answer('We applied imidacloprid.', [['product']]);
+    // Two sentences are required, so pair it with a clean one.
+    const a = answer('We applied Merit 2F. We applied imidacloprid.', [['product'], ['product']]);
+    expect(named.paragraph).toContain('imidacloprid');
+    expect(problemsOf(a, NOTE_ONLY)).toContain('active_ingredient');
+    expect(problemsOf(answer('We applied Merit 2F. We applied Palm Gro 8-2-12.', [['product'], ['product']]), NOTE_ONLY)).toEqual([]);
+    // An ingredient word that IS part of a listed product name stays allowed.
+    const inName = { ...NOTE_ONLY, products: [{ name: 'Imidacloprid 75 WSP', activeIngredient: 'imidacloprid', kind: 'systemic', targets: [] }], knownProductNames: [] };
+    expect(problemsOf(answer('We applied Imidacloprid 75 WSP. Our technician saw scale on the hedge.', [['product'], ['note']]), { ...inName, technicianNote: 'Saw scale on the hedge.' })).not.toContain('active_ingredient');
+  });
+
+  test('the report headline is not a fact: a low-confidence finding stated unhedged is rejected even when the headline carries it', () => {
+    const inputs = {
+      technicianNote: 'Treated the hedges with Merit and fed the palms with the palm fertilizer.',
+      products: INPUTS.products,
+      findings: [{ label: 'pest pressure signals', confidence: 'low' }],
+      facts: { headline: 'Healthy — monitoring pest pressure' },
+      knownProductNames: INPUTS.knownProductNames,
+    };
+    expect(tech.normalizeInputs(inputs).facts.headline).toBeNull();
+    const stated = answer('Our technician found pest pressure. We applied Merit 2F.', [['fact', 'finding'], ['product']]);
+    expect(problemsOf(stated, inputs)).toContain('low_confidence_stated_as_fact:insect');
+    const hedged = answer('We are keeping an eye on possible pest pressure. We applied Merit 2F.', [['finding'], ['product']]);
+    expect(problemsOf(hedged, inputs)).toEqual([]);
+  });
+
+  test('care advice to the customer is rejected; a finding about pruning stress is not', () => {
+    const bad = [
+      'Prune the hedge.', 'Trim back the hedges.', 'Cut back the dead fronds.', 'Water the beds deeply.', 'Fertilize the palms in spring.',
+      'You should prune the hedge.', 'You need to thin the canopy.', 'Please keep the hedge trimmed.',
+      'We applied Merit 2F, and trim the hedge.',
+    ];
+    for (const sentence of bad) {
+      expect(problemsOf(answer(`Our technician found scale on the hedge. ${sentence}`, [['note'], ['note']]), INPUTS)).toContain('care_instruction');
+    }
+    expect(problemsOf(answer('Our technician found pruning stress on the hedge. We applied Merit 2F.', [['note'], ['product']]), { ...INPUTS, technicianNote: 'Found pruning stress on the hedge. Applied Merit.', findings: [] })).toEqual([]);
+  });
+
+  test('a sentence that names an applied product may not name a plant group or place', () => {
+    const run = (text) => problemsOf(answer(text, [['note'], ['note', 'product']]), INPUTS);
+    const lead = 'Our technician saw scale on the hedges. ';
+    expect(run(`${lead}We put Merit 2F on the palms.`)).toContain('product_placement');
+    expect(run(`${lead}We treated the hedges with Merit 2F.`)).toContain('product_placement');
+    expect(run(`${lead}Merit 2F went on the front and back.`)).toContain('product_placement');
+    expect(run(`${lead}Merit 2F went around the whole property.`)).toContain('product_placement');
+    expect(run(`${lead}We applied Merit 2F.`)).toEqual([]);
+    expect(run(`${lead}We applied Merit 2F to protect against scale.`)).toEqual([]);
+    // A product whose own name holds a place noun is cut out first, not flagged.
+    expect(run(`${lead}We applied Palm Gro 8-2-12.`)).toEqual([]);
+    // No product named: a plant group in the sentence is fine.
+    expect(problemsOf(answer('Our technician saw scale on the hedges. We also saw sooty mold on a few leaves.', [['note'], ['note']]), INPUTS)).toEqual([]);
   });
 });
 
