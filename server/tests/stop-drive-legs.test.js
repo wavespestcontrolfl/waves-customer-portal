@@ -213,4 +213,48 @@ describe('attachDriveLegs', () => {
     const late = 10 * 60 + 30 + leg - (9 * 60 + 120);
     expect(services[3].driveLateMin).toBe(late > 0 ? late : null);
   });
+
+  it('carries a delay forward to every later stop', () => {
+    const services = [
+      stop('a', '08:00', A, { windowEnd: '11:00' }),
+      stop('b', '09:00', B, { windowEnd: '10:00' }),
+      stop('c', '10:00', C, { windowEnd: '11:00' }),
+    ];
+    attachDriveLegs(services);
+    const [ab, bc] = [services[1].driveFromPrevMin, services[2].driveFromPrevMin];
+    const arriveB = 11 * 60 + ab;
+    expect(services[1].driveLateMin).toBe(arriveB - (9 * 60 + 120));
+    // b cannot leave before its late arrival plus its hour of work.
+    expect(services[2].driveLateMin).toBe(arriveB + 60 + bc - (10 * 60 + 120));
+  });
+
+  it('plans recognized services at owner planning minutes under the capacity gate', () => {
+    const before = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      const services = [
+        stop('a', '08:00', A, { windowEnd: '11:00', serviceTypeRaw: 'Quarterly Pest Control', isRecurring: true }),
+        stop('c', '08:00', C),
+      ];
+      attachDriveLegs(services);
+      // Recurring pest plans at 25 minutes, not the 3-hour window span.
+      expect(services[1].driveLateMin).toBeNull();
+      process.env.GATE_SCHEDULING_CAPACITY = 'false';
+      attachDriveLegs(services);
+      expect(services[1].driveLateMin).toBe(11 * 60 + services[1].driveFromPrevMin - (8 * 60 + 120));
+    } finally {
+      if (before === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = before;
+    }
+  });
+
+  it('stops predicting lateness after a leg it cannot measure', () => {
+    const services = [
+      stop('a', '08:00', A, { windowEnd: '12:00' }),
+      stop('x', '09:00', null),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(services);
+    expect(services[2].driveLateMin).toBeNull();
+  });
 });

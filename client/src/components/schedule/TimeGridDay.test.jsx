@@ -456,3 +456,38 @@ describe('TimeGridDay open hours', () => {
     expect(screen.getByRole('button', { name: 'Book open hour 11 AM–12 PM for Alex Tech' })).toBeInTheDocument();
   });
 });
+
+describe('TimeGridDay drive labels', () => {
+  it('moves the leg out of a short block onto the block it leads to', () => {
+    const short = { ...SERVICES[0], driveToNextMin: 59 }; // 60 min: too short for a label
+    const tall = {
+      ...SERVICES[1], id: 'svc-tall', windowStart: '10:00', windowEnd: '12:00', windowDisplay: '10 AM–12 PM',
+      driveInShown: true, drivePrevId: 'svc-1', driveFromPrevMin: 59, lastStop: true,
+    };
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[short, tall]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getByText('~59 min in')).toBeInTheDocument();
+  });
+
+  it('keeps the leg on a tall block and does not repeat it on the next', () => {
+    const tall = { ...SERVICES[0], windowStart: '08:00', windowEnd: '10:00', windowDisplay: '8–10 AM', driveToNextMin: 12 };
+    const next = {
+      ...SERVICES[1], windowStart: '11:00', windowEnd: '13:00', windowDisplay: '11 AM–1 PM',
+      driveInShown: true, drivePrevId: 'svc-1', driveFromPrevMin: 12, lastStop: true,
+    };
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[tall, next]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getByText('~12 min out')).toBeInTheDocument();
+    expect(screen.queryByText('~12 min in')).toBeNull();
+  });
+});

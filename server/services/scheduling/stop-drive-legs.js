@@ -11,7 +11,10 @@
 // read as "next door".
 
 const { driveMin } = require('../auto-dispatch/geo');
-const { ARRIVAL_WINDOW_MINUTES } = require('../../utils/sms-time-format');
+const RouteOptimizer = require('../route-optimizer');
+const {
+  simulateArrivalRoute, effectiveWindowRange, workDuration, startCoVisitChain, advanceCoVisit,
+} = require('../route-reorder-window-fit');
 
 // Visits the tech will not drive to.
 const NOT_A_STOP = new Set(['cancelled', 'skipped', 'no_show']);
@@ -29,54 +32,69 @@ function hasGeo(s) {
   return s?.lat != null && s?.lng != null && Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0;
 }
 
-// A row's planned work: its window span (window end is the service-end
-// estimate), else its stored duration, else one hour.
-function workMinutes(s) {
-  const start = minutesOf(s.windowStart);
-  const end = minutesOf(s.windowEnd);
-  if (Number.isFinite(end) && end > start) return end - start;
-  const dur = Number(s.estimatedDuration);
-  return Number.isFinite(dur) && dur > 0 ? dur : 60;
+// One day-feed row as the route simulator reads a scheduled_services row,
+// so its work comes from the same workDuration (owner planning minutes
+// under GATE_SCHEDULING_CAPACITY, else window span or stored estimate).
+function simRow(s) {
+  return {
+    id: s.id,
+    window_start: s.windowStart,
+    window_end: s.windowEnd,
+    estimated_duration_minutes: 'rawEstimateMinutes' in s ? s.rawEstimateMinutes : s.estimatedDuration,
+    service_type: s.serviceTypeRaw || s.serviceType,
+    is_recurring: s.isRecurring === true,
+    is_callback: s.isCallback === true,
+  };
 }
 
-// A row's real work estimate, 0 when it has none. The day feed fills a
-// missing estimate with 60 for display, so it also sends the stored value
-// (rawEstimateMinutes); only that counts (coVisitWork's raw_estimate_minutes
-// rule). A row without the field uses estimatedDuration as stored.
-function realEstimate(s) {
-  const raw = 'rawEstimateMinutes' in s ? s.rawEstimateMinutes : s.estimatedDuration;
-  const dur = Number(raw);
-  return Number.isFinite(dur) && dur > 0 ? dur : 0;
-}
-
-// When the tech leaves a stop. One crew at one pin does every piece of
-// work there in turn, starting at the stop's earliest booked time:
-// - a visit group's rows add up (arrival-route.js groupRouteStops), so two
-//   60-minute rows of one visit at 09:00 leave at 11:00;
-// - ungrouped rows sharing the pin count as one co-visit, as
-//   route-reorder-window-fit.js coVisitWork does: the sum of their real
-//   estimates, floored by the longest row's own work, so two span-only
-//   rows sharing an hour stay one hour (the phantom hour);
-// - those pieces then add up with each other.
-// No row leaves before its own booked work ends.
-function departure(rows) {
+// On-site minutes for one physical stop, with the simulator's own pieces:
+// a visit group sums its rows (arrival-route.js groupRouteStops); ungrouped
+// rows sharing the pin are one co-visit (startCoVisitChain/advanceCoVisit,
+// so two span-only rows sharing an hour stay one hour); the pieces add up.
+function stopWork(members) {
   const groups = new Map();
   const loose = [];
-  for (const m of rows) {
-    if (!m.visitId) { loose.push(m); continue; }
+  for (const m of members) {
+    if (!m.visitId) { loose.push(simRow(m)); continue; }
     if (!groups.has(m.visitId)) groups.set(m.visitId, []);
-    groups.get(m.visitId).push(m);
+    groups.get(m.visitId).push(simRow(m));
   }
   let work = 0;
-  for (const g of groups.values()) work += g.reduce((sum, m) => sum + workMinutes(m), 0);
+  for (const g of groups.values()) work += g.reduce((sum, r) => sum + workDuration(r), 0);
   if (loose.length) {
-    work += Math.max(
-      loose.reduce((sum, m) => sum + realEstimate(m), 0),
-      ...loose.map(workMinutes),
-    );
+    let chain = { ...startCoVisitChain(loose[0]), arrivalMin: 0 };
+    chain.clock = chain.coMerged;
+    for (const r of loose.slice(1)) chain = advanceCoVisit(chain, r);
+    work += chain.coMerged;
   }
-  const starts = rows.map((m) => minutesOf(m.windowStart));
-  return Math.max(Math.min(...starts) + work, ...rows.map((m, i) => starts[i] + workMinutes(m)));
+  return work;
+}
+
+// Minutes past each stop's 2-hour arrival window, from the shared route
+// simulator (simulateArrivalRoute, reportLate): the clock carries every
+// earlier delay forward, waits for a window to open, and uses the same legs
+// the lines show. The day starts at the first stop at its booked time.
+// After a leg that cannot be measured, arrivals are unknown: no lateness.
+function lateByStop(stops, legs) {
+  const seq = stops.map((st) => ({
+    id: st.legs[0].id,
+    window_start: st.legs[0].windowStart,
+    estimated_duration_minutes: stopWork(st.members),
+    memberIds: st.members.map((m) => m.id),
+    lat: st.anchor.lat,
+    lng: st.anchor.lng,
+  }));
+  const known = legs.findIndex((l) => l == null);
+  const upTo = known === -1 ? seq.length : known + 1;
+  if (upTo < 2) return new Map();
+  const legById = new Map(seq.slice(1).map((r, i) => [r.id, legs[i]]));
+  const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, seq.slice(0, upTo), {
+    startMin: minutesOf(seq[0].window_start),
+    origin: { lat: Number(seq[0].lat), lng: Number(seq[0].lng) },
+    reportLate: true,
+    legMinutes: (_prev, stop) => legById.get(stop.id) ?? 0,
+  });
+  return new Map((sim?.arrivals || []).map((a) => [a.id, a.lateMinutes]));
 }
 
 // Visits the tech has not reached yet: only these can still run late.
@@ -98,7 +116,7 @@ function stopOrder(a, b) {
  * Sets `driveFromPrevMin` / `driveToNextMin` (number or null) and
  * `firstStop` / `lastStop` in place on one technician's services. Each leg
  * in is also stamped once (`driveInShown`, on the stop's first card) with
- * the stop it comes from (`drivePrevName`) and `driveLateMin`: the minutes
+ * the stop it comes from (`drivePrevName`, `drivePrevId`) and `driveLateMin`: the minutes
  * past the customer's 2-hour arrival window (start + 120) the tech lands if
  * the previous stop ends as planned, else null. A leg that cannot be
  * measured marks its stop's first card `driveLegUnknown`.
@@ -116,6 +134,7 @@ function attachDriveLegs(services) {
     s.drivePrevName = null;
     s.driveLateMin = null;
     s.driveLegUnknown = false;
+    s.drivePrevId = null;
   }
   // A visit group is one stop wherever its rows sort (route-model.js
   // physicalStops groups every visit_id the same way): placed at its
@@ -149,28 +168,27 @@ function attachDriveLegs(services) {
     stops[0].legs.forEach((s) => { s.firstStop = true; });
     stops[stops.length - 1].legs.forEach((s) => { s.lastStop = true; });
   }
+  const legs = [];
   for (let i = 1; i < stops.length; i += 1) {
     const prev = stops[i - 1];
     const cur = stops[i];
     // Distinct pins are never "~0 min" apart: the estimator rounds a very
     // short hop to 0, so it floors at one minute.
     const leg = hasGeo(prev.anchor) && hasGeo(cur.anchor) ? Math.max(1, driveMin(prev.anchor, cur.anchor)) : null;
+    legs.push(leg);
     prev.legs.forEach((s) => { s.driveToNextMin = leg; });
     cur.legs.forEach((s) => { s.driveFromPrevMin = leg; });
     // A leg without coordinates: the day total cannot claim to be whole.
     if (leg == null) { cur.legs[0].driveLegUnknown = true; continue; }
-    const first = cur.legs[0];
-    first.driveInShown = true;
-    first.drivePrevName = String(prev.legs[0].customerName || '').trim() || null;
-    if (NOT_REACHED.has(first.status)) {
-      // The previous stop's work that runs before this one: a group member
-      // booked later than this stop does not hold the tech here.
-      const startMin = minutesOf(first.windowStart);
-      const before = prev.members.filter((m) => minutesOf(m.windowStart) <= startMin);
-      const arrive = departure(before.length ? before : prev.legs.slice(0, 1)) + leg;
-      const late = arrive - (startMin + ARRIVAL_WINDOW_MINUTES);
-      if (late > 0) first.driveLateMin = late;
-    }
+    cur.legs[0].driveInShown = true;
+    cur.legs[0].drivePrevName = String(prev.legs[0].customerName || '').trim() || null;
+    cur.legs[0].drivePrevId = prev.legs[0].id;
+  }
+  const late = stops.length > 1 && hasGeo(stops[0].anchor) ? lateByStop(stops, legs) : new Map();
+  for (const st of stops.slice(1)) {
+    const first = st.legs[0];
+    const min = late.get(first.id);
+    if (NOT_REACHED.has(first.status) && min > 0) first.driveLateMin = min;
   }
 }
 

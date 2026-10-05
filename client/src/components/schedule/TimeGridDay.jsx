@@ -334,17 +334,20 @@ function CloseoutOwedChip({ onClick }) {
 }
 
 // "~9 min out" from the day route's straight-line legs (GET /admin/schedule);
-// null when the payload carries none. The leg in repeats the block above's
-// leg out, so it is not shown (owner 2026-10-05).
-function driveLegsLabel(service) {
-  if (service.lastStop || !Number.isFinite(service.driveToNextMin)) return null;
-  return `~${service.driveToNextMin} min out`;
+// null when the payload carries none. Each leg shows once (owner
+// 2026-10-05): on the block it leaves from, or as "~N min in" on the block it
+// leads to when the block it leaves from is too short to show a label.
+function driveLegsLabel(service, showIn) {
+  const into = showIn && service.driveInShown && Number.isFinite(service.driveFromPrevMin)
+    ? `~${service.driveFromPrevMin} min in` : null;
+  const out = !service.lastStop && Number.isFinite(service.driveToNextMin) ? `~${service.driveToNextMin} min out` : null;
+  return [into, out].filter(Boolean).join(' · ') || null;
 }
 
-function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false }) {
+function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false, showDriveIn = false }) {
   // A move awaiting confirmation changes the route: the server's legs are
   // stale until the refresh, so they hide.
-  const drive = routeStale ? null : driveLegsLabel(service);
+  const drive = routeStale ? null : driveLegsLabel(service, showDriveIn);
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -742,6 +745,14 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
               return (parseHHMM(a.windowStart) || 0) - (parseHHMM(b.windowStart) || 0);
             })
             .map((s) => s.id);
+          // A block shows its drive label only when taller than two slots;
+          // the leg out of a shorter block moves to the block it leads to.
+          const labelFits = new Set(services.filter((s) => {
+            const st = parseHHMM(s.windowStart);
+            if (st == null) return false;
+            const ds = Math.max(st, DAY_START_HOUR * 60);
+            return Math.max(st + effectiveDuration(s), ds + SLOT_MIN) - ds > SLOT_MIN * 2;
+          }).map((s) => s.id));
           return services.map((svc) => {
             const startMin = parseHHMM(svc.windowStart);
             if (startMin == null || startMin >= DAY_END_HOUR * 60) return null;
@@ -779,6 +790,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
                 onToggleSelect={onToggleSelect}
                 routeOrder={routeOrder}
                 accent={accent}
+                showDriveIn={Boolean(svc.drivePrevId) && !labelFits.has(svc.drivePrevId)}
               />
             );
           });
