@@ -201,10 +201,13 @@ it('a hold that is dragged off the button, or cancelled, does not swallow the ne
     fireEvent.pointerCancel(raise);
     fireEvent.click(raise);
     expect(density.value).toBe(String(held + 1));
-    // A right-button hold never starts the repeat.
-    fireEvent.pointerDown(raise, { button: 2 });
+    // A right-button hold never starts the repeat. jsdom has no PointerEvent
+    // (fireEvent would drop `button`), so the property is set on the event itself.
+    const rightPress = new Event('pointerdown', { bubbles: true });
+    Object.defineProperty(rightPress, 'button', { value: 2 });
+    fireEvent(raise, rightPress);
     act(() => { vi.advanceTimersByTime(450 + 120 * 3); });
-    fireEvent.pointerUp(raise, { button: 2 });
+    fireEvent.pointerUp(raise);
     expect(density.value).toBe(String(held + 1));
   } finally {
     vi.useRealTimers();
