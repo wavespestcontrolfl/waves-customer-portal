@@ -90,8 +90,10 @@ function flagsAccess(text, { priorAskedForCode = false } = {}) {
 // Our text asked for a credential only when it names one AND asks: a question
 // mark, or a request ("send", "let us know", "what is"). "Your gate code was
 // updated" asks nothing.
-const ASKS = /\?|\b(?:send|text|share|reply|let (?:us|me) know|what(?:'s| is)|need|provide|give)\b/i;
-const askedForCode = (text) => ASKED_FOR_CODE.test(String(text || '')) && ASKS.test(String(text || ''));
+const CREDENTIAL = '(?:gate\\s+)?(?:codes?|pass\\s?codes?|passwords?|pins?|combos?|combinations?)';
+const ASKS = new RegExp('\\b(?:what(?:\'s| is| are)|send|text|share|reply with|let (?:us|me) know|need|provide|give)\\b[^.!?\\n]{0,40}\\b'
+  + CREDENTIAL + '\\b|\\b' + CREDENTIAL + '\\b[^.!?\\n]{0,40}\\?', 'i');
+const askedForCode = (text) => ASKS.test(String(text || ''));
 // A reply answers a question only while the question is recent.
 const ASK_WINDOW_HOURS = 48;
 
@@ -284,7 +286,8 @@ const canonicalLower = (v) => String(v || '').trim().replace(/\s+/g, '').toLower
 // the day the customer sent it, so it cannot stay listed for ever. One rule
 // for the live list and for the sweep's duplicate check.
 function isLive(r, now = new Date()) {
-  if (r.status === 'found' || r.life === 'standing') return true;
+  if (r.life === 'standing') return true;
+  if (r.status === 'found' && r.scheduled_service_id) return true;
   if (r.scheduled_service_id) return !ENDED_VISIT_STATUSES.includes(r.service_status || 'pending');
   const from = r.source_at || r.created_at;
   return !from || new Date(from) >= addETDays(now, -VISIT_WINDOW_DAYS);
@@ -518,7 +521,12 @@ async function listForCustomer(conn, customerId) {
 async function listFound(conn, { limit = 50, offset = 0 } = {}) {
   const base = () => conn('customer_access_codes as a')
     .join('customers as c', 'c.id', 'a.customer_id')
-    .whereNull('c.deleted_at').where('a.status', 'found');
+    .whereNull('c.deleted_at').where('a.status', 'found')
+    // A one-visit code older than its window is no longer a candidate.
+    .where(function current() {
+      this.where('a.life', 'standing')
+        .orWhereRaw('COALESCE(a.source_at, a.created_at) >= ?', [addETDays(new Date(), -VISIT_WINDOW_DAYS)]);
+    });
   const [{ count }] = await base().count({ count: '*' });
   const rows = await base()
     .select('a.*', 'c.first_name', 'c.last_name', 'c.company_name')
@@ -652,6 +660,11 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const visit = next.life === 'visit'
         ? await visitFor(trx, row.customer_id, { from: row.source_at ? new Date(row.source_at) : now, chosenId }) : { id: null };
       if (visit.error) return fail(400, visit.error);
+      // A visit code bound to nothing lives 14 days from the day it was sent; one
+      // past that is refused, never turned into an active code nobody can see.
+      if (next.life === 'visit' && !visit.id && !isLive({ ...row, life: 'visit', status: 'active', scheduled_service_id: null }, now)) {
+        return fail(409, 'expired');
+      }
       const scheduledServiceId = visit.id;
       const profileField = await fillEmptyProfileField(trx, row.customer_id, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));

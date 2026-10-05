@@ -344,6 +344,14 @@ postgres('access codes section', () => {
       expect((await rows(c.id))[0].property_id).toBeNull();
     });
 
+    test('a text that names a gate but asks for no code does not make a bare number a reply', async () => {
+      const c = await customer();
+      await text(c.id, 'We need to reschedule because the gate is broken.', { at: '2040-03-10T14:00:00Z', direction: 'outbound' });
+      await text(c.id, '4821');
+      const read = stub([gateItem({ code: '4821', quote: '4821' })]);
+      expect(await sweep(read)).toMatchObject({ read: 0 });
+    });
+
     test('a bare number is read only after our last text asked for a code', async () => {
       const asked = await customer();
       await text(asked.id, 'What is the gate code?', { at: '2040-03-10T14:50:00Z', direction: 'outbound' });
@@ -723,6 +731,15 @@ postgres('access codes section', () => {
       expect(await access.accept(trx, row.id, { scheduledServiceId: theirs, now: NOW })).toMatchObject({ ok: false, code: 'invalid_visit' });
       expect(await access.accept(trx, row.id, { scheduledServiceId: done, now: NOW })).toMatchObject({ ok: false, code: 'invalid_visit' });
       expect((await access.accept(trx, row.id, { scheduledServiceId: mine, now: NOW })).row.scheduledServiceId).toBe(mine);
+    });
+
+    test('a one-visit candidate older than 14 days leaves the review list and cannot be accepted', async () => {
+      const c = await customer();
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      await trx('customer_access_codes').where({ id: row.id }).update({ source_at: new Date(Date.now() - 20 * 86400000) });
+      expect((await access.listFound(trx, {})).items.map((r) => r.id)).not.toContain(row.id);
+      expect((await access.listForCustomer(trx, c.id)).found).toHaveLength(0);
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, status: 409, code: 'expired' });
     });
 
     test('a visit code bound to no visit leaves the live list 14 days after it was sent', async () => {
