@@ -83,7 +83,9 @@ async function bestOfferTierForSlots(estimate, raw) {
     db,
     estimateId: estimate?.id,
     raw,
-    gateOn: featureGates.estimateOfferTiersLive(),
+    gateOn: typeof featureGates.estimateOfferTiersLive === 'function'
+      ? featureGates.estimateOfferTiersLive()
+      : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true',
     buildPricingBundle,
     isActiveMember: (customerId) => isActivePlanCustomer(db, customerId, { strict: true }),
   });

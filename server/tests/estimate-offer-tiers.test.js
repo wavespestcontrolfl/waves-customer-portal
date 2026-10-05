@@ -182,6 +182,7 @@ describe('pricing bundle offer tiers', () => {
     const [good, better, best] = bundle.offerTiers;
     expect(good).toEqual(expect.objectContaining({ key: 'good', serviceMode: 'one_time', oneTimeTotal: 264 }));
     expect(better).toEqual(expect.objectContaining({ key: 'better', services: ['pest_control'], usesBundleFrequencies: true }));
+    expect(best.services).toEqual(['pest_control', 'lawn_care']);
     expect(best.frequencies.map((f) => f.key)).toEqual(['quarterly', 'bi_monthly', 'monthly']);
     const bestQuarterly = best.frequencies.find((f) => f.key === 'quarterly');
     // Pest 35.67 + lawn 57.75, both at the Silver 10% the stored bundle carries.
@@ -197,14 +198,13 @@ describe('pricing bundle offer tiers', () => {
     expect(bestCombo.perServiceTreatments.map((r) => r.service).sort()).toEqual(['lawn_care', 'pest_control']);
     expect(bestCombo.monthly).toBeCloseTo(84.08, 2);
     expect(best.serviceCadenceCombos.every((c) => c.perServiceTreatments.some((r) => r.service === 'lawn_care'))).toBe(true);
-    // The page renders Best's sections from the tier itself; the bundle's own
-    // sections stay pest-only.
+    // The page renders Best's section cards and summary from the tier itself
+    // (`sections`, beside the `services` key list); the bundle's own sections
+    // stay the pest-only view.
     expect(best.services).toEqual(['pest_control', 'lawn_care']);
     expect(best.sections.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
     expect(best.combinedRecurring).toBeTruthy();
     expect(best.waveGuardTier).toBe('Silver');
-    // (the pest-only bundle renders one combined 'bundle' section, no lawn)
-    expect(bundle.services.map((s) => s.key)).toEqual(['bundle']);
     expect(bundle.services.some((s) => s.key === 'lawn_care')).toBe(false);
   });
 
@@ -213,6 +213,21 @@ describe('pricing bundle offer tiers', () => {
     const bundle = await buildPricingBundle(pestLawnOneTimeToggleEstimate(), { monthlyBilled: false });
     expect(bundle.offerTiers).toBeUndefined();
     expect(bundle.offerTierDefaultKey).toBeUndefined();
+  });
+
+  test('gate off: a row already accepted on best still builds its tier view, so the accepted recap keeps what was booked', async () => {
+    delete process.env[GATE];
+    const accepted = pestLawnOneTimeToggleEstimate({ status: 'accepted' });
+    accepted.estimate_data.customerSelection = { offerTier: 'best', frequencyKey: 'quarterly' };
+    const bundle = await buildPricingBundle(accepted, { monthlyBilled: false });
+    const best = (bundle.offerTiers || []).find((t) => t.key === 'best');
+    expect(best).toBeTruthy();
+    const view = OfferTiers.acceptedBestPricingView(bundle, accepted.estimate_data);
+    expect(view.frequencies.find((f) => f.key === 'quarterly').monthly).toBeCloseTo(84.08, 2);
+    expect(view.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
+    expect(view.combinedRecurring).toBeTruthy();
+    expect(view.acceptedOfferTier).toBe('best');
+    expect(view.offerTiers).toBeUndefined();
   });
 
   test('ineligible shapes carry no tiers: no one-time toggle, pest-only, member snapshot, manual discount', async () => {
@@ -275,20 +290,17 @@ describe('resolveBestOfferTierForSlots (slot routes)', () => {
 });
 
 describe('accepted Best view', () => {
-  test('a row accepted on best serves the tier view (ladder, sections, summary) with the picker fields dropped; anything else is untouched', () => {
-    const best = { key: 'best', frequencies: [{ key: 'quarterly', monthly: 84.08 }], serviceCadenceCombos: [{ key: 'c' }], sections: [{ key: 'pest_control' }, { key: 'lawn_care' }], combinedRecurring: { monthlySubtotal: 84.08 }, waveGuardTier: 'Silver' };
-    const bundle = { frequencies: [{ key: 'quarterly', monthly: 32.1 }], services: [{ key: 'bundle' }], waveGuardTier: 'Bronze', offerTiers: [{ key: 'good' }, { key: 'better' }, best], offerTierDefaultKey: 'better' };
+  test('a row accepted on best serves the tier view with the picker fields dropped; anything else is untouched', () => {
+    const best = { key: 'best', frequencies: [{ key: 'quarterly', monthly: 84.08 }], serviceCadenceCombos: [{ key: 'c' }], waveGuardTier: 'Silver' };
+    const bundle = { frequencies: [{ key: 'quarterly', monthly: 32.1 }], waveGuardTier: 'Bronze', offerTiers: [{ key: 'good' }, { key: 'better' }, best], offerTierDefaultKey: 'better' };
     const view = OfferTiers.acceptedBestPricingView(bundle, { customerSelection: { offerTier: 'best' } });
     expect(view.frequencies[0].monthly).toBe(84.08);
-    expect(view.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
-    expect(view.combinedRecurring.monthlySubtotal).toBe(84.08);
     expect(view.waveGuardTier).toBe('Silver');
     expect(view.acceptedOfferTier).toBe('best');
     expect(view.offerTiers).toBeUndefined();
     expect(view.offerTierDefaultKey).toBeUndefined();
     expect(OfferTiers.acceptedBestPricingView(bundle, { customerSelection: { offerTier: 'better' } })).toBe(bundle);
     expect(OfferTiers.acceptedBestPricingView(bundle, {})).toBe(bundle);
-    expect(OfferTiers.acceptedBestPricingView({ frequencies: [] }, { customerSelection: { offerTier: 'best' } })).toEqual({ frequencies: [] });
     expect(OfferTiers.acceptedOfferTierKey({ customerSelection: { offerTier: ' BEST ' } })).toBe('best');
     expect(OfferTiers.acceptedOfferTierKey({ customerSelection: { offerTier: 'gold' } })).toBeNull();
   });

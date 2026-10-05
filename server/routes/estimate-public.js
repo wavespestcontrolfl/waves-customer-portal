@@ -150,6 +150,13 @@ const {
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
 const OfferTiers = require('../services/estimate-offer-tiers');
+// GATE_ESTIMATE_OFFER_TIERS read at call time. Tests mock feature-gates with
+// a partial object, so the env read is the fallback when the reader is absent.
+function offerTiersGateOn() {
+  return typeof featureGates.estimateOfferTiersLive === 'function'
+    ? featureGates.estimateOfferTiersLive()
+    : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
+}
 const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
@@ -10437,7 +10444,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const { tier: offerTier, error: offerTierError } = OfferTiers.resolveSelectedOfferTier(
       pricingBundleAsOffered,
       selectedOfferTierRaw,
-      { serviceMode, gateOn: featureGates.estimateOfferTiersLive() },
+      { serviceMode, gateOn: offerTiersGateOn() },
     );
     if (offerTierError) {
       return res.status(400).json({ error: offerTierError, code: 'offer_tier_unavailable' });
@@ -11898,6 +11905,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             services: nextEstimateData.recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)),
           };
         }
+        acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
+      }
+      // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a Good (one-time) accept has
+      // no selectedFrequency branch to ride, so the chosen tier is recorded
+      // here for every tiered accept (the recurring branch above wrote it
+      // already for Better / Best; this is idempotent on the same key).
+      if (offerTier && nextEstimateData && nextEstimateData.customerSelection?.offerTier !== offerTier.key) {
+        nextEstimateData.customerSelection = {
+          ...(nextEstimateData.customerSelection || {}),
+          offerTier: offerTier.key,
+          selectedAt: nextEstimateData.customerSelection?.selectedAt || new Date().toISOString(),
+        };
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
       const acceptedEstimateForScheduling = nextEstimateData
@@ -25065,7 +25084,12 @@ function serviceCadenceComboKey(selection = {}) {
 // excluded: withManualDiscount nets the discount into payload.frequencies
 // only, and a second ladder it never touched could show a different number.
 function buildOfferTierFieldsForV1({ estimate, estData, v1, prefs, pestOnlyChoice, v1FloorOptions, anchorOneTimePrice }) {
-  if (!pestOnlyChoice || !featureGates.estimateOfferTiersLive()) return {};
+  if (!pestOnlyChoice) return {};
+  // A row already accepted on 'best' keeps its tier view even after the gate
+  // is turned off: what was booked must keep reading as what was booked
+  // (the /data projection never serves the picker on an accepted row).
+  const acceptedBest = OfferTiers.acceptedOfferTierKey(estData) === 'best';
+  if (!offerTiersGateOn() && !acceptedBest) return {};
   if (normalizeManualDiscountSummary(estData)) return {};
   const OptOut = require('../services/estimate-service-opt-out');
   const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
@@ -26908,6 +26932,8 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
   // contract view the bundle gets (built through the SAME attach / floor-hide
   // / presentation chain, from the tier's own ladder). The tier object is
   // replaced, not mutated: the payload's array can be a cached bundle's.
+  // `services` stays the key list; the page's section objects ride on
+  // `sections`.
   const bestOfferTier = OfferTiers.offerTiersOf(withContractBase).find((tier) => tier && tier.key === 'best');
   let withContract = withContractBase;
   if (bestOfferTier) {
@@ -26924,8 +26950,6 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
       offerTiers: withContractBase.offerTiers.map((tier) => (tier === bestOfferTier
         ? {
           ...tier,
-          // `services` stays the PR 1 key list; the page's section objects
-          // ride beside it.
           sections: bestView.services,
           combinedRecurring: bestView.combinedRecurring ?? null,
           waveGuardTier: bestView.waveGuardTier ?? withContractBase.waveGuardTier ?? null,
@@ -29997,7 +30021,7 @@ async function composeEstimateDataPayload(estimate, {
       try { offerTiersBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
       catch (_) { offerTiersBlockedByMembership = true; }
     }
-    const offerTiersServed = featureGates.estimateOfferTiersLive()
+    const offerTiersServed = offerTiersGateOn()
       && Array.isArray(pricingBundle?.offerTiers)
       && !offerTiersBlockedByMembership
       && !adminDraftPreview
