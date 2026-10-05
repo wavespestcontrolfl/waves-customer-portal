@@ -486,10 +486,46 @@ function v13ProtocolRows(structuredProtocol) {
 // other structured protocol (the staged row missing because the migration did not
 // run or the track had no active baseline, or a visit pinned to an older version)
 // would pair v13 products and catalog-default rates with another version's windows
-// and gates. The plan withholds its calculated products and blocks instead.
-function lawnV13ProtocolMissing({ trackKey, structuredProtocol }) {
-  return featureGates.lawnV13Live?.() === true && Boolean(trackKey)
-    && structuredProtocol?.version !== LAWN_V13_VERSION;
+// and gates. The reverse also holds: a visit already pinned to the staged v13
+// protocol while the gate is OFF would show legacy-recipe amounts against v13
+// windows. Either way the plan withholds its calculated products and blocks
+// instead; the pin is read from the appointment itself, so this does not depend on
+// the completion-default gates. Returns the block, or null.
+function lawnV13PlanBlock({ trackKey, service, structuredProtocol }) {
+  if (featureGates.lawnV13Live?.() === true) {
+    if (!trackKey || structuredProtocol?.version === LAWN_V13_VERSION) return null;
+    return { code: 'lawn_v13_protocol_missing', severity: 'block', message: `This visit has no staged ${LAWN_V13_VERSION} lawn protocol (not loaded for this track, or the visit is pinned to an older version); suggested amounts are unavailable. Enter the actual work.` };
+  }
+  if (service?.lawn_protocol_version === LAWN_V13_VERSION || structuredProtocol?.version === LAWN_V13_VERSION) {
+    return { code: 'lawn_v13_gate_off', severity: 'block', message: `This visit is pinned to the ${LAWN_V13_VERSION} lawn protocol but GATE_LAWN_V13 is off; suggested amounts are unavailable. Enter the actual work.` };
+  }
+  return null;
+}
+
+// What a staged v13 product row's gates mean in the field, for the plan item the
+// panel and job card show. 'required' = a condition the tech must meet or check
+// before applying (the plan has no evidence to clear it); 'note' = an instruction.
+// Gates the plan CAN judge are evaluated: novToMarOnly against the service month,
+// northPortBlocked against the visit's resolved municipality, spreaderVisitOnly
+// against the window's production mode. Keys not listed carry no field text.
+function v13GateNotes(gates, { monthNumber = null, municipality = null, productionMode = null } = {}) {
+  const g = gates && typeof gates === 'object' ? gates : {};
+  const notes = [];
+  const add = (key, severity, text) => notes.push({ key, severity, text });
+  if (g.minDistanceFromWaterFt) add('minDistanceFromWaterFt', 'required', `Keep ${g.minDistanceFromWaterFt} ft from ponds, lakes and canals; skip that strip.`);
+  if (g.holdForTropicalWatch) add('holdForTropicalWatch', 'required', 'Hold the application if a tropical storm or hurricane is forecast.');
+  if (g.novToMarOnly && monthNumber != null && monthNumber > 3 && monthNumber < 11) add('novToMarOnly', 'required', 'Use only from November through March; this visit is outside that season.');
+  if (g.spreaderVisitOnly && /hose|reel/i.test(String(productionMode || ''))) add('spreaderVisitOnly', 'required', 'Granular product: apply on a spreader visit, not from the hose pass.');
+  if (g.northPortBlocked && /north\s*port/i.test(String(municipality || ''))) add('northPortBlocked', 'required', 'Not allowed in North Port this month; skip this product.');
+  if (g.applyAlone) add('applyAlone', 'note', 'Apply alone: no other product in the tank.');
+  if (g.delayWateringHours) add('delayWateringHours', 'note', `Delay watering for ${g.delayWateringHours} hours.`);
+  if (g.noWaterIn) add('noWaterIn', 'note', 'Do not water this in.');
+  if (g.tankMixWith) add('tankMixWith', 'note', `Tank mix with ${g.tankMixWith}.`);
+  if (g.concentration) add('concentration', 'note', `Concentration ${g.concentration}.`);
+  if (g.paleTurfRate) add('paleTurfRate', 'note', `Pale turf rate: ${g.paleTurfRate}.`);
+  if (g.rateRange) add('rateRange', 'note', `Label rate range ${g.rateRange}.`);
+  if (g.sunnyTurfOnly) add('sunnyTurfOnly', 'note', 'Sunny turf only; the amount covers the sunny share of the lawn.');
+  return notes;
 }
 
 // The same rows for a reader with no visit (the tank sheet, the cost audit): one
@@ -499,7 +535,7 @@ function lawnV13ProtocolMissing({ trackKey, structuredProtocol }) {
 async function loadV13RowsForMonth(knex, trackKey, monthName) {
   if (featureGates.lawnV13Live?.() !== true) return new Map();
   const serviceDate = new Date(Date.UTC(2026, MONTH_ABBR.indexOf(monthName), 15, 16));
-  const summary = summarizeProtocolContext(await getProtocolWindowContext(knex, { serviceDate, grassTrack: trackKey, strict: true }));
+  const summary = summarizeProtocolContext(await getProtocolWindowContext(knex, { serviceDate, grassTrack: trackKey, strict: true, planning: true }));
   if (summary?.version !== LAWN_V13_VERSION) {
     throw Object.assign(new Error(`GATE_LAWN_V13 is on but the staged ${LAWN_V13_VERSION} protocol is missing for ${trackKey}`), { code: 'lawn_v13_protocol_missing' });
   }
@@ -1462,6 +1498,7 @@ async function buildPlanForService(serviceId, options = {}) {
     serviceDate,
     grassTrack: calendarProtocol.trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
+    planning: true,
     ...(completionDefaultsEnabled ? {
       strict: true, windowKey: service.lawn_protocol_window_key,
       protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version,
@@ -1554,6 +1591,14 @@ async function buildPlanForService(serviceId, options = {}) {
       areaFactorBroadcast: item.areaFactorBroadcast,
       selectionReason: item.selectionReason,
       selected: item.selected,
+      // The staged v13 row's gates and what they mean in the field (empty for
+      // every other plan), carried so the panel and job card can show them.
+      gates: v13Row?.gates && Object.keys(v13Row.gates).length ? v13Row.gates : null,
+      gateNotes: v13Row ? v13GateNotes(v13Row.gates, {
+        monthNumber: MONTH_ABBR.indexOf(month) + 1 || null,
+        municipality: resolvedOrdinanceCity,
+        productionMode: structuredProtocol?.window?.productionMode,
+      }) : [],
       matched: !!plannedProduct,
       product: plannedProduct ? {
         id: plannedProduct.id,
@@ -1599,8 +1644,8 @@ async function buildPlanForService(serviceId, options = {}) {
   const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems);
   // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
   // either (the block below says why), never amounts from catalog defaults.
-  const v13ProtocolMissing = lawnV13ProtocolMissing({ trackKey, structuredProtocol });
-  if (archivedRecipeUnavailable || v13ProtocolMissing) planItems.length = 0;
+  const v13PlanBlock = lawnV13PlanBlock({ trackKey, service, structuredProtocol });
+  if (archivedRecipeUnavailable || v13PlanBlock) planItems.length = 0;
   const plannedItems = planItems.filter((item) => item.selected);
   const materialCostSummary = summarizeMaterialCost(plannedItems);
 
@@ -1623,8 +1668,20 @@ async function buildPlanForService(serviceId, options = {}) {
   if (completionContext && !completionContext.propertyMatchesProfile) {
     blocks.push({ code: 'lawn_property_unresolved', severity: 'block', message: 'The saved turf profile does not prove this service property; suggested amounts are unavailable.' });
   }
-  if (v13ProtocolMissing) {
-    blocks.push({ code: 'lawn_v13_protocol_missing', severity: 'block', message: `This visit has no staged ${LAWN_V13_VERSION} lawn protocol (not loaded for this track, or the visit is pinned to an older version); suggested amounts are unavailable. Enter the actual work.` });
+  if (v13PlanBlock) blocks.push(v13PlanBlock);
+  // Restored v13 product gates on the selected items: a condition the plan cannot
+  // clear is a visible warning; an apply-alone product selected beside any other
+  // product holds the mix.
+  for (const item of plannedItems) {
+    for (const note of item.gateNotes || []) {
+      if (note.severity !== 'required') continue;
+      warnings.push({ code: 'lawn_v13_product_gate', severity: 'warning', gate: note.key, productId: item.product?.id || null, productName: item.product?.name || null, message: `${item.product?.name || 'Product'}: ${note.text}` });
+    }
+  }
+  const applyAloneConflicts = plannedItems.filter((item) => item.product && item.gateNotes?.some((note) => note.key === 'applyAlone')
+    && plannedItems.some((other) => other !== item && other.product));
+  for (const item of applyAloneConflicts) {
+    blocks.push({ code: 'lawn_v13_apply_alone', severity: 'block', productId: item.product.id, productName: item.product.name, message: `${item.product.name} is applied alone, but other products are selected with it. Remove them from the mix or apply them separately.` });
   }
   if (completionDefaultsEnabled && !matchesLawnCompletionProtocol(structuredProtocol, {
     protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version, windowKey: service.lawn_protocol_window_key,
@@ -1844,7 +1901,8 @@ async function buildPlanForService(serviceId, options = {}) {
       source: service.lawn_protocol_assignment_source || null,
       assignedAt: service.lawn_protocol_assigned_at || null,
     },
-    mixingOrder: buildMixOrder(plannedItems),
+    // An apply-alone conflict holds the mix: no combined order is offered.
+    mixingOrder: applyAloneConflicts.length ? [] : buildMixOrder(plannedItems),
     closeout: {
       requiredPhotos: ['before', 'after'],
       captureActualProductAmounts: true,
@@ -1875,7 +1933,8 @@ module.exports = {
   v13ProtocolRows,
   v13RateOptions,
   loadV13RowsForMonth,
-  lawnV13ProtocolMissing,
+  lawnV13PlanBlock,
+  v13GateNotes,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,

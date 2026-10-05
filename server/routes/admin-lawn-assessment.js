@@ -716,7 +716,7 @@ router.post('/assess', async (req, res, next) => {
       // the model sees the products the tech is actually expected to apply.
       const assignedWindowKey = scheduledService?.lawn_protocol_window_key || null;
       const protoCtx = track
-        ? await getProtocolWindowContext(db, { serviceDate: visitDate, grassTrack: track, windowKey: assignedWindowKey })
+        ? await getProtocolWindowContext(db, { serviceDate: visitDate, grassTrack: track, windowKey: assignedWindowKey, planning: true })
         : null;
       const structured = protoCtx ? summarizeProtocolContext(protoCtx) : null;
       // Only claim products we're CERTAIN were applied: default-in-plan AND

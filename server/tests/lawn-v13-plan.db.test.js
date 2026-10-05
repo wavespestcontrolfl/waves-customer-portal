@@ -6,6 +6,7 @@
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
 const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
+const { buildLawnProtocolReportContext } = require('../services/service-report/dynamic-context');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const KEY = 'fixture_v13_lawn';
@@ -42,13 +43,17 @@ describeDb('the v13 plan through PostgreSQL', () => {
       name: 'Tetrino Insecticide', category: 'insecticide', default_rate_per_1000: 0.367, rate_unit: 'fl oz',
       label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'fl oz', active: true,
     }).returning('*');
+    await knex('products_catalog').insert({
+      name: 'Arena 50 WDG', category: 'insecticide', default_rate_per_1000: 0.29, rate_unit: 'oz',
+      label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true,
+    });
     const [old] = await knex('lawn_protocols').insert({ protocol_key: KEY, version: OLD_VERSION, name: 'Fixture old', status: 'active', grass_track: 'bermuda', region: 'swfl' }).returning('*');
     const [staged] = await knex('lawn_protocols').insert({ protocol_key: KEY, version: LAWN_V13_VERSION, name: 'Fixture v13', status: 'staged', grass_track: 'bermuda', region: 'swfl', effective_from: '2000-01-01' }).returning('*');
     for (const [protocol, windowKey] of [[old, 'fixture_5'], [staged, 'may_v13']]) {
       const [window] = await knex('lawn_protocol_windows').insert({ lawn_protocol_id: protocol.id, month: 5, window_key: windowKey, title: windowKey, visit_type: 'fixture' }).returning('*');
       await knex('lawn_protocol_products').insert({
         lawn_protocol_window_id: window.id, product_id: tetrino.id, product_name: tetrino.name, role: 'insecticide', application_mode: 'broadcast',
-        default_in_plan: true, rate_per_1000: 0.367, rate_unit: 'fl oz', gates: JSON.stringify(protocol === staged ? { sunnyTurfOnly: true } : {}),
+        default_in_plan: true, rate_per_1000: 0.367, rate_unit: 'fl oz', gates: JSON.stringify(protocol === staged ? { sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true } : {}),
       });
     }
     const [equipment] = await knex('equipment_systems').insert({ name: 'Fixture rig', system_type: 'skid', tank_capacity_gal: 110, active: true }).returning('*');
@@ -123,5 +128,78 @@ describeDb('the v13 plan through PostgreSQL', () => {
     const result = await plan(await plannedVisit({ lawn_protocol_key: KEY, lawn_protocol_version: OLD_VERSION, lawn_protocol_window_key: 'fixture_5' }));
     expect(codes(result)).not.toContain('lawn_v13_protocol_missing');
     expect(result.protocol.structured.version).toBe(OLD_VERSION);
+  });
+
+  describe.each(PREREQ)('gate OFF with a visit pinned to the staged v13 protocol: completion defaults %s, property history %s', (completion, history) => {
+    test('no calculated products, no amounts, the lawn_v13_gate_off block', async () => {
+      setGates({ v13: 'off', completion, history });
+      const result = await plan(await plannedVisit({ lawn_protocol_key: KEY, lawn_protocol_version: LAWN_V13_VERSION, lawn_protocol_window_key: 'may_v13' }));
+      expect(codes(result)).toContain('lawn_v13_gate_off');
+      expect(result.status).toBe('blocked');
+      expect(result.mixCalculator.items).toEqual([]);
+      expect(result.mixCalculator.conditionalOptions).toEqual([]);
+      expect(result.protocol.base).toEqual([]);
+      expect(result.protocol.conditional).toEqual([]);
+    });
+  });
+
+  test('a service report for a legacy completed record (no ledger row, no pin) never shows v13 as followed, gate on', async () => {
+    setGates({ v13: 'on' });
+    const visit = await plannedVisit();
+    const record = { id: visit.id, customer_id: visit.customer_id, service_date: '2026-05-12', scheduled_service_id: visit.id };
+    const context = await buildLawnProtocolReportContext(record, knex, new Date('2026-05-12T16:00:00Z'));
+    expect(context.version).toBe(OLD_VERSION);
+    expect(context.status).toBe('active');
+    expect(context.window.key).toBe('fixture_5');
+    // The planner, asked the same question for the same visit, reads the staged v13 protocol.
+    expect((await plan(visit)).protocol.structured.version).toBe(LAWN_V13_VERSION);
+  });
+
+  test('a service report for a record whose ledger row names v13 still shows v13 (its own record)', async () => {
+    setGates({ v13: 'on' });
+    const visit = await plannedVisit();
+    const staged = await knex('lawn_protocols').where({ protocol_key: KEY, version: LAWN_V13_VERSION }).first();
+    const stagedWindow = await knex('lawn_protocol_windows').where({ lawn_protocol_id: staged.id }).first();
+    const [serviceRecord] = await knex('service_records').insert({ customer_id: visit.customer_id, scheduled_service_id: visit.id, service_date: '2026-05-12', service_type: 'Lawn fixture' }).returning('*');
+    await knex('lawn_protocol_service_completions').insert({
+      service_record_id: serviceRecord.id, scheduled_service_id: visit.id, customer_id: visit.customer_id,
+      lawn_protocol_id: staged.id, lawn_protocol_window_id: stagedWindow.id, protocol_key: KEY, protocol_version: LAWN_V13_VERSION, window_key: 'may_v13',
+    });
+    const context = await buildLawnProtocolReportContext({ id: serviceRecord.id, customer_id: visit.customer_id, service_date: '2026-05-12', scheduled_service_id: visit.id }, knex, new Date('2026-05-12T16:00:00Z'));
+    expect(context.version).toBe(LAWN_V13_VERSION);
+  });
+
+  describe('restored Tetrino gates on the plan item', () => {
+    test('the item carries its gates, a required water-distance warning shows on the plan, and alone there is no apply-alone block', async () => {
+      setGates();
+      const result = await plan(await plannedVisit());
+      const item = tetrinoItem(result);
+      expect(item.gates).toEqual({ sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true });
+      expect(item.gateNotes.map((n) => `${n.severity}:${n.key}`)).toEqual(['required:minDistanceFromWaterFt', 'note:applyAlone', 'note:sunnyTurfOnly']);
+      const warning = result.propertyGate.warnings.find((w) => w.code === 'lawn_v13_product_gate');
+      expect(warning).toMatchObject({ gate: 'minDistanceFromWaterFt', productName: 'Tetrino Insecticide', message: 'Tetrino Insecticide: Keep 25 ft from ponds, lakes and canals; skip that strip.' });
+      expect(codes(result)).not.toContain('lawn_v13_apply_alone');
+      expect(result.mixingOrder).toHaveLength(1);
+    });
+
+    test('another selected product beside the apply-alone Tetrino holds the mix: block, no combined mixing order', async () => {
+      setGates();
+      const visit = await plannedVisit();
+      const result = await buildPlanForService(visit.id, { db: knex, selectedConditionalProductNames: ['Arena 50 WDG'] });
+      expect(result.mixCalculator.items.map((i) => i.product.name).sort()).toEqual(['Arena 50 WDG', 'Tetrino Insecticide']);
+      expect(codes(result)).toContain('lawn_v13_apply_alone');
+      expect(result.status).toBe('blocked');
+      expect(result.mixingOrder).toEqual([]);
+    });
+
+    test('gate off: the plan item carries no v13 gates or notes, and nothing is warned', async () => {
+      setGates({ v13: 'off' });
+      const result = await plan(await plannedVisit());
+      expect(result.propertyGate.warnings.some((w) => w.code === 'lawn_v13_product_gate')).toBe(false);
+      for (const item of [...result.protocol.base, ...result.protocol.conditional]) {
+        expect(item.gates).toBeNull();
+        expect(item.gateNotes).toEqual([]);
+      }
+    });
   });
 });

@@ -225,14 +225,20 @@ describe('getActiveLawnProtocol', () => {
     ]);
   });
 
-  test('gate on: only the staged v13 version, never the active one', async () => {
+  test('gate on, planning caller: only the staged v13 version, never the active one', async () => {
     const { knex, calls } = recordingKnex();
-    await withGateAsync('true', () => getActiveLawnProtocol(knex, { grassTrack: 'bermuda', region: 'swfl' }));
+    await withGateAsync('true', () => getActiveLawnProtocol(knex, { grassTrack: 'bermuda', region: 'swfl', planning: true }));
     expect(calls).toEqual([
       ['table', 'lawn_protocols'], ['where', { status: 'staged', version: LAWN_V13_VERSION }],
       ['orderBy', 'effective_from', 'desc'], ['orderBy', 'created_at', 'desc'],
       ['where', { grass_track: 'bermuda' }], ['where', { region: 'swfl' }],
     ]);
+  });
+
+  test('gate on, historical caller (no planning option): exactly the old active query', async () => {
+    const { knex, calls } = recordingKnex();
+    await withGateAsync('true', () => getActiveLawnProtocol(knex, { grassTrack: 'bermuda', region: 'swfl' }));
+    expect(calls[1]).toEqual(['where', { status: 'active' }]);
   });
 
   // A table-backed fake: first() returns the first stored row every where() object matches.
@@ -252,9 +258,11 @@ describe('getActiveLawnProtocol', () => {
   const STAGED = { id: 's1', protocol_key: 'k', version: LAWN_V13_VERSION, status: 'staged', grass_track: 'bermuda', region: 'swfl' };
 
   test('gate on with the staged row missing returns nothing instead of the old active version', async () => {
-    const filters = { grassTrack: 'bermuda', region: 'swfl' };
+    const filters = { grassTrack: 'bermuda', region: 'swfl', planning: true };
     expect(await withGateAsync('true', () => getActiveLawnProtocol(tableKnex([ACTIVE]), filters))).toBeNull();
     expect((await withGateAsync('true', () => getActiveLawnProtocol(tableKnex([ACTIVE, STAGED]), filters))).version).toBe(LAWN_V13_VERSION);
+    // A historical reader never sees the staged row: it keeps the active one.
+    expect((await withGateAsync('true', () => getActiveLawnProtocol(tableKnex([ACTIVE, STAGED]), { grassTrack: 'bermuda', region: 'swfl' }))).version).toBe('2026.06');
     // Gate off: the old behavior, the active row, and a staged row alone is never served.
     expect((await withGateAsync(undefined, () => getActiveLawnProtocol(tableKnex([ACTIVE, STAGED]), filters))).version).toBe('2026.06');
     expect(await withGateAsync(undefined, () => getActiveLawnProtocol(tableKnex([STAGED]), filters))).toBeNull();
@@ -354,17 +362,60 @@ describe('plan engine reads the matched v13 protocol row', () => {
     expect(stated).toEqual(expect.arrayContaining([migration.NAMES.STW, migration.NAMES.NT, migration.NAMES.DIM, migration.NAMES.TET, migration.NAMES.STW15]));
   });
 
-  test('a visit is blocked when GATE_LAWN_V13 is on and its structured protocol is not the staged v13 one, pinned or not', () => {
+  test('plan block: gate on, any structured protocol but the staged v13 one; gate off, anything pinned to v13', () => {
     const staged = { version: LAWN_V13_VERSION };
     const old = { version: '2026.06' };
-    const missing = (args) => withGate('true', () => engine.lawnV13ProtocolMissing(args));
-    expect(missing({ trackKey: 'bermuda', structuredProtocol: null })).toBe(true);
-    expect(missing({ trackKey: 'bermuda', structuredProtocol: old })).toBe(true);
-    expect(missing({ trackKey: 'bermuda', structuredProtocol: staged })).toBe(false);
+    const block = (args, gate = 'true') => withGate(gate, () => engine.lawnV13PlanBlock({ service: {}, ...args }));
+    expect(block({ trackKey: 'bermuda', structuredProtocol: null }).code).toBe('lawn_v13_protocol_missing');
+    expect(block({ trackKey: 'bermuda', structuredProtocol: old }).code).toBe('lawn_v13_protocol_missing');
+    expect(block({ trackKey: 'bermuda', structuredProtocol: old, service: { lawn_protocol_version: '2026.06' } }).code).toBe('lawn_v13_protocol_missing');
+    expect(block({ trackKey: 'bermuda', structuredProtocol: staged })).toBeNull();
     // No track has its own block elsewhere.
-    expect(missing({ trackKey: null, structuredProtocol: null })).toBe(false);
-    // Gate off: never.
-    expect(withGate(undefined, () => engine.lawnV13ProtocolMissing({ trackKey: 'bermuda', structuredProtocol: null }))).toBe(false);
+    expect(block({ trackKey: null, structuredProtocol: null })).toBeNull();
+    // Gate off: a visit pinned to the staged v13 protocol has no recipe to match.
+    expect(block({ trackKey: 'bermuda', structuredProtocol: old, service: { lawn_protocol_version: LAWN_V13_VERSION } }, 'false').code).toBe('lawn_v13_gate_off');
+    expect(block({ trackKey: 'bermuda', structuredProtocol: staged }, 'false').code).toBe('lawn_v13_gate_off');
+    // Gate off, nothing v13 about the visit: never.
+    expect(block({ trackKey: 'bermuda', structuredProtocol: old, service: { lawn_protocol_version: '2026.06' } }, 'false')).toBeNull();
+    expect(block({ trackKey: 'bermuda', structuredProtocol: null }, 'false')).toBeNull();
+  });
+
+  describe('v13GateNotes', () => {
+    const keys = (notes) => notes.map((n) => `${n.severity}:${n.key}`);
+    test('May Tetrino: water distance is a required warning, apply-alone and sunny turf are notes', () => {
+      const notes = engine.v13GateNotes({ sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true });
+      expect(keys(notes)).toEqual(['required:minDistanceFromWaterFt', 'note:applyAlone', 'note:sunnyTurfOnly']);
+      expect(notes[0].text).toBe('Keep 25 ft from ponds, lakes and canals; skip that strip.');
+    });
+    test('judged gates: Nov-Mar only by month, North Port by municipality, spreader-only by production mode', () => {
+      expect(keys(engine.v13GateNotes({ novToMarOnly: true }, { monthNumber: 7 }))).toEqual(['required:novToMarOnly']);
+      for (const month of [11, 12, 1, 3]) expect(engine.v13GateNotes({ novToMarOnly: true }, { monthNumber: month })).toEqual([]);
+      expect(keys(engine.v13GateNotes({ northPortBlocked: true }, { municipality: 'North Port' }))).toEqual(['required:northPortBlocked']);
+      expect(engine.v13GateNotes({ northPortBlocked: true }, { municipality: 'Sarasota' })).toEqual([]);
+      expect(engine.v13GateNotes({ northPortBlocked: true }, {})).toEqual([]);
+      expect(keys(engine.v13GateNotes({ spreaderVisitOnly: true }, { productionMode: 'main_reel_plus_spot_backpack' }))).toEqual(['required:spreaderVisitOnly']);
+      expect(engine.v13GateNotes({ spreaderVisitOnly: true }, { productionMode: 'spreader_plus_spot_backpack' })).toEqual([]);
+    });
+    test('tropical watch is required; watering, tank mix, concentration, rate gates are notes; unknown keys say nothing', () => {
+      expect(keys(engine.v13GateNotes({ holdForTropicalWatch: true }))).toEqual(['required:holdForTropicalWatch']);
+      expect(keys(engine.v13GateNotes({ delayWateringHours: 24, noWaterIn: true, tankMixWith: 'Celsius WG', concentration: '0.25% v/v', paleTurfRate: '16 fl oz', rateRange: '0.046-0.092 fl oz/1000', trigger: 'x', annualCounter: 'y' })))
+        .toEqual(['note:delayWateringHours', 'note:noWaterIn', 'note:tankMixWith', 'note:concentration', 'note:paleTurfRate', 'note:rateRange']);
+      expect(engine.v13GateNotes(null)).toEqual([]);
+    });
+    test('every restored gate key the data migration puts on a row is either shown here or deliberately silent', () => {
+      const silent = new Set(['trigger', 'annualCounter', 'stressGate', 'targetN', 'targetK2O', 'blackoutSensitive', 'requiresZeroNP', 'postAppIrrigation']);
+      const shown = new Set();
+      for (const [, spec] of migration.PRODUCTS) {
+        for (const key of Object.keys(spec[7] || {})) {
+          if (silent.has(key) || key === 'recheckDays') continue;
+          const probe = engine.v13GateNotes({ [key]: key === 'minDistanceFromWaterFt' ? 25 : key === 'delayWateringHours' ? 24 : true },
+            { monthNumber: 7, municipality: 'North Port', productionMode: 'main_reel_plus_spot_backpack' });
+          if (probe.length) shown.add(key);
+          expect({ key, shown: probe.length > 0 }).toEqual({ key, shown: true });
+        }
+      }
+      expect(shown.has('minDistanceFromWaterFt')).toBe(true);
+    });
   });
 
   describe('loadV13RowsForMonth', () => {

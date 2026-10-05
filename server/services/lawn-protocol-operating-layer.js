@@ -121,20 +121,24 @@ function normalizeGate(row) {
 // grounding hash) must not read a transient outage as "no protocol".
 // Default stays fail-soft for existing consumers (waveguard plan engine).
 async function getActiveLawnProtocol(knex = db, filters = {}) {
-  const { strict = false } = filters;
+  const { strict = false, planning = false } = filters;
   const soft = (query, fallback) => {
     const read = savepointRead(knex, () => query);
     return strict ? read : read.catch(() => fallback);
   };
-  // GATE_LAWN_V13 on: a visit with no assignment resolves the staged v13 version
-  // and nothing else (an assigned visit resolves its own pinned version in
-  // getProtocolWindowContext and never reaches this lookup). With no staged row
-  // (migration not run, or the key had no active baseline) this returns null:
-  // falling back to the active version would pair its windows, gates and rates
-  // with the v13 recipe lawnProtocols() already switched to. Off, the query is
+  // GATE_LAWN_V13 on, for a PLANNING caller (planning: true: the plan engine, tank
+  // sheet, pre-visit brief, live assessment, admin reference views): a visit with
+  // no assignment resolves the staged v13 version and nothing else (an assigned
+  // visit resolves its own pinned version in getProtocolWindowContext and never
+  // reaches this lookup). With no staged row (migration not run, or the key had no
+  // active baseline) this returns null: falling back to the active version would
+  // pair its windows, gates and rates with the v13 recipe lawnProtocols() already
+  // switched to. A HISTORICAL reader (the service report context) never passes
+  // planning, so a legacy completed record with no ledger row and no pin keeps the
+  // pre-gate resolution and never reads as having followed v13. Off, the query is
   // exactly the old one.
   const query = knex('lawn_protocols');
-  if (featureGates.lawnV13Live?.() === true) query.where({ status: 'staged', version: LAWN_V13_VERSION });
+  if (planning && featureGates.lawnV13Live?.() === true) query.where({ status: 'staged', version: LAWN_V13_VERSION });
   else query.where({ status: 'active' });
   query.orderBy('effective_from', 'desc').orderBy('created_at', 'desc');
 
@@ -186,7 +190,7 @@ async function getLawnProtocolById(knex = db, id, { strict = false } = {}) {
   };
 }
 
-async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false } = {}) {
+async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), grassTrack = 'st_augustine', region = 'swfl', protocolId, protocolKey, protocolVersion, windowKey, strict = false, planning = false } = {}) {
   // An appointment's assigned version must not fall through to the currently
   // active protocol when that assignment can no longer be resolved.
   if (!protocolId && protocolKey) {
@@ -198,7 +202,7 @@ async function getProtocolWindowContext(knex = db, { serviceDate = new Date(), g
   }
   const protocol = protocolId
     ? await getLawnProtocolById(knex, protocolId, { strict })
-    : await getActiveLawnProtocol(knex, { grassTrack, region, strict });
+    : await getActiveLawnProtocol(knex, { grassTrack, region, strict, planning });
   if (!protocol) return null;
 
   const month = etParts(serviceDate).month;

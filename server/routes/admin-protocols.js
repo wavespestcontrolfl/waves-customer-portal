@@ -1135,6 +1135,7 @@ router.get('/lawn/active', async (req, res, next) => {
       grassTrack: req.query.grassTrack || req.query.grass_track || 'st_augustine',
       region: req.query.region || 'swfl',
       protocolKey: req.query.protocolKey || req.query.protocol_key || null,
+      planning: true,
     });
     if (!protocol) return res.status(404).json({ error: 'Active lawn protocol not found' });
     res.json({ protocol });
@@ -1150,6 +1151,7 @@ router.get('/lawn/window', async (req, res, next) => {
       serviceDate,
       grassTrack: req.query.grassTrack || req.query.grass_track || 'st_augustine',
       region: req.query.region || 'swfl',
+      planning: true,
     });
     if (!context?.protocol) return res.status(404).json({ error: 'Active lawn protocol not found' });
     res.json({ context: summarizeProtocolContext(context) });
