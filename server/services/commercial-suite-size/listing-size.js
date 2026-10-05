@@ -107,7 +107,9 @@ const TOTAL_BEFORE_RE = new RegExp(`\\b${TOTAL_WORDS}\\b[^.;|]{0,24}$`, 'i');
 // total word or a center / plaza / complex noun. "1,350 SF retail space in a
 // plaza" keeps its figure: its phrase is "retail space".
 const TOTAL_AFTER_WORDS_RE = new RegExp(`\\b(?:${TOTAL_WORDS.slice(3, -1)}|shopping|center|centre|plaza|complex|development|campus|mall|strip|park|property|anchored)\\b`, 'i');
-const NOUN_PHRASE_END_RE = /[.,;:|()—–-]|\b(?:in|at|of|on|with|for|near|by|to|from|and|is|are|was|available|located|within)\b/i;
+// A hyphen inside a word ("multi-tenant", "grocery-anchored") is part of the
+// phrase; only a spaced hyphen or a dash ends it.
+const NOUN_PHRASE_END_RE = /[.,;:|()—–]|\s-\s|\b(?:in|at|of|on|with|for|near|by|to|from|and|is|are|was|available|located|within)\b/i;
 function nounPhraseAfter(text) {
   const head = String(text || '').replace(/^\s*(?:of\s+)?/i, '');
   const end = head.search(NOUN_PHRASE_END_RE);

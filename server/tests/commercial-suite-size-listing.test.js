@@ -142,6 +142,9 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     // However many modifiers precede the center noun.
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 at Oak Plaza — 25,000 SF grocery anchored neighborhood shopping center', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 1,350 SF available now', c)).toEqual([1350]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 25,000 SF multi-tenant retail building', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 25,000 SF grocery-anchored shopping center', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 1,350 SF in-line retail space', c)).toEqual([1350]);
     // An approximation mark between the number and the unit is an estimate.
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350 ± SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350 +/- SF', c)).toEqual([]);
