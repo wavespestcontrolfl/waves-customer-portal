@@ -113,10 +113,214 @@ describe('attachDriveLegs', () => {
     expect(by.c).toMatchObject({ driveInShown: true, drivePrevName: 'Sample B' });
   });
 
+  it('flags late only past the 2-hour arrival window, not the start time', () => {
+    const leg = Math.max(1, driveMin(A, C));
+    // Previous work ends at 12:00. A stop starting at 12:30 has a window to
+    // 14:30, so a leg that lands after 12:30 but before 14:30 is on time.
+    const onTime = [stop('a', '11:00', A, { windowEnd: '12:00' }), stop('c', '12:30', C)];
+    attachDriveLegs(onTime);
+    expect(leg).toBeGreaterThan(0);
+    expect(onTime[1].driveLateMin).toBeNull();
+    // The work ends late enough that the same leg misses the window.
+    const late = [stop('a', '11:00', A, { windowEnd: '14:25' }), stop('c', '12:30', C)];
+    attachDriveLegs(late);
+    expect(late[1].driveLateMin).toBe(14 * 60 + 25 + leg - (12 * 60 + 30 + 120));
+    // A visit the tech already reached is never flagged.
+    const reached = [stop('a', '11:00', A, { windowEnd: '14:25' }), stop('c', '12:30', C, { status: 'in_progress' })];
+    attachDriveLegs(reached);
+    expect(reached[1].driveLateMin).toBeNull();
+  });
+
+  it('uses duration, else one hour, when the previous stop has no window end', () => {
+    const services = [stop('a', '08:00', A, { estimatedDuration: 180 }), stop('c', '09:00', C)];
+    attachDriveLegs(services);
+    const leg = services[1].driveFromPrevMin;
+    expect(services[1].driveLateMin).toBe(8 * 60 + 180 + leg - (9 * 60 + 120));
+  });
+
+  it('runs a group\'s rows one after another before the next drive', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', windowEnd: '10:00' }),
+      stop('g2', '09:00', A, { visitId: 'v1', windowEnd: '10:00' }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // Two 60-minute rows leave at 11:00, not 10:00.
+    expect(services[2].driveLateMin).toBe(11 * 60 + leg - (9 * 60 + 120));
+  });
+
+  it('keeps ungrouped rows at one pin on their own planned end (no phantom hour)', () => {
+    const same = { customerId: 'cust-1', premise: { line1: '1 Sample St', line2: null, city: 'Parrish', zip: '34219' } };
+    const services = [
+      stop('r1', '09:00', A, { windowEnd: '10:00', ...same }),
+      stop('r2', '09:00', A, { windowEnd: '10:00', ...same }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    const late = 10 * 60 + leg - (9 * 60 + 120);
+    expect(services[2].driveLateMin).toBe(late > 0 ? late : null);
+  });
+
   it('marks a leg it cannot measure', () => {
     const services = [stop('a', '08:00', A), stop('b', '10:00', null), stop('c', '13:00', C)];
     attachDriveLegs(services);
     expect(services.map((s) => s.driveLegUnknown)).toEqual([false, true, true]);
+  });
+
+  it('sums real estimates of ungrouped rows at one pin', () => {
+    const same = { customerId: 'cust-1', premise: { line1: '1 Sample St', line2: null, city: 'Parrish', zip: '34219' } };
+    const services = [
+      stop('r1', '09:00', A, { estimatedDuration: 90, ...same }),
+      stop('r2', '09:00', A, { estimatedDuration: 90, ...same }),
+      stop('c', '10:00', C),
+    ];
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // Two 90-minute jobs leave at 12:00; the 10:00 window closes at 12:00.
+    expect(services[2].driveLateMin).toBe(12 * 60 + leg - (10 * 60 + 120));
+  });
+
+  it('counts a real 60-minute estimate but not the feed\'s 60 fill', () => {
+    const same = { customerId: 'cust-1', premise: { line1: '1 Sample St', line2: null, city: 'Parrish', zip: '34219' } };
+    const real = [
+      stop('r1', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: 60, windowEnd: '09:30', ...same }),
+      stop('r2', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: 60, windowEnd: '09:30', ...same }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(real);
+    const leg = real[2].driveFromPrevMin;
+    const lateReal = 11 * 60 + leg - (9 * 60 + 120);
+    expect(real[2].driveLateMin).toBe(lateReal > 0 ? lateReal : null);
+    const filled = [
+      stop('r1', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: null, windowEnd: '09:30', ...same }),
+      stop('r2', '09:00', A, { estimatedDuration: 60, rawEstimateMinutes: null, windowEnd: '09:30', ...same }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(filled);
+    const lateFilled = 9 * 60 + 30 + leg - (9 * 60 + 120);
+    expect(filled[2].driveLateMin).toBe(lateFilled > 0 ? lateFilled : null);
+  });
+
+  it('adds up two visit groups and a loose row that share one pin', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', windowEnd: '09:30' }),
+      stop('h1', '09:00', A, { visitId: 'v2', windowEnd: '09:30' }),
+      stop('x', '09:00', A, { windowEnd: '09:30' }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(services);
+    const leg = services[3].driveFromPrevMin;
+    // 30 + 30 + 30 minutes of work from 09:00: the tech leaves at 10:30.
+    const late = 10 * 60 + 30 + leg - (9 * 60 + 120);
+    expect(services[3].driveLateMin).toBe(late > 0 ? late : null);
+  });
+
+  it('carries a delay forward to every later stop', () => {
+    const services = [
+      stop('a', '08:00', A, { windowEnd: '11:00' }),
+      stop('b', '09:00', B, { windowEnd: '10:00' }),
+      stop('c', '10:00', C, { windowEnd: '11:00' }),
+    ];
+    attachDriveLegs(services);
+    const [ab, bc] = [services[1].driveFromPrevMin, services[2].driveFromPrevMin];
+    const arriveB = 11 * 60 + ab;
+    expect(services[1].driveLateMin).toBe(arriveB - (9 * 60 + 120));
+    // b cannot leave before its late arrival plus its hour of work.
+    expect(services[2].driveLateMin).toBe(arriveB + 60 + bc - (10 * 60 + 120));
+  });
+
+  it('plans recognized services at owner planning minutes under the capacity gate', () => {
+    const before = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    try {
+      const services = [
+        stop('a', '08:00', A, { windowEnd: '11:00', serviceTypeRaw: 'Quarterly Pest Control', isRecurring: true }),
+        stop('c', '08:00', C),
+      ];
+      attachDriveLegs(services);
+      // Recurring pest plans at 25 minutes, not the 3-hour window span.
+      expect(services[1].driveLateMin).toBeNull();
+      process.env.GATE_SCHEDULING_CAPACITY = 'false';
+      attachDriveLegs(services);
+      expect(services[1].driveLateMin).toBe(11 * 60 + services[1].driveFromPrevMin - (8 * 60 + 120));
+    } finally {
+      if (before === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = before;
+    }
+  });
+
+  it('stops predicting lateness after a leg it cannot measure', () => {
+    const services = [
+      stop('a', '08:00', A, { windowEnd: '12:00' }),
+      stop('x', '09:00', null),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(services);
+    expect(services[2].driveLateMin).toBeNull();
+  });
+
+  it('adds up rows at one pin that are not one customer\'s co-visit', () => {
+    const services = [
+      stop('u1', '09:00', A, { windowEnd: '10:00', customerId: 'cust-1', address: '1 Sample St, Unit 1' }),
+      stop('u2', '09:00', A, { windowEnd: '10:00', customerId: 'cust-2', address: '1 Sample St, Unit 2' }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(services);
+    // Two customers in one building: two hours of work, leaving at 11:00.
+    expect(services[2].driveLateMin).toBe(11 * 60 + services[2].driveFromPrevMin - (9 * 60 + 120));
+  });
+
+  it('keeps a later window at the same pin: the tech waits for it', () => {
+    const services = [
+      stop('m', '09:00', A, { windowEnd: '10:00', customerId: 'cust-1', address: '1 Sample St', displayOrder: 0 }),
+      stop('pm', '13:00', A, { windowEnd: '14:00', customerId: 'cust-1', address: '1 Sample St', displayOrder: 1 }),
+      stop('c', '11:00', C, { displayOrder: 2 }),
+    ];
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // The 13:00 visit cannot start at 10:00: the tech leaves the pin at 14:00.
+    expect(services[2].driveLateMin).toBe(14 * 60 + leg - (11 * 60 + 120));
+  });
+
+  it('keeps each member promise of a staggered visit group', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', windowEnd: '10:00' }),
+      stop('g2', '11:00', A, { visitId: 'v1', windowEnd: '12:00' }),
+      stop('c', '10:00', C, { displayOrder: 2 }),
+    ];
+    services[0].displayOrder = 0;
+    services[1].displayOrder = 1;
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // Arrive 10:00 so the 11:00 member starts on time; leave at 12:00.
+    expect(services[2].driveLateMin).toBe(12 * 60 + leg - (10 * 60 + 120));
+  });
+
+  it('waits for a group member whose window no single arrival can keep', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', windowEnd: '10:00', displayOrder: 0 }),
+      stop('g2', '13:00', A, { visitId: 'v1', windowEnd: '14:00', displayOrder: 1 }),
+      stop('c', '11:00', C, { displayOrder: 2 }),
+    ];
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // The tech waits for the 13:00 member and leaves at 14:00.
+    expect(services[2].driveLateMin).toBe(14 * 60 + leg - (11 * 60 + 120));
+  });
+
+  it('flags a split visit whose later member misses its own window', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', estimatedDuration: 420, displayOrder: 0 }),
+      stop('g2', '13:00', A, { visitId: 'v1', windowEnd: '14:00', displayOrder: 1 }),
+      stop('z', '08:00', B, { displayOrder: -1 }),
+    ];
+    attachDriveLegs(services);
+    const leg = services[0].driveFromPrevMin;
+    // z ends 09:00, g1 arrives 09:00 + leg and works 7 hours; g2's 13:00
+    // window closes at 15:00.
+    expect(services[0].driveLateMin).toBe(9 * 60 + leg + 420 - (13 * 60 + 120));
   });
 
   it('names the customer the tech leaves last at a shared pin', () => {
@@ -127,5 +331,51 @@ describe('attachDriveLegs', () => {
     ];
     attachDriveLegs(services);
     expect(services[2].drivePrevName).toBe('Sample Two');
+  });
+
+  it('reads "St." and "Street" as one premise for a co-visit', () => {
+    const p1 = { line1: '1 Sample St.', line2: null, city: 'Parrish', zip: '34219' };
+    const p2 = { line1: '1 Sample Street', line2: null, city: 'Parrish', zip: '34219-1234' };
+    const services = [
+      stop('r1', '09:00', A, { windowEnd: '10:00', customerId: 'cust-1', premise: p1 }),
+      stop('r2', '09:00', A, { windowEnd: '10:00', customerId: 'cust-1', premise: p2 }),
+      stop('c', '09:00', C, { displayOrder: 2 }),
+    ];
+    services[0].displayOrder = 0;
+    services[1].displayOrder = 1;
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // One shared hour, not two: the tech leaves at 10:00.
+    const late = 10 * 60 + leg - (9 * 60 + 120);
+    expect(services[2].driveLateMin).toBe(late > 0 ? late : null);
+    const twoHours = 11 * 60 + leg - (9 * 60 + 120);
+    expect(twoHours).toBeGreaterThan(0);
+    expect(services[2].driveLateMin).not.toBe(twoHours);
+  });
+
+  it('works a loose visit between a split group\'s members in day order', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', windowEnd: '10:00', displayOrder: 0 }),
+      stop('g2', '13:00', A, { visitId: 'v1', windowEnd: '14:00', displayOrder: 1 }),
+      stop('x', '10:00', A, { windowEnd: '11:00', displayOrder: 2 }),
+      stop('c', '12:00', C, { displayOrder: 3 }),
+    ];
+    attachDriveLegs(services);
+    const leg = services[3].driveFromPrevMin;
+    // 09:00, 10:00, then wait for 13:00: the tech leaves at 14:00.
+    expect(services[3].driveLateMin).toBe(14 * 60 + leg - (12 * 60 + 120));
+    // The 10:00 visit is worked on time, so the stop itself is not late.
+    expect(services[0].driveLateMin).toBeNull();
+  });
+
+  it('warns a stop whose first card is done but whose later visit is at risk', () => {
+    const services = [
+      stop('z', '08:00', B, { windowEnd: '12:00', displayOrder: 0 }),
+      stop('done', '09:00', A, { windowEnd: '10:00', status: 'completed', customerId: 'c1', displayOrder: 1 }),
+      stop('open', '10:00', A, { windowEnd: '11:00', customerId: 'c2', displayOrder: 2 }),
+    ];
+    attachDriveLegs(services);
+    expect(services[1].driveInShown).toBe(true);
+    expect(services[1].driveLateMin).toBeGreaterThan(0);
   });
 });
