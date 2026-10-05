@@ -612,6 +612,7 @@ const LINKED_FOLLOWUP_KIND_SQL = "((source_action = ? AND status = 'pending') OR
 const applyCallFollowUpFilter = (q, parentServiceId) => q
   .where({ parent_service_id: parentServiceId, customer_confirmed: false })
   .whereRaw(LINKED_FOLLOWUP_KIND_SQL, ['ai_call_pipeline_followup', PACKAGE_FOLLOWUP_SOURCE_ACTION]);
+const PACKAGE_CHILD_STILL_SPACED_SQL = '(source_action <> ? OR scheduled_date - ?::date = COALESCE((SELECT sv.follow_up_interval_days FROM services sv WHERE sv.id = scheduled_services.service_id AND sv.follow_up_interval_days > 0), ?))';
 // A parent CANCEL is wider for the package child: it is a $0 included
 // treatment of the cancelled package, so it goes with visit 1 even after
 // the customer confirmed it (codex #5896 r1 P1). The call child keeps its
@@ -632,6 +633,12 @@ async function planCallFollowUpShift({ conn, parentServiceId, fromDate, toDate }
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return [];
   return applyCallFollowUpFilter(conn('scheduled_services'), parentServiceId)
+    // A package visit 2 follows only while it still sits on its spaced date
+    // (parent's old date + the catalog interval). The customer can move it
+    // from the portal, and that move leaves customer_confirmed false — a
+    // date the customer (or the office) picked by hand is theirs, and a
+    // later parent move must not overwrite it.
+    .whereRaw(PACKAGE_CHILD_STILL_SPACED_SQL, [PACKAGE_FOLLOWUP_SOURCE_ACTION, fromStr, DEFAULT_FOLLOW_UP_INTERVAL_DAYS])
     .select('id', 'technician_id', 'window_start', 'window_end', 'estimated_duration_minutes', 'recurring_dispatch_due_date',
       conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"),
       conn.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));

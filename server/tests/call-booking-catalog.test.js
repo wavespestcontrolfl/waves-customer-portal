@@ -1468,6 +1468,18 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     return { conn, log };
   }
 
+  test('a package visit 2 follows a parent move only while it still sits on its spaced date', async () => {
+    const { conn, log } = fakeConn({ updatedCount: 1 });
+    await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    // The plan read carries the spacing predicate: a child the customer (or
+    // the office) moved by hand no longer equals parent-old-date + interval
+    // and is left where it was put (pre-push audit P1 on #5896).
+    const spaced = log.wheres.find((w) => w && w.sql && /scheduled_date - \?::date = COALESCE/.test(w.sql));
+    expect(spaced).toBeTruthy();
+    expect(spaced.sql.startsWith('(source_action <> ? OR ')).toBe(true);
+    expect(spaced.bindings).toEqual(['package_followup_auto', '2026-07-02', 14]);
+  });
+
   test('shifts the still-pending, never-confirmed child by the parent delta', async () => {
     const { conn, log } = fakeConn({ updatedCount: 1 });
     const shifted = await shiftCallFollowUpsForParentMove({
