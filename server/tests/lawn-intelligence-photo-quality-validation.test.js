@@ -79,5 +79,6 @@ describe('assessPhotoQuality caller budget', () => {
     dispatchWithFallback.mockResolvedValue({ ok: true, json: { sharpness: 80, lawn_coverage_pct: 80, lighting: 80, usable: true, issues: [] } });
     await assessPhotoQuality('b64', 'image/jpeg', { timeoutMs: 5000 });
     expect(dispatchWithFallback.mock.calls[0][1]).toMatchObject({ timeoutMs: 5000 });
+    expect(dispatchWithFallback.mock.calls[0][2]).toMatchObject({ reserveFallbackBudget: true });
   });
 });

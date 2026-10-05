@@ -118,7 +118,12 @@ async function assessPhotoQuality(base64Image, mimeType, { timeoutMs } = {}) {
       jsonMode: true,
       jsonSchema: PHOTO_QUALITY_SCHEMA,
       maxTokens: 300,
-    }, { validate: (result) => invalidPhotoQualityJson(result.json) });
+    }, {
+      validate: (result) => invalidPhotoQualityJson(result.json),
+      // Under a caller budget each leg gets its share, so a stalled primary
+      // leaves the OpenAI backup time to answer (no effect without a budget).
+      reserveFallbackBudget: true,
+    });
     if (!res.ok || !res.json) throw new Error(res.reason || 'no_json');
     const result = res.json;
     const score = Math.round((result.sharpness * 0.4 + result.lawn_coverage_pct * 0.35 + result.lighting * 0.25));

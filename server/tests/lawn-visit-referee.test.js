@@ -127,6 +127,21 @@ describe('second-opinion trigger (unsure or serious)', () => {
     expect(result.referee).toMatchObject({ triggered: false, outcome: 'skipped', reason: 'no_dispute' });
   });
 
+  test('a caller budget already spent by the first read skips the second opinion', async () => {
+    jest.useFakeTimers();
+    try {
+      const overrides = { findings: [named('Chinch bug damage', { confidence: 'low' })] };
+      dispatchWithFallback.mockImplementation(async () => { jest.setSystemTime(Date.now() + 3000); return ok(answer(overrides), { model: 'gemini-x' }); });
+      dispatch.mockResolvedValue(solOk(answer(overrides)));
+      const result = await analyzeVisit({ photos, timeoutMs: 2000 });
+      expect(dispatchWithFallback.mock.calls[0][2]).toMatchObject({ reserveFallbackBudget: true });
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(result.referee).toMatchObject({ triggered: false, outcome: 'skipped', reason: 'deadline_exhausted', secondOpinion: { called: false, reasons: ['low_confidence_finding'] } });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   test('a caller budget (POST /assess) caps the second opinion at what is left of it', async () => {
     const overrides = { findings: [named('Chinch bug damage', { confidence: 'low' })] };
     dispatchWithFallback.mockResolvedValue(ok(answer(overrides), { model: 'gemini-x' }));

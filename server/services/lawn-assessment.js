@@ -314,7 +314,11 @@ async function callGeminiVision(base64Image, mimeType, context = {}, deadline = 
 async function analyzePhoto(base64Image, mimeType, context = {}, { timeoutMs } = {}) {
   if (timeoutMs != null && timeoutMs <= 0) return null;
   const deadline = timeoutMs ? Date.now() + timeoutMs : null;
-  const gemini = await callGeminiVision(base64Image, mimeType, context, deadline);
+  // When Claude can stand in, the Gemini attempts get the first half of the
+  // budget so a stalled Gemini still leaves the fallback time to answer.
+  const claudeAvailable = Boolean(Anthropic && process.env.ANTHROPIC_API_KEY);
+  const geminiDeadline = deadline && claudeAvailable ? Date.now() + timeoutMs / 2 : deadline;
+  const gemini = await callGeminiVision(base64Image, mimeType, context, geminiDeadline);
   const claude = gemini || (deadline && Date.now() >= deadline) ? null : await callClaudeVision(base64Image, mimeType, context, deadline);
 
   if (!claude && !gemini) return null;

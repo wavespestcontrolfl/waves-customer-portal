@@ -49,7 +49,12 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
     laneId: 'lawn_visit_assessment',
     promptVersion: prompt.version,
   };
-  const outcome = await dispatchWithFallback(policy, payload, { validate: (result) => validateAssessmentJson(result, photos.length, { lighting }) });
+  const outcome = await dispatchWithFallback(policy, payload, {
+    validate: (result) => validateAssessmentJson(result, photos.length, { lighting }),
+    // Under a caller budget (POST /assess) each leg gets its share, so a
+    // stalled Gemini leaves the OpenAI backup time to answer.
+    reserveFallbackBudget: true,
+  });
   // GATE_LAWN_ASSESSMENT_REFEREE (owner ruling 2026-09-29), read at call time.
   // Off: nothing below runs and the return shape is exactly what it always was.
   const refereeOn = lawnAssessmentRefereeLive();

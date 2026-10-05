@@ -160,6 +160,24 @@ describe('analyzePhoto — overwatering flag must be explicit', () => {
 // reach the Gemini fetch as an abort signal, and a photo already out of time
 // skips the Claude fallback instead of starting a fresh 10-minute SDK call.
 describe('analyzePhoto — timeoutMs budget', () => {
+  it('a stalled Gemini leaves the Claude fallback the second half of the budget', async () => {
+    // Real timers: AbortSignal.timeout runs on Node's own clock. Gemini
+    // "answers" only when its abort signal fires, i.e. at its half of the budget.
+    global.fetch = jest.fn((url, init) => new Promise((resolve) => {
+      init.signal.addEventListener('abort', () => resolve({ ok: false, status: 499, statusText: 'aborted' }));
+    }));
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: JSON.stringify(CLAUDE_SCORES) }] });
+
+    const started = Date.now();
+    const result = await analyzePhoto('base64photo', 'image/jpeg', {}, { timeoutMs: 4000 });
+
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1900);
+    expect(result.claude).toMatchObject({ turf_density: CLAUDE_SCORES.turf_density });
+    const options = mockAnthropicCreate.mock.calls[0][1];
+    expect(options.timeout).toBeGreaterThan(1000);
+    expect(options.timeout).toBeLessThanOrEqual(2100);
+  }, 10000);
+
   it('passes the budget to the Gemini fetch as an abort signal', async () => {
     global.fetch = jest.fn().mockResolvedValue(geminiResponse(GEMINI_SCORES));
 
