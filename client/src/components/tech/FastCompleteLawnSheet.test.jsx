@@ -508,7 +508,8 @@ describe('products', () => {
   test('a recurring visit opens with the plan\'s products on: name, method, amount, and the whole-lawn area as text', async () => {
     await openSheet();
     const talak = editorFor('Talak 7.9%');
-    expect(within(talak).getByText('Broadcast spray · whole lawn, 6,000 sq ft')).toBeTruthy();
+    // The plan's own area for this product (6,000) is not the saved whole lawn (5,000): it is named a planned area.
+    expect(within(talak).getByText('Broadcast spray · planned area, 6,000 sq ft')).toBeTruthy();
     expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('6.4');
     expect(within(talak).getByLabelText('Unit for Talak 7.9%').value).toBe('fl_oz');
     const iron = editorFor('Iron Plus');
@@ -558,13 +559,59 @@ describe('products', () => {
     expect(screen.queryByRole('group', { name: 'Iron Plus' })).toBeNull();
   });
 
-  test('a sprayed product the tech adds goes down on the lawn area the plan gives; nobody types one', async () => {
+  test('a sprayed product the tech adds goes down on the WHOLE-lawn area (the property\'s saved one), not a planned product\'s area; nobody types one', async () => {
     await openSheet();
     fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
     fireEvent.click(await screen.findByText('Green Granules'));
-    expect(within(editorFor('Green Granules')).getByText(/whole lawn, 6,000 sq ft/)).toBeTruthy();
+    expect(within(editorFor('Green Granules')).getByText(/whole lawn, 5,000 sq ft/)).toBeTruthy();
     await analyzeAndComplete();
-    expect(completeCalls()[0].body.products.find((p) => p.productId === P_GRANULE)).toMatchObject({ areaValue: 6000, areaUnit: 'sqft' });
+    expect(completeCalls()[0].body.products.find((p) => p.productId === P_GRANULE)).toMatchObject({ areaValue: 5000, areaUnit: 'sqft' });
+    // The planned Talak row keeps its own area.
+    expect(completeCalls()[0].body.products.find((p) => p.productId === P_TALAK)).toMatchObject({ areaValue: 6000 });
+  });
+
+  test('a spot-factor plan: the spot row submits its own partial area, an added broadcast product the whole lawn, and the visit coverage is the whole lawn', async () => {
+    propertyAreasAnswer = areasAnswer({ lawn: { sqft: 5750, source: 'recorded', reviewedAt: null } });
+    const ctx = context({ plannedProducts: { source: 'plan', items: [
+      { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'broadcast_spray', amount: 2, amountUnit: 'fl_oz', treatedSqft: 1437.5, areaUnit: 'sqft' },
+    ] } });
+    await openSheet({ request: makeRequest({ ctx }) });
+    // Named for what it is: never "whole lawn" for a partial area.
+    expect(within(editorFor('Talak 7.9%')).getByText('Broadcast spray · planned area, 1,437.5 sq ft')).toBeTruthy();
+    expect(within(editorFor('Talak 7.9%')).queryByText(/whole lawn/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(await screen.findByText('Green Granules'));
+    expect(await within(editorFor('Green Granules')).findByText(/whole lawn, 5,750 sq ft/)).toBeTruthy();
+    await analyzeAndComplete();
+    const { body } = completeCalls()[0];
+    expect(body.products.find((p) => p.productId === P_TALAK)).toMatchObject({ areaValue: 1437.5, areaUnit: 'sqft' });
+    expect(body.products.find((p) => p.productId === P_GRANULE)).toMatchObject({ areaValue: 5750, areaUnit: 'sqft' });
+    expect(body.propertyServiceArea).toEqual({ propertyId: 'prop-1', version: VERSION, kind: 'lawn', treatedSqft: 5750 });
+  });
+
+  test('a planned row\'s own area equal to the saved whole lawn is called the whole lawn', async () => {
+    propertyAreasAnswer = areasAnswer({ lawn: { sqft: 6000, source: 'recorded', reviewedAt: null } });
+    await openSheet();
+    expect(await within(editorFor('Talak 7.9%')).findByText('Broadcast spray · whole lawn, 6,000 sq ft')).toBeTruthy();
+  });
+
+  test('plan area only, property areas off: the planned row completes with its own area, and no visit coverage is sent', async () => {
+    propertyAreasAnswer = { enabled: false };
+    await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray', { treatedSqft: 1437.5, areaUnit: 'sqft' }) }) });
+    expect(within(editorFor('Talak 7.9%')).getByText('Broadcast spray · planned area, 1,437.5 sq ft')).toBeTruthy();
+    await analyzeAndComplete();
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 1437.5 });
+    expect(completeCalls()[0].body).not.toHaveProperty('propertyServiceArea');
+  });
+
+  test('an added broadcast product with no whole-lawn area known stays held, though the planned row has its own area', async () => {
+    propertyAreasAnswer = { enabled: false };
+    await openSheet({ request: makeRequest({ ctx: plannedOne('spot_treatment', { treatedSqft: 1437.5, areaUnit: 'sqft' }) }) });
+    fireEvent.click(screen.getByRole('button', { name: '+ Other product' }));
+    fireEvent.click(await screen.findByText('Green Granules'));
+    await analyze();
+    await waitFor(() => expect(footerNote()).toBe('The lawn area is not on file for Green Granules. Tell the office.'));
+    expect(completeButton().disabled).toBe(true);
   });
 
   const talakNeedsArea = async () => {
@@ -645,10 +692,11 @@ describe('products', () => {
     expect(completeCalls()[0].body).not.toHaveProperty('propertyServiceArea');
   });
 
-  test('a visit whose products need no area still sends the coverage when the plan gave one', async () => {
+  test('the visit coverage is the saved whole lawn, never a planned product\'s own area', async () => {
     await openSheet({ request: makeRequest({ ctx: plannedOne('spot_treatment', { treatedSqft: 4100, areaUnit: 'sqft' }) }) });
     await analyzeAndComplete();
-    expect(completeCalls()[0].body.propertyServiceArea).toMatchObject({ kind: 'lawn', treatedSqft: 4100, version: VERSION });
+    expect(completeCalls()[0].body.propertyServiceArea).toMatchObject({ kind: 'lawn', treatedSqft: 5000, version: VERSION });
+    expect(completeCalls()[0].body.products[0]).toMatchObject({ applicationMethod: 'spot_treatment' });
   });
 
   test('property_service_area_changed (409): the areas are read again once, the words say tap Complete again, and the next tap sends the new version under a new key', async () => {

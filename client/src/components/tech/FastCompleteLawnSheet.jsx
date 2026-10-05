@@ -15,7 +15,8 @@
 //  3. Products used: the plan's products, each with its method and amount
 //     (change the amount, remove, or add one from the catalog). No area box:
 //     every lawn visit treats the whole lawn, so a sprayed or spread product
-//     goes down on the lawn area the plan gives (/complete requires it);
+//     goes down on its own planned area or the visit property's saved
+//     whole-lawn area (/complete requires one);
 //  4. Tips from your tech (optional, one tip);
 //  5. Blog post for the customer (optional, GATE_REPORT_BLOG_POST);
 //  6. Treatment zone map (optional, a closed row that opens the tracer);
@@ -39,7 +40,8 @@
 //  - a CONFIRMED lawn assessment (photos, Analyze lawn, Confirm assessment);
 //  - at least one product, a rule of this sheet (Add the products applied);
 //  - the lawn area for a sprayed or spread product (the server refuses a
-//    broadcast row without square feet; the plan carries it);
+//    broadcast row without square feet; the planned row's own area, else the
+//    property's saved lawn area);
 //  - the lawn condition on a one-time lawn visit (typed findings the server
 //    requires).
 // A product with no amount is noted, never blocked.
@@ -321,15 +323,18 @@ const plannedRateOf = (row) => (row.planned && !row.rateChanged ? row.planRate :
 const NO_RATE = { rate: '', rateUnit: '', max: null };
 
 // Every lawn visit treats the whole lawn (owner 2026-10-04), so nobody types an
-// area. /complete still requires square feet for a sprayed or spread row: the
-// row's own plan figure, else the lawn area any planned product of this visit
-// carries (the same lawn), else the lawn area on the customer's turf profile
-// (what the full form prefills from). null when none is on file; the sheet then
-// says so and never invents one. Linear feet (perimeter) are never known here.
-const lawnSqftOf = (planned) => {
-  const item = (planned || []).find((entry) => Number(entry?.treatedSqft) > 0 && (!entry.areaUnit || entry.areaUnit === 'sqft'));
-  return item ? Number(item.treatedSqft) : null;
-};
+// area. /complete still requires square feet for a sprayed or spread row. Two
+// figures, kept apart:
+//  - the WHOLE-LAWN area: the visit property's saved lawn area (savedLawnArea of
+//    the property-areas read) and nothing else. The lawn-fast context carries no
+//    whole-lawn field (its planned items hold only each product's own area), and
+//    a planned product's area is NOT it: the plan engine multiplies the lawn size
+//    by a per-product area factor (a spot treatment is a fraction of the lawn);
+//  - a planned product's OWN area (`plannedSqft`): that row's area, and only that
+//    row's.
+// A row submits its own area, else the whole-lawn area, else none (the sheet then
+// says so and never invents one). An added product has no area of its own, so it
+// takes the whole-lawn area. Linear feet (perimeter) are never known here.
 // The visit's OWN property areas (GET /admin/schedule/:serviceId/property-areas):
 // the server resolves the property this visit is at (a secondary property
 // included) and answers its saved areas with a `version`. Nothing customer-wide
@@ -350,10 +355,10 @@ function useVisitPropertyAreas({ request, serviceId }) {
   const reload = useCallback(() => setAttempt((n) => n + 1), []);
   return { ...state, reload };
 }
-const areaOf = (row, lawnSqft) => {
+const areaOf = (row, wholeLawn) => {
   const requirement = requirementOf(row);
   if (requirement?.unit !== 'sqft') return null;
-  return row.plannedSqft || lawnSqft || null;
+  return row.plannedSqft || wholeLawn || null;
 };
 
 // One id, one planned product, however the plan lists it: the FIRST entry wins
@@ -678,12 +683,11 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
   const { rows } = products;
-  const planSqft = useMemo(() => lawnSqftOf(ctx.planned), [ctx.planned]);
-  // The plan's figure, else the lawn area this visit's property has saved. The
-  // customer-wide turf profile is never used: at a secondary property it can be
-  // the primary's lawn.
-  const lawnSqft = planSqft ?? savedLawnArea(propertyAreas.data?.areas);
-  const areasLoading = planSqft == null && propertyAreas.status === 'loading';
+  // The whole-lawn area is this visit property's saved lawn area, never a planned
+  // product's own (possibly partial) area and never the customer-wide turf
+  // profile (at a secondary property that can be the primary's lawn).
+  const lawnSqft = savedLawnArea(propertyAreas.data?.areas);
+  const areasLoading = propertyAreas.status === 'loading';
   const [form, setForm] = useState({ note: '', condition: '', tipId: '', customTip: '', blogPost: null });
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
@@ -852,7 +856,11 @@ function ProductsSection({ ctx, products, lawnSqft, locked, other, popover }) {
 function ProductEditor({ row, lawnSqft, locked, onChange, onRemove }) {
   const nameId = useId();
   const area = areaOf(row, lawnSqft);
-  const how = [methodLabel(row.method), area ? `whole lawn, ${area.toLocaleString('en-US')} sq ft` : null].filter(Boolean).join(' · ');
+  // The area this row will submit, named for what it is: "whole lawn" only when it
+  // is the whole-lawn figure; a planned product's own smaller (or unchecked) area
+  // is "planned area".
+  const areaText = area ? `${area === lawnSqft ? 'whole lawn' : 'planned area'}, ${area.toLocaleString('en-US')} sq ft` : null;
+  const how = [methodLabel(row.method), areaText].filter(Boolean).join(' · ');
   return (
     <div role="group" aria-labelledby={nameId} className="tech-product-editor">
       <div className="tech-product-editor-head">
