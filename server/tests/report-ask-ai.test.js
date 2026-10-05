@@ -55,7 +55,7 @@ const featureGates = require('../config/feature-gates');
 const {
   SYSTEM_PROMPT,
   buildReportAskFacts,
-  petPrecautionLost,
+  AI_ASK_TOPICS,
   buildReportAskPrompt,
   screenAskAnswer,
   placeOfApplication,
@@ -143,15 +143,14 @@ describe('buildReportAskFacts', () => {
   test('carries the visit\'s recorded pet precaution', () => {
     const withPet = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated zones until dry.' } } } });
     expect(withPet.pet_precaution_today).toBe('Keep pets off treated zones until dry.');
-    // A fixed wait does not survive the timing strip; the route then keeps
-    // the rule answer for re-entry questions.
+    // A fixed wait does not survive the timing strip; re-entry questions
+    // never reach the AI anyway.
     const timed = { serviceLine: 'pest', applications: [], advisory: { pet_advisory: 'Keep pets indoors for 2 hours.' } };
     expect(buildReportAskFacts({ data: timed }).pet_precaution_today).toBeUndefined();
-    expect(petPrecautionLost(timed)).toBe(true);
-    expect(petPrecautionLost({ dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated zones until dry.' } } })).toBe(false);
-    expect(petPrecautionLost({})).toBe(false);
-    // Partly stripped counts as lost too.
-    expect(petPrecautionLost({ advisory: { pet_advisory: 'Keep pets indoors for 2 hours. Keep pets away from bait stations.' } })).toBe(true);
+    expect(AI_ASK_TOPICS.has('reentry')).toBe(false);
+    expect(AI_ASK_TOPICS.has('next_steps')).toBe(false);
+    expect(AI_ASK_TOPICS.has('watering')).toBe(false);
+    expect(AI_ASK_TOPICS.has('applied')).toBe(true);
   });
 
   test('carries the visit facts the answer needs', () => {
@@ -444,6 +443,18 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
     expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: QUESTION.length, topic: 'applied' });
+  });
+
+  test('gate on, a re-entry question: the fixed-rule answer and no model call', async () => {
+    process.env.GATE_REPORT_ASK_AI = 'true';
+    mockDb();
+    const q = 'When can I re-enter treated areas?';
+    const rules = routeServiceReportQuestion({ question: q, data: { serviceLine: 'pest', applications: [] } }).answer;
+    await withServer(async (baseUrl) => {
+      const { body } = await ask(baseUrl, q);
+      expect(body).toEqual({ answer: rules });
+    });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
   test('gate on, a lawn report: the fixed-rule answer and no model call (its aftercare stays rule-driven)', async () => {

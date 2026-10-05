@@ -180,23 +180,15 @@ function reviewedLine(value, { allowLong = false } = {}) {
   return clip(stripped, allowLong ? 400 : 260);
 }
 
-// The visit's recorded pet precaution, as the fact sheet can carry it. A
-// line with a fixed wait ("for 2 hours") does not survive reviewedLine's
-// timing strip, so petPrecautionLost() tells the route to keep the
-// fixed-rule re-entry answer, which states it.
-function recordedPetPrecaution(data = {}) {
-  return cleanText(data.dynamicContext?.reentry?.petAdvisory) || cleanText(data.advisory?.pet_advisory) || null;
-}
+// The visit's recorded pet precaution, when the fact sheet can carry it.
 function petPrecautionFact(data = {}) {
-  const recorded = recordedPetPrecaution(data);
+  const recorded = cleanText(data.dynamicContext?.reentry?.petAdvisory) || cleanText(data.advisory?.pet_advisory);
   return recorded ? reviewedLine(recorded) : null;
 }
-// Lost = any part did not survive: empty, stripped or clipped.
-function petPrecautionLost(data = {}) {
-  const recorded = recordedPetPrecaution(data);
-  if (!recorded) return false;
-  return petPrecautionFact(data) !== recorded;
-}
+
+// Rule-router topics the AI may answer. Re-entry, watering and next steps
+// stay on the fixed rules: they carry recorded instructions word for word.
+const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'next_visit', 'unrouted']);
 
 function productFacts(app = {}) {
   const product = app.product || {};
@@ -469,5 +461,5 @@ module.exports = {
   screenAskAnswer,
   placeOfApplication,
   answerReportQuestionWithAI,
-  petPrecautionLost,
+  AI_ASK_TOPICS,
 };
