@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), socketEvent: null }))
 vi.mock('socket.io-client', () => ({ io: () => ({ on: (_event, callback) => { mocks.socketEvent = callback; }, off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: (key) => key === 'pest-recap-v1', useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
-vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: ({ inlineScheduleChanges }) => <div data-testid="floating-notices" data-inline={String(Boolean(inlineScheduleChanges))} /> }));
+vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: ({ inlineScheduleChanges, placement }) => <div data-testid="floating-notices" data-inline={String(Boolean(inlineScheduleChanges))} data-placement={placement} /> }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
   default: ({ onPendingPhotosChange, onCreated }) => <div role="dialog" aria-label="Create project fixture">
     <button onClick={() => onPendingPhotosChange(true)}>Queue report photo</button>
@@ -392,13 +392,14 @@ describe('Tech field workspace uses the existing route workflow', () => {
   });
 
   it.each([
-    ['the Today overview (shown in the page)', '/admin/today', 'true'],
-    ['Tools', '/admin/today/tools', 'false'],
-    ['More', '/admin/today/more', 'false'],
-    ['an open visit', '/admin/today?visit=row%3Atwo', 'false'],
-  ])('schedule changes stop floating only on %s', async (_label, path, inline) => {
+    ['the Today overview (shown in the page)', '/admin/today', 'true', 'page'],
+    ['Tools', '/admin/today/tools', 'false', 'elsewhere'],
+    ['More', '/admin/today/more', 'false', 'elsewhere'],
+    ['an open visit', '/admin/today?visit=row%3Atwo', 'false', 'elsewhere'],
+  ])('schedule changes stop floating only on %s; notices sit in the page only on Today (owner 2026-10-05)', async (_label, path, inline, placement) => {
     mount(path);
     await waitFor(() => expect(screen.getByTestId('floating-notices')).toHaveAttribute('data-inline', inline));
+    expect(screen.getByTestId('floating-notices')).toHaveAttribute('data-placement', placement);
   });
 
 });

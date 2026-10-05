@@ -1,27 +1,24 @@
 import { useEffect, useRef } from 'react';
 import { Link, matchPath, Outlet, useLocation } from 'react-router-dom';
-import useIsMobile from '../../hooks/useIsMobile';
-import { CalendarDays, ClipboardList, MoreHorizontal, Waves, Wrench } from 'lucide-react';
 import AddToHomeScreenHint from './AddToHomeScreenHint';
 import { useTechNavigationLock } from './TechNavigationLock';
 import { useTechBasePath } from './techBasePath';
 import './tech-field.css';
 
 // Mounted only after the admin shell verifies the staff profile. Child routes
-// consume the outlet context.
-// embedded adjusts the chrome for the admin scroll container and adds a Menu
-// tab back into the rest of Waves Admin.
-export default function TechFieldShell({ techName, techRole, staffProfile = null, documentsAvailable, payGrowthAvailable, embedded = false }) {
+// consume the outlet context. The workspace sits inside Waves Admin: the admin
+// top bar and tab bar are the chrome, and a page-level tab row (Today, Tools,
+// More) switches between the workspace's own sections (owner 2026-10-05).
+export default function TechFieldShell({ staffProfile = null, techRole, documentsAvailable, payGrowthAvailable }) {
   const base = useTechBasePath();
   const { pathname, search } = useLocation();
-  const isMobile = useIsMobile();
-  // Embedded, .tf-main is its own scroll container and stays mounted across
-  // child routes: snap it to the top on navigation like AdminLayoutV2 does
-  // for .admin-main.
-  const mainRef = useRef(null);
-  // Opening or closing a visit changes only ?visit=: reset then too (Codex #5573 r15).
+  // The page scrolls in the admin main area (.admin-main), which stays mounted
+  // across child routes. AdminLayoutV2 snaps it to the top when the path
+  // changes; opening or closing a visit changes only ?visit=, so reset then
+  // too (Codex #5573 r15).
+  const rootRef = useRef(null);
   const visitKey = new URLSearchParams(search).get('visit');
-  useEffect(() => { mainRef.current?.scrollTo?.({ top: 0, behavior: 'instant' }); }, [pathname, visitKey]);
+  useEffect(() => { rootRef.current?.closest('.admin-main')?.scrollTo?.({ top: 0, behavior: 'instant' }); }, [pathname, visitKey]);
   const { navigationBusy, setNavigationBusy } = useTechNavigationLock();
   const documentsRoute = Boolean(matchPath(`${base}/documents`, pathname));
   const payGrowthRoute = Boolean(matchPath(`${base}/pay-growth`, pathname));
@@ -33,12 +30,19 @@ export default function TechFieldShell({ techName, techRole, staffProfile = null
   const section = moreRoute || documentsRoute || payGrowthRoute ? 'more'
     : todayRoute ? 'today' : 'tools';
   return (
-    <div className={embedded ? 'tech-field tf-embedded' : 'tech-field'}>
-      <header className="tf-header">
-        <Link to={base} className="tf-brand" aria-label="Waves Tech Today" onClick={(event) => { if (navigationBusy) event.preventDefault(); }} aria-disabled={navigationBusy}><Waves aria-hidden="true" /><strong>waves</strong> tech</Link>
-        <span className="tf-profile">{techName}</span>
-      </header>
-      <main className="tf-main" ref={mainRef}>
+    <div className="tech-field" ref={rootRef}>
+      <nav className="tf-tabs" aria-label="Field sections">
+        {[
+          { id: 'today', to: base, label: 'Today' },
+          { id: 'tools', to: `${base}/tools`, label: 'Tools' },
+          { id: 'more', to: `${base}/more`, label: 'More' },
+        ].map(({ id, to, label }) => (
+          <Link key={id} to={`${to}${visitSearch}`} aria-current={section === id ? 'page' : undefined} aria-disabled={navigationBusy} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>
+            {label}
+          </Link>
+        ))}
+      </nav>
+      <div className="tf-main">
         <AddToHomeScreenHint />
         {visit && !todayRoute && <Link className="tf-button" to={`${base}${visitSearch}`} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>Return to visit</Link>}
         <div className={legacyTool ? 'tf-existing' : undefined}>
@@ -46,21 +50,7 @@ export default function TechFieldShell({ techName, techRole, staffProfile = null
             ? <p>Staff documents are unavailable.</p>
             : <Outlet context={{ techRole, staffProfile, documentsAvailable, payGrowthAvailable, setNavigationBusy }} />}
         </div>
-      </main>
-      <nav className="tf-nav" aria-label="Field navigation">
-        {[
-          { id: 'today', to: base, label: 'Today', Icon: CalendarDays },
-          { id: 'tools', to: `${base}/tools`, label: 'Tools', Icon: Wrench },
-          { id: 'more', to: `${base}/more`, label: 'More', Icon: ClipboardList },
-          // /admin/more is the mobile-only index (it redirects desktop to /admin);
-          // on desktop the admin sidebar is already beside the workspace.
-          ...(embedded && isMobile ? [{ id: 'menu', to: '/admin/more', label: 'Menu', Icon: MoreHorizontal, leavesWorkspace: true }] : []),
-        ].map(({ id, to, label, Icon, leavesWorkspace }) => (
-          <Link key={id} to={leavesWorkspace ? to : `${to}${visitSearch}`} aria-current={section === id ? 'page' : undefined} aria-disabled={navigationBusy} onClick={(event) => { if (navigationBusy) event.preventDefault(); }}>
-            <Icon aria-hidden="true" /><span>{label}</span>
-          </Link>
-        ))}
-      </nav>
+      </div>
     </div>
   );
 }

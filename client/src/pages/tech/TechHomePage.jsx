@@ -877,10 +877,14 @@ export default function TechHomePage({ section = 'today' }) {
     <div style={{ margin: '0 auto' }}>
       <GeofenceArrivalPrompt
         // The field workspace's Today overview shows schedule changes in the
-        // page (TechScheduleChanges) once its feed has loaded; Tools, More, an
-        // open visit, or a feed that has not loaded keep the floating cards
-        // (pre-push audit P1, Codex #5786 P2).
+        // page (TechScheduleChanges) once its feed has loaded; a feed that has
+        // not loaded keeps the visit cards in the flow (pre-push audit P1,
+        // Codex #5786 P2). The cards sit in the page on Today; on Tools, More
+        // and an open visit only the arrival cards float and one line points
+        // to Today (owner 2026-10-05).
         inlineScheduleChanges={section === 'today' && !selectedVisitKey && scheduleFeedReady}
+        placement={section === 'today' && !selectedVisitKey ? 'page' : 'elsewhere'}
+        navigationBusy={navigationBusy}
         onStormReview={(payload) => {
           // Storm-watch nudge → open the Quick Move sheet for that job.
           // Prefer the live row from today's schedule; fall back to a

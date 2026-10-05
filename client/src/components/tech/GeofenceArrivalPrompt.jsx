@@ -21,8 +21,13 @@
  *     on this tech's route) — same kept-until-"Got it" rule and cap,
  *     sharing the visit-card slot
  *
- * Mount once inside TechHomePage — it renders a fixed-position
- * container so the parent layout doesn't need to reserve space.
+ * Mount once inside TechHomePage. `placement` decides where the cards sit
+ * (owner 2026-10-05, after phone screenshots of notices covering the screen):
+ *   - 'page' (default; the Today overview): every card renders in the page
+ *     flow at the top, so the tech scrolls past them. No overlay.
+ *   - 'elsewhere' (Tools, More, an open visit): only the time-critical
+ *     arrival cards float; every other card waits on Today, and one small
+ *     line at the top says how many there are and links there.
  *
  * Audit focus:
  * - Polling cleanup: confirm the 10s interval is cleared on unmount and
@@ -44,7 +49,10 @@
  */
 import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { useTechBasePath } from './techBasePath';
+import useIsMobile from '../../hooks/useIsMobile';
 import { formatETDateOnly } from '../../lib/timezone';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -74,6 +82,8 @@ const NUDGE_TYPES = new Set(['tech_open_visit_nudge']);
 // kept until "Got it" the same way, so it isn't lost to the 5-min auto-
 // dismiss timer before the tech has opened the stop.
 const PHOTO_TYPES = new Set(['customer_visit_photos']);
+// Time-critical: these still float over Tools, More and an open visit.
+const FLOATING_TYPES = new Set(['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped']);
 const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES]);
 // Waves Admin look: ink and stone, amber for a warning, red only where the
 // notice is a genuine alert (a cancelled visit, a late arrival check).
@@ -131,7 +141,9 @@ function getPosition() {
   });
 }
 
-export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleChanges = false }) {
+export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleChanges = false, placement = 'page', navigationBusy = false }) {
+  const elsewhere = placement === 'elsewhere';
+  const isMobile = useIsMobile();
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
 
@@ -183,7 +195,7 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
   // Storm cards are capped so a burst of alerts can never bury the home
   // screen: one card per stop (newest wins when the sweep re-alerts), at
   // most MAX_STORM_CARDS on screen, the rest summarized in one line.
-  const { cards, hiddenStormCount, hiddenVisitCount } = useMemo(() => {
+  const { cards, hiddenStormCount, hiddenVisitCount, waitingCount } = useMemo(() => {
     const stormByJob = new Map();
     const otherCards = [];
     const visitCards = [];
@@ -201,6 +213,15 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     const stormAlerts = [...stormByJob.values()].sort(
       (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
     );
+    // Away from Today only the arrival cards render; everything else is
+    // counted for the "notices on Today" line and left unread.
+    if (elsewhere) {
+      return {
+        cards: otherCards.filter((n) => FLOATING_TYPES.has(n.type)),
+        hiddenStormCount: 0, hiddenVisitCount: 0,
+        waitingCount: visitCards.length + stormAlerts.length,
+      };
+    }
     const shownStorms = stormAlerts.slice(0, MAX_STORM_CARDS);
     // Tracking cards (follow_through_tracking) rank ahead of routine kept
     // cards inside the cap — stage 2 first, then stage 1 — so two newer
@@ -221,8 +242,9 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
       cards: [...otherCards, ...shownStorms, ...shownVisits],
       hiddenStormCount: stormAlerts.length - shownStorms.length,
       hiddenVisitCount: visitsRanked.length - shownVisits.length,
+      waitingCount: 0,
     };
-  }, [active, inlineScheduleChanges]);
+  }, [active, inlineScheduleChanges, elsewhere]);
 
   // Superseded same-stop storm alerts are duplicates of information the tech
   // IS seeing (the newest card for that stop) — mark them read immediately so
@@ -300,18 +322,21 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     }
   }
 
-  if (active.length === 0) return null;
+  const showStack = cards.length > 0 || hiddenVisitCount > 0 || hiddenStormCount > 0;
+  if (!showStack && waitingCount === 0) return null;
 
   return (
-    <div style={{
-      position: 'fixed', top: 'calc(12px + env(safe-area-inset-top, 0px))', left: 12, right: 12, zIndex: 10_000,
+    <>
+    {elsewhere && waitingCount > 0 && <NoticesOnToday count={waitingCount} busy={navigationBusy} />}
+    {showStack && <div data-testid="notice-stack" data-placement={elsewhere ? 'float' : 'page'} style={elsewhere ? {
+      // On a phone the floating arrival cards sit below the admin top bar (52px), so the bar stays reachable.
+      position: 'fixed', top: isMobile ? 'calc(60px + env(safe-area-inset-top, 0px))' : 12, left: 12, right: 12, zIndex: 10_000,
       display: 'flex', flexDirection: 'column', gap: 10, pointerEvents: 'none',
-      // The stack scrolls inside the viewport instead of running past it:
-      // a phone-height screen must still reach every card.
-      maxHeight: 'calc(100vh - 24px - env(safe-area-inset-top, 0px))', overflowY: 'auto',
-    }}>
+      // Arrival cards are few; a cap keeps even a burst from covering the page.
+      maxHeight: '50dvh', overflowY: 'auto',
+    } : { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 12 }}>
       {cards.map((n) => (
-        <div key={n.id} style={{ pointerEvents: 'auto' }}>
+        <div key={n.id} style={elsewhere ? { pointerEvents: 'auto', filter: 'drop-shadow(0 6px 14px rgba(28,25,23,0.18))' } : undefined}>
           {n.type === 'geofence_arrival_reminder' && (
             <ReminderCard n={n} onStart={() => handleStart(n)} onDismiss={() => removeCard(n.id)} />
           )}
@@ -352,20 +377,44 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
         </div>
       ))}
       {hiddenVisitCount > 0 && (
-        <div style={{ ...cardStyle(COLORS.muted), pointerEvents: 'auto', padding: 10 }} data-testid="visit-notice-more">
+        <div style={{ ...cardStyle(COLORS.muted), padding: 10 }} data-testid="visit-notice-more">
           <div style={{ fontSize: 13, color: COLORS.muted }}>
             🗓 {hiddenVisitCount} more notice{hiddenVisitCount === 1 ? '' : 's'} — they'll surface as you clear these.
           </div>
         </div>
       )}
       {hiddenStormCount > 0 && (
-        <div style={{ ...cardStyle(COLORS.amber), pointerEvents: 'auto', padding: 10 }}>
+        <div style={{ ...cardStyle(COLORS.amber), padding: 10 }}>
           <div style={{ fontSize: 13, color: COLORS.muted }}>
             ⛈️ {hiddenStormCount} more storm watch{hiddenStormCount === 1 ? '' : 'es'} — they'll surface as you clear these.
           </div>
         </div>
       )}
-    </div>
+    </div>}
+    </>
+  );
+}
+
+// "N notices on Today": the one in-page line shown away from Today for the
+// cards that wait there. Held while a visit action is in flight, like the
+// workspace's other links.
+function NoticesOnToday({ count, busy }) {
+  const base = useTechBasePath();
+  return (
+    <Link
+      to={base}
+      aria-disabled={busy || undefined}
+      onClick={(event) => { if (busy) event.preventDefault(); }}
+      data-testid="notices-on-today"
+      style={{
+        display: 'flex', alignItems: 'center', minHeight: 44, marginBottom: 12, padding: '0 14px', boxSizing: 'border-box',
+        border: `0.5px solid ${COLORS.borderStrong}`, borderRadius: 6, background: COLORS.bg, color: COLORS.text,
+        fontFamily: "'Roboto', system-ui, sans-serif", fontSize: 14, fontWeight: 500, textDecoration: 'none',
+        opacity: busy ? 0.5 : 1,
+      }}
+    >
+      {count} {count === 1 ? 'notice' : 'notices'} on Today
+    </Link>
   );
 }
 
@@ -608,7 +657,6 @@ function cardStyle(accent) {
     borderLeft: `4px solid ${accent}`,
     borderRadius: 6,
     padding: 14,
-    boxShadow: '0 10px 30px rgba(28,25,23,0.18)',
     fontFamily: "'Roboto', system-ui, sans-serif",
   };
 }

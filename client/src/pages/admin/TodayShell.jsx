@@ -22,8 +22,6 @@ export default function TodayShell() {
     <TechBasePathContext.Provider value="/admin/today">
       <FieldPortalClassContext.Provider value="tech-field-portal">
       <TechFieldShell
-        embedded
-        techName={user?.name || 'Staff'}
         techRole={user?.role}
         staffProfile={user || null}
         documentsAvailable={documentsAvailable}

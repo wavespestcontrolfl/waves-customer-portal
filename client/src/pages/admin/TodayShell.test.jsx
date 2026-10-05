@@ -49,8 +49,7 @@ function mount(path = '/admin/today') {
         <Route path="protocols" element={<div>Protocols page</div>} />
         <Route path="documents" element={<div>Staff document library</div>} />
       </Route>
-      <Route path="more" element={<div>Admin menu page</div>} />
-    </Route>
+      </Route>
     <Route path="/tech/*" element={<div>Legacy tech shell</div>} />
   </Routes></MemoryRouter></TechNavigationLock>);
 }
@@ -68,17 +67,17 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 describe('/admin/today field shell', () => {
-  it('renders the embedded field workspace with Today, Tools, More and Menu', async () => {
+  it('renders the field workspace with a Today, Tools, More tab row and no header or bottom bar of its own', async () => {
     mount();
-    const nav = await screen.findByRole('navigation', { name: 'Field navigation' });
-    expect(nav.textContent).toMatch(/Today.*Tools.*More.*Menu/);
-    expect(screen.getByText('Fixture Tech')).toBeInTheDocument();
-    expect(document.querySelector('.tech-field.tf-embedded')).toBeInTheDocument();
+    const tabs = await screen.findByRole('navigation', { name: 'Field sections' });
+    expect(tabs.textContent).toBe('TodayToolsMore');
+    expect(document.querySelector('.tech-field')).toBeInTheDocument();
+    expect(document.querySelector('.tf-header, .tf-nav, .tf-embedded')).toBeNull();
     expect(screen.getByRole('link', { name: 'Today' })).toHaveAttribute('href', '/admin/today');
     expect(screen.getByRole('link', { name: 'Tools' })).toHaveAttribute('href', '/admin/today/tools');
     expect(screen.getByRole('link', { name: 'More' })).toHaveAttribute('href', '/admin/today/more');
-    expect(screen.getByRole('link', { name: 'Menu' })).toHaveAttribute('href', '/admin/more');
-    expect(screen.getByRole('link', { name: 'Waves Tech Today' })).toHaveAttribute('href', '/admin/today');
+    expect(screen.queryByRole('link', { name: 'Menu' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Waves Tech Today' })).not.toBeInTheDocument();
     // Field workspace content; the retired dark route UI is gone.
     expect(await screen.findByRole('button', { name: 'Open visit' })).toBeInTheDocument();
     expect(document.querySelector('[data-legacy-field-shell]')).toBeNull();
@@ -102,19 +101,6 @@ describe('/admin/today field shell', () => {
     expect(screen.queryByText('Staff document library')).not.toBeInTheDocument();
   });
 
-  it('on desktop the mobile-only Menu tab is not offered (the admin sidebar is beside the workspace)', async () => {
-    viewport.mobile = false;
-    mount();
-    await screen.findByRole('navigation', { name: 'Field navigation' });
-    expect(screen.queryByRole('link', { name: 'Menu' })).not.toBeInTheDocument();
-  });
-
-  it('Menu leaves the workspace for the admin menu', async () => {
-    mount();
-    fireEvent.click(await screen.findByRole('link', { name: 'Menu' }));
-    expect(await screen.findByText('Admin menu page')).toBeInTheDocument();
-  });
-
   it('opening a stop stays inside /admin/today', async () => {
     mount();
     fireEvent.click((await screen.findAllByRole('button', { name: 'Open visit' }))[0]);
@@ -125,10 +111,10 @@ describe('/admin/today field shell', () => {
     expect(screen.queryByText('Legacy tech shell')).not.toBeInTheDocument();
   });
 
-  it('keeps the visit selection on in-workspace nav links', async () => {
+  it('keeps the visit selection on the tab row links', async () => {
     mount('/admin/today/tools?visit=row%3Atwo');
     expect(await screen.findByRole('link', { name: 'Today' })).toHaveAttribute('href', '/admin/today?visit=row%3Atwo');
     expect(screen.getByRole('link', { name: 'Return to visit' })).toHaveAttribute('href', '/admin/today?visit=row%3Atwo');
-    expect(screen.getByRole('link', { name: 'Menu' })).toHaveAttribute('href', '/admin/more');
+    expect(screen.getByRole('link', { name: 'More' })).toHaveAttribute('href', '/admin/today/more?visit=row%3Atwo');
   });
 });
