@@ -28,6 +28,26 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(source).not.toMatch(/WKAppBoundDomains:0 string portal\./);
   });
 
+  test('bootstrap-ios raises the iOS floor to 15.0 and attaches the privacy manifest to the App target', () => {
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    expect(source).toContain('IOS_MIN="15.0"');
+    expect(source).toMatch(/platform :ios, '\$\{IOS_MIN\}'/);
+    expect(source).toContain('IPHONEOS_DEPLOYMENT_TARGET = ${IOS_MIN};');
+    expect(source).toContain('phase.add_file_reference(ref, true) unless phase.files_references.include?(ref)');
+    // Pods targets take their floor from podspecs: post_install raises them too.
+    expect(source).toContain('waves: iOS floor');
+    expect(source).toContain('installer.pods_project.targets.each');
+    // A Podfile floor above 15 is kept, and a Podfile with no post_install gets one.
+    expect(source).toContain("s/^platform :ios, '([0-9]|1[0-4])");
+    expect(source).toContain('post_install do |installer|\\n" + hook + "end');
+    // A missing Homebrew wrapper must not end the script under pipefail.
+    expect(source).toMatch(/POD_GEM_HOME="\$\(.*\|\| true\)"/);
+    // The manual add step prints only when the automatic attach failed.
+    expect(source).toContain('if [ "${PRIVACY_ATTACHED:-0}" != "1" ]; then');
+    // The floor is raised before `npx cap sync ios`, which runs pod install.
+    expect(source.indexOf('IOS_MIN="15.0"')).toBeLessThan(source.indexOf('\nnpx cap sync ios'));
+  });
+
   test('bootstrap-ios installs the tracked icon into a clean catalog repeatably', () => {
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'waves-ios-assets-'));
     const assetCatalog = path.join(fixture, 'Assets.xcassets');
