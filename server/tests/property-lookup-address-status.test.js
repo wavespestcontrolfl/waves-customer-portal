@@ -128,6 +128,15 @@ describe('countyRollAnswer — read off the lookup evidence, never inferred from
     expect(countyRollAnswer({ propertyRecord: null, addressAudit: audit({ hasExactMatch: true }) })).toBe('found');
   });
 
+  test('a negative audit of the typed number outranks a record found for another house number', () => {
+    const snapped = { propertyRecord: { _parcel: { parcelId: '123' } }, addressAudit: audit({ snappedRecord: { typed: '1010', record: '1012' } }) };
+    expect(countyRollAnswer(snapped)).toBe('not_found');
+    // A snapped marker whose audit could not run: the roll did not answer for the typed number.
+    expect(countyRollAnswer({ propertyRecord: { _parcel: { parcelId: '123' } }, addressAudit: { county: null, streetExists: null, hasExactMatch: false, snappedRecord: { typed: '1010' } } })).toBe('unknown');
+    // An exact audit match beside a record is found.
+    expect(countyRollAnswer({ propertyRecord: { _parcel: { parcelId: '123' } }, addressAudit: audit({ hasExactMatch: true }) })).toBe('found');
+  });
+
   test('only an audit that ran for a county and found no exact match is not_found', () => {
     expect(countyRollAnswer({ propertyRecord: null, addressAudit: audit() })).toBe('not_found');
     expect(countyRollAnswer({ propertyRecord: { _addressAudit: audit({ streetExists: false }) } })).toBe('not_found');

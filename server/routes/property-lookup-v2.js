@@ -1335,18 +1335,25 @@ function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
 
 // The county roll's own answer for the address status line (PR 4), read off
 // the lookup's evidence and never inferred from an absence:
-//   found      a county-backed record, or the house-number audit matched
-//              the typed number exactly
+// The audit of the TYPED number comes first: the lookup deliberately keeps
+// both a record and a negative audit when the record is for another house
+// number (typed 1010, record for 1012).
 //   not_found  the audit RAN for a county (it answered whether the street
-//              exists) and has no exact match
-//   unknown    anything else: no audit, an audit that could not run
-//              (outage, out of area), or only a snapped-record marker
+//              exists) and has no exact match for the typed number
+//   found      the audit matched the typed number exactly, or (with no
+//              completed audit) a county-backed record came back
+//   unknown    anything else: no audit and no record, an audit that could
+//              not run (outage, out of area), or only a snapped-record marker
 function countyRollAnswer(result) {
   const record = result?.propertyRecord;
-  if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId || record._raw?.parcelId || hasCountyEvidence(record))) return 'found';
   const audit = result?.addressAudit || record?._addressAudit || null;
   if (audit?.hasExactMatch === true) return 'found';
   if (audit && audit.county && typeof audit.streetExists === 'boolean' && audit.hasExactMatch === false) return 'not_found';
+  if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId || record._raw?.parcelId || hasCountyEvidence(record))) {
+    // A snapped-record marker with no completed audit: the record is for
+    // another number and the roll did not answer for the typed one.
+    return audit?.snappedRecord ? 'unknown' : 'found';
+  }
   return 'unknown';
 }
 
