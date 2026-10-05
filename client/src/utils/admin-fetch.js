@@ -48,12 +48,11 @@ export function adminLoginUrl({ pathname, search, hash }) {
 }
 
 // The message of a non-JSON error body. A plain-text server message is worth
-// showing; an HTML body is a proxy or edge error page (a Cloudflare 524 on a
-// long request) and would paint its whole markup into the UI, so it is dropped
-// and the caller falls back to the status.
+// showing (Express labels a `res.send('message')` string text/html, so the
+// header cannot decide); an HTML document is a proxy or edge error page (a
+// Cloudflare 524 on a long request) and would paint its whole markup into the
+// UI, so it is dropped and the caller falls back to the status.
 async function plainTextError(r) {
-  const type = r.headers?.get?.('content-type') || '';
-  if (/html/i.test(type)) return '';
   let text = '';
   try { text = await r.text(); } catch { /* ignore */ }
   return /^\s*<(!doctype|html)/i.test(text) ? '' : text;

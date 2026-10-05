@@ -37,8 +37,8 @@ describe("non-JSON error bodies", () => {
       .rejects.toMatchObject({ status: 524, message: "Request failed (524)" });
   });
 
-  it("still surfaces a plain-text server message", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => response(400, "Missing ?location= parameter", "text/plain")));
+  it("still surfaces a plain-text server message (Express labels res.send strings text/html)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response(400, "Missing ?location= parameter", "text/html; charset=utf-8")));
     await expect(adminFetch("/admin/settings/x")).rejects.toMatchObject({ status: 400, message: "Missing ?location= parameter" });
   });
 });
