@@ -256,6 +256,17 @@ describe('adjust_stock with no stated unit (the bar never assumes the inventory 
     expect(mutations).toEqual([]);
   });
 
+  test('no amount and no unit reports both in one refusal; a unit with no amount keeps the writer\'s amount validation', async () => {
+    const mutations = useDb({ products_catalog: [TALAK] });
+    const result = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'damaged_lost' });
+    expect(result).toMatchObject({ success: false, code: 'unit_and_amount_required' });
+    expect(result.error).toMatch(/amount and the unit are missing/i);
+    const amountOnly = await executeProcurementTool('adjust_stock', { product_name: 'Talak', movement_type: 'damaged_lost', unit: 'fl_oz' });
+    expect(amountOnly.code).not.toMatch(/unit/);
+    expect(amountOnly.error).toMatch(/quantity/i);
+    expect(mutations).toEqual([]);
+  });
+
   test('a blank or whitespace unit counts as no unit', async () => {
     const mutations = useDb({ products_catalog: [TALAK] });
     for (const unit of ['', '   ']) {

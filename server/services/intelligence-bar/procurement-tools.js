@@ -1781,6 +1781,11 @@ async function adjustStock(input, actionContext) {
     const unitFact = inventoryUnit
       ? ` ${name} is counted in ${inventoryUnit}${containerSize ? ` (container size ${containerSize})` : ''}.`
       : containerSize ? ` ${name} has a container size of ${containerSize}.` : '';
+    // A call missing the amount as well asks for both in one refusal, so the operator is not asked twice.
+    if (input.quantity == null && input.set_total == null) {
+      return { success: false, code: 'unit_and_amount_required',
+        error: `The amount and the unit are missing, so no stock was changed.${unitFact} Ask the operator one short question for both the amount and its unit (for example "how much, and in what unit: gallons, fl oz?"), then call again with what they say. Never guess either.` };
+    }
     return { success: false, code: 'unit_required',
       error: `The unit is missing, so no stock was changed.${unitFact} Ask the operator one short question about the unit of the amount (for example "2 what: gallons, fl oz?"), then call again with the unit they say. Never guess the unit.` };
   }

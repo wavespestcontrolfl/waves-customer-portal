@@ -477,6 +477,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('operational', 'Clears stale tracker evidence on this visit (tracker state released, cleanup run; no status change)');
     }
   }
+  // A stock write always shows what it records and where the count lands (owner 2026-10-05): the product, the amount and unit
+  // the operator entered, and the on-hand count before and after in the product's own inventory unit.
+  if ((toolName === 'adjust_stock' || (toolName === 'update_restock_request' && params?.action === 'receive'))
+    && preview && preview.stock_before != null && preview.stock_after != null) {
+    const what = toolName === 'adjust_stock' ? `${String(preview.movement_type || '').replace(/_/g, ' ')}` : 'receive';
+    const entered = preview.entered_quantity != null ? ` ${preview.entered_quantity} ${preview.entered_unit || ''}`.trimEnd() : '';
+    push('operational', `${preview.product?.name || 'Product'}: ${what}${entered}; on hand ${preview.stock_before} → ${preview.stock_after} ${preview.unit || ''}`.trimEnd(), {
+      before: `${preview.stock_before} ${preview.unit || ''}`.trimEnd(), after: `${preview.stock_after} ${preview.unit || ''}`.trimEnd(),
+    });
+  }
   if (toolName === 'bulk_update_leads') {
     push('customer', `${(params?.lead_ids || []).length} leads: ${params?.current_status} → ${params?.new_status}`, {
       before: params?.current_status, after: params?.new_status,
