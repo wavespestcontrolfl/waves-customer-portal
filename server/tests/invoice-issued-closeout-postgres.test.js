@@ -466,8 +466,12 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
       }).returning('id').then((r) => r.map((x) => x.id ?? x));
       return id;
     };
-    const recent = await statement(new Date());
+    // Settled the day AFTER the fixture visits (YESTERDAY): an ordinary NET-terms settlement, no prepayment.
+    const recent = await statement(new Date('2040-03-04T15:00:00Z'));
     const stale = await statement(new Date(Date.now() - 30 * 86400000));
+    // Settled ON the visit day, and in ADVANCE of it: prepayments.
+    const sameDaySettled = await statement(new Date('2040-03-03T15:00:00Z'));
+    const advanceSettled = await statement(new Date('2040-03-01T15:00:00Z'));
     const auditRow = (visitId, invoiceId, action, code) => trx('audit_log').insert({
       actor_type: 'system', action, resource_type: 'scheduled_services', resource_id: visitId,
       metadata: JSON.stringify({ invoiceId, trigger: 'paid', code }),
@@ -507,14 +511,20 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // 13. ARRIVED, refused before 2026-10-04 with the historical visit_on_site → retried under the rule that now admits it
     const v13 = await visit({ status: 'on_site' }); const i13 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v13.id });
     await auditRow(v13.id, i13.id, 'visit.completion_on_invoice_issued_refused', 'visit_on_site');
+    // 14. unstarted, statement settled ON the visit day, the closeout NEVER ran (or its audit write failed) → left alone: no audit row is not evidence either
+    const v14 = await visit(); await invoice({ status: 'paid', payer_statement_id: sameDaySettled, scheduled_service_id: v14.id });
+    // 15. …and settled in ADVANCE of the visit day → left alone
+    const v15 = await visit(); await invoice({ status: 'paid', payer_statement_id: advanceSettled, scheduled_service_id: v15.id });
+    // 16. ARRIVED, settled on the visit day, never ran → retried: the technician was there
+    const v16 = await visit({ status: 'on_site' }); await invoice({ status: 'paid', payer_statement_id: sameDaySettled, scheduled_service_id: v16.id });
     // 12. en_route → not a candidate
     const v12 = await visit({ status: 'en_route' }); await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v12.id });
 
     const out = await retrySettledStatementCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 7, retried: 5, closed: 5 });
+    expect(out).toEqual({ candidates: 10, retried: 6, closed: 6 });
     const retriedIds = mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort();
-    expect(retriedIds).toEqual([v1.id, v2.id, v7.id, v9.id, v13.id].sort());
-    expect(retriedIds).not.toContain(v11.id);
+    expect(retriedIds).toEqual([v1.id, v2.id, v7.id, v9.id, v13.id, v16.id].sort());
+    for (const left of [v11, v14, v15]) expect(retriedIds).not.toContain(left.id);
     expect(retriedIds).not.toContain(v10.id);
     expect(retriedIds).not.toContain(v12.id);
     expect(mockCompleteScheduledService.mock.calls.find(([args]) => args.serviceId === v7.id)[0].idempotencyKey).toBe(`invoice-issued:${i7.id}`);

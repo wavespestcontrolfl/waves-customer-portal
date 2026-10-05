@@ -327,13 +327,24 @@ async function latestCloseoutAudit(conn, { visitId, invoiceId, trigger = null })
 
 const refusedForTheMoment = (last) => Boolean(last) && last.action === 'visit.completion_on_invoice_issued_refused' && isTransientRefusal(last.meta);
 
-// The prepayment guard, shared by both sweeps. `visit_scheduled_today` on a
-// visit nobody has arrived at says "settled before anyone went". The day
-// passing does not turn that into evidence the visit happened (it may have
-// been rained out and never moved), so no sweep completes such a visit on
-// the strength of that row. On an ARRIVED visit the same code only meant
-// "sent, not paid, today", which the day passing does resolve.
-const prepaidAndNobodyArrived = (last, visitStatus) => !isArrivedVisitStatus(visitStatus) && last?.meta?.code === 'visit_scheduled_today';
+// The prepayment guard, shared by both sweeps, for a visit NOBODY ARRIVED AT.
+// Settled or delivered on or before the visit day, the invoice proves only
+// that money or paper moved; the day passing does not turn that into
+// evidence the visit happened (it may have been rained out and never moved).
+// So no sweep completes such a visit on the strength of:
+//  - a `visit_scheduled_today` row — "settled before anyone went", or
+//  - no audit row at all, unless the invoice / statement was issued on a
+//    LATER ET day than the visit (`issued_after_service_day`): that is no
+//    prepayment, and the ordinary send / payment path closes exactly it.
+// An ARRIVED visit is never a prepayment case: the technician was there.
+function prepaidAndNobodyArrived(last, row, { neverRan }) {
+  if (isArrivedVisitStatus(row.visit_status)) return false;
+  if (neverRan) return !row.issued_after_service_day;
+  return last?.meta?.code === 'visit_scheduled_today';
+}
+
+// `column` settled / delivered on a later ET day than the visit's day.
+const settledAfterServiceDaySql = (column) => `((${column}) AT TIME ZONE 'America/New_York')::date > s.scheduled_date`;
 
 async function retrySettledStatementCloseouts({ conn = db, today = etDateString(), sinceDays = 7 } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { candidates: 0, retried: 0, closed: 0 };
@@ -346,7 +357,8 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       .where('ps.paid_at', '>=', new Date(Date.now() - sinceDays * 86400000))
       .where((q) => retryableVisitFilter(q, today))
       .orderBy(['ps.id', 'i.id'])
-      .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', 's.status as visit_status', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
+      .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', 's.status as visit_status',
+        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${settledAfterServiceDaySql('ps.paid_at')} as issued_after_service_day`));
   } catch (err) {
     logger.error(`[invoice-issued-closeout] settled-statement retry: candidate lookup failed: ${err.message}`);
     return { candidates: 0, retried: 0, closed: 0 };
@@ -365,7 +377,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
       // Never ran (the settlement is the only trigger a child gets), or
       // refused for the moment; a real refusal is left alone.
       if (last && !refusedForTheMoment(last)) continue;
-      if (prepaidAndNobodyArrived(last, row.visit_status)) continue;
+      if (prepaidAndNobodyArrived(last, row, { neverRan: !last })) continue;
     }
     retried += 1;
     const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today });
@@ -380,10 +392,7 @@ async function retrySettledStatementCloseouts({ conn = db, today = etDateString(
 const DELIVERED_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
 const SETTLED_INVOICE_STATUSES = ['paid', 'prepaid'];
 const ISSUED_AT_SQL = "COALESCE(i.paid_at, i.sent_at, i.sms_sent_at, i.email_sent_at)";
-// The invoice was delivered / settled on a LATER ET day than the visit was
-// scheduled for: the opposite of a prepayment. The ordinary send / payment
-// path closes such a visit, so a run of it that never happened is owed.
-const ISSUED_AFTER_SERVICE_DAY_SQL = `((${ISSUED_AT_SQL}) AT TIME ZONE 'America/New_York')::date > s.scheduled_date`;
+const ISSUED_AFTER_SERVICE_DAY_SQL = settledAfterServiceDaySql(ISSUED_AT_SQL);
 
 // THE durable retry for every invoice outside a statement (GitHub r1 P1 and
 // r3 P1 ×2 #5886). Every rail — the Stripe webhook, cash / check / reconcile,
@@ -452,8 +461,7 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
         continue;
       }
       if (last && !refusedForTheMoment(last)) continue;
-      if (!isArrivedVisitStatus(row.visit_status) && !last && !row.issued_after_service_day) continue;
-      if (prepaidAndNobodyArrived(last, row.visit_status)) continue;
+      if (prepaidAndNobodyArrived(last, row, { neverRan: !last })) continue;
     }
     retried += 1;
     const trigger = SETTLED_INVOICE_STATUSES.includes(String(row.invoice_status)) ? 'paid' : 'sent';
