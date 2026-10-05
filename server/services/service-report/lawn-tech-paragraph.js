@@ -458,11 +458,13 @@ function mentionProblem(term, sentence, mention, prov, from) {
   const purposeOnly = PURPOSE_CUE_RE.test(mention.clause) && !OBSERVED_CUE_RE.test(mention.clause);
   if (purposeOnly && prov.purpose) return from.includes('product') ? null : `purpose_without_product_source:${key}`;
   // From here the paragraph says the condition is (or may be) PRESENT.
-  if (prov.noteStance === 'affirmed' || prov.findingHigh || prov.progress || prov.fact) return null;
+  // The technician's note wins over every other input: a term the note negates
+  // or doubts cannot be stated as found, whatever a finding or fixed line says.
+  if (prov.noteStance === 'negated') return `negated_in_note_stated_as_found:${key}`;
   if (prov.noteStance === 'uncertain') return mention.stance === 'uncertain' ? null : `uncertain_stated_as_fact:${key}`;
+  if (prov.noteStance === 'affirmed' || prov.findingHigh || prov.progress || prov.fact) return null;
   if (prov.findingLow) return HEDGE_RE.test(sentence) ? null : `low_confidence_stated_as_fact:${key}`;
   if (prov.prior) return PRIOR_REF_RE.test(sentence) ? null : `condition_from_prior_only:${key}`;
-  if (prov.noteStance === 'negated') return `negated_in_note_stated_as_found:${key}`;
   if (prov.purpose) return `target_stated_as_found:${key}`;
   return `condition_not_in_inputs:${key}`;
 }
@@ -490,14 +492,25 @@ const SENTENCE_DIRECTIONS = {
 };
 const COMPARISON_RE = /\b(?:since|than|compared|improv\w*|better|worse|recover\w*|declin\w*|thicker|fuller|healthier|thinner|ahead|behind|progress\w*|steady|unchanged|on\s+track|as\s+expected|too\s+early)\b/i;
 
-// A comparison sentence passes only when a fixed progress line says the same
-// thing about the same metric (thickness, weeds or stress) in the same direction.
+// A comparison sentence passes only when every clause that compares is backed
+// by a fixed progress line saying the same thing about the same metric
+// (thickness, weeds or stress) in the same direction. Each clause is judged on
+// its own, so "weeds steady, but stress worse" needs BOTH lines; a clause with
+// a comparison cue and no metric, or two metrics or directions, is unsupported.
 function comparisonSupported(sentence, progressLines) {
-  const metrics = Object.keys(SENTENCE_METRICS).filter((k) => SENTENCE_METRICS[k].test(sentence));
-  const directions = Object.keys(SENTENCE_DIRECTIONS).filter((k) => SENTENCE_DIRECTIONS[k].test(sentence));
-  return progressLines.some((line) => {
+  const supported = new Set();
+  for (const line of progressLines) {
     const meta = PROGRESS_META.get(line);
-    return !!meta && metrics.includes(meta.metric) && directions.includes(meta.direction);
+    if (meta) supported.add(`${meta.metric}:${meta.direction}`);
+  }
+  const clauses = sentence.split(CLAUSE_BREAK_RE).map((c) => c.trim()).filter(Boolean);
+  const comparing = clauses.filter((c) => COMPARISON_RE.test(c) || Object.values(SENTENCE_DIRECTIONS).some((re) => re.test(c)));
+  if (!comparing.length) return false;
+  return comparing.every((clause) => {
+    const metrics = Object.keys(SENTENCE_METRICS).filter((k) => SENTENCE_METRICS[k].test(clause));
+    const directions = Object.keys(SENTENCE_DIRECTIONS).filter((k) => SENTENCE_DIRECTIONS[k].test(clause));
+    if (metrics.length !== 1 || directions.length !== 1) return false;
+    return supported.has(`${metrics[0]}:${directions[0]}`);
   });
 }
 

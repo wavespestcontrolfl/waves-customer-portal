@@ -2652,7 +2652,8 @@ product's own name, a date, month, amount, price, timing, promise ("will", "next
 visit", "follow up") or watering/mowing advice; says "no issues" or "all clear";
 compares color between visits or compares anything with the last visit unless a fixed
 progress sentence has the same metric (thickness, weeds or stress) and direction
-(better, same, worse, on track); says a condition is present when the note says it
+(better, same, worse, on track), judged clause by clause so a compound comparison
+needs a line for each clause; says a condition is present when the note says it
 was NOT found or only MIGHT be (negation and uncertainty are read around the term;
 a negated term may appear only as negated, an uncertain one only hedged); states a
 product's target or role as found, seen or present (they license a purpose claim

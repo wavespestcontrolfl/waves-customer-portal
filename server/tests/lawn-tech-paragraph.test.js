@@ -102,6 +102,18 @@ describe('validator: accepts', () => {
     expect(check(withThird('The lawn is better than at our last visit.'), inputs).problems).toContain('comparison_without_progress');
   });
 
+  test('every clause of a compound comparison needs its own progress line', () => {
+    const weedsOnly = { ...FIXTURE, progressLines: ['Weed pressure is holding steady.'] };
+    const both = { ...FIXTURE, progressLines: ['Weed pressure is holding steady.', 'Turf repair is behind where we expected.'] };
+    const base = 'Our technician saw chinch bugs at the trouble spot. Arena 50 WDG went on the front and side yards to treat them.';
+    const a = answer(`${base} Weeds are holding steady, but stressed areas are worse than at our last visit.`, [['note'], ['note', 'product'], ['progress', 'prior']]);
+    expect(check(a, weedsOnly).problems).toContain('comparison_without_progress');
+    expect(check(a, both).problems).toEqual([]);
+    // A clause naming two metrics or two directions is never supported.
+    const two = answer(`${base} Weeds and thin areas are holding steady since our last visit.`, [['note'], ['note', 'product'], ['progress', 'prior']]);
+    expect(check(two, both).problems).toContain('comparison_without_progress');
+  });
+
   test('naming "progress" as the source is not enough: with no progress line every comparison is rejected', () => {
     for (const progressLines of [[], undefined]) {
       const a = answer('Our technician found chinch bugs in the trouble spot. The turf looks thicker than at our last visit.', [['note'], ['progress', 'prior']]);
@@ -223,6 +235,18 @@ describe('validator: negation and uncertainty in the technician note', () => {
   test('note says "no chinch bugs found" + Arena: "found chinch bugs" is rejected', () => {
     const a = sentenceOf('Our technician found chinch bugs in the trouble spot.', ['note']);
     expect(check(a, NONE).problems).toContain('negated_in_note_stated_as_found:chinch');
+  });
+
+  test('the note wins over a high-confidence photo finding and a fixed line', () => {
+    const thinNote = noted('Applied Arena to the front and side yards. No thinning turf found today. Also applied LESCO 24-0-11 to the whole yard.');
+    const highThin = { ...thinNote, findings: [{ label: 'thinning turf', confidence: 'high' }] };
+    expect(check(sentenceOf('Our technician found thinning turf near the driveway.', ['note', 'finding']), highThin).problems)
+      .toContain('negated_in_note_stated_as_found:thin');
+    // Doubt in the note still needs a hedge, even with a high finding behind it.
+    const maybeThin = { ...noted('Applied Arena to the front and side yards. Might be some thinning turf near the driveway. Also applied LESCO 24-0-11 to the whole yard.'), findings: [{ label: 'thinning turf', confidence: 'high' }] };
+    expect(check(sentenceOf('Our technician found thinning turf near the driveway.', ['note', 'finding']), maybeThin).problems)
+      .toContain('uncertain_stated_as_fact:thin');
+    expect(check(sentenceOf('Our technician may have seen some thinning turf near the driveway.', ['note', 'finding']), maybeThin).problems).toEqual([]);
   });
 
   test('...but a treatment-purpose claim is accepted', () => {
