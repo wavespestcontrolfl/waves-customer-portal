@@ -773,6 +773,34 @@ postgres('access codes section', () => {
       expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, status: 409, code: 'source_moved' });
     });
 
+    test('a refused accept leaves the active twin untouched', async () => {
+      const winner = await customer();
+      const loser = await customer();
+      const first = await found(winner.id);
+      await access.accept(trx, first.id, {});
+      const id = await text(winner.id, 'The gate code is #4821, press 2 first');
+      await sweep(stub([gateItem({ instructions: 'press 2 first', quote: 'The gate code is #4821, press 2 first' })]));
+      const candidate = (await rows(winner.id)).find((r) => r.status === 'found');
+      await trx('sms_log').where({ id }).update({ customer_id: loser.id });
+      expect(await access.accept(trx, candidate.id, {})).toMatchObject({ ok: false, code: 'source_moved' });
+      expect((await trx('customer_access_codes').where({ id: first.id }).first()).status).toBe('active');
+    });
+
+    test('a code whose text moved away is never promoted into the profile', async () => {
+      const winner = await customer();
+      const loser = await customer();
+      const id = await text(winner.id, 'The garage code is 1357');
+      await sweep(stub([gateItem({ kind: 'garage', code: '1357', quote: 'The garage code is 1357' })]));
+      const moved = (await rows(winner.id))[0];
+      const keep = await found(winner.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, keep.id, {});
+      await access.accept(trx, moved.id, {});
+      await trx('sms_log').where({ id }).update({ customer_id: loser.id });
+      const out = await access.retire(trx, keep.id, {});
+      expect(out).toMatchObject({ ok: true, promoted: false });
+      expect((await trx('property_preferences').where({ customer_id: winner.id }).first()).garage_code).toBeNull();
+    });
+
     test('a visit code bound to no visit leaves the live list 14 days after it was sent', async () => {
       const c = await customer();
       const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });

@@ -670,6 +670,22 @@ const audit = (trx, adminUserId, action, id, metadata) => recordAuditEvent({
   resource_type: 'customer_access_codes', resource_id: id, metadata,
 });
 
+// An office action runs in one transaction, and a refusal (a { ok: false }
+// result) rolls the whole transaction back: no check that fails late can leave
+// an earlier write (a retired twin, a filled profile field) committed.
+async function officeTransaction(conn, work) {
+  try {
+    return await conn.transaction(async (trx) => {
+      const out = await work(trx);
+      if (out && out.ok === false) throw Object.assign(new Error('office_action_refused'), { refusal: out });
+      return out;
+    });
+  } catch (err) {
+    if (err && err.refusal) return err.refusal;
+    throw err;
+  }
+}
+
 // Accept a found code (optionally edited by the office): it becomes active, a
 // visit-life code attaches to the customer's next visit, and a standing code
 // fills an empty profile field. Only a `found` row can be accepted.
@@ -678,7 +694,7 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
   const head = await conn('customer_access_codes').where({ id }).first('customer_id');
   if (!head) return fail(404, 'not_found');
   try {
-    return await conn.transaction(async (trx) => {
+    return await officeTransaction(conn, async (trx) => {
       if (!(await lockCustomer(trx, head.customer_id))) return fail(404, 'customer_not_found');
       const row = await trx('customer_access_codes').where({ id }).forUpdate().first();
       if (!row) return fail(404, 'not_found');
@@ -686,6 +702,7 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const checked = validateFields(row, { kind, life, code, instructions });
       if (checked.error) return fail(400, checked.error);
       const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
+      if (!(await sourceStillOwned(trx, row))) return fail(409, 'source_moved');
       const refused = await supersedeOrRefuse(trx, row.customer_id, next, { exceptId: row.id, adminUserId });
       if (refused) return refused;
       // A one-visit candidate lives 14 days from the day it was sent; one past
@@ -693,8 +710,6 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (next.life === 'visit' && !isLive({ ...row, life: 'visit', status: 'active', scheduled_service_id: null }, now)) {
         return fail(409, 'expired');
       }
-      // A text moved to another customer (a merge undone) is not this one's evidence.
-      if (!(await sourceStillOwned(trx, row))) return fail(409, 'source_moved');
       const visit = next.life === 'visit'
         ? await visitFor(trx, row.customer_id, { from: row.source_at ? new Date(row.source_at) : now, chosenId }) : { id: null };
       if (visit.error) return fail(400, visit.error);
@@ -723,7 +738,7 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
 
 async function decide(conn, id, { from, to, action, adminUserId }) {
   if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
-  return conn.transaction(async (trx) => {
+  return officeTransaction(conn, async (trx) => {
     const row = await trx('customer_access_codes').where({ id }).forUpdate().first('id', 'customer_id', 'kind', 'life', 'status');
     if (!row) return fail(404, 'not_found');
     if (row.status !== from) return fail(409, from === 'found' ? 'not_pending' : 'not_active');
@@ -748,7 +763,7 @@ async function retire(conn, id, { adminUserId = null } = {}) {
   if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
   const head = await conn('customer_access_codes').where({ id }).first('customer_id');
   if (!head) return fail(404, 'not_found');
-  return conn.transaction(async (trx) => {
+  return officeTransaction(conn, async (trx) => {
     if (!(await lockCustomer(trx, head.customer_id))) return fail(404, 'customer_not_found');
     const row = await trx('customer_access_codes').where({ id }).forUpdate().first();
     if (!row) return fail(404, 'not_found');
@@ -764,6 +779,7 @@ async function retire(conn, id, { adminUserId = null } = {}) {
         const heir = await trx('customer_access_codes')
           .where({ customer_id: row.customer_id, kind: row.kind, status: 'active', life: 'standing' })
           .whereNot('id', row.id).whereNotNull('code')
+          .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'))
           .orderBy('decided_at', 'desc').orderBy('created_at', 'desc').orderBy('id').first('code');
         await trx('property_preferences').where({ id: prefs.id }).update({ [field]: heir ? heir.code : null, updated_at: trx.fn.now() });
         clearedField = field;
@@ -786,7 +802,7 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
   const checked = validateFields({}, { kind, life, code, instructions });
   if (checked.error) return fail(400, checked.error);
   const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
-  return conn.transaction(async (trx) => {
+  return officeTransaction(conn, async (trx) => {
     if (!(await lockCustomer(trx, customerId))) return fail(404, 'customer_not_found');
     const refused = await supersedeOrRefuse(trx, customerId, next, { adminUserId });
     if (refused) return refused;
