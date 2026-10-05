@@ -188,6 +188,15 @@ describe('on-site follow-up: caller demotion + confirmation replay', () => {
     expect(state.prefs).toEqual([]);
   });
 
+  test('the account primary phone IS the confirmed slot phone: nobody is demoted (it would leave no recipient)', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse({ phone: '+15550100123' }) });
+    await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY });
+    expect(state.prefs).toEqual([]);
+    expect(state.optin[0].caller_demoted_at).toBeNull();
+    expect(sendReplay).not.toHaveBeenCalled();
+    expect(state.optin[0].followup_done_at).toBeNull();
+  });
+
   test('a contact removed from the slots ends it', async () => {
     const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse({ service_contact_phone: '+15550100999' }) });
     await optin.settleOnSiteFollowUps(['c1']);

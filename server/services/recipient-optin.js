@@ -237,23 +237,36 @@ const REPLAY_TERMINAL_REASONS = new Set(['missing_input', 'visit_not_live', 'alr
 // 'not_recipient' (in a slot but not yet textable: retry).
 async function demoteCallerForPhone(customer, phoneKey) {
   const { SERVICE_CONTACT_SLOTS, getAppointmentContacts } = require('./customer-contact');
-  const slotKeys = SERVICE_CONTACT_SLOTS.map((slot) => recipientPhoneKey(customer[slot.phone])).filter(Boolean);
-  if (!slotKeys.includes(phoneKey)) return 'not_in_slot';
-  if (slotKeys.some((k) => k !== phoneKey)) return 'not_applicable';
-  if (!getAppointmentContacts(customer, {}).some((c) => recipientPhoneKey(c.phone) === phoneKey)) return 'not_recipient';
-  const won = await db.transaction(async (trx) => {
+  // With the caller's texts switched off, the confirmed phone must still be a
+  // recipient in its own right (prefs with the primary excluded: an account
+  // whose primary phone IS this slot phone resolves the slot as a duplicate,
+  // and demoting would leave nobody).
+  const standing = (row) => {
+    const slotKeys = SERVICE_CONTACT_SLOTS.map((slot) => recipientPhoneKey(row[slot.phone])).filter(Boolean);
+    if (!slotKeys.includes(phoneKey)) return 'not_in_slot';
+    if (slotKeys.some((k) => k !== phoneKey)) return 'not_applicable';
+    if (!getAppointmentContacts(row, { appointment_notify_primary: false }).some((c) => recipientPhoneKey(c.phone) === phoneKey)) return 'not_recipient';
+    return 'ok';
+  };
+  const before = standing(customer);
+  if (before !== 'ok') return before;
+  return db.transaction(async (trx) => {
+    // Re-read under the customer row lock: a contact edit between the check
+    // and the write must not leave the account with no recipient.
+    const locked = await trx('customers').where({ id: customer.id }).forUpdate().first();
+    const now = locked ? standing(locked) : 'not_in_slot';
+    if (now !== 'ok') return now;
     const marked = await trx('recipient_optin')
       .where({ customer_id: customer.id, phone_key: phoneKey, status: 'confirmed' })
       .whereNull('caller_demoted_at')
       .update({ caller_demoted_at: new Date() });
-    if (!marked) return false;
+    if (!marked) return 'already';
     await trx('notification_prefs')
       .insert({ customer_id: customer.id, appointment_notify_primary: false })
       .onConflict('customer_id')
       .merge({ appointment_notify_primary: false });
-    return true;
+    return 'demoted';
   });
-  return won ? 'demoted' : 'already';
 }
 
 // `replyPhoneKey` is the phone whose YES triggered this run: only ITS replay
