@@ -143,7 +143,10 @@ function verifyItem(item, bodyText, { refuse, phones }) {
   // so a grounded code never carries invented steps into a one-tap save.
   if (instructions && !bodyText.toLowerCase().includes(normalizeText(instructions).toLowerCase())) return null;
   if (code) {
-    if (code.length > MAX_CODE || !MODEL_CODE_SHAPE.test(code) || !codeIsWholeTokenIn(code, quote)) return null;
+    // Whole token in the quote AND in the full text: a quote cropped to "4821"
+    // out of "#4821" must not strip the symbol or shorten the code.
+    if (code.length > MAX_CODE || !MODEL_CODE_SHAPE.test(code) || !codeIsWholeTokenIn(code, quote)
+      || !codeIsWholeTokenIn(code, bodyText)) return null;
     const digits = digitsOf(code);
     if (refuse.has(digits)) return null;
     // A phone number is never a code, with or without its country prefix: ten

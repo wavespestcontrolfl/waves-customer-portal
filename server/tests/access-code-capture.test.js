@@ -182,6 +182,13 @@ describe('verifyItems', () => {
     expect(verify([item({ kind: 'door', quote: 'Door code is #4821, thanks.' })], body)).toHaveLength(1);
   });
 
+  test('a cropped quote cannot strip a symbol or shorten the code', () => {
+    const body = 'The gate code is #4821';
+    expect(verify([item({ code: '4821', quote: '4821' })], body)).toEqual([]);
+    expect(verify([item({ code: '482', quote: '482' })], body)).toEqual([]);
+    expect(verify([item({ code: '#4821', quote: '#4821' })], body)).toHaveLength(1);
+  });
+
   test('keeps the code formats storage supports: letters only, inner spaces', () => {
     expect(verify([item({ code: 'WAVE', quote: 'The gate code is WAVE' })], 'The gate code is WAVE')).toHaveLength(1);
     expect(verify([item({ code: '12 34', quote: 'The gate code is 12 34' })], 'The gate code is 12 34')).toHaveLength(1);
