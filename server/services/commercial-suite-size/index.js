@@ -98,7 +98,10 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
   // restaurant (subtype correction, cadence), whichever source sized it.
   let listing = null;
   const listingRemaining = remainingBudgetMs(opts.deadlineAt);
-  if (opts.skipWebSearch || opts.skipListing) {
+  // The cache-hit path (skipWebSearch) skips this network leg, EXCEPT when
+  // the row's own listing stamp aged out (opts.listingRefresh): then the
+  // published size is re-read rather than dropped to a default.
+  if ((opts.skipWebSearch && opts.listingRefresh !== true) || opts.skipListing) {
     // skipped by the caller
   } else if (listingRemaining < MIN_LEG_REMAINING_MS) {
     logger.warn(`[commercial-suite-size] skipping listing leg — ${Math.max(0, Math.round(listingRemaining))}ms left in the lookup budget`);

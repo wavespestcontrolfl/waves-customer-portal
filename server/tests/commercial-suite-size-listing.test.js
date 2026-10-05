@@ -27,7 +27,9 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(a.streetWord).toBe('70');
     expect(P.extractSuiteSizes('14617 SR 70 E, Bradenton, FL 34202 - Retail for Lease | LoopNet. Suite 103 … 1,350 SF available; Suite 105 2,000 SF', a)).toEqual([1350]);
     expect(P.extractSuiteSizes('14617 State Road 70 E Suite 103 Bradenton FL — 1,350 sq ft', a)).toEqual([1350]);
-    expect(P.extractSuiteSizes('Ste. 103, 14617 FL-70 E: 1,350 SF retail', a)).toEqual([1350]);
+    expect(P.extractSuiteSizes('14617 FL-70 E, Ste. 103: 1,350 SF retail', a)).toEqual([1350]);
+    // The figure must directly follow the suite: an address between them breaks the pair.
+    expect(P.extractSuiteSizes('Ste. 103, 14617 FL-70 E: 1,350 SF retail', a)).toEqual([]);
   });
   test('a range, another street number, a missing suite mention, or an implausible figure never count', () => {
     expect(P.extractSuiteSizes('14617 SR 70 E Bradenton retail 1,200 - 2,400 SF suite 103', a)).toEqual([]);
@@ -91,6 +93,7 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     // Another state named after a place is never this address.
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Atlanta GA, Suite 103 — 2,000 SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Mobile, AL 36602 Suite 103 — 2,000 SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy, Atlanta Georgia 30301, Suite 103 — 2,000 SF', c)).toEqual([]);
     // A bare hash with a space, and a suite named far away in the title and again beside the figure.
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy # 103 — 1,350 SF', c)).toEqual([1350]);
     expect(P.extractSuiteSizes(`4400 Test Commons Pkwy Suite 103 ${'retail for lease in a great location '.repeat(3)}Suite 103 1,350 SF`, c)).toEqual([1350]);
@@ -121,7 +124,7 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('4400 Test St E Suite 103 and 104 3,000 SF', e)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test St E Suites 103, 104: 3,000 SF', e)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test St E Suite 103 + 104: 3,000 SF', e)).toEqual([]);
-    expect(P.extractSuiteSizes('4400 Test St E Suite 103/104: 3,000 SF; Suite 103 alone: 1,350 SF', e)).toEqual([1350]);
+    expect(P.extractSuiteSizes('4400 Test St E Suite 103/104: 3,000 SF; Suite 103: 1,350 SF', e)).toEqual([1350]);
     // A dash before the figure is a separator, not a combined suite.
     expect(P.extractSuiteSizes('4400 Test St E Suite 103 - 1,350 SF', e)).toEqual([1350]);
     expect(P.extractSuiteSizes('4400 Test St E Suite 103 – 1,350 SF', e)).toEqual([1350]);
@@ -145,6 +148,15 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 25,000 SF multi-tenant retail building', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 25,000 SF grocery-anchored shopping center', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 1,350 SF in-line retail space', c)).toEqual([1350]);
+    // Only punctuation may sit between the suite and its figure.
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 is housed inside this modern 25,000 SF warehouse', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — parking 4/1,000 SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 offers 1,350 SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 (1,350 SF)', c)).toEqual([1350]);
+    // The rest of this address may sit between them; another city may not.
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103, Bradenton, FL — 1,350 SF', c)).toEqual([1350]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 Riverside Plaza — 1,350 SF', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 — 2,000 SF warehouse suite', c)).toEqual([2000]);
     // An approximation mark between the number and the unit is an estimate.
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350 ± SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350 +/- SF', c)).toEqual([]);

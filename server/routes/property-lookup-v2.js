@@ -1269,6 +1269,11 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
     skipWebSearch: true,
     requireWarmCache: true,
     cacheOnly: options.cacheOnly === true,
+    // The row carries a listing size whose stamp aged out (90 days, or 30
+    // when license-backed): re-read the listing on this hit instead of
+    // dropping the published size to a license estimate or a type default.
+    listingRefresh: lookupListingSizeLive() && record?._commercialSuiteSize?.source === 'listing_verified_text'
+      && !commercialSuiteSizeStampIsFresh(record._commercialSuiteSize),
   });
   // A license size resolved on THIS hit (older row with no stamp, or an
   // aged-out stamp, and a warm DBPR cache) is backfilled onto the cached
@@ -2030,12 +2035,10 @@ function commercialSuiteSizeStampIsFresh(stamp, now = Date.now()) {
   // A license-backed listing stamp carries the DBPR classification too
   // (restaurant subtype, cadence): it ages on the LICENSE's 30 days, so a
   // closed restaurant never keeps restaurant pricing for the listing's 90.
-  // A listing stamp whose license leg never answered (skipped or failed) is
-  // good for one day only: the next day's lookup asks DBPR again rather than
-  // pinning "no license" for the listing's 90.
+  // An aged-out listing stamp is re-read on the next cache hit
+  // (listingRefresh), so its size is never silently dropped to a default.
   let maxAge = SUITE_SIZE_STAMP_MAX_AGE_MS[stamp.source];
   if (stamp.licenseBacked === true) maxAge = Math.min(maxAge || Infinity, SUITE_SIZE_STAMP_MAX_AGE_MS.license_seats);
-  else if (stamp.source === 'listing_verified_text' && stamp.licenseChecked === false) maxAge = DAY_MS;
   if (!maxAge) return true;
   const resolvedAt = Date.parse(stamp.resolvedAt);
   if (!Number.isFinite(resolvedAt)) return false;

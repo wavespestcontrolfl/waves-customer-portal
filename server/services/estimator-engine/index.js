@@ -2750,10 +2750,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             // suite: run the license check once more with it (no listing
             // search, no web search) for the CLASSIFICATION only. The
             // listing's size and link stand.
-            if (suiteSize && suiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT && suiteSize.licenseBacked !== true && context?.phone) {
+            if (suiteSize && suiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT && suiteSize.licenseBacked !== true
+              && (context?.phone || suiteSize.licenseChecked === false)) {
               suiteSize = await classifyListingSuiteByLicense(suiteSize, {
                 addressLine: intent.address || result.addressUsed || address,
-                phone: context.phone,
+                phone: context?.phone || null,
                 commercialRiskType: intent.commercial_risk_type || null,
                 commercialSubtype: intent.commercial_subtype || null,
               });

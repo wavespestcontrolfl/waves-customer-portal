@@ -49,8 +49,6 @@ const MAX_PAGES = 3;
 const MAX_RESULTS_PER_QUERY = 10;
 const MIN_SUITE_SQFT = 150;
 const MAX_SUITE_SQFT = 100000;
-// Characters between the suite token (or the street number) and the figure.
-const UNIT_REACH = 80;
 // With a suite known, the typed street number must still precede the figure
 // within this many characters: the listing block for THIS property.
 const ADDRESS_REACH = 400;
@@ -217,7 +215,7 @@ function unitMentions(text) {
   UNIT_MENTION_RE.lastIndex = 0;
   while ((m = UNIT_MENTION_RE.exec(text))) {
     const extra = String(m[2] || '').replace(/\s+/g, '');
-    out.push({ index: m.index, unit: (m[1] + extra).toUpperCase() });
+    out.push({ index: m.index, end: m.index + m[0].length, unit: (m[1] + extra).toUpperCase() });
   }
   return out;
 }
@@ -269,7 +267,7 @@ function extractSuiteSizes(text, anchors) {
     if (addressAt < 0) continue;
     const block = figureBlock(t, m.index);
     if (!zipAgrees(t, addressAt, m.index, block.end, anchors)) continue;
-    if (!blockOwnsFigure(block, m.index, wanted)) continue;
+    if (!blockOwnsFigure(block, m.index, wanted, anchors)) continue;
     out.push(value);
   }
   return out;
@@ -349,8 +347,9 @@ const CITY_BEFORE_STATE_RE = /\b([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*)
 // "Mobile, AL") is not this address, typed city or not. Upper-case
 // abbreviations only, so "in", "or", "me" in prose never read as states.
 const OTHER_STATE_RE = /\b[A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+)?\s*,?\s+(?:AL|AK|AZ|AR|CA|CO|CT|DE|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|DC)\b(?=\s*(?:\d{5}|[,.;|)]|$|\s+(?:Suite|Ste|Unit|Bay|Space|#)))/;
+const OTHER_STATE_NAME_RE = /\b(?:Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New\s+Hampshire|New\s+Jersey|New\s+Mexico|New\s+York|North\s+Carolina|North\s+Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode\s+Island|South\s+Carolina|South\s+Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West\s+Virginia|Wisconsin|Wyoming)\b(?=\s*(?:\d{5}|[,.;|)]|$|\s+(?:Suite|Ste|Unit|Bay|Space|#)))/;
 function cityAgrees(span, city) {
-  if (OTHER_STATE_RE.test(span)) return false;
+  if (OTHER_STATE_RE.test(span) || OTHER_STATE_NAME_RE.test(span)) return false;
   const typed = String(city || '').trim().toLowerCase();
   if (!typed) return true;
   CITY_BEFORE_STATE_RE.lastIndex = 0;
@@ -363,14 +362,32 @@ function cityAgrees(span, city) {
   return !named;
 }
 
-// The block names exactly one suite, this one, within reach of the figure.
-function blockOwnsFigure(block, idx, wanted) {
+// The block names exactly one suite, this one, and the figure DIRECTLY
+// follows a mention of it: only punctuation or spaces between them ("Suite
+// 103 — 1,350 SF", "Suite 103: 1,350 SF", "Suite 103 1,350 SF"). Any word in
+// between ("Suite 103 is housed inside this modern 25,000 SF warehouse",
+// "Suite 103 — parking 4/1,000 SF") means the figure describes something
+// else. This one positional rule replaces guessing at every phrasing.
+const SEPARATORS_ONLY_RE = /^[\s:;,—–\-()…·•]*$/;
+// The rest of THIS address may sit between them ("Suite 103, Bradenton, FL
+// 34202 — 1,350 SF"): the typed city, the state and the typed ZIP are
+// removed from the gap before it is judged.
+function gapIsSeparatorsOnly(gap, anchors) {
+  let rest = gap;
+  if (anchors.city) rest = rest.replace(new RegExp(`\\b${anchors.city.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')}\\b`, 'i'), ' ');
+  rest = rest.replace(/\b(?:FL|Florida)\b/i, ' ');
+  if (anchors.zip) rest = rest.replace(new RegExp(`\\b${anchors.zip}(?:-\\d{4})?\\b`), ' ');
+  return SEPARATORS_ONLY_RE.test(rest);
+}
+
+function blockOwnsFigure(block, idx, wanted, anchors) {
   const mentions = unitMentions(block.text);
   const units = [...new Set(mentions.map((u) => u.unit))];
   if (units.length !== 1 || units[0] !== wanted) return false;
-  // Any mention of the suite within reach (a title may name it far from
-  // the figure and the description again right beside it).
-  return mentions.some((u) => u.unit === wanted && Math.abs((block.start + u.index) - idx) <= UNIT_REACH);
+  return mentions.some((u) => {
+    const end = block.start + u.end;
+    return u.unit === wanted && end <= idx && idx - end <= 60 && gapIsSeparatorsOnly(block.text.slice(u.end, idx - block.start), anchors);
+  });
 }
 
 function sameSize(a, b) {

@@ -55,6 +55,16 @@ describe('resolveCommercialSuiteSize — listing rung (PR 5b) sits above the lic
     expect(resolveViaListing).not.toHaveBeenCalled();
   });
 
+  test('the cache-hit path runs the listing leg only to refresh an aged-out listing stamp', async () => {
+    resolveViaDbprLicense.mockResolvedValue(null);
+    resolveViaWebSearch.mockResolvedValue(null);
+    resolveViaListing.mockResolvedValueOnce({ value: 1350, source: 'listing_verified_text', confidence: 'medium', url: 'https://www.loopnet.com/x', evidence: [] });
+    const out = await resolveCommercialSuiteSize({ address: ADDRESS }, { skipWebSearch: true, listingRefresh: true });
+    expect(resolveViaListing).toHaveBeenCalledTimes(1);
+    expect(out.source).toBe(SOURCES.LISTING_VERIFIED_TEXT);
+    expect(resolveViaWebSearch).not.toHaveBeenCalled();
+  });
+
   test('a listing leg error falls through to the license', async () => {
     resolveViaListing.mockRejectedValueOnce(new Error('vendor down'));
     resolveViaDbprLicense.mockResolvedValue({ value: 1400, businessName: 'Test Taco Shop', seats: 25, evidence: [] });
