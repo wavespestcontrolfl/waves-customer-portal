@@ -189,11 +189,11 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     });
     return id;
   }
-  async function estimate(customerId, { status = 'sent', sentAt = minutesAgo(10) } = {}) {
+  async function estimate(customerId, { status = 'sent', sentAt = minutesAgo(10), linkedVisitId = null } = {}) {
     const id = randomUUID();
     await mockPg('estimates').insert({
       id, customer_id: customerId, status, sent_at: sentAt, token: randomUUID().replace(/-/g, ''),
-      customer_name: 'Fixture Assessment', estimate_data: JSON.stringify({}),
+      customer_name: 'Fixture Assessment', estimate_data: JSON.stringify(linkedVisitId ? { scheduled_service_id: linkedVisitId } : {}),
     });
     return id;
   }
@@ -552,6 +552,37 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 2, closed: 2 });
     expect((await row(a)).status).toBe('completed');
     expect((await row(b)).status).toBe('completed');
+  });
+
+  test('the estimate\'s explicit booking link decides: an estimate linked to assessment A closes A, never a later B', async () => {
+    const customerId = await customer();
+    const a = await visit(customerId, { day: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
+    const b = await visit(customerId);
+    // A's pre-drafted estimate is sent today, after B was booked and reached.
+    await estimate(customerId, { sentAt: minutesAgo(5), linkedVisitId: a });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(a)).status).toBe('completed');
+    expect((await row(b)).status).toBe('on_site');
+    expect(await mockPg('service_records').where({ scheduled_service_id: b })).toHaveLength(0);
+  });
+
+  test('a failure does not rest the visit: the next tick retries it; a refusal about the visit still rests', async () => {
+    const failed = await customer();
+    const failedVisit = await visit(failed);
+    await estimate(failed);
+    await mockPg('audit_log').insert({ actor_type: 'system', action: AUDIT_REFUSED, resource_type: 'scheduled_services', resource_id: failedVisit, metadata: JSON.stringify({ code: 'error' }) });
+    const outage = await customer();
+    const outageVisit = await visit(outage);
+    await estimate(outage);
+    await mockPg('audit_log').insert({ actor_type: 'system', action: AUDIT_REFUSED, resource_type: 'scheduled_services', resource_id: outageVisit, metadata: JSON.stringify({ code: 'completion_profile_lookup_failed', status: 503 }) });
+    const refused = await customer();
+    const refusedVisit = await visit(refused);
+    await estimate(refused);
+    await mockPg('audit_log').insert({ actor_type: 'system', action: AUDIT_REFUSED, resource_type: 'scheduled_services', resource_id: refusedVisit, metadata: JSON.stringify({ code: 'grouped_visit', status: 409 }) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 2, closed: 2 });
+    expect((await row(failedVisit)).status).toBe('completed');
+    expect((await row(outageVisit)).status).toBe('completed');
+    expect((await row(refusedVisit)).status).toBe('on_site');
   });
 
   test('money is a person\'s: a priced assessment, a prepaid one and one with a linked invoice are never candidates', async () => {

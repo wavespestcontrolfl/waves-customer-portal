@@ -143,15 +143,17 @@ function candidateVisits(conn, { today, now }) {
             .whereNotNull('e.sent_at')
             .whereNot('e.status', 'draft')
             .where('e.sent_at', '>=', estimateSince)
-            // One estimate, one assessment (matchedAssessmentId): no newer
-            // assessment of this customer on or before the estimate's day.
-            .whereRaw(`NOT EXISTS (
+            // One estimate, one assessment (matchedAssessmentId): the
+            // estimate's explicit booking link when it has one; otherwise
+            // (legacy, unlinked) no newer assessment of this customer on or
+            // before the estimate's day.
+            .whereRaw(`(e.estimate_data ->> 'scheduled_service_id' = s.id::text OR (e.estimate_data ->> 'scheduled_service_id' IS NULL AND NOT EXISTS (
               SELECT 1 FROM scheduled_services s2 LEFT JOIN services svc2 ON svc2.id = s2.service_id
               WHERE s2.customer_id = s.customer_id AND s2.id <> s.id
                 AND (s2.status IS NULL OR s2.status NOT IN (${DEAD_STATUSES.map(() => '?').join(', ')}))
                 AND s2.scheduled_date <= ${SENT_DAY_SQL}
                 AND (s2.scheduled_date > s.scheduled_date OR (s2.scheduled_date = s.scheduled_date AND s2.id > s.id))
-                AND (LOWER(TRIM(s2.service_type)) = ? OR svc2.service_key = ? OR LOWER(TRIM(svc2.name)) = ?))`,
+                AND (LOWER(TRIM(s2.service_type)) = ? OR svc2.service_key = ? OR LOWER(TRIM(svc2.name)) = ?))))`,
             [...DEAD_STATUSES, ASSESSMENT_DISPLAY_NAME.toLowerCase(), ASSESSMENT_SERVICE_KEY, ASSESSMENT_DISPLAY_NAME.toLowerCase()])
             .where((rule) => rule
               .where((started) => started.whereIn('s.status', STARTED_STATUSES)
@@ -170,7 +172,11 @@ function candidateVisits(conn, { today, now }) {
           this.select(conn.raw('1')).from('audit_log as al')
             .whereRaw("al.resource_type = 'scheduled_services' AND al.resource_id = s.id")
             .where('al.action', AUDIT_REFUSED)
-            .where('al.created_at', '>=', restSince);
+            .where('al.created_at', '>=', restSince)
+            // Only a refusal about the visit rests it. A failure (a thrown
+            // error, or a 5xx the completion returned) is an outage, retried
+            // on the very next tick (Codex r4 P2 #5903).
+            .whereRaw("COALESCE(al.metadata ->> 'code', '') <> 'error' AND COALESCE(NULLIF(al.metadata ->> 'status', '')::int, 0) < 500");
         }))
       .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
     // Open visits first: a resume that keeps failing must not take the
@@ -194,14 +200,27 @@ async function audit(action, { visitId, estimateId, code = null, status = null, 
   }
 }
 
-// ONE estimate closes ONE assessment: the newest assessment of that customer
-// on or before the day the estimate was sent — the walkthrough the estimate
+// ONE estimate closes ONE assessment: the visit its booking link names, else
+// (legacy) the newest assessment of that customer on or before the day the
+// estimate was sent — the walkthrough the estimate
 // came out of. An older assessment still open behind it (abandoned, then
 // rebooked) is not closed by the same estimate, whether the newer one is
 // still open or already completed (GitHub r1 P1 #5903). Newest = latest
 // scheduled day, then id; the candidate query applies the same order in SQL.
-async function matchedAssessmentId(conn, customerId, estimateSentAt) {
-  const sentDay = etDateString(new Date(estimateSentAt));
+async function matchedAssessmentId(conn, customerId, estimate) {
+  // The estimate's own booking link (estimator-engine/booking-predraft.js
+  // writes estimate_data.scheduled_service_id): when present it decides,
+  // whatever else the customer has booked (Codex r4 P1 #5903). It names
+  // this customer's visit or nothing.
+  let data = estimate.estimate_data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  const linked = data && data.scheduled_service_id ? String(data.scheduled_service_id) : null;
+  if (linked) {
+    const visit = await conn('scheduled_services').where({ id: linked, customer_id: customerId }).first('id');
+    return visit ? visit.id : null;
+  }
+  // Legacy, unlinked: the newest assessment on or before the send day.
+  const sentDay = etDateString(new Date(estimate.sent_at));
   const query = conn('scheduled_services as s')
     .leftJoin('services as svc', 'svc.id', 's.service_id')
     .where('s.customer_id', customerId)
@@ -226,9 +245,9 @@ async function estimateForAssessment(conn, visit, { now }) {
     .whereNot('status', 'draft')
     .where('sent_at', '>=', new Date(now.getTime() - ESTIMATE_WINDOW_DAYS * 86400000))
     .orderBy('sent_at', 'desc')
-    .select('id', 'sent_at', 'status');
+    .select('id', 'sent_at', 'status', 'estimate_data');
   for (const estimate of sent) {
-    if (String(await matchedAssessmentId(conn, visit.customer_id, estimate.sent_at)) === String(visit.id)) return estimate;
+    if (String(await matchedAssessmentId(conn, visit.customer_id, estimate)) === String(visit.id)) return estimate;
   }
   return null;
 }
