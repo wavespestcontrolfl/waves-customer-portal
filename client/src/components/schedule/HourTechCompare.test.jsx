@@ -24,6 +24,11 @@ describe('HourTechCompare', () => {
     expect(onPick).toHaveBeenCalledWith(ROWS[1]);
   });
 
+  it('withholds "Best fit" when the first route was not priced', () => {
+    render(<HourTechCompare rows={[{ ...ROWS[0], detourMinutes: null }, { ...ROWS[1], detourMinutes: null }]} />);
+    expect(screen.queryByText('Best fit')).toBeNull();
+  });
+
   it('renders nothing without rows and no "Best fit" for a single tech', () => {
     const { container, rerender } = render(<HourTechCompare rows={[]} />);
     expect(container).toBeEmptyDOMElement();

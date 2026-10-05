@@ -3990,6 +3990,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // Auto mode: price the typed hour on every technician's route instead,
     // so the operator can see who adds the least drive and pick them.
     compareTechsAt: techMode === 'choose' ? undefined : windowStart,
+    serviceTypes: services.map((svc) => svc?.name).filter(Boolean),
     rangeFrom: etDateString(),
   });
 
@@ -6418,7 +6419,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             style={{ marginBottom: 10 }}
           />
           <HourTechCompare
-            rows={pickedByTech}
+            // A partly committed booking is locked to retry or close: the
+            // remaining groups must keep the technician already chosen.
+            rows={partialCommitLocked ? [] : pickedByTech}
             onPick={(row) => {
               // The drive was priced on this technician's route: picking
               // the row books them, as the hint chips do.

@@ -22,6 +22,8 @@
  *     compareTechs?,          // hint mode, all techs, gap mode: answer `pickedByTech` — the
  *                             // picked hour on every technician's route that fits it,
  *                             // least added drive first — instead of `picked`
+ *     serviceTypes?,          // compareTechs: every service in the booking; a tech that
+ *                             // cannot perform one is left out of `pickedByTech`
  *   }
  */
 
@@ -211,7 +213,7 @@ router.post('/', async (req, res) => {
       topN,
       hint, serviceId, arrivalWindows, excludeServiceIds, slotStepMinutes,
       pickedStart, pickedEnd, sameDayFloorMin, propertyId, durationEdit,
-      summary, pickedDate, moveScope, compareTechs,
+      summary, pickedDate, moveScope, compareTechs, serviceTypes,
     } = req.body || {};
     // Edit appointment's choice on a shared stop: 'separate' = the save
     // splits this service off and moves only it.
@@ -395,11 +397,25 @@ router.post('/', async (req, res) => {
     // New appointment's "who adds the least drive at this hour" list: the
     // picked hour on every technician's route. Only for a search across all
     // technicians in gap mode (the arrival checker prices one route).
-    const pickedByTech = hint && compareTechs === true && pickedStart && !technicianId && !useArrivalWindows
+    // Every service in the booking must be one the technician performs: a
+    // row picks the tech explicitly, past the auto matcher's capability
+    // check, so an unqualified tech is never listed (either finder path).
+    let pickedByTech = hint && compareTechs === true && pickedStart && !technicianId && !useArrivalWindows
       ? await scorePickedHourByTech({
         rawSlots, from: plan.verdictDate, today, sameDayFloorMin, pickedStart, pickedEnd, spanMin, excluded,
       })
       : undefined;
+    if (pickedByTech?.length) {
+      const wanted = [...new Set([serviceType, ...(Array.isArray(serviceTypes) ? serviceTypes : [])]
+        .filter((t) => typeof t === 'string' && t.trim()))];
+      if (wanted.length) {
+        const inactive = await require('../services/technician-capabilities').inactiveCapabilitiesForServices(
+          db, pickedByTech.map((v) => v.technician.id), wanted.map((service_type) => ({ service_type })),
+        );
+        const unqualified = new Set(inactive.map((row) => String(row.technician_id)));
+        pickedByTech = pickedByTech.filter((v) => !unqualified.has(String(v.technician.id)));
+      }
+    }
 
     // The engine's per-date refusal counts feed the summary's day status
     // only; they are not part of any response contract.

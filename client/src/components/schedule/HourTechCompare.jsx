@@ -22,6 +22,8 @@ function driveIn(row) {
 
 export default function HourTechCompare({ rows, onPick, style }) {
   if (!Array.isArray(rows) || rows.length === 0) return null;
+  // "Best fit" only when the winner's route was actually priced.
+  const best = rows.length > 1 && Number.isFinite(rows[0].detourMinutes);
   return (
     <section aria-label="Technicians free at this hour" style={{ display: 'flex', flexDirection: 'column', gap: 6, ...style }}>
       <div style={{ fontSize: 14, fontWeight: 500, color: '#18181B' }}>
@@ -34,14 +36,14 @@ export default function HourTechCompare({ rows, onPick, style }) {
           onClick={() => onPick?.(row)}
           style={{
             display: 'flex', alignItems: 'center', gap: 10, minHeight: 48, padding: '8px 12px',
-            background: '#FFFFFF', border: `1px solid ${i === 0 ? '#067647' : '#E4E4E7'}`, borderRadius: 8,
+            background: '#FFFFFF', border: `1px solid ${best && i === 0 ? '#18181B' : '#E4E4E7'}`, borderRadius: 8,
             cursor: 'pointer', textAlign: 'left', fontSize: 14,
           }}
         >
           <span style={{ flex: 1, minWidth: 0 }}>
             <span style={{ display: 'block', fontWeight: 500, color: '#18181B' }}>
               {row.technicianName || 'Technician'}
-              {i === 0 && rows.length > 1 && <span style={{ marginLeft: 8, color: '#067647' }}>Best fit</span>}
+              {best && i === 0 && <span style={{ marginLeft: 8, color: '#52525B' }}>Best fit</span>}
             </span>
             <span style={{ display: 'block', color: '#71717A' }}>
               {[driveIn(row), detourPhrase(row)].filter(Boolean).join(' · ')}

@@ -161,7 +161,7 @@ function normalizeDay(day, scopedToTech) {
 export function useBestTimes({
   date, serviceId, customerId, durationMinutes, technicianId, excludeServiceIds,
   arrivalWindows = false, enabled = true, address, lat, lng, propertyId,
-  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false, compareTechsAt,
+  pickedStart, pickedEnd, rangeFrom, sameDayFloorMin, durationEdit = false, summary = false, compareTechsAt, serviceTypes,
   // Edit appointment's choice on a shared stop ('together' | 'separate'):
   // the route check answers for the move the save will make.
   moveScope,
@@ -188,6 +188,9 @@ export function useBestTimes({
   const rangeKey = YMD.test(String(rangeFrom || '')) ? String(rangeFrom) : '';
   // The hour to price on every route: all-tech searches with no single
   // picked hour of their own.
+  // The booking's services, so the compared list leaves out a tech who
+  // cannot perform one of them.
+  const serviceTypesKey = (serviceTypes || []).filter(Boolean).map(String).join('\n');
   const compareKey = !technicianId && !pickedKey && /^\d{2}:\d{2}(:\d{2})?$/.test(String(compareTechsAt || ''))
     ? String(compareTechsAt).slice(0, 5) : '';
 
@@ -200,7 +203,7 @@ export function useBestTimes({
   const subjectKey = [serviceId, customerId, propertyId, address, lat, lng].map((v) => v ?? '').join('|');
   const requestKey = [
     enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows,
-    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey,
+    address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey,
   ].map((v) => v ?? '').join('|');
   const availability = useMemo(() => {
     if (!answer || !enabled) return null;
@@ -221,7 +224,7 @@ export function useBestTimes({
     if (!(summary && date >= etDateString() && Date.now() >= summaryUnavailableUntil)) setAvailability(null);
     const controller = new AbortController();
     const pickedArgs = compareKey
-      ? { pickedStart: compareKey, compareTechs: true }
+      ? { pickedStart: compareKey, compareTechs: true, serviceTypes: serviceTypesKey ? serviceTypesKey.split('\n') : undefined }
       : { pickedStart: pickedKey || undefined, pickedEnd: (pickedKey && pickedEndKey) || undefined };
     setChecking(true);
     const timer = setTimeout(async () => {
@@ -318,6 +321,6 @@ export function useBestTimes({
       if (!controller.signal.aborted) setChecking(false);
     }, 300);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey]);
+  }, [enabled, date, serviceId, customerId, durationMinutes, durationEdit, technicianId, excludeKey, arrivalWindows, address, lat, lng, propertyId, pickedKey, pickedEndKey, rangeKey, sameDayFloorMin, summary, moveScope, compareKey, serviceTypesKey]);
   return { bestTimes, picked, pickedByTech, bestInRange, availability, checking };
 }
