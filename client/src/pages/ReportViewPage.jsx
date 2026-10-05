@@ -8517,6 +8517,17 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .pressure-trend-chart .pressure-value-label {
           font-size: 10px;
         }
+        /* The SVG scales with the card: under ~320px of card width 10 units
+           would draw below 10px, so narrow phones get larger units (Codex P2
+           #5888). */
+        @media (max-width: 400px) {
+          .pressure-trend-chart .chart-label,
+          .pressure-trend-chart .pressure-value-label { font-size: 12px; }
+        }
+        @media (max-width: 360px) {
+          .pressure-trend-chart .chart-label,
+          .pressure-trend-chart .pressure-value-label { font-size: 13px; }
+        }
         .neighborhood-pressure-line {
           stroke: var(--report-muted);
           stroke-width: 1;
