@@ -47,9 +47,6 @@ export function adminLoginUrl({ pathname, search, hash }) {
   return pathname === '/admin/login' ? next : `/admin/login?next=${encodeURIComponent(next)}`;
 }
 
-// redirectOn401: false hands a 401 back to the caller without navigating
-// (a caller that must first check the answer still belongs to the stored
-// token, e.g. the field workspace's staff check).
 // The message of a non-JSON error body. A plain-text server message is worth
 // showing; an HTML body is a proxy or edge error page (a Cloudflare 524 on a
 // long request) and would paint its whole markup into the UI, so it is dropped
@@ -62,6 +59,9 @@ async function plainTextError(r) {
   return /^\s*<(!doctype|html)/i.test(text) ? '' : text;
 }
 
+// redirectOn401: false hands a 401 back to the caller without navigating
+// (a caller that must first check the answer still belongs to the stored
+// token, e.g. the field workspace's staff check).
 export async function adminFetch(path, { redirectOn401 = true, ...options } = {}) {
   let attempt = 0;
    
