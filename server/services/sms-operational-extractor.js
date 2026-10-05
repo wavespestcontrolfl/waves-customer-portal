@@ -121,6 +121,8 @@ function isQuestionSource(source) {
 const accessCodeCaptureEnabled = () => gateEnvValue('GATE_ACCESS_CODE_CAPTURE');
 const PROPERTY_GATE_WORDS = /\b(?:side|back|rear|yard|backyard|left|right|pool|fence|driveway|property)\s+gate\b/i;
 const CODE_HEDGE = /\b(?:i think|i believe|i guess|maybe|perhaps|possibly|probably|not sure|unsure|might be|should be|used to be)\b|\d[#*]?\s+or\s+[#*]?\d/i;
+// A code the client reports as dead or replaced, anywhere in the message.
+const CODE_INVALIDATED = /\b(?:no longer|any ?more|wrong|incorrect|changed|expired|invalid|broken|old code|used to|stopped working|(?:does|did|do|will|would)(?: not|n['’]t) work)\b/i;
 // Which one kind of code the message talks about; null when it names none or
 // more than one ("the gate and the garage"), because the digits then cannot be
 // tied to a kind. A plain "gate" beside a side or back gate is that same gate;
@@ -142,11 +144,16 @@ function accessCodeKind(text) {
 function matchesNaturalAccessCode({ field, value }, { messageBody = '', properties = [] } = {}) {
   const candidate = String(value || '').trim();
   const body = String(messageBody || '');
-  if (!/^[#*]?\d{3,8}[#*]?$/.test(candidate) || !body.includes(candidate)) return false;
+  if (!/^[#*]?\d{3,8}[#*]?$/.test(candidate)) return false;
+  // The one number in the message, with the key symbols the client wrote
+  // around it: "#5550" never saves as "5550".
+  const tokens = body.match(/[#*]*\d{3,}[#*]*/g) || [];
+  if (tokens.length !== 1 || tokens[0] !== candidate) return false;
+  if (CODE_HEDGE.test(body) || CODE_INVALIDATED.test(body) || isQuestionSource(body)) return false;
+  // "Gate code is not 5550": a negation in the number's own sentence.
+  const sentence = body.split(/(?<=[.!?])\s+|\n+/).find((part) => part.includes(candidate)) || body;
+  if (/\b(?:not|never|no)\b|n['’]t/i.test(sentence)) return false;
   const digits = candidate.replace(/\D/g, '');
-  const numbers = new Set(body.match(/\d{3,}/g) || []);
-  if (numbers.size !== 1 || !numbers.has(digits)) return false;
-  if (CODE_HEDGE.test(body)) return false;
   if (properties.some((property) => (String(property.address_line1 || '').match(/^\s*(\d+)/) || [])[1] === digits
     || String(property.zip || '').slice(0, 5) === digits)) return false;
   return accessCodeKind(body) === field;

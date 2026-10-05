@@ -63,10 +63,23 @@ describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)',
     ['digits the client did not write', 'neighborhood_gate_code', 'Gate code is 5550', '5551'],
     ['a value with words', 'neighborhood_gate_code', 'Gate code is 5550 then star', '5550 then star'],
     ['a question', 'neighborhood_gate_code', 'Is the gate code 5550?', '5550'],
+    ['a negated code', 'neighborhood_gate_code', 'Gate code is not 5550', '5550'],
+    ['a code that stopped working', 'neighborhood_gate_code', 'Gate code 5550 no longer works', '5550'],
+    ['a code reported broken in a later sentence', 'neighborhood_gate_code', 'Gate code is 5550. It doesn\'t work on Sundays.', '5550'],
+    ['a value without the symbol the client wrote', 'neighborhood_gate_code', 'Gate code is #5550', '5550'],
+    ['a value without the trailing symbol', 'garage_code', 'Garage keypad 5550#', '5550'],
   ])('gate on still refuses %s', (_name, field, quote, value) => {
     process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
     const item = codeFact(field, quote, value);
     expect(ground(item).facts).toEqual([]);
+    expect(verdict(item)).not.toBe('apply');
+  });
+
+  test('a negation in another sentence does not block the code', () => {
+    process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
+    const item = codeFact('neighborhood_gate_code', 'Sorry I did not answer. Gate code is 5550', '5550');
+    expect(ground(item).facts).toEqual([item]);
+    expect(verdict(item)).toBe('apply');
   });
 
   test('the strict sentence form still saves with the gate on', () => {
