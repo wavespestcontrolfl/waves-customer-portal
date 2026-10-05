@@ -345,11 +345,13 @@ technician rated the landscape Excellent or Good). No model text is ever printed
 (`freezeTreeShrubTechParagraph`, `tree-shrub-tech-paragraph-gate.js`), with at most
 one model call (lane `ts_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second
 deadline across the whole step) that only EXTRACTS closed-list `{ condition, plant }`
-ids (plus a `seenToday` judgment that must be true) from the technician's note;
-code verifies each against the note (a sighting word such as saw/found/noticed in
-the sentence; not negated, not hedged, no other visit past or planned; no treatment
-or purpose such as applied/treated/for in the condition's clause; same clause for the
-plant; bare shorthand with no sighting word supports nothing) and drops a failing item. Inputs: the note,
+ids from the technician's note, each with `quote` (the technician's exact words) and
+a `seenToday` judgment. The model judges the language and the code only verifies
+(owner ruling 2026-10-05, the 2026-10-03 portal chat pattern): an item stays only
+when `seenToday` is true and the quote is word for word part of one note sentence
+that names the condition and no palm-banned term; the plant stays only when the
+quote names it. There is no sighting, negation or purpose word list; a failing item
+drops. Inputs: the note,
 the applied products' names, the kept photo findings (a finding the technician hid
 or rewrote never enters) and the technician's landscape rating. The seasonal watch
 list (`GATE_TS_WATCH_LIST`), the last visit, the report headline and a product's

@@ -18,7 +18,15 @@ const { TS_SENTENCES, CONDITIONS, PLANTS, FINDING_LABELS } = tech;
 const NOTE = 'Found scale on the hedges and sooty mold on the ixora. Applied Merit and fed the palms.';
 const PRODUCTS = [{ name: 'Merit 2F' }, { name: 'Palm Gro 8-2-12' }];
 const inputs = (over = {}) => tech.normalizeInputs({ technicianNote: NOTE, products: PRODUCTS, findings: [], landscapeCondition: null, ...over });
-const obs = (condition, plant = 'none', seenToday = true) => ({ condition, plant, seenToday });
+// A model item. The default quote is the plain phrase "{condition} on the {plant}"
+// (or the condition alone), which the fixture notes contain word for word.
+const defaultQuote = (condition, plant) => {
+  const c = CONDITIONS_DISPLAY(condition);
+  const p = tech.PLANTS[plant] ? tech.PLANTS[plant].display : null;
+  return p ? `${c} on the ${p}` : c;
+};
+function CONDITIONS_DISPLAY(id) { return tech.CONDITIONS[id] ? tech.CONDITIONS[id].display : String(id); }
+const obs = (condition, plant = 'none', seenToday = true, quote = defaultQuote(condition, plant)) => ({ condition, plant, quote, seenToday });
 const slotsFor = (over, observations, opts) => {
   const i = inputs(over);
   return tech.buildSlots(i, tech.verifyObservations(observations, i.technicianNote), opts);
@@ -62,11 +70,11 @@ describe('TS_SENTENCES is the only source of words', () => {
 describe('Codex round 1 and 2 examples are impossible by construction', () => {
   // A hostile model answer: every field is either a closed-list id or ignored.
   const HOSTILE = [
-    { condition: 'It went on the palms.', plant: 'palms', seenToday: true },
-    { condition: 'pruning', plant: 'hedges', seenToday: true },
-    { condition: 'scale', plant: 'the front yard', seenToday: true },
-    { condition: 'imidacloprid', plant: 'none', seenToday: true },
-    { condition: 'scale', plant: 'none', seenToday: true, text: 'Prune the hedge again.' },
+    { condition: 'It went on the palms.', plant: 'palms', seenToday: true, quote: 'It went on the palms.' },
+    { condition: 'pruning', plant: 'hedges', seenToday: true, quote: 'scale on the hedges' },
+    { condition: 'scale', plant: 'the front yard', seenToday: true, quote: 'scale' },
+    { condition: 'imidacloprid', plant: 'none', seenToday: true, quote: 'Applied Merit' },
+    { condition: 'scale', plant: 'none', seenToday: true, quote: 'scale', text: 'Prune the hedge again.' },
     { paragraph: 'The photos found scale. Prune the hedge.' },
   ];
 
@@ -117,7 +125,7 @@ describe('Codex round 1 and 2 examples are impossible by construction', () => {
     for (const id of Object.keys(CONDITIONS)) expect(prompt.system).toContain(id);
     for (const id of Object.keys(PLANTS)) expect(prompt.system).toContain(id);
     expect(prompt.system).not.toMatch(/ganoderma|\bconks?\b|lethal\s+bronzing|fusarium/i);
-    expect(prompt.promptVersion).toBe('ts_tech_paragraph_v3');
+    expect(prompt.promptVersion).toBe('ts_tech_paragraph_v4');
   });
 
   test('the schema is closed enums, nothing numeric, and the lawn source enum is gone', () => {
@@ -130,45 +138,48 @@ describe('Codex round 1 and 2 examples are impossible by construction', () => {
   });
 });
 
-describe('verifyObservations: the note must support each item', () => {
+describe('the model judges, the code verifies the quote (owner 2026-10-05)', () => {
   const verify = (note, ...items) => tech.verifyObservations(items, note);
 
-  test('a condition and plant in the same clause are kept', () => {
+  test('a quote copied from one note sentence, naming the condition, is kept', () => {
     expect(verify('Found scale on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
-    expect(verify('Found scale on the hedge.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
-    expect(verify('Saw whitefly on the underside of leaves of several shrubs.', obs('whitefly', 'shrubs'))).toEqual([{ condition: 'whitefly', plant: 'shrubs' }]);
+    // Case, curly quotes and spacing fold; trailing punctuation drops.
+    expect(verify('FOUND  Scale on the hedges.', obs('scale', 'hedges', true, 'found scale on the hedges.'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
   });
 
-  test('scale and hedges in different note sentences: the item stays, the plant is dropped (a weaker, true claim)', () => {
-    expect(verify('Found scale along the fence. Trimmed the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: null }]);
-    // Same sentence but different clauses.
-    expect(verify('Saw scale on the palms, whitefly on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: null }]);
-    expect(verify('Saw scale on the palms, whitefly on the hedges.', obs('whitefly', 'hedges'))).toEqual([{ condition: 'whitefly', plant: 'hedges' }]);
+  test('the plant stays only when the quote names it', () => {
+    expect(verify('Found scale along the fence. Trimmed the hedges.', obs('scale', 'hedges', true, 'found scale along the fence'))).toEqual([{ condition: 'scale', plant: null }]);
   });
 
-  test('a condition the note does not carry is dropped, and so is one it negates, hedges or ties to a palm-banned term', () => {
-    expect(verify('Found scale on the hedges.', obs('whitefly', 'hedges'))).toEqual([]);
-    expect(verify('No scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
-    expect(verify('Did not see scale.', obs('scale'))).toEqual([]);
-    expect(verify('Possible scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
-    // Absence wording drops the item (fail safe), including "missing", which can mean damage.
-    for (const note of ['Scale absent on palms.', 'Absence of scale on the palms.', 'Scale gone from the palms.', 'Scale cleared on the palms.', 'Scale eliminated on the palms.', 'Palms clear of scale.', 'No sign of scale on the palms.', 'No evidence of scale on palms.', 'Palms free from scale.', 'Palms lack scale.', 'Palms lacking scale.', 'Scale missing on the palms.']) {
-      expect(verify(note, obs('scale', 'palms'))).toEqual([]);
+  test('the model saying it was not a sighting today drops the item (Codex r6, r7, r9 wordings)', () => {
+    for (const note of ['Applied Merit for scale on the hedges.', 'Saw yellowing on palms, and used Merit due to scale on hedges.', 'Last visit we saw scale on the hedges.', 'No scale on the hedges.']) {
+      expect(verify(note, obs('scale', 'hedges', false, 'scale on the hedges'))).toEqual([]);
     }
-    expect(verify('Looks like scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
-    expect(verify('Scale on the palm crown.', obs('scale', 'palms'))).toEqual([]);
-    expect(verify('Scale near the conk on one palm.', obs('scale', 'palms'))).toEqual([]);
-    expect(verify('Scale on palms, possible Ganoderma.', obs('scale', 'palms'))).toEqual([]);
+  });
+
+  test('a quote that is not in the note, spans two sentences, misses the condition or is too long is dropped', () => {
+    const note = 'Found scale on the hedges. Fed the palms.';
+    expect(verify(note, obs('scale', 'hedges', true, 'saw heavy scale on the hedges'))).toEqual([]);
+    expect(verify(note, obs('scale', 'hedges', true, 'scale on the hedges. fed the palms'))).toEqual([]);
+    expect(verify(note, obs('scale', 'palms', true, 'fed the palms'))).toEqual([]);
+    expect(verify(note, obs('scale', 'hedges', true, ''))).toEqual([]);
+    expect(verify(`${'x'.repeat(250)} scale.`, obs('scale', 'none', true, `${'x'.repeat(250)} scale`))).toEqual([]);
+  });
+
+  test('a palm-banned term in the quote drops the item', () => {
+    expect(verify('Scale on the palm crown.', obs('scale', 'palms', true, 'scale on the palm crown'))).toEqual([]);
+    expect(verify('Scale near the conk on one palm.', obs('scale', 'palms', true, 'scale near the conk on one palm'))).toEqual([]);
   });
 
   test('an unknown id, a repeat, a malformed item and everything past three are dropped', () => {
-    const note = 'Scale on the hedges, whitefly, aphids, thrips and sooty mold seen.';
+    const note = 'Found scale on the hedges, whitefly, aphids, thrips and sooty mold.';
     const out = verify(note, obs('scale', 'hedges'), obs('scale', 'trees'), obs('made_up'), null, 'x', obs('whitefly'), obs('aphids'), obs('thrips'));
     expect(out.map((o) => o.condition)).toEqual(['scale', 'whitefly', 'aphids']);
   });
 
-  test('a negation or hedge in one sentence does not touch a plain mention in another', () => {
-    expect(verify('No whitefly. Found scale on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
+  test('there is no sighting, negation or purpose word list in the module (do not grow one)', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/service-report/tree-shrub-tech-paragraph.js'), 'utf8');
+    expect(src).not.toMatch(/\b(?:NEGATION_RE|HEDGE_RE|TEMPORAL_RE|SIGHTING_RE|PURPOSE_RE)\b/);
   });
 
   test('palm-banned terms can never be rendered: they are in no list', () => {
@@ -239,47 +250,6 @@ describe('mites stay generic (Codex r8)', () => {
   });
 });
 
-describe('a sighting, never a treatment target (Codex r7)', () => {
-  const verify = (note, ...items) => tech.verifyObservations(items, note);
-  test('a treatment or its purpose supports no "saw" line', () => {
-    for (const note of [
-      'Applied Merit for scale on the hedges.',
-      'Treated scale on the hedges.',
-      'Sprayed the hedges to control scale.',
-      'Drenched the hedges against scale, saw nothing else.',
-      'Treated the hedges for scale we found.',
-    ]) expect(verify(note, obs('scale', 'hedges'))).toEqual([]);
-  });
-  test('bare shorthand with no sighting word supports nothing (fail closed)', () => {
-    expect(verify('Scale on the hedges.', obs('scale', 'hedges'))).toEqual([]);
-    expect(verify('Aphids.', obs('aphids'))).toEqual([]);
-  });
-  test('a sighting beside a separate treatment clause still counts', () => {
-    expect(verify('Found scale on the hedges and treated them with Merit.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
-  });
-});
-
-describe('only what was seen on THIS visit (Codex r6)', () => {
-  const verify = (note, ...items) => tech.verifyObservations(items, note);
-  test('a note about another visit, past or planned, supports no item', () => {
-    for (const note of [
-      'Last visit we saw scale on the hedges.',
-      'Scale was on the hedges before.',
-      'Return next week to treat scale on the hedges.',
-      'Will recheck the scale on the hedges.',
-      'Scale on the hedges two weeks ago.',
-      'Follow up on scale on the hedges.',
-    ]) expect(verify(note, obs('scale', 'hedges'))).toEqual([]);
-  });
-  test('the model saying it was not seen today drops the item, even on a plain note', () => {
-    expect(verify('Found scale on the hedges.', obs('scale', 'hedges', false))).toEqual([]);
-    expect(verify('Found scale on the hedges.', obs('scale', 'hedges'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
-  });
-  test('a past mention beside a plain one: the plain sentence still supports it', () => {
-    expect(verify('Last visit we saw whitefly. Found scale on the hedges today.', obs('scale', 'hedges'), obs('whitefly'))).toEqual([{ condition: 'scale', plant: 'hedges' }]);
-  });
-});
-
 describe('every confirmed finding prints (Codex r4)', () => {
   test('all five confirmed categories appear, none dropped', () => {
     const findings = ['pest_activity', 'disease_leaf_spot', 'water_heat_mechanical_stress', 'leaf_color_vigor', 'foliage_fullness'].map((key) => ({ key, kind: 'confirmed' }));
@@ -312,7 +282,7 @@ describe('the model call (extraction only)', () => {
     expect(out.slots.observed).toEqual([{ condition: 'scale', plant: 'hedges' }, { condition: 'sooty_mold', plant: 'none' }]);
     const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
     expect(policy).toBe(MODELS.TEXT_POLICIES.report);
-    expect(payload).toMatchObject({ laneId: 'ts_tech_paragraph', promptVersion: 'ts_tech_paragraph_v3', jsonMode: true, timeoutMs: 15000 });
+    expect(payload).toMatchObject({ laneId: 'ts_tech_paragraph', promptVersion: 'ts_tech_paragraph_v4', jsonMode: true, timeoutMs: 15000 });
     expect(payload.jsonSchema).toEqual(tech.extractionSchema());
     expect(options).toMatchObject({ hardDeadline: true, reserveFallbackBudget: true });
     expect(options.validate({ ok: true, json: { paragraph: 'Prune the hedge.' } })).toMatch(/no_answer/);
@@ -463,7 +433,7 @@ describe('freeze and read back', () => {
     const frozen = await run({ deps: { now: () => new Date('2026-10-05T12:00:00Z') } });
     expect(frozen.status).toBe('frozen');
     const entry = state.notes.treeShrubTechParagraph['77'];
-    expect(entry).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v3', assessmentId: '77', text: 'Our technician saw scale on the hedges. Today we applied Merit 2F and Palm Gro 8-2-12.' });
+    expect(entry).toMatchObject({ v: 1, promptVersion: 'ts_tech_paragraph_v4', assessmentId: '77', text: 'Our technician saw scale on the hedges. Today we applied Merit 2F and Palm Gro 8-2-12.' });
     expect(entry.slots.observed).toEqual([{ condition: 'scale', plant: 'hedges' }]);
     expect(tech.readFrozenTechParagraph(state.notes, 77)).toBe(entry.text);
   });
