@@ -724,6 +724,15 @@ postgres('access codes section', () => {
       expect((await access.accept(trx, row.id, { scheduledServiceId: later, now: NOW })).row.scheduledServiceId).toBe(later);
     });
 
+    test('a visit day already past is not offered: yesterday\'s open visit does not require a choice', async () => {
+      const c = await customer();
+      const now = new Date();
+      await visit(c.id, etDateString(addETDays(now, -1)));
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      await trx('customer_access_codes').where({ id: row.id }).update({ source_at: new Date(now.getTime() - 2 * 86400000) });
+      expect(await access.accept(trx, row.id, { now })).toMatchObject({ ok: true, row: { scheduledServiceId: null } });
+    });
+
     test('a visit code with no visit inside 14 days of the day it was sent binds to nothing', async () => {
       const c = await customer();
       await visit(c.id, day(30));

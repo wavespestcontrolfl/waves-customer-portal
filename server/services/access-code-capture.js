@@ -679,7 +679,10 @@ async function visitFor(trx, customerId, { from, chosenId }) {
   // only" code cannot be parked on an appointment months away.
   const live = () => trx('scheduled_services').where({ customer_id: customerId })
     .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
-    .whereBetween('scheduled_date', [etDateString(from), etDateString(addETDays(from, VISIT_WINDOW_DAYS))]);
+    // From today at the earliest: a visit day already past is not one a code can
+    // still open the door for, and the office picker lists upcoming visits only.
+    .whereBetween('scheduled_date', [[etDateString(from), etDateString(new Date())].sort()[1],
+      etDateString(addETDays(from, VISIT_WINDOW_DAYS))]);
   if (chosenId !== undefined && chosenId !== null) {
     if (!UUID_RE.test(String(chosenId))) return { error: 'invalid_visit' };
     // Locked, so the visit cannot end or move before this code commits.
