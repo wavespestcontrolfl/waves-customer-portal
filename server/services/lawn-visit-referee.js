@@ -311,7 +311,8 @@ const skipped = (reason, extra = {}) => ({
 /**
  * The whole gated pass over a successful Gemini answer. `payload` is the exact
  * payload Gemini was sent (so Sol sees the same prompt, images and schema);
- * `visit` = { photoCount, images, context }. Returns { json, referee } where
+ * `visit` = { photoCount, images, context, lighting? } (lighting = the payload's schema is
+ * the GATE_LAWN_LIGHTING variant, so the second opinion is validated against it). Returns { json, referee } where
  * `json` is Gemini's own object untouched unless a dispute settled. Never throws.
  */
 async function refereeVisit({ policy, payload, geminiJson, visit }) {
@@ -327,7 +328,7 @@ async function refereeVisit({ policy, payload, geminiJson, visit }) {
     delete solPayload.thinkingLevel;
     const solResult = await boundedDispatch(solRoute, { ...solPayload, promptVersion: `${version}:second-opinion` }, SECOND_OPINION_MAX_MS);
     const solInfo = { called: true, reasons, ...legInfo(solResult, solRoute) };
-    const solValid = solResult.ok && validateAssessmentJson(solResult, visit.photoCount) === null;
+    const solValid = solResult.ok && validateAssessmentJson(solResult, visit.photoCount, { lighting: visit.lighting === true }) === null;
     if (solResult.ok && !solValid) {
       solInfo.ok = false; solInfo.reason = 'malformed_assessment';
       // The adapter filed this leg as a success; flip its ledger row (Codex #5362 r1).

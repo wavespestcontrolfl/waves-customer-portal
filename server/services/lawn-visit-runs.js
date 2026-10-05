@@ -112,6 +112,19 @@ async function priorAssessmentCount(customerId, knex) {
   }
 }
 
+// The photo quality rows the technician's screen gets. The stored rows carry the
+// model's light read too (GATE_LAWN_LIGHTING); that is for the report's color
+// comparison, not something the technician reads or must act on, so it stays off
+// the staff response. Rows from before the gate have no such keys and pass through.
+function staffPhotoQuality(value) {
+  const rows = Array.isArray(value) ? value : [];
+  return rows.map((row) => {
+    if (!row || typeof row !== 'object' || !('lighting' in row || 'hard_shadows' in row)) return row;
+    const { lighting, hard_shadows: hardShadows, ...rest } = row; // eslint-disable-line no-unused-vars
+    return rest;
+  });
+}
+
 // Staff response from the persisted run. Raw provider output, input hashes,
 // token accounting and prompt context remain internal to the run store.
 function responseForRun(run) {
@@ -121,7 +134,7 @@ function responseForRun(run) {
     runId: run.id, status: run.status, unavailableReason: run.unavailable_reason || null,
     provider: run.provider, model: run.requested_model, fallbackUsed: !!run.fallback_used,
     promptVersion: run.prompt_version, findings: array(run.findings), severities: parseObject(run.severities),
-    photoQuality: array(run.photo_quality), observations: run.observations,
+    photoQuality: staffPhotoQuality(run.photo_quality), observations: run.observations,
     reviewedFindings: run.reviewed_findings == null ? null : array(run.reviewed_findings),
     addedDetails: run.added_details == null ? null : array(run.added_details),
     reconciliation: parseObject(run.reconciliation), reviewedAt: run.reviewed_at || null,
