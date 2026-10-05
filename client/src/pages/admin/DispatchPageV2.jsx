@@ -65,6 +65,7 @@ import MobileDispatchList from "../../components/schedule/MobileDispatchList";
 import useDispatchReadiness from "../../components/schedule/useDispatchReadiness";
 import ScheduleClientSearch from "../../components/schedule/ScheduleClientSearch";
 import MobileAppointmentDetailSheet from "../../components/schedule/MobileAppointmentDetailSheet";
+import { onSiteTimeOf } from "../../lib/on-site-time";
 import MobileCheckoutSheet from "../../components/schedule/MobileCheckoutSheet";
 import MobilePaymentSheet from "../../components/schedule/MobilePaymentSheet";
 import MobileServiceEditModal from "../../components/schedule/MobileServiceEditModal";
@@ -1951,7 +1952,17 @@ export default function DispatchPageV2({
             customerName: lawnFastService.customer_name || lawnFastService.customerName,
             serviceType: lawnFastService.service_type || lawnFastService.serviceType,
             address: shortAddress(lawnFastService.address) || lawnFastService.address || "",
+            // The customer block under the title (name link, directions, call).
+            customerId: lawnFastService.customerId || lawnFastService.customer_id || null,
+            fullAddress: typeof lawnFastService.address === "string" ? lawnFastService.address : "",
+            customerPhone: lawnFastService.customerPhone || lawnFastService.customer_phone || "",
+            // When the technician checked in (the Time on-site clock), by the full
+            // form's own rule: the on-site status-log entry, else checkInTime.
+            onSiteAt: onSiteTimeOf(lawnFastService) || null,
             timeLabel: serviceWindowLabel(lawnFastService) || "",
+            // Server-computed (GATE_TRACE_ELIGIBILITY): false hides the
+            // treatment-zone row, since the save route would refuse the trace.
+            traceEligible: lawnFastService.traceEligible,
             // Decides whether a zero stock holds Complete (WaveGuard lawn visits may go negative).
             waveguardTier: lawnFastService.waveguardTier || null,
             // The visit the user opened, checked against the live context.
@@ -1985,6 +1996,13 @@ export default function DispatchPageV2({
             const service = lawnFastService;
             setLawnFastService(null);
             handleComplete(service, { fullForm: true });
+          }}
+          // Details: the appointment details sheet (price, reschedule, cancel),
+          // the same one the full form's Details pill opens.
+          onViewDetails={() => {
+            const service = lawnFastService;
+            setLawnFastService(null);
+            setDetailService(service);
           }}
         />
       )}
