@@ -75,6 +75,45 @@ jest.setTimeout(30000);
     expect(await sweepMissedCalls()).toBe(0);
   });
 
+  test('a redial that someone answered settles the missed call without a bell', async () => {
+    const customer = randomUUID();
+    const missed = call(10, { customer_id: customer, status: 'completed', answered_by: 'voicemail', duration_seconds: 10 });
+    const redial = call(10, { customer_id: customer, status: 'completed', answered_by: 'human', duration_seconds: 199, from_phone: '9415550100' });
+    redial.created_at = new Date(missed.created_at.getTime() + 20000);
+    await database('call_log').insert([missed, redial]);
+    expect(await sweepMissedCalls()).toBe(0);
+    expect(triggerNotification).not.toHaveBeenCalled();
+    const meta = (await database('call_log').where({ id: missed.id }).first()).metadata;
+    expect(meta.missed_call_settled_at).toBeTruthy();
+    expect(meta.missed_call_superseded).toBe('called_back');
+    expect(await sweepMissedCalls()).toBe(0);
+  });
+
+  test('a callback whose customer leg was dialed settles the missed call; an undialed one does not', async () => {
+    const missed = call(10, { customer_id: randomUUID() });
+    const undialed = call(9, { direction: 'outbound', from_phone: '+19415559999', to_phone: '+19415550100', status: 'no-answer', answered_by: null });
+    await database('call_log').insert([missed, undialed]);
+    expect(await ringMissedCallIfUnanswered(missed.twilio_call_sid)).toBe(true);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+
+    const missed2 = call(8, { customer_id: randomUUID(), from_phone: '+19415550101' });
+    const bridged = call(7, { direction: 'outbound', from_phone: '+19415559999', to_phone: '+19415550101', status: 'completed', answered_by: null, bridged_at: new Date(now - 7 * 60000) });
+    await database('call_log').insert([missed2, bridged]);
+    expect(await ringMissedCallIfUnanswered(missed2.twilio_call_sid)).toBe(false);
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    expect((await database('call_log').where({ id: missed2.id }).first()).metadata.missed_call_superseded).toBe('called_back');
+  });
+
+  test('an earlier answered call or a later unanswered redial still rings', async () => {
+    const customer = randomUUID();
+    const earlier = call(30, { customer_id: customer, status: 'completed', answered_by: 'human' });
+    const missed = call(10, { customer_id: customer });
+    const hangup = call(9, { customer_id: customer });
+    await database('call_log').insert([earlier, missed, hangup]);
+    expect(await ringMissedCallIfUnanswered(missed.twilio_call_sid)).toBe(true);
+    expect(triggerNotification.mock.calls[0][1].callLogId).toBe(missed.id);
+  });
+
   test('permanently ineligible calls are excluded before the missed-call page is loaded', async () => {
     const rejected = [
       { from_phone: 'anonymous' },
