@@ -271,13 +271,21 @@ postgres('access codes section', () => {
 
     test('a live visit code does not hide the same code sent later as a standing code', async () => {
       const c = await customer();
-      await visit(c.id, day(2));
+      const soon = await visit(c.id, day(2));
       const visitRow = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
-      await access.accept(trx, visitRow.id, { now: NOW });
+      await access.accept(trx, visitRow.id, { scheduledServiceId: soon, now: NOW });
       await text(c.id, 'The door code is always #9090');
       const read = stub([gateItem({ kind: 'door', code: '#9090', life: 'standing', quote: 'The door code is always #9090' })]);
       expect(await sweep(read)).toMatchObject({ found: 1 });
       expect((await rows(c.id)).map((r) => [r.life, r.status]).sort()).toEqual([['standing', 'found'], ['visit', 'active']]);
+    });
+
+    test('new directions with a known code reach the office', async () => {
+      const c = await customer({ prefs: { neighborhood_gate_code: '#4821' } });
+      await text(c.id, 'The gate code is #4821, press 2 first');
+      const read = stub([gateItem({ instructions: 'press 2 first', quote: 'The gate code is #4821, press 2 first' })]);
+      expect(await sweep(read)).toMatchObject({ found: 1 });
+      expect((await rows(c.id))[0]).toMatchObject({ code: '#4821', instructions: 'press 2 first', status: 'found' });
     });
 
     test('a retired value the customer sends again comes back as found', async () => {
@@ -440,16 +448,17 @@ postgres('access codes section', () => {
   });
 
   describe('visit-life codes', () => {
-    test('attach to the next live visit within 14 days and leave the live list once it is completed', async () => {
+    test('attach to the visit the office names and leave the live list once it is completed', async () => {
       const c = await customer();
       const cancelled = await visit(c.id, day(1), 'cancelled');
       const next = await visit(c.id, day(3));
       const later = await visit(c.id, day(5));
       const tooFar = await visit(c.id, day(30));
       const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
-      const out = await access.accept(trx, row.id, { now: NOW });
+      expect(await access.accept(trx, row.id, { scheduledServiceId: cancelled, now: NOW })).toMatchObject({ ok: false, code: 'invalid_visit' });
+      const out = await access.accept(trx, row.id, { scheduledServiceId: next, now: NOW });
       expect(out.row.scheduledServiceId).toBe(next);
-      expect([cancelled, later, tooFar]).not.toContain(out.row.scheduledServiceId);
+      expect([later, tooFar]).not.toContain(out.row.scheduledServiceId);
       let list = await access.listForCustomer(trx, c.id);
       expect(list.active.map((r) => r.id)).toEqual([row.id]);
       expect(list.active[0].scheduledDate).toBe(day(3));
@@ -465,22 +474,22 @@ postgres('access codes section', () => {
       const next = await visit(c.id, day(2));
       const visitRow = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
       const standing = await found(c.id, { kind: 'garage', code: '2468' });
-      await access.accept(trx, visitRow.id, { now: NOW });
+      await access.accept(trx, visitRow.id, { scheduledServiceId: next, now: NOW });
       await access.accept(trx, standing.id, { now: NOW });
       await trx('scheduled_services').where({ id: next }).update({ status: 'cancelled' });
       const list = await access.listForCustomer(trx, c.id);
       expect(list.active.map((r) => r.id)).toEqual([standing.id]);
     });
 
-    test('a visit code reviewed after its visit ended stays with that visit and never moves to a later one', async () => {
+    test('the office must name the visit while the customer has a live one in the window; it is never guessed', async () => {
       const c = await customer();
-      const sameDay = await visit(c.id, day(0));
-      await visit(c.id, day(5));
+      const sameDay = await visit(c.id, day(0), 'completed');
+      const later = await visit(c.id, day(5));
       const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
-      await trx('scheduled_services').where({ id: sameDay }).update({ status: 'completed' });
-      const out = await access.accept(trx, row.id, { now: new Date(NOW.getTime() + 20 * 86400000) });
-      expect(out.row.scheduledServiceId).toBe(sameDay);
-      expect((await access.listForCustomer(trx, c.id)).active).toHaveLength(0);
+      expect(await access.accept(trx, row.id, { now: NOW })).toMatchObject({ ok: false, status: 400, code: 'visit_required' });
+      expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('found');
+      expect(await access.accept(trx, row.id, { scheduledServiceId: sameDay, now: NOW })).toMatchObject({ ok: false, code: 'invalid_visit' });
+      expect((await access.accept(trx, row.id, { scheduledServiceId: later, now: NOW })).row.scheduledServiceId).toBe(later);
     });
 
     test('a visit code with no visit inside 14 days of the day it was sent binds to nothing', async () => {
@@ -515,7 +524,7 @@ postgres('access codes section', () => {
       const c = await customer();
       const first = await visit(c.id, day(2));
       const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
-      await access.accept(trx, row.id, { now: NOW });
+      await access.accept(trx, row.id, { scheduledServiceId: first, now: NOW });
       await text(c.id, 'The door code is #9090');
       const read = stub([gateItem({ kind: 'door', code: '#9090', life: 'visit', quote: 'The door code is #9090' })]);
       expect(await sweep(read)).toMatchObject({ found: 0 });
@@ -537,7 +546,7 @@ postgres('access codes section', () => {
       const c = await customer();
       const next = await visit(c.id, day(2));
       const row = await found(c.id, { kind: 'door', code: '#9090', life: 'standing' });
-      const out = await access.accept(trx, row.id, { life: 'visit', now: NOW });
+      const out = await access.accept(trx, row.id, { life: 'visit', scheduledServiceId: next, now: NOW });
       expect(out.row).toMatchObject({ life: 'visit', scheduledServiceId: next });
     });
   });
@@ -623,7 +632,7 @@ postgres('access codes section', () => {
       const gate = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', adminUserId: ADMIN_ID, now: NOW });
       expect(gate.row).toMatchObject({ status: 'active', sourceType: 'staff', sourceId: null, decidedBy: ADMIN_ID, propertyId: c.propertyIds[0] });
       expect(gate.profileField).toBe('garage_code');
-      const door = await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'visit', code: '#9090', instructions: 'Back door', now: NOW });
+      const door = await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'visit', code: '#9090', instructions: 'Back door', scheduledServiceId: next, now: NOW });
       expect(door.row.scheduledServiceId).toBe(next);
       const dupe = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '24 68' });
       expect(dupe).toEqual({ ok: false, status: 409, code: 'duplicate_active' });

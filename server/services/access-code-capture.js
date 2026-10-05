@@ -284,18 +284,20 @@ async function fileFoundItems(conn, { message, properties }, items, receipt) {
         .leftJoin('scheduled_services as ss', 'ss.id', 'a.scheduled_service_id')
         .where('a.customer_id', customer.id).whereIn('a.status', ['found', 'active'])
         .whereIn('a.value_hash', items.map((i) => i.value_hash))
-        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
+        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.instructions', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
         .filter((r) => isLive(r));
       // A live standing row covers the same value for any life; a live visit row
       // covers only another visit item, so a code first given for one visit and
-      // then given for good still reaches the office.
+      // then given for good still reaches the office. New directions with a known
+      // code ("press 2 first") are news too.
       const covered = (item) => existing.some((r) => r.kind === item.kind && r.value_hash === item.value_hash
-        && (r.life === 'standing' || r.life === item.life));
+        && (r.life === 'standing' || r.life === item.life)
+        && normalizeText(r.instructions) === normalizeText(item.instructions));
       toInsert = items.filter((item) => {
         if (covered(item)) return false;
         // Already on the profile: the strict rule saved it, nothing is lost.
         const field = PROFILE_FIELD[item.kind];
-        return !(field && item.code && canonicalLower(prefs[field]) === canonicalLower(item.code));
+        return !(field && item.code && !item.instructions && canonicalLower(prefs[field]) === canonicalLower(item.code));
       });
     }
     const propertyId = properties.length === 1 ? properties[0].id : null;
@@ -462,27 +464,24 @@ async function lockCustomer(trx, customerId) {
   return !!(await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id'));
 }
 
-// The visit a visit-life code belongs to. The office may name a live one.
-// Otherwise it is the customer's first visit on or after the day the customer
-// SENT the code (not the day the office reviewed it), inside the window,
-// completed or not: a "today only" code reviewed after that visit ended
-// stays bound to the ended visit, so it is out of the live list at once and
-// never moves to a later appointment. Returns { id } or { error }.
+// The visit a visit-life code belongs to is the office's call, never a guess:
+// which appointment a "today only" code was meant for cannot be worked out
+// from statuses after a late review or a cancellation. While the customer has
+// a live visit inside the window after the day the code was SENT, the office
+// must name one (`visit_required`). With none, the code binds to nothing and
+// leaves the live list VISIT_WINDOW_DAYS after it was sent. Returns { id } or
+// { error }.
 async function visitFor(trx, customerId, { from, chosenId }) {
-  const visits = () => trx('scheduled_services').where({ customer_id: customerId });
+  const live = () => trx('scheduled_services').where({ customer_id: customerId })
+    .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES);
   if (chosenId !== undefined && chosenId !== null) {
     if (!UUID_RE.test(String(chosenId))) return { error: 'invalid_visit' };
-    const chosen = await visits().where({ id: chosenId })
-      .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
-      .first('id');
+    const chosen = await live().where({ id: chosenId }).first('id');
     return chosen ? { id: chosen.id } : { error: 'invalid_visit' };
   }
-  // A cancelled or skipped visit never took place, so the code was not for it.
-  const row = await visits().whereRaw("COALESCE(status, 'pending') NOT IN ('cancelled', 'skipped')")
-    .whereBetween('scheduled_date', [etDateString(from), etDateString(addETDays(from, VISIT_WINDOW_DAYS))])
-    .orderBy('scheduled_date').orderByRaw('window_start NULLS LAST').orderBy('id')
-    .first('id');
-  return { id: row ? row.id : null };
+  const candidate = await live()
+    .whereBetween('scheduled_date', [etDateString(from), etDateString(addETDays(from, VISIT_WINDOW_DAYS))]).first('id');
+  return candidate ? { error: 'visit_required' } : { id: null };
 }
 
 // A standing code fills its profile field only while that field is empty
