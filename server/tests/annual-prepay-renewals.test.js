@@ -7951,6 +7951,17 @@ describe('stamp-time price check for every mint (GATE_PREPAY_MINT_PRICE_HOLD) â€
     expect(result.stampedCount).toBe(1);
   });
 
+  // Four stamps queued; the FIRST activity_log read (the /secure lookup) fails.
+  function updates4(rows) {
+    const updateQueries = [1, 2, 3, 4].map(() => query({ returning: [{ id: 'x' }] }));
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), ...updateQueries],
+      activity_log: [failingRead()],
+      notifications: [query({ first: undefined })],
+    });
+    return updateQueries;
+  }
+
   const failingRead = () => {
     const q = query();
     q.first = jest.fn(async () => { throw new Error('read failed'); });
@@ -7967,6 +7978,18 @@ describe('stamp-time price check for every mint (GATE_PREPAY_MINT_PRICE_HOLD) â€
     // The read ran in its own savepoint, so its failure cannot poison the
     // caller's transaction.
     expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('shadow: with every covered visit unpriced, a failed /secure lookup never stops the stamp either', async () => {
+    process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'shadow';
+    const rows = ROWS().map((r) => ({ ...r, estimated_price: null }));
+    const updateQueries = updates4(rows);
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(4);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(updateQueries).toHaveLength(4);
   });
 
   test('true: a failed read of the mint prices fails closed (nothing is stamped)', async () => {
@@ -8020,12 +8043,22 @@ describe('stamp-time price check for every mint (GATE_PREPAY_MINT_PRICE_HOLD) â€
       expect(db).not.toHaveBeenCalled();
     });
 
-    test('true: a failed read records nothing and does not throw', async () => {
-      process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'true';
+    const failingRows = () => {
       const failing = query();
       failing.then = (resolve, reject) => Promise.reject(new Error('boom')).then(resolve, reject);
-      setDbQueues({ scheduled_services: [failing] });
+      return failing;
+    };
+
+    test('shadow: a failed read records nothing and does not throw', async () => {
+      process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'shadow';
+      setDbQueues({ scheduled_services: [failingRows()] });
       expect(await AnnualPrepayRenewals.recordMintVisitPrices(TERM)).toBeNull();
+    });
+
+    test('true: a failed read throws, so the mint cannot commit without its baseline', async () => {
+      process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'true';
+      setDbQueues({ scheduled_services: [failingRows()] });
+      await expect(AnnualPrepayRenewals.recordMintVisitPrices(TERM)).rejects.toThrow('boom');
     });
   });
 });

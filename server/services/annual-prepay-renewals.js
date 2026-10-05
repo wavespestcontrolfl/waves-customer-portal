@@ -2653,12 +2653,15 @@ function prepayMintPriceHoldMode() {
 
 // The per-visit price baseline of a term that is not a /secure pick: what
 // each covered visit cost when the term was created. Called once per mint,
-// after every price write of that mint. Best-effort inside its own savepoint:
-// a failure records nothing (the term then has no baseline and stamps as
-// before) and never poisons the caller's transaction. Termite annual plans
-// and their renewal successors are left out: their fee is not a visit price.
+// after every price write of that mint, inside its own savepoint. In shadow
+// a failure records nothing and never poisons the caller's transaction.
+// Under `true` it PROPAGATES and the mint rolls back: a term created without
+// its baseline would later stamp a repriced visit as if the gate were off.
+// Termite annual plans and their renewal successors are left out: their fee
+// is not a visit price.
 async function recordMintVisitPrices(termOrId, conn = db) {
-  if (prepayMintPriceHoldMode() === 'off' || !termOrId) return null;
+  const mode = prepayMintPriceHoldMode();
+  if (mode === 'off' || !termOrId) return null;
   try {
     return await conn.transaction(async (sp) => {
       const term = typeof termOrId === 'object'
@@ -2682,6 +2685,7 @@ async function recordMintVisitPrices(termOrId, conn = db) {
       return prices;
     });
   } catch (err) {
+    if (mode === 'true') throw err;
     logger.warn(`[annual-prepay] mint visit prices not recorded for term ${typeof termOrId === 'object' ? termOrId.id : termOrId}: ${err.message}`);
     return null;
   }
@@ -2726,6 +2730,33 @@ function heldPriceNow(row) {
   return cents == null ? 'no price' : `$${(cents / 100).toFixed(2)}`;
 }
 
+// The rows the mint record names whose price is no longer the recorded one.
+function mintPriceDriftedRows(eligible, byVisit) {
+  return eligible
+    .filter((row) => byVisit.has(String(row.id)) && priceCents(row.estimated_price) !== byVisit.get(String(row.id)))
+    .map((row) => ({ row, soldCents: byVisit.get(String(row.id)), mintPrice: true }));
+}
+
+// Shadow only observes: it logs the visits `true` would hold and changes
+// nothing. Every read runs in ONE savepoint (a failed statement poisons a
+// PostgreSQL transaction; a catch alone does not restore it), so a failure
+// can never stop a stamp that would run with the gate off. `checkSecure`: the
+// caller has not yet ruled out a /secure pick, which keeps its own baseline.
+async function logShadowMintPriceHolds(term, eligible, conn, { checkSecure = false } = {}) {
+  try {
+    const byVisit = await conn.transaction(async (sp) => {
+      if (checkSecure && await securePlanSoldPerVisitCents(term, sp) != null) return null;
+      return mintVisitPriceCents(term, sp);
+    });
+    if (!byVisit) return;
+    for (const { row, soldCents } of mintPriceDriftedRows(eligible, byVisit)) {
+      logger.warn(`[annual-prepay] shadow: term ${term.id} would hold visit ${row.id} (${dateOnly(row.scheduled_date) || 'undated'}) out of coverage: ${heldPriceNow(row)} now, $${(soldCents / 100).toFixed(2)} when the term was created`);
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] shadow: mint visit prices unreadable for term ${term.id}: ${err.message}`);
+  }
+}
+
 // Splits `rows` (coverage rows in canonical slot order) into the visits the
 // term may stamp and the ones held for a changed price.
 async function holdPriceDriftedRows(term, rows, conn, { skipRow = null, includeCompleted = false } = {}) {
@@ -2752,40 +2783,30 @@ async function holdPriceDriftedRows(term, rows, conn, { skipRow = null, includeC
   const candidates = eligible.filter((row) => priceCents(row.estimated_price) != null);
   const mintMode = prepayMintPriceHoldMode();
   // Gate off, a pass with no priced row reads nothing (unchanged). Gate on, a
-  // visit whose price was CLEARED since the mint must still be judged.
-  if (mintMode === 'off' ? !candidates.length : !eligible.length) return none;
+  // visit whose price was CLEARED since the mint must still be judged; in
+  // shadow that extra pass only observes.
+  if (!candidates.length) {
+    if (mintMode === 'off' || !eligible.length) return none;
+    if (mintMode === 'shadow') {
+      await logShadowMintPriceHolds(term, eligible, conn, { checkSecure: true });
+      return none;
+    }
+  }
   const soldCents = await securePlanSoldPerVisitCents(term, conn);
   if (soldCents == null) {
     if (mintMode === 'off') return none;
+    if (mintMode === 'shadow') {
+      await logShadowMintPriceHolds(term, eligible, conn);
+      return none;
+    }
     // Not a /secure pick: judge each visit against its own mint price. A
     // price cleared to NULL after the mint is a change, not an unknown: the
-    // record proves the visit had a price when the term was created.
-    let byVisit;
-    try {
-      // Shadow only observes: a failed read must not stop a stamp that
-      // would run with the gate off, so it runs in its own savepoint (a
-      // failed statement poisons a PostgreSQL transaction; a catch alone
-      // does not restore it). Under `true` it fails closed.
-      byVisit = mintMode === 'shadow'
-        ? await conn.transaction((sp) => mintVisitPriceCents(term, sp))
-        : await mintVisitPriceCents(term, conn);
-    } catch (err) {
-      if (mintMode !== 'shadow') throw err;
-      logger.warn(`[annual-prepay] shadow: mint visit prices unreadable for term ${term.id}: ${err.message}`);
-      return none;
-    }
+    // record proves the visit had a price when the term was created. A
+    // failed read PROPAGATES (fail closed).
+    const byVisit = await mintVisitPriceCents(term, conn);
     if (!byVisit) return none;
     const inBaseline = (row) => byVisit.has(String(row.id));
-    for (const row of eligible.filter(inBaseline)) {
-      const sold = byVisit.get(String(row.id));
-      if (priceCents(row.estimated_price) !== sold) held.push({ row, soldCents: sold, mintPrice: true });
-    }
-    if (mintMode !== 'true') {
-      for (const { row, soldCents: sold } of held) {
-        logger.warn(`[annual-prepay] shadow: term ${term.id} would hold visit ${row.id} (${dateOnly(row.scheduled_date) || 'undated'}) out of coverage: ${heldPriceNow(row)} now, $${(sold / 100).toFixed(2)} when the term was created`);
-      }
-      return none;
-    }
+    held.push(...mintPriceDriftedRows(eligible, byVisit));
     return {
       held,
       heldIds: new Set(held.map(({ row }) => String(row.id))),
