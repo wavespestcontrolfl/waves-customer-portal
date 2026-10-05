@@ -516,7 +516,16 @@ function provenanceOf(term, hay) {
   };
 }
 
-// Does this sentence name this applied product (its first distinctive token)?
+// Product classes a paragraph may call applied, and the recorded kinds that back each.
+const CLASS_CLAIMS = [
+  [/\bfungicides?\b/i, ['fungicide']],
+  [/\binsecticides?\b|\bmiticides?\b/i, ['insecticide']],
+  [/\bherbicides?\b|\bpre[-\s]?emergents?\b|\bweed\s+(?:control|killer|preventer)\b/i, ['herbicide', 'pre_emergent']],
+  [/\bfertiliz(?:er|ers|ed|ing)?\b|\bfeeding\b|\bfed\b/i, ['fertilizer']],
+  [/\bsupplements?\b|\bmicronutrients?\b|\biron\b/i, ['supplement', 'fertilizer']],
+];
+
+// Does this clause name this applied product (its first distinctive token)?
 function productNamedIn(product, sentence) {
   const tok = words(product.name).find((w) => w.length >= 3 && !GENERIC_NAME_TOKENS.has(w) && !COMMON_WORDS.has(w));
   return !!tok && new RegExp(`\\b${escapeRe(tok)}\\b`, 'i').test(sentence);
@@ -538,7 +547,7 @@ function mentionProblem(term, sentence, mention, prov, from, inputs) {
   if (purposeOnly && prov.purpose) {
     // A purpose claim that names a product must match THAT product's own targets
     // or role: Arena's chinch bugs never become the fertilizer's.
-    const named = inputs.products.filter((p) => productNamedIn(p, sentence));
+    const named = inputs.products.filter((p) => productNamedIn(p, mention.clause));
     if (named.length && !named.some((p) => productLicenses(p, term))) return `purpose_not_this_product:${key}`;
     return from.includes('product') || (prov.noteStance === 'purpose' && from.includes('note')) ? null : `purpose_without_product_source:${key}`;
   }
@@ -650,6 +659,11 @@ function validateParagraph(answer, rawInputs) {
   // number may be part of something the log must not hold.
   if (NUMBER_TOKEN_RE.test(stripAppliedNames(text, inputs))) fail('number');
 
+  // A product CLASS named as applied ("we applied fungicide") needs an applied
+  // product of that kind; fixed code, no token.
+  for (const [re, kinds] of CLASS_CLAIMS) {
+    if (re.test(text) && !inputs.products.some((p) => kinds.includes(p.kind))) { fail('class_not_applied'); break; }
+  }
   // Products: only applied ones. A catalog or built-in name that was not applied,
   // or a capitalized name nothing carries, is a product we did not use.
   const applied = appliedTokens(inputs);
