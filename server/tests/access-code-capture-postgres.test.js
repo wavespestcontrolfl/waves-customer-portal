@@ -1171,6 +1171,16 @@ postgres('access codes section', () => {
       expect(await sweep(stub([gateItem({ kind: 'door', code: '1234', quote: 'The door code is 1234' })]))).toMatchObject({ found: 1 });
     });
 
+    test('an office save of a new code on a one-home account retires the old code of that kind at once', async () => {
+      const c = await customer();
+      const first = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468' });
+      const second = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '1357' });
+      expect(second).toMatchObject({ ok: true });
+      expect((await trx('customer_access_codes').where({ id: first.row.id }).first()).status).toBe('retired');
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBe('1357');
+      expect((await access.listForCustomer(trx, c.id)).active.map((r) => r.code)).toEqual(['1357']);
+    });
+
     test('home choices name the unit and the property label', async () => {
       const c = await customer({ properties: 2 });
       const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
@@ -1270,16 +1280,17 @@ postgres('access codes section', () => {
       expect((await profile(c.id)).garage_code).toBe('1357');
     });
 
-    test('retire hands the profile field to another active code of the same kind', async () => {
+    test('on a one-home account a newer save replaces the older code, so retiring it leaves the field empty', async () => {
       const c = await customer();
       const first = await found(c.id, { kind: 'garage', code: '2468' });
       await access.accept(trx, first.id, {});
       const second = await found(c.id, { kind: 'garage', code: '1357' });
       await access.accept(trx, second.id, {});
-      // the newer accept is the profile's value; retiring it hands the field back to the older code
+      // One source: the newer save retired the older code in the same transaction.
+      expect((await trx('customer_access_codes').where({ id: first.id }).first()).status).toBe('retired');
       expect((await profile(c.id)).garage_code).toBe('1357');
-      expect(await access.retire(trx, second.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: true, clearedField: 'garage_code', promoted: true });
-      expect((await profile(c.id)).garage_code).toBe('2468');
+      expect(await access.retire(trx, second.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: true, clearedField: 'garage_code', promoted: false });
+      expect((await profile(c.id)).garage_code).toBeNull();
     });
 
     test('retire leaves a profile field that holds a different value', async () => {

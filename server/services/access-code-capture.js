@@ -972,6 +972,21 @@ async function syncProfileField(trx, customerId, { kind, life, code }) {
   return field;
 }
 
+// One source per access point: after the office writes a new standing code of
+// a profile-backed kind on a one-home account, every other active coded row
+// of that kind for that home is retired in the same transaction (the profile
+// field already holds the new code, so it is kept).
+async function retireReplacedRows(trx, customerId, { kind, life, code, property_id: home }, keepId, adminUserId) {
+  if (life !== 'standing' || !PROFILE_FIELD[kind] || !code || !home) return 0;
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
+  if (homes.length !== 1 || homes[0] !== home) return 0;
+  const rows = await trx('customer_access_codes')
+    .where({ customer_id: customerId, kind, status: 'active', life: 'standing', property_id: home })
+    .whereNotNull('code').whereNot('id', keepId).forUpdate();
+  for (const row of rows) await retireLocked(trx, row, { adminUserId, action: 'access_code.replaced', keepProfile: true });
+  return rows.length;
+}
+
 // The active standing row that already holds this kind and value, if any.
 // A one-visit code repeated for the same visit (a second text, a retried add)
 // is a duplicate; the same code for another appointment is not.
@@ -1088,6 +1103,7 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
         customer_id: row.customer_id, kind: next.kind, life: next.life, source_type: row.source_type,
         edited, profile_field: profileField, scheduled_service_id: scheduledServiceId,
       });
+      await retireReplacedRows(trx, row.customer_id, updated, updated.id, adminUserId);
       return { ok: true, row: serialize(updated), profileField };
     });
   } catch (err) {
@@ -1225,6 +1241,7 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
     await audit(trx, adminUserId, 'access_code.added', row.id, {
       customer_id: customerId, kind: next.kind, life: next.life, profile_field: profileField, scheduled_service_id: scheduledServiceId,
     });
+    await retireReplacedRows(trx, customerId, row, row.id, adminUserId);
     return { ok: true, row: serialize(row), profileField };
   });
 }
