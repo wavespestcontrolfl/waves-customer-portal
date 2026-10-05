@@ -187,6 +187,13 @@ export default function LawnAssessmentCompletionBlock({
   // The tech's free-text visit notes (owned by CompletionPanel) — passed through
   // so the AI photo analysis can factor them in alongside the images.
   technicianNotes = "",
+  // The Fast Complete sheet's one-screen mode (owner 2026-10-04): the lawn
+  // length box never shows, and a confirm that leaves a score blank says so in
+  // the sheet's words. onProgress reports { photos, assessed } so the sheet can
+  // say what is missing. The full completion form passes neither and is
+  // unchanged.
+  compact = false,
+  onProgress,
 }) {
   const [photos, setPhotosState] = useState([]);
   // The photo list's source of truth is this ref: every change goes through
@@ -473,7 +480,9 @@ export default function LawnAssessmentCompletionBlock({
       setConfirmedId(assessmentId);
       onConfirmed?.(assessmentId);
       onReady?.(true);
-      setError(assessmentId ? "" : "Scores saved. Complete the missing scores before confirming.");
+      setError(assessmentId ? "" : compact
+        ? "The photos did not give a full read. Fill any blank score, or tap Retake and analyze again."
+        : "Scores saved. Complete the missing scores before confirming.");
     } catch (err) {
       setError(err.message || "Confirm failed");
       // A definitive 4xx rejection means the write did NOT commit — null is
@@ -538,6 +547,9 @@ export default function LawnAssessmentCompletionBlock({
   const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
   const hasResult = !!result?.assessment?.id;
   const confirmed = !!confirmedId;
+  useEffect(() => {
+    onProgress?.({ photos: photos.length, assessed: hasResult });
+  }, [photos.length, hasResult]);
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
       {loading && (
@@ -581,7 +593,7 @@ export default function LawnAssessmentCompletionBlock({
             {!modeKnown && <span role="status" data-testid="lawn-photo-mode-pending" style={{ fontSize: 14, color: D.muted }}>Checking photo options…</span>}
           </>
         )}
-            {showGaugeReading && (
+            {showGaugeReading && !compact && (
               <>
                 <span style={{ fontSize: 14, color: D.muted, fontWeight: 500 }}>Lawn length</span>
                 <input

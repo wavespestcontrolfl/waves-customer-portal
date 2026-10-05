@@ -122,6 +122,14 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
   });
 
+  it('prints the Waves blog post picked at completion at the bottom, once (the lawn Fast Complete sheet offers one)', async () => {
+    const post = { title: 'Why Your St. Augustine Thins in Summer', url: 'https://www.wavespestcontrol.com/lawn-care/st-augustine-summer-thinning/' };
+    const { container } = renderReport({ ...lawnReportV2, blogPost: post });
+    await screen.findByText('Stable — watching thin areas');
+    expect(container.querySelectorAll('#from-the-blog')).toHaveLength(1);
+    expect(screen.getByRole('link', { name: post.title }).getAttribute('href')).toBe(post.url);
+  });
+
   it('the watering banner renders once, directly under the visit status card', async () => {
     const banner = { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
     const { container } = renderReport({ ...lawnReportV2, reportV2: { ...lawnReportV2.reportV2, banner } });
