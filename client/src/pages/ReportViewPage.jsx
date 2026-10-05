@@ -1090,8 +1090,10 @@ function pestVisitResultLine(data = {}) {
     ? data.applications.filter(isProductApplication)
       .flatMap((app) => String(app?.applicationArea || '').split(',').map((area) => area.trim()))
     : [];
-  const outside = areas.some((area) => TREATMENT_AREA_SCOPES.exterior.includes(area));
-  const inside = areas.some((area) => TREATMENT_AREA_SCOPES.interior.includes(area));
+  // The Fast Complete sheet records its own two chips, "Outside" and
+  // "Inside", which the shared list does not carry (Codex P2 r4 #5888).
+  const outside = areas.some((area) => area === 'Outside' || TREATMENT_AREA_SCOPES.exterior.includes(area));
+  const inside = areas.some((area) => area === 'Inside' || TREATMENT_AREA_SCOPES.interior.includes(area));
   let where = null;
   if (outside && inside) where = 'We treated outside and inside.';
   else if (outside) where = 'We treated outside.';

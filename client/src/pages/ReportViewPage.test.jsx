@@ -1347,6 +1347,13 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
         .toBe('We treated inside. Pest pressure: very low.');
     });
 
+    it('reads the Fast Complete sheet\'s own Outside and Inside chips', () => {
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Outside' }] }), 'static').result)
+        .toBe('We treated outside. Pest pressure: very low.');
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Inside, Outside' }] }), 'static').result)
+        .toBe('We treated outside and inside. Pest pressure: very low.');
+    });
+
     it('ignores a station or monitor row: a device checked is not an area treated', () => {
       expect(smartStatusSummary(pestVisit({
         applications: [
