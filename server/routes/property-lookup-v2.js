@@ -2674,7 +2674,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     && parcelTurfBoundApplies
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
-  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup });
+  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup, commercialProfile });
   // A cached listing-size stamp reused on this profile keeps its
   // confirm-on-site flag (the fresh path adds it in applyCommercialSuiteSize).
   if (resolvedCommercialSuiteSize?.source === 'listing_verified_text' && Number(resolvedCommercialSuiteSize.value) > 0) {
@@ -4388,7 +4388,7 @@ function calcPestPressureMult(pressure) {
 // ─────────────────────────────────────────────
 // FIELD VERIFY FLAGS
 // ─────────────────────────────────────────────
-function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false } = {}) {
+function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false, commercialProfile } = {}) {
   const flags = [];
 
   // Geocoder snapped the typed house number to a different premise — this
@@ -4685,7 +4685,26 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // — a 2–4 address parcel is more likely a duplex/small multi-unit and
   // gets neutral copy.
   const parkParcel = detectMultiSitusMasterParcel(rc);
-  if (parkParcel) {
+  // A COMMERCIAL profile (the lookup's own read, or the category the
+  // business-scope answer resolved: `commercialProfile`) on a shared parcel
+  // the roll did not positively identify as a park must not be told it is
+  // "homes on a land-lease community" (seen 2026-10-05: a salon in a
+  // 24-address plaza). The roll's address count alone cannot tell a plaza
+  // from a campus or a park whose attributes did not load, so the copy
+  // states only what is known: several addresses, one parcel.
+  // The supplied resolved category is authoritative (a unit lookup the
+  // guardrails reclassified to residential must keep residential copy);
+  // the record's own read is used only when no category was supplied.
+  const commercialRead = typeof commercialProfile === 'boolean'
+    ? commercialProfile : detectCategory(rc, ai || {}) === 'COMMERCIAL';
+  const sharedCommercialParcel = Boolean(parkParcel) && parkParcel.parkConfirmed !== true && commercialRead;
+  if (sharedCommercialParcel) {
+    flags.push({
+      field: 'parkParcel',
+      reason: `Address is one of ${parkParcel.situsCount} addresses on a single county parcel (a plaza, a center or another shared property), so this address's own sq ft, lot size, and stories are not on the roll. Get them from the customer or on site and save them as field-verified.`,
+      priority: 'HIGH',
+    });
+  } else if (parkParcel) {
     flags.push({
       field: 'parkParcel',
       reason: (parkParcel.parkConfirmed || parkParcel.situsCount >= 5)

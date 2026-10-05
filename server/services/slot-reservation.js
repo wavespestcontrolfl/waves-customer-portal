@@ -632,6 +632,7 @@ async function resolveReservationServiceProfile(client, row, opts = {}) {
     serviceMode: opts.serviceMode,
     selectedFrequency: opts.selectedFrequency,
     serviceCadences: opts.serviceCadences,
+    offerTier: opts.offerTier,
     durationMinutes: opts.durationMinutes,
     preserveCombinedCapacity: opts.preserveCombinedCapacity,
     preserveCapacity: row?.reservation_policy_version === 2,
@@ -762,6 +763,8 @@ async function reserveSlot({
   serviceMode = 'recurring',
   selectedFrequency = '',
   serviceCadences = null,
+  // Offer tier (GATE_ESTIMATE_OFFER_TIERS): 'best' sizes the full bundle.
+  offerTier = null,
   // Optional caller-supplied no-booking revalidation, run on the LOCKED estimate row before any hold is
   // minted - the SAME name and contract as extendReservation's: `(estimateRow, trx) => null | { status, body }`
   // (may be async; `trx` is the reservation transaction, for reads that must be locked with it). The public /reserve route passes it so a state that appeared after its pre-transaction
@@ -919,7 +922,7 @@ async function reserveSlot({
       const estimateForCapacity = await db('estimates').where({ id: estimateId }).first();
       if (!estimateForCapacity || !holdCoords) throw capacityError('missing_coordinates');
       const profile = await estimateSlotAvailability.resolveCatalogSlotProfile(estimateForCapacity, {
-        serviceMode, selectedFrequency, serviceCadences, durationMinutes,
+        serviceMode, selectedFrequency, serviceCadences, offerTier, durationMinutes,
       });
       // Authenticate the offered tuple before spending the shared traffic budget.
       // The transaction repeats this check against the locked estimate profile.
@@ -1058,6 +1061,7 @@ async function reserveSlot({
           serviceMode,
           selectedFrequency,
           serviceCadences,
+          offerTier,
           durationMinutes,
         }, trx);
       // Seasonal (Feb–Oct) redemption re-check (codex r8 P1): the slot LIST
@@ -1621,6 +1625,8 @@ async function commitReservation({
   serviceMode = 'recurring',
   selectedFrequency = '',
   serviceCadences = null,
+  // Offer tier (GATE_ESTIMATE_OFFER_TIERS): 'best' sizes the full bundle.
+  offerTier = null,
   durationMinutes,
   preLockedDate = null,
   preLockedTechId = null,
@@ -1637,7 +1643,7 @@ async function commitReservation({
   await refreshCustomerBookingWindowConfig(trx || db);
   requireKnownBookingWindowConfig();
   if (!trx && !preparedCapacity) preparedCapacity = await prepareReservationCommit(scheduledServiceId, {
-    estimate, serviceMode, selectedFrequency, serviceCadences, durationMinutes,
+    estimate, serviceMode, selectedFrequency, serviceCadences, offerTier, durationMinutes,
   });
   // Body is shared between the "caller already has a txn" path (use it) and
   // the "no caller txn" path (open our own). Either way the SELECT runs
@@ -1862,6 +1868,7 @@ async function commitReservation({
       serviceMode,
       selectedFrequency,
       serviceCadences,
+      offerTier,
       durationMinutes,
       preserveCombinedCapacity: !!require('./combined-visit-capacity').capacityFromReservation(row),
     });

@@ -6401,6 +6401,12 @@ router.get('/', async (req, res, next) => {
         propertySqft: s.property_sqft, lotSqft: s.lot_sqft,
         zone, zoneColor: ZONE_COLORS[zone] || '#94a3b8', zoneLabel: ZONE_LABELS[zone] || zone,
         estimatedDuration: s.estimated_duration_minutes || 60,
+        // The stored estimate before the 60 fill: the drive-line late check
+        // sums real estimates only (stop-drive-legs.js).
+        rawEstimateMinutes: s.estimated_duration_minutes ?? null,
+        // The effective service premise, for the late check's co-visit
+        // rule (premiseStampConflicts reads these canonically).
+        premise: { line1: s.address_line1 || null, line2: s.address_line2 || null, city: s.city || null, zip: s.zip || null },
         materialsNeeded: s.materials_needed ? (typeof s.materials_needed === 'string' ? JSON.parse(s.materials_needed) : s.materials_needed) : [],
         materialsLoaded: s.materials_loaded_confirmed,
         propertyAlerts: alerts,
@@ -6483,7 +6489,8 @@ router.get('/', async (req, res, next) => {
       Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
     }
 
-    // "~N min from last stop / to next" on the day list (display only).
+    // Drive legs, the stop each leg comes from, and late risk against the
+    // 2-hour arrival window, for the day list (display only).
     Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services));
 
     // Calculate tech summaries

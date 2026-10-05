@@ -247,6 +247,7 @@ describe('dashboard request recovery', () => {
       '/admin/dashboard/channel-mix?period=qtd',
       '/admin/dashboard/lead-funnel?period=qtd',
       '/admin/dashboard/channel-roi?period=qtd',
+      '/admin/dashboard/service-lines?period=qtd',
     ]);
     expect(result.current.values.alerts).toBe(retainedAlerts);
     expect(result.current.values.kpis.path).toContain('period=qtd');
@@ -286,8 +287,8 @@ describe('dashboard request recovery', () => {
 
     await act(async () => newCycle.resolve());
     await waitFor(() => expect(result.current.refreshing).toBe(false));
-    expect(adminFetch).toHaveBeenCalledTimes(31);
-    expect(adminFetch.mock.calls.slice(4, 13).map(([path]) => path)).toEqual([
+    expect(adminFetch).toHaveBeenCalledTimes(32);
+    expect(adminFetch.mock.calls.slice(4, 14).map(([path]) => path)).toEqual([
       '/admin/dashboard/alerts',
       '/admin/dashboard/today-completion',
       '/admin/command-center/stale-visits',
@@ -297,6 +298,7 @@ describe('dashboard request recovery', () => {
       '/admin/dashboard/channel-mix?period=qtd',
       '/admin/dashboard/lead-funnel?period=qtd',
       '/admin/dashboard/channel-roi?period=qtd',
+      '/admin/dashboard/service-lines?period=qtd',
     ]);
     expect(result.current.values.kpis).toEqual({ path: 'new-period' });
     expect(result.current.values.alerts).toEqual({ alerts: [] });

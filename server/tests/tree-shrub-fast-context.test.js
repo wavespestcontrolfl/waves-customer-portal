@@ -330,6 +330,28 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx.products.find((p) => p.id === 'palm').tsFlags.npBlackout).toBe(false);
   });
 
+  test('due rules hold a Snapshot applied under 60 days ago; the palm feed still suggests', async () => {
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': [],
+      'property_application_history as pah': [],
+      'property_application_history as history': [
+        { application_date: '2026-09-05', property_id: 'prop-1', product_name: 'Snapshot 2.5TG', application_rate: 2.3, rate_unit: 'lb' },
+      ],
+    }));
+    expect(ctx.monthProducts).toEqual([{ productId: 'palm', method: 'granular_broadcast' }]);
+    expect(ctx.monthProductHolds).toEqual([{ name: 'Snapshot 2.5TG', reason: 'Snapshot was applied less than 60 days ago.' }]);
+  });
+
+  test('an unreadable application history holds Snapshot and the palm feed instead of suggesting them', async () => {
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': [],
+      'property_application_history as pah': [],
+      'property_application_history as history': new Error('db down'),
+    }));
+    expect(ctx.monthProducts).toEqual([]);
+    expect(ctx.monthProductHolds.map((h) => h.name)).toEqual(['Snapshot 2.5TG', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)']);
+  });
+
   test('a summer visit in a blackout zone flags N/P fertilizer on the catalog rows', async () => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit({ scheduled_date: '2026-07-10' }), products_catalog: catalog,

@@ -35,6 +35,7 @@
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
  *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 25s+, no answer, no voicemail — texts them back from the line they called)
+ *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 25s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -2227,6 +2228,14 @@ const gates = {
   // no claim taken. The sweep still reconciles claims this lane left
   // orphaned while it was on.
   missedCallTextBack: process.env.GATE_MISSED_CALL_TEXT_BACK === 'true',
+  // Widens the text-back lane ONLY (not the bell): a caller who waited 25s+
+  // at the voicemail greeting and hung up without speaking leaves a recording
+  // the processor rejects as no-speech; the voicemail lane does nothing with
+  // it, so the caller got no text. On → that call counts as "no message
+  // left" once the processor has finished with it (a recording still
+  // awaiting transcription never does). Needs GATE_MISSED_CALL_TEXT_BACK.
+  // Off → byte-identical to before.
+  missedCallTextBackEmptyVoicemail: process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
@@ -2642,6 +2651,18 @@ const gates = {
   // rewrites monthly_total / annual_total / onetime_total.
   // Enable with GATE_ESTIMATE_SERVICE_ADD=true (with the opt-out gate on).
   estimateServiceAdd: process.env.GATE_ESTIMATE_SERVICE_ADD === 'true',
+
+  // Good / Better / Best offer tiers on a sent residential pest estimate
+  // (owner 2026-10-05): the one-time choice (Good), the pest-only recurring
+  // choice (Better) and — NEW — the full quoted bundle (Best: pest + lawn
+  // and/or tree & shrub) as three server-priced options the customer picks
+  // between. Rides the existing show_one_time_option machinery; the only new
+  // accept behavior is `selectedTier: 'best'`, which keeps the companion
+  // programs the one-time toggle used to drop. Read at call time via
+  // estimateOfferTiersLive() — this map entry is for logGateStatus only.
+  // STRICT opt-in: it changes what the page offers and what accept books.
+  // Enable with GATE_ESTIMATE_OFFER_TIERS=true.
+  estimateOfferTiers: process.env.GATE_ESTIMATE_OFFER_TIERS === 'true',
 
   // Send-time "lead with one service": when a NEW residential customer's
   // estimate carries EXACTLY two recurring lines (the non-lead one removable),
@@ -4430,6 +4451,12 @@ function duplicatesSameNameLive() {
   return process.env.GATE_DUPLICATES_SAME_NAME === 'true';
 }
 
+// GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL — ships DARK, off unless exactly
+// 'true'. Same switch the text-back service reads through isEnabled().
+function missedCallTextBackEmptyVoicemailLive() {
+  return process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true';
+}
+
 // GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT read at CALL time — strict `=== 'true'`,
 // dark. On, the ten-minute sweep (assessment-estimate-closeout.js) completes
 // an open Waves Assessment visit once an estimate has been sent to its
@@ -4673,6 +4700,12 @@ function autoDispatchSharedModelLive() {
 // reader server/services/estimate-consultation-offer.js uses. The offer
 // additionally requires leadInspectionLinkLive() (the /inspection/:token page
 // itself must be live too) — checked by the builder, not duplicated here.
+// GATE_ESTIMATE_OFFER_TIERS read at CALL time — strict `'true'` only, so an
+// unset variable is the kill switch (no redeploy). See the gates map entry.
+function estimateOfferTiersLive() {
+  return process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
+}
+
 function estimateConsultationOfferLive() {
   return process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true';
 }
@@ -5691,7 +5724,10 @@ module.exports.lawnLightingLive = lawnLightingLive;
 module.exports.lawnReportPhotoSetLive = lawnReportPhotoSetLive;
 // GATE_LAWN_REPORT_PHOTO_FINDINGS reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportPhotoFindingsLive = lawnReportPhotoFindingsLive;
+// GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL reader, on its own line so gate PRs never conflict.
+module.exports.missedCallTextBackEmptyVoicemailLive = missedCallTextBackEmptyVoicemailLive;
 // GATE_RELAY_UNBOOKED_HANDOFF reader, on its own line so gate PRs never conflict.
 module.exports.relayUnbookedHandoffLive = relayUnbookedHandoffLive;
 // GATE_LAWN_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.
 module.exports.lawnTechParagraphLive = lawnTechParagraphLive;
+module.exports.estimateOfferTiersLive = estimateOfferTiersLive;

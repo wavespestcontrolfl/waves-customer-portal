@@ -169,6 +169,41 @@
       ],
       "summary": "Choose target rate"
     },
+    "tristar": {
+      "kind": "Insects · foliar spray",
+      "targetTitle": "Pest targets",
+      "targets": "Hard and soft scales (including Florida wax, euonymus, tea, and Caribbean black scale) and whiteflies. Use on live finds only: armored scale crawlers or whitefly nymphs and adults.",
+      "apply": "Cover all plant surfaces evenly. The label sets the finished spray volume by plant size. Tank mixing with a surfactant may improve control of adult whiteflies; test a small area first. Allow 6 hours before overhead irrigation.",
+      "rates": [
+        [
+          "8.5–16.5 fl oz / 100 gal",
+          "Hard and soft scales, and whiteflies. Use the higher rate when pressure is high."
+        ]
+      ],
+      "mixes": [
+        [
+          "Scale or whitefly",
+          0.085,
+          0.165
+        ]
+      ],
+      "limits": [
+        "Do not reapply more than once every 7 days.",
+        "Maximum 4 applications per calendar year; 25.3 fl oz per acre per application; 92.5 fl oz per acre per year.",
+        "Group 4A neonicotinoid: count it with Merit and Zylam in the annual 4A log.",
+        "Toxic to bees: do not apply while bees or other pollinators are actively visiting; dawn, dusk, or below 55°F lowers the risk.",
+        "Professional applicators only. Do not apply to bearing fruit trees."
+      ],
+      "source": "Cleary Chemicals · EPA 8033-106-1001 · label 62432_4, 06/29/2021 · pp. 9–12",
+      "url": "https://www.domyown.com/msds/TriStar_8_5_SL_Insecticide_Label_2022.pdf",
+      "name": "TriStar 8.5 SL",
+      "equipment": [
+        "bg",
+        "flowzone",
+        "rig"
+      ],
+      "summary": "Choose target rate"
+    },
     "tritek": {
       "kind": "Insects, mites & diseases · contact oil",
       "targetTitle": "Pest & disease targets",
@@ -229,28 +264,6 @@
         0.08
       ],
       "summary": ""
-    },
-    "talus": {
-      "kind": "Insects · use-site restriction",
-      "targetTitle": "Pest targets",
-      "pending": "Residential use is prohibited by the label currently linked by SePRO. Replacement decision needed for this program.",
-      "targets": "Immature whiteflies, scales, mealybugs, and other listed sucking insects. It is not an adulticide.",
-      "apply": "No residential application directions are offered here.",
-      "rates": [
-        [
-          "Residential rate: none",
-          "Mixing amounts have been removed from this draft."
-        ]
-      ],
-      "limits": [
-        "Do not apply in residential areas (label p. 4)."
-      ],
-      "program": "The earlier program carried Talus as a residential treatment. Keep it on hold while the program replacement is decided.",
-      "source": "SePRO · EPA 71711-21-67690 · pp. 3–4",
-      "url": "https://www.seproscientific.com/labels/talus-70df-label.pdf",
-      "name": "Talus 70DF",
-      "equipment": [],
-      "summary": "On hold"
     },
     "merit": {
       "kind": "Insects · soil drench or injection",
@@ -339,27 +352,6 @@
         "rig"
       ],
       "summary": "Target-specific rate"
-    },
-    "headway": {
-      "kind": "Diseases · label mismatch",
-      "targetTitle": "Disease targets",
-      "pending": "The Headway liquid label found is for turfgrass. It does not establish a tree-and-shrub leaf-disease treatment.",
-      "targets": "The reviewed label lists turfgrass diseases. An ornamental product and disease-specific label are still needed for this row.",
-      "apply": "No tree-and-shrub application directions are offered here.",
-      "rates": [
-        [
-          "Tree & Shrub rate: unconfirmed",
-          "Confirm the exact product or choose an ornamental replacement."
-        ]
-      ],
-      "limits": [
-        "Do not transfer a turf rate to shrubs or palms."
-      ],
-      "source": "Syngenta · EPA 100-1216 · 02-2016 · pp. 2–4",
-      "url": "https://labelsds.com/document.php?file=Headway+Label+2-1-16.pdf&product=866",
-      "name": "Headway",
-      "equipment": [],
-      "summary": "On hold"
     },
     "zylam": {
       "kind": "Insects · foliar spray",
