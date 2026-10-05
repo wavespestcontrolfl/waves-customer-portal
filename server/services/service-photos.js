@@ -732,6 +732,29 @@ async function lockStagedPhotoForChange(trx, { scheduledServiceId, photoId, acto
   return { photo };
 }
 
+// What the report writer was told about a visit's staged photos, derived as
+// the Fast Complete sheet derives it (photoCaptionsOf): the first five
+// non-empty descriptions, 200 characters each, in the order GET /photos lists
+// them. Completion compares it with the sheet's photoCaptionsSeen under the
+// visit lock, so a description changed on another device after the report
+// was written cannot go out under the old report (Codex P2 on #5701).
+function reportPhotoCaptionsOf(photos) {
+  return (Array.isArray(photos) ? photos : [])
+    .map((photo) => String(photo?.caption || '').trim())
+    .filter(Boolean)
+    .slice(0, 5)
+    .map((caption) => caption.slice(0, 200));
+}
+
+async function stagedReportPhotoCaptions(knex, scheduledServiceId) {
+  const staged = await knex('scheduled_service_photo_staging')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .orderBy('captured_at', 'asc')
+    .orderBy('sort_order', 'asc')
+    .select('caption');
+  return reportPhotoCaptionsOf(staged);
+}
+
 async function updateStagedServicePhotoCaption({ scheduledServiceId, photoId, caption, actor, knex = db }) {
   const clean = sanitizeCustomerFacingPhotoCaption(caption);
   return withPhotoDbTransaction(knex, async (trx) => {
@@ -853,6 +876,8 @@ module.exports = {
   servicePhotoVisitChanged,
   servicePhotoVisitSnapshot,
   updateStagedServicePhotoCaption,
+  reportPhotoCaptionsOf,
+  stagedReportPhotoCaptions,
   deleteStagedServicePhoto,
   promoteStagedServicePhotos,
   promoteStagedPhotosForCompletedVisit,
