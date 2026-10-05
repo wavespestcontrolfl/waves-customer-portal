@@ -460,9 +460,9 @@ describe('model-switchboard', () => {
     expect(lane.fallback.model).toBe(MODELS.TEXT_POLICIES.imageScreen.fallback.model);
     expect(lane.fallback.provider).toBe('anthropic');
     expect(lane.continuity).toBe('verified');
-    // The alt-text pass on the same file stays on the separate visionAnalysis policy.
+    // The alt-text pass on the same file rides the separate routineVision policy.
     const heroAlt = lanes.find((l) => l.id === 'hero_alt');
-    expect(heroAlt.primary.model).toBe(MODELS.TEXT_POLICIES.visionAnalysis.primary.model);
+    expect(heroAlt.primary.model).toBe(MODELS.TEXT_POLICIES.routineVision.primary.model);
   });
 
   it('locks the lanes a generic picker must not move', () => {
@@ -536,7 +536,15 @@ describe('model-switchboard', () => {
     // its default (Opus 5.5) is itself a requires:'deep' model.
     // SMS_SCHEDULING_DECIDE: dispatched through llm/call.js like the
     // referees; its default (Sonnet 5.5) is a requires:'deep' model.
-    expect(deepSafe).toEqual(['ADS_ADVISOR', 'DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE', 'SMS_SCHEDULING_DECIDE']);
+    // ROUTINE: its default (Sonnet 5.5) is a requires:'deep' model; the two
+    // routine* policies go through llm/call.js and the two direct sites
+    // (invoice PDFs, lead synopsis) floor max_tokens and read the first text block.
+    expect(deepSafe).toEqual(['ADS_ADVISOR', 'DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE', 'ROUTINE', 'SMS_SCHEDULING_DECIDE']);
+    expect(MODELS.TEXT_POLICIES.routineAnswer.primary).toEqual({ provider: 'anthropic', model: MODELS.ROUTINE, effort: 'low' });
+    expect(MODELS.TEXT_POLICIES.routineVision.primary).toEqual({ provider: 'anthropic', model: MODELS.ROUTINE, effort: 'low' });
+    for (const id of ['wiki_qa', 'expense_categorize', 'hero_alt', 'invoice_pdf', 'lead_synopsis']) {
+      expect(lanes.find((l) => l.id === id).primary.selector).toBe('ROUTINE');
+    }
     expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');
     expect(lanes.find((l) => l.id === 'newsletter').primary.accepts.deep).toBe(true);
     expect(lanes.find((l) => l.id === 'events_curation').primary.accepts.deep).toBe(true);

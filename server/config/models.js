@@ -144,6 +144,12 @@ function anthropicThinkingAlwaysOn(model) {
 const DEFAULTS = Object.freeze({
   FLAGSHIP: 'claude-opus-4-8',
   WORKHORSE: 'claude-sonnet-5',
+  // Routine internal lanes that used to ride the flagship (owner 2026-10-04):
+  // wiki Q&A, expense categories, vendor invoice PDFs, lead synopsis, hero
+  // alt text. Sonnet 5.5, not Sonnet 5: same list price, and it is in the
+  // thinking floor below, so these lanes' short caps (200 to 2000 tokens)
+  // are not spent on thinking. Roll back with MODEL_ROUTINE=claude-opus-4-8.
+  ROUTINE: 'claude-sonnet-5-5',
   FAST: 'claude-sonnet-5',
   VOICE: 'claude-sonnet-5',
   VISION: 'claude-opus-4-8',
@@ -225,6 +231,7 @@ const DEFAULTS = Object.freeze({
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || DEFAULTS.FLAGSHIP;
 const WORKHORSE = process.env.MODEL_WORKHORSE || DEFAULTS.WORKHORSE;
+const ROUTINE   = process.env.MODEL_ROUTINE   || DEFAULTS.ROUTINE;
 const FAST      = process.env.MODEL_FAST      || DEFAULTS.FAST;
 const VOICE     = process.env.MODEL_VOICE     || DEFAULTS.VOICE;
 // Owner 2026-07-21 (T&S report dry-run): photo scoring drives customer-facing
@@ -520,6 +527,21 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
+  // highStakes / visionAnalysis with the ROUTINE tier on the Anthropic leg
+  // and the same OpenAI backup each had before: internal, low-risk lanes only
+  // (owner 2026-10-04). Nothing customer-facing belongs here. effort 'low':
+  // wiki Q&A is interactive and the rest are short lookups, so the
+  // always-thinking default must not think at the global MODEL_ANTHROPIC_EFFORT.
+  routineAnswer: Object.freeze({
+    name: 'routineAnswer',
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, effort: 'low' }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
+  routineVision: Object.freeze({
+    name: 'routineVision',
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, effort: 'low' }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
+  }),
   adsAdvisor: Object.freeze({
     name: 'adsAdvisor',
     // Daily Google Ads advisor (campaign-advisor.js) — owner ruling
@@ -700,6 +722,7 @@ module.exports = {
   EXTREME,
   FLAGSHIP,
   WORKHORSE,
+  ROUTINE,
   FAST,
   VOICE,
   VISION,

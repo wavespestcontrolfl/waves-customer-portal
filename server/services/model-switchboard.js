@@ -55,6 +55,12 @@ const SELECTORS = [
   { key: 'DEEP', env: 'MODEL_DEEP', description: 'Verifiers, judges, gates (via llm/deep.js)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'EXTREME', env: 'MODEL_EXTREME', description: 'Explicit deep-audit opt-in; never automatic', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'WORKHORSE', env: 'MODEL_WORKHORSE', description: 'Drafting and content', accepts: { providers: ['anthropic'], cap: 'text' } },
+  // deep: true — every call site reads past thinking blocks and floors
+  // max_tokens (llm/call.js#dispatch for the two routine* policies;
+  // anthropicMaxTokens + anthropicText at the two direct sites), so the
+  // Sonnet 5.5 default and the models like it are pickable. cap: 'vision' —
+  // hero alt text and vendor invoice PDFs send images / documents.
+  { key: 'ROUTINE', env: 'MODEL_ROUTINE', description: 'Routine internal lanes moved off the flagship (owner 2026-10-04)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
   { key: 'FAST', env: 'MODEL_FAST', description: 'Claude leg of the fast lanes', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VOICE', env: 'MODEL_VOICE', description: 'Spoken voice relay + Ask Waves fallback', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'VISION', env: 'MODEL_VISION', description: 'Claude photo scoring', accepts: { providers: ['anthropic'], cap: 'vision' } },
@@ -141,6 +147,8 @@ const POLICY_SELECTOR = {
   customerCopy: { primary: 'FLAGSHIP', fallback: 'OPENAI_BALANCED' },
   contentDraft: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   highStakes: { primary: 'FLAGSHIP', fallback: 'OPENAI_REPORT_WRITER' },
+  routineAnswer: { primary: 'ROUTINE', fallback: 'OPENAI_REPORT_WRITER' },
+  routineVision: { primary: 'ROUTINE', fallback: 'OPENAI_BALANCED' },
   adsAdvisor: { primary: 'ADS_ADVISOR', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
@@ -384,7 +392,7 @@ const LANES = [
   // for one file's two policies.
   L('events_curation', 'Community events curation (scoring)', 'event-curation.js', 'fastText', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback')),
   L('events_editorial', 'Community events normalizing (venue/type cleanup)', 'event-normalizer.js', 'fastText', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
-  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'routine categories on the flagship tier' }),
+  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('routineAnswer', 'primary'), P('routineAnswer', 'fallback'), { note: 'routine categories on the ROUTINE tier (owner 2026-10-04)' }),
 
   // ── Multimodal ──
   // Sequential ladder, not a fan-out (owner ruling 2026-09-26,
@@ -450,13 +458,13 @@ const LANES = [
   L('lawn_quality_gate', 'Lawn photo-quality gate', 'lawn-intelligence.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_diag_vision', 'Lawn diagnostic · vision leg', 'lawn-diagnostic-prompt.js', 'multimodal', E('LAWN_VISION_MODEL', T('GEMINI_VISION_BEST')), T('VISION')),
   L('lawn_challenge', 'Lawn diagnostic · adversarial challenge', 'lawn-diagnostic-prompt.js', 'multimodal', T('LAWN_CHALLENGE')),
-  L('hero_alt', 'Hero image alt-text', 'content/hero-alt-vision.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
+  L('hero_alt', 'Hero image alt-text', 'content/hero-alt-vision.js', 'multimodal', P('routineVision', 'primary'), P('routineVision', 'fallback')),
   // Generated-image screen (owner ruling 2026-09-25: Sol first, Claude
   // backup) — the blog image text/logo/uniform/van check, a separate call
   // from the hero_alt alt-text pass above (which stays on visionAnalysis).
   L('image_screen', 'Generated image screen', 'content/hero-alt-vision.js', 'multimodal', P('imageScreen', 'primary'), P('imageScreen', 'fallback'), { note: 'blog image text/logo/uniform/van check; Sol first, Claude VISION backs it up' }),
   L('wdo_project_brief', 'WDO project brief + treatment-photo read', 'routes/admin-projects.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'text-only briefs ride contentDraft' }),
-  L('invoice_pdf', 'Vendor invoice PDF processing', 'email/invoice-processor.js', 'multimodal', T('FLAGSHIP'), null, { inbound: true }),
+  L('invoice_pdf', 'Vendor invoice PDF processing', 'email/invoice-processor.js', 'multimodal', T('ROUTINE'), null, { inbound: true }),
   L('contact_dictation', 'Contact dictation decoder', 'contact-dictation.js', 'multimodal', D('GEMINI_CONTACT_DECODER_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true }),
   L('address_recovery', 'Address street recovery', 'address-validation/recovery.js', 'multimodal', D('GEMINI_RECOVERY_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true }),
 
@@ -517,7 +525,7 @@ const LANES = [
   L('estimate_assistant', 'Estimate assistant Q&A', 'estimate-assistant.js', 'qa', R('estimateAssistant'), E('ESTIMATE_ASSISTANT_MODEL', T('WORKHORSE'), { live: true }), { inbound: true }),
   L('knowledge_qa', 'Knowledge-base Q&A', 'knowledge-bridge.js', 'qa', R('knowledgeAnswer'), T('FLAGSHIP')),
   L('ask_waves', 'Ask Waves (public chat)', 'ask-waves-intake.js', 'qa', P('askWaves', 'primary'), E('ASK_WAVES_MODEL', P('askWaves', 'fallback'), { live: true }), { inbound: true }),
-  L('wiki_qa', 'Wiki Q&A', 'knowledge/wiki-qa.js', 'qa', P('highStakes', 'primary'), P('highStakes', 'fallback')),
+  L('wiki_qa', 'Wiki Q&A', 'knowledge/wiki-qa.js', 'qa', P('routineAnswer', 'primary'), P('routineAnswer', 'fallback')),
   L('wdo_history', 'WDO history lookup', 'property-lookup/wdo-history-lookup.js', 'qa', T('WORKHORSE'), null, { inbound: true }),
   L('link_investigator', 'Internal-link path investigation', 'seo/link-path-investigator.js', 'qa', T('WORKHORSE')),
   L('internal_link_judge', 'Internal-link reader check before auto-merge', 'content/internal-link-judge.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback')),
@@ -536,7 +544,7 @@ const LANES = [
   L('tax_advisor', 'Tax advisor weekly report', 'tax-advisor.js', 'reason', T('FLAGSHIP')),
   L('csr_coach', 'CSR call coaching', 'csr/csr-coach.js', 'reason', P('highStakes', 'primary'), P('highStakes', 'fallback')),
   L('inventory_research', 'Inventory vendor mapping + price research', 'routes/admin-inventory.js', 'reason', T('FLAGSHIP'), null, { note: 'Anthropic web_search tool' }),
-  L('lead_synopsis', 'Lead synopsis from call', 'call-recording-processor.js', 'reason', T('FLAGSHIP'), null, { inbound: true }),
+  L('lead_synopsis', 'Lead synopsis from call', 'call-recording-processor.js', 'reason', T('ROUTINE'), null, { inbound: true }),
   L('call_commitments', 'Call commitments from transcript', 'call-commitments.js', 'reason', T('FLAGSHIP'), null, { inbound: true }),
   L('codex_remediation', 'Content finding auto-fix', 'content/codex-remediation.js', 'reason', T('FLAGSHIP')),
   L('portal_assistant', 'Customer portal assistant', 'ai-assistant/assistant.js', 'reason', T('FLAGSHIP')),

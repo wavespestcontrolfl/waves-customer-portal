@@ -8484,10 +8484,10 @@ async function generateLeadSynopsis(transcription) {
     // that could steal live work. With every call bounded, a stuck pass
     // FAILS, releases and stops beating, and the heartbeat rule alone is
     // enough.
-    const response = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => client.messages.create({
-      model: MODELS.FLAGSHIP,
-      ...anthropicEffortConfig(MODELS.FLAGSHIP),
-      max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 1200),
+    const response = await ledgerCall('anthropic', MODELS.ROUTINE, () => client.messages.create({
+      model: MODELS.ROUTINE,
+      ...anthropicEffortConfig(MODELS.ROUTINE),
+      max_tokens: anthropicMaxTokens(MODELS.ROUTINE, 1200),
       messages: [{
         role: 'user',
         content: `Role:

@@ -59,9 +59,9 @@ Rules:
 - Chemicals, PPE, equipment supplies: use "Supplies"
 - If truly unclear, use "Office Expenses" as default`;
 
-  // FLAGSHIP first, Sol on a miss. A two-leg miss throws like the old SDK
+  // ROUTINE tier first (owner 2026-10-04), Sol on a miss. A two-leg miss throws like the old SDK
   // path did — callers decide whether that blocks the insert.
-  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+  const res = await dispatchWithFallback(MODELS.TEXT_POLICIES.routineAnswer, {
     laneId: 'expense_categorize',
     text: prompt,
     jsonMode: true,
