@@ -175,48 +175,24 @@ it.each([null, 0])('shows an unavailable or genuinely zero score on reload and p
   expect(confirmPosts()[0]).toEqual({});
 });
 
-// Codex r1 P2 on #5904: a held press that ends off the button fires no click,
-// so the "swallow the post-hold click" flag must reset, or the next tap on any
-// step button is discarded.
-it('a hold that is dragged off the button, or cancelled, does not swallow the next tap', async () => {
+// Steppers are tap-only (no hold-to-repeat): nothing runs between events, so a
+// press that ends off the button, a right-click, or a Confirm/Retake with a
+// second finger can never change a score on its own.
+it('a stepper has no hold-to-repeat: a long press steps at most once, and no timer keeps stepping after it', async () => {
   vi.useFakeTimers();
   try {
     render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
     await vi.waitFor(() => screen.getByRole('button', { name: 'Confirm assessment' }));
     const density = screen.getByLabelText('Density score');
     const raise = screen.getByRole('button', { name: 'Raise Density score' });
-    // Touch: pointerdown captures the pointer; the handler must release it so a slide away cancels.
-    const release = vi.fn();
-    raise.releasePointerCapture = release;
-    fireEvent.pointerDown(raise, { pointerId: 7 });
-    expect(release).toHaveBeenCalledTimes(1);
-    act(() => { vi.advanceTimersByTime(450 + 120 * 2 + 10); });
-    expect(Number(density.value)).toBeGreaterThan(80);
-    const held = Number(density.value);
-    fireEvent.pointerLeave(raise);
-    fireEvent.click(screen.getByRole('button', { name: 'Lower Density score' }));
-    expect(density.value).toBe(String(held - 1));
     fireEvent.pointerDown(raise);
-    act(() => { vi.advanceTimersByTime(450 + 10); });
-    fireEvent.pointerCancel(raise);
-    fireEvent.click(raise);
-    expect(density.value).toBe(String(held + 1));
-    // A right-button hold never starts the repeat. jsdom has no PointerEvent
-    // (fireEvent would drop `button`), so the property is set on the event itself.
-    const rightPress = new Event('pointerdown', { bubbles: true });
-    Object.defineProperty(rightPress, 'button', { value: 2 });
-    fireEvent(raise, rightPress);
-    act(() => { vi.advanceTimersByTime(450 + 120 * 3); });
+    act(() => { vi.advanceTimersByTime(2000); });
+    expect(density.value).toBe('80');
     fireEvent.pointerUp(raise);
-    expect(density.value).toBe(String(held + 1));
-    // A hold still running when Confirm is tapped with another finger stops at once.
-    fireEvent.pointerDown(raise);
-    act(() => { vi.advanceTimersByTime(450 + 10); });
-    const atConfirm = Number(density.value);
-    fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
-    act(() => { vi.advanceTimersByTime(120 * 5); });
-    expect(Number(density.value)).toBe(atConfirm);
-    await act(async () => { await vi.runOnlyPendingTimersAsync(); });
+    fireEvent.click(raise);
+    expect(density.value).toBe('81');
+    act(() => { vi.advanceTimersByTime(5000); });
+    expect(density.value).toBe('81');
   } finally {
     vi.useRealTimers();
   }
@@ -224,7 +200,7 @@ it('a hold that is dragged off the button, or cancelled, does not swallow the ne
 
 // Owner ruling 2026-10-05: each score has a - and a + beside its number (this
 // is new on the shared block; no older test here asserted the buttons absent).
-it('each score has a Lower and a Raise button: one step per tap, held to 0-100, posting like a typed number', async () => {
+it('each score has a Lower and a Raise button: one step per tap, clamped to 0-100, posting like a typed number', async () => {
   render(<CompletionPanel service={service} products={[]} onClose={() => {}} onSubmit={() => {}} />);
   await screen.findByRole('button', { name: 'Confirm assessment' });
   for (const label of ['Density', 'Weed control', 'Color', 'Condition']) {
