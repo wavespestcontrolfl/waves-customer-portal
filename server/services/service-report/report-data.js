@@ -2826,6 +2826,20 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
   // case where the payload (and so the document) changes; a legacy visit keeps
   // its key. An unreadable marker means no stamp.
   if (lawnReportPhotoSetLive() && carriesShotListMarker(assessment?.photos)) irrigationStamp += ':photoset=1';
+  // The "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH) is frozen text
+  // the lead prints, so it keys the PDF: a PDF cached before the paragraph
+  // existed is never served after it, and a changed text re-keys. Read from the
+  // record itself (a cache-lookup caller's row is partial). The stamp rides only
+  // while the gate is live AND a whole entry exists, so a visit with none keeps
+  // its key; an unreadable record stamps random (re-render, never a stale hit).
+  if (featureGates.lawnTechParagraphLive() && assessment?.id) {
+    try {
+      const row = await knex('service_records').where({ id: service.id }).first('structured_notes');
+      irrigationStamp += require('./lawn-tech-paragraph').techParagraphSignature(row?.structured_notes, assessment.id);
+    } catch {
+      irrigationStamp += `:tp=err${crypto.randomBytes(4).toString('hex')}`;
+    }
+  }
   // "What the photos showed" (P23b) is built from this assessment's reviewed run,
   // so the key follows the run's reviewed state, and only for a visit that would
   // print the block (no block = no stamp, so such a visit keeps its key). The
@@ -6106,6 +6120,22 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             if (reportV2.followUp && preOverlay.followUp) restore(reportV2.followUp, preOverlay.followUp, 'reason');
           }
         }
+      }
+      // GATE_LAWN_TECH_PARAGRAPH: the "From your technician" paragraph written
+      // once at completion and frozen (lawn-tech-paragraph.js). A render only
+      // READS it, from the record this build already loaded: no new query, no
+      // model call, and nothing for /ask to read. It rides the report as a
+      // non-enumerable hand-off and reaches the customer only through
+      // reportV2.lead.techParagraph. A frozen entry that fails the read-time
+      // screens, or any read error, prints nothing; the PDF key (below) follows
+      // the same read, so a cached PDF can never lack text the page shows.
+      if (reportV2 && featureGates.lawnTechParagraphLive()) {
+        try {
+          const techParagraph = require('./lawn-tech-paragraph').readFrozenTechParagraph(service.structured_notes, lawnAssessment.assessmentId);
+          if (techParagraph) {
+            Object.defineProperty(reportV2, 'techParagraph', { value: techParagraph, enumerable: false, writable: true, configurable: true });
+          }
+        } catch { lawnAssessment.weekWeatherUncacheable = true; }
       }
       // Only a built block is attached: no prior (or a prior with no frozen
       // memory) leaves the key off rather than carrying a null.

@@ -1,0 +1,92 @@
+{
+  "_meta": {
+    "about": "The owner's 2026-10-05 local test: chinch bug damage, a report that said 'Looking great'. Scores are the real ones; address, name and the prior visit's product names are invented (see synthetic); the harness never passes _meta to the prompt.",
+    "address": "123 Example Street, Bradenton FL 34205 (synthetic)",
+    "firstName": "Sam (the record has it; the prompt never carries any customer name)",
+    "scores": "Real scores of the owner's case: overall 89; turf density 94, weed suppression 97, color 88, condition/stress 75.",
+    "synthetic": "Synthetic: first name, address, and the prior visit's product names (Prior Fertilizer 16-0-8, Prior Iron Supplement; the real prior visit had a fertilizer and color support)."
+  },
+  "technicianNote": "Today we applied Arena, 16.6 grams in total, to the front and side yards. We also applied LESCO 24-0-11 granular fertilizer to the entire yard. There are chinch bugs; that is the damage you see in the trouble spot photo.",
+  "products": [
+    {
+      "name": "Arena 50 WDG",
+      "activeIngredient": "clothianidin",
+      "kind": "insecticide",
+      "method": "broadcast_spray",
+      "targets": [
+        "Southern chinch bugs",
+        "white grubs",
+        "mole crickets",
+        "billbugs"
+      ]
+    },
+    {
+      "name": "LESCO 24-0-11",
+      "activeIngredient": null,
+      "kind": "fertilizer",
+      "method": "granular_broadcast",
+      "targets": []
+    }
+  ],
+  "scores": {
+    "overall": 89,
+    "rows": [
+      {
+        "label": "Turf Density",
+        "score": 94
+      },
+      {
+        "label": "Weed Suppression",
+        "score": 97
+      },
+      {
+        "label": "Color & Vigor",
+        "score": 88
+      },
+      {
+        "label": "Condition & Stress",
+        "score": 75
+      }
+    ]
+  },
+  "findings": [
+    {
+      "label": "thinning turf",
+      "confidence": "low"
+    }
+  ],
+  "prior": {
+    "date": "2026-08-16",
+    "products": [
+      {
+        "name": "Prior Fertilizer 16-0-8",
+        "kind": "fertilizer",
+        "targets": []
+      },
+      {
+        "name": "Prior Iron Supplement",
+        "kind": "supplement",
+        "targets": []
+      }
+    ],
+    "watched": [],
+    "findings": []
+  },
+  "progressLines": [],
+  "facts": {
+    "headline": "Looking great",
+    "watering": "Water in today's granular treatment with your sprinklers within the next day."
+  },
+  "knownProductNames": [
+    "Celsius WG",
+    "Dismiss",
+    "Talstar P",
+    "Prodiamine 65 WDG",
+    "Acelepryn",
+    "Headway G",
+    "Arena 50 WDG",
+    "LESCO 24-0-11",
+    "Prior Fertilizer 16-0-8",
+    "Prior Iron Supplement"
+  ]
+}
