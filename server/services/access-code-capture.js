@@ -267,7 +267,9 @@ async function fileFoundItems(conn, { message, properties }, items, receipt) {
     if (items.length) {
       const prefs = await trx('property_preferences').where({ customer_id: customer.id }).first() || {};
       const existing = await trx('customer_access_codes')
-        .where({ customer_id: customer.id }).whereNot('status', 'dismissed')
+        // A retired or dismissed value the customer sends again is news: only a row
+        // still waiting or still live makes a new one redundant.
+        .where({ customer_id: customer.id }).whereIn('status', ['found', 'active'])
         .whereIn('value_hash', items.map((i) => i.value_hash))
         .select('kind', 'value_hash');
       const taken = new Set(existing.map((r) => `${r.kind}:${r.value_hash}`));

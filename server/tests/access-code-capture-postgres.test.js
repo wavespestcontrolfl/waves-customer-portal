@@ -269,6 +269,15 @@ postgres('access codes section', () => {
       expect((await rows(c.id)).map((r) => r.status).sort()).toEqual(['dismissed', 'found']);
     });
 
+    test('a retired value the customer sends again comes back as found', async () => {
+      const c = await customer();
+      const existing = await found(c.id);
+      await trx('customer_access_codes').where({ id: existing.id }).update({ status: 'retired' });
+      await text(c.id, 'The gate code is #4821');
+      expect(await sweep(stub([gateItem()]))).toMatchObject({ found: 1 });
+      expect((await rows(c.id)).map((r) => r.status).sort()).toEqual(['found', 'retired']);
+    });
+
     test('property_id is set only for a customer with one active property', async () => {
       const one = await customer({ properties: 1 });
       const two = await customer({ properties: 2 });
