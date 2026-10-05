@@ -294,8 +294,10 @@ function isLive(r, now = new Date()) {
 // the office has not decided yet. Each waiting row is brought in line with the
 // latest read: the same code and directions take the read's life and quote
 // (a "today only" added or removed); anything the read no longer supports is
-// dismissed, and with no items (a text corrected to say nothing, made too
-// long, or emptied) all of them are. Decided rows stay as history.
+// removed, and with no items (a text corrected to say nothing, made too long,
+// or emptied) all of them are. A waiting row is the read's output, not a
+// decision, so removing it loses nothing and a later read that brings the
+// code back files it again. Decided rows stay as history.
 async function reconcileSource(trx, message, items) {
   const key = (r) => `${r.kind}:${r.value_hash}:${normalizeText(r.instructions)}`;
   const latest = new Map(items.map((item) => [key(item), item]));
@@ -311,10 +313,7 @@ async function reconcileSource(trx, message, items) {
         .update({ life: item.life, source_quote: item.quote, updated_at: trx.fn.now() });
     }
   }
-  if (stale.length) {
-    await trx('customer_access_codes').whereIn('id', stale)
-      .update({ status: 'dismissed', decided_at: trx.fn.now(), updated_at: trx.fn.now() });
-  }
+  if (stale.length) await trx('customer_access_codes').whereIn('id', stale).del();
   return stale.length;
 }
 
@@ -409,7 +408,14 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
           // A receipt is for the words it read (hashExtractionSource = sha256
           // hex of the body): a corrected text is read again.
           .whereRaw("x.source_hash = encode(sha256(convert_to(coalesce(s.message_body, ''), 'UTF8')), 'hex')")
-          .whereIn('x.status', TERMINAL_STATUSES);
+          .whereIn('x.status', TERMINAL_STATUSES)
+          // and it is the newest receipt for this text: words restored to an
+          // earlier version are read again, since a later read changed the rows.
+          .whereNotExists(function laterRead() {
+            this.select(1).from('data_hygiene_source_extractions as y')
+              .whereRaw('y.source_id = x.source_id AND y.source_type = x.source_type AND y.extractor_version = x.extractor_version')
+              .whereRaw('y.source_hash <> x.source_hash AND y.last_attempted_at > x.last_attempted_at');
+          });
       })
       .orderBy('s.created_at').orderBy('s.id').limit(BATCH)
       .select(...SOURCE_COLUMNS.map((column) => `s.${column}`));

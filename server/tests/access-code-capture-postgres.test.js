@@ -206,19 +206,19 @@ postgres('access codes section', () => {
       const read = stub([gateItem({ instructions: 'press 2 first', quote: 'The gate code is #4821, press 2 first' })]);
       expect(await sweep(read)).toMatchObject({ found: 1 });
       const list = (await rows(c.id)).map((r) => [r.status, r.instructions]).sort();
-      expect(list).toEqual([['dismissed', null], ['found', 'press 2 first']]);
+      expect(list).toEqual([['found', 'press 2 first']]);
     });
 
-    test('a corrected text that changes the code, or drops it, dismisses what it filed', async () => {
+    test('a corrected text that changes the code, or drops it, removes what it filed', async () => {
       const c = await customer();
       const id = await text(c.id, 'The gate code is #4821');
       expect(await sweep(stub([gateItem()]))).toMatchObject({ found: 1 });
       await trx('sms_log').where({ id }).update({ message_body: 'The gate code is #9876' });
       expect(await sweep(stub([gateItem({ code: '#9876', quote: 'The gate code is #9876' })]))).toMatchObject({ found: 1 });
-      expect((await rows(c.id)).map((r) => [r.code, r.status]).sort()).toEqual([['#4821', 'dismissed'], ['#9876', 'found']]);
+      expect((await rows(c.id)).map((r) => [r.code, r.status]).sort()).toEqual([['#9876', 'found']]);
       await trx('sms_log').where({ id }).update({ message_body: 'See you Tuesday' });
       expect(await sweep(stub([]))).toMatchObject({ found: 0 });
-      expect((await rows(c.id)).map((r) => r.status).sort()).toEqual(['dismissed', 'dismissed']);
+      expect(await rows(c.id)).toEqual([]);
     });
 
     test('a corrected text that changes the life of the same code updates the waiting row both ways', async () => {
@@ -235,7 +235,7 @@ postgres('access codes section', () => {
       expect(list.map((r) => [r.life, r.status])).toEqual([['standing', 'found']]);
     });
 
-    test('a text corrected to be too long, or emptied, dismisses what it filed', async () => {
+    test('a text corrected to be too long, or emptied, removes what it filed', async () => {
       const long = await customer();
       const a = await text(long.id, 'The gate code is #4821');
       const empty = await customer();
@@ -244,8 +244,21 @@ postgres('access codes section', () => {
       await trx('sms_log').where({ id: a }).update({ message_body: `The gate code is #4821. ${'x'.repeat(700)}` });
       await trx('sms_log').where({ id: b }).update({ message_body: '' });
       await sweep(stub([gateItem()]));
-      expect((await rows(long.id)).map((r) => r.status)).toEqual(['dismissed']);
-      expect((await rows(empty.id)).map((r) => r.status)).toEqual(['dismissed']);
+      expect(await rows(long.id)).toEqual([]);
+      expect(await rows(empty.id)).toEqual([]);
+    });
+
+    test('a text corrected back to an earlier code, in new or the exact old words, files it again', async () => {
+      const c = await customer();
+      const id = await text(c.id, 'The gate code is #4821');
+      const a = stub([gateItem()]);
+      await sweep(a);
+      await trx('sms_log').where({ id }).update({ message_body: 'The gate code is #9876' });
+      await trx('data_hygiene_source_extractions').update({ last_attempted_at: trx.raw("last_attempted_at - interval '1 minute'") });
+      await sweep(stub([gateItem({ code: '#9876', quote: 'The gate code is #9876' })]));
+      await trx('sms_log').where({ id }).update({ message_body: 'The gate code is #4821' });
+      expect(await sweep(a)).toMatchObject({ read: 1, found: 1 });
+      expect((await rows(c.id)).map((r) => [r.code, r.status])).toEqual([['#4821', 'found']]);
     });
 
     test('a corrected text never touches a row the office already decided', async () => {
