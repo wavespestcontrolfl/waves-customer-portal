@@ -132,6 +132,16 @@ describe('source contracts', () => {
     expect(completion).toMatch(/allowSameDay: !!completionInput\.issuedInvoiceCloseout \|\| completionInput\.systemQuietCloseout === true \}\);/);
   });
 
+  test('a system quiet closeout takes the scheduled-invoice mint lock before the customer and visit row locks', () => {
+    const completion = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+    const persistAt = completion.indexOf('const persistRecord = async (trx) => {');
+    const mintAt = completion.indexOf("if (systemQuietCloseout) {\n            await require('../services/scheduled-invoice-mint').acquireScheduledInvoiceMintLock(trx, svc.id);", persistAt);
+    const visitLockAt = completion.indexOf("const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();", persistAt);
+    const customerLockAt = completion.indexOf('.forShare()', persistAt);
+    expect(mintAt).toBeGreaterThan(persistAt);
+    expect(customerLockAt).toBeGreaterThan(mintAt);
+    expect(visitLockAt).toBeGreaterThan(mintAt);
+  });
   test('the gate is strict and read at call time', () => {
     const gates = fs.readFileSync(path.join(__dirname, '../config/feature-gates.js'), 'utf8');
     expect(gates).toMatch(/function estimateSentClosesAssessmentLive\(\) \{\s*return process\.env\.GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT === 'true';\s*\}/);
@@ -189,11 +199,18 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     });
     return id;
   }
-  async function estimate(customerId, { status = 'sent', sentAt = minutesAgo(10), linkedVisitId = null } = {}) {
+  // A REAL handoff by default: admin-estimates stamps deliveryState on every
+  // delivery that reached the customer. `delivered: false` models a
+  // suppressed send (sent_at stamped, nothing delivered).
+  async function estimate(customerId, { status = 'sent', sentAt = minutesAgo(10), linkedVisitId = null, delivered = true, acceptedAt = null } = {}) {
     const id = randomUUID();
     await mockPg('estimates').insert({
       id, customer_id: customerId, status, sent_at: sentAt, token: randomUUID().replace(/-/g, ''),
-      customer_name: 'Fixture Assessment', estimate_data: JSON.stringify(linkedVisitId ? { scheduled_service_id: linkedVisitId } : {}),
+      customer_name: 'Fixture Assessment', accepted_at: acceptedAt,
+      estimate_data: JSON.stringify({
+        ...(linkedVisitId ? { scheduled_service_id: linkedVisitId } : {}),
+        ...(delivered && sentAt ? { deliveryState: { firstDeliveredAt: new Date(sentAt).toISOString(), lastDeliveredAt: new Date(sentAt).toISOString(), deliveredAt: [new Date(sentAt).toISOString()] } } : {}),
+      }),
     });
     return id;
   }
@@ -583,6 +600,39 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect((await row(failedVisit)).status).toBe('completed');
     expect((await row(outageVisit)).status).toBe('completed');
     expect((await row(refusedVisit)).status).toBe('on_site');
+  });
+
+  test('"sent" means a real handoff: a suppressed send (sent_at, nothing delivered) closes nothing; an estimate accepted during its first send, with no sent_at, closes', async () => {
+    const suppressed = await customer();
+    const suppressedVisit = await visit(suppressed);
+    await estimate(suppressed, { delivered: false });
+    const accepted = await customer();
+    const acceptedVisit = await visit(accepted);
+    await estimate(accepted, { status: 'accepted', sentAt: null, delivered: false, acceptedAt: minutesAgo(5) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(suppressedVisit)).status).toBe('on_site');
+    expect((await row(acceptedVisit)).status).toBe('completed');
+  });
+
+  test('a linked invoice with a NULL status is a live invoice: the assessment is left to a person', async () => {
+    const customerId = await customer();
+    const visitId = await visit(customerId);
+    await estimate(customerId);
+    await mockPg('invoices').insert({ id: randomUUID(), customer_id: customerId, scheduled_service_id: visitId, invoice_number: `TST-${randomUUID().slice(0, 8)}`,
+      token: randomUUID().replace(/-/g, ''), status: null, total: 50, subtotal: 50, service_date: startDay(), service_type: 'Waves Assessment', line_items: JSON.stringify([]) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 0, closed: 0 });
+    expect((await row(visitId)).status).toBe('on_site');
+  });
+
+  test('a parked completion still resumes after the completed visit was reclassified and fell outside the window', async () => {
+    const customerId = await customer();
+    const parked = await visit(customerId, { status: 'completed', day: etDateString(addETDays(new Date(), -40)), serviceType: 'Fixture Reclassified Service', serviceId: null });
+    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: parked, idempotency_key: `assessment-estimate:${parked}:backfill`, status: 'side_effects_pending', request_hash: 'x' });
+    await closeAssessmentsWithSentEstimates({ conn: mockPg });
+    const calls = Completion.completeScheduledService.mock.calls.map(([input]) => input);
+    expect(calls.map((input) => input.serviceId)).toEqual([parked]);
+    expect(calls[0].idempotencyKey).toBe(`assessment-estimate:${parked}:backfill`);
+    expect(calls[0].lockedVisitGuard).toBeNull();
   });
 
   test('money is a person\'s: a priced assessment, a prepaid one and one with a linked invoice are never candidates', async () => {

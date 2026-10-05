@@ -5777,6 +5777,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // namespace, sorted winner/loser ids) before its own customer row
           // lock, so whichever transaction arrives first runs to completion
           // before the other takes any row lock — no cycle is reachable.
+          // A system quiet closeout serializes with every scheduled-service
+          // invoice writer on the mint lock, taken BEFORE the customer and
+          // visit row locks (their order), so an invoice being minted for
+          // this visit either commits first — and the caller's locked guard
+          // sees it — or waits until this completion has committed (Codex r5
+          // P1 #5903).
+          if (systemQuietCloseout) {
+            await require('../services/scheduled-invoice-mint').acquireScheduledInvoiceMintLock(trx, svc.id);
+          }
           if (issuedInvoiceCloseout) {
             // Gate, then ownership re-read, REPEATED until the owner is
             // stable (GitHub r7 P2 #4127 ×2): a merge that held the gate

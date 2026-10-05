@@ -127,46 +127,50 @@ async function parkedKey(conn, visitId) {
 // it). The JS rule re-decides each row on a fresh read, and the completion
 // decides once more under its row lock; this only chooses the page.
 function candidateVisits(conn, { today, now }) {
+  const { LATEST_HANDOFF_SQL } = require('./call-commitments');
   const oldest = etDateString(new Date(now.getTime() - ASSESSMENT_WINDOW_DAYS * 86400000));
   const estimateSince = new Date(now.getTime() - ESTIMATE_WINDOW_DAYS * 86400000);
   const restSince = new Date(now.getTime() - REFUSAL_REST_HOURS * 3600000);
-  const SENT_DAY_SQL = "(e.sent_at AT TIME ZONE 'America/New_York')::date";
-  const query = conn('scheduled_services as s')
+  // "Sent" is a REAL handoff (Codex r5 P1 #5903): a delivery that reached the
+  // customer, or their own acceptance — never a bare sent_at, which a
+  // suppressed send stamps while nothing goes out.
+  const HANDOFF_SQL = `(${LATEST_HANDOFF_SQL})`;
+  const HANDOFF_DAY_SQL = `((${LATEST_HANDOFF_SQL}) AT TIME ZONE 'America/New_York')::date`;
+  return conn('scheduled_services as s')
     .leftJoin('services as svc', 'svc.id', 's.service_id')
-    .where('s.scheduled_date', '<=', today)
-    .where('s.scheduled_date', '>=', oldest)
     .where((q) => q
-      .where((open) => open
-        .whereExists(function sentAfter() {
-          this.select(conn.raw('1')).from('estimates as e')
-            .whereRaw('e.customer_id = s.customer_id')
-            .whereNotNull('e.sent_at')
-            .whereNot('e.status', 'draft')
-            .where('e.sent_at', '>=', estimateSince)
+      .where((open) => scopeToAssessmentBookings(open, 's', 'svc')
+        .where('s.scheduled_date', '<=', today)
+        .where('s.scheduled_date', '>=', oldest)
+        .whereExists(function handedOffAfter() {
+          this.select(conn.raw('1')).from('estimates')
+            .whereRaw('estimates.customer_id = s.customer_id')
+            .whereRaw(`${HANDOFF_SQL} >= ?`, [estimateSince])
             // One estimate, one assessment (matchedAssessmentId): the
             // estimate's explicit booking link when it has one; otherwise
             // (legacy, unlinked) no newer assessment of this customer on or
-            // before the estimate's day.
-            .whereRaw(`(e.estimate_data ->> 'scheduled_service_id' = s.id::text OR (e.estimate_data ->> 'scheduled_service_id' IS NULL AND NOT EXISTS (
+            // before the estimate's handoff day.
+            .whereRaw(`(estimates.estimate_data ->> 'scheduled_service_id' = s.id::text OR (estimates.estimate_data ->> 'scheduled_service_id' IS NULL AND NOT EXISTS (
               SELECT 1 FROM scheduled_services s2 LEFT JOIN services svc2 ON svc2.id = s2.service_id
               WHERE s2.customer_id = s.customer_id AND s2.id <> s.id
                 AND (s2.status IS NULL OR s2.status NOT IN (${DEAD_STATUSES.map(() => '?').join(', ')}))
-                AND s2.scheduled_date <= ${SENT_DAY_SQL}
+                AND s2.scheduled_date <= ${HANDOFF_DAY_SQL}
                 AND (s2.scheduled_date > s.scheduled_date OR (s2.scheduled_date = s.scheduled_date AND s2.id > s.id))
                 AND (LOWER(TRIM(s2.service_type)) = ? OR svc2.service_key = ? OR LOWER(TRIM(svc2.name)) = ?))))`,
             [...DEAD_STATUSES, ASSESSMENT_DISPLAY_NAME.toLowerCase(), ASSESSMENT_SERVICE_KEY, ASSESSMENT_DISPLAY_NAME.toLowerCase()])
             .where((rule) => rule
               .where((started) => started.whereIn('s.status', STARTED_STATUSES)
-                .whereRaw(`${SENT_DAY_SQL} >= s.scheduled_date`)
-                .whereRaw('(COALESCE(s.arrived_at, s.en_route_at) IS NULL OR e.sent_at > COALESCE(s.arrived_at, s.en_route_at))'))
+                .whereRaw(`${HANDOFF_DAY_SQL} >= s.scheduled_date`)
+                .whereRaw(`(COALESCE(s.arrived_at, s.en_route_at) IS NULL OR ${HANDOFF_SQL} > COALESCE(s.arrived_at, s.en_route_at))`))
               .orWhere((unstarted) => unstarted
                 .where((live) => live.whereIn('s.status', UNSTARTED_STATUSES).orWhereNull('s.status'))
-                .whereRaw(`${SENT_DAY_SQL} > s.scheduled_date`)));
+                .whereRaw(`${HANDOFF_DAY_SQL} > s.scheduled_date`)));
         })
-        // Money is a person's: no visit price, no prepayment, no linked invoice.
+        // Money is a person's: no visit price, no prepayment, no linked
+        // invoice (a NULL invoice status is a live invoice).
         .whereRaw('COALESCE(s.estimated_price, 0) <= 0 AND COALESCE(s.prepaid_amount, 0) <= 0')
         .whereNotExists(function linkedInvoice() {
-          this.select(conn.raw('1')).from('invoices as inv').whereRaw('inv.scheduled_service_id = s.id').whereNot('inv.status', 'void');
+          this.select(conn.raw('1')).from('invoices as inv').whereRaw("inv.scheduled_service_id = s.id AND inv.status IS DISTINCT FROM 'void'");
         })
         .whereNotExists(function resting() {
           this.select(conn.raw('1')).from('audit_log as al')
@@ -178,12 +182,15 @@ function candidateVisits(conn, { today, now }) {
             // on the very next tick (Codex r4 P2 #5903).
             .whereRaw("COALESCE(al.metadata ->> 'code', '') <> 'error' AND COALESCE(NULLIF(al.metadata ->> 'status', '')::int, 0) < 500");
         }))
+      // This closeout's own committed attempt, owed its post-commit work: it
+      // resumes from the state it froze, so no current eligibility applies —
+      // not the window, not the assessment identity (a later edit to the
+      // completed visit must not strand it, Codex r5 P2).
       .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
     // Open visits first: a resume that keeps failing must not take the
-    // slots of visits that can close (it stays inside the 30-day window too).
+    // slots of visits that can close.
     .orderByRaw(`(${OWN_PARKED_ATTEMPT_SQL}) ASC, s.scheduled_date ASC, s.id ASC`)
     .select('s.*', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
-  return scopeToAssessmentBookings(query, 's', 'svc');
 }
 
 async function audit(action, { visitId, estimateId, code = null, status = null, error = null }) {
@@ -239,14 +246,18 @@ async function matchedAssessmentId(conn, customerId, estimate) {
 // The candidate query selects by the same pairing in SQL.
 async function estimateForAssessment(conn, visit, { now }) {
   if (!visit.customer_id) return null;
-  const sent = await conn('estimates')
+  const { HANDOFF_COLS, latestHandoffAt } = require('./call-commitments');
+  const since = now.getTime() - ESTIMATE_WINDOW_DAYS * 86400000;
+  const rows = await conn('estimates')
     .where({ customer_id: visit.customer_id })
-    .whereNotNull('sent_at')
-    .whereNot('status', 'draft')
-    .where('sent_at', '>=', new Date(now.getTime() - ESTIMATE_WINDOW_DAYS * 86400000))
-    .orderBy('sent_at', 'desc')
-    .select('id', 'sent_at', 'status', 'estimate_data');
-  for (const estimate of sent) {
+    .select([...HANDOFF_COLS(conn), 'estimate_data']);
+  // `sent_at` below is the LATEST real handoff (a delivery or the customer's
+  // own acceptance), never the row's sent_at column (Codex r5 P1 #5903).
+  const handedOff = rows
+    .map((row) => ({ ...row, sent_at: latestHandoffAt(row) }))
+    .filter((row) => row.sent_at && row.sent_at.getTime() >= since)
+    .sort((x, y) => y.sent_at - x.sent_at);
+  for (const estimate of handedOff) {
     if (String(await matchedAssessmentId(conn, visit.customer_id, estimate)) === String(visit.id)) return estimate;
   }
   return null;
@@ -257,7 +268,7 @@ async function estimateForAssessment(conn, visit, { now }) {
 // it right now), or it is one stop of a grouped visit (the whole visit
 // closes together).
 async function liveRefusal(conn, visit) {
-  const invoice = await conn('invoices').where({ scheduled_service_id: visit.id }).whereNot('status', 'void').first('id');
+  const invoice = await conn('invoices').where({ scheduled_service_id: visit.id }).whereRaw("status IS DISTINCT FROM 'void'").first('id');
   if (invoice) return 'assessment_has_invoice';
   const { visitJobTimerRunning } = require('./invoice-issued-closeout');
   if (await visitJobTimerRunning(conn, visit.id)) return 'visit_timer_running';
@@ -330,13 +341,15 @@ async function closeOne(conn, row, { today, now }) {
   try {
     // Fresh reads: the candidate query is a snapshot.
     const visit = await conn('scheduled_services').where({ id: visitId }).first();
-    if (!visit || !(await isAssessmentBooking(visit, conn))) return { closed: false, reason: 'not_assessment' };
+    if (!visit) return { closed: false, reason: 'not_found' };
+    const parkedResume = Boolean(row.own_attempt_parked) && visit.status === 'completed';
+    if (!parkedResume && !(await isAssessmentBooking(visit, conn))) return { closed: false, reason: 'not_assessment' };
     // This closeout's own attempt committed the visit as completed and still
     // owes its post-commit work: finish it from the state it froze. It needs
     // no fresh evidence — the estimate may have gone back to draft or aged
     // out of the window since, and requiring it again would strand the
     // attempt for good (pre-push audit P1).
-    const resuming = Boolean(row.own_attempt_parked) && visit.status === 'completed';
+    const resuming = parkedResume;
     let resumeKey = null;
     if (resuming) {
       resumeKey = await parkedKey(conn, visitId);
