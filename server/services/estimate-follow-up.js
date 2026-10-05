@@ -18,6 +18,7 @@
  */
 
 const db = require("../models/db");
+const { typedPhoneBlocksPreAcceptSms } = require("./estimate-contact-gaps");
 const { estimateGreetingFirstName } = require("../utils/greeting-first-name");
 const EmailTemplateLibrary = require("./email-template-library");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
@@ -418,7 +419,10 @@ async function withFollowupPropertyRow(est, payload) {
 async function sendDualChannel(est, { sms, email }) {
   let attempted = false;
   let smsHold = null;
-  if (est.customer_phone && sms) {
+  // A phone the customer typed on the accept card gets no follow-up text
+  // before acceptance (estimate-contact-gaps typedPhoneBlocksPreAcceptSms);
+  // the email half below still goes.
+  if (est.customer_phone && sms && !typedPhoneBlocksPreAcceptSms(est)) {
     try {
       const result = await sendCustomerMessage({
         to: est.customer_phone,

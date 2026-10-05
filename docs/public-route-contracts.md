@@ -1635,8 +1635,14 @@ holder whether a number is a customer's; that is bounded by design (a
 non-customer number is saved and closes the gap, a customer number rings the
 office, and the limiter caps attempts). The page keeps the card step and the
 Accept button locked while `contactGaps.phone` is true and reloads `/data`
-after a save. No message is sent because of this write; the accept's own
-confirmation text then goes to the saved number, as for any estimate phone.
+after a save. No message is sent because of this write, and no AUTOMATED text
+goes to a typed phone before the estimate is accepted
+(`typedPhoneBlocksPreAcceptSms`: the follow-up cron and the extension reply
+skip their SMS half; email is unaffected; a staff-initiated send is the
+office's own act). After the accept the number is the customer's record and
+the accept's confirmation text goes to it, as for any estimate phone. The
+office bell for a matched number is one row per estimate, refreshed without
+re-ringing when a different number is typed.
 
 Pay-after-first-visit flag (owner ruling 2026-09-30, `GATE_PAY_AFTER_FIRST_VISIT`,
 dark). GET `/api/estimates/:token/data` carries `recurringCardPolicy.payAfterFirstVisit:

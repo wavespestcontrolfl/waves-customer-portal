@@ -796,7 +796,11 @@ async function raiseAcceptTypedPhoneMatchAlert({ estimate, typedPhone, candidate
     }, {
       bell: true,
       dedupeKey: `accept-typed-phone-match:${estimate.id}`,
-      dedupeVersion: 'v1',
+      // One row per estimate, kept current: a different typed number (a corrected typo) refreshes the row's detail
+      // and match count without ringing again, so the office never calls back the first, wrong number.
+      dedupeVersion: `typed:${String(typedPhone).replace(/\D/g, '').slice(-10)}:${candidateCount}`,
+      refreshOnDedupe: true,
+      ringOnRefresh: () => false,
       detail: `The estimate had no phone. On the accept card the customer typed ${typedPhone}, which matches ${candidateCount} customer record${candidateCount === 1 ? '' : 's'} on file. `
         + 'Nothing was saved to the estimate, no customer was created or changed and no card was taken. '
         + 'A visit time they picked before this step stays on hold until that hold runs out; it is not booked. '

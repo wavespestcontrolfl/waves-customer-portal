@@ -255,6 +255,16 @@ function phoneTypedByCustomer(estimate) {
     && last10(estimate.customer_phone_typed) === last10(estimate.customer_phone);
 }
 
+// No automated text goes to a typed phone before the estimate is accepted.
+// The customer gave the number on the accept card for appointment reminders
+// and service-day contact; an abandoned page is not consent to sales
+// follow-up texts, and the capture is not the estimate's created_at consent.
+// Email follow-up is unaffected. After the accept the number is the
+// customer's own record and texts as any customer phone does.
+function typedPhoneBlocksPreAcceptSms(estimate) {
+  return phoneTypedByCustomer(estimate) && estimate.status !== 'accepted';
+}
+
 const CALL_OFFICE_REFUSAL = {
   error: 'We could not complete this booking online — please call the Waves office and we’ll finish setting up your service right away.',
   code: 'CUSTOMER_CONTACT_REQUIRED',
@@ -319,6 +329,7 @@ async function saveAcceptContactPhone({ estimate, rawPhone, database, countCusto
 module.exports = {
   saveAcceptContactPhone,
   phoneTypedByCustomer,
+  typedPhoneBlocksPreAcceptSms,
   IDENTITY_MISMATCH,
   capCodePoints,
   hasRealLastName,
