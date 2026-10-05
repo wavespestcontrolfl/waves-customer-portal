@@ -17929,7 +17929,7 @@ const CallRecordingProcessor = {
                     // Savepoint rolled back: visit 2 is lost but the confirmed
                     // primary appointment commits. Dispatch confirms follow-ups
                     // by hand, so surface it in the log for manual recovery.
-                    logger.warn(`[call-proc] Follow-up visit insert failed for ${callSid}; primary booking kept: ${fuErr.message}`);
+                    logger.warn(`[call-proc] Follow-up visit insert failed for ${callSid}; primary booking kept: ${fuErr.code || fuErr.name || 'error'}`);
                     return null;
                   }
                 };

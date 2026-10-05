@@ -236,6 +236,9 @@ async function switchAppointmentProperty(input, actionContext) {
   const { planAppointmentAddress, lockAppointmentAddress, applyAppointmentAddress, refreshAppointmentAddressBriefs } = require('../appointment-address');
   const { previewFingerprint } = require('./authorization-contract');
   const plan = await planAppointmentAddress(db, input.appointment_id, input.property_id, 'visit');
+  // A package visit 1 carries its address to visit 2, which this card does
+  // not show: change it from the Schedule screen.
+  if ((plan.packageChildIds || []).length) return { error: 'This visit has a linked second treatment (package visit 2) that would move to the new address too. Change the address from the Schedule screen. Nothing was changed.' };
   if (input.confirmed !== true) return appointmentPropertyPreview(db, plan);
   if (!actionContext.confirmed || !input._verified_address_fingerprint) return { error: 'Use the confirmation card to approve this change.' };
   const result = await db.transaction(async trx => {
