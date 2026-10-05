@@ -11,6 +11,7 @@ const {
   sanitizeContactEmail,
   sanitizeContactPhone,
   saveAcceptContactPhone,
+  phoneTypedByCustomer,
   CONTACT_LAST_NAME_MAX,
   CONTACT_EMAIL_MAX,
 } = require('../services/estimate-contact-gaps');
@@ -234,6 +235,7 @@ describe('saveAcceptContactPhone', () => {
       update: async (row) => { calls.update.push(row); return updated; },
     };
     const database = (table) => { calls.table = table; return qb; };
+    database.raw = (sql, bindings) => ({ sql, bindings });
     return { database, calls };
   }
   const ESTIMATE = { id: 'est-1', customer_id: null, customer_phone: null, customer_name: 'Dana Sample' };
@@ -249,7 +251,11 @@ describe('saveAcceptContactPhone', () => {
     expect(calls.table).toBe('estimates');
     expect(calls.where).toEqual([{ id: 'est-1' }, { null: 'customer_id' }]);
     expect(calls.whereRaw[0]).toMatch(/customer_phone/);
-    expect(calls.update).toEqual([{ customer_phone: '+19415550142' }]);
+    // The phone and its provenance stamp are written by ONE statement.
+    expect(calls.update).toHaveLength(1);
+    expect(calls.update[0].customer_phone).toBe('+19415550142');
+    expect(calls.update[0].estimate_data.sql).toMatch(/jsonb_set\(COALESCE\(estimate_data/);
+    expect(JSON.parse(calls.update[0].estimate_data.bindings[0])).toEqual({ phoneSource: 'customer_typed', phone: '+19415550142' });
     expect(onExistingCustomerPhone).not.toHaveBeenCalled();
   });
 
@@ -293,5 +299,24 @@ describe('saveAcceptContactPhone', () => {
     const { database } = harness({ updated: 0 });
     const out = await saveAcceptContactPhone({ estimate: ESTIMATE, rawPhone: '9415550142', database, countCustomersWithPhone: async () => 0 });
     expect(out).toEqual({ status: 200, body: { saved: false, alreadyOnFile: true } });
+  });
+});
+
+describe('phoneTypedByCustomer', () => {
+  const stamp = { acceptContact: { phoneSource: 'customer_typed', phone: '+19415550142' } };
+  test('true only while the estimate still carries the typed number', () => {
+    expect(phoneTypedByCustomer({ customer_phone: '+19415550142', estimate_data: stamp })).toBe(true);
+    expect(phoneTypedByCustomer({ customer_phone: '(941) 555-0142', estimate_data: JSON.stringify(stamp) })).toBe(true);
+    expect(phoneTypedByCustomer({ customer_phone: '+19415550199', estimate_data: stamp })).toBe(false);
+    expect(phoneTypedByCustomer({ customer_phone: null, estimate_data: stamp })).toBe(false);
+  });
+  test('false without a stamp, with another source, or on unreadable data', () => {
+    expect(phoneTypedByCustomer({ customer_phone: '+19415550142' })).toBe(false);
+    expect(phoneTypedByCustomer({ customer_phone: '+19415550142', estimate_data: { acceptContact: { phoneSource: 'office', phone: '+19415550142' } } })).toBe(false);
+    expect(phoneTypedByCustomer({ customer_phone: '+19415550142', estimate_data: '{not json' })).toBe(false);
+    expect(phoneTypedByCustomer(null)).toBe(false);
+  });
+  test('an identity snapshot carries the flag directly', () => {
+    expect(phoneTypedByCustomer({ customer_phone: '+19415550142', customer_phone_typed: true })).toBe(true);
   });
 });

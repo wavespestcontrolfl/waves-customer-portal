@@ -234,6 +234,36 @@ async function fillExistingCustomerEmail(trx, customerId, email, { expectedName 
   return backfillCustomerEmailInTrx(trx, { customerId, email, source: 'estimate-accept-contact' });
 }
 
+// Provenance of a phone the customer typed on the accept card. It is stamped
+// on the estimate WITH the phone (one statement) and read by the one phone
+// matcher every card and accept route uses (estimate-public
+// matchAcceptCustomerByPhone): a typed phone must never resolve to an
+// existing customer, not at the save and not later, when a customer with
+// that number may have appeared. The stamp holds only while the estimate
+// still carries the typed number: a phone the office later puts on the
+// estimate is the office's, and is trusted as before.
+// `estimate` may be a full row (estimate_data as jsonb object or string) or
+// an identity snapshot carrying `customer_phone_typed` (see acceptIdentity).
+const TYPED_PHONE_SOURCE = 'customer_typed';
+function last10(value) {
+  return String(value ?? '').replace(/\D/g, '').slice(-10);
+}
+function phoneTypedByCustomer(estimate) {
+  if (!estimate || !hasPhone(estimate.customer_phone)) return false;
+  if (estimate.customer_phone_typed === true) return true;
+  // Unreadable data carries no stamp. The read never throws: this runs inside
+  // the park decision, which must answer even for an estimate whose pricing
+  // inputs cannot be read.
+  let data = null;
+  try {
+    data = estimate.estimate_data;
+    if (typeof data === 'string') data = JSON.parse(data);
+  } catch { data = null; }
+  const stamp = data && typeof data === 'object' ? data.acceptContact : null;
+  return !!stamp && stamp.phoneSource === TYPED_PHONE_SOURCE
+    && last10(stamp.phone) === last10(estimate.customer_phone);
+}
+
 const CALL_OFFICE_REFUSAL = {
   error: 'We could not complete this booking online — please call the Waves office and we’ll finish setting up your service right away.',
   code: 'CUSTOMER_CONTACT_REQUIRED',
@@ -248,8 +278,12 @@ const CALL_OFFICE_REFUSAL = {
 //   - nothing usable typed / malformed → 400 CONTACT_PHONE_INVALID;
 //   - the number belongs to ANY customer on file → nothing written,
 //     onExistingCustomerPhone runs (the office bell), 409 "call the office";
-//   - otherwise a guarded update (still unlinked, still phone-less) saves it.
-//     Zero rows = a concurrent writer closed the gap first: alreadyOnFile.
+//   - otherwise a guarded update (still unlinked, still phone-less) saves it
+//     together with its provenance stamp (estimate_data.acceptContact), in
+//     one statement. Zero rows = a concurrent writer closed the gap first:
+//     alreadyOnFile. A customer who acquires the number AFTER this point is
+//     handled by the stamp, not here: the matcher parks the accept for the
+//     office instead of reusing that customer.
 async function saveAcceptContactPhone({ estimate, rawPhone, database, countCustomersWithPhone, onExistingCustomerPhone }) {
   if (estimate.customer_id || hasPhone(estimate.customer_phone)) {
     return { status: 200, body: { saved: false, alreadyOnFile: true } };
@@ -265,7 +299,13 @@ async function saveAcceptContactPhone({ estimate, rawPhone, database, countCusto
   }
   const saved = await database('estimates').where({ id: estimate.id }).whereNull('customer_id')
     .whereRaw("length(regexp_replace(COALESCE(customer_phone, ''), '[^0-9]', '', 'g')) < 10")
-    .update({ customer_phone: typedPhone });
+    .update({
+      customer_phone: typedPhone,
+      estimate_data: database.raw(
+        "jsonb_set(COALESCE(estimate_data, '{}'::jsonb), '{acceptContact}', ?::jsonb)",
+        [JSON.stringify({ phoneSource: TYPED_PHONE_SOURCE, phone: typedPhone })],
+      ),
+    });
   return saved
     ? { status: 200, body: { saved: true } }
     : { status: 200, body: { saved: false, alreadyOnFile: true } };
@@ -273,6 +313,8 @@ async function saveAcceptContactPhone({ estimate, rawPhone, database, countCusto
 
 module.exports = {
   saveAcceptContactPhone,
+  phoneTypedByCustomer,
+  TYPED_PHONE_SOURCE,
   IDENTITY_MISMATCH,
   capCodePoints,
   hasRealLastName,

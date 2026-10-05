@@ -7361,7 +7361,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     setContactPhoneSaving(true);
     setContactPhoneError('');
     try {
-      const r = await fetch(`${API_BASE}/public/estimates/${token}/contact-phone`, {
+      const r = await fetch(`${API_BASE}/estimates/${token}/contact-phone`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contactPhone }),

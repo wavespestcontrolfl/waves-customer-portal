@@ -242,3 +242,55 @@ describe('acceptPhoneParkedVerdict (the preflight park decision)', () => {
     expect(dbMock).not.toHaveBeenCalled();
   });
 });
+
+// Owner 2026-10-04: a phone the customer TYPED on the accept card (PUT /:token/contact-phone stamps its provenance on
+// the estimate) proves nothing about who typed it. It never resolves to an existing customer, at the save or later.
+describe('a phone typed by the customer never resolves to an existing customer', () => {
+  const typed = (overrides = {}) => janeEstimate({
+    customer_phone: '+19415550142',
+    estimate_data: { acceptContact: { phoneSource: 'customer_typed', phone: '+19415550142' } },
+    ...overrides,
+  });
+
+  it('a lone candidate that AGREES on email or address is still refused and parked', async () => {
+    // Without the stamp this exact pair is an ordinary match (the email agrees).
+    mockDbFixtures['customers:list'] = [{ ...BOB, email: 'jane@example.com' }];
+    expect((await matchAcceptCustomerByPhone(janeEstimate())).match.id).toBe('cust-bob');
+    const res = await matchAcceptCustomerByPhone(typed());
+    expect(res.match).toBeNull();
+    expect(res.contradicted).toBe(true);
+    expect(res.rejectedCustomerId).toBe('cust-bob');
+    expect(await acceptPhoneParkedVerdict(typed())).toEqual({ rejectedCustomerId: 'cust-bob' });
+  });
+
+  it('several candidates are refused too, even one a unique email would have picked', async () => {
+    const LANDLORD = { ...BOB, id: 'cust-landlord', email: 'owner@example.com', address_line1: '10 Oak Ln' };
+    const RENTAL = { ...BOB, id: 'cust-rental', email: 'jane@example.com', address_line1: '55 Pine Ct' };
+    mockDbFixtures['customers:list'] = [LANDLORD, RENTAL];
+    const res = await matchAcceptCustomerByPhone(typed());
+    expect(res.match).toBeNull();
+    expect(res.contradicted).toBe(true);
+    expect(res.candidateCount).toBe(2);
+  });
+
+  it('no candidate: an ordinary no-match, so the accept creates the new customer', async () => {
+    mockDbFixtures['customers:list'] = [];
+    const res = await matchAcceptCustomerByPhone(typed());
+    expect(res).toEqual({ match: null, candidateCount: 0 });
+  });
+
+  it('the stamp reads from a JSON string, and from the accept transaction identity snapshot', async () => {
+    mockDbFixtures['customers:list'] = [{ ...BOB, email: 'jane@example.com' }];
+    const asString = typed({ estimate_data: JSON.stringify({ acceptContact: { phoneSource: 'customer_typed', phone: '+19415550142' } }) });
+    expect((await matchAcceptCustomerByPhone(asString)).contradicted).toBe(true);
+    const snapshot = { customer_phone: '+19415550142', customer_email: 'jane@example.com', address: '742 Evergreen Ter, Sarasota, FL 34236', customer_phone_typed: true };
+    expect((await matchAcceptCustomerByPhone(snapshot)).contradicted).toBe(true);
+  });
+
+  it('a phone the office later puts on the estimate is the office\'s: the stale stamp no longer applies', async () => {
+    mockDbFixtures['customers:list'] = [{ ...BOB, phone: '(941) 555-0199', email: 'jane@example.com' }];
+    const res = await matchAcceptCustomerByPhone(typed({ customer_phone: '9415550199' }));
+    expect(res.match.id).toBe('cust-bob');
+    expect(res.contradicted).toBeUndefined();
+  });
+});

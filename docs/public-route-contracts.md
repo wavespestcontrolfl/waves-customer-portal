@@ -1599,9 +1599,20 @@ CUSTOMER_CONTACT_REQUIRED` with the standing "call the Waves office" copy —
 the number already belongs to ANY live customer: NOTHING is written, and one
 Estimates bell (deduped per estimate) gives the office the typed number. A
 typed phone proves nothing about who typed it, so it never attaches the
-estimate, a saved card or a hold to an existing account; a diff that lets a
-typed phone reach `matchAcceptCustomerByPhone`'s reuse path, or that writes
-it when it matches a customer, is a P0. The 200/409 difference tells a token
+estimate, a saved card or a hold to an existing account, at the save or
+later. The save stamps its provenance in the same statement
+(`estimate_data.acceptContact = { phoneSource: 'customer_typed', phone }`),
+and `matchAcceptCustomerByPhone` — the one matcher every card and accept
+route reads — treats ANY candidate as a contradiction while the estimate
+still carries that typed number (`phoneTypedByCustomer`): no match, and the
+standing B18 park answers it (`ACCEPT_NEEDS_OFFICE_REVIEW`, nothing created,
+no card captured, the office told). So a customer who acquires the number
+after the save is not reused either. A phone the office later puts on the
+estimate differs from the stamp and is trusted as before. A diff that lets a
+typed phone resolve to an existing customer, or that writes it when it
+matches one, is a P0. The route sets `Cache-Control: no-store`,
+`Pragma: no-cache` and `Referrer-Policy: no-referrer` on every response, and
+its limiter is skipped while the gate is off (the 404 never becomes a 429). The 200/409 difference tells a token
 holder whether a number is a customer's; that is bounded by design (a
 non-customer number is saved and closes the gap, a customer number rings the
 office, and the limiter caps attempts). The page keeps the card step and the

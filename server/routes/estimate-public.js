@@ -30,6 +30,7 @@ const {
   sanitizeContactFirstName,
   sanitizeContactEmail,
   saveAcceptContactPhone,
+  phoneTypedByCustomer,
   fillExistingCustomerLastName,
   fillExistingCustomerEmail,
   cleanedNameTokens: contactGapNameTokens,
@@ -595,7 +596,15 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
     .orderBy('updated_at', 'desc');
   if (lockShare) candidateQuery = candidateQuery.forShare().noWait();
   const candidates = await candidateQuery;
-  let contradicted = candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate);
+  // A phone the customer typed on the accept card (PUT /:token/contact-phone, stamped with its provenance) proves
+  // nothing about who typed it, so it NEVER resolves to an existing customer, however many share the number and
+  // whatever their email or address: any candidate is a contradiction, and the standing B18 park answers it (nothing
+  // created, no card captured, the office told). This is the one matcher every card and accept route reads, so the
+  // rule holds at the save and for every later request, including a customer who acquired the number afterwards.
+  const typedPhone = phoneTypedByCustomer(estimate);
+  let contradicted = typedPhone
+    ? candidates.length > 0
+    : candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate);
   // The accept resolves a customer-unlinked GROUPED estimate through its accepted sibling BEFORE it ever matches by
   // phone (the sibling is the deterministic owner; a second property's address naturally differs), so that estimate
   // never reaches the phone match this contradiction rule guards: it is not parked, and every reader of the matcher
@@ -608,7 +617,9 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
     contradicted = false;
   }
   const verdict = {
-    match: candidates.length === 1 && !contradicted ? candidates[0] : pickAcceptCustomerMatch(candidates, estimate),
+    match: typedPhone && contradicted
+      ? null
+      : candidates.length === 1 && !contradicted ? candidates[0] : pickAcceptCustomerMatch(candidates, estimate),
     candidateCount: candidates.length,
     ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id } : {}),
   };
@@ -807,7 +818,10 @@ async function raiseAcceptParkedAlert({ estimate, rejectedCustomerId }) {
         who: 'person',
       };
       const detail = `The phone number on this estimate belongs to ${rejectedName} (customer id ${rejectedCustomerId}), `
-        + 'whose email and address do not match the estimate, so online accepting and booking are held for the office: no customer was created or changed, no card was taken and no time is held. '
+        + (phoneTypedByCustomer(estimate)
+          ? 'and the customer typed that number on the estimate page, which does not prove it is theirs, '
+          : 'whose email and address do not match the estimate, ')
+        + 'so online accepting and booking are held for the office: no customer was created or changed, no card was taken and no time is held. '
         + 'Fix the phone on the estimate, or link the estimate to the right customer, and then they can accept.';
       const metadata = { estimateId: String(estimate.id), rejectedCustomerId: String(rejectedCustomerId) };
       let filed;
@@ -12225,7 +12239,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // profile whose email/address uniquely matches — splitting the
         // estimate off the existing account. pickAcceptCustomerMatch needs the
         // full set to judge ambiguity.
-        acceptedPhoneIdentity = { customer_phone: estimate.customer_phone, customer_email: estimate.customer_email, address: estimate.address };
+        // customer_phone_typed carries the accept-card provenance onto the snapshot (it has no estimate_data).
+        acceptedPhoneIdentity = { customer_phone: estimate.customer_phone, customer_email: estimate.customer_email, address: estimate.address, customer_phone_typed: phoneTypedByCustomer(estimate) };
         const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(acceptedPhoneIdentity, trx, { authoritative: true, afterSiblingResolution: true });
         // B18: the card policy, hold auto-satisfy and prepay quote were decided on the PREFLIGHT identity. A
         // contradiction here the preflight did not see (the candidate or the phone's candidate set moved in
@@ -18817,11 +18832,17 @@ const contactPhoneLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  // Gate off = the route does not exist: its 404 must not turn into a 429.
+  skip: () => !featureGates.isEnabled('estimateAcceptPhone'),
   keyGenerator: (req) => `${require('../middleware/rate-limit-key').rateLimitKey(req)}:${req.params.token}`,
   message: { error: 'Too many attempts. Please wait a moment and try again, or call our office.' },
 });
 router.put('/:token/contact-phone', contactPhoneLimiter, async (req, res, next) => {
   try {
+    // Tokenized estimate response: never cached, never sent as a referrer. Stamped before any branch.
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Referrer-Policy', 'no-referrer');
     if (!featureGates.isEnabled('estimateAcceptPhone')) return res.status(404).json({ error: 'Estimate not found' });
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
