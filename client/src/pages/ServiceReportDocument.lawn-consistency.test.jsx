@@ -111,3 +111,26 @@ describe('lawn PDF "No lawn issues" row', () => {
     expect(text(data, 'tok-c3')).toContain(NO_ISSUES);
   });
 });
+
+describe('tree & shrub PDF "No issues" row', () => {
+  const TS_NO_ISSUES = 'No tree or shrub issues observed this visit';
+  const tsFinding = { id: 'f3', category: 'no_activity', severity: 'info', title: TS_NO_ISSUES, detail: 'Inspected tree and shrub areas did not show conditions requiring a corrective finding.' };
+  const tsData = (insights, status) => lawnData({
+    serviceLine: 'tree_shrub',
+    findings: [tsFinding],
+    reportV2: { snapshot: { overallScore: 80, statusHeadline: 'Landscape check', status }, insights },
+  });
+  const text = (data, token) => render(<ServiceReportDocument data={data} token={token} />).container.textContent;
+
+  it('is left out beside an urgent insight', () => {
+    const urgent = { category: 'pest', status: 'urgent', priority: 1, headline: 'Action needed', whatWeSaw: 'Heavy scale on the ficus.' };
+    expect(text(tsData([urgent], 'needs_attention'), 'tok-t1')).not.toContain(TS_NO_ISSUES);
+    cleanup();
+    expect(text(tsData([urgent], 'healthy'), 'tok-t2')).not.toContain(TS_NO_ISSUES);
+  });
+
+  it('is still printed on a clean tree & shrub visit', () => {
+    const clear = { category: 'overall', status: 'stable', priority: 9, headline: 'Plants look steady', whatWeSaw: 'No problems seen.' };
+    expect(text(tsData([clear], 'stable'), 'tok-t3')).toContain(TS_NO_ISSUES);
+  });
+});

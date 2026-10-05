@@ -909,12 +909,16 @@ export default function ServiceReportDocument({ data, token }) {
   // came from the findings pipeline; a bare title did not. Fail closed on
   // the bare titles — AGENTS.md: raw technician_notes never egress.
   // A clean-visit "No ... observed this visit" row is dropped when the payload
-  // carries any finding, watch item or stress pattern: the same rule as the
-  // server's todays_result_overclaims_clear reconciliation (a watch or
-  // needs-attention insight), plus any other recorded finding.
+  // carries any finding, watch item or stress pattern. Lawn and tree & shrub
+  // share the reportV2 slot, so every status the V2 builders emit counts except
+  // the clear ones (healthy / strong / stable / good / tracking / unknown):
+  // watch, needs_attention and urgent. Same idea as the server's
+  // todays_result_overclaims_clear reconciliation, plus any other recorded finding.
+  const V2_CLEAR_STATUSES = ['healthy', 'strong', 'stable', 'good', 'tracking', 'unknown', ''];
+  const v2IssueStatus = (status) => !V2_CLEAR_STATUSES.includes(String(status || '').toLowerCase());
   const issueRecorded = (Array.isArray(data.findings) ? data.findings : []).some((f) => f && f.category !== 'no_activity' && String(f.title || '').trim())
-    || (Array.isArray(v2?.insights) ? v2.insights : []).some((i) => i && (i.status === 'watch' || i.status === 'needs_attention'))
-    || ['watch', 'needs_attention'].includes(String(v2?.snapshot?.status || ''));
+    || (Array.isArray(v2?.insights) ? v2.insights : []).some((i) => i && v2IssueStatus(i.status))
+    || v2IssueStatus(v2?.snapshot?.status);
   const recordFindings = (Array.isArray(data.findings) ? data.findings : [])
     .filter((finding) => finding && String(finding.title || '').trim())
     .filter((finding) => !(issueRecorded && finding.category === 'no_activity'))

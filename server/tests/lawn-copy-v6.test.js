@@ -116,7 +116,7 @@ describe('whatToExpect: approved rows only, their own sentences word for word', 
     ]);
     const { fields, expectSentences } = buildLawnCopyV6(reportV2(), { nextVisitGapDays: 42 }, deps);
     expect(fields.whatToExpect).toBe('Greening builds slowly. By your next visit, color may be up. Insects slow down.');
-    expect(expectSentences.filter((s) => s.needsVisit)).toHaveLength(1);
+    expect(expectSentences.filter((s) => s.needsVisit)).toHaveLength(2); // frozen whole; one prints
     // A first product with no by-next-visit sentence leaves the next one's in.
     const later = expectationsReturning([
       row('r1', [['visibleChange', 'Greening builds slowly.']]),
@@ -151,6 +151,34 @@ describe('whatToExpect: approved rows only, their own sentences word for word', 
     };
     const out = await resolveLawnCopyV6ForRender({ structuredNotes: { lawnCopyV6: { a1: frozen } }, assessmentId: 'a1', reportV2: reportV2(), ctx: { nextVisitIso: '2026-11-11' } });
     expect(out.copy.whatToExpect).toBe('Greening builds slowly. Thickening takes longer. By your next visit, color may be up.');
+  });
+
+  test('a row whose sentences all exceed the word cap does not count toward the 2-row limit (a later row that fits is still used)', () => {
+    const w = (n, label) => Array.from({ length: n }, (_, i) => `${label}${i}`).join(' ');
+    const deps = expectationsReturning([
+      row('r1', [['visibleChange', `${w(26, 'a')}.`]]),
+      row('r2', [['visibleChange', `${w(17, 'b')}.`]]),
+      row('r3', [['visibleChange', `${w(10, 'c')}.`]]),
+    ]);
+    const { fields, expectRows } = buildLawnCopyV6(reportV2(), {}, deps);
+    expect(fields.whatToExpect).toBe(`${w(26, 'a')}. ${w(10, 'c')}.`);
+    expect(expectRows.map((r) => r.id)).toEqual(['r1', 'r3']);
+  });
+
+  test('a rescheduled visit falls back to a later row\'s schedule-independent sentence', async () => {
+    const deps = expectationsReturning([
+      { id: 'r1', approved: true, judgedByAbsence: false, sentences: [{ key: 'visibleChange', text: 'Weeds curl.' }, { key: 'byNextVisit', text: 'Gone by your next visit.' }] },
+      { id: 'r2', approved: true, judgedByAbsence: true, sentences: [{ key: 'byNextVisit', text: 'Little to see by your next visit.' }] },
+    ]);
+    const built = buildLawnCopyV6(reportV2(), { nextVisitGapDays: 42 }, deps);
+    expect(built.fields.whatToExpect).toBe('Weeds curl. Gone by your next visit.');
+    const entry = { v: 1, assessmentId: 'a1', nextVisitIso: '2026-11-11', fields: built.fields, expectSentences: built.expectSentences };
+    const replay = (nextVisitIso) => resolveLawnCopyV6ForRender({
+      structuredNotes: { lawnCopyV6: { a1: entry } }, assessmentId: 'a1', reportV2: reportV2(), ctx: { nextVisitIso },
+    }).then((r) => r.copy.whatToExpect);
+    expect(await replay('2026-11-11')).toBe('Weeds curl. Gone by your next visit.');
+    expect(await replay('2026-11-18')).toBe('Weeds curl. Little to see by your next visit.');
+    expect(await replay(null)).toBe('Weeds curl.');
   });
 
   test('an expectations failure leaves whatToExpect null and the other fields standing', () => {
@@ -237,19 +265,14 @@ describe('resolveLawnCopyV6ForRender', () => {
         ] }),
       };
       const built = buildLawnCopyV6(reportV2(), { nextVisitGapDays: 42 }, deps);
+      // The freeze keeps every sentence the cap kept, so a replay can choose.
       expect(built.expectSentences).toEqual([
         { key: 'visibleChange', text: 'Weeds curl.', needsVisit: false, gapBased: false },
         { key: 'byNextVisit', text: 'Gone by your next visit.', needsVisit: true, gapBased: true },
+        { key: 'byNextVisit', text: 'Little to see by your next visit.', needsVisit: true, gapBased: false },
       ]);
-      // Only one by-next-visit sentence prints (the first product's); an
-      // absence-judged row's own sentence is marked as not gap-timed.
-      const absence = buildLawnCopyV6(reportV2(), { nextVisitGapDays: 42 }, {
-        buildExpectations: () => ({ rows: [
-          { id: 'r1', approved: true, judgedByAbsence: false, sentences: [{ key: 'visibleChange', text: 'Weeds curl.' }] },
-          { id: 'r2', approved: true, judgedByAbsence: true, sentences: [{ key: 'byNextVisit', text: 'Little to see by your next visit.' }] },
-        ] }),
-      });
-      expect(absence.expectSentences[1]).toEqual({ key: 'byNextVisit', text: 'Little to see by your next visit.', needsVisit: true, gapBased: false });
+      // ...and only one by-next-visit sentence prints: the first product's.
+      expect(built.fields.whatToExpect).toBe('Weeds curl. Gone by your next visit.');
       // No known visit: no "by your next visit" sentence at all, absence rows included.
       const unknown = buildLawnCopyV6(reportV2(), { nextVisitGapDays: null }, deps);
       expect(unknown.fields.whatToExpect).toBe('Weeds curl.');
@@ -258,7 +281,7 @@ describe('resolveLawnCopyV6ForRender', () => {
       await resolveLawnCopyV6ForRender({ structuredNotes: {}, serviceRecordId: 's1', assessmentId: 'a1', reportV2: reportV2(), ctx: { nextVisitGapDays: 42, nextVisitIso: '2026-11-11' }, knex, deps });
       const written = JSON.parse(chain.update.mock.calls[0][0].structured_notes.bindings[0]).a1;
       expect(written.nextVisitIso).toBe('2026-11-11');
-      expect(written.expectSentences).toHaveLength(2);
+      expect(written.expectSentences).toHaveLength(3);
     });
   });
 
