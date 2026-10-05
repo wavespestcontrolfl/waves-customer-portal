@@ -181,9 +181,19 @@ describe('plain refusals — nothing previewed, nothing sent', () => {
     expect((await run({})).preview).toBe(true);
   });
 
-  test('customer opted out of receipts, or settings unreadable', async () => {
+  test('customer opted out of receipts: not refused, the card says so and the opt-out is pinned', async () => {
     receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: true, prefsLookupFailed: false });
-    expect((await run({})).error).toMatch(/opted out of payment receipts/);
+    const out = await run({});
+    expect(out.preview).toBe(true);
+    expect(out.opted_out).toMatch(/opted out of payment receipts/);
+    expect(out._version.opted_out).toBe(true);
+    // Not opted out: no line, and the pin says so (an opt-out set since the card is drift).
+    const plain = await run({});
+    expect(plain).not.toHaveProperty('opted_out');
+    expect(plain._version.opted_out).toBe(false);
+  });
+
+  test('receipt settings unreadable: refused', async () => {
     receiptEmailOptOutState.mockResolvedValueOnce({ receiptKillSwitch: false, prefsLookupFailed: true });
     expect((await run({})).error).toMatch(/receipt settings could not be read/);
   });

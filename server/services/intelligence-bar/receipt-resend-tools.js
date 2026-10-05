@@ -44,7 +44,7 @@ const RECEIPT_RESEND_TOOLS = [
   {
     name: 'resend_receipt',
     description: `Send (or re-send) the paid receipt for ONE invoice to the customer, exactly as the Invoices page "Resend receipt" button does. The first call returns a PREVIEW and sends nothing: the invoice, the amount the receipt states, the paid date, whether a receipt was already sent and when (then the card says plainly it is a RE-SEND), the channels, and who it reaches (masked). The operator approves on the confirmation card; the confirmed run re-checks all of it, refuses if anything changed, and reports email and text separately (sent, not sent with the reason, or unknown when the provider did not answer), the outcome of the visit closeout, and what became of a queued automatic receipt for the invoice (back in the queue and will deliver on its own, held for reconciliation, or none) — say only what those fields report.
-Refused with the reason: a memo with a text-only send, invoice not found, not paid, a receipt for this invoice is being delivered right now, the customer opted out of payment receipts, no recipient on file, amount unverifiable.
+Refused with the reason: a memo with a text-only send, invoice not found, not paid, a receipt for this invoice is being delivered right now, no recipient on file, amount unverifiable. A customer who opted out of payment receipts is NOT refused (a staff resend usually answers their own request): the card says so, and you tell the operator before they confirm.
 Takes invoice_id OR invoice_number (e.g. WPC-2026-0534), exactly one. via is email, sms or both (default both). memo is an optional note that appears in the receipt EMAIL only (the receipt text, the receipt PDF and the receipt page do not carry it), so it needs via email or both: a memo with via sms is refused — only include a memo when the operator gave you the words. The customer is contacted. Admin-only.
 Use for: "resend the receipt for invoice X", "send the paid receipt again", "the customer never got their receipt". To know whether a receipt already went out, read receipt_sent_at from get_invoice_detail / get_customer_invoices; never guess.`,
     input_schema: {
@@ -129,7 +129,7 @@ async function probeCloseout(invoice) {
 // The card's optional lines: a queued automatic receipt (disclosed, not pinned: the claim settles
 // it) and the visit closeout (backed by issuedCloseoutTarget and the closeout's quiet posture,
 // runQuietCloseout: backfill, no completion text, report, review ask or charge).
-function optionalCardLines({ memo, queuedJob, closeout }) {
+function optionalCardLines({ memo, queuedJob, closeout, optedOut }) {
   const closeoutLine = closeout?.resuming
     ? `Also finishes a closeout already started for the linked visit — ${closeout.serviceType || 'visit'} on ${closeout.date}: completes its remaining steps, even if the receipt itself does not go out; no completion text, report, review request or charge`
     : `Also completes the linked visit — ${closeout?.serviceType || 'visit'} on ${closeout?.date}: creates its service record, even if the receipt itself does not go out; no completion text, report, review request or charge`;
@@ -139,6 +139,7 @@ function optionalCardLines({ memo, queuedJob, closeout }) {
       automatic_receipt: 'An automatic receipt is queued for this invoice. If this send does not deliver the email, it goes back in the queue and will try again on its own; a delivered email closes it.',
     } : {}),
     ...(closeout ? { visit_closeout: closeoutLine } : {}),
+    ...(optedOut ? { opted_out: 'This customer opted out of payment receipts. Send only if they asked for this receipt.' } : {}),
   };
 }
 
@@ -157,6 +158,8 @@ function approvedVersion({ invoice, via, who, memo, closeout, sentAt }) {
     amount: who.amount,
     paid: paidKey(invoice),
     recipients_key: receiptRecipientsKey(who),
+    // The opt-out the card disclosed: one set since the card is drift.
+    opted_out: who.optedOut === true,
     memo,
     // The linked visit the closeout would complete (null = none).
     closeout_visit: closeout?.visitId || null,
@@ -192,7 +195,7 @@ async function derivePlan(input, { ownClaimToken = null } = {}) {
       : 'No receipt is recorded as sent yet',
     channels: VIA_LABEL[via],
     recipients: reach(who, via),
-    ...optionalCardLines({ memo, queuedJob, closeout }),
+    ...optionalCardLines({ memo, queuedJob, closeout, optedOut: who.optedOut }),
     _version: approvedVersion({ invoice, via, who, memo, closeout, sentAt }),
     note: 'PREVIEW ONLY — nothing was sent. Confirm sends exactly this; if anything changed it refuses.',
   };

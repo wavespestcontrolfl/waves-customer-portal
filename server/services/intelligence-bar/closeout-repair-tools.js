@@ -194,7 +194,9 @@ async function receiptInvoiceOrBlocker(invoiceId, knex, { resend = false, ownCla
   }
   const optOut = await receiptEmailOptOutState(invoice);
   if (optOut.prefsLookupFailed) return { blocker: "the customer's receipt settings could not be read" };
-  if (optOut.receiptKillSwitch) return { blocker: 'the customer opted out of payment receipts' };
+  // A staff resend usually answers the customer's own request for the receipt, so the opt-out does
+  // not block it (the Invoices button sends too); the resend card discloses it instead (owner 2026-10-05).
+  if (optOut.receiptKillSwitch) return resend ? { invoice, optedOut: true } : { blocker: 'the customer opted out of payment receipts' };
   return { invoice };
 }
 
@@ -250,7 +252,7 @@ async function receiptRecipients(invoiceId, knex, { resend = false, ownClaimToke
   } catch {
     return { blocker: 'the receipt amount could not be verified (payment lookup failed)' };
   }
-  return { email: emailLeg.email, phone, app, payerBilled, invoiceNumber: invoice.invoice_number || null, amount, invoice };
+  return { email: emailLeg.email, phone, app, payerBilled, invoiceNumber: invoice.invoice_number || null, amount, invoice, optedOut: eligible.optedOut === true };
 }
 
 const receiptRecipientsKey = (who) => crypto.createHash('sha256').update(JSON.stringify([who.email, who.phone, who.app === true])).digest('hex').slice(0, 16);
