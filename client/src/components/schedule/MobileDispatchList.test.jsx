@@ -41,7 +41,7 @@ describe('MobileDispatchList technician workflow', () => {
     );
 
     const assignButton = screen.getByRole('button', { name: 'Assign technician' });
-    expect(assignButton).toHaveClass('h-11');
+    expect(assignButton).toHaveStyle({ height: '56px' });
     fireEvent.click(assignButton);
     fireEvent.click(screen.getByRole('button', { name: 'Alex Tech' }));
 
@@ -73,7 +73,7 @@ describe('MobileDispatchList technician workflow', () => {
     );
 
     const action = await screen.findByRole('button', { name: 'Tech En Route' });
-    expect(action).toHaveClass('h-11');
+    expect(action).toHaveStyle({ height: '56px' });
     fireEvent.click(action);
 
     await waitFor(() => expect(onEnRoute).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-1' })));
@@ -395,5 +395,36 @@ describe('MobileDispatchList open hours with a windowless visit', () => {
     const rows = screen.getAllByRole('button', { name: /^Book open hour/ });
     const anytime = screen.getByText('Anytime Customer');
     expect(rows[rows.length - 1].compareDocumentPosition(anytime) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe('MobileDispatchList card button labels', () => {
+  it('puts a word under each card button', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[{ ...SERVICE, technicianId: 'tech-1', technicianName: 'Alex Tech' }]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+        onProtocol={vi.fn()}
+        onEnRoute={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Technician: Alex Tech' })).toHaveTextContent('ATech');
+    expect(screen.getByRole('button', { name: 'Protocol' })).toHaveTextContent('Protocol');
+    expect(screen.getByRole('button', { name: 'Tech En Route' })).toHaveTextContent('En route');
+    expect(screen.getByRole('link', { name: 'Open 1 Test Lane in Google Maps' })).toHaveTextContent('Map');
+  });
+
+  it('labels the tech button Assign when no tech is set', () => {
+    render(
+      <MobileDispatchList
+        mode="day"
+        date="2026-07-15"
+        services={[SERVICE]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Assign technician' })).toHaveTextContent('Assign');
   });
 });
