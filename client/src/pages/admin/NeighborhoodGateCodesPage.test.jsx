@@ -231,7 +231,8 @@ it("lists found codes with the customer linked, the client sentence and the code
   await waitFor(() => expect(screen.getByText("No codes are waiting.")).toBeInTheDocument());
   const post = rawAdminFetch.mock.calls.find(([, init]) => init?.method === "POST");
   expect(post[0]).toBe("/admin/access-codes/f1/accept");
-  expect(JSON.parse(post[1].body)).toEqual({ kind: "door", life: "standing", code: "9876", instructions: null });
+  // Nothing edited: the save sends no field, so the server keeps the row as filed.
+  expect(JSON.parse(post[1].body)).toEqual({});
 });
 
 it("Dismiss posts dismiss, and a one-visit code offers the visits that came with the list", async () => {

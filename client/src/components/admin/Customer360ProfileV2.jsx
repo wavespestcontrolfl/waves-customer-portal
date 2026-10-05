@@ -7489,9 +7489,9 @@ export function CustomerNeighborhoodBlock({ customerId }) {
 // ─── Access codes (every code a client gives, staff only) ────────
 // Active codes, the ones found in texts that wait for a one-tap office save,
 // and an add form. Admin-only; renders nothing at all when the section is off
-// (404) or the viewer is not a full admin (403). `upcomingScheduled` is the
-// visit list this page already loaded: it feeds the visit picker.
-export function CustomerAccessCodesBlock({ customerId, upcomingScheduled = [] }) {
+// (404) or the viewer is not a full admin (403). The visit picker uses the
+// visits the access-codes API returns with their homes.
+export function CustomerAccessCodesBlock({ customerId }) {
   const [codes, setCodes] = useState(null);
   const [loadError, setLoadError] = useState("");
   const [adding, setAdding] = useState(false);
@@ -7557,7 +7557,7 @@ export function CustomerAccessCodesBlock({ customerId, upcomingScheduled = [] })
       {adding && (
         <div className="mb-2">
           <AddCodeForm
-            visits={codes?.visits || upcomingScheduled}
+            visits={codes?.visits || []}
             homes={codes?.properties || []}
             onSubmit={(body) => post("", { customerId, ...body })}
             onCancel={() => setAdding(false)}
@@ -7582,7 +7582,7 @@ export function CustomerAccessCodesBlock({ customerId, upcomingScheduled = [] })
               <FoundCodeCard
                 key={row.id}
                 row={row}
-                visits={codes?.visits || upcomingScheduled}
+                visits={codes?.visits || []}
                 homes={codes?.properties || []}
                 onSave={(r, body) => post(`/${r.id}/accept`, body)}
                 onDismiss={(r) => post(`/${r.id}/dismiss`)}
@@ -7595,7 +7595,7 @@ export function CustomerAccessCodesBlock({ customerId, upcomingScheduled = [] })
   );
 }
 
-function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, upcomingScheduled }) {
+function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
@@ -7675,7 +7675,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, upcomin
       <>
         <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} />
         {isAdmin && <CustomerNeighborhoodBlock customerId={customerId} />}
-        {isAdmin && <CustomerAccessCodesBlock customerId={customerId} upcomingScheduled={upcomingScheduled} />}
+        {isAdmin && <CustomerAccessCodesBlock customerId={customerId} />}
       </>
     );
   }
@@ -7724,7 +7724,6 @@ function CustomerProfileProperty({
   reloadCustomer,
   onCustomerMutation,
   prefs,
-  upcomingScheduled,
 }) {
   const handlePropertyChanged = async () => {
     onCustomerMutation?.({ customerId, action: "update" });
@@ -7824,7 +7823,6 @@ function CustomerProfileProperty({
             isAdmin={isAdmin}
             prefs={prefs}
             onSaved={handlePropertyChanged}
-            upcomingScheduled={upcomingScheduled}
           />
         </div>{" "}
       </div>{" "}
@@ -11144,7 +11142,6 @@ export default function Customer360ProfileV2({
         reloadCustomer={reloadCustomer}
         onCustomerMutation={onCustomerMutation}
         prefs={prefs}
-        upcomingScheduled={upcomingScheduled}
       />
     ),
     compliance: (

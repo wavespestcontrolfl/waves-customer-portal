@@ -173,13 +173,19 @@ function CodeFields({ idPrefix, draft, setDraft, choices, busy, homes = [] }) {
 }
 
 // The body for accept and add. A standing code never names a visit.
-export function bodyFromDraft(draft) {
-  const body = {
+// For a found code, only the fields the office changed are sent: a text
+// corrected while the card was open (a new life or directions on the same
+// row) is not overwritten by the card's older copy.
+export function bodyFromDraft(draft, original = null) {
+  const all = {
     kind: draft.kind,
     life: draft.life,
     code: draft.code.trim() || null,
     instructions: draft.instructions.trim() || null,
   };
+  const body = original
+    ? Object.fromEntries(Object.entries(all).filter(([key, value]) => value !== ((original[key] ?? null) || null)))
+    : all;
   if (draft.life === "visit" && draft.scheduledServiceId) body.scheduledServiceId = draft.scheduledServiceId;
   // A multi-home account names the home of a standing code.
   if (draft.life === "standing" && draft.propertyId) body.propertyId = draft.propertyId;
@@ -276,7 +282,7 @@ export function FoundCodeCard({ row, visits, homes = null, onSave, onDismiss, re
       <CodeFields idPrefix={`found-${row.id}`} draft={draft} setDraft={setDraft} choices={choices} busy={busy} homes={homeList} />
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={busy || !typed} onClick={() => run(() => onSave(row, bodyFromDraft(draft)), "Could not save the code")}>
+        <Button size="sm" disabled={busy || !typed} onClick={() => run(() => onSave(row, bodyFromDraft(draft, row)), "Could not save the code")}>
           Save
         </Button>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(() => onDismiss(row), "Could not dismiss the code")}>

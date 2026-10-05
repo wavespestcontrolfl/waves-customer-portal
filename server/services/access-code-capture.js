@@ -873,10 +873,11 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (!(await sourceStillOwned(trx, row))) return fail(409, 'source_moved');
       if (!(await sourceStillSupports(trx, row))) return fail(409, 'source_changed');
       // A standing code's home is settled first: duplicates are per home.
+      // (A one-visit code takes its visit's home, below.)
       const standingHome = next.life === 'standing'
-        ? await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id }) : null;
-      if (standingHome?.error) return fail(400, standingHome.error);
-      if (standingHome) next.property_id = standingHome.propertyId;
+        ? await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id }) : { propertyId: null };
+      if (standingHome.error) return fail(400, standingHome.error);
+      next.property_id = standingHome.propertyId;
       const refused = await supersedeOrRefuse(trx, row.customer_id, next, { exceptId: row.id, adminUserId });
       if (refused) return refused;
       // A one-visit candidate lives 14 days from the day it was sent; one past
@@ -889,8 +890,7 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (visit.error) return fail(400, visit.error);
       const scheduledServiceId = visit.id;
       if (await visitTwin(trx, row.customer_id, next, scheduledServiceId, row.id)) return fail(409, 'duplicate_active');
-      const home = standingHome || (visit.propertyId ? { propertyId: visit.propertyId }
-        : await resolveHome(trx, row.customer_id, { life: next.life, propertyId, current: row.property_id }));
+      const home = next.life === 'standing' ? standingHome : { propertyId: visit.propertyId || null };
       if (home.error) return fail(400, home.error);
       const profileField = await fillEmptyProfileField(trx, row.customer_id, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));

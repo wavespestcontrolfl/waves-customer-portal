@@ -210,6 +210,20 @@ function FoundInMessages({ items, total, loading, error, onRetry, onMore, onSave
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// The page's two views. Shown only while the access-codes section is on.
+function ViewTabs({ show, tab, onChange, foundTotal }) {
+  if (!show) return null;
+  return (
+    <div className="mb-3 flex items-center gap-2" role="group" aria-label="Gate codes view">
+      {[["neighborhoods", "Neighborhoods"], ["found", `Found in messages (${foundTotal})`]].map(([key, label]) => (
+        <Button key={key} size="sm" variant={tab === key ? "primary" : "secondary"} aria-pressed={tab === key} onClick={() => onChange(key)}>
+          {label}
+        </Button>
+      ))}
+    </div>
+  );
+}
+
 export default function NeighborhoodGateCodesPage() {
   // A link (a conflict bell, a customer's neighborhood) can open one neighborhood.
   const [searchParams, setSearchParams] = useSearchParams();
@@ -250,7 +264,10 @@ export default function NeighborhoodGateCodesPage() {
       }));
     } catch (err) {
       if (seq !== foundSeq.current) return;
-      if (err.status === 404 || err.status === 403) setFound({ available: false, items: [], total: 0, loading: false, error: "" });
+      if (err.status === 404 || err.status === 403) {
+        setFound({ available: false, items: [], total: 0, loading: false, error: "" });
+        setTab("neighborhoods");
+      }
       // Any other failure keeps the tab, so its error and Try again stay reachable.
       else setFound((f) => ({ ...f, available: true, loading: false, error: err.message || "Could not load found codes" }));
     }
@@ -365,18 +382,9 @@ export default function NeighborhoodGateCodesPage() {
     <UiSurface density="comfortable" className="mx-auto max-w-[1300px]">
       <AdminCommandHeader variant="workspace" title="Neighborhood gate codes" icon={KeyRound} />
 
-      {found.available && (
-        <div className="mb-3 flex items-center gap-2" role="group" aria-label="Gate codes view">
-          <Button size="sm" variant={tab === "neighborhoods" ? "primary" : "secondary"} aria-pressed={tab === "neighborhoods"} onClick={() => setTab("neighborhoods")}>
-            Neighborhoods
-          </Button>
-          <Button size="sm" variant={tab === "found" ? "primary" : "secondary"} aria-pressed={tab === "found"} onClick={() => setTab("found")}>
-            {`Found in messages${found.total ? ` (${found.total})` : ""}`}
-          </Button>
-        </div>
-      )}
+      <ViewTabs show={found.available} tab={tab} onChange={setTab} foundTotal={found.total} />
 
-      {found.available && tab === "found" ? (
+      {tab === "found" ? (
         <FoundInMessages
           items={found.items}
           total={found.total}

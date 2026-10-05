@@ -76,14 +76,14 @@ afterEach(() => {
 
 describe('CustomerAccessCodesBlock', () => {
   it('lists active codes with kind, monospace code, directions, life and source, and found codes with the client sentence', async () => {
-    stubFetch(() => response({
-      active: [
+    stubFetch(() => response({ visits: VISITS,
+active: [
         row(),
         row({ id: 'c2', kind: 'garage', code: '5555', instructions: null, life: 'visit', scheduledDate: '2026-10-08', sourceType: 'staff', sourceAt: null }),
       ],
       found: [found()],
     }));
-    render(<CustomerAccessCodesBlock customerId="customer-a" upcomingScheduled={VISITS} />);
+    render(<CustomerAccessCodesBlock customerId="customer-a" />);
     const code = await screen.findByText('1234');
     expect(code).toHaveClass('font-mono');
     const first = within(code.closest('.rounded-sm'));
@@ -101,7 +101,7 @@ describe('CustomerAccessCodesBlock', () => {
 
   it.each([404, 403])('renders nothing at all on %i', async (status) => {
     stubFetch(() => response({ enabled: false }, status));
-    const { container } = render(<CustomerAccessCodesBlock customerId="customer-a" upcomingScheduled={[]} />);
+    const { container } = render(<CustomerAccessCodesBlock customerId="customer-a" />);
     await waitFor(() => expect(calls).toHaveLength(1));
     await new Promise((r) => setTimeout(r, 20));
     expect(container).toBeEmptyDOMElement();
@@ -113,9 +113,10 @@ describe('CustomerAccessCodesBlock', () => {
     stubFetch((path, init) => {
       if (init.method === 'POST') return response({ accessCode: row({ status: 'retired' }) });
       listed += 1;
-      return response({ active: listed === 1 ? [row()] : [], found: [] });
+      return response({ visits: VISITS,
+active: listed === 1 ? [row()] : [], found: [] });
     });
-    render(<CustomerAccessCodesBlock customerId="customer-a" upcomingScheduled={[]} />);
+    render(<CustomerAccessCodesBlock customerId="customer-a" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Retire' }));
     expect(calls.filter((c) => c.method === 'POST')).toHaveLength(0);
     fireEvent.click(screen.getByRole('button', { name: 'Yes, retire' }));
@@ -125,8 +126,9 @@ describe('CustomerAccessCodesBlock', () => {
   });
 
   it('Keep backs out of a retire without a request', async () => {
-    stubFetch(() => response({ active: [row()], found: [] }));
-    render(<CustomerAccessCodesBlock customerId="customer-a" upcomingScheduled={[]} />);
+    stubFetch(() => response({ visits: VISITS,
+active: [row()], found: [] }));
+    render(<CustomerAccessCodesBlock customerId="customer-a" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Retire' }));
     fireEvent.click(screen.getByRole('button', { name: 'Keep' }));
     expect(screen.getByRole('button', { name: 'Retire' })).toBeInTheDocument();
@@ -141,9 +143,10 @@ describe('CustomerAccessCodesBlock', () => {
         if (attempt === 1) return response({ error: 'Choose the visit this code is for', code: 'visit_required' }, 400);
         return response({ accessCode: row({ id: 'f1', kind: 'garage', status: 'active' }) });
       }
-      return response({ active: [], found: attempt >= 2 ? [] : [found()] });
+      return response({ visits: VISITS,
+active: [], found: attempt >= 2 ? [] : [found()] });
     });
-    render(<CustomerAccessCodesBlock customerId="customer-a" upcomingScheduled={VISITS} />);
+    render(<CustomerAccessCodesBlock customerId="customer-a" />);
     await screen.findByText('The door code is 9876 for tomorrow');
     fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'garage' } });
     fireEvent.change(screen.getByLabelText('Code'), { target: { value: '4455' } });
@@ -153,14 +156,15 @@ describe('CustomerAccessCodesBlock', () => {
     expect(within(picker).getAllByRole('option').map((o) => o.textContent)).toEqual(['Choose a visit', 'Thu, Oct 8 · Pest control']);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByText('Choose the visit this code is for')).toBeInTheDocument();
-    expect(calls.find((c) => c.method === 'POST').body).toEqual({ kind: 'garage', life: 'visit', code: '4455', instructions: null });
+    // Only the fields the office changed are sent.
+    expect(calls.find((c) => c.method === 'POST').body).toEqual({ kind: 'garage', life: 'visit', code: '4455' });
 
     fireEvent.change(picker, { target: { value: 'v1' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(screen.queryByText('The door code is 9876 for tomorrow')).not.toBeInTheDocument());
     const posts = calls.filter((c) => c.method === 'POST');
     expect(posts[1].path).toBe('/admin/access-codes/f1/accept');
-    expect(posts[1].body).toEqual({ kind: 'garage', life: 'visit', code: '4455', instructions: null, scheduledServiceId: 'v1' });
+    expect(posts[1].body).toEqual({ kind: 'garage', life: 'visit', code: '4455', scheduledServiceId: 'v1' });
   });
 
   it.each([
@@ -170,8 +174,9 @@ describe('CustomerAccessCodesBlock', () => {
   ])('shows the server message for %s', async (code, message) => {
     stubFetch((path, init) => (init.method === 'POST'
       ? response({ error: message, code }, 409)
-      : response({ active: [], found: [found()] })));
-    render(<CustomerAccessCodesBlock customerId="customer-a" upcomingScheduled={[]} />);
+      : response({ visits: VISITS,
+active: [], found: [found()] })));
+    render(<CustomerAccessCodesBlock customerId="customer-a" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Save' }));
     expect(await screen.findByText(message)).toBeInTheDocument();
   });
@@ -180,9 +185,10 @@ describe('CustomerAccessCodesBlock', () => {
     let dismissed = false;
     stubFetch((path, init) => {
       if (init.method === 'POST') { dismissed = true; return response({ accessCode: found({ status: 'dismissed' }) }); }
-      return response({ active: [], found: dismissed ? [] : [found()] });
+      return response({ visits: VISITS,
+active: [], found: dismissed ? [] : [found()] });
     });
-    render(<CustomerAccessCodesBlock customerId="customer-a" upcomingScheduled={[]} />);
+    render(<CustomerAccessCodesBlock customerId="customer-a" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Dismiss' }));
     await waitFor(() => expect(screen.queryByText('Found in messages')).not.toBeInTheDocument());
     expect(calls.find((c) => c.method === 'POST').path).toBe('/admin/access-codes/f1/dismiss');
@@ -192,9 +198,10 @@ describe('CustomerAccessCodesBlock', () => {
     let added = false;
     stubFetch((path, init) => {
       if (init.method === 'POST') { added = true; return response({ accessCode: row({ id: 'n1', kind: 'call_box', code: '77' }) }); }
-      return response({ active: added ? [row({ id: 'n1', kind: 'call_box', code: '77' })] : [], found: [] });
+      return response({ visits: VISITS,
+active: added ? [row({ id: 'n1', kind: 'call_box', code: '77' })] : [], found: [] });
     });
-    render(<CustomerAccessCodesBlock customerId="customer-a" upcomingScheduled={[]} />);
+    render(<CustomerAccessCodesBlock customerId="customer-a" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Add a code' }));
     fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'call_box' } });
     fireEvent.change(screen.getByLabelText('Code'), { target: { value: '77' } });

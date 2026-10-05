@@ -288,13 +288,15 @@ const ACCESS_KIND_LABELS = {
 };
 
 function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
-  const [rows, setRows] = useState([]);
+  // Rows are kept with the stop they were read for and shown only for that
+  // stop, so the first render of a new stop never shows the last stop's codes.
+  const [loaded, setLoaded] = useState({ key: '', rows: [] });
   const [failed, setFailed] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const visitKey = visitIds.join(',');
+  const stopKey = `${customerId || ''}|${visitKey}`;
+  const rows = loaded.key === stopKey ? loaded.rows : [];
   useEffect(() => {
-    // A new stop never shows the previous stop's codes while its own load.
-    setRows([]);
     if (!request || !customerId) return undefined;
     let cancelled = false;
     const ids = visitKey ? visitKey.split(',') : [];
@@ -311,11 +313,11 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
       .then((lists) => {
         if (cancelled) return;
         const seen = new Set();
-        setRows(lists.flat().filter((r) => (seen.has(r.id) ? false : seen.add(r.id))));
+        setLoaded({ key: stopKey, rows: lists.flat().filter((r) => (seen.has(r.id) ? false : seen.add(r.id))) });
       })
       .catch(() => { if (!cancelled) setFailed(true); });
     return () => { cancelled = true; };
-  }, [request, customerId, visitKey, attempt]);
+  }, [request, customerId, visitKey, stopKey, attempt]);
   const ids = visitKey ? visitKey.split(',') : [];
   // Already shown above for the SAME access point; equal values at different
   // points (a gate and a door both 1234) are both shown.
