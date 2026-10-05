@@ -49,6 +49,7 @@ const MESSAGES = {
   invalid_code: 'code must be text of 40 characters or fewer',
   invalid_instructions: 'instructions must be text of 600 characters or fewer',
   value_required: 'A code or instructions are required',
+  invalid_visit: 'scheduledServiceId must be a visit of this customer that has not ended',
   invalid_body: 'The request body must be a JSON object',
 };
 
@@ -73,7 +74,7 @@ const body = (req) => (req.body && typeof req.body === 'object' && !Array.isArra
 // an explicit null clears code or instructions.
 function suppliedFields(input) {
   const out = {};
-  for (const key of ['kind', 'life', 'code', 'instructions']) {
+  for (const key of ['kind', 'life', 'code', 'instructions', 'scheduledServiceId']) {
     if (Object.prototype.hasOwnProperty.call(input, key)) out[key] = input[key];
   }
   return out;

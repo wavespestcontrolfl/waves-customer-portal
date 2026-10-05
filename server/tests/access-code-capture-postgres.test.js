@@ -80,7 +80,7 @@ postgres('access codes section', () => {
     const value = { kind: 'neighborhood_gate', code: '#4821', instructions: null, life: 'standing', ...extra };
     const [row] = await trx('customer_access_codes').insert({
       customer_id: customerId, kind: value.kind, code: value.code, instructions: value.instructions, life: value.life,
-      status: 'found', source_type: 'sms', source_id: randomUUID(), source_quote: 'q', source_at: new Date(),
+      status: 'found', source_type: 'sms', source_id: randomUUID(), source_quote: 'q', source_at: NOW,
       value_hash: access.valueHash(value.code, value.instructions),
     }).returning('*');
     return row;
@@ -459,6 +459,42 @@ postgres('access codes section', () => {
       await trx('scheduled_services').where({ id: next }).update({ status: 'cancelled' });
       const list = await access.listForCustomer(trx, c.id);
       expect(list.active.map((r) => r.id)).toEqual([standing.id]);
+    });
+
+    test('a visit code binds to the visit of the day it was sent, never to a later one after a late review', async () => {
+      const c = await customer();
+      const sameDay = await visit(c.id, day(0));
+      const later = await visit(c.id, day(5));
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      await trx('customer_access_codes').where({ id: row.id }).update({ source_at: NOW });
+      await trx('scheduled_services').where({ id: sameDay }).update({ status: 'completed' });
+      const out = await access.accept(trx, row.id, { now: new Date(NOW.getTime() + 20 * 86400000) });
+      expect(out.row.scheduledServiceId).toBe(later);
+      await trx('scheduled_services').where({ id: later }).update({ scheduled_date: day(30) });
+      const again = await found(c.id, { kind: 'door', code: '#8080', life: 'visit' });
+      await trx('customer_access_codes').where({ id: again.id }).update({ source_at: NOW });
+      expect((await access.accept(trx, again.id, { now: NOW })).row.scheduledServiceId).toBeNull();
+    });
+
+    test('the office can name the visit; a visit of another customer or an ended visit is refused', async () => {
+      const c = await customer();
+      const other = await customer();
+      const mine = await visit(c.id, day(9));
+      const theirs = await visit(other.id, day(2));
+      const done = await visit(c.id, day(1), 'completed');
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      expect(await access.accept(trx, row.id, { scheduledServiceId: theirs, now: NOW })).toMatchObject({ ok: false, code: 'invalid_visit' });
+      expect(await access.accept(trx, row.id, { scheduledServiceId: done, now: NOW })).toMatchObject({ ok: false, code: 'invalid_visit' });
+      expect((await access.accept(trx, row.id, { scheduledServiceId: mine, now: NOW })).row.scheduledServiceId).toBe(mine);
+    });
+
+    test('a visit code bound to no visit leaves the live list 14 days after it was sent', async () => {
+      const c = await customer();
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      await access.accept(trx, row.id, { now: NOW });
+      expect((await access.listForCustomer(trx, c.id)).active).toHaveLength(1);
+      await trx('customer_access_codes').where({ id: row.id }).update({ source_at: new Date(Date.now() - 15 * 86400000) });
+      expect((await access.listForCustomer(trx, c.id)).active).toHaveLength(0);
     });
 
     test('a door code sent again after its visit ended is found again', async () => {

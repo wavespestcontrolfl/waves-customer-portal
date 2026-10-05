@@ -257,9 +257,15 @@ const canonicalLower = (v) => String(v || '').trim().replace(/\s+/g, '').toLower
 // Insert the kept items as `found` and write the receipt, in one transaction.
 // Returns how many rows went in.
 // A row the office still sees: waiting, standing, or a visit code whose visit
-// has not ended. One rule for the live list and for the sweep's duplicate check.
-const isLive = (r) => r.status === 'found' || r.life === 'standing' || !r.scheduled_service_id
-  || !ENDED_VISIT_STATUSES.includes(r.service_status || 'pending');
+// has not ended. A visit code bound to no visit lives VISIT_WINDOW_DAYS from
+// the day the customer sent it, so it cannot stay listed for ever. One rule
+// for the live list and for the sweep's duplicate check.
+function isLive(r, now = new Date()) {
+  if (r.status === 'found' || r.life === 'standing') return true;
+  if (r.scheduled_service_id) return !ENDED_VISIT_STATUSES.includes(r.service_status || 'pending');
+  const from = r.source_at || r.created_at;
+  return !from || new Date(from) >= addETDays(now, -VISIT_WINDOW_DAYS);
+}
 
 async function fileFoundItems(conn, { message, properties }, items, receipt) {
   return conn.transaction(async (trx) => {
@@ -278,8 +284,8 @@ async function fileFoundItems(conn, { message, properties }, items, receipt) {
         .leftJoin('scheduled_services as ss', 'ss.id', 'a.scheduled_service_id')
         .where('a.customer_id', customer.id).whereIn('a.status', ['found', 'active'])
         .whereIn('a.value_hash', items.map((i) => i.value_hash))
-        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.scheduled_service_id', 'ss.status as service_status'))
-        .filter(isLive);
+        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.scheduled_service_id', 'a.source_at', 'a.created_at', 'ss.status as service_status'))
+        .filter((r) => isLive(r));
       const taken = new Set(existing.map((r) => `${r.kind}:${r.value_hash}`));
       toInsert = items.filter((item) => {
         if (taken.has(`${item.kind}:${item.value_hash}`)) return false;
@@ -396,7 +402,7 @@ async function listForCustomer(conn, customerId) {
     .where('a.customer_id', customerId).whereIn('a.status', ['active', 'found'])
     .select('a.*', conn.raw('ss.scheduled_date::text AS scheduled_date'), 'ss.status as service_status')
     .orderBy('a.created_at', 'desc').orderBy('a.id');
-  const kept = rows.filter(isLive);
+  const kept = rows.filter((r) => isLive(r));
   return {
     active: kept.filter((r) => r.status === 'active').map(serialize),
     found: kept.filter((r) => r.status === 'found').map(serialize),
@@ -452,15 +458,24 @@ async function lockCustomer(trx, customerId) {
   return !!(await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first('id'));
 }
 
-// The customer's next live visit inside the window, for a visit-life code.
-async function nextVisitId(trx, customerId, now) {
-  const row = await trx('scheduled_services')
-    .where({ customer_id: customerId })
-    .whereBetween('scheduled_date', [etDateString(now), etDateString(addETDays(now, VISIT_WINDOW_DAYS))])
-    .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES)
+// The visit a visit-life code belongs to. The office may name it; otherwise it
+// is the customer's first live visit on or after the day the customer SENT the
+// code (not the day the office reviewed it), inside the window. A "today only"
+// code reviewed after that visit ended therefore binds to nothing, and never
+// to a later appointment. Returns { id } or { error }.
+async function visitFor(trx, customerId, { from, chosenId }) {
+  const live = () => trx('scheduled_services').where({ customer_id: customerId })
+    .whereRaw(`COALESCE(status, 'pending') NOT IN (${ENDED_VISIT_STATUSES.map(() => '?').join(', ')})`, ENDED_VISIT_STATUSES);
+  if (chosenId !== undefined && chosenId !== null) {
+    if (!UUID_RE.test(String(chosenId))) return { error: 'invalid_visit' };
+    const chosen = await live().where({ id: chosenId }).first('id');
+    return chosen ? { id: chosen.id } : { error: 'invalid_visit' };
+  }
+  const row = await live()
+    .whereBetween('scheduled_date', [etDateString(from), etDateString(addETDays(from, VISIT_WINDOW_DAYS))])
     .orderBy('scheduled_date').orderByRaw('window_start NULLS LAST').orderBy('id')
     .first('id');
-  return row ? row.id : null;
+  return { id: row ? row.id : null };
 }
 
 // A standing code fills its profile field only while that field is empty
@@ -495,7 +510,7 @@ const audit = (trx, adminUserId, action, id, metadata) => recordAuditEvent({
 // Accept a found code (optionally edited by the office): it becomes active, a
 // visit-life code attaches to the customer's next visit, and a standing code
 // fills an empty profile field. Only a `found` row can be accepted.
-async function accept(conn, id, { adminUserId = null, kind, life, code, instructions, now = new Date() } = {}) {
+async function accept(conn, id, { adminUserId = null, kind, life, code, instructions, scheduledServiceId: chosenId, now = new Date() } = {}) {
   if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
   const head = await conn('customer_access_codes').where({ id }).first('customer_id');
   if (!head) return fail(404, 'not_found');
@@ -509,7 +524,10 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (checked.error) return fail(400, checked.error);
       const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
       if (await standingTwin(trx, row.customer_id, next, row.id)) return fail(409, 'duplicate_active');
-      const scheduledServiceId = next.life === 'visit' ? await nextVisitId(trx, row.customer_id, now) : null;
+      const visit = next.life === 'visit'
+        ? await visitFor(trx, row.customer_id, { from: row.source_at ? new Date(row.source_at) : now, chosenId }) : { id: null };
+      if (visit.error) return fail(400, visit.error);
+      const scheduledServiceId = visit.id;
       const profileField = await fillEmptyProfileField(trx, row.customer_id, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));
       const [updated] = await trx('customer_access_codes').where({ id }).update({
@@ -582,7 +600,7 @@ async function retire(conn, id, { adminUserId = null } = {}) {
 }
 
 // The office adds a code itself: active at once.
-async function addByStaff(conn, { customerId, kind, life, code, instructions, adminUserId = null, now = new Date() } = {}) {
+async function addByStaff(conn, { customerId, kind, life, code, instructions, scheduledServiceId: chosenId, adminUserId = null, now = new Date() } = {}) {
   if (!UUID_RE.test(String(customerId))) return fail(400, 'invalid_customer');
   const checked = validateFields({}, { kind, life, code, instructions });
   if (checked.error) return fail(400, checked.error);
@@ -591,7 +609,9 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, ad
     if (!(await lockCustomer(trx, customerId))) return fail(404, 'customer_not_found');
     if (await standingTwin(trx, customerId, next)) return fail(409, 'duplicate_active');
     const properties = await trx('customer_properties').where({ customer_id: customerId, active: true }).select('id');
-    const scheduledServiceId = next.life === 'visit' ? await nextVisitId(trx, customerId, now) : null;
+    const visit = next.life === 'visit' ? await visitFor(trx, customerId, { from: now, chosenId }) : { id: null };
+    if (visit.error) return fail(400, visit.error);
+    const scheduledServiceId = visit.id;
     const profileField = await fillEmptyProfileField(trx, customerId, next);
     const [row] = await trx('customer_access_codes').insert({
       customer_id: customerId, property_id: properties.length === 1 ? properties[0].id : null,
