@@ -537,6 +537,9 @@ export default function LawnAssessmentCompletionBlock({
         stepScore(key, delta);
       },
       onPointerDown: (event) => {
+        // Only a primary press (left button / touch) starts a hold: a right or
+        // middle press never clicks, so it must not change a score (Codex r3 P2).
+        if (event.button != null && event.button !== 0) return;
         // On touch, pointerdown captures the pointer, so pointerleave never
         // fires while the finger is down and a slide away would keep stepping.
         // Releasing the capture makes leave/cancel fire as on a mouse (Codex r2 P2).

@@ -201,6 +201,11 @@ it('a hold that is dragged off the button, or cancelled, does not swallow the ne
     fireEvent.pointerCancel(raise);
     fireEvent.click(raise);
     expect(density.value).toBe(String(held + 1));
+    // A right-button hold never starts the repeat.
+    fireEvent.pointerDown(raise, { button: 2 });
+    act(() => { vi.advanceTimersByTime(450 + 120 * 3); });
+    fireEvent.pointerUp(raise, { button: 2 });
+    expect(density.value).toBe(String(held + 1));
   } finally {
     vi.useRealTimers();
   }
