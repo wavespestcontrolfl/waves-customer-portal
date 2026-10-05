@@ -47,13 +47,53 @@ async function fetchProductJs(page, origin, handle, timeout) {
   try { return JSON.parse(txt); } catch (e) { return null; }
 }
 
+// PURE: a clean pack-size string from a Shopify variant's grams (the .js endpoint reports
+// variant.weight in grams), or null. Only a CLEAN weight counts — a whole/quarter pound or a
+// whole/quarter ounce within 0.5% — because a shipping weight with packaging in it (a 9.4 lb
+// "gallon") is not a pack size and must never be guessed into one.
+function sizeFromWeightGrams(grams) {
+  const g = Number(grams);
+  if (!Number.isFinite(g) || g < 28) return null;
+  const clean = (n, step) => {
+    const r = Math.round(n / step) * step;
+    return r > 0 && Math.abs(n - r) / r <= 0.005 ? r : null;
+  };
+  const lb = clean(g / 453.592, 0.25);
+  if (lb != null && lb >= 1) return `${lb} lb`;
+  if (g >= 453.592) return null; // a pound or more that is not a clean pound count: not a pack
+  const oz = clean(g / 28.3495, 0.25);
+  return oz != null ? `${oz} oz` : null;
+}
+
+// PURE: the pack size for one variant, or null when none can be derived (never guessed).
+// Order: the variant title, the product title, the variant's option values, a labelled size in
+// the tags ("Spec:Size:17 oz.") or body ("Size: 10 oz"), then the variant's clean weight.
+// "Default Title" products with no size anywhere but a weight (Golf Course Lawn Store sells
+// 25 lb bags this way) therefore still size-match.
+function packSizeOfVariant(data, v) {
+  if (extractSizeToken(v.title)) return v.title;
+  if (extractSizeToken(data.title)) return data.title;
+  const opts = [v.option1, v.option2, v.option3].filter((o) => o && !/default title/i.test(o));
+  const opt = opts.find((o) => extractSizeToken(o));
+  if (opt) return opt;
+  const tags = Array.isArray(data.tags) ? data.tags : String(data.tags || '').split(',');
+  const tagSize = tags.map((t) => String(t).match(/\bsize\s*:\s*(.+)$/i)).find((m) => m && extractSizeToken(m[1]));
+  if (tagSize) return tagSize[1];
+  const text = String(data.description || data.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  const labelled = text.match(/\b(?:size|net\s*(?:wt|weight)|package\s*size|pack\s*size|contents?)\s*[:\-]\s*([^.;|]{1,40})/i);
+  if (labelled && extractSizeToken(labelled[1])) return labelled[1];
+  return sizeFromWeightGrams(v.weight);
+}
+
 // One product's variants -> the {size, price, availabilityRaw} shape pickVariantOffer wants.
 // Shopify price is in cents. A variant whose title isn't a size (e.g. "Default Title" on a
-// single-variant product) borrows the product title, which carries the size for those.
+// single-variant product) borrows the product title, then option/tag/body/weight (see
+// packSizeOfVariant). With no derivable size it keeps the title text, which cannot size-match,
+// so pickVariantOffer returns null rather than guessing.
 function variantsFromShopify(data) {
   if (!data || !Array.isArray(data.variants)) return [];
   return data.variants.map((v) => ({
-    size: extractSizeToken(v.title) ? v.title : (data.title || v.title),
+    size: packSizeOfVariant(data, v) || data.title || v.title,
     price: Number(v.price) / 100,
     availabilityRaw: v.available === false ? 'OutOfStock' : (v.available === true ? 'InStock' : null),
     id: v.id != null ? v.id : null, // Shopify variant id -> variant-specific proof URL
@@ -209,6 +249,7 @@ module.exports = {
   fetchCandidate,
   // exposed for unit tests
   variantsFromShopify,
+  sizeFromWeightGrams,
   handlesFromSuggest,
   freeShippingFromShopify,
   hazmatFromShopify,

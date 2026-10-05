@@ -529,6 +529,15 @@ describe('priceMatchHeadlineAndSummary', () => {
       .toBe('Bifen at $65.00 delivered (incl. ~$15.00 est. shipping), about $20 less per order. Draft not sent.');
   });
 
+  test('a $0 estimate shows as an estimate in the bell summary, not "free shipping"', () => {
+    const { shippingLabel } = require('../services/price-scan/shipping-rules');
+    const sh = { amount: 0, basis: 'estimated' };
+    const line = { product: 'Bifen', sitePrice: 100, savingsPct: 0.2, compLanded: 80, shippingNote: shippingLabel(sh), compShipping: sh };
+    const { summary } = priceMatchHeadlineAndSummary([line]);
+    expect(summary).toContain('est. shipping');
+    expect(summary).not.toContain('free shipping');
+  });
+
   test('several lines say the figures are delivered, and flag estimated shipping', () => {
     const a = { ...segmentII, compLanded: 800, compShipping: { amount: 0, basis: 'free' } };
     const b = { ...onslaught, compLanded: 440, compShipping: { amount: 15, basis: 'estimated' } };

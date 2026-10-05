@@ -13,7 +13,18 @@
    "id": 42408172781817,
    "title": "Default Title",
    "price": 15599,
-   "available": true
+   "available": true,
+   "weight": 11340,
+   "option1": "Default Title"
+  }
+ ],
+ "options": [
+  {
+   "name": "Title",
+   "position": 1,
+   "values": [
+    "Default Title"
+   ]
   }
  ]
 }

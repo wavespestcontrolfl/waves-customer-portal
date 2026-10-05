@@ -9,7 +9,7 @@ const { collectSnapshot, applySizeHint, freeShippingFromJsonLd } = require('../s
 const diypest = require('../services/price-scan/adapters/diypest');
 const forestry = require('../services/price-scan/adapters/forestry');
 const shopify = require('../services/price-scan/adapters/shopify');
-const { offerFromSnapshot, verifyMatch } = require('../services/price-scan/extract');
+const { offerFromSnapshot, verifyMatch, pickVariantOffer } = require('../services/price-scan/extract');
 const { shippingFor } = require('../services/price-scan/shipping-rules');
 const { SHOPIFY_HOSTS } = require('../services/price-scan/adapters/shopify-hosts');
 
@@ -148,6 +148,57 @@ describe('Shopify additions: Golf Course Lawn Store + Gemplers', () => {
     const variants = shopify.variantsFromShopify(data);
     expect(variants).toHaveLength(1);
     expect(variants[0]).toMatchObject({ price: 155.99, availabilityRaw: 'InStock' });
+  });
+
+  test('a "Default Title" product with no size in title/tags takes its pack size from the variant weight', () => {
+    const data = JSON.parse(read('golfcourselawn-product.json'));
+    expect(data.title).not.toMatch(/\d\s*(lb|oz)/i); // fixture really has no size in the title
+    const [v] = shopify.variantsFromShopify(data);
+    expect(v.size).toBe('25 lb'); // 11340 g
+    expect(pickVariantOffer([v], { targetOz: 400 })).toMatchObject({ price: 155.99, quantity: '25 lb' });
+    expect(pickVariantOffer([v], { targetOz: 160 })).toBeNull(); // a 10 lb catalog size does not match
+  });
+
+  test('sizeFromWeightGrams only trusts a clean weight, never a packaged shipping weight', () => {
+    expect(shopify.sizeFromWeightGrams(11340)).toBe('25 lb');
+    expect(shopify.sizeFromWeightGrams(2268)).toBe('5 lb');
+    expect(shopify.sizeFromWeightGrams(283.5)).toBe('10 oz');
+    expect(shopify.sizeFromWeightGrams(35.4)).toBe('1.25 oz');
+    expect(shopify.sizeFromWeightGrams(4150)).toBeNull(); // ~9.15 lb: not a clean pack
+    expect(shopify.sizeFromWeightGrams(0)).toBeNull();
+    expect(shopify.sizeFromWeightGrams(null)).toBeNull();
+  });
+
+  test('size is also read from variant options, a Size tag and a labelled body line', () => {
+    const base = { title: 'Some Product', variants: [{ id: 1, title: 'Default Title', price: 1000, available: true }] };
+    expect(shopify.variantsFromShopify({ ...base, variants: [{ ...base.variants[0], option1: '2.5 Gallon' }] })[0].size).toBe('2.5 Gallon');
+    expect(shopify.variantsFromShopify({ ...base, tags: ['Spec:Size:17 oz.'] })[0].size).toBe('17 oz.');
+    expect(shopify.variantsFromShopify({ ...base, description: '<p>Net Weight: 10 oz. Mix 1 gallon of water.</p>' })[0].size).toBe('10 oz');
+  });
+
+  test('no derivable size -> the variant cannot size-match (never guessed)', () => {
+    const data = { title: 'Mystery Granular', description: '<p>Mix 1 gallon of water per 1,000 sq ft.</p>', variants: [{ id: 1, title: 'Default Title', price: 1000, available: true, weight: 4150 }] };
+    const [v] = shopify.variantsFromShopify(data);
+    expect(pickVariantOffer([v], { targetOz: 128 })).toBeNull();
+    expect(pickVariantOffer([v], { targetOz: 400 })).toBeNull();
+  });
+
+  test('end to end: fixture product -> verified scan candidate at the catalog size', async () => {
+    const data = JSON.parse(read('golfcourselawn-product.json'));
+    const page = {
+      goto: async () => {},
+      evaluate: async () => JSON.stringify(data),
+      $$eval: async () => [],
+    };
+    const vendor = { vendor_id: 'v1', name: 'Golf Course Lawn Store', website: 'https://golfcourselawn.store', url: 'https://golfcourselawn.store/products/acelepryn-g-insecticide-grub-and-armyworm-control' };
+    const product = { name: 'Acelepryn G Insecticide', productName: 'Acelepryn G Insecticide', quantity: '25 lb' };
+    const cand = await shopify.fetchCandidate(page, vendor, product);
+    expect(cand).toMatchObject({ price: 155.99, quantity: '25 lb', availability: 'in_stock', vendor_id: 'v1' });
+    expect(cand.source_url).toContain('golfcourselawn.store/products/acelepryn-g-insecticide-grub-and-armyworm-control');
+    expect(verifyMatch({ name: cand.name, text: cand.text, quantity: cand.quantity }, product).matched).toBe(true);
+    // a catalog pack the product does not come in yields no sized candidate at all
+    const wrong = await shopify.fetchCandidate(page, vendor, { ...product, quantity: '10 lb' });
+    expect(wrong && wrong.quantity).not.toBe('10 lb');
   });
 
   test('free-shipping flag: tags or a threshold-free description only', () => {

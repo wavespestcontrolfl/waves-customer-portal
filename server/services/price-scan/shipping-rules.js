@@ -81,7 +81,9 @@ const RULES = [
   { id: 'domyown', type: 'free', hosts: ['domyown.com'], names: [/do\s*my\s*own/i], note: 'free shipping' },
   { id: 'chemicalwarehouse', type: 'free', hosts: ['chemicalwarehouse.com'], names: [/chemical\s*warehouse/i], note: 'free shipping' },
   { id: 'diypestcontrol', type: 'free', hosts: ['diypestcontrol.com'], names: [/diy\s*pest/i], note: 'free shipping' },
-  { id: 'seedbarn', type: 'free', hosts: ['seedbarn.com'], names: [/seed\s*barn/i], note: 'free shipping (time-limited promo, recheck)' },
+  // SeedBarn's store-wide free shipping is a time-limited promo with no end date: never a
+  // permanent 'free'. Estimated unless the scanned offer carries a free-shipping flag.
+  { id: 'seedbarn', type: 'flagged_free', hosts: ['seedbarn.com'], names: [/seed\s*barn/i], note: 'time-limited promo, recheck', promo: true },
   { id: 'gemplers', type: 'free_over', hosts: ['gemplers.com'], names: [/gemplers/i], threshold: GEMPLERS_FREE_OVER_USD, hazmatExtra: true },
   { id: 'solutions', type: 'flagged_free', hosts: ['solutionsstores.com'], names: [/solutions\s*(pest|stores)/i], note: 'free only on flagged items' },
   { id: 'golfcourselawn', type: 'flagged_free', hosts: ['golfcourselawn.store'], names: [/golf\s*course\s*lawn/i], note: 'free only on flagged items' },
@@ -203,7 +205,11 @@ function applyRule(rule, input) {
       };
     }
     case 'flagged_free':
-      if (input.freeShipping === true) return { amount: 0, basis: 'free', note: 'free shipping (item flagged free)' };
+      if (input.freeShipping === true) {
+        return rule.promo
+          ? { amount: 0, basis: 'free', promo: true, note: `free shipping (${rule.note})` }
+          : { amount: 0, basis: 'free', note: 'free shipping (item flagged free)' };
+      }
       return estimated(weightLb, rule.note);
     case 'estimated':
     default:
@@ -224,8 +230,9 @@ function shippingFor(input = {}, opts = {}) {
 function shippingLabel(shipping) {
   if (!shipping || !Number.isFinite(Number(shipping.amount))) return '';
   const amt = Number(shipping.amount);
-  if (amt === 0) return 'free shipping';
+  // An estimate stays labelled an estimate even when the configured allowance is $0.
   if (shipping.basis === 'estimated') return `incl. ~${usd(amt)} est. shipping`;
+  if (amt === 0) return 'free shipping';
   return `incl. ${usd(amt)} shipping`;
 }
 
@@ -237,7 +244,7 @@ function shippingProofText(shipping) {
   if (!shipping || !Number.isFinite(Number(shipping.amount))) return '';
   const amt = Number(shipping.amount);
   if (shipping.basis === 'estimated') return `shipping estimated ~${usd(amt)} (not a quote)`;
-  if (amt === 0) return 'free shipping (firm)';
+  if (amt === 0) return shipping.promo ? 'free shipping (current promo, recheck)' : 'free shipping (firm)';
   return `${usd(amt)} shipping by published rule (firm)`;
 }
 

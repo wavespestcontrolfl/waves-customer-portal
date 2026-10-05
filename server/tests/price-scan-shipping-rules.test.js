@@ -13,10 +13,26 @@ describe('shippingFor — free hosts', () => {
   ])('%s ships free', (host) => {
     expect(shippingFor({ vendorHost: host, price: 50, quantity: '1 gal' })).toMatchObject({ amount: 0, basis: 'free' });
   });
-  test('SeedBarn is free with a time-limited-promo note', () => {
+  test('SeedBarn promo is never a permanent free: estimated unless the offer is flagged free', () => {
     const r = shippingFor({ vendorHost: 'seedbarn.com', price: 20, quantity: '5 lb' });
-    expect(r).toMatchObject({ amount: 0, basis: 'free' });
+    expect(r).toMatchObject({ amount: 15, basis: 'estimated' });
     expect(r.note).toMatch(/time-limited promo, recheck/);
+    expect(shippingProofText(r)).toBe('shipping estimated ~$15.00 (not a quote)');
+    expect(shippingProofText(r)).not.toMatch(/firm/);
+    const flagged = shippingFor({ vendorHost: 'seedbarn.com', price: 20, quantity: '5 lb', freeShipping: true });
+    expect(flagged).toMatchObject({ amount: 0, basis: 'free', promo: true });
+    expect(flagged.note).toMatch(/recheck/);
+    expect(shippingProofText(flagged)).toBe('free shipping (current promo, recheck)');
+    expect(shippingProofText(flagged)).not.toMatch(/firm/);
+  });
+  test('a $0 default allowance keeps an estimate labelled an estimate (label and proof text)', () => {
+    process.env.PRICE_SCAN_DEFAULT_SHIPPING_USD = '0';
+    const r = shippingFor({ vendorHost: 'gciturfacademy.com', price: 40, quantity: '1 gal' });
+    expect(r).toMatchObject({ amount: 0, basis: 'estimated' });
+    expect(shippingLabel(r)).toBe('incl. ~$0.00 est. shipping');
+    expect(shippingLabel(r)).not.toMatch(/^free/);
+    expect(shippingProofText(r)).toBe('shipping estimated ~$0.00 (not a quote)');
+    expect(shippingLabel({ amount: 0, basis: 'free' })).toBe('free shipping');
   });
   test('reads the host from a candidate source_url or a vendor website', () => {
     expect(shippingFor({ vendor: { source_url: 'https://www.domyown.com/x-p-1.html' } }).basis).toBe('free');
