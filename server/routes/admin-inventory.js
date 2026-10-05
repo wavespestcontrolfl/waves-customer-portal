@@ -698,6 +698,8 @@ function mapProduct(product, vendorPricing = []) {
     reorderQuantity: numberOrNull(product.reorder_quantity),
     perCompletionUsage: numberOrNull(product.per_completion_usage),
     perCompletionServiceLines: Array.isArray(product.per_completion_service_lines) ? product.per_completion_service_lines : null,
+    // The lines this product is applied on (the tech sheets list by it); null = not tagged.
+    serviceLines: Array.isArray(product.service_lines) ? product.service_lines : null,
     vendorPricing: enrichedPricing,
     unitPrices,
     // Product Registry fields
@@ -3692,6 +3694,9 @@ router.put('/:id', async (req, res, next) => {
     if (req.body.lowStockThreshold !== undefined) upd.low_stock_threshold = nextThreshold;
 
     Object.assign(upd, await autoReorderPatch(req.body));
+    // Which service lines apply this product (null = not tagged); same ids as
+    // the per-visit consumable lines.
+    if (req.body.serviceLines !== undefined) upd.service_lines = serviceLinesOrNull(req.body.serviceLines);
 
     const sizeInPayload = upd.container_size !== undefined || upd.unit_size_oz !== undefined;
     const updated = await db.transaction(async (trx) => {

@@ -14,8 +14,12 @@
 //     under the photos when the server asks for it). Confirm sends the default keep-all
 //     review, as the full form's button does;
 //  3. Products used: the plan's products, each with its method and amount
-//     (change the amount, remove, or add one from the catalog: an inline "Search
-//     products" box, one tap adds the row). No area box:
+//     (change the method or the amount, remove, or add one from the catalog: an
+//     inline "Search products" box, one tap adds the row; the box lists lawn
+//     products only). The method is the common three as chips (Spot treatment,
+//     Broadcast spray, Granular broadcast) and the rest under "More methods",
+//     offered by the context (`methods`), the lawn re-service sheet's own control.
+//     No area box:
 //     every lawn visit treats the whole lawn, so a sprayed or spread product
 //     goes down on its own planned area or the visit property's saved
 //     whole-lawn area (/complete requires one);
@@ -73,8 +77,8 @@ import {
 import { submittedAmount } from '../../lib/measure-units';
 import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
-  AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton,
-  SavedView, TipSection, VisitNote, methodLabel, techTipsOf, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
+  SavedView, TipSection, VisitNote, methodChoicesOf, techTipsOf, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -176,7 +180,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
-  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null,
+  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null, methods: [],
   findingsType: null, stockAdvisory: undefined,
 };
 
@@ -257,6 +261,8 @@ function contextFrom(data, service) {
     planned: plannedItemsOf(data),
     plannedUnavailable: data?.plannedProductsUnavailable || null,
     assessment: assessmentOf(data),
+    // The methods a row may take (the server's list; the common three when it has none).
+    methods: methodChoicesOf(data),
     ...optionalContextFields(data),
   };
 }
@@ -423,6 +429,9 @@ function useProductRows(ctx, catalog) {
         // An amount the tech changed is no longer the plan's, and the plan's
         // rate no longer describes the row.
         ...('totalAmount' in patch || 'amountUnit' in patch ? { fromPlan: false, rateChanged: true } : {}),
+        // The plan's per-1,000 rate was given at the plan's method: a row moved
+        // to another method records no rate (the amount the tech typed stays).
+        ...('method' in patch && patch.method !== row.method ? { rateChanged: true } : {}),
       };
     }));
   }, []);
@@ -949,9 +958,9 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 
 // ── products ────────────────────────────────────────────────────────────────
 
-// Each product on the sheet: the plan's, or one the tech added. The amount can
-// change and any product can go (a removed plan product is recorded as
-// skipped). No area and no rate box.
+// Each product on the sheet: the plan's, or one the tech added. The method and
+// the amount can change and any product can go (a removed plan product is
+// recorded as skipped). No area and no rate box.
 function ProductsSection({ ctx, products, lawnSqft, locked, other, popover, inlineSearch }) {
   const { rows, updateRow, removeRow } = products;
   return (
@@ -963,30 +972,30 @@ function ProductsSection({ ctx, products, lawnSqft, locked, other, popover, inli
         <p className="tech-visit-muted" role="status">The planned products could not be loaded. Add what you applied.</p>
       )}
       {rows.map((row) => (
-        <ProductEditor key={row.productId} row={row} lawnSqft={lawnSqft} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
+        <ProductEditor key={row.productId} row={row} methods={ctx.methods} lawnSqft={lawnSqft} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
       ))}
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
 }
 
-// A product: its name, how it goes down (and the whole-lawn area when the way
-// it goes down needs one), the amount, and Remove.
-function ProductEditor({ row, lawnSqft, locked, onChange, onRemove }) {
+// A product: its name, how it goes down (the method chips, and the area it will
+// submit when the method needs one), the amount, and Remove.
+function ProductEditor({ row, methods, lawnSqft, locked, onChange, onRemove }) {
   const nameId = useId();
-  const area = areaOf(row, lawnSqft);
   // The area this row will submit, named for what it is: "whole lawn" only when it
   // is the whole-lawn figure; a planned product's own smaller (or unchecked) area
-  // is "planned area".
-  const areaText = area ? `${area === lawnSqft ? 'whole lawn' : 'planned area'}, ${area.toLocaleString('en-US')} sq ft` : null;
-  const how = [methodLabel(row.method), areaText].filter(Boolean).join(' · ');
+  // is "planned area". Only a method that needs square feet shows one.
+  const area = requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : null;
+  const areaText = area ? `${area === lawnSqft ? 'Whole lawn' : 'Planned area'}, ${area.toLocaleString('en-US')} sq ft` : null;
   return (
     <div role="group" aria-labelledby={nameId} className="tech-product-editor">
       <div className="tech-product-editor-head">
         <h4 id={nameId} className="tech-product-editor-name">{row.name}</h4>
         <span className="tech-visit-muted">{[categoryLabel(row.product), row.added ? 'added by you' : 'planned'].filter(Boolean).join(' · ')}</span>
       </div>
-      <p className="tech-visit-muted">{how}</p>
+      <MethodSection row={row} methods={methods} locked={locked} onChange={onChange} />
+      {areaText && <p className="tech-visit-muted">{areaText}</p>}
       <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
       {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
       <div className="tech-product-editor-actions">

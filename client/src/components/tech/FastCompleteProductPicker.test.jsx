@@ -57,9 +57,64 @@ describe('lawn grouping', () => {
     expect(within(picker).queryByText('Yard Sign')).toBeNull();
   });
 
-  test('search covers every listed product on either line', () => {
+  test('the dialog search covers every listed product on either line', () => {
     const picker = mount({ line: 'lawn' });
     fireEvent.change(within(picker).getByLabelText('Search products'), { target: { value: 'bait' } });
     expect(within(within(picker).getByRole('group', { name: 'Matching products' })).getByRole('button', { name: /Roach Gel Bait/ })).toBeTruthy();
+  });
+
+  test('a product tagged with its service lines is a lawn product only when lawn is one; an untagged one goes by its category', () => {
+    const tagged = [
+      { id: 'arena', name: 'Arena 50 WDG', category: 'insecticide', service_lines: ['lawn', 'pest'] },
+      { id: 'advion', name: 'Advion WDG Granular', category: 'insecticide', service_lines: ['pest'] },
+      { id: 'nutri', name: 'Nutriroot', category: 'fertilizer', service_lines: ['tree_shrub'] },
+      // pg hands jsonb back parsed; a fake store may hand back the string.
+      { id: 'string', name: 'Stringy Fert', category: 'fertilizer', service_lines: '["lawn"]' },
+      ...PRODUCTS,
+    ];
+    const picker = mount({ line: 'lawn', products: tagged });
+    const lawn = names(within(picker).getByRole('group', { name: 'Lawn products' })).join('|');
+    expect(lawn).toMatch(/Arena 50 WDG/);
+    expect(lawn).toMatch(/Stringy Fert/);
+    expect(lawn).toMatch(/Celsius WG/);
+    expect(lawn).not.toMatch(/Advion WDG Granular/);
+    expect(lawn).not.toMatch(/Nutriroot/);
+    fireEvent.click(within(picker).getByRole('button', { name: 'Show other products' }));
+    const other = names(within(picker).getByRole('group', { name: 'Other products' })).join('|');
+    expect(other).toMatch(/Advion WDG Granular/);
+    expect(other).toMatch(/Nutriroot/);
+  });
+});
+
+describe('inline search (the lawn sheet)', () => {
+  const products = [
+    { id: 'arena', name: 'Arena 50 WDG', category: 'insecticide', service_lines: ['lawn', 'pest'] },
+    { id: 'advion', name: 'Advion WDG Granular', category: 'insecticide', service_lines: ['pest'] },
+    { id: 'nufarm', name: 'Nufarm Cleary 3336F', category: 'fungicide' },
+    ...PRODUCTS,
+  ];
+  function mountInline(props = {}) {
+    render(<FastCompleteProductPicker variant="inline" line="lawn" products={products} commonProducts={[]} onSheetIds={new Set()} onPick={vi.fn()} {...props} />);
+    return screen.getByLabelText('Search products');
+  }
+
+  test('on the lawn line it lists lawn products only: no bait, no pest-tagged insecticide, no supplies', () => {
+    const box = mountInline();
+    fireEvent.change(box, { target: { value: 'wdg' } });
+    const matches = names(screen.getByRole('group', { name: 'Matching products' })).join('|');
+    expect(matches).toMatch(/Arena 50 WDG/);
+    expect(matches).not.toMatch(/Advion WDG Granular/);
+    fireEvent.change(box, { target: { value: 'bait' } });
+    expect(screen.getByText('No products match.')).toBeTruthy();
+    fireEvent.change(box, { target: { value: 'sign' } });
+    expect(screen.getByText('No products match.')).toBeTruthy();
+    fireEvent.change(box, { target: { value: 'nu' } });
+    expect(names(screen.getByRole('group', { name: 'Matching products' })).join('|')).toMatch(/Nufarm Cleary 3336F/);
+  });
+
+  test('on the pest line it searches every listed product', () => {
+    const box = mountInline({ line: 'pest' });
+    fireEvent.change(box, { target: { value: 'bait' } });
+    expect(names(screen.getByRole('group', { name: 'Matching products' })).join('|')).toMatch(/Roach Gel Bait/);
   });
 });

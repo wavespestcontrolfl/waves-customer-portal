@@ -49,10 +49,28 @@ const LAWN_CATEGORIES = new Set([
   "wetting agent", "adjuvant", "surfactant", "soil surfactant",
 ]);
 
-/** 'pest' (the primary list) | 'other' | 'hidden' for the lawn-aware picker. */
+// products_catalog.service_lines: the lines a product is applied on, set in
+// Inventory (null = not tagged yet, so the category decides). pg hands jsonb
+// back parsed; a fake store may hand back the string.
+export function productServiceLines(product) {
+  const raw = product?.service_lines;
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === "string" && raw.trim().startsWith("[")) {
+    try { return JSON.parse(raw); } catch { return null; }
+  }
+  return null;
+}
+
+/**
+ * 'pest' (the primary list) | 'other' | 'hidden' for the lawn-aware picker.
+ * A product tagged with its service lines is a lawn product only when "lawn"
+ * is one of them; an untagged product is one by its category.
+ */
 export function lawnProductGroup(product) {
   const key = categoryKey(product);
   if (HIDDEN_CATEGORIES.has(key)) return "hidden";
+  const lines = productServiceLines(product);
+  if (lines) return lines.includes("lawn") ? "pest" : "other";
   return LAWN_CATEGORIES.has(key) ? "pest" : "other";
 }
 

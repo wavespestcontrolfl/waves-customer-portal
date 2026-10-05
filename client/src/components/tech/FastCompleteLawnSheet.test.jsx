@@ -81,6 +81,13 @@ const context = (overrides = {}) => ({
   turfHeightCapture: false,
   plannedProducts: { source: 'plan', items: PLANNED },
   plannedProductsUnavailable: null,
+  // The server's method list (lawn-reservice-fast-context LAWN_METHODS), trimmed.
+  methods: [
+    { value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false },
+    { value: 'broadcast_spray', label: 'Broadcast spray', common: true, requiresSqft: true },
+    { value: 'granular_broadcast', label: 'Granular broadcast', common: true, requiresSqft: true },
+    { value: 'soil_drench', label: 'Soil drench', common: false, requiresSqft: false },
+  ],
   assessment: { exists: false, id: null, confirmed: false },
   photoStatus: null,
   previousFrontPhoto: null,
@@ -216,6 +223,9 @@ const completeButton = () => document.querySelector('.tech-visit-footer .tech-vi
 const completeCalls = () => requests.filter((r) => r.path.endsWith('/complete'));
 const confirmCalls = () => requests.filter((r) => r.path.endsWith('/lawn-assessment/confirm'));
 const editorFor = (name) => screen.getByRole('group', { name });
+// The method chip pressed on a product card ("How"), or null.
+const pressedMethod = (editor) => within(within(editor).getByRole('group', { name: 'How' })).getAllByRole('button').find((b) => b.getAttribute('aria-pressed') === 'true')?.textContent ?? null;
+const pickMethod = (editor, label) => fireEvent.click(within(within(editor).getByRole('group', { name: 'How' })).getByRole('button', { name: label }));
 const footerNote = () => document.querySelector('.tech-visit-footer [role="status"]')?.textContent || '';
 
 async function submit() {
@@ -640,22 +650,87 @@ describe('products', () => {
     await openSheet();
     const talak = editorFor('Talak 7.9%');
     // The plan's own area for this product (6,000) is not the saved whole lawn (5,000): it is named a planned area.
-    expect(within(talak).getByText('Broadcast spray · planned area, 6,000 sq ft')).toBeTruthy();
+    expect(pressedMethod(talak)).toBe('Broadcast spray');
+    expect(within(talak).getByText('Planned area, 6,000 sq ft')).toBeTruthy();
     expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('6.4');
     expect(within(talak).getByLabelText('Unit for Talak 7.9%').value).toBe('fl_oz');
     const iron = editorFor('Iron Plus');
-    expect(within(iron).getByText('Spot treatment')).toBeTruthy();
+    expect(pressedMethod(iron)).toBe('Spot treatment');
+    // A spot treatment goes down on no area, so none is named.
+    expect(within(iron).queryByText(/sq ft/)).toBeNull();
     // The plan had no quantity for this one: blank, and said so, never invented.
     expect(within(iron).getByLabelText('Iron Plus').value).toBe('');
     expect(within(iron).getByText('No amount entered. It is recorded without one.')).toBeTruthy();
   });
 
-  test('no area box and no rate box, and no way to change the method', async () => {
+  test('no area box and no rate box', async () => {
     await openSheet();
     expect(screen.queryByLabelText(/Area treated|Linear feet/)).toBeNull();
     expect(screen.queryByLabelText(/ rate$/)).toBeNull();
     expect(screen.queryByLabelText(/label max/)).toBeNull();
-    expect(within(editorFor('Talak 7.9%')).queryByRole('button', { name: /Broadcast spray|Granular|Spot treatment/ })).toBeNull();
+  });
+
+  test('the method is the context\'s list: the common three as chips under How, the rest under More methods', async () => {
+    await openSheet();
+    const talak = editorFor('Talak 7.9%');
+    expect(within(within(talak).getByRole('group', { name: 'How' })).getAllByRole('button').map((b) => b.textContent)).toEqual(['Spot treatment', 'Broadcast spray', 'Granular broadcast']);
+    const more = within(talak).getByLabelText('More methods for Talak 7.9%');
+    expect([...more.options].map((o) => o.textContent)).toEqual(['More methods', 'Soil drench']);
+    expect(within(talak).queryByText('Perimeter spray? Use Full form.')).toBeNull();
+  });
+
+  test('an older context with no methods still offers the common three', async () => {
+    await openSheet({ request: makeRequest({ ctx: context({ methods: undefined }) }) });
+    const talak = editorFor('Talak 7.9%');
+    expect(within(within(talak).getByRole('group', { name: 'How' })).getAllByRole('button')).toHaveLength(3);
+    expect(within(talak).queryByLabelText('More methods for Talak 7.9%')).toBeNull();
+  });
+
+  test('moving a planned broadcast row to Spot treatment drops its area and the plan\'s rate; the amount stays', async () => {
+    await openSheet();
+    const talak = editorFor('Talak 7.9%');
+    pickMethod(talak, 'Spot treatment');
+    expect(pressedMethod(talak)).toBe('Spot treatment');
+    expect(within(talak).queryByText(/sq ft/)).toBeNull();
+    expect(within(talak).getByLabelText('Talak 7.9%').value).toBe('6.4');
+    await analyze();
+    await submit();
+    const sent = completeCalls()[0].body.products.find((p) => p.productId === P_TALAK);
+    expect(sent).toMatchObject({ applicationMethod: 'spot_treatment', totalAmount: 6.4, amountUnit: 'fl_oz' });
+    expect(sent.areaValue).toBeUndefined();
+    expect(sent.areaUnit).toBeUndefined();
+    expect(sent.rate).toBeUndefined();
+    expect(sent.rateUnit).toBeUndefined();
+  });
+
+  test('a planned row left on the plan\'s method keeps the plan\'s rate; re-choosing that method is not a change', async () => {
+    await openSheet();
+    const talak = editorFor('Talak 7.9%');
+    pickMethod(talak, 'Broadcast spray');
+    await analyze();
+    await submit();
+    expect(completeCalls()[0].body.products.find((p) => p.productId === P_TALAK)).toMatchObject({ applicationMethod: 'broadcast_spray', rate: 1.07, rateUnit: 'fl_oz', areaValue: 6000, areaUnit: 'sqft' });
+  });
+
+  test('a spot row moved to Broadcast spray goes down on the whole lawn, as a broadcast does', async () => {
+    await openSheet();
+    const iron = editorFor('Iron Plus');
+    pickMethod(iron, 'Broadcast spray');
+    expect(within(iron).getByText('Whole lawn, 5,000 sq ft')).toBeTruthy();
+    await analyze();
+    await submit();
+    expect(completeCalls()[0].body.products.find((p) => p.productId === P_IRON)).toMatchObject({ applicationMethod: 'broadcast_spray', areaValue: 5000, areaUnit: 'sqft' });
+  });
+
+  test('a method from More methods is sent as is', async () => {
+    await openSheet();
+    const talak = editorFor('Talak 7.9%');
+    fireEvent.change(within(talak).getByLabelText('More methods for Talak 7.9%'), { target: { value: 'soil_drench' } });
+    expect(pressedMethod(talak)).toBeNull();
+    expect(within(talak).getByLabelText('More methods for Talak 7.9%').value).toBe('soil_drench');
+    await analyze();
+    await submit();
+    expect(completeCalls()[0].body.products.find((p) => p.productId === P_TALAK)).toMatchObject({ applicationMethod: 'soil_drench' });
   });
 
   test('a visit with no planned products shows the inline search and no empty-state text', async () => {
@@ -744,7 +819,7 @@ describe('products', () => {
   test('a sprayed product the tech adds goes down on the WHOLE-lawn area (the property\'s saved one), not a planned product\'s area; nobody types one', async () => {
     await openSheet();
     await addProductByName('Green Granules');
-    expect(within(editorFor('Green Granules')).getByText(/whole lawn, 5,000 sq ft/)).toBeTruthy();
+    expect(within(editorFor('Green Granules')).getByText(/Whole lawn, 5,000 sq ft/)).toBeTruthy();
     await analyzeAndComplete();
     expect(completeCalls()[0].body.products.find((p) => p.productId === P_GRANULE)).toMatchObject({ areaValue: 5000, areaUnit: 'sqft' });
     // The planned Talak row keeps its own area.
@@ -758,10 +833,10 @@ describe('products', () => {
     ] } });
     await openSheet({ request: makeRequest({ ctx }) });
     // Named for what it is: never "whole lawn" for a partial area.
-    expect(within(editorFor('Talak 7.9%')).getByText('Broadcast spray · planned area, 1,437.5 sq ft')).toBeTruthy();
+    expect(within(editorFor('Talak 7.9%')).getByText('Planned area, 1,437.5 sq ft')).toBeTruthy();
     expect(within(editorFor('Talak 7.9%')).queryByText(/whole lawn/)).toBeNull();
     await addProductByName('Green Granules');
-    expect(await within(editorFor('Green Granules')).findByText(/whole lawn, 5,750 sq ft/)).toBeTruthy();
+    expect(await within(editorFor('Green Granules')).findByText(/Whole lawn, 5,750 sq ft/)).toBeTruthy();
     await analyzeAndComplete();
     const { body } = completeCalls()[0];
     expect(body.products.find((p) => p.productId === P_TALAK)).toMatchObject({ areaValue: 1437.5, areaUnit: 'sqft' });
@@ -772,13 +847,13 @@ describe('products', () => {
   test('a planned row\'s own area equal to the saved whole lawn is called the whole lawn', async () => {
     propertyAreasAnswer = areasAnswer({ lawn: { sqft: 6000, source: 'recorded', reviewedAt: null } });
     await openSheet();
-    expect(await within(editorFor('Talak 7.9%')).findByText('Broadcast spray · whole lawn, 6,000 sq ft')).toBeTruthy();
+    expect(await within(editorFor('Talak 7.9%')).findByText('Whole lawn, 6,000 sq ft')).toBeTruthy();
   });
 
   test('plan area only, property areas off: the planned row completes with its own area, and no visit coverage is sent', async () => {
     propertyAreasAnswer = { enabled: false };
     await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray', { treatedSqft: 1437.5, areaUnit: 'sqft' }) }) });
-    expect(within(editorFor('Talak 7.9%')).getByText('Broadcast spray · planned area, 1,437.5 sq ft')).toBeTruthy();
+    expect(within(editorFor('Talak 7.9%')).getByText('Planned area, 1,437.5 sq ft')).toBeTruthy();
     await analyzeAndComplete();
     expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 1437.5 });
     expect(completeCalls()[0].body).not.toHaveProperty('propertyServiceArea');
@@ -806,7 +881,7 @@ describe('products', () => {
 
   test('a plan with no area uses the lawn area its own property has recorded (the primary property), read from the visit, never the customer\'s turf profile', async () => {
     const { request } = await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
-    expect(await within(editorFor('Talak 7.9%')).findByText('Broadcast spray · whole lawn, 5,000 sq ft')).toBeTruthy();
+    expect(await within(editorFor('Talak 7.9%')).findByText('Whole lawn, 5,000 sq ft')).toBeTruthy();
     await analyzeAndComplete();
     expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 5000, areaUnit: 'sqft' });
     expect(request.mock.calls.some(([path]) => path === '/admin/schedule/svc-lawn/property-areas')).toBe(true);
@@ -816,7 +891,7 @@ describe('products', () => {
   test('a secondary property\'s own reviewed area is the one used', async () => {
     propertyAreasAnswer = areasAnswer({ lawn: { sqft: 2200, source: 'measured', reviewedAt: '2026-09-01T00:00:00.000Z', reviewedBy: 'tech-1' } }, { propertyId: 'prop-2' });
     await openSheet({ request: makeRequest({ ctx: plannedOne('broadcast_spray') }) });
-    expect(await within(editorFor('Talak 7.9%')).findByText('Broadcast spray · whole lawn, 2,200 sq ft')).toBeTruthy();
+    expect(await within(editorFor('Talak 7.9%')).findByText('Whole lawn, 2,200 sq ft')).toBeTruthy();
     await analyzeAndComplete();
     expect(completeCalls()[0].body.products[0]).toMatchObject({ areaValue: 2200, areaUnit: 'sqft' });
   });

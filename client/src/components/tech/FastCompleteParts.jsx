@@ -16,7 +16,7 @@ import { isMlUnit } from '../../lib/measure-units';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import DictationButton from './DictationButton';
 import FastCompleteProductPicker, { WarningIcon } from './FastCompleteProductPicker';
-import { UiSurface, ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
+import { UiSurface, ActionFeedback, Button, Field, Input, Select, Textarea, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // Tips shown before the tech searches or opens the whole list.
@@ -274,6 +274,56 @@ export function AmountRow({ row, rate, onChange }) {
         </div>
       ) : null}
       {overLabel && <p className="tech-visit-warning" role="status">&gt; label max {rate.max}</p>}
+    </div>
+  );
+}
+
+// The common lawn methods the sheets fall back to when the context offers none
+// (an older server): the three every lawn visit uses, in screen order. The
+// server's list (lawn-reservice-fast-context LAWN_METHODS) is the authority
+// when it is there.
+export const COMMON_LAWN_METHODS = [
+  { value: 'spot_treatment', label: 'Spot treatment', common: true },
+  { value: 'broadcast_spray', label: 'Broadcast spray', common: true },
+  { value: 'granular_broadcast', label: 'Granular broadcast', common: true },
+];
+
+/** The context's method list, or the common three when it has none. */
+export function methodChoicesOf(data) {
+  const offered = (Array.isArray(data?.methods) ? data.methods : []).filter((choice) => choice?.value);
+  return offered.length ? offered : COMMON_LAWN_METHODS;
+}
+
+// How a product went down: the common methods as chips under "How", the rest
+// in a "More methods" select. Shared by the lawn sheet and the lawn re-service
+// sheet. `footnote` is the sheet's own line under the chips, if it has one.
+export function MethodSection({ row, methods, locked, onChange, footnote = null }) {
+  const methodId = useId();
+  // An older context without `common` shows every method as a button.
+  const hasCommon = methods.some((choice) => choice.common);
+  const common = hasCommon ? methods.filter((choice) => choice.common) : methods;
+  const more = hasCommon ? methods.filter((choice) => !choice.common) : [];
+  return (
+    <div>
+      <span id={methodId} className="tech-product-editor-label">How</span>
+      <div role="group" aria-labelledby={methodId} className="tech-visit-tile-grid tech-product-methods">
+        {common.map((choice) => (
+          <Chip disabled={locked} key={choice.value} label={choice.label} pressed={row.method === choice.value} onClick={() => onChange({ method: choice.value })} />
+        ))}
+      </div>
+      {more.length > 0 && (
+        <Select
+          aria-label={`More methods for ${row.name}`}
+          className="tech-visit-control"
+          disabled={locked}
+          value={more.some((choice) => choice.value === row.method) ? row.method : ''}
+          onChange={(e) => { if (e.target.value) onChange({ method: e.target.value }); }}
+        >
+          <option value="">More methods</option>
+          {more.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+        </Select>
+      )}
+      {footnote && <p className="tech-visit-muted">{footnote}</p>}
     </div>
   );
 }
