@@ -126,10 +126,13 @@ function appliedLine(sinceLast) {
   return list.length ? `Last visit we applied ${joinList(list)}.` : null;
 }
 
+// `withheld` (GATE_LAWN_LIGHTING only): the gate-off line this block would have had,
+// which the light rules took away. It still takes its place in the block's size
+// limits and is removed last, so the gate can only remove a sentence.
 function overallLine(progress) {
-  const direction = progress?.overall?.direction;
+  const direction = progress?.overall?.legacyDirection ?? progress?.overall?.direction;
   return Object.prototype.hasOwnProperty.call(OVERALL_SENTENCE, direction)
-    ? { text: OVERALL_SENTENCE[direction], direction, states: direction === 'flat' ? ['flat'] : [] }
+    ? { text: OVERALL_SENTENCE[direction], direction, states: direction === 'flat' ? ['flat'] : [], withheld: progress.overall.direction !== direction }
     : null;
 }
 
@@ -137,8 +140,8 @@ function metricLines(progress) {
   // The slots are chosen from each item's LEGACY state (what the engine said before
   // GATE_LAWN_LIGHTING; the same as `state` when the gate is off), exactly as they
   // always were; only then is a line replaced by, or withheld for, the state the
-  // light rules gave. So the gate can remove or soften a sentence but never lets
-  // a line that was cut for room into the payload.
+  // light rules left. So the gate can only remove a sentence, never replace one
+  // or let in a line that was cut for room.
   const held = (map, metric, state) => {
     if (!STATE_PRECEDENCE.includes(state)) return;
     const prior = map.get(metric);
@@ -157,8 +160,10 @@ function metricLines(progress) {
     .filter((slot) => METRIC_SENTENCE[slot.metric][slot.legacyState])
     .sort((a, b) => LINE_PRIORITY.indexOf(a.legacyState) - LINE_PRIORITY.indexOf(b.legacyState))
     .slice(0, MAX_METRIC_LINES)
-    .map(({ metric }) => ({ text: METRIC_SENTENCE[metric][actual.get(metric)] || null, state: actual.get(metric) }))
-    .filter((line) => line.text);
+    // A metric whose state the light rules withheld keeps its slot (flagged `withheld`)
+    // and is removed at the end (THE RULE of GATE_LAWN_LIGHTING: remove a gate-off
+    // sentence, never print a different one).
+    .map(({ metric, legacyState }) => ({ text: METRIC_SENTENCE[metric][legacyState], state: legacyState, withheld: actual.get(metric) !== legacyState }));
 }
 
 function watchLine(sinceLast, insights, bannerPresent) {
@@ -181,7 +186,8 @@ function watchLine(sinceLast, insights, bannerPresent) {
  * @param {object|null} [input.progress] buildLawnProgress's block (P13), or null
  * @param {object[]} [input.insights] this visit's insight cards (category, status)
  * @param {boolean} [input.bannerPresent] the watering banner carries lines
- * @returns {{ priorDate: string, lines: string[] }|null} null when there is nothing to say
+ * @returns {{ priorDate: string, lines: string[] }|null} null when there is nothing to say (a block whose every line the
+ *   light rules withheld has no lines but a non-enumerable `budgetLines`)
  */
 function buildSinceLastCopy({ sinceLast, progress = null, insights = [], bannerPresent = false } = {}) {
   if (!sinceLast || typeof sinceLast !== 'object') return null;
@@ -197,15 +203,28 @@ function buildSinceLastCopy({ sinceLast, progress = null, insights = [], bannerP
     progress: overall ? overall.direction : 'unknown',
     progressStates: [...(overall ? overall.states : []), ...metrics.map((line) => GUARD_STATE[line.state]).filter(Boolean)],
   };
-  const guarded = [appliedLine(sinceLast), overall && overall.text, ...metrics.map((line) => line.text)]
-    .filter(Boolean)
-    .filter((text) => checkLawnModelCopy(text, facts).ok);
+  const candidates = [
+    { text: appliedLine(sinceLast), withheld: false },
+    overall && { text: overall.text, withheld: overall.withheld },
+    ...metrics.map((line) => ({ text: line.text, withheld: line.withheld })),
+  ].filter((line) => line && line.text);
+  // Sized exactly as gate-off sizes it (withheld lines still count), then the
+  // withheld ones come out: the gate never makes room for a line gate-off cut.
+  const guarded = candidates.filter((line) => checkLawnModelCopy(line.text, facts).ok);
 
   const watch = watchLine(sinceLast, insights, bannerPresent);
   // guarded is ordered applied, overall, metrics (most important first), so
   // cutting from its end drops the lesser metric line.
-  const lines = watch ? [...guarded.slice(0, MAX_LINES - 1), watch] : guarded.slice(0, MAX_LINES);
-  return lines.length ? { priorDate, lines } : null;
+  const sized = watch ? guarded.slice(0, MAX_LINES - 1) : guarded.slice(0, MAX_LINES);
+  const lines = [...sized.filter((line) => !line.withheld).map((line) => line.text), ...(watch ? [watch] : [])];
+  // With the gate on, `budgetLines` is the block gate-off would have printed. It rides
+  // non-enumerably, only when something was withheld, and the lead counts ITS words
+  // (word cap, region budget) so a withheld line never frees room for another one.
+  const budgetLines = [...sized.map((line) => line.text), ...(watch ? [watch] : [])];
+  if (!lines.length && !budgetLines.length) return null;
+  const copy = { priorDate, lines };
+  if (budgetLines.length !== lines.length) Object.defineProperty(copy, 'budgetLines', { value: budgetLines, enumerable: false });
+  return copy;
 }
 
 module.exports = {

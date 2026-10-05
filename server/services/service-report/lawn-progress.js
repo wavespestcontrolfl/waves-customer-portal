@@ -64,12 +64,13 @@
  *     leaves unspoken (every color verdict rests on the two color scores, the
  *     in-window "no clear gain yet" included).
  *   - a color move smaller than COLOR_NO_CHANGE_POINTS is no change even in
- *     compatible light: a would-be `behind` from a small, flat score reads
- *     `holding_steady` (gate 'color_dead_band').
- *   - the overall direction is decided by thickness, weeds and stress damage, never
- *     by color alone (overallDirection, `drivers`). A move only color explains, or
- *     one the printed overall score would contradict, has no direction
- *     (reason 'color_driven') and so no sentence.
+ *     compatible light: a would-be `behind` or `seasonal` from it is withheld
+ *     (`unclear`, gate 'color_dead_band'), never rewritten.
+ *   - the overall direction is the gate-off one, kept only when thickness, weeds and
+ *     stress damage agree with it (overallDirectionByDrivers); a color-driven move or
+ *     a disagreement has no direction (reason 'color_driven') and so no sentence.
+ *   THE RULE: the gate may only remove a sentence gate-off would print, never print a
+ *   different one (pinned by a subset property test).
  *
  * Thresholds: the band (8 points per category, 4 for the overall) is W5's
  * proposal; tune it with the calibration replay (server/scripts/
@@ -290,19 +291,18 @@ function appliedRows(applied, priorDate, issues = []) {
   return { rows: built.rows, unmapped: built.unmapped };
 }
 
-// GATE_LAWN_LIGHTING (gates.color exists only then): color is not compared when the
-// two visits' light is unknown or different.
-function colorLightBlock(metric, gates) {
-  return metric === 'color_health' && gates.color != null && !gates.color.comparable;
-}
-
-// GATE_LAWN_LIGHTING: in compatible light, a color move smaller than the dead band
-// is no change: a would-be "behind", and a cool-season "seasonal" (a 70 -> 70
-// score is not a seasonal color change), both read holding steady. Runs BEFORE
-// the seasonal rule.
-function smallColorMove(metric, gates, state, scoreDelta) {
-  return metric === 'color_health' && gates.color != null && Math.abs(scoreDelta) < gates.color.band
-    && (state === 'behind' || gates.seasonChange);
+// GATE_LAWN_LIGHTING (gates.color exists only then). THE RULE for the whole gate: it
+// may only REMOVE a sentence the gate-off engine would have printed, never print a
+// different one. So an item is either what gate-off says or `unclear`, and
+// `unclear` is withheld by the copy. It withholds a color item (a) when the two
+// visits' light is unknown or different, and (b) in compatible light when the move
+// is under the dead band and gate-off would have said "behind" or "mostly seasonal"
+// (a move that small is neither). Returns the gate name, or null to leave it alone.
+function colorGuardGate(metric, gates, state, scoreDelta) {
+  if (metric !== 'color_health' || gates.color == null || state === 'unclear') return null;
+  if (!gates.color.comparable) return gates.color.reason;
+  const small = Math.abs(scoreDelta) < gates.color.band;
+  return small && (state === 'behind' || state === 'seasonal') ? 'color_dead_band' : null;
 }
 
 function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
@@ -317,14 +317,6 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
   } else if (!gates.comparable || gates.divergent.has(metric)) {
     state = 'unclear';
     gate = 'low_confidence';
-  } else if (colorLightBlock(metric, gates)) {
-    // GATE_LAWN_LIGHTING: no color claim across unknown or different light.
-    state = 'unclear';
-    gate = gates.color.reason;
-  } else if (smallColorMove(metric, gates, state, scoreDelta)) {
-    // GATE_LAWN_LIGHTING: a small color move is no change, even in compatible light.
-    state = 'holding_steady';
-    gate = 'color_dead_band';
   } else if (metric === 'color_health' && gates.seasonChange) {
     state = 'seasonal';
     gate = 'seasonal';
@@ -334,13 +326,12 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
     state = 'holding_steady';
   }
 
-  // GATE_LAWN_LIGHTING: the state this item would have WITHOUT the light rules, so
-  // the copy can pick its sentence slots exactly as gate-off would and only then
-  // withhold a line (the gate may remove a sentence, never promote another into
-  // its slot). Present only where the light rules changed the state.
-  const legacyState = gates.color && metric === 'color_health'
-    ? itemForMetric({ row, metric, days, cur, prior, gates: { ...gates, color: undefined }, band }).state
-    : state;
+  // GATE_LAWN_LIGHTING: the state gate-off would have given is kept as `legacyState`
+  // wherever the light rules withhold it, so the copy picks its sentence slots
+  // exactly as gate-off would and only then withholds the line.
+  const guarded = colorGuardGate(metric, gates, state, scoreDelta);
+  const legacyState = guarded ? state : null;
+  if (guarded) { state = 'unclear'; gate = guarded; }
   return {
     kind: 'applied',
     rowId: row.id,
@@ -349,7 +340,7 @@ function itemForMetric({ row, metric, days, cur, prior, gates, band }) {
     approved: Boolean(row.approved),
     metric,
     state,
-    ...(legacyState !== state ? { legacyState } : {}),
+    ...(legacyState ? { legacyState } : {}),
     gate,
     rawVerdict,
     basis: { daysSinceApplication: Number.isFinite(days) ? days : null, scoreDelta, band },
@@ -427,30 +418,27 @@ function nonColorBlend(scores) {
 }
 
 /**
- * GATE_LAWN_LIGHTING: the headline direction decided by thickness, weeds and stress
- * damage; color alone can never make it up or down. Two numbers: the overall delta
- * the customer sees printed, and the same blend without color.
- *   up    the non-color blend gained a band AND the printed overall rose
- *   down  the non-color blend lost a band AND the printed overall fell
- *   flat  neither moved a band
- *   none  (unknown, 'color_driven') anything else: color moved the printed score
- *         while the rest held, or the two disagree. A sentence would contradict the
- *         number or credit the light, so there is none.
- * Photo confidence and the cool-season rule are the existing ones.
+ * GATE_LAWN_LIGHTING: color alone can never make the headline direction. THE RULE
+ * (the gate only removes): the direction is first computed exactly as gate-off does
+ * (overallDirection), and is kept only when the no-color blend (thickness, weeds,
+ * stress damage) AGREES with it: up with the blend up a band, down with it down a
+ * band, flat with it inside the band. Anything else, a color-driven move or a
+ * disagreement, is `unknown` ('color_driven') and so prints nothing; it is never
+ * turned into a different direction. A gate-off `unknown` stays as it was.
  */
-function overallDirectionByDrivers({ current, prior, curOverall, priorOverall, comparable, seasonChange, band }) {
-  const d = delta(curOverall, priorOverall);
-  if (d == null) return { direction: 'unknown', delta: null, band, reason: 'missing_scores' };
-  if (!comparable) return { direction: 'unknown', delta: d, band, reason: 'low_confidence' };
+function overallDirectionByDrivers({ current, prior, ...input }) {
+  const legacy = overallDirection(input);
+  if (legacy.direction === 'unknown') return legacy;
   const curBlend = nonColorBlend(current.scores);
   const priorBlend = nonColorBlend(prior.scores);
-  if (curBlend == null || priorBlend == null) return { direction: 'unknown', delta: d, band, reason: 'missing_scores' };
+  if (curBlend == null || priorBlend == null) return { ...legacy, direction: 'unknown', reason: 'missing_scores' };
   const drivers = Math.round((curBlend - priorBlend) * 10) / 10;
-  const result = (direction, reason = null) => ({ direction, delta: d, band, reason, drivers });
-  if (drivers >= band && d > 0) return result('up');
-  if (drivers <= -band && d < 0) return seasonChange ? result('unknown', 'seasonal') : result('down');
-  if (Math.abs(drivers) < band && Math.abs(d) < band) return result('flat');
-  return result('unknown', 'color_driven');
+  const agrees = (legacy.direction === 'up' && drivers >= input.band)
+    || (legacy.direction === 'down' && drivers <= -input.band)
+    || (legacy.direction === 'flat' && Math.abs(drivers) < input.band);
+  // `legacyDirection` is what gate-off would have said: the copy sizes its block by it and
+  // then withholds the line, so withholding never makes room for another sentence.
+  return agrees ? { ...legacy, drivers } : { ...legacy, direction: 'unknown', reason: 'color_driven', drivers, legacyDirection: legacy.direction };
 }
 
 function seasonOf(side) {

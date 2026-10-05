@@ -127,13 +127,23 @@ function photoLightsFromRun(run) {
 }
 
 /**
- * ONE light for a whole visit, from the photos the color score rests on: every
- * usable photo whose shot carries a POSITIVE area weight (shotList.areaWeight, the
- * same weights the shot guide gives color_health: front, back, side, untagged,
- * and the half-weight shade and hot-edge shots). Detail shots (weight 0) do not
- * count: a close-up in shade must not void a sunny overview. A shade photo in
- * different light from the front photo makes the visit mixed, because it moves
- * the color score too.
+ * Whether a run was read under the shot-list prompt, from the run's OWN stored
+ * prompt version (`lawn-visit-v1-shot-list[-lighting]`), never from today's gate.
+ */
+const readUnderShotList = (promptVersion) => typeof promptVersion === 'string' && promptVersion.includes('-shot-list');
+
+/**
+ * ONE light for a whole visit, from the photos the visit's color score rests on.
+ * That depends on the prompt the visit was read under (`opts.shotList`, from
+ * readUnderShotList of the run's stored version):
+ *   - SHOT-LIST prompt (default): area scores come from the shots with a POSITIVE
+ *     area weight (shotList.areaWeight: front, back, side, untagged, and the
+ *     half-weight shade and hot-edge shots); detail shots (weight 0) do not count,
+ *     so a close-up in shade cannot void a sunny overview.
+ *   - LEGACY prompt (`shotList: false`, GATE_LAWN_SHOT_LIST off at capture): ONE
+ *     whole-visit color score is read from every numbered photo, so EVERY usable
+ *     photo counts, close-up and trouble photos included.
+ * Usable = adequate or limited.
  *   - any prompt position with no stored photo row -> unknown
  *   - no such photo, or any of them unknown       -> unknown
  *   - all the same                                -> that light
@@ -142,12 +152,12 @@ function photoLightsFromRun(run) {
  *     every non-matching photo is low light
  * @param {Array<{light:string, quality?:string, zone?:string|null}>} photos
  */
-function visitLightFromPhotos(photos) {
+function visitLightFromPhotos(photos, { shotList: shotListPrompt = true } = {}) {
   // A prompt position whose photo row or read is missing could be any shot in any
   // light, so the visit's light cannot be known.
   if ((Array.isArray(photos) ? photos : []).some((p) => p && p.missing === true)) return 'unknown';
   const overview = (Array.isArray(photos) ? photos : [])
-    .filter((p) => p && USABLE_QUALITY.has(p.quality) && shotList.areaWeight(p.zone) > 0);
+    .filter((p) => p && USABLE_QUALITY.has(p.quality) && (!shotListPrompt || shotList.areaWeight(p.zone) > 0));
   if (!overview.length) return 'unknown';
   const lights = overview.map((p) => (LIGHTING.includes(p.light) ? p.light : 'unknown'));
   if (lights.includes('unknown')) return 'unknown';
@@ -170,14 +180,14 @@ async function loadVisitLights(knex, assessmentIds, { customerId = null } = {}) 
   if (!ids.length) return lights;
   const scoped = (query) => (customerId == null ? query : query.where({ customer_id: customerId }));
   const runs = await scoped(knex('lawn_assessment_runs').whereIn('assessment_id', ids))
-    .select('assessment_id', 'photo_ids', 'photo_quality');
+    .select('assessment_id', 'photo_ids', 'photo_quality', 'prompt_version');
   if (!runs.length) return lights;
   const photoRows = await scoped(knex('lawn_assessment_photos').whereIn('assessment_id', ids))
     .select('id', 'assessment_id', 'zone');
   const zoneById = new Map(photoRows.map((row) => [String(row.id), row.zone || null]));
   for (const run of runs) {
     const photos = photoLightsFromRun(run).map((p) => ({ ...p, zone: p.photoId == null ? null : (zoneById.get(p.photoId) ?? null) }));
-    lights.set(String(run.assessment_id), visitLightFromPhotos(photos));
+    lights.set(String(run.assessment_id), visitLightFromPhotos(photos, { shotList: readUnderShotList(run.prompt_version) }));
   }
   return lights;
 }
@@ -192,6 +202,7 @@ module.exports = {
   lightsCompatible,
   colorComparability,
   photoLightsFromRun,
+  readUnderShotList,
   visitLightFromPhotos,
   loadVisitLights,
 };

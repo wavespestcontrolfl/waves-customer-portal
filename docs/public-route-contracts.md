@@ -2632,7 +2632,10 @@ Compatible light: full sun with full sun; overcast and open shade with each othe
 mixed sun and shade, low light and unknown are never compatible. A visit's light
 comes from its usable photos whose shot has positive color weight in
 `shared/lawn-photo-shots.json` (front, back, side, untagged, and the half-weight
-shade and hot-edge shots; detail shots do not count); a mix is mixed light. Any prompt position with no stored photo row (its insert failed) or no
+shade and hot-edge shots; detail shots do not count) when the visit was read under
+the shot-list prompt, and from EVERY usable photo when it was read under the legacy
+prompt (one whole-visit color score from all photos); which prompt is decided from
+the run's own stored prompt version, never from today's gate. A mix is mixed light. Any prompt position with no stored photo row (its insert failed) or no
 light read makes the visit's light unknown.
 
 Every code path that reads the gate (`lawnLightingLive()` in
@@ -2653,19 +2656,27 @@ Every code path that reads the gate (`lawnLightingLive()` in
    requires `GATE_LAWN_SINCE_LAST` to matter. It only REMOVES sentences from
    `reportV2.lead.sinceLast.lines` (live views only, `mode: 'live'`; PDF and static
    builds never carry that block, so PDF content and its cache signature are
-   unchanged and no signature stamp rides this gate): the color lines ("Color is
-   ahead of schedule.", "Color is on track.", "Color is holding steady.", "Color
-   is behind where we expected.", "The color change since then is mostly
-   seasonal.", "It is too early to judge the color response.") are spoken only
-   when both visits have a stored, compatible light, and a color move under 8
-   points (`COLOR_NO_CHANGE_POINTS`, the category band) is "holding steady", never
-   "behind" and never "mostly seasonal" (the dead band runs before the cool-season
-   rule). The two per-treatment slots are chosen exactly as with the gate off, and
-   only then is a color line replaced or withheld, so the gate never lets a
-   sentence into the block that was not already in it. The overall sentence ("Your overall lawn score is up / down since
-   then." / "...holding steady.") is decided by thickness, weeds and stress damage,
-   never by color alone: when only color moved the printed score, or the printed
-   score and the no-color blend disagree, there is no overall sentence. For every
+   unchanged and no signature stamp rides this gate). THE RULE: the gate may only
+   REMOVE a sentence gate-off would have printed, never print a different one, and
+   a removed sentence never makes room for another. So the engine first reaches
+   exactly the gate-off state for every item and the gate then only withholds:
+   the color lines ("Color is ahead of schedule.", "Color is on track.", "Color
+   is holding steady.", "Color is behind where we expected.", "The color change
+   since then is mostly seasonal.", "It is too early to judge the color
+   response.") are withheld unless both visits have a stored, compatible light,
+   and, in compatible light, a "behind" or "mostly seasonal" that rests on a color
+   move under 8 points (`COLOR_NO_CHANGE_POINTS`, the category band) is withheld
+   too (nothing is said; it is never rewritten to "holding steady"). The overall
+   sentence ("Your overall lawn score is up / down since then." / "...holding
+   steady.") is first decided exactly as gate-off decides it and is kept only when
+   thickness, weeds and stress damage agree with it (up with the no-color blend up
+   a band, down with it down a band, steady with it inside the band); otherwise
+   there is none. The two per-treatment slots, the four-line limit, the 40-word cap
+   and the lead's region word budget are all sized with the withheld lines still
+   counted (`budgetLines`, a non-enumerable hand-off, never a payload key), and the
+   withheld lines are removed last. A property test pins the rule over a grid of
+   score moves, seasons, treatments, photo confidence and light combinations: the
+   gate-on lines and lead strings are always a subset of the gate-off ones. For every
    existing customer those color lines and color-driven overall sentences stop
    appearing on reopened reports, because the block is re-selected from the frozen
    memory and the two visits' scores on every live view; the frozen memory entry

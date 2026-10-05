@@ -152,14 +152,14 @@ describe('loadVisitLights', () => {
   ];
   const runs = [
     {
-      assessment_id: 'A', photo_ids: ['c1', 'c2'],
+      assessment_id: 'A', prompt_version: 'lawn-visit-v1-shot-list-lighting', photo_ids: ['c1', 'c2'],
       photo_quality: [
         { photo: 1, quality: 'adequate', issue: '', lighting: 'overcast', hard_shadows: 'no' },
         { photo: 2, quality: 'adequate', issue: '', lighting: 'full_sun', hard_shadows: 'yes' },
       ],
     },
     // a run from before the gate: no read on the row
-    { assessment_id: 'B', photo_ids: ['o1'], photo_quality: [{ photo: 1, quality: 'adequate', issue: '' }] },
+    { assessment_id: 'B', prompt_version: 'lawn-visit-v1-shot-list', photo_ids: ['o1'], photo_quality: [{ photo: 1, quality: 'adequate', issue: '' }] },
   ];
 
   test('one run read and one photo read for every id; a visit with no stored read is unknown', async () => {
@@ -172,7 +172,7 @@ describe('loadVisitLights', () => {
 
   test('end to end: a sunny front plus a shade photo whose row failed to save reads unknown, not full_sun', async () => {
     const gapRuns = [{
-      assessment_id: 'G', photo_ids: ['g1', null],
+      assessment_id: 'G', prompt_version: 'lawn-visit-v1-shot-list-lighting', photo_ids: ['g1', null],
       photo_quality: [
         { photo: 1, quality: 'adequate', issue: '', lighting: 'full_sun', hard_shadows: 'no' },
         { photo: 2, quality: 'adequate', issue: '', lighting: 'overcast', hard_shadows: 'no' },
@@ -180,6 +180,25 @@ describe('loadVisitLights', () => {
     }];
     const { knex } = fakeKnex({ runs: gapRuns, photos: [{ id: 'g1', assessment_id: 'G', zone: 'front' }] });
     expect(Object.fromEntries(await lighting.loadVisitLights(knex, ['G']))).toEqual({ G: 'unknown' });
+  });
+
+  test('the capture mode comes from the run\'s own stored prompt version: a legacy-prompt visit counts EVERY usable photo, a shot-list visit only the color-weighted shots', async () => {
+    const rows = (version) => [{
+      assessment_id: 'M', prompt_version: version, photo_ids: ['m1', 'm2'],
+      photo_quality: [
+        { photo: 1, quality: 'adequate', issue: '', lighting: 'full_sun', hard_shadows: 'no' },
+        { photo: 2, quality: 'adequate', issue: '', lighting: 'overcast', hard_shadows: 'no' },
+      ],
+    }];
+    const photos = [{ id: 'm1', assessment_id: 'M', zone: 'front' }, { id: 'm2', assessment_id: 'M', zone: 'close_up' }];
+    const legacy = await lighting.loadVisitLights(fakeKnex({ runs: rows('lawn-visit-v1-lighting'), photos }).knex, ['M']);
+    expect(legacy.get('M')).toBe('mixed_sun_shade'); // the legacy prompt scored color from both photos
+    const shot = await lighting.loadVisitLights(fakeKnex({ runs: rows('lawn-visit-v1-shot-list-lighting'), photos }).knex, ['M']);
+    expect(shot.get('M')).toBe('full_sun'); // close_up carries no color weight under the shot guide
+    expect(lighting.readUnderShotList('lawn-visit-v1-shot-list')).toBe(true);
+    expect(lighting.readUnderShotList('lawn-visit-v1-lighting')).toBe(false);
+    expect(lighting.readUnderShotList(undefined)).toBe(false);
+    expect(lighting.visitLightFromPhotos([{ light: 'full_sun', zone: 'front', quality: 'adequate' }, { light: 'overcast', zone: 'trouble', quality: 'limited' }], { shotList: false })).toBe('mixed_sun_shade');
   });
 
   test('no ids reads nothing; no run at all reads no photos', async () => {

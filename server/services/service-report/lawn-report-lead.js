@@ -77,7 +77,7 @@ const WATCHING_LABEL_WORDS = 1;
 const LEAD_FIELDS = {
   headline: (lead) => [lead.headline],
   why: (lead) => [lead.why],
-  sinceLast: (lead) => (lead.sinceLast && Array.isArray(lead.sinceLast.lines) ? lead.sinceLast.lines : []),
+  sinceLast: (lead) => lead.sinceLastBudgetLines || (lead.sinceLast && Array.isArray(lead.sinceLast.lines) ? lead.sinceLast.lines : []),
   applied: (lead) => [lead.applied],
   whatToExpect: (lead) => [lead.whatToExpect],
   watching: (lead) => [lead.watching],
@@ -165,15 +165,25 @@ function deriveNext(reportV2, topIssue, bannerPresent) {
 // line is its own sentence; the last ones are the least important).
 function deriveSinceLast(copy) {
   const priorDate = copy && /^\d{4}-\d{2}-\d{2}$/.test(String(copy.priorDate || '')) ? copy.priorDate : null;
-  const lines = (copy && Array.isArray(copy.lines) ? copy.lines : []).map(clean).filter(Boolean);
   if (!priorDate) return null;
-  while (lines.length && lines.reduce((sum, line) => sum + countWords(line), 0) > FIELD_WORD_CAPS.sinceLast) lines.pop();
-  return lines.length ? { priorDate, lines } : null;
+  const clipped = (list) => (Array.isArray(list) ? list : []).map(clean).filter(Boolean);
+  const lines = clipped(copy.lines);
+  // GATE_LAWN_LIGHTING: `budgetLines` is the block gate-off would have printed. The
+  // word cap runs over IT, so withheld lines still take their room and the lines
+  // that survive are exactly gate-off's survivors minus the withheld ones.
+  const budget = copy.budgetLines ? clipped(copy.budgetLines) : [...lines];
+  while (budget.length && budget.reduce((sum, line) => sum + countWords(line), 0) > FIELD_WORD_CAPS.sinceLast) budget.pop();
+  const kept = lines.filter((line) => budget.includes(line));
+  return { priorDate, lines: kept, budget };
 }
 
 function dropField(lead, field) {
-  if (OPTIONAL_FIELDS.has(field)) delete lead[field];
-  else lead[field] = null;
+  if (OPTIONAL_FIELDS.has(field)) {
+    delete lead[field];
+    if (field === 'sinceLast') delete lead.sinceLastBudgetLines;
+  } else {
+    lead[field] = null;
+  }
 }
 
 // The writer's fields, or null when the gate is off / nothing was written.
@@ -220,7 +230,12 @@ function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null, rainfastWat
   }
   lead.yourPart = lead.yourPart.filter((task) => countWords(task) <= FIELD_WORD_CAPS.yourPart);
   const since = deriveSinceLast(sinceLast);
-  if (since) lead.sinceLast = since;
+  if (since && since.lines.length) lead.sinceLast = { priorDate: since.priorDate, lines: since.lines };
+  // The region budget counts the block gate-off would have printed (see deriveSinceLast).
+  // Non-enumerable: no payload key, and it is absent unless the light rules withheld a line.
+  if (since && since.budget.length !== since.lines.length) {
+    Object.defineProperty(lead, 'sinceLastBudgetLines', { value: since.budget, writable: true, configurable: true, enumerable: false });
+  }
   // Approved expectation sentences and the fixed watching line: under a
   // banner the same wording test that guards every lead field applies, and a
   // field over its cap is left out whole.

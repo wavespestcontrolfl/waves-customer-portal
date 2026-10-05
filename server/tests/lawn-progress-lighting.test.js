@@ -12,6 +12,7 @@ const {
 const { buildSinceLastCopy, OVERALL_SENTENCE, METRIC_SENTENCE } = require('../services/service-report/lawn-since-last-copy');
 const { COLOR_NO_CHANGE_POINTS } = require('../services/lawn-lighting');
 const { ISSUE_ROWS } = require('../config/lawn-expectations');
+const { deriveLawnLead, leadWords } = require('../services/service-report/lawn-report-lead');
 
 const DAY = 86400000;
 const addDays = (ymd, n) => new Date(Date.parse(`${ymd}T00:00:00Z`) + n * DAY).toISOString().slice(0, 10);
@@ -106,10 +107,10 @@ describe('color is compared only in known, compatible light', () => {
   });
 });
 
-describe('a small color move is no change, even in compatible light', () => {
-  test('under the band a would-be "behind" reads holding_steady; at the band it is a real move', () => {
+describe('a small color move is no change, even in compatible light (nothing is said)', () => {
+  test('under the band a would-be "behind" is withheld, not rewritten; at the band it is a real move', () => {
     for (const color of [-7, -3, 0, 3, 7]) {
-      expect(colorItem(compare({ days: 30, guard: SUN, cur: { color_health: 70 + color } }))).toMatchObject({ state: 'holding_steady', gate: 'color_dead_band' });
+      expect(colorItem(compare({ days: 30, guard: SUN, cur: { color_health: 70 + color } }))).toMatchObject({ state: 'unclear', legacyState: 'behind', gate: 'color_dead_band' });
     }
     expect(colorItem(compare({ days: 30, guard: SUN, cur: { color_health: 62 } }))).toMatchObject({ state: 'behind', gate: null }); // -8 = the band
     expect(colorItem(compare({ days: 30, guard: SUN, cur: { color_health: 78 } })).state).toBe('on_track'); // +8
@@ -121,11 +122,11 @@ describe('a small color move is no change, even in compatible light', () => {
   });
 });
 
-describe('a small color move across a cool-season boundary is holding steady, never "seasonal"', () => {
+describe('a small color move across a cool-season boundary is not "seasonal"', () => {
   const season = { priorSeason: 'peak', curSeason: 'dormant', days: 120 };
-  test('gate on, compatible light: 70 -> 70 and any move under the band read holding steady; a real move is still seasonal', () => {
+  test('gate on, compatible light: 70 -> 70 and any move under the band are withheld (neither seasonal nor anything else); a real move is still seasonal', () => {
     for (const color of [-7, -1, 0, 1, 7]) {
-      expect(colorItem(compare({ ...season, guard: SUN, cur: { color_health: 70 + color } }))).toMatchObject({ state: 'holding_steady', gate: 'color_dead_band' });
+      expect(colorItem(compare({ ...season, guard: SUN, cur: { color_health: 70 + color } }))).toMatchObject({ state: 'unclear', legacyState: 'seasonal', gate: 'color_dead_band' });
     }
     expect(colorItem(compare({ ...season, guard: SUN, cur: { color_health: 62 } })).state).toBe('seasonal');
     expect(colorItem(compare({ ...season, guard: SUN, cur: { color_health: 78 } })).state).toBe('seasonal');
@@ -161,9 +162,10 @@ describe('the gate only ever removes a sentence: the two metric slots are chosen
     expect(out.filter((line) => /Weed|Color|Thickness|repair|stressed/.test(line))).toHaveLength(1);
   });
 
-  test('gate on, compatible light and a flat score: the color slot stays and reads holding steady', () => {
+  test('gate on, compatible light and a flat score: the small color move is withheld, the weed line stays, the cut stress line stays cut', () => {
     const out = lines(threeMetrics(SUN));
-    expect(out).toContain(METRIC_SENTENCE.color_health.holding_steady);
+    for (const sentence of Object.values(METRIC_SENTENCE.color_health)) expect(out).not.toContain(sentence);
+    expect(out).toContain(METRIC_SENTENCE.weed_suppression.behind);
     expect(out).not.toContain(METRIC_SENTENCE.stress_damage.on_track);
   });
 
@@ -185,10 +187,19 @@ describe('the overall direction is decided without color', () => {
     }
   });
 
-  test('thickness, weeds and stress damage drive it', () => {
+  test('thickness, weeds and stress damage drive it, and the gate-off direction is kept only when they agree', () => {
     expect(overall({ guard: NO_READ, cur: { turf_density: 82, weed_suppression: 78 } })).toMatchObject({ direction: 'up', reason: null });
     expect(overall({ guard: NO_READ, cur: { turf_density: 58, stress_damage: 60 } })).toMatchObject({ direction: 'down', reason: null });
-    expect(overall({ guard: NO_READ, cur: { stress_damage: 85 } }).direction).toBe('up');
+    // stress +15 alone: the non-color blend rose a band but the printed overall rose 3, gate-off says flat
+    // -> the gate never rewrites flat into up; it prints nothing
+    expect(compare({ cur: { stress_damage: 85 } }).overall.direction).toBe('flat');
+    expect(overall({ guard: NO_READ, cur: { stress_damage: 85 } })).toMatchObject({ direction: 'unknown', reason: 'color_driven' });
+  });
+
+  test('the Codex r3 case: density 70->82, weeds 70->78, color 70->60 (no-color +7.5, printed +3): gate-off flat is never turned into up', () => {
+    const cur = { turf_density: 82, weed_suppression: 78, color_health: 60 };
+    expect(compare({ cur }).overall).toMatchObject({ direction: 'flat', delta: 3 });
+    expect(overall({ guard: NO_READ, cur })).toMatchObject({ direction: 'unknown', reason: 'color_driven' });
   });
 
   test('a small color move beside a flat lawn is holding steady; nothing moving is holding steady', () => {
@@ -243,10 +254,9 @@ describe('the customer sentences ("Since your last visit")', () => {
     expect(lines[0]).toBe('Last visit we applied weed control.');
   });
 
-  test('compatible light: the color line returns, a small move reads "holding steady", and the overall line follows the drivers', () => {
+  test('compatible light: the color line returns for a real move; a small move says nothing; the overall line follows the drivers', () => {
     expect(said(compare({ days: 30, guard: SUN, cur: { color_health: 85 } }))).toContain(METRIC_SENTENCE.color_health.on_track);
-    expect(said(compare({ days: 30, guard: SUN, cur: { color_health: 67 } }))).toContain(METRIC_SENTENCE.color_health.holding_steady);
-    expect(said(compare({ days: 30, guard: SUN, cur: { color_health: 67 } }))).not.toContain(METRIC_SENTENCE.color_health.behind);
+    for (const sentence of colorSentences) expect(said(compare({ days: 30, guard: SUN, cur: { color_health: 67 } }))).not.toContain(sentence);
     expect(said(compare({ days: 30, guard: SUN, cur: { turf_density: 85, weed_suppression: 82 } }))).toContain(OVERALL_SENTENCE.up);
     expect(said(compare({ days: 30, guard: SUN, cur: {} }))).toContain(OVERALL_SENTENCE.flat);
   });
@@ -254,5 +264,121 @@ describe('the customer sentences ("Since your last visit")', () => {
   test('without a guard (gate off) the sentences are the ones the engine always chose', () => {
     expect(said(compare({ days: 30, cur: { color_health: 90 } }))).toContain(OVERALL_SENTENCE.up);
     expect(said(compare({ days: 30, cur: { color_health: 90 } }))).toContain(METRIC_SENTENCE.color_health.on_track);
+  });
+});
+
+// THE RULE of GATE_LAWN_LIGHTING: the gate may only REMOVE a sentence gate-off would
+// have printed, never print a different one. Property check over a grid of score
+// moves, days, seasons, photo confidence, treatments and light combinations.
+describe('property: with the gate on, the customer lines are always a subset of the gate-off lines', () => {
+  const LIGHTS = [
+    undefined, // gate off
+    NO_READ, UNKNOWN, SUN, SUN_VS_CLOUD,
+    { currentLight: 'open_shade', priorLight: 'overcast' },
+    { currentLight: 'mixed_sun_shade', priorLight: 'mixed_sun_shade' },
+  ];
+  const TREATMENTS = [
+    { applied: [{ name: 'Celsius WG' }], issues: ['dry_spot', 'chinch'] },
+    { applied: [{ name: 'Celsius WG' }], issues: ['mowed_short'] },
+    { applied: [{ name: 'Celsius WG' }], issues: [] },
+  ];
+  const sinceLast = { priorDate: PRIOR_DATE, applied: [{ kind: 'herbicide' }, { kind: 'fertilizer' }], checks: [{ key: 'weeds', status: 'watch' }] };
+  const linesOf = (progress) => buildSinceLastCopy({
+    sinceLast, progress, insights: [{ category: 'weeds', status: 'watch' }],
+  })?.lines || [];
+
+  test('same strings, over the whole grid (sinceLast lines and the overall line)', () => {
+    let compared = 0;
+    let removed = 0;
+    for (const treatment of TREATMENTS) {
+      for (const days of [10, 30, 120]) {
+        for (const [priorSeason, curSeason] of [['peak', 'peak'], ['peak', 'dormant']]) {
+          for (const confidence of ['moderate', 'low']) {
+            for (const color of [-20, -8, -3, 0, 3, 8, 20]) {
+              for (const turf of [-12, 0, 12]) {
+                for (const weeds of [-8, 0, 8]) {
+                  for (const stress of [-10, 0, 15]) {
+                    const cur = { color_health: 70 + color, turf_density: 70 + turf, weed_suppression: 70 + weeds, stress_damage: 70 + stress };
+                    const base = { days, cur, priorSeason, curSeason, confidence, ...treatment };
+                    const off = new Set(linesOf(compare(base)));
+                    for (const guard of LIGHTS.slice(1)) {
+                      const on = linesOf(compare({ ...base, guard }));
+                      for (const line of on) {
+                        if (!off.has(line)) throw new Error(`gate printed a line gate-off did not: "${line}" (${JSON.stringify({ base, guard })})`);
+                      }
+                      compared += 1;
+                      removed += off.size - on.length;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    expect(compared).toBeGreaterThan(10000);
+    expect(removed).toBeGreaterThan(0); // the grid does exercise removals
+  });
+
+  test('the overall item itself: an on-direction is the off-direction or unknown, never another direction', () => {
+    for (const color of [-20, -8, 0, 8, 20]) for (const turf of [-12, 0, 12]) for (const weeds of [-8, 0, 8]) for (const stress of [-10, 0, 15]) {
+      const cur = { color_health: 70 + color, turf_density: 70 + turf, weed_suppression: 70 + weeds, stress_damage: 70 + stress };
+      const off = compare({ cur }).overall.direction;
+      for (const guard of [NO_READ, SUN, SUN_VS_CLOUD]) {
+        expect([off, 'unknown']).toContain(compare({ cur, guard }).overall.direction);
+      }
+    }
+  });
+});
+
+describe('property: the lead around the block obeys the same rule (word cap and region budget count withheld lines)', () => {
+  const sinceLast = { priorDate: PRIOR_DATE, applied: [{ kind: 'herbicide' }, { kind: 'fertilizer' }], checks: [{ key: 'weeds', status: 'watch' }] };
+  const copyOf = (input) => buildSinceLastCopy({ sinceLast, progress: compare(input), insights: [{ category: 'weeds', status: 'watch' }] });
+  const reportWith = (padWords) => ({
+    snapshot: {
+      statusHeadline: 'Stable and watching weeds', scoreExplanation: 'The score is mainly pulled down by weed pressure along the edge.',
+      treatmentSummary: 'Today we applied a broadleaf herbicide to the edge weeds and a light feeding.', customerAction: 'Raise your mower to 4 inches this week.',
+      nextVisit: { label: 'Monday, October 12', source: 'scheduled' },
+    },
+    insights: [{ category: 'weeds', status: 'watch', priority: 1, headline: 'Weeds along the edge', customerAction: 'Raise your mower to 4 inches this week.', nextVisitPlan: 'Spot-treat the edge weeds.' }],
+    banner: { state: 'water_in', lines: [Array.from({ length: padWords }, (_, i) => `word${i}`).join(' ')] },
+    water: {},
+  });
+  const stringsOf = (lead) => ({
+    headline: lead?.headline ?? null, why: lead?.why ?? null, applied: lead?.applied ?? null, next: lead?.next ?? null,
+    sinceLast: lead?.sinceLast?.lines ?? [],
+  });
+
+  test('every lead string the gate prints is one gate-off printed, at every banner length', () => {
+    let withheldCases = 0;
+    for (const input of [
+      { days: 30, cur: { color_health: 90, turf_density: 78, weed_suppression: 78 }, applied: [{ name: 'Celsius WG' }], issues: ['dry_spot', 'chinch'] },
+      { days: 30, cur: { color_health: 40 }, applied: [{ name: 'Celsius WG' }], issues: ['dry_spot'] },
+      { days: 120, priorSeason: 'peak', curSeason: 'dormant', cur: { color_health: 72 }, applied: [{ name: 'Celsius WG' }], issues: ['dry_spot'] },
+    ]) {
+      const off = copyOf(input);
+      for (const guard of [NO_READ, SUN_VS_CLOUD, SUN]) {
+        const on = copyOf({ ...input, guard });
+        for (let pad = 0; pad <= 220; pad += 3) {
+          const leadOff = deriveLawnLead(reportWith(pad), { sinceLast: off });
+          const leadOn = deriveLawnLead(reportWith(pad), { sinceLast: on });
+          const a = stringsOf(leadOff);
+          const b = stringsOf(leadOn);
+          for (const field of ['headline', 'why', 'applied', 'next']) if (b[field] != null) expect(b[field]).toBe(a[field]);
+          for (const line of b.sinceLast) expect(a.sinceLast).toContain(line);
+          if (b.sinceLast.length < a.sinceLast.length) withheldCases += 1;
+          expect(leadWords({ ...reportWith(pad), lead: leadOn })).toBeLessThanOrEqual(leadWords({ ...reportWith(pad), lead: leadOff }));
+        }
+      }
+    }
+    expect(withheldCases).toBeGreaterThan(0);
+  });
+
+  test('the budget lines never become a payload key', () => {
+    const copy = copyOf({ days: 30, cur: { color_health: 90 }, guard: SUN_VS_CLOUD, applied: [{ name: 'Celsius WG' }], issues: ['dry_spot'] });
+    const lead = deriveLawnLead(reportWith(0), { sinceLast: copy });
+    expect(JSON.stringify(lead)).not.toMatch(/budget/i);
+    expect(Object.keys(lead)).not.toContain('sinceLastBudgetLines');
   });
 });
