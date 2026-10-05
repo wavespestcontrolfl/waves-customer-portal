@@ -420,9 +420,27 @@ describe('correct_invoice_address', () => {
     expect(res.note).toMatch(/nothing was re-sent to the customer/);
     // A paid invoice: the bar is told to offer the resend (its own card), never to send it.
     expect(res.next_step).toMatch(/resend_receipt/);
+    // The card itself shows the offer, so it reaches the operator on every confirm path.
+    expect(res.message).toMatch(/resend it/);
+  });
+  test('the offer follows the status read under the lock: refunded since the card → no offer; paid since the card → offer', async () => {
+    const after = { address_line1: '9 New Street Apt 4', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34203', corrected_at: 'x' };
+    const confirm = async (preview) => run('correct_invoice_address', { invoice_id: INV, ...NEW }, { confirmed: true, technicianId: 'admin-1', executionPins: { _verified_address_correction: preview } });
+    let preview = await prev();
+    audited.mockResolvedValueOnce({ invoice: invoice({ status: 'refunded' }), before: {}, after });
+    let res = await confirm(preview);
+    expect(res.success).toBe(true);
+    expect(res).not.toHaveProperty('next_step');
+    expect(res).not.toHaveProperty('message');
+    seed(invoice({ status: 'sent' }));
+    preview = await prev();
+    audited.mockResolvedValueOnce({ invoice: invoice({ status: 'paid' }), before: {}, after });
+    res = await confirm(preview);
+    expect(res.next_step).toMatch(/resend_receipt/);
   });
   test('an unpaid invoice gets no resend offer: there is no receipt to send', async () => {
     seed(invoice({ status: 'sent' }));
+    audited.mockResolvedValueOnce({ invoice: invoice({ status: 'sent' }), before: {}, after: { address_line1: '9 New Street Apt 4', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34203', corrected_at: 'x' } });
     const preview = await prev();
     const res = await run('correct_invoice_address', { invoice_id: INV, ...NEW }, { confirmed: true, technicianId: 'admin-1', executionPins: { _verified_address_correction: preview } });
     expect(res.success).toBe(true);
