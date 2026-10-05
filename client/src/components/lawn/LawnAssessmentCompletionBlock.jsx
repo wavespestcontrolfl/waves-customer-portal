@@ -527,6 +527,12 @@ export default function LawnAssessmentCompletionBlock({
     holdRef.current.repeated = false;
   }
   useEffect(() => stopHold, []);
+  // A hold must not outlive the moment its button stops accepting input: a
+  // confirm (or retake, or the parent disabling the block) started with
+  // another finger would otherwise keep stepping the displayed score after
+  // the server saved a different one (Codex r4 P2).
+  const stepsFrozen = disabled || confirming || analyzing || !!confirmedId;
+  useEffect(() => { if (stepsFrozen) cancelHold(); }, [stepsFrozen]);
   // Handlers for a step button: a tap (or Enter/Space) steps once; holding the
   // press steps again every 120ms after a short pause, and the click that ends
   // a hold does not step a second time.
