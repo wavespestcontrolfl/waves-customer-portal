@@ -169,6 +169,45 @@ describeDb('lawn size from the estimate (real PostgreSQL)', () => {
   });
 });
 
+describeDb('mirror-only repair (real PostgreSQL)', () => {
+  test('turf already matches the estimate but the mirrors do not: classified mirrors_differ, apply repairs only the mirrors', async () => {
+    const schema = `lawn_size_m_${randomUUID().replaceAll('-', '')}`;
+    const knex = knexFactory({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 2 } });
+    try {
+      await knex.raw('CREATE SCHEMA ??', [schema]);
+      await knex.schema.createTable('customers', t => { t.uuid('id').primary(); for (const k of ['address_line1', 'address_line2', 'city', 'zip', 'state']) t.string(k); t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at'); });
+      await knex.schema.createTable('customer_properties', t => {
+        t.uuid('id').primary(); t.uuid('customer_id'); t.boolean('active').defaultTo(true); t.boolean('is_primary').defaultTo(false);
+        for (const k of ['address_line1', 'address_line2', 'city', 'state', 'zip']) t.string(k);
+        t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at'); t.jsonb('service_area_measurements');
+      });
+      await knex.schema.createTable('customer_turf_profiles', t => { t.uuid('customer_id').primary(); t.integer('lawn_sqft'); t.boolean('active').defaultTo(true); t.timestamp('updated_at'); });
+      await knex.schema.createTable('estimates', t => { t.uuid('id').primary(); t.uuid('customer_id'); t.uuid('property_id'); t.string('address'); t.string('status'); t.timestamp('accepted_at'); t.jsonb('estimate_data'); });
+      await knex.schema.createTable('audit_log', t => { t.increments('id'); t.string('actor_type'); t.uuid('actor_id'); t.string('action'); t.string('resource_type'); t.uuid('resource_id'); t.jsonb('metadata'); t.string('ip_address'); t.string('user_agent'); });
+      const customerId = randomUUID();
+      const addr = { address_line1: '100 Fixture Street', city: 'Fixture City', zip: '34201' };
+      await knex('customers').insert({ id: customerId, ...addr, property_sqft: 3000 });
+      await knex('customer_properties').insert({ id: randomUUID(), customer_id: customerId, ...addr, is_primary: true, property_sqft: 3500, service_area_measurements: {} });
+      await knex('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: 5200 });
+      const estimate = { id: randomUUID(), customer_id: customerId, address: '100 Fixture Street, Fixture City, FL 34201', status: 'accepted', accepted_at: '2026-10-01T00:00:00Z', estimate_data: lawnData(5200) };
+      await knex('estimates').insert(estimate);
+      const stubLoad = async () => [{ customer_id: customerId, estimate_ids: [estimate.id] }];
+      // The service-areas column is part of the mirror rule's gate.
+      await knex.raw('ALTER TABLE customer_properties ADD COLUMN IF NOT EXISTS neighborhood_id uuid');
+      const dry = await script.runBackfill({ knex, today: '2026-10-04' }, { loadLawnCustomers: stubLoad });
+      expect(dry.rows[0]).toMatchObject({ class: 'mirrors_differ', turf_lawn_sqft: 5200, primary_property_sqft: 3500, customer_property_sqft: 3000 });
+      const applied = await script.runBackfill({ knex, today: '2026-10-04', apply: true }, { loadLawnCustomers: stubLoad });
+      expect(applied.applied).toEqual([expect.objectContaining({ status: 'written', before_property: 3500, after_property: 5200, before_customer: 3000, after_customer: 5200 })]);
+      expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBe(5200);
+      expect((await knex('customer_properties').where({ customer_id: customerId }).first()).property_sqft).toBe(5200);
+      expect((await script.runBackfill({ knex, today: '2026-10-04' }, { loadLawnCustomers: stubLoad })).rows[0].class).toBe('same');
+    } finally {
+      await knex.raw('DROP SCHEMA ?? CASCADE', [schema]);
+      await knex.destroy();
+    }
+  });
+});
+
 // The real candidate query (live recurring lawn visits -> customers + linked estimates).
 describeDb('lawn customer candidate query (real PostgreSQL)', () => {
   let knex; let schema;

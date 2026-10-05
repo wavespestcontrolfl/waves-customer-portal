@@ -34,17 +34,22 @@
 //
 // Classes (the first that applies wins):
 //   no_accepted_lawn_estimate | ambiguous | estimate_for_another_property |
-//   estimate_has_no_confirmed_size | turf_profile_empty | differs | same
-// --apply writes ONLY turf_profile_empty and differs, through the SAME
+//   estimate_has_no_confirmed_size | turf_profile_empty | differs |
+//   mirrors_differ | same
+// mirrors_differ = the turf profile already holds the estimate's size but the
+// primary property's property_sqft or customers.property_sqft (where those
+// mirrors apply) does not. `same` means all applicable places agree.
+// --apply writes ONLY turf_profile_empty, differs and mirrors_differ, through the SAME
 // function estimate acceptance uses (lawn-size-sync.applyEstimateLawnSqft:
 // customer fence, three places in sync, audit row), and never reprices anyone.
 //
 // This script has no hard-coded connection: it reads DATABASE_URL only.
 const fs = require('fs');
+const { addressKey } = require('../services/customer-property-address-keys');
 
-const APPLY_CLASSES = new Set(['turf_profile_empty', 'differs']);
+const APPLY_CLASSES = new Set(['turf_profile_empty', 'differs', 'mirrors_differ']);
 const CLASSES = [
-  'same', 'differs', 'turf_profile_empty', 'no_accepted_lawn_estimate',
+  'same', 'differs', 'mirrors_differ', 'turf_profile_empty', 'no_accepted_lawn_estimate',
   'estimate_has_no_confirmed_size', 'estimate_for_another_property', 'ambiguous',
 ];
 const CSV_COLUMNS = [
@@ -161,7 +166,15 @@ function classifyCustomer({ customer, primary, turf, linked = [], accepted = [] 
   const over = sqft > REVIEW_ABOVE_SQFT ? 'yes' : '';
   const turfSqft = num(turf?.lawn_sqft);
   if (turfSqft === null) return done({ ...fill, class: 'turf_profile_empty', over_20000: over }, e);
-  if (turfSqft === sqft) return done({ ...fill, class: 'same', over_20000: over }, e);
+  if (turfSqft === sqft) {
+    // Same mirror rule as lawn-size-sync.writeLawnSqft: the primary property
+    // carries the mirrors only at the customer's own address; with no primary
+    // row the customer row is the only mirror; a mismatched primary has none.
+    const mirrors = [];
+    if (primary && addressKey(customer) === addressKey(primary)) mirrors.push(num(primary.property_sqft), num(customer.property_sqft));
+    else if (!primary) mirrors.push(num(customer.property_sqft));
+    return done({ ...fill, class: mirrors.some((m) => m !== sqft) ? 'mirrors_differ' : 'same', over_20000: over }, e);
+  }
   return done({ ...fill, class: 'differs', pct_diff: pctDiff(sqft, turfSqft) ?? '', over_20000: over }, e);
 }
 
@@ -269,17 +282,22 @@ async function runBackfill({ knex, today, apply = false, only = null, limit = nu
   return { rows, applied, counts: summarize(rows) };
 }
 
-function buildKnex(url) {
-  const knexFactory = require('knex');
+// A dry run opens every session read-only, so even a bug cannot write.
+// --apply opens normal sessions.
+function buildKnex(url, { readOnly = false } = {}, knexFactory = require('knex')) {
   const local = /localhost|127\.0\.0\.1/.test(url);
   return knexFactory({
     client: 'pg',
     connection: { connectionString: url, ssl: local ? false : { rejectUnauthorized: false } },
-    pool: { min: 0, max: 2 },
+    pool: {
+      min: 0,
+      max: 2,
+      ...(readOnly ? { afterCreate: (conn, done) => conn.query('SET default_transaction_read_only = on', (err) => done(err, conn)) } : {}),
+    },
   });
 }
 
-async function main(argv = process.argv.slice(2), env = process.env) {
+async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const args = parseArgs(argv);
   const apply = args.apply === true;
   if (apply && args['dry-run']) throw new Error('Choose --dry-run or --apply, not both.');
@@ -292,10 +310,10 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   if (apply && args['i-am-sure-this-is-the-intended-database'] !== true) {
     throw new Error('Refusing --apply without --i-am-sure-this-is-the-intended-database (check the host printed above first).');
   }
-  const knex = buildKnex(url);
+  const knex = buildKnex(url, { readOnly: !apply }, deps.knexFactory);
   try {
     const { etDateString } = require('../utils/datetime-et');
-    const result = await runBackfill({
+    const result = await (deps.runBackfill || runBackfill)({
       knex, today: etDateString(), apply, only: typeof args.only === 'string' ? args.only : null, limit,
       log: (m) => console.log(`[lawn-size-backfill] ${m}`),
     });
@@ -319,4 +337,4 @@ if (require.main === module) {
   main().then(() => process.exit(0)).catch((err) => { console.error(`[lawn-size-backfill] ${err.message}`); process.exit(1); });
 }
 
-module.exports = { parseArgs, describeDatabase, classifyCustomer, runBackfill, toCsv, summarize, summaryText, loadLawnCustomers, CLASSES, APPLY_CLASSES, CSV_COLUMNS, main };
+module.exports = { parseArgs, describeDatabase, classifyCustomer, runBackfill, toCsv, summarize, summaryText, loadLawnCustomers, buildKnex, CLASSES, APPLY_CLASSES, CSV_COLUMNS, main };

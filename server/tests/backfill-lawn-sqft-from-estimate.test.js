@@ -19,9 +19,23 @@ const est = (id, over = {}) => ({
 const classify = (input) => script.classifyCustomer({ customer: customer(), primary: primary(), turf: null, linked: [], accepted: [], ...input });
 
 describe('classifyCustomer', () => {
-  test('same', () => {
-    const r = classify({ turf: { lawn_sqft: 5200 }, linked: [est('e1')] });
-    expect(r).toMatchObject({ class: 'same', via: 'linked', estimate_id: 'e1', confirmed_sqft: 5200, turf_lawn_sqft: 5200 });
+  const synced = { customer: customer({ property_sqft: 5200 }), primary: primary({ property_sqft: 5200 }) };
+  test('same: turf and every applicable mirror agree', () => {
+    const r = classify({ ...synced, turf: { lawn_sqft: 5200 }, linked: [est('e1')] });
+    expect(r).toMatchObject({ class: 'same', via: 'linked', estimate_id: 'e1', confirmed_sqft: 5200, turf_lawn_sqft: 5200, primary_property_sqft: 5200, customer_property_sqft: 5200 });
+  });
+  test('mirrors_differ: turf matches but the primary property or the customer mirror does not (all three numbers shown)', () => {
+    const a = classify({ customer: customer({ property_sqft: 5200 }), primary: primary({ property_sqft: 3000 }), turf: { lawn_sqft: 5200 }, linked: [est('e1')] });
+    expect(a).toMatchObject({ class: 'mirrors_differ', turf_lawn_sqft: 5200, primary_property_sqft: 3000, customer_property_sqft: 5200 });
+    const b = classify({ customer: customer({ property_sqft: null }), primary: primary({ property_sqft: 5200 }), turf: { lawn_sqft: 5200 }, linked: [est('e1')] });
+    expect(b).toMatchObject({ class: 'mirrors_differ', customer_property_sqft: '' });
+    expect(script.APPLY_CLASSES.has('mirrors_differ')).toBe(true);
+  });
+  test('mirror applicability: no primary row checks only the customer mirror; a primary at another address has no mirrors', () => {
+    const input = { turf: { lawn_sqft: 5200 }, linked: [est('e1')] };
+    expect(classify({ ...input, customer: customer({ property_sqft: 5200 }), primary: null }).class).toBe('same');
+    expect(classify({ ...input, customer: customer({ property_sqft: 1 }), primary: null }).class).toBe('mirrors_differ');
+    expect(classify({ ...input, customer: customer({ property_sqft: 1 }), primary: primary({ address_line1: '5 Elm St', property_sqft: 2 }) }).class).toBe('same');
   });
   test('differs carries both numbers and the percent difference', () => {
     const r = classify({ turf: { lawn_sqft: 4000 }, linked: [est('e1')] });
@@ -91,9 +105,10 @@ describe('runBackfill apply path', () => {
   const rowsByCustomer = {
     c1: { customer: customer({ id: 'c1' }), primary: primary({ customer_id: 'c1' }), turf: { lawn_sqft: 4000 }, linked: [est('e1', { customer_id: 'c1' })] },
     c2: { customer: customer({ id: 'c2' }), primary: primary({ id: 'p2', customer_id: 'c2' }), turf: null, linked: [est('e2', { customer_id: 'c2' })] },
-    c3: { customer: customer({ id: 'c3' }), primary: primary({ id: 'p3', customer_id: 'c3' }), turf: { lawn_sqft: 5200 }, linked: [est('e3', { customer_id: 'c3' })] },
+    c3: { customer: customer({ id: 'c3', property_sqft: 5200 }), primary: primary({ id: 'p3', customer_id: 'c3', property_sqft: 5200 }), turf: { lawn_sqft: 5200 }, linked: [est('e3', { customer_id: 'c3' })] },
     c4: { customer: customer({ id: 'c4' }), primary: primary({ id: 'p4', customer_id: 'c4' }), turf: { lawn_sqft: 3000 }, linked: [est('e4a', { customer_id: 'c4' }), est('e4b', { customer_id: 'c4', estimate_data: data(6100) })] },
     c5: { customer: customer({ id: 'c5' }), primary: primary({ id: 'p5', customer_id: 'c5' }), turf: { lawn_sqft: 3000 }, linked: [est('e5', { customer_id: 'c5', estimate_data: data(5200, 'lotFallback') })] },
+    c7: { customer: customer({ id: 'c7', property_sqft: 1800 }), primary: primary({ id: 'p7', customer_id: 'c7', property_sqft: 1800 }), turf: { lawn_sqft: 5200 }, linked: [est('e7', { customer_id: 'c7' })] },
     c6: { customer: customer({ id: 'c6' }), primary: primary({ id: 'p6', customer_id: 'c6' }), turf: { lawn_sqft: 3000 }, linked: [est('e6', { customer_id: 'c6', property_id: 'other' })] },
   };
   const deps = (applyFn) => ({
@@ -115,16 +130,16 @@ describe('runBackfill apply path', () => {
     const apply = jest.fn();
     const out = await script.runBackfill({ knex: {}, today: '2026-10-04', apply: false }, deps(apply));
     expect(apply).not.toHaveBeenCalled();
-    expect(out.counts).toMatchObject({ differs: 1, turf_profile_empty: 1, same: 1, ambiguous: 1, estimate_has_no_confirmed_size: 1, estimate_for_another_property: 1 });
+    expect(out.counts).toMatchObject({ differs: 1, turf_profile_empty: 1, same: 1, mirrors_differ: 1, ambiguous: 1, estimate_has_no_confirmed_size: 1, estimate_for_another_property: 1 });
   });
 
   test('--apply writes only differs and turf_profile_empty, one customer at a time, through the shared writer', async () => {
     const apply = jest.fn(async (_k, { customerId }) => ({ status: 'written', sqft: 5200, before: { turf_lawn_sqft: customerId === 'c1' ? 4000 : null }, after: { turf_lawn_sqft: 5200 } }));
     const out = await script.runBackfill({ knex: { tag: 'db' }, today: '2026-10-04', apply: true }, deps(apply));
-    expect(apply.mock.calls.map(([, a]) => a.customerId)).toEqual(['c1', 'c2']);
+    expect(apply.mock.calls.map(([, a]) => a.customerId)).toEqual(['c1', 'c2', 'c7']);
     expect(apply.mock.calls[0][0]).toEqual({ tag: 'db' });
     expect(apply.mock.calls[0][1]).toMatchObject({ trigger: 'backfill', estimate: expect.objectContaining({ id: 'e1' }) });
-    expect(out.applied.map((a) => [a.customer_id, a.status])).toEqual([['c1', 'written'], ['c2', 'written']]);
+    expect(out.applied.map((a) => [a.customer_id, a.status])).toEqual([['c1', 'written'], ['c2', 'written'], ['c7', 'written']]);
   });
 
   test('an error on one customer is recorded and the next customer still runs', async () => {
@@ -133,13 +148,48 @@ describe('runBackfill apply path', () => {
       return { status: 'written', sqft: 5200, before: {}, after: { turf_lawn_sqft: 5200 } };
     });
     const out = await script.runBackfill({ knex: {}, today: '2026-10-04', apply: true }, deps(apply));
-    expect(out.applied.map((a) => [a.customer_id, a.status])).toEqual([['c1', 'error'], ['c2', 'written']]);
+    expect(out.applied.map((a) => [a.customer_id, a.status])).toEqual([['c1', 'error'], ['c2', 'written'], ['c7', 'written']]);
   });
 
   test('--only and --limit narrow the set', async () => {
     const apply = jest.fn(async () => ({ status: 'unchanged', before: {}, after: {} }));
     expect((await script.runBackfill({ knex: {}, today: 'x', only: 'c3' }, deps(apply))).rows.map((r) => r.customer_id)).toEqual(['c3']);
     expect((await script.runBackfill({ knex: {}, today: 'x', limit: 2 }, deps(apply))).rows).toHaveLength(2);
+  });
+});
+
+describe('dry run is read-only at the session level', () => {
+  const fakeFactory = () => { const f = jest.fn((config) => ({ config, destroy: async () => {} })); return f; };
+  const query = (config) => { const calls = []; const conn = { query: (sql, cb) => { calls.push(sql); cb(null); } }; const done = jest.fn(); config.pool.afterCreate(conn, done); return { calls, done, conn }; };
+
+  test('buildKnex(readOnly) sets default_transaction_read_only on every new session', () => {
+    const f = fakeFactory();
+    script.buildKnex('postgresql://h/d', { readOnly: true }, f);
+    const { calls, done, conn } = query(f.mock.calls[0][0]);
+    expect(calls).toEqual(['SET default_transaction_read_only = on']);
+    expect(done).toHaveBeenCalledWith(null, conn);
+  });
+  test('a failing SET fails the session instead of silently continuing writable', () => {
+    const f = fakeFactory();
+    script.buildKnex('postgresql://h/d', { readOnly: true }, f);
+    const done = jest.fn();
+    f.mock.calls[0][0].pool.afterCreate({ query: (_s, cb) => cb(new Error('no')) }, done);
+    expect(done.mock.calls[0][0]).toBeInstanceOf(Error);
+  });
+  test('main: dry run builds a read-only pool; --apply does not', async () => {
+    const original = console.log;
+    console.log = jest.fn();
+    const runBackfill = jest.fn(async () => ({ rows: [], applied: [], counts: script.summarize([]) }));
+    const out = require('path').join(require('os').tmpdir(), `lawn-ro-${process.pid}.csv`);
+    const env = { DATABASE_URL: 'postgresql://h.example.net:5432/d' };
+    const dry = fakeFactory();
+    await script.main(['--out', out], env, { knexFactory: dry, runBackfill });
+    expect(dry.mock.calls[0][0].pool.afterCreate).toEqual(expect.any(Function));
+    const app = fakeFactory();
+    await script.main(['--apply', '--i-am-sure-this-is-the-intended-database', '--out', out], env, { knexFactory: app, runBackfill });
+    expect(app.mock.calls[0][0].pool.afterCreate).toBeUndefined();
+    for (const f of [out, `${out}.summary.txt`, `${out}.applied.csv`]) require('fs').rmSync(f, { force: true });
+    console.log = original;
   });
 });
 
