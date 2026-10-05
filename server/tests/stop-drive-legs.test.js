@@ -167,4 +167,16 @@ describe('attachDriveLegs', () => {
     attachDriveLegs(services);
     expect(services.map((s) => s.driveLegUnknown)).toEqual([false, true, true]);
   });
+
+  it('sums real estimates of ungrouped rows at one pin', () => {
+    const services = [
+      stop('r1', '09:00', A, { estimatedDuration: 90 }),
+      stop('r2', '09:00', A, { estimatedDuration: 90 }),
+      stop('c', '10:00', C),
+    ];
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // Two 90-minute jobs leave at 12:00; the 10:00 window closes at 12:00.
+    expect(services[2].driveLateMin).toBe(12 * 60 + leg - (10 * 60 + 120));
+  });
 });

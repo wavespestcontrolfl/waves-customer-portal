@@ -39,17 +39,26 @@ function workMinutes(s) {
   return Number.isFinite(dur) && dur > 0 ? dur : 60;
 }
 
+// A row's real work estimate, 0 when it has none. The day feed fills a
+// missing estimate with the legacy 60 (planning-minutes.js
+// LEGACY_DEFAULT_MINUTES), so 60 reads as no estimate.
+function realEstimate(s) {
+  const dur = Number(s.estimatedDuration);
+  return Number.isFinite(dur) && dur > 0 && dur !== 60 ? dur : 0;
+}
+
 // When the tech leaves a stop. A visit group's rows run one after another
 // (arrival-route.js groupRouteStops sums a visit's work), so two 60-minute
 // rows of one visit booked at 09:00 leave at 11:00. Ungrouped rows merged
-// only by sharing a pin keep their own planned end: a span-only row's
-// window is not work to add (route-reorder-window-fit.js coVisitWork's
-// phantom hour), so the late warning never fires on a doubled hour.
+// by sharing a pin follow route-reorder-window-fit.js coVisitWork: the sum
+// of their real estimates, floored by the longest row's own work, so two
+// span-only rows sharing an hour stay one hour (the phantom hour).
 function departure(rows) {
   const ends = [];
   const groups = new Map();
+  const loose = [];
   for (const m of rows) {
-    if (!m.visitId) { ends.push(minutesOf(m.windowStart) + workMinutes(m)); continue; }
+    if (!m.visitId) { loose.push(m); continue; }
     if (!groups.has(m.visitId)) groups.set(m.visitId, []);
     groups.get(m.visitId).push(m);
   }
@@ -57,6 +66,11 @@ function departure(rows) {
     const starts = g.map((m) => minutesOf(m.windowStart));
     const summed = Math.min(...starts) + g.reduce((sum, m) => sum + workMinutes(m), 0);
     ends.push(Math.max(summed, ...g.map((m, i) => starts[i] + workMinutes(m))));
+  }
+  if (loose.length) {
+    const starts = loose.map((m) => minutesOf(m.windowStart));
+    const estimates = loose.reduce((sum, m) => sum + realEstimate(m), 0);
+    ends.push(Math.max(Math.min(...starts) + estimates, ...loose.map((m, i) => starts[i] + workMinutes(m))));
   }
   return Math.max(...ends);
 }
