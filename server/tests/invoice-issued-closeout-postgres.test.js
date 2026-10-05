@@ -41,26 +41,59 @@ const {
   resolveVisitForIssuedInvoice,
   closeOutVisitForIssuedInvoice,
   retrySettledStatementCloseouts,
-  issuedCloseoutServiceDayEligible,
+  issuedCloseoutVisitRefusal,
   issuedCloseoutTarget,
 } = require('../services/invoice-issued-closeout');
 const { recordAuditEvent } = require('../services/audit-log');
+const { ACTIVE_WRITE_GENERATION } = require('../constants/staff-time');
 
 const { backfillCompletionPlan, backfillCompletionEndInstant } = jest.requireActual('../services/complete-scheduled-service');
 
 describe('backfillCompletionPlan same-day switch', () => {
-  test('the shared issued-closeout date rule admits today only for payment', () => {
+  test('the shared issued-closeout rule: a past day closes an unstarted or an arrived visit; today closes only an arrived visit, and only on payment (owner 2026-10-04)', () => {
     const options = { today: '2040-03-04' };
-    expect(issuedCloseoutServiceDayEligible('2040-03-04', { ...options, trigger: 'sent' })).toBe(false);
-    expect(issuedCloseoutServiceDayEligible('2040-03-04', { ...options, trigger: 'paid' })).toBe(true);
-    expect(issuedCloseoutServiceDayEligible('2040-03-03', { ...options, trigger: 'sent' })).toBe(true);
-    expect(issuedCloseoutServiceDayEligible('2040-03-05', { ...options, trigger: 'paid' })).toBe(false);
+    const rule = (status, day, trigger) => issuedCloseoutVisitRefusal(status, day, { ...options, ...(trigger ? { trigger } : {}) });
+    // A past day: a send or a payment closes an unstarted (pending / confirmed /
+    // legacy NULL) visit and an arrived (on_site) one.
+    for (const status of ['pending', 'confirmed', null, 'on_site']) {
+      expect(rule(status, '2040-03-03', 'sent')).toBeNull();
+      expect(rule(status, '2040-03-03', 'paid')).toBeNull();
+      expect(rule(status, '2040-03-03')).toBeNull();
+    }
+    // Today, arrived: money received closes it; a send does not.
+    expect(rule('on_site', '2040-03-04', 'paid')).toBeNull();
+    expect(rule('on_site', '2040-03-04', 'sent')).toBe('visit_scheduled_today');
+    // Today, nobody has arrived: a payment is a prepayment — the visit stays
+    // with its technician. A send never closed it.
+    for (const status of ['pending', 'confirmed', null]) {
+      expect(rule(status, '2040-03-04', 'paid')).toBe('visit_scheduled_today');
+      expect(rule(status, '2040-03-04', 'sent')).toBe('visit_scheduled_today');
+    }
     // Fail closed: a missing or unknown trigger never admits today (allowlist,
-    // pre-push audit P1) — only a past day is eligible without proof of payment.
-    expect(issuedCloseoutServiceDayEligible('2040-03-04', options)).toBe(false);
-    expect(issuedCloseoutServiceDayEligible('2040-03-04', { ...options, trigger: 'resend' })).toBe(false);
-    expect(issuedCloseoutServiceDayEligible('2040-03-03', options)).toBe(true);
-    expect(issuedCloseoutServiceDayEligible('not-a-date', { ...options, trigger: 'paid' })).toBe(false);
+    // pre-push audit P1).
+    expect(rule('on_site', '2040-03-04')).toBe('visit_scheduled_today');
+    expect(rule('on_site', '2040-03-04', 'resend')).toBe('visit_scheduled_today');
+    // The future and an unparseable day never close, whatever the status.
+    expect(rule('on_site', '2040-03-05', 'paid')).toBe('visit_in_future');
+    expect(rule('confirmed', '2040-03-05', 'paid')).toBe('visit_in_future');
+    expect(rule('confirmed', 'not-a-date', 'paid')).toBe('visit_in_future');
+    // UNSTARTED on a past day: the invoice must have been settled / delivered
+    // AFTER the visit day. With no stamp, the call day stands in (above).
+    const proof = (issuedDay, day = '2040-03-02') => issuedCloseoutVisitRefusal('confirmed', day, { ...options, trigger: 'paid', issuedDay });
+    expect(proof('2040-03-03')).toBeNull();
+    expect(proof('2040-03-02')).toBe('visit_prepaid');
+    expect(proof('2040-03-01')).toBe('visit_prepaid');
+    // A stamp from the future proves nothing yet: the call day stands in.
+    expect(proof('2040-03-09')).toBeNull();
+    expect(proof('2040-03-09', '2040-03-03')).toBeNull();
+    // An ARRIVED visit ignores the stamp.
+    expect(issuedCloseoutVisitRefusal('on_site', '2040-03-02', { ...options, trigger: 'paid', issuedDay: '2040-03-01' })).toBeNull();
+    // en_route (nobody has reached the property) and every terminal status
+    // stay as they are, on any day.
+    for (const status of ['en_route', 'completed', 'cancelled', 'skipped', 'no_show']) {
+      expect(rule(status, '2040-03-03', 'paid')).toBe(`visit_${status}`);
+      expect(rule(status, '2040-03-04', 'paid')).toBe(`visit_${status}`);
+    }
   });
 
   test('the panel rule stays past-only; the internal issued-invoice trigger admits today, never the future', () => {
@@ -142,19 +175,26 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: past.id, date: '2040-02-20' }), { today: TODAY })).svc.id).toBe(past.id);
     // A SEND leaves a visit scheduled for TODAY open (Codex P1 r7 #4131): the
     // office picker sends pre-completion invoices for today's visits before
-    // the tech arrives. A payment still closes it; a past day closes on a send.
+    // the tech arrives. A PAYMENT against a visit nobody has reached today is
+    // a prepayment and leaves it open too (owner 2026-10-04); a past day
+    // closes on a send.
     expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id, date: TODAY }), { today: TODAY, trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_scheduled_today' });
-    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id, date: TODAY }), { today: TODAY, trigger: 'paid' })).svc.id).toBe(open.id);
+    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: open.id, date: TODAY }), { today: TODAY, trigger: 'paid' })).toMatchObject({ svc: null, reason: 'visit_scheduled_today' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: past.id, date: '2040-02-20' }), { today: TODAY, trigger: 'sent' })).svc.id).toBe(past.id);
     // YESTERDAY is the fixture default precisely because it closes on a send.
     const yesterday = await visit();
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: yesterday.id }), { today: TODAY, trigger: 'sent' })).svc.id).toBe(yesterday.id);
-    // In-progress visits stay with their technician (GitHub r9 P1): a running
-    // job timer and a completion of their own — the office closeout leaves them.
+    // A visit its technician ARRIVED at and never closed out (owner
+    // 2026-10-04; the GPS arrival sets on_site on nearly every worked visit):
+    // a past day closes it like an unstarted one; today only a payment does.
     const onSite = await visit({ date: '2040-02-21', status: 'on_site' });
-    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: onSite.id, date: '2040-02-21' }), { today: TODAY })).toMatchObject({ svc: null, reason: 'visit_on_site' });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: onSite.id, date: '2040-02-21' }), { today: TODAY, trigger: 'sent' })).svc.id).toBe(onSite.id);
+    const onSiteToday = await visit({ date: TODAY, status: 'on_site' });
+    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: onSiteToday.id, date: TODAY }), { today: TODAY, trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_scheduled_today' });
+    expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: onSiteToday.id, date: TODAY }), { today: TODAY, trigger: 'paid' })).svc.id).toBe(onSiteToday.id);
+    // en_route stays with its technician: nobody has reached the property.
     const enRoute = await visit({ date: '2040-02-22', status: 'en_route' });
-    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: enRoute.id, date: '2040-02-22' }), { today: TODAY })).toMatchObject({ svc: null, reason: 'visit_en_route' });
+    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: enRoute.id, date: '2040-02-22' }), { today: TODAY, trigger: 'paid' })).toMatchObject({ svc: null, reason: 'visit_en_route' });
     const future = await visit({ date: '2040-03-05' });
     expect((await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: future.id, date: '2040-03-05' }), { today: TODAY })).reason).toBe('visit_in_future');
     const done = await visit({ status: 'completed', date: '2040-02-01' });
@@ -323,9 +363,13 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const open = await visit({ date: '2040-02-20', serviceType: 'Lawn Care Visit' });
     const inv = await invoice({ scheduled_service_id: open.id, date: '2040-02-20' });
     expect(await issuedCloseoutTarget(inv, { today: TODAY, conn: trx })).toEqual({ visitId: open.id, serviceType: 'Lawn Care Visit', date: '2040-02-20', resuming: false });
-    // A same-day visit closes on payment (the default trigger here), never on a send.
+    // A same-day visit its technician ARRIVED at closes on payment (the
+    // default trigger here), never on a send; one nobody has reached does
+    // not close at all today — the payment is a prepayment (owner 2026-10-04).
     const sameDay = await visit({ date: TODAY });
     const sameDayInv = await invoice({ scheduled_service_id: sameDay.id, date: TODAY });
+    expect(await issuedCloseoutTarget(sameDayInv, { today: TODAY, conn: trx })).toBeNull();
+    await trx('scheduled_services').where({ id: sameDay.id }).update({ status: 'on_site' });
     expect(await issuedCloseoutTarget(sameDayInv, { today: TODAY, conn: trx })).toMatchObject({ visitId: sameDay.id });
     expect(await issuedCloseoutTarget(sameDayInv, { today: TODAY, conn: trx, trigger: 'sent' })).toBeNull();
     // Future, completed-with-nothing-parked and unlinked invoices close nothing.
@@ -433,8 +477,12 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
       }).returning('id').then((r) => r.map((x) => x.id ?? x));
       return id;
     };
-    const recent = await statement(new Date());
+    // Settled the day AFTER the fixture visits (YESTERDAY): an ordinary NET-terms settlement, no prepayment.
+    const recent = await statement(new Date('2040-03-04T15:00:00Z'));
     const stale = await statement(new Date(Date.now() - 30 * 86400000));
+    // Settled ON the visit day, and in ADVANCE of it: prepayments.
+    const sameDaySettled = await statement(new Date('2040-03-03T15:00:00Z'));
+    const advanceSettled = await statement(new Date('2040-03-01T15:00:00Z'));
     const auditRow = (visitId, invoiceId, action, code) => trx('audit_log').insert({
       actor_type: 'system', action, resource_type: 'scheduled_services', resource_id: visitId,
       metadata: JSON.stringify({ invoiceId, trigger: 'paid', code }),
@@ -464,10 +512,62 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const v8 = await visit({ status: 'completed' }); await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v8.id });
     await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: v8.id, idempotency_key: randomUUID(), status: 'side_effects_pending', request_hash: 'x' });
 
+    // 9. arrived (on_site) TODAY, never ran → retried: a payment closes an arrived visit on its own day (owner 2026-10-04)
+    const v9 = await visit({ status: 'on_site', date: TODAY }); await invoice({ status: 'paid', date: TODAY, payer_statement_id: recent, scheduled_service_id: v9.id });
+    // 10. unstarted TODAY → not a candidate: the settlement is a prepayment until someone arrives or the day passes
+    const v10 = await visit({ date: TODAY }); await invoice({ status: 'paid', date: TODAY, payer_statement_id: recent, scheduled_service_id: v10.id });
+    // 11. unstarted, the statement settled before anyone arrived (visit_scheduled_today), the day has passed → LEFT ALONE: a prepayment is not proof the visit happened
+    const v11 = await visit(); const i11 = await invoice({ status: 'paid', payer_statement_id: sameDaySettled, scheduled_service_id: v11.id });
+    await auditRow(v11.id, i11.id, 'visit.completion_on_invoice_issued_refused', 'visit_scheduled_today');
+    // 13. ARRIVED, refused before 2026-10-04 with the historical visit_on_site → retried under the rule that now admits it
+    const v13 = await visit({ status: 'on_site' }); const i13 = await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v13.id });
+    await auditRow(v13.id, i13.id, 'visit.completion_on_invoice_issued_refused', 'visit_on_site');
+    // 14. unstarted, statement settled ON the visit day, the closeout NEVER ran (or its audit write failed) → left alone: no audit row is not evidence either
+    const v14 = await visit(); await invoice({ status: 'paid', payer_statement_id: sameDaySettled, scheduled_service_id: v14.id });
+    // 15. …and settled in ADVANCE of the visit day → left alone
+    const v15 = await visit(); await invoice({ status: 'paid', payer_statement_id: advanceSettled, scheduled_service_id: v15.id });
+    // 16. ARRIVED, settled on the visit day, never ran → retried: the technician was there
+    const v16 = await visit({ status: 'on_site' }); await invoice({ status: 'paid', payer_statement_id: sameDaySettled, scheduled_service_id: v16.id });
+    // ── DELIVERED, unpaid statements (NET terms): the 'sent' trigger, proof = the statement's sent_at (GitHub r5 P1 #5886) ──
+    const deliveredStatement = async (sentAt, status = 'sent') => {
+      const [id] = await trx('payer_statements').insert({
+        payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status, terms_snapshot: 'net30',
+        token: randomUUID().replace(/-/g, ''), sent_at: sentAt,
+      }).returning('id').then((r) => r.map((x) => x.id ?? x));
+      return id;
+    };
+    const delivered = await deliveredStatement(new Date('2040-03-04T15:00:00Z'));
+    const sentAudit = (visitId, invoiceId, code) => trx('audit_log').insert({
+      actor_type: 'system', action: 'visit.completion_on_invoice_issued_refused', resource_type: 'scheduled_services', resource_id: visitId,
+      metadata: JSON.stringify({ invoiceId, trigger: 'sent', code }),
+    });
+    // 17. arrived child, refused at delivery while its job timer ran; the timer has stopped → retried with 'sent'
+    const v17 = await visit({ status: 'on_site' }); const i17 = await invoice({ status: 'sent', payer_statement_id: delivered, scheduled_service_id: v17.id });
+    await sentAudit(v17.id, i17.id, 'visit_timer_running');
+    // 18. unstarted child, delivery closeout failed with an outage → retried with 'sent' (the statement went out after the visit day)
+    const v18 = await visit(); const i18 = await invoice({ status: 'sent', payer_statement_id: delivered, scheduled_service_id: v18.id });
+    await sentAudit(v18.id, i18.id, 'error');
+    // 19. arrived TODAY on a delivered statement → not a candidate: a send never closes a same-day visit
+    const v19 = await visit({ status: 'on_site', date: TODAY }); await invoice({ status: 'sent', date: TODAY, payer_statement_id: delivered, scheduled_service_id: v19.id });
+    // 20. a 'viewed' statement delivered ON the visit day, unstarted child → left alone (prepayment rule)
+    const viewedSameDay = await deliveredStatement(new Date('2040-03-03T15:00:00Z'), 'viewed');
+    const v20 = await visit(); await invoice({ status: 'sent', payer_statement_id: viewedSameDay, scheduled_service_id: v20.id });
+    // 21. a FINALIZED (never delivered) statement → not a candidate
+    const [finalized] = await trx('payer_statements').insert({ payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status: 'finalized', terms_snapshot: 'net30', token: randomUUID().replace(/-/g, '') }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const v21 = await visit({ status: 'on_site' }); await invoice({ status: 'draft', payer_statement_id: finalized, scheduled_service_id: v21.id });
+    // 12. en_route → not a candidate
+    const v12 = await visit({ status: 'en_route' }); await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v12.id });
+
     const out = await retrySettledStatementCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 4, retried: 3, closed: 3 });
+    expect(out).toEqual({ candidates: 13, retried: 8, closed: 8 });
     const retriedIds = mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort();
-    expect(retriedIds).toEqual([v1.id, v2.id, v7.id].sort());
+    expect(retriedIds).toEqual([v1.id, v2.id, v7.id, v9.id, v13.id, v16.id, v17.id, v18.id].sort());
+    const triggerOf = (id) => mockCompleteScheduledService.mock.calls.find(([args]) => args.serviceId === id)[0].issuedInvoiceCloseout.trigger;
+    expect([triggerOf(v17.id), triggerOf(v18.id), triggerOf(v1.id)]).toEqual(['sent', 'sent', 'paid']);
+    for (const left of [v19, v20, v21]) expect(retriedIds).not.toContain(left.id);
+    for (const left of [v11, v14, v15]) expect(retriedIds).not.toContain(left.id);
+    expect(retriedIds).not.toContain(v10.id);
+    expect(retriedIds).not.toContain(v12.id);
     expect(mockCompleteScheduledService.mock.calls.find(([args]) => args.serviceId === v7.id)[0].idempotencyKey).toBe(`invoice-issued:${i7.id}`);
     // A retry is nobody's action: the system is the actor.
     for (const [args] of mockCompleteScheduledService.mock.calls) expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
@@ -495,6 +595,250 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ actor_type: 'technician', action: 'visit.completion_on_invoice_issued_refused', resource_id: bad.id, metadata: expect.objectContaining({ code: 'error' }) }));
     mockCompleteScheduledService.mockImplementation(async () => ({ status: 200, body: { success: true } }));
   });
+  test('a visit whose job timer is still running stays with its technician; once the timer stops the same invoice closes it — the closeout never writes time_entries (GitHub r9 P1 #4127, r1 P1 ×3 #5886)', async () => {
+    const techId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Fixture Tech' });
+    const startedAt = new Date(Date.now() - 45 * 60000);
+    await trx('time_entries').insert({ id: randomUUID(), technician_id: techId, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(startedAt.getTime() - 60000) });
+    const arrived = await visit({ status: 'on_site', technician_id: techId });
+    const timerId = randomUUID();
+    await trx('time_entries').insert({ id: timerId, technician_id: techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: startedAt, job_id: arrived.id });
+    const inv = await invoice({ scheduled_service_id: arrived.id, status: 'paid' });
+    const before = await trx('time_entries').where({ id: timerId }).first();
+
+    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid' })).toMatchObject({ svc: null, reason: 'visit_timer_running', visit: expect.objectContaining({ id: arrived.id }) });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_timer_running', visitId: arrived.id });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({ resource_id: arrived.id, action: 'visit.completion_on_invoice_issued_refused', metadata: expect.objectContaining({ code: 'visit_timer_running' }) }));
+    // Read-only: the running entry is exactly as it was.
+    expect(await trx('time_entries').where({ id: timerId }).first()).toEqual(before);
+
+    // An unstarted visit with a running timer is being worked too.
+    const unstarted = await visit({ technician_id: techId, date: '2040-03-01' });
+    await trx('time_entries').insert({ id: randomUUID(), technician_id: techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: startedAt, job_id: unstarted.id });
+    expect(await resolveVisitForIssuedInvoice(trx, await invoice({ scheduled_service_id: unstarted.id, date: '2040-03-01' }), { today: TODAY, trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_timer_running' });
+
+    // The technician stopped the timer (payroll's own write): the visit closes.
+    const stoppedAt = new Date();
+    await trx('time_entries').where({ id: timerId }).update({ status: 'completed', clock_out: stoppedAt, duration_minutes: 45 });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: true, visitId: arrived.id });
+    expect(await trx('time_entries').where({ id: timerId }).first()).toMatchObject({ status: 'completed', duration_minutes: expect.anything() });
+    // Another visit's running timer never blocks this one.
+  });
+
+  test('no job timer starts on a COMPLETED visit — the geofence arrival that raced a closeout is refused before any time_entries write (GitHub r2 P1 #5886)', async () => {
+    const timeTracking = require('../services/time-tracking');
+    const techId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Fixture Tech' });
+    await trx('time_entries').insert({ id: randomUUID(), technician_id: techId, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(Date.now() - 3600000) });
+    // The technician's timer on another stop is running.
+    const current = await visit({ status: 'on_site', technician_id: techId, date: '2040-03-02' });
+    const currentTimer = randomUUID();
+    await trx('time_entries').insert({ id: currentTimer, technician_id: techId, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(Date.now() - 600000), job_id: current.id });
+    const done = await visit({ status: 'completed', technician_id: techId });
+    // Unscoped, exactly as geofence-handler calls it.
+    await expect(timeTracking.startJob(techId, done.id, { lat: 27.4, lng: -82.5 })).rejects.toMatchObject({ status: 409, code: 'job_already_completed' });
+    expect(await trx('time_entries').where({ job_id: done.id })).toHaveLength(0);
+    // The refusal came before the "close any other active job" write.
+    expect((await trx('time_entries').where({ id: currentTimer }).first()).status).toBe('active');
+  });
+
+  test('Undo cannot restore a stopped job timer onto a COMPLETED visit; on an open visit it still restores (the restore side of the startJob guard)', async () => {
+    const timeTracking = require('../services/time-tracking');
+    const techId = randomUUID();
+    await trx('technicians').insert({ id: techId, name: 'Fixture Tech' });
+    await trx('time_entries').insert({ id: randomUUID(), technician_id: techId, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(Date.now() - 3600000) });
+    const stoppedTimer = async (jobId) => {
+      const id = randomUUID();
+      await trx('time_entries').insert({ id, technician_id: techId, entry_type: 'job', status: 'completed', clock_in: new Date(Date.now() - 900000), clock_out: new Date(Date.now() - 30000), duration_minutes: 14.5, job_id: jobId });
+      return id;
+    };
+    // Geofence stop, then the payment completed the visit, then Undo.
+    const done = await visit({ status: 'completed', technician_id: techId });
+    const doneTimer = await stoppedTimer(done.id);
+    const before = await trx('time_entries').where({ id: doneTimer }).first();
+    await expect(timeTracking.reopenStoppedEntry(techId, doneTimer)).rejects.toMatchObject({ statusCode: 409 });
+    expect(await trx('time_entries').where({ id: doneTimer }).first()).toEqual(before);
+    // The other sequence: Undo first on a still-open visit restores the timer, and the closeout then refuses the running timer.
+    await trx('time_entries').where({ id: doneTimer }).del();
+    const open = await visit({ status: 'on_site', technician_id: techId, date: '2040-03-02' });
+    const openTimer = await stoppedTimer(open.id);
+    expect(await timeTracking.reopenStoppedEntry(techId, openTimer)).toMatchObject({ id: openTimer, status: 'active' });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: (await invoice({ scheduled_service_id: open.id, date: '2040-03-02', status: 'paid' })).id, trigger: 'paid', conn: trx, today: TODAY }))
+      .toMatchObject({ closed: false, reason: 'visit_timer_running' });
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+  });
+
+  test('a failed timer lookup is audited as an error against the visit, so the paid-invoice sweep can retry it (pre-push audit P1)', async () => {
+    const svc = await visit({ status: 'on_site' });
+    const inv = await invoice({ scheduled_service_id: svc.id, status: 'paid', paid_at: new Date() });
+    // A connection whose time_entries read fails; every other table reads through.
+    const flaky = Object.assign((table) => {
+      if (table === 'time_entries') throw new Error('time_entries lookup reset');
+      return trx(table);
+    }, { raw: (...a) => trx.raw(...a) });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: flaky, today: TODAY });
+    expect(out).toMatchObject({ closed: false, reason: 'error', visitId: svc.id, audited: true });
+    // Written through the helper's CRITICAL path: its default swallows a failed insert and would report a row that does not exist.
+    expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ critical: true, metadata: expect.objectContaining({ code: 'error' }) }));
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    // A failure with NO durable audit row says so, and the Stripe webhook
+    // hands it back for redelivery: the audit write itself failing…
+    recordAuditEvent.mockRejectedValueOnce(new Error('audit insert reset'));
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: flaky, today: TODAY })).toMatchObject({ reason: 'error', visitId: svc.id, audited: false });
+    // …or a read that failed before any visit was in hand.
+    const blind = Object.assign(() => { throw new Error('invoice lookup reset'); }, { raw: (...a) => trx.raw(...a) });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: blind, today: TODAY })).toMatchObject({ reason: 'error', visitId: null, audited: false });
+    expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'visit.completion_on_invoice_issued_refused', resource_id: svc.id,
+      metadata: expect.objectContaining({ invoiceId: inv.id, trigger: 'paid', code: 'error' }),
+    }));
+    // The audit module is mocked here; write the row it would have written, then sweep.
+    await trx('audit_log').insert({ actor_type: 'system', action: 'visit.completion_on_invoice_issued_refused', resource_type: 'scheduled_services', resource_id: svc.id, metadata: JSON.stringify({ invoiceId: inv.id, trigger: 'paid', code: 'error' }) });
+    const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
+    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 1, retried: 1, closed: 1 });
+    expect(mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId)).toEqual([svc.id]);
+  });
+
+  test('a visit NOBODY ARRIVED AT closes only on an invoice settled or delivered AFTER its day — the same verdict for a live trigger, a redelivered webhook and a sweep, whatever day the visit is moved to (the prepayment rule)', async () => {
+    const paidAt = new Date('2040-03-02T15:00:00Z');
+    // Visit on 03-01, paid the day after: no prepayment → closes.
+    const svc = await visit({ date: '2040-03-01' });
+    const inv = await invoice({ scheduled_service_id: svc.id, status: 'paid', paid_at: paidAt, date: '2040-03-01' });
+    expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(svc.id);
+    // Moved onto the payment day itself (still in the past): now a prepayment
+    // for the day it is on → refused, days later, by any caller.
+    await trx('scheduled_services').where({ id: svc.id }).update({ scheduled_date: '2040-03-02' });
+    expect(await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid' })).toMatchObject({ svc: null, reason: 'visit_prepaid' });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: false, reason: 'visit_prepaid', visitId: svc.id });
+    expect(await issuedCloseoutTarget(inv, { today: TODAY, conn: trx })).toBeNull();
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    // The proof is per trigger: a payment stamp says nothing for a send…
+    expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'sent' })).svc.id).toBe(svc.id);
+    // …and a delivery stamp on the visit day refuses the send too; a later delivery proves it.
+    const sentSameDay = await invoice({ scheduled_service_id: svc.id, date: '2040-03-02', sent_at: new Date('2040-03-02T15:00:00Z') });
+    expect(await resolveVisitForIssuedInvoice(trx, sentSameDay, { today: TODAY, trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_prepaid' });
+    await trx('invoices').where({ id: sentSameDay.id }).update({ email_sent_at: new Date('2040-03-03T15:00:00Z') });
+    expect((await resolveVisitForIssuedInvoice(trx, await trx('invoices').where({ id: sentSameDay.id }).first(), { today: TODAY, trigger: 'sent' })).svc.id).toBe(svc.id);
+    // An ARRIVED visit is never a prepayment case.
+    await trx('scheduled_services').where({ id: svc.id }).update({ status: 'on_site' });
+    expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(svc.id);
+  });
+
+  test('a statement child reads its delivery proof from the STATEMENT: delivered on or before the visit day it is a prepayment for a visit nobody arrived at; delivered after, it closes', async () => {
+    const [payerId] = await trx('payers').insert({ display_name: 'Fixture Bill-To' }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const [statementId] = await trx('payer_statements').insert({
+      payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status: 'sent', terms_snapshot: 'net30',
+      token: randomUUID().replace(/-/g, ''), sent_at: new Date('2040-03-02T15:00:00Z'),
+    }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const before = await visit({ date: '2040-03-01' });
+    const onTheDay = await visit({ date: '2040-03-02' });
+    const child = (svc) => invoice({ scheduled_service_id: svc.id, date: '2040-03-01', payer_statement_id: statementId });
+    expect((await resolveVisitForIssuedInvoice(trx, await child(before), { today: TODAY, trigger: 'sent' })).svc.id).toBe(before.id);
+    expect(await resolveVisitForIssuedInvoice(trx, await child(onTheDay), { today: TODAY, trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_prepaid' });
+    // Arrived: never a prepayment case.
+    await trx('scheduled_services').where({ id: onTheDay.id }).update({ status: 'on_site' });
+    expect((await resolveVisitForIssuedInvoice(trx, await child(onTheDay), { today: TODAY, trigger: 'sent' })).svc.id).toBe(onTheDay.id);
+  });
+
+  test('issued-invoice retry: an ARRIVED visit with a delivered or settled invoice is retried whether or not a closeout ever ran; an UNSTARTED one only after a closeout that ran and failed; real refusals, prepayments, statement children and old invoices are left alone (GitHub r1 P1, r3 P1 ×2 #5886)', async () => {
+    const { retryIssuedInvoiceCloseouts } = require('../services/invoice-issued-closeout');
+    const refused = 'visit.completion_on_invoice_issued_refused';
+    const auditRow = (visitId, invoiceId, code, { trigger = 'paid', status = null, action = refused } = {}) => trx('audit_log').insert({
+      actor_type: 'system', action, resource_type: 'scheduled_services', resource_id: visitId,
+      metadata: JSON.stringify({ invoiceId, trigger, code, ...(status ? { status } : {}) }),
+    });
+    const paid = (svc, rest = {}) => invoice({ status: 'paid', paid_at: new Date(), scheduled_service_id: svc.id, ...rest });
+    const sent = (svc, rest = {}) => invoice({ status: 'sent', sent_at: new Date(), scheduled_service_id: svc.id, ...rest });
+    const expectRetried = [];
+    const want = (svc, trigger) => { expectRetried.push([svc.id, trigger]); return svc; };
+
+    // ── ARRIVED (on_site): the state itself is the proof ──
+    // A1. paid, NEVER ran (the process died after the payment committed, or a cash rail ignored an unaudited failure) → retried
+    const a1 = want(await visit({ status: 'on_site' }), 'paid'); await paid(a1);
+    // A2. paid TODAY, never ran → retried (a payment closes an arrived visit on its own day)
+    const a2 = want(await visit({ status: 'on_site', date: TODAY }), 'paid'); await paid(a2, { date: TODAY });
+    // A3. SENT (unpaid), past day, never ran → retried with the 'sent' trigger
+    const a3 = want(await visit({ status: 'on_site' }), 'sent'); await sent(a3);
+    // A4. sent, refused while its job timer ran (audited with trigger 'sent'); the timer has stopped → retried
+    const a4 = want(await visit({ status: 'on_site' }), 'sent'); const ia4 = await sent(a4); await auditRow(a4.id, ia4.id, 'visit_timer_running', { trigger: 'sent' });
+    // A5. sent, the completion RETURNED a 503 → retried
+    const a5 = want(await visit({ status: 'on_site' }), 'sent'); const ia5 = await sent(a5); await auditRow(a5.id, ia5.id, 'completion_profile_lookup_failed', { trigger: 'sent', status: 503 });
+    // A6. paid, failed with an outage → retried
+    const a6 = want(await visit({ status: 'on_site' }), 'paid'); const ia6 = await paid(a6); await auditRow(a6.id, ia6.id, 'error');
+    // A7. paid, refused under the lock (timer started / reassigned mid-closeout) → retried
+    const a7 = want(await visit({ status: 'on_site' }), 'paid'); const ia7 = await paid(a7); await auditRow(a7.id, ia7.id, 'issued_visit_identity_changed');
+    // A8. viewed (delivered, unpaid) → the same as sent
+    const a8 = want(await visit({ status: 'on_site' }), 'sent'); await invoice({ status: 'viewed', sent_at: new Date(), scheduled_service_id: a8.id });
+    // A16. refused before 2026-10-04 with the historical visit_on_site (every arrived visit was) → retried under the rule that now admits it
+    const a16 = want(await visit({ status: 'on_site' }), 'sent'); const ia16 = await sent(a16); await auditRow(a16.id, ia16.id, 'visit_on_site', { trigger: 'sent' });
+    // A17. arrived, sent on its own day (visit_scheduled_today), the day has passed → retried: on an arrived visit that row only meant "not paid yet, today"
+    const a17 = want(await visit({ status: 'on_site' }), 'sent'); const ia17 = await sent(a17); await auditRow(a17.id, ia17.id, 'visit_scheduled_today', { trigger: 'sent' });
+    // A18. paid BEFORE the visit day (visit_in_future then); the technician has since arrived and the day has passed → retried: that refusal was about a state that changed
+    const a18 = want(await visit({ status: 'on_site' }), 'paid'); const ia18 = await paid(a18, { paid_at: new Date('2040-03-01T15:00:00Z') }); await auditRow(a18.id, ia18.id, 'visit_in_future');
+    // A19. refused while the technician was on the way (visit_en_route); arrived since → retried
+    const a19 = want(await visit({ status: 'on_site' }), 'paid'); const ia19 = await paid(a19); await auditRow(a19.id, ia19.id, 'visit_en_route');
+    // A20. sent_at BEFORE the visit and outside the window, emailed again AFTER it: the NEWEST delivery stamp is the proof and the window (the resolver reads the same stamp)
+    const a20 = want(await visit({ status: 'pending' }), 'sent'); await invoice({ status: 'sent', scheduled_service_id: a20.id, sent_at: new Date(Date.now() - 30 * 86400000), email_sent_at: new Date('2040-03-04T15:00:00Z') });
+    // A9. SENT today → not a candidate: a send never closes a same-day visit
+    const a9 = await visit({ status: 'on_site', date: TODAY }); await sent(a9, { date: TODAY });
+    // A10. refused for a real reason → left alone, never re-audited
+    const a10 = await visit({ status: 'on_site' }); const ia10 = await paid(a10); await auditRow(a10.id, ia10.id, 'grouped_visit');
+    // A11. the completion's own verdict (a 409 with an unlisted code) → left alone
+    const a11 = await visit({ status: 'on_site' }); const ia11 = await paid(a11); await auditRow(a11.id, ia11.id, 'project_required_completion', { status: 409 });
+    // A12. a DRAFT invoice (never delivered) → not a candidate
+    const a12 = await visit({ status: 'on_site' }); await invoice({ status: 'draft', scheduled_service_id: a12.id });
+    // A13. issued outside the window → not a candidate
+    const a13 = await visit({ status: 'on_site' }); await paid(a13, { paid_at: new Date(Date.now() - 30 * 86400000) });
+    // A14. a statement child → the statement sweep's, not this one's
+    const [payerId] = await trx('payers').insert({ display_name: 'Fixture Bill-To' }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const [statementId] = await trx('payer_statements').insert({ payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status: 'paid', terms_snapshot: 'net30', token: randomUUID().replace(/-/g, ''), paid_at: new Date() }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const a14 = await visit({ status: 'on_site' }); await paid(a14, { payer_statement_id: statementId });
+    // A15. en_route → not a candidate
+    const a15 = await visit({ status: 'en_route' }); await paid(a15);
+
+    // ── UNSTARTED (pending / confirmed), past day: nobody is known to have gone ──
+    // U1. paid ON the visit day (2040-03-03 fixture day, paid then), NEVER ran → left alone: a prepayment whose day passed is not proof the visit happened
+    const u1 = await visit(); await paid(u1, { paid_at: new Date('2040-03-03T15:00:00Z') });
+    // U7. paid BEFORE the visit day, never ran → left alone
+    const u7 = await visit(); await paid(u7, { paid_at: new Date('2040-03-01T15:00:00Z') });
+    // U8. paid on a LATER day than the visit, never ran (the process died before the closeout) → retried: no prepayment, the live path closes exactly this
+    const u8 = want(await visit(), 'paid'); await paid(u8, { paid_at: new Date('2040-03-04T15:00:00Z') });
+    // U9. …and the same for a send delivered after the visit day
+    const u9 = want(await visit({ status: 'pending' }), 'sent'); await sent(u9, { sent_at: new Date('2040-03-04T15:00:00Z') });
+    // U10. 11:30 PM ET on the visit day is 03:30Z the next day — still the visit day in ET → left alone
+    const u10 = await visit(); await paid(u10, { paid_at: new Date('2040-03-04T03:30:00Z') });
+    // U2. paid before anyone arrived (visit_scheduled_today), the day has passed → STILL left alone
+    const u2 = await visit(); const iu2 = await paid(u2, { paid_at: new Date('2040-03-03T15:00:00Z') }); await auditRow(u2.id, iu2.id, 'visit_scheduled_today');
+    // U3. a closeout that RAN on an eligible day and failed → retried
+    const u3 = want(await visit(), 'paid'); const iu3 = await paid(u3, { paid_at: new Date('2040-03-04T15:00:00Z') }); await auditRow(u3.id, iu3.id, 'error');
+    // U4. …also for a send
+    const u4 = want(await visit({ status: 'pending' }), 'sent'); const iu4 = await sent(u4, { sent_at: new Date('2040-03-04T15:00:00Z') }); await auditRow(u4.id, iu4.id, 'issued_visit_rescheduled', { trigger: 'sent' });
+    // U11. a closeout failed (error row), but the invoice was settled ON the visit day → left alone: an error row is not evidence anyone went
+    const u11 = await visit(); const iu11 = await paid(u11, { paid_at: new Date('2040-03-03T15:00:00Z') }); await auditRow(u11.id, iu11.id, 'error');
+    // U12. a rescheduling race (issued_visit_rescheduled) moved the visit to a day AFTER the invoice; that day has passed → left alone: it is a prepayment for the day the visit is on now
+    const u12 = await visit(); const iu12 = await paid(u12, { paid_at: new Date('2040-03-01T15:00:00Z') }); await auditRow(u12.id, iu12.id, 'issued_visit_rescheduled');
+    // U5. sent on the visit day, never ran → left alone
+    const u5 = await visit(); await sent(u5, { sent_at: new Date('2040-03-03T15:00:00Z') });
+    // U6. unstarted TODAY with an error row → not a candidate today
+    const u6 = await visit({ date: TODAY }); const iu6 = await paid(u6, { date: TODAY }); await auditRow(u6.id, iu6.id, 'error');
+
+    // ── COMPLETED with this closeout's own attempt parked → resumed ──
+    const c1 = want(await visit({ status: 'completed' }), 'paid'); const ic1 = await paid(c1);
+    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: c1.id, idempotency_key: `invoice-issued:${ic1.id}`, status: 'side_effects_pending', request_hash: 'x' });
+    // …a completed visit with nothing parked is not a candidate
+    const c2 = await visit({ status: 'completed' }); await paid(c2);
+
+    const out = await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY });
+    expect(out).toEqual({ candidates: 27, retried: 18, closed: 18 });
+    const calls = mockCompleteScheduledService.mock.calls.map(([args]) => [args.serviceId, args.issuedInvoiceCloseout.trigger]);
+    expect(calls.sort()).toEqual(expectRetried.sort());
+    // A retry is nobody's action: the system is the actor.
+    for (const [args] of mockCompleteScheduledService.mock.calls) expect(args.actor).toEqual({ techRole: 'admin', technicianId: null, technician: null });
+    mockGate.on = false;
+    expect(await retryIssuedInvoiceCloseouts({ conn: trx, today: TODAY })).toEqual({ candidates: 0, retried: 0, closed: 0 });
+  });
+
   test('a refused completion is reported, audited as refused, and never thrown', async () => {
     mockCompleteScheduledService.mockResolvedValueOnce({ status: 409, body: { code: 'already_completed' } });
     const open = await visit();

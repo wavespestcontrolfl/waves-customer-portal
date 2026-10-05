@@ -60,6 +60,15 @@ async function main() {
             return route.abort();
           }
         });
+        // The contact boxes are closed behind "Estimate goes to: …" until asked
+        // for; open them before reading or filling the name.
+        async function contactName() {
+          const box = page.getByLabel('Customer name', { exact: true });
+          if (!(await box.isVisible())) {
+            await page.locator('button[aria-controls="estimate-contact-fields"]').click();
+          }
+          return box;
+        }
         async function screenshot(name, locator) {
           if (locator) await locator.scrollIntoViewIfNeeded();
           await waitForFonts(page);
@@ -71,7 +80,7 @@ async function main() {
         await page.getByRole('heading', { name: 'Create estimate', exact: true }).waitFor();
         assert.equal(new URL(page.url()).pathname, '/admin/pipeline', 'The existing redirect remains authoritative');
         await screenshot('create');
-        await page.getByRole('textbox', { name: 'Customer name', exact: true }).fill('Avery Example');
+        await (await contactName()).fill('Avery Example');
         await page.getByRole('textbox', { name: 'Phone', exact: true }).fill('+19415550100');
         await page.getByRole('textbox', { name: 'Email', exact: true }).fill('avery@example.invalid');
         await page.getByRole('textbox', { name: 'Service address', exact: true }).fill(source.address);
@@ -143,7 +152,7 @@ async function main() {
         await page.reload();
         await page.getByText(/Editing existing estimate for Avery Example/).waitFor();
         assert.equal(await page.getByRole('textbox', { name: 'Customer-visible notes', exact: true }).inputValue(), 'Retain this unsaved note.');
-        await page.getByRole('textbox', { name: 'Customer name', exact: true }).fill('Avery Updated');
+        await (await contactName()).fill('Avery Updated');
         await save.click();
         await page.getByText('Draft saved. It has not been sent.', { exact: true }).waitFor();
         assert.equal(records.get('estimate-example-created').customerName, 'Avery Updated');
@@ -164,10 +173,10 @@ async function main() {
         await dialog.waitFor({ state: 'detached' });
         assert.equal(await send.evaluate((node) => node === document.activeElement), true);
         fixtures.state.conflictRevision = true;
-        await page.getByRole('textbox', { name: 'Customer name', exact: true }).fill('Keep this unsaved revision');
+        await (await contactName()).fill('Keep this unsaved revision');
         await save.click();
         await page.getByText('This example changed in another editor. Reopen the saved estimate.', { exact: true }).waitFor();
-        assert.equal(await page.getByRole('textbox', { name: 'Customer name', exact: true }).inputValue(), 'Keep this unsaved revision');
+        assert.equal(await (await contactName()).inputValue(), 'Keep this unsaved revision');
         assert.equal(records.get('estimate-example-created').customerName, 'Avery Updated');
         await screenshot('conflict', page.locator('#estimate-review'));
         page.once('dialog', (dialog) => dialog.accept());
@@ -179,13 +188,13 @@ async function main() {
         assert.equal(await page.getByRole('textbox', { name: 'Customer-visible notes', exact: true }).inputValue(), source.notes);
         await page.getByRole('button', { name: 'Next estimate (keep services)', exact: true }).click();
         assert.equal(await page.getByRole('textbox', { name: 'Customer-visible notes', exact: true }).inputValue(), '');
-        assert.equal(await page.getByRole('textbox', { name: 'Customer name', exact: true }).inputValue(), '');
+        assert.equal(await (await contactName()).inputValue(), '');
         assert.equal(await page.getByRole('checkbox', { name: 'Pest Control', exact: true }).isChecked(), true);
         assert.equal(await page.getByLabel('Type', { exact: true }).inputValue(), 'NONE');
         for (const label of ['Amount', 'Label (shown on estimate)', 'Internal reason']) {
           assert.equal(await page.getByLabel(label, { exact: true }).inputValue(), '');
         }
-        await page.getByRole('textbox', { name: 'Customer name', exact: true }).fill('Next Example');
+        await (await contactName()).fill('Next Example');
         await page.getByRole('spinbutton', { name: 'Home Sq Ft', exact: true }).fill('2000');
         await page.getByRole('button', { name: 'Generate Estimate', exact: true }).click();
         await save.click();
@@ -235,7 +244,7 @@ async function main() {
         page.once('dialog', (dialog) => dialog.accept());
         await page.goto(`${server.baseUrl}/admin/estimates?tab=new&leadId=lead-example-a&customerName=Lead%20Example`);
         await page.getByRole('heading', { name: 'Create estimate', exact: true }).waitFor();
-        assert.equal(await page.getByRole('textbox', { name: 'Customer name', exact: true }).inputValue(), 'Lead Example');
+        assert.equal(await (await contactName()).inputValue(), 'Lead Example');
         await page.getByRole('spinbutton', { name: 'Home Sq Ft', exact: true }).fill('2000');
         await page.getByRole('checkbox', { name: 'Pest Control', exact: true }).check();
         await page.getByRole('button', { name: 'Generate Estimate', exact: true }).click();
@@ -246,7 +255,7 @@ async function main() {
         assert.equal(leadSaved.estimateData.inputs.leadId, 'lead-example-a');
         await page.getByRole('button', { name: 'Next estimate (keep services)', exact: true }).click();
         assert.equal(new URL(page.url()).searchParams.has('leadId'), false);
-        await page.getByRole('textbox', { name: 'Customer name', exact: true }).fill('After Lead Example');
+        await (await contactName()).fill('After Lead Example');
         await page.getByRole('spinbutton', { name: 'Home Sq Ft', exact: true }).fill('2000');
         assert.equal(await page.getByRole('checkbox', { name: 'Pest Control', exact: true }).isChecked(), true);
         await page.getByRole('button', { name: 'Generate Estimate', exact: true }).click();

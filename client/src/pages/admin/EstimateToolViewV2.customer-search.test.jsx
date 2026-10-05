@@ -194,3 +194,29 @@ it('lead, remove the link, then a customer with no email: the lead\'s email does
   expect(document.getElementById('estimate-customerName')).toHaveValue('Jamie Fixture');
   expect(document.getElementById('estimate-customerEmail')).toHaveValue('');
 });
+
+it('the contact boxes are closed until asked for, and one line says who the estimate goes to', async () => {
+  search.mockResolvedValue(response([]));
+  leadSearch.mockResolvedValue(leadResponse([lead]));
+  mount();
+  const fields = document.getElementById('estimate-contact-fields');
+  expect(fields).not.toBeVisible();
+  expect(screen.getByTestId('estimate-contact-summary')).toHaveTextContent('No one is selected yet.');
+  fireEvent.change(input(), { target: { value: 'Dana' } });
+  fireEvent.click(await screen.findByRole('button', { name: /Dana Sample.*Lead/ }));
+  expect(screen.getByTestId('estimate-contact-summary')).toHaveTextContent('Estimate goes to: Dana Sample · dana.sample@example.com');
+  expect(fields).not.toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit contact details' }));
+  expect(fields).toBeVisible();
+  expect(screen.getByLabelText('Customer name')).toHaveValue('Dana Sample');
+  fireEvent.click(screen.getByRole('button', { name: 'Hide contact details' }));
+  expect(fields).not.toBeVisible();
+});
+
+it('a person who is in no list can still be entered by hand', async () => {
+  mount();
+  fireEvent.click(screen.getByRole('button', { name: 'Add a person by hand' }));
+  fireEvent.change(screen.getByLabelText('Customer name'), { target: { value: 'Pat Example' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Hide contact details' }));
+  expect(screen.getByTestId('estimate-contact-summary')).toHaveTextContent('Estimate goes to: Pat Example');
+});

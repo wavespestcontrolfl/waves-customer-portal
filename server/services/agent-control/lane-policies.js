@@ -398,6 +398,7 @@ const LANE_RUNTIME = {
   // direct_sdk (Codex r17): knowledge-bridge.js callClaude falls back through its own Anthropic client after an OpenAI miss.
   knowledge_qa: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa' },
   wiki_qa: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa' },
+  wiki_qa_staff: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa' },
   kb_audit: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'compliance_check', ...LONG_BATCH },
   wiki_compiler: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'retrieval_qa', ...LONG_BATCH },
   embeddings: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'embedding', fallback_class: 'offline', eval_family: null },

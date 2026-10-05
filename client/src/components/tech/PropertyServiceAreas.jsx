@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Button, Card, Dialog, DialogHeader, DialogTitle, DialogBody, DialogFooter, Input, Select } from '../ui';
 import { adminFetch } from '../../utils/admin-fetch';
+import { recordedLawnArea } from '../../lib/lawn-completion';
 
 const AREA_LABELS = { beds: 'Ornamental beds', lawn: 'Treatable lawn', mosquito: 'Mosquito coverage' };
 const SOURCES = { imagery: 'Satellite estimate', field: 'Field measurement', recorded: 'Recorded area', computed: 'Property estimate' };
@@ -147,6 +148,12 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
   const shownKeys = activeKey ? [activeKey] : Object.keys(AREA_LABELS);
   const savedArea = activeKey ? data.areas[activeKey] : null;
   const effectiveVisitArea = visitArea ?? (savedArea?.reviewedAt ? savedArea.sqft : '');
+  // A lawn visit treats the whole recorded lawn, so the completion screen has
+  // nothing to ask: the card returns only when no lawn area is recorded, or
+  // when a draft carries an area the tech typed (kept visible so it can be
+  // cleared). The property editor (no serviceLine) is unaffected.
+  const wholeLawnRecorded = serviceLine === 'lawn' && Number(recordedLawnArea(savedArea)) > 0;
+  if (wholeLawnRecorded && onVisitAreaChange && visitArea == null) return null;
   return <>
     <Card className="my-4 p-4 text-14 text-zinc-900">
       <div className="flex items-center justify-between gap-3">
@@ -165,7 +172,7 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
           <Input className="mt-1 min-h-11 text-16" type="number" min="0" max="1000000" step="1" inputMode="numeric"
             value={effectiveVisitArea} disabled={disabled} onChange={event => onVisitAreaChange(event.target.value)} />
         </label>
-        {visitArea != null && savedArea?.reviewedAt && <Button variant="ghost" className={controlClass} disabled={disabled}
+        {visitArea != null && (savedArea?.reviewedAt || wholeLawnRecorded) && <Button variant="ghost" className={controlClass} disabled={disabled}
           onClick={() => onVisitAreaChange(null)}>Use property area</Button>}
       </div>}
       {/* The lookup estimates beds and lawn only; a service panel offers it

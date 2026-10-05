@@ -32,6 +32,9 @@ const MESSAGE_TYPE = 'contact_report_ready';
 const ENTRY_POINT = 'contact_report_ready_deferred';
 // A report older than this is not announced any more.
 const EXPIRE_MS = 24 * 60 * 60 * 1000;
+// Stands in for {first_name} in the one render; plain ASCII so the renderer's
+// GSM normalization leaves it alone.
+const FIRST_NAME_MARKER = '__CONTACT_FIRST_NAME__';
 
 function enabled() {
   return require('../config/feature-gates').contactReportTextLive();
@@ -39,6 +42,19 @@ function enabled() {
 
 function phoneKey(phone) {
   return String(phone || '').replace(/\D/g, '').slice(-10);
+}
+
+// The first name the text greets: the slot's OWN name for that phone ("there"
+// when the slot has none). The shared contact list falls back to the account
+// holder's name for a nameless slot, and a contact must not be greeted by it.
+// GSM-safe (messaging/gsm-normalize.js gsmSafeName): the name goes into the
+// body AFTER the renderer's normalization, and one accented or non-Latin
+// character would turn the whole text into UCS-2 segments.
+function greetingName(customer, phone) {
+  const { firstNameFrom, getServiceContactSlots } = require('./customer-contact');
+  const { gsmSafeName } = require('./messaging/gsm-normalize');
+  const slot = getServiceContactSlots(customer).find((s) => phoneKey(s.phone) === phoneKey(phone));
+  return gsmSafeName(firstNameFrom(slot?.name || ''), 'there');
 }
 
 // The customer row the contact rule reads. A secondary profile with no phone
@@ -101,13 +117,22 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
   const profile = await loadCustomer(customerId);
   if (!profile || !slotContacts(profile).length) return 0;
   const { renderSmsTemplate } = require('./sms-template-renderer');
-  // A template read that fails throws; a missing or inactive row, or an
-  // edited body that lost {report_url}, is "off" (the link is the message).
-  const body = await renderSmsTemplate(TEMPLATE_KEY, {
-    street_address: await streetAddress(db, scheduledServiceId, profile),
+  const street = await streetAddress(db, scheduledServiceId, profile);
+  // ONE render (one template and variant selection), with a marker where
+  // the first name goes; each contact's body is that render with their own
+  // first name in its place (the greeting names the CONTACT, never the
+  // account holder). `personalized` says whether the selected body uses the
+  // name at all: an edited body or variant may not. A template read that
+  // fails throws; a missing or inactive row, or an edited body that lost
+  // {report_url}, is "off" (the link is the message).
+  const rendered = await renderSmsTemplate(TEMPLATE_KEY, {
+    first_name: FIRST_NAME_MARKER,
+    street_address: street,
     report_url: reportUrl,
   }, { workflow: TEMPLATE_KEY, entity_type: 'customer', entity_id: customerId }, { throwOnError: true, requiredVars: ['report_url'] });
-  if (!body || !body.includes(reportUrl)) return 0;
+  if (!rendered || !rendered.includes(reportUrl)) return 0;
+  const personalized = rendered.includes(FIRST_NAME_MARKER);
+  const bodyFor = (row, phone) => rendered.split(FIRST_NAME_MARKER).join(greetingName(row, phone));
   return db.transaction(async (trx) => {
     // The contact-save lock (routes/notifications.js): the contact list
     // cannot change between this read and the queue rows.
@@ -119,6 +144,8 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
     const fromPhone = require('../config/twilio-numbers').getOutboundNumber();
     let queued = 0;
     for (const contact of contacts) {
+      // The name comes from the lock-held row: the contact as saved now.
+      const body = bodyFor(customer, contact.phone);
       const reportKey = `${sourceKey}:${phoneKey(contact.phone)}`;
       const existing = await trx('sms_log')
         .where({ customer_id: customerId, message_type: MESSAGE_TYPE })
@@ -144,6 +171,10 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
           // (dispatchDeferredReplay) instead of sending it unchecked.
           requires_registered_dispatch: true,
           contact_report_key: reportKey,
+          // The name the frozen body greets, only when the body uses one:
+          // the recheck drops the text when that phone has since been saved
+          // under another name. A body without a name stays sendable.
+          ...(personalized ? { contact_report_first_name: greetingName(customer, contact.phone) } : {}),
           contact_report_source: String(sourceKey),
           contact_report_queued_at: new Date().toISOString(),
           ...(source.visitId ? { visit_id: source.visitId, summary_token_hash: source.summaryTokenHash || null } : {}),
@@ -209,6 +240,11 @@ async function recheckContactReportText(meta = {}, { conn = db } = {}) {
   if (!customer) return { eligible: false, reason: 'customer-missing' };
   const stillConfirmed = (await confirmedContacts(customer, conn)).some((c) => phoneKey(c.phone) === phoneKey(meta.to_phone));
   if (!stillConfirmed) return { eligible: false, reason: 'contact-removed' };
+  // Same phone, another person: the frozen body greets the previous name.
+  if (typeof meta.contact_report_first_name === 'string'
+    && greetingName(customer, meta.to_phone) !== meta.contact_report_first_name) {
+    return { eligible: false, reason: 'contact-renamed' };
+  }
   return { eligible: true };
 }
 

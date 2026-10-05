@@ -107,7 +107,7 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
-import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, recordedLawnArea, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
@@ -12247,16 +12247,17 @@ export function CompletionPanel({
   const [lawnPlanReloadKey, setLawnPlanReloadKey] = useState(0);
   const lawnDefaultsEnabled = completionImprovements && lawnCompletionDefaults?.enabled === true && lawnCompletionDefaults.serviceId === service.id;
   const currentLawnPlanReady = lawnPlanReady === service.id;
-  const reviewedLawnArea = currentPropertyAreas?.areas.lawn?.reviewedAt ? currentPropertyAreas.areas.lawn.sqft : undefined;
+  // A lawn visit treats the whole recorded lawn, reviewed or not.
+  const recordedLawnAreaSqft = recordedLawnArea(currentPropertyAreas?.areas.lawn);
   const propertyAreasIdentity = currentPropertyAreas ? `${currentPropertyAreas.propertyId}|${currentPropertyAreas.addressKey ?? ""}` : null;
   // A lawn area entered for one property (e.g. restored from a draft) never
   // applies to another, including the same row at a new address.
   const effectiveLawnAreaOverride = lawnAreaOverride !== undefined
     && (!propertyAreasIdentity || lawnAreaOverrideFor === null || lawnAreaOverrideFor === propertyAreasIdentity)
     ? lawnAreaOverride : undefined;
-  const lawnPlanArea = lawnDefaultsEnabled ? effectiveLawnAreaOverride ?? (currentPropertyAreas ? reviewedLawnArea ?? null : undefined) : undefined;
+  const lawnPlanArea = lawnDefaultsEnabled ? effectiveLawnAreaOverride ?? (currentPropertyAreas ? recordedLawnAreaSqft ?? null : undefined) : undefined;
   const lawnVisitArea = effectiveLawnAreaOverride !== undefined ? effectiveLawnAreaOverride
-    : currentPropertyAreas ? reviewedLawnArea ?? "" : lawnCompletionDefaults?.lawnSqft ?? "";
+    : currentPropertyAreas ? recordedLawnAreaSqft ?? "" : lawnCompletionDefaults?.lawnSqft ?? "";
   useEffect(() => {
     let live = true;
     setLawnSqftForPrefill(null);

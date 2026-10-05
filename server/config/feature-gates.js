@@ -1169,6 +1169,10 @@ const gates = {
   smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
+  // Owner 2026-10-04: an access code saves from the client's own wording
+  // ("Gate code is 1234"), not only from the strict sentence form. Read at
+  // call time in sms-operational-extractor.js. Off = strict form only.
+  accessCodeCapture: gateEnvValue('GATE_ACCESS_CODE_CAPTURE'),
 
   // Email asks + staff promises, same shape as the SMS lane above. Also
   // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
@@ -2048,9 +2052,12 @@ const gates = {
   // (2026-08-05 silent-cancel incident). Fail-closed; owner flips.
   cancelNoticeHook: process.env.GATE_CANCEL_NOTICE_HOOK === 'true',
   // Invoice issued ⇒ visit completed (owner ruling 2026-09-07): an invoice
-  // linked to an open visit that is SENT to the customer or PAID by hand
-  // closes the visit out quietly (no report / text / review ask / charge;
-  // the invoice is reused). Ships DARK; owner flips.
+  // linked to an open visit that is SENT to the customer or PAID (by hand,
+  // or by card / bank through the Stripe webhook) closes the visit out
+  // quietly (no report / text / review ask / charge; the invoice is reused).
+  // Owner ruling 2026-10-04: a past day closes an unstarted or an arrived
+  // (on_site) visit; today only an arrived visit closes, and only on a
+  // payment (issuedCloseoutVisitRefusal). Ships DARK; owner flips.
   invoiceIssuedClosesVisit: process.env.GATE_INVOICE_ISSUED_CLOSES_VISIT === 'true',
   // Per-family plan-rate ledger (owner ruling 2026-08-06): with the gate ON,
   // an accept's customers.monthly_rate becomes the SUM of the customer's

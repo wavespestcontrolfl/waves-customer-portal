@@ -6,6 +6,15 @@ import { isTankCalculation } from './product-rate-prefill';
 // prepare editable closeout fields and select a previous confirmed visit.
 export const LAWN_DEFAULT_AREAS = ['Front yard', 'Back yard', 'Side yards'];
 
+// A lawn visit treats the whole recorded lawn: the property areas read's lawn
+// entry counts when staff reviewed it or when it is the property's own recorded
+// area (reviewedAt stays null for that one). A lookup estimate (satellite or
+// computed) is a suggestion, never a default. Undefined = no recorded area.
+export function recordedLawnArea(area) {
+  if (!area) return undefined;
+  return area.reviewedAt || (area.source === 'recorded' && Number(area.sqft) > 0) ? area.sqft : undefined;
+}
+
 export function previousLawnAssessment(history, service) {
   const day = String(service.scheduledDate || service.scheduled_date || service.date || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return null;
