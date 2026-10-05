@@ -190,10 +190,16 @@ describe('admin communications voice route', () => {
       return mockCallCreate.mock.calls[0][0];
     }
 
-    test('gate on: a linked customer is called from their home line', async () => {
+    // The customer leg presents the home line (callerIdNumber on the prompt
+    // URL, which /outbound-connect turns into <Dial callerId>). The staff leg
+    // — calls.create's `from`, the ring to the admin cell — stays on the main
+    // line whatever the gate says: ringing the cell from a rotating office
+    // line is what its unknown-caller screening silenced, so nobody could
+    // press 1 and no outbound call connected.
+    test('gate on: a linked customer is called from their home line; the staff cell still rings from main', async () => {
       homeLineLive.mockReturnValue(true);
       const call = await callFor(parrishCustomer);
-      expect(call.from).toBe(PARRISH);
+      expect(call.from).toBe(MAIN);
       expect(call.url).toContain(`callerIdNumber=${encodeURIComponent(PARRISH)}`);
       expect(alertTwilioFailure).toHaveBeenCalledWith(expect.objectContaining({ from: PARRISH }));
     });
@@ -201,7 +207,8 @@ describe('admin communications voice route', () => {
     test('gate on: a customer whose address names no office gets Bradenton (owner 2026-10-02)', async () => {
       homeLineLive.mockReturnValue(true);
       const call = await callFor({ ...parrishCustomer, zip: '', city: '' });
-      expect(call.from).toBe('+19413187612');
+      expect(call.from).toBe(MAIN);
+      expect(call.url).toContain(`callerIdNumber=${encodeURIComponent('+19413187612')}`);
     });
 
     test('gate on: a service-contact number sent with customerIdHint calls from that customer\'s home line', async () => {
@@ -218,7 +225,9 @@ describe('admin communications voice route', () => {
           body: JSON.stringify({ to: '+15551234567', customerIdHint: '11111111-1111-4111-8111-111111111111' }),
         });
       });
-      expect(mockCallCreate).toHaveBeenCalledWith(expect.objectContaining({ from: PARRISH }));
+      expect(mockCallCreate).toHaveBeenCalledWith(expect.objectContaining({
+        from: MAIN, url: expect.stringContaining(`callerIdNumber=${encodeURIComponent(PARRISH)}`),
+      }));
     });
 
     test('customerId with a number the customer is not known by is refused', async () => {
@@ -252,7 +261,9 @@ describe('admin communications voice route', () => {
           body: JSON.stringify({ to: '+15551234567', customerIdHint: '11111111-1111-4111-8111-111111111111' }),
         });
       });
-      expect(mockCallCreate).toHaveBeenCalledWith(expect.objectContaining({ from: PARRISH }));
+      expect(mockCallCreate).toHaveBeenCalledWith(expect.objectContaining({
+        from: MAIN, url: expect.stringContaining(`callerIdNumber=${encodeURIComponent(PARRISH)}`),
+      }));
     });
 
     test('customerIdHint with a number that is not theirs: never refused, main line', async () => {
@@ -272,12 +283,15 @@ describe('admin communications voice route', () => {
         });
         expect(res.status).not.toBe(400);
       });
-      expect(mockCallCreate).toHaveBeenCalledWith(expect.objectContaining({ from: MAIN }));
+      expect(mockCallCreate).toHaveBeenCalledWith(expect.objectContaining({
+        from: MAIN, url: expect.stringContaining(`callerIdNumber=${encodeURIComponent(MAIN)}`),
+      }));
     });
 
-    test('gate off: the main line, as before', async () => {
+    test('gate off: the main line on both legs, as before', async () => {
       const call = await callFor(parrishCustomer);
       expect(call.from).toBe(MAIN);
+      expect(call.url).toContain(`callerIdNumber=${encodeURIComponent(MAIN)}`);
     });
   });
 
