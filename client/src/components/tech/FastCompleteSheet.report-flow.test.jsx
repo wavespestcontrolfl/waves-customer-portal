@@ -176,14 +176,14 @@ describe('the visit the tech tapped', () => {
 });
 
 describe('the visit step', () => {
-  test('a regular pest visit opens as a service: no pest, where or how taps, customer not home with full access', async () => {
+  test('a regular pest visit opens as a service: no pest, where or how taps, customer home and spoke with them (owner 2026-10-04)', async () => {
     await openSheet(makeRequest());
     expect(screen.getByRole('heading', { name: 'Complete service' })).toBeTruthy();
     for (const gone of ['Ants', 'Outside', 'Inside', 'Spot treatment', 'Perimeter spray', 'Light']) {
       expect(screen.queryByRole('button', { name: gone })).toBeNull();
     }
-    expect(screen.getByRole('button', { name: 'Not home — full access' }).getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByRole('button', { name: 'Home — spoke with them' }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: 'Home — spoke with them' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Not home — full access' }).getAttribute('aria-pressed')).toBe('false');
     expect(screen.getByRole('button', { name: 'Not home — partial access' }).getAttribute('aria-pressed')).toBe('false');
     const tracker = screen.getByRole('group', { name: 'Pest activity' });
     expect(within(tracker).getAllByRole('button').map((button) => button.textContent)).toEqual(['1', '2', '3', '4', '5']);
@@ -257,10 +257,17 @@ describe('the visit step', () => {
 });
 
 describe('generate and read', () => {
+  test('a tech who taps nothing for the customer sends home, spoke with them (owner 2026-10-04)', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    expect(request.bodies('/generate-report')[0]).toMatchObject({ customerInteraction: 'Customer home — spoke with them' });
+  });
+
   test('the report request carries the note and the taps; the note\'s facts are read beside it', async () => {
     const request = makeRequest();
     await openSheet(request);
-    fireEvent.click(screen.getByRole('button', { name: 'Home — spoke with them' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Not home — partial access' }));
     await generate();
     const [payload] = request.bodies('/generate-report');
     // The note is read first, and the report is written from exactly what
@@ -271,7 +278,7 @@ describe('generate and read', () => {
     expect(payload).toMatchObject({
       scheduledServiceId: 'svc-1',
       serviceNotes: NOTE,
-      customerInteraction: 'Customer home — spoke with them',
+      customerInteraction: 'Customer not home — partial access',
       pestActivityRating: 3,
       includeCustomerComms: true,
       technicianName: 'Adam',
@@ -550,7 +557,7 @@ describe('complete and send', () => {
       complete: [{ success: true, completionSmsStatus: 'sent', invoiceId: 'inv-1', invoiceTotal: 95, invoiceStatus: 'sent' }],
     });
     await openSheet(request);
-    fireEvent.click(screen.getByRole('button', { name: 'Home — spoke with them' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Not home — partial access' }));
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
@@ -560,7 +567,7 @@ describe('complete and send', () => {
       technicianNotes: REPORT,
       reportDraftBase: REPORT,
       areasServiced: ['Inside', 'Outside'],
-      customerInteraction: 'tech_home_spoke_with_them',
+      customerInteraction: 'not_home_partial_access',
       clientPestRating: 3,
       sendCompletionSms: true,
       includePayLink: true,

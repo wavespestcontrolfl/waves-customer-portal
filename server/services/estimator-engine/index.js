@@ -492,6 +492,25 @@ function commercialHint(context) {
   return propType === 'commercial' || context.lead?.is_commercial === true;
 }
 
+// Phone-aware DBPR classification for a suite a LISTING sized (PR 5b). Only
+// a license result changes anything, and only the classification fields: the
+// listing's value, source, url and evidence are kept. Fail-open.
+async function classifyListingSuiteByLicense(suiteSize, { addressLine, phone, commercialRiskType, commercialSubtype }) {
+  try {
+    const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
+    const { suiteAddressParts } = require('../commercial-suite-size/address-parts');
+    const license = await resolveCommercialSuiteSize({
+      address: suiteAddressParts(addressLine), phone, businessNameHint: null, commercialRiskType, commercialSubtype,
+    }, { skipWebSearch: true, skipListing: true });
+    if (license && license.source === SQFT_SOURCES.LICENSE_SEATS) {
+      return { ...suiteSize, licenseBacked: true, businessType: 'restaurant_food', businessName: license.businessName || suiteSize.businessName || null, ...(license.seats != null ? { seats: license.seats } : {}) };
+    }
+  } catch (err) {
+    logger.warn(`[estimator-engine] listing suite license classification failed: ${err.message}`);
+  }
+  return suiteSize;
+}
+
 const { sameStreetAddress, addressAddsLocality, addressCompletesGatheredStreet } = require('./address-compare');
 const { applyBusinessCommercialVerdict, stampBusinessScope, withoutBusinessListing } = require('./business-scope-engine');
 
@@ -2694,7 +2713,8 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             // re-resolved with those (no second web search).
             const lookupSuiteSize = effectiveParcelOk ? (effectiveSignals.enriched?.suiteSize || null) : null;
             let suiteSize = (lookupSuiteSize && Number(lookupSuiteSize.value) > 0
-              && (lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS || lookupSuiteSize.source === 'verified'))
+              && (lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS || lookupSuiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT
+                || lookupSuiteSize.source === 'verified'))
               ? lookupSuiteSize
               : null;
             if (!suiteSize) {
@@ -2725,6 +2745,20 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                 }
               }
             }
+            // A listing size the lookup found was resolved WITHOUT the call's
+            // phone, which is what picks one license when several share the
+            // suite: run the license check once more with it (no listing
+            // search, no web search) for the CLASSIFICATION only. The
+            // listing's size and link stand.
+            if (suiteSize && suiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT && suiteSize.licenseBacked !== true
+              && (context?.phone || suiteSize.licenseChecked === false)) {
+              suiteSize = await classifyListingSuiteByLicense(suiteSize, {
+                addressLine: intent.address || result.addressUsed || address,
+                phone: context?.phone || null,
+                commercialRiskType: intent.commercial_risk_type || null,
+                commercialSubtype: intent.commercial_subtype || null,
+              });
+            }
             if (suiteSize && Number(suiteSize.value) > 0) {
               propertyFacts.home = {
                 value: suiteSize.value,
@@ -2741,7 +2775,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               // this: a web-search businessType is model output, and model
               // output must not pick the pricing program (AGENTS.md).
               if (!intent.commercial_risk_type
-                && suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
+                && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS || suiteSize.licenseBacked === true)) {
                 intent.commercial_risk_type = 'restaurant_food';
               }
             }
@@ -3466,6 +3500,7 @@ module.exports = {
   runDraftPipeline,
   notify,
   _private: {
+    classifyListingSuiteByLicense,
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
     parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, supersedeRowScopedDraftBlock,
     clearDraftBlockOnCall,
