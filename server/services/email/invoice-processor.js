@@ -199,14 +199,19 @@ const NOT_A_CHARGE_SUBJECT = /\b(unsuccessful|not successful|failed|declined|did
 // second, with the same subject and the same body, for the same amount.
 // Nothing weaker counts: separate receipts can share a sender, a second and
 // an amount, and a missed copy only costs a review, while a wrong match
-// silently drops a real expense.
-async function findSameNoticeExpense(conn, emailId, amount) {
-  const me = await conn('emails').where({ id: emailId }).first('from_address', 'received_at', 'subject');
-  if (!me?.from_address || !me?.received_at || !me?.subject) return null;
+// silently drops a real expense. Emails with attachments are never matched
+// here (two PDF invoices can share one email template); they rely on the
+// invoice-number check. The description (vendor + invoice number) must also
+// match, so a different invoice number never matches.
+async function findSameNoticeExpense(conn, emailId, amount, description) {
+  const me = await conn('emails').where({ id: emailId }).first('from_address', 'received_at', 'subject', 'has_attachments');
+  if (!me?.from_address || !me?.received_at || !me?.subject || me.has_attachments) return null;
   return conn('expenses as x')
     .join('emails as e', 'e.expense_id', 'x.id')
     .where('e.from_address', me.from_address)
     .where('e.subject', me.subject)
+    .where('x.description', description)
+    .whereRaw('coalesce(e.has_attachments, false) = false')
     .whereNot('e.id', emailId)
     // Same second, not the same instant: Gmail keeps milliseconds.
     .whereRaw("date_trunc('second', e.received_at) = date_trunc('second', ?::timestamptz)", [me.received_at])
@@ -281,7 +286,7 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
       // depend on which copy is processed first; the per-sender lock covers
       // two copies processed at once.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`expense-notice:${String(email.from_address || '').toLowerCase()}`]);
-      const copy = await findSameNoticeExpense(trx, email.id, amount);
+      const copy = await findSameNoticeExpense(trx, email.id, amount, expenseDescription(vendorName, invoiceNumber));
       if (copy) {
         await trx('emails').where({ id: email.id }).update({
           expense_id: copy.id,

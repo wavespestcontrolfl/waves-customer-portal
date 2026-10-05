@@ -252,3 +252,11 @@ test('a stale link to a deleted expense does not block booking the email again',
     { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 12 }));
 });
+
+test('an email with an attachment never takes the copy shortcut (distinct PDF invoices can share one template)', async () => {
+  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Your invoice', has_attachments: true };
+  mockState.copy = { id: 'exp-other-pdf' };
+  extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0025', invoice_date: '2026-01-15', total: 40 });
+  await processVendorInvoice({ id: 'e25', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Your invoice' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 40 }));
+});
