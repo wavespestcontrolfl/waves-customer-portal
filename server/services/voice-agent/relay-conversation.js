@@ -4235,6 +4235,10 @@ class RelayConversation {
             bookingRequested: this._bookingRequested === true,
             reserviceFiled: this._reserviceFiled === true,
             transferRequested: this._transferRequested === true,
+            // A write that outlived the bounded drain (capture_lead, request_reservice,
+            // a booking, the capture floor) IS this call's artifact once it lands:
+            // the hand-off stands down rather than race it.
+            pendingWrites: this._inFlightWrites.size > 0 || detachedWrites.length > 0 || Boolean(this._captureFloorWrite),
             leadCaptured: this.leadCaptured === true,
             leadId: this._leadId || null,
             estimateFields: this._estimateFields || null,

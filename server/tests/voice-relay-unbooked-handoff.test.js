@@ -137,6 +137,7 @@ describe('nothing to do', () => {
     ['a re-service filed', { reserviceFiled: true }],
     ['a transfer to the office', { transferRequested: true }],
     ['a sandbox call', { sandbox: true }],
+    ['a capture/booking write still pending past the close drain', { pendingWrites: true }],
     ['a caller who never spoke', { callerTurnCount: 0 }],
   ])('%s: the database is never touched', async (_n, over) => {
     const { db } = makeDb();

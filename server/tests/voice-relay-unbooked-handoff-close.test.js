@@ -48,7 +48,7 @@ test('a matched ai_handled reconcile passes the session facts to the hand-off', 
   await c.end('ws_close');
   expect(run).toHaveBeenCalledTimes(1);
   expect(run.mock.calls[0][0]).toMatchObject({
-    callSid: 'CA-hook-1', sandbox: false, callerTurnCount: 1,
+    callSid: 'CA-hook-1', sandbox: false, callerTurnCount: 1, pendingWrites: false,
     bookingRequested: false, reserviceFiled: false, transferRequested: false, leadCaptured: false, leadId: null,
   });
   expect(typeof run.mock.calls[0][0].fence).toBe('function');
@@ -60,6 +60,14 @@ test('a booking latched on the session is passed on as booked', async () => {
   c._bookingRequested = true;
   await c.end('ws_close');
   expect(run.mock.calls[0][0].bookingRequested).toBe(true);
+});
+
+test('a write that outlives the close drain is passed on as pending (the hand-off stands down)', async () => {
+  primeDb(1);
+  const c = convo();
+  c._captureFloorWrite = new Promise(() => {}); // the capture floor still writing past its bound
+  await c.end('ws_close');
+  expect(run.mock.calls[0][0].pendingWrites).toBe(true);
 });
 
 test('0 rows reconciled (a failure outcome already won): the hand-off is not run', async () => {

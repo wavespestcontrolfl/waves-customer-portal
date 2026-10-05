@@ -53,6 +53,7 @@ function isGateOn() {
 function unbookedEligible(facts = {}) {
   if (!facts.callSid || facts.sandbox === true) return false;
   if (!(Number(facts.callerTurnCount) >= 1)) return false;
+  if (facts.pendingWrites === true) return false; // an unsettled artifact write is the call's artifact
   if (facts.bookingRequested === true || facts.reserviceFiled === true || facts.transferRequested === true) return false;
   if (facts.leadCaptured === true || facts.leadId) return false;
   return true;
