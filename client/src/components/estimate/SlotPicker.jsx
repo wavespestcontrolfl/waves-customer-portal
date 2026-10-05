@@ -92,9 +92,6 @@ export default function SlotPicker({
   // the server's seasonal slot filter/horizon while selectedFrequency stays
   // the pest cadence.
   serviceCadences = null,
-  // Good / Better / Best: 'best' sizes the visit from every quoted program
-  // (the server re-checks the tier before honoring it).
-  offerTier = null,
   onFirstSlotDate = null,
   cityLabel = null,
   // B18: the server parked this estimate for the office - its slot reads answer an empty review shape
@@ -212,8 +209,6 @@ export default function SlotPicker({
     if (serviceMode !== 'one_time' && serviceCadences) {
       params.set('serviceCadences', JSON.stringify(serviceCadences));
     }
-    // Good / Better / Best: only the Best tier changes the visit profile.
-    if (serviceMode !== 'one_time' && offerTier === 'best') params.set('offerTier', 'best');
     const query = params.toString();
     fetch(`${API_BASE}/public/estimates/${token}/available-slots${query ? `?${query}` : ''}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('slot fetch failed'))))
@@ -225,7 +220,7 @@ export default function SlotPicker({
       })
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
-  }, [token, preview, refreshSignal, serviceMode, selectedFrequency, serviceCadences, offerTier]);
+  }, [token, preview, refreshSignal, serviceMode, selectedFrequency, serviceCadences]);
 
   if (preview) return <section style={{ padding: 20 }} aria-label="Scheduling preview">
     <p style={{ margin: 0, fontSize: 16 }}>Customers choose from current appointment times here. Scheduling and date searches are disabled in staff preview.</p>
@@ -286,7 +281,6 @@ export default function SlotPicker({
     p.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
     if (serviceMode !== 'one_time' && selectedFrequency) p.set('selectedFrequency', selectedFrequency);
     if (serviceMode !== 'one_time' && serviceCadences) p.set('serviceCadences', JSON.stringify(serviceCadences));
-    if (serviceMode !== 'one_time' && offerTier === 'best') p.set('offerTier', 'best');
     return p;
   };
 
@@ -297,13 +291,7 @@ export default function SlotPicker({
         'Content-Type': 'application/json',
         ...(askToken ? { 'X-Estimate-Ask-Token': askToken } : {}),
       },
-      body: JSON.stringify({
-        query,
-        serviceMode,
-        selectedFrequency,
-        ...(serviceCadences ? { serviceCadences } : {}),
-        ...(serviceMode !== 'one_time' && offerTier === 'best' ? { offerTier: 'best' } : {}),
-      }),
+      body: JSON.stringify({ query, serviceMode, selectedFrequency, ...(serviceCadences ? { serviceCadences } : {}) }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || 'search failed');
