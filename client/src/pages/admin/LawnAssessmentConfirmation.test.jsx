@@ -209,6 +209,14 @@ it('a hold that is dragged off the button, or cancelled, does not swallow the ne
     act(() => { vi.advanceTimersByTime(450 + 120 * 3); });
     fireEvent.pointerUp(raise);
     expect(density.value).toBe(String(held + 1));
+    // A hold still running when Confirm is tapped with another finger stops at once.
+    fireEvent.pointerDown(raise);
+    act(() => { vi.advanceTimersByTime(450 + 10); });
+    const atConfirm = Number(density.value);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
+    act(() => { vi.advanceTimersByTime(120 * 5); });
+    expect(Number(density.value)).toBe(atConfirm);
+    await act(async () => { await vi.runOnlyPendingTimersAsync(); });
   } finally {
     vi.useRealTimers();
   }
