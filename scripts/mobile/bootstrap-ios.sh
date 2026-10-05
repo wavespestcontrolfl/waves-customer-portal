@@ -229,13 +229,25 @@ fi
 # App Review rejects a build without it. Attach it with the xcodeproj gem that
 # CocoaPods ships (idempotent). Without that gem, say so and leave the manual
 # Xcode step below.
-# `|| true`: a CocoaPods installed with `gem install` has no Homebrew wrapper,
-# and under `set -o pipefail` a grep with no match would end the bootstrap.
-POD_GEM_HOME="$(grep -o 'GEM_HOME="[^"]*"' "$(readlink -f "$(command -v pod)")" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
-# Run Ruby with the xcodeproj gem: Homebrew's CocoaPods keeps it under its own
-# GEM_HOME; a `gem install cocoapods` puts it where plain `ruby` finds it.
+# Run Ruby with the xcodeproj gem, through the same Ruby CocoaPods runs on.
+# Homebrew's `pod` is a wrapper that sets GEM_HOME and execs libexec/bin/pod,
+# whose shebang names Homebrew's Ruby; a `gem install cocoapods` pod is itself
+# a Ruby script. `realpath` (not `readlink -f`, missing on older macOS)
+# resolves the symlink. Every probe tolerates no match: under pipefail a
+# failed grep would end the bootstrap.
+POD_BIN="$(command -v pod || true)"
+POD_REAL="$POD_BIN"
+if [ -n "$POD_BIN" ]; then
+  POD_REAL="$(realpath "$POD_BIN" 2>/dev/null || readlink -f "$POD_BIN" 2>/dev/null || echo "$POD_BIN")"
+fi
+POD_GEM_HOME="$( { [ -n "$POD_REAL" ] && grep -o 'GEM_HOME="[^"]*"' "$POD_REAL" 2>/dev/null | head -1 | cut -d'"' -f2; } || true)"
+POD_SCRIPT="$POD_REAL"
+if [ -n "$POD_GEM_HOME" ] && [ -f "$POD_GEM_HOME/bin/pod" ]; then POD_SCRIPT="$POD_GEM_HOME/bin/pod"; fi
+POD_RUBY="ruby"
+POD_SHEBANG="$( { [ -n "$POD_SCRIPT" ] && head -1 "$POD_SCRIPT" 2>/dev/null | sed -n 's/^#![[:space:]]*//p' | cut -d' ' -f1; } || true)"
+if [ -n "$POD_SHEBANG" ] && [ -x "$POD_SHEBANG" ] && [ "$(basename "$POD_SHEBANG")" != "env" ]; then POD_RUBY="$POD_SHEBANG"; fi
 xcodeproj_ruby() {
-  if [ -n "$POD_GEM_HOME" ]; then GEM_HOME="$POD_GEM_HOME" ruby "$@"; else ruby "$@"; fi
+  if [ -n "$POD_GEM_HOME" ]; then GEM_HOME="$POD_GEM_HOME" "$POD_RUBY" "$@"; else "$POD_RUBY" "$@"; fi
 }
 if (cd ios/App && xcodeproj_ruby -e '
   require "xcodeproj"
