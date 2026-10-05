@@ -444,6 +444,13 @@ describe('buildWhatToExpect — owner wording rules 2026-10-01', () => {
     // Label durations never reach the writer (they are not follow-up windows).
     const plain = buildWhatToExpect({ plain: true, products: [{ name: 'Tekko Pro IGR', targets: ['German cockroaches'] }, { name: 'Delta Dust' }] });
     expect(plain.lines.join(' ')).not.toMatch(/months/);
+    // Two growth regulators share one line: no single label's duration.
+    for (const order of [
+      [{ name: 'Gentrol IGR' }, { name: 'Tekko Pro IGR', targets: ['German cockroaches'] }],
+      [{ name: 'Tekko Pro IGR', targets: ['German cockroaches'] }, { name: 'Gentrol IGR' }],
+    ]) {
+      expect(buildWhatToExpect({ products: order }).lines.join(' ')).not.toMatch(/months/);
+    }
     const plainGentrol = buildWhatToExpect({ plain: true, products: [{ name: 'Gentrol IGR' }] });
     expect(plainGentrol.lines.join(' ')).not.toMatch(/months/);
   });

@@ -450,15 +450,19 @@ function buildWhatToExpect({ products = [], plain = false } = {}) {
         // A label duration never reaches the writer (plain). Tekko Pro's
         // figure needs a roach-tagged application (it also covers fleas,
         // flies and mosquitoes); Gentrol's applies to every listed pest.
-        const duration = plain ? null : classProducts
+        // Two growth regulators on one visit share one line, so no single
+        // label's duration can speak for it: state a duration only when one
+        // product's applies (Codex P2 #5982).
+        const durations = plain ? [] : [...new Set(classProducts
           .map((p) => {
             const entry = IGR_LABEL_DURATION.get(normalizeProductName(p?.name));
             if (!entry) return null;
             if (entry.needsRoachTarget && !(Array.isArray(p?.targets) && p.targets.some((t) => /roach/i.test(t)))) return null;
             return entry.sentence;
           })
-          .find(Boolean);
-        return EXPECTATION_TEXT.igr(ai, { labelDuration: duration || '' });
+          .filter(Boolean))];
+        const igrProducts = new Set(classProducts.map((p) => normalizeProductName(p?.name)));
+        return EXPECTATION_TEXT.igr(ai, { labelDuration: durations.length === 1 && igrProducts.size === 1 ? durations[0] : '' });
       }
       return EXPECTATION_TEXT[cls](ai, { aftercare: !plain, labelDuration: !plain });
     })
