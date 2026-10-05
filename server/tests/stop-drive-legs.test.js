@@ -283,4 +283,18 @@ describe('attachDriveLegs', () => {
     // The 13:00 visit cannot start at 10:00: the tech leaves the pin at 14:00.
     expect(services[2].driveLateMin).toBe(14 * 60 + leg - (11 * 60 + 120));
   });
+
+  it('keeps each member promise of a staggered visit group', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', windowEnd: '10:00' }),
+      stop('g2', '11:00', A, { visitId: 'v1', windowEnd: '12:00' }),
+      stop('c', '10:00', C, { displayOrder: 2 }),
+    ];
+    services[0].displayOrder = 0;
+    services[1].displayOrder = 1;
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // Arrive 10:00 so the 11:00 member starts on time; leave at 12:00.
+    expect(services[2].driveLateMin).toBe(12 * 60 + leg - (10 * 60 + 120));
+  });
 });

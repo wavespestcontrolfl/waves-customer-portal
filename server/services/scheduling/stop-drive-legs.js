@@ -75,15 +75,12 @@ function stopPieces(members) {
     if (m.visitId) {
       chain = null;
       prevLoose = null;
-      if (byVisit.has(m.visitId)) {
-        const piece = byVisit.get(m.visitId);
-        piece.work += workDuration(row);
-        piece.start = Math.min(piece.start, minutesOf(m.windowStart));
-        continue;
+      if (!byVisit.has(m.visitId)) {
+        const piece = { id: m.id, rows: [] };
+        byVisit.set(m.visitId, piece);
+        pieces.push(piece);
       }
-      const piece = { id: m.id, start: minutesOf(m.windowStart), work: workDuration(row) };
-      byVisit.set(m.visitId, piece);
-      pieces.push(piece);
+      byVisit.get(m.visitId).rows.push(row);
       continue;
     }
     if (chain && coVisitPair(prevLoose, m)) {
@@ -96,6 +93,29 @@ function stopPieces(members) {
       pieces.push(chain);
     }
     prevLoose = m;
+  }
+  // A visit group runs its rows in turn and must keep every member's
+  // promise: groupRouteStops' arrival range (each member's window, shifted
+  // by the work before it; one shared range when all share an arrival).
+  for (const piece of pieces) {
+    if (!piece.rows) continue;
+    const rows = [...piece.rows].sort((x, y) => minutesOf(x.window_start) - minutesOf(y.window_start));
+    const shared = rows.every((r) => String(r.window_start) === String(rows[0].window_start));
+    let work = 0;
+    let startMin = -Infinity;
+    let endMin = Infinity;
+    for (const r of rows) {
+      const range = effectiveWindowRange(r);
+      const offset = shared ? 0 : work;
+      startMin = Math.max(startMin, range.startMin - offset);
+      endMin = Math.min(endMin, range.endMin - offset);
+      work += workDuration(r);
+    }
+    piece.start = minutesOf(rows[0].window_start);
+    piece.work = work;
+    // No arrival keeps every promise: the earliest member's own window
+    // still drives the late check.
+    piece.range = endMin >= startMin ? { startMin, endMin } : null;
   }
   return pieces;
 }
@@ -124,6 +144,7 @@ function lateByStop(stops, legs) {
       const mm = String(p.start % 60).padStart(2, '0');
       seq.push({
         id,
+        arrivalRange: p.range || null,
         window_start: `${hh}:${mm}`,
         estimated_duration_minutes: p.work,
         memberIds: [p.id],
@@ -132,7 +153,8 @@ function lateByStop(stops, legs) {
       });
     });
   });
-  const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, seq, {
+  const rangeFor = (row) => row.arrivalRange || effectiveWindowRange(row);
+  const sim = simulateArrivalRoute(RouteOptimizer, rangeFor, seq, {
     startMin: minutesOf(seq[0].window_start),
     origin: { lat: Number(seq[0].lat), lng: Number(seq[0].lng) },
     reportLate: true,
