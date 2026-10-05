@@ -1144,6 +1144,10 @@ function quoteSharesContent(sentence, quote, names) {
 // one must be three words or more (a bare heading proves nothing).
 function recordWordsOf(quote, normRecord) {
   const raw = String(quote || "");
+  // Word for word as given (the usual case, and a record line that itself
+  // holds quotation marks): the whole quote is the evidence, as before.
+  const whole = normalizeForMatch(raw);
+  if (whole.length >= 3 && normRecord.includes(whole)) return whole;
   const quoted = [...raw.matchAll(/["\u201c]([^"\u201c\u201d]{3,})["\u201d]/g)].map((m) => m[1]);
   // Words inside quotation marks are the copy; otherwise the runs between "...".
   const runs = (quoted.length ? quoted : raw.split(/\.{3,}|\u2026/)).map(normalizeForMatch).filter((r) => r.length >= 3);

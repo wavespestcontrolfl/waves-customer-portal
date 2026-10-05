@@ -487,9 +487,14 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     const record = norm('SERVICE REPORT FOR THIS VISIT:\n- Recap: We nourished your turf, and spot-treated areas showing lawn fungus along with weeds.\n- Conversation with the customer: The customer was not home, so I missed them.\n- [customer, 2026-10-01 11:11 ET] I get back in town this Saturday.');
     // word for word, as before
     expect(recordWordsOf('so I missed them', record)).toBe('so i missed them');
+    // a record line that itself holds quotation marks is still the whole evidence
+    const said = norm('- Recap: The customer said "thanks" after we treated the ants.');
+    expect(recordWordsOf('The customer said "thanks" after we treated the ants.', said)).toBe('the customer said thanks after we treated the ants');
+    expect(recordWordsOf('after we treated the ants', said)).toBe('after we treated the ants');
     // the production checker's framing: a label and quotation marks, a timestamp, runs joined by "..."
     expect(recordWordsOf('Visit report: "The customer was not home, so I missed them."', record)).toBe('the customer was not home so i missed them');
-    expect(recordWordsOf('[2026-10-01 11:11 ET] "I get back in town this Saturday."', record)).toBe('i get back in town this saturday');
+    expect(recordWordsOf('[2026-10-01 11:11 ET] "I get back in town this Saturday."', record)).toBe('2026 10 01 11 11 et i get back in town this saturday');
+    expect(recordWordsOf('Text from the customer: "I get back in town this Saturday."', record)).toBe('i get back in town this saturday');
     expect(recordWordsOf('Service Report for This Visit: ... We nourished your turf ...', record)).toBe('service report for this visit we nourished your turf');
     // a restored subject: one leading word may go when four or more still match in a row
     expect(recordWordsOf('We spot-treated areas showing lawn fungus along with weeds.', record)).toBe('spot treated areas showing lawn fungus along with weeds');
@@ -498,7 +503,10 @@ describe('fact check — every sentence backed by the record (owner ruling 2026-
     expect(recordWordsOf('The customer was away, so the tech missed them', record)).toBeNull();
     expect(recordWordsOf('We nourished your turf ... and treated the new nursery', record)).toBeNull();
     expect(recordWordsOf('Visit report: "the puppies were adorable"', record)).toBeNull();
-    expect(recordWordsOf('Recap', record)).toBeNull();
+    // framing with under three copied words in every run is not evidence
+    expect(recordWordsOf('Heading: "your turf"', record)).toBeNull();
+    // two words word for word, as given, were evidence before and still are
+    expect(recordWordsOf('lawn fungus', record)).toBe('lawn fungus');
     expect(recordWordsOf('', record)).toBeNull();
   });
 
