@@ -424,6 +424,7 @@ function jobEntriesWithPlan(start, end, { requireJob = true } = {}) {
     .select(
       'technicians.name as tech_name',
       'time_entries.technician_id',
+      'time_entries.job_id',
       'time_entries.service_type',
       'time_entries.duration_minutes',
       'scheduled_services.id as ss_id',
@@ -502,28 +503,39 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
       .orderBy('time_weekly_summary.week_start');
 
     // Efficiency: budget (planned minutes of the stops done) over the shift.
-    const efficiencyByTech = analyticsMath.buildEfficiencyByTech(entryRows, utilizationByTech);
+    // The denominator is read from the shift entries themselves, with an open
+    // shift counted up to now — the daily summary is only written at clock-out
+    // or overnight, so it would leave today's jobs over no shift at all.
+    let shiftQuery = applyStaffEntryWorkDateRange(
+      db('time_entries')
+        .where('time_entries.entry_type', 'shift')
+        .where('time_entries.status', '!=', 'voided'),
+      start,
+      end,
+    )
+      .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')
+      .select(
+        'technicians.name as tech_name',
+        'time_entries.technician_id',
+        'time_entries.duration_minutes',
+        'time_entries.clock_in',
+        'time_entries.status',
+      );
+    if (technicianId) shiftQuery = shiftQuery.where('time_entries.technician_id', technicianId);
+    const liveShiftRows = analyticsMath.buildLiveShiftRows(await shiftQuery, now);
+    const efficiencyByTech = analyticsMath.buildEfficiencyByTech(entryRows, liveShiftRows);
 
-    // Booked ahead: live scheduled stops in the next 3 ET weeks, from today on.
+    // Booked ahead: the scheduler's own day-quality measurement for the next
+    // 3 ET weeks from today — physical stops and co-visit-aware on-site
+    // minutes, the same numbers the route scorecard plans with.
     const today = staffWorkDate(now);
     const weekStarts = analyticsMath.loadAheadWeekStarts(now);
     const lastWeekEnd = addStaffWorkDays(weekStarts[weekStarts.length - 1], 6);
-    let aheadQuery = db('scheduled_services')
-      .where('scheduled_services.scheduled_date', '>=', today)
-      .where('scheduled_services.scheduled_date', '<=', lastWeekEnd)
-      .whereNotIn('scheduled_services.status', analyticsMath.NOT_BOOKED_STATUSES)
-      .whereRaw('(scheduled_services.reservation_expires_at IS NULL OR scheduled_services.reservation_expires_at > NOW())')
-      .select(
-        db.raw("to_char(scheduled_services.scheduled_date, 'YYYY-MM-DD') as sched_day"),
-        'scheduled_services.service_type',
-        'scheduled_services.is_recurring',
-        'scheduled_services.is_callback',
-        'scheduled_services.window_start',
-        'scheduled_services.window_end',
-        'scheduled_services.estimated_duration_minutes',
-      );
-    if (technicianId) aheadQuery = aheadQuery.where('scheduled_services.technician_id', technicianId);
-    const aheadRows = await aheadQuery;
+    const { getScheduleQualityMeasurements } = require('../services/scheduling/day-quality');
+    const ahead = await getScheduleQualityMeasurements(
+      { date_from: today, date_to: lastWeekEnd, includeStopExtras: true }, db, now,
+    );
+    const aheadDays = ahead && !ahead.error ? ahead.days : [];
 
     // Trailing 4 completed weeks of what the team actually clocked.
     const thisWeek = weekStarts[0];
@@ -546,7 +558,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
       efficiencyByTech,
       efficiencyBands: analyticsMath.EFFICIENCY_BANDS,
       loadAhead: {
-        weeks: analyticsMath.buildLoadAhead(aheadRows, now),
+        weeks: analyticsMath.buildLoadAhead(aheadDays, now, { technicianId: technicianId || null }),
         trailing: analyticsMath.buildTrailing(trailingRows),
       },
       dateRange: { start, end },

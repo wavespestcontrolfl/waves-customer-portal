@@ -21,11 +21,6 @@ const EFFICIENCY_BANDS = Object.freeze([
   Object.freeze({ key: 'elite', label: 'Elite', min: 90, max: null }),
 ]);
 
-// Scheduled rows that are still going to happen. Same exclusion list the
-// reorder pass uses (route-reorder.js EXCLUDE_STATUSES) minus en_route and
-// on_site: those stops are in progress, not finished.
-const NOT_BOOKED_STATUSES = Object.freeze(['cancelled', 'completed', 'skipped', 'rescheduled', 'no_show']);
-
 const LOAD_AHEAD_WEEKS = 3;
 const TRAILING_WEEKS = 4;
 
@@ -132,32 +127,67 @@ function buildEfficiencyByTech(entryRows, shiftRows) {
   const techs = new Map();
   const get = (id, name) => {
     if (!techs.has(id)) {
-      techs.set(id, { technician_id: id, tech_name: name ?? null, budget_minutes: 0, job_minutes: 0, shift_minutes: 0, jobs: 0, jobs_with_budget: 0 });
+      techs.set(id, {
+        row: { technician_id: id, tech_name: name ?? null, budget_minutes: 0, job_minutes: 0, shift_minutes: 0, jobs: 0, jobs_with_budget: 0 },
+        seenJobs: new Set(),
+        budgetedJobs: new Set(),
+      });
     }
     const t = techs.get(id);
-    if (t.tech_name == null && name != null) t.tech_name = name;
+    if (t.row.tech_name == null && name != null) t.row.tech_name = name;
     return t;
   };
-  for (const row of entryRows) {
-    const t = get(row.technician_id, row.tech_name);
-    t.jobs += 1;
-    const planned = entryPlanned(row);
-    if (planned != null) {
-      t.jobs_with_budget += 1;
-      t.budget_minutes += planned;
-      t.job_minutes += num(row.duration_minutes);
+  for (const entry of entryRows) {
+    const t = get(entry.technician_id, entry.tech_name);
+    // A stop worked in two segments (stop, then restart) is two time_entries
+    // rows on ONE job_id: it is one job with one budget, and both segments'
+    // minutes. An entry with no job_id is its own job.
+    const jobKey = entry.job_id != null ? `job:${entry.job_id}` : null;
+    if (jobKey == null || !t.seenJobs.has(jobKey)) {
+      t.row.jobs += 1;
+      if (jobKey) t.seenJobs.add(jobKey);
+    }
+    const planned = entryPlanned(entry);
+    if (planned == null) continue;
+    t.row.job_minutes += num(entry.duration_minutes);
+    if (jobKey == null || !t.budgetedJobs.has(jobKey)) {
+      if (jobKey) t.budgetedJobs.add(jobKey);
+      t.row.jobs_with_budget += 1;
+      t.row.budget_minutes += planned;
     }
   }
-  for (const row of shiftRows) {
-    get(row.technician_id, row.tech_name).shift_minutes += num(row.total_shift);
+  for (const shift of shiftRows) {
+    get(shift.technician_id, shift.tech_name).row.shift_minutes += num(shift.total_shift);
   }
   return [...techs.values()]
-    .map((t) => ({ ...t, efficiency_pct: efficiencyPct(t.budget_minutes, t.shift_minutes) }))
-    .sort((a, b) => {
-      if (a.tech_name == null) return 1;
-      if (b.tech_name == null) return -1;
-      return a.tech_name < b.tech_name ? -1 : a.tech_name > b.tech_name ? 1 : 0;
+    .map(({ row }) => ({ ...row, shift_minutes: round1(row.shift_minutes), efficiency_pct: efficiencyPct(row.budget_minutes, row.shift_minutes) }))
+    .sort((x, y) => {
+      if (x.tech_name == null) return 1;
+      if (y.tech_name == null) return -1;
+      return x.tech_name < y.tech_name ? -1 : x.tech_name > y.tech_name ? 1 : 0;
     });
+}
+
+/**
+ * Live shift minutes per technician from shift time_entries rows
+ * (technician_id, tech_name, duration_minutes, clock_in, status). A shift
+ * still open has no duration yet, so it counts from clock_in to now: today's
+ * finished jobs must never sit over a denominator that is missing today's
+ * shift (the daily summary is only written at clock-out or overnight).
+ */
+function buildLiveShiftRows(shiftEntries, now = new Date()) {
+  const byTech = new Map();
+  for (const e of shiftEntries) {
+    let minutes = e.duration_minutes != null ? num(e.duration_minutes) : null;
+    if (minutes == null) {
+      const start = e.clock_in ? new Date(e.clock_in).getTime() : NaN;
+      minutes = Number.isFinite(start) ? Math.max(0, (now.getTime() - start) / 60000) : 0;
+    }
+    const t = byTech.get(e.technician_id) || { technician_id: e.technician_id, tech_name: e.tech_name ?? null, total_shift: 0 };
+    t.total_shift += minutes;
+    byTech.set(e.technician_id, t);
+  }
+  return [...byTech.values()];
 }
 
 /** The next LOAD_AHEAD_WEEKS ET Monday date strings, starting with this week. */
@@ -172,16 +202,31 @@ function weekStartOf(dateStr) {
   return etWeekStart(parseETDateTime(`${String(dateStr).slice(0, 10)}T12:00`));
 }
 
-/** rows carry sched_day (YYYY-MM-DD) plus the columns workDuration reads. */
-function buildLoadAhead(rows, now = new Date()) {
+/**
+ * Weeks from the scheduler's own day-quality measurement
+ * (scheduling/day-quality.js getScheduleQualityMeasurements with
+ * includeStopExtras): physical stops and co-visit-aware on-site minutes per
+ * technician-day, plus the day's unallocated visits. A grouped visit or a
+ * same-property pair is ONE stop with its shared time, exactly as the route
+ * scorecard counts it. technicianId narrows to that technician's rows and
+ * drops the unallocated work (it belongs to nobody yet).
+ */
+function buildLoadAhead(days, now = new Date(), { technicianId = null } = {}) {
   const starts = loadAheadWeekStarts(now);
   const weeks = starts.map((week_start) => ({ week_start, stops: 0, planned_minutes: 0 }));
   const byStart = new Map(weeks.map((w) => [w.week_start, w]));
-  for (const row of rows) {
-    const w = byStart.get(weekStartOf(row.sched_day));
+  for (const day of days || []) {
+    const w = byStart.get(weekStartOf(day.date));
     if (!w) continue;
-    w.stops += 1;
-    w.planned_minutes += plannedMinutes(row);
+    for (const tech of day.byTech || []) {
+      if (technicianId && tech.technicianId !== technicianId) continue;
+      w.stops += num(tech.physicalStops);
+      w.planned_minutes += num(tech.coVisitOnSiteMinutes);
+    }
+    if (!technicianId) {
+      w.stops += num(day.unallocatedVisits);
+      w.planned_minutes += num(day.unallocatedServiceMinutes);
+    }
   }
   return weeks;
 }
@@ -209,7 +254,6 @@ function buildTrailing(weeklyRows) {
 
 module.exports = {
   EFFICIENCY_BANDS,
-  NOT_BOOKED_STATUSES,
   LOAD_AHEAD_WEEKS,
   TRAILING_WEEKS,
   plannedMinutes,
@@ -218,6 +262,7 @@ module.exports = {
   buildServiceTypeStats,
   buildComparison,
   buildEfficiencyByTech,
+  buildLiveShiftRows,
   loadAheadWeekStarts,
   buildLoadAhead,
   buildTrailing,

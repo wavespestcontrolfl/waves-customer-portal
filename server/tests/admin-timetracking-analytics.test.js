@@ -16,7 +16,14 @@ jest.mock('../models/db', () => {
     }
     chain.where = jest.fn((...args) => { chain._where.push(['where', ...args]); return chain; });
     chain.select = jest.fn((...args) => { chain._selected.push(...args); return chain; });
-    const settle = () => { mockCalls.push(chain); return Promise.resolve(mockTableRows[table] || []); };
+    // Job and shift reads both hit time_entries; the shift read is the one
+    // filtered on entry_type = 'shift'.
+    const isShift = () => chain._where.some((w) => w[0] === 'where' && w[1] === 'time_entries.entry_type' && w[2] === 'shift');
+    const settle = () => {
+      mockCalls.push(chain);
+      const key = table === 'time_entries' && isShift() ? 'time_entries_shift' : table;
+      return Promise.resolve(mockTableRows[key] || []);
+    };
     chain.then = (resolve, reject) => settle().then(resolve, reject);
     chain.catch = (reject) => settle().catch(reject);
     return chain;
@@ -27,6 +34,10 @@ jest.mock('../models/db', () => {
   fn.transaction = jest.fn();
   return fn;
 });
+const mockAheadDays = { days: [] };
+jest.mock('../services/scheduling/day-quality', () => ({
+  getScheduleQualityMeasurements: jest.fn(async () => ({ days: mockAheadDays.days })),
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/time-tracking', () => ({}));
 jest.mock('../services/push-notifications', () => ({ deactivateStaffUser: jest.fn(async () => 1) }));
@@ -59,7 +70,7 @@ async function get(path) {
 }
 
 const entry = (over = {}) => ({
-  tech_name: 'Tech A', technician_id: 't1', service_type: null, duration_minutes: 30,
+  tech_name: 'Tech A', technician_id: 't1', job_id: 's1', service_type: null, duration_minutes: 30,
   ss_id: 's1', ss_service_type: 'Pest Control', ss_is_recurring: false, ss_is_callback: false,
   ss_window_start: null, ss_window_end: null, ss_estimated_duration_minutes: 60, ...over,
 });
@@ -67,6 +78,7 @@ const entry = (over = {}) => ({
 beforeEach(() => {
   mockCalls.length = 0;
   for (const k of Object.keys(mockTableRows)) delete mockTableRows[k];
+  mockAheadDays.days = [];
 });
 
 describe('analytics queries read the real planned-minutes column', () => {
@@ -121,20 +133,38 @@ describe('efficiency math', () => {
       .toEqual(['broken', 'weak', 'weak', 'normal', 'normal', 'elite']);
     expect(math.EFFICIENCY_BANDS.map((b) => [b.key, b.min])).toEqual([['broken', 0], ['weak', 50], ['normal', 70], ['elite', 90]]);
   });
-  test('per tech: budget from linked entries only, shift from the daily summary', () => {
+  test('per tech: budget from linked entries only, over the shift minutes given', () => {
     const rows = [
       entry({ ss_estimated_duration_minutes: 90, duration_minutes: 50 }),
-      entry({ ss_estimated_duration_minutes: 30, duration_minutes: 40, ss_id: 's2' }),
-      entry({ ss_id: null, duration_minutes: 15 }),
+      entry({ ss_estimated_duration_minutes: 30, duration_minutes: 40, ss_id: 's2', job_id: 's2' }),
+      entry({ ss_id: null, job_id: null, duration_minutes: 15 }),
     ];
     const [t] = math.buildEfficiencyByTech(rows, [{ technician_id: 't1', tech_name: 'Tech A', total_shift: '240' }]);
     expect(t).toEqual(expect.objectContaining({
       budget_minutes: 120, job_minutes: 90, shift_minutes: 240, efficiency_pct: 50, jobs: 3, jobs_with_budget: 2,
     }));
   });
-  test('the route returns efficiencyByTech and the bands', async () => {
+  test('a stop worked in two segments is ONE job with ONE budget and both segments minutes', () => {
+    const rows = [
+      entry({ ss_estimated_duration_minutes: 60, duration_minutes: 25 }),
+      entry({ ss_estimated_duration_minutes: 60, duration_minutes: 20 }), // same job_id s1, restarted
+    ];
+    const [t] = math.buildEfficiencyByTech(rows, [{ technician_id: 't1', tech_name: 'Tech A', total_shift: 120 }]);
+    expect(t).toEqual(expect.objectContaining({ budget_minutes: 60, job_minutes: 45, jobs: 1, jobs_with_budget: 1, efficiency_pct: 50 }));
+  });
+  test('live shift minutes: a closed shift uses its duration, an open one runs to now', () => {
+    const now = new Date('2026-10-07T16:00:00Z');
+    const rows = math.buildLiveShiftRows([
+      { technician_id: 't1', tech_name: 'Tech A', duration_minutes: '480', clock_in: '2026-10-06T12:00:00Z', status: 'completed' },
+      { technician_id: 't1', tech_name: 'Tech A', duration_minutes: null, clock_in: '2026-10-07T13:00:00Z', status: 'active' },
+    ], now);
+    expect(rows).toEqual([{ technician_id: 't1', tech_name: 'Tech A', total_shift: 660 }]);
+  });
+  test('the route reads the shift from shift entries (not the daily summary) and returns the bands', async () => {
     mockTableRows.time_entries = [entry({ ss_estimated_duration_minutes: 90 })];
-    mockTableRows.time_entry_daily_summary = [{ technician_id: 't1', tech_name: 'Tech A', total_shift: '180' }];
+    mockTableRows.time_entries_shift = [{ technician_id: 't1', tech_name: 'Tech A', duration_minutes: '180', clock_in: '2026-10-06T12:00:00Z', status: 'completed' }];
+    // A stale daily summary must not be the denominator.
+    mockTableRows.time_entry_daily_summary = [{ technician_id: 't1', tech_name: 'Tech A', total_shift: '9999' }];
     const { body } = await get('/analytics');
     expect(body.efficiencyByTech[0]).toEqual(expect.objectContaining({ technician_id: 't1', budget_minutes: 90, shift_minutes: 180, efficiency_pct: 50 }));
     expect(body.efficiencyBands).toHaveLength(4);
@@ -151,20 +181,30 @@ describe('loadAhead', () => {
     expect(math.loadAheadWeekStarts(new Date('2026-10-11T20:00:00Z'))[0]).toBe('2026-10-05');
   });
 
-  test('buckets stops by week and sums planned minutes; rows outside the window are ignored', () => {
-    const row = (sched_day, est) => ({ sched_day, service_type: 'Pest Control', estimated_duration_minutes: est, window_start: null, window_end: null });
+  const day = (date, byTech, unallocatedVisits = 0, unallocatedServiceMinutes = 0) => ({ date, byTech, unallocatedVisits, unallocatedServiceMinutes });
+  const tech = (technicianId, physicalStops, coVisitOnSiteMinutes) => ({ technicianId, physicalStops, coVisitOnSiteMinutes });
+
+  test('sums the scheduler day-quality physical stops and co-visit minutes per week; days outside the window are ignored', () => {
     const weeks = math.buildLoadAhead([
-      row('2026-10-07', 60), row('2026-10-11', 90), row('2026-10-12', 30), row('2026-10-25', 60), row('2026-10-26', 60),
+      day('2026-10-07', [tech('t1', 2, 50), tech('t2', 1, 25)], 1, 30),
+      day('2026-10-11', [tech('t1', 1, 90)]),
+      day('2026-10-12', [tech('t1', 1, 30)]),
+      day('2026-10-25', [tech('t1', 1, 60)]),
+      day('2026-10-26', [tech('t1', 5, 300)]),
     ], now);
     expect(weeks).toEqual([
-      { week_start: '2026-10-05', stops: 2, planned_minutes: 150 },
+      { week_start: '2026-10-05', stops: 5, planned_minutes: 195 },
       { week_start: '2026-10-12', stops: 1, planned_minutes: 30 },
       { week_start: '2026-10-19', stops: 1, planned_minutes: 60 },
     ]);
   });
 
+  test('a technician filter keeps only that technician and drops unallocated work', () => {
+    const weeks = math.buildLoadAhead([day('2026-10-07', [tech('t1', 2, 50), tech('t2', 1, 25)], 1, 30)], now, { technicianId: 't2' });
+    expect(weeks[0]).toEqual({ week_start: '2026-10-05', stops: 1, planned_minutes: 25 });
+  });
+
   test('the route returns 3 weeks plus the trailing average', async () => {
-    mockTableRows.scheduled_services = [];
     mockTableRows.time_weekly_summary = [
       { week_start: '2026-09-14', total_job_minutes: '1000', total_shift_minutes: '2000' },
       { week_start: '2026-09-14', total_job_minutes: '500', total_shift_minutes: '1000' },

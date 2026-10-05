@@ -2140,13 +2140,13 @@ function AnalyticsTab() {
       </div>{" "}
       <div style={sCard}>
         {efficiencyByTech.length === 0 ? (
-          <div style={{ color: D.muted, fontSize: 12 }}>
+          <div style={{ color: D.muted, fontSize: 14 }}>
             No efficiency data yet
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
           <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
           >
             {" "}
             <thead>
@@ -2200,7 +2200,7 @@ function AnalyticsTab() {
           </table>
           </div>
         )}
-        <div style={{ color: D.muted, fontSize: 11, marginTop: 8 }}>
+        <div style={{ color: D.muted, fontSize: 14, marginTop: 8 }}>
           Budget = planned minutes for the stops done. Clocked = whole shift.
           70–90% is normal, 90%+ is elite, under 50% means half the day is
           drive, load or waiting.
@@ -2219,13 +2219,13 @@ function AnalyticsTab() {
       </div>{" "}
       <div style={sCard}>
         {loadAheadWeeks.length === 0 ? (
-          <div style={{ color: D.muted, fontSize: 12 }}>
+          <div style={{ color: D.muted, fontSize: 14 }}>
             No booked-ahead data
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
           <table
-            style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}
+            style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}
           >
             {" "}
             <thead>
@@ -2260,7 +2260,7 @@ function AnalyticsTab() {
         )}
         {loadAheadTrailing &&
           loadAheadTrailing.avg_job_minutes_per_week != null && (
-            <div style={{ color: D.muted, fontSize: 11, marginTop: 8 }}>
+            <div style={{ color: D.muted, fontSize: 14, marginTop: 8 }}>
               Last {loadAheadTrailing.weeks || 4} weeks averaged{" "}
               {hrs(loadAheadTrailing.avg_job_minutes_per_week)} job hours and{" "}
               {hrs(loadAheadTrailing.avg_shift_minutes_per_week)} shift hours
