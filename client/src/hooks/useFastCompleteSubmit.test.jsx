@@ -3,7 +3,7 @@ import 'fake-indexeddb/auto';
 import { IDBFactory, IDBObjectStore } from 'fake-indexeddb';
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import useFastCompleteSubmit from './useFastCompleteSubmit';
+import useFastCompleteSubmit, { completionFailureOutcome } from './useFastCompleteSubmit';
 import {
   getFastCompletionAttempt,
   putFastCompletionAttempt,
@@ -462,5 +462,51 @@ describe('a saved completion whose stored copy will not clear (GitHub Codex P2 o
     expect(view.result.current.done).toBeTruthy();
     expect(view.result.current.done.notice).toBeUndefined();
     expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+  });
+});
+
+describe('definite refusals (GitHub Codex P2s on #5967)', () => {
+  it('a 403 that names its reason is refused for good; a bare 403 or a lapsed login stays open', () => {
+    expect(completionFailureOutcome({ status: 403, code: 'service_not_assigned' })).not.toBe('retry');
+    expect(completionFailureOutcome({ status: 403, code: 'backfill_admin_only' })).not.toBe('retry');
+    expect(completionFailureOutcome({ status: 403 })).toBe('retry');
+    expect(completionFailureOutcome({ status: 401 })).toBe('retry');
+    expect(completionFailureOutcome({ status: 429 })).toBe('retry');
+  });
+
+  it('a refused copy the device could not delete comes back after a reload to discard, never to retry', async () => {
+    const attempt = { idempotencyKey: 'refused-key', ...photoBody };
+    await putFastCompletionAttempt('svc-1', 'tech-a', { body: attempt, summary: 'Refused visit' });
+    const request = vi.fn().mockRejectedValue(Object.assign(new Error('Changed'), { status: 409, code: 'idempotency_key_mismatch' }));
+    const first = renderHook(() => useFastCompleteSubmit({ ...scope, request }));
+    await waitFor(() => expect(first.result.current.restored).toBe(true));
+    const remove = vi.spyOn(IDBObjectStore.prototype, 'delete').mockImplementation(() => {
+      throw new DOMException('Busy', 'UnknownError');
+    });
+    await act(async () => { await first.result.current.retry(); });
+    remove.mockRestore();
+    expect(first.result.current.failure).toBe('terminal');
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toMatchObject({ body: attempt, refused: true });
+    first.unmount();
+
+    const reloaded = renderHook(() => useFastCompleteSubmit({ ...scope, request }));
+    await waitFor(() => expect(reloaded.result.current.recovering).toBe(false));
+    expect(reloaded.result.current.restored).toBe(true);
+    expect(reloaded.result.current.failure).toBe('terminal');
+    expect(reloaded.result.current.retryPending).toBe(false);
+    expect(reloaded.result.current.error).toMatch(/server refused this saved completion/);
+    await act(async () => { await reloaded.result.current.discard(); });
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull();
+    // The refusal it answered is gone with the reload: a fresh form opens.
+    expect(reloaded.result.current.failure).toBeNull();
+    expect(reloaded.result.current.error).toBe('');
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('a new send of the same visit clears the refused mark', async () => {
+    const attempt = { idempotencyKey: 'mark-key', ...photoBody };
+    await putFastCompletionAttempt('svc-1', 'tech-a', { body: attempt, summary: 'Marked', refused: true });
+    await putFastCompletionAttempt('svc-1', 'tech-a', { body: attempt, summary: 'Marked', expectedBody: attempt });
+    expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.refused).toBeUndefined();
   });
 });

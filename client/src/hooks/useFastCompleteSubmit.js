@@ -55,7 +55,17 @@ const savedNotice = (cleared) => (cleared ? {} : { notice: SAVED_COPY_NOTICE });
 // A request refused for good whose stored copy this device could not clear:
 // the saved-attempt view stays up with Discard, never a retry.
 const KEPT_COPY_NOTICE = 'This device could not clear its saved copy of this completion. Discard it here.';
+// A saved copy the server had refused, found again after a reload.
+const REFUSED_COPY_NOTICE = 'The server refused this saved completion. Discard it here to start a new one.';
 const STORAGE_WARNING = 'This device can’t save a reload-safe copy right now. Keep this screen open. You can still send after this warning.';
+
+// A lapsed login, a timeout or a rate limit leaves the outcome open. A 403
+// that names its reason (service_not_assigned after a reassignment, an
+// admin-only override) is the server's definite refusal (GitHub Codex P2 on
+// #5967).
+function leavesOutcomeOpen(status, code) {
+  return [401, 408, 425, 429].includes(status) || (status === 403 && !code);
+}
 
 // Only a sheet that renders the prompt (`confirmable`, the report flow) gets
 // the confirm outcome; every other consumer keeps showing the server's
@@ -64,7 +74,7 @@ export function completionFailureOutcome(err, { confirmable = false } = {}) {
   const status = Number(err?.status);
   if (status === 409 && SAVED_CODES.has(err?.code)) return 'saved';
   if (confirmable && status === 409 && CONFIRM_FLAGS[err?.code]) return 'confirm';
-  if ([401, 403, 408, 425, 429].includes(status)) return 'retry';
+  if (leavesOutcomeOpen(status, err?.code)) return 'retry';
   if (shouldResetCompletionIdempotencyKey(err)) return 'correctable';
   if (!Number.isFinite(status) || status >= 500 || (status === 409 && IN_PROGRESS_CODES.has(err?.code))) return 'retry';
   return 'terminal';
@@ -109,6 +119,9 @@ export default function useFastCompleteSubmit({
   const inFlight = useRef(false);
   const scopeRef = useRef(scopeOf(serviceId, operatorId, 0));
   const storageWarningSeenRef = useRef(false);
+  // The held body is a refused copy found on reload: discarding it opens a
+  // fresh form, since the refusal it answered is no longer on screen.
+  const reloadedRefusalRef = useRef(false);
   const [recovering, setRecovering] = useState(true);
   const [restored, setRestored] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -130,6 +143,7 @@ export default function useFastCompleteSubmit({
     pendingSummaryRef.current = '';
     inFlight.current = false;
     storageWarningSeenRef.current = false;
+    reloadedRefusalRef.current = false;
     setRecovering(true);
     setRestored(false);
     setSubmitting(false);
@@ -159,8 +173,16 @@ export default function useFastCompleteSubmit({
         keyRef.current = attempt.body.idempotencyKey;
         persistedBodyRef.current = attempt.body;
         setRestored(true);
-        setFailure('retry');
-        setError('An unfinished completion is saved on this device. Tap Retry when you’re ready to send the same completion again.');
+        if (attempt.refused === true) {
+          // Refused for good before the reload: Discard only, never Retry
+          // (GitHub Codex P2 on #5967).
+          reloadedRefusalRef.current = true;
+          setFailure('terminal');
+          setError(REFUSED_COPY_NOTICE);
+        } else {
+          setFailure('retry');
+          setError('An unfinished completion is saved on this device. Tap Retry when you’re ready to send the same completion again.');
+        }
       }
       setRecovering(false);
     });
@@ -195,6 +217,26 @@ export default function useFastCompleteSubmit({
     if (await clearStored(scope, storedBody)) return true;
     return !(await stillStored());
   }, [clearStored]);
+
+  // A refused request whose copy would not delete is marked refused in place
+  // (best effort: storage that refused the delete may refuse this too), so a
+  // reload offers it to discard, never as an uncertain retry (GitHub Codex P2
+  // on #5967).
+  const markRefused = useCallback(async (scope, storedBody, summary) => {
+    if (!scope.serviceId || !scope.operatorId || !storedBody) return;
+    await putFastCompletionAttempt(scope.serviceId, scope.operatorId, {
+      body: storedBody, summary, expectedBody: storedBody, refused: true,
+    });
+  }, []);
+
+  // A definitive answer removes the send's stored copy; a refused copy that
+  // stays is marked refused. True when no copy of that answer remains.
+  const settleCopy = useCallback(async (outcome, scope, storedBody, summary) => {
+    if (!DEFINITIVE_OUTCOMES.has(outcome)) return true;
+    const removed = await clearSettled(scope, storedBody);
+    if (!removed && outcome !== 'saved') await markRefused(scope, storedBody, summary);
+    return removed;
+  }, [clearSettled, markRefused]);
 
   const persistPrepared = useCallback(async (scope, body, summary) => {
     if (!scope.serviceId || !scope.operatorId) return 'send';
@@ -242,7 +284,7 @@ export default function useFastCompleteSubmit({
 
   const settleFailure = useCallback(async (err, scope, body, summary, storedBody) => {
     const outcome = completionFailureOutcome(err, { confirmable });
-    const removed = DEFINITIVE_OUTCOMES.has(outcome) ? await clearSettled(scope, storedBody) : true;
+    const removed = await settleCopy(outcome, scope, storedBody, summary);
     if (!sameScope(scopeRef.current, scope)) return;
     if (outcome === 'correctable' && !removed && persistedBodyRef.current) {
       rejectedBodyRef.current = persistedBodyRef.current;
@@ -278,7 +320,7 @@ export default function useFastCompleteSubmit({
     }
     setFailure(outcome === 'correctable' ? null : outcome);
     setError(outcomeMessage(outcome, err));
-  }, [clearSettled, confirmable]);
+  }, [settleCopy, confirmable]);
 
   const submit = useCallback(async (buildBody, summary) => {
     if (inFlight.current || recovering) return;
@@ -362,7 +404,7 @@ export default function useFastCompleteSubmit({
     const storedBody = persistedBodyRef.current || body;
     // A request refused for good stays refused: discarding its saved copy
     // keeps the sheet's answer and its lock.
-    const refused = failure === 'terminal';
+    const refused = failure === 'terminal' && !reloadedRefusalRef.current;
     inFlight.current = true;
     setSubmitting(true);
     try {
@@ -380,6 +422,7 @@ export default function useFastCompleteSubmit({
       pendingSummaryRef.current = '';
       keyRef.current = genIdempotencyKey();
       persistedBodyRef.current = null;
+      reloadedRefusalRef.current = false;
       setRestored(false);
       setStorageWarning((warning) => (warning === KEPT_COPY_NOTICE ? '' : warning));
       if (!refused) {
