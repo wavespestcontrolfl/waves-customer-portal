@@ -128,6 +128,11 @@ describe('extractSuiteSizes — a figure counts only beside THIS suite', () => {
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350 ± SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350 +/- SF', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103 1,350+ SF', c)).toEqual([]);
+    // The same qualifiers after the figure.
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103: 1,350 SF (approx.)', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103: 1,350 SF +/-', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103: 1,350 SF minimum', c)).toEqual([]);
+    expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103: 1,350 SF or more', c)).toEqual([]);
     expect(P.extractSuiteSizes('4400 Test Commons Pkwy Suite 103. Total 25,000 SF plaza; Suite 103 1,350 SF', c)).toEqual([1350]);
   });
 

@@ -63,6 +63,9 @@ const SAME_SIZE_TOLERANCE = 0.1;
 const SIZE_RE = /(\d{1,3}(?:,\d{3})+|\d{3,6})(\s*(?:\+\/-|±|\+))?\s*(?:sf|sq\.?\s*ft\.?|square\s+feet|sqft)\b/gi;
 // "up to 2,400 SF", "from 1,350 SF", "approx. 1,400 SF": a bound or an
 // estimate, not the suite's area.
+// The same qualifiers right after the figure: "1,350 SF (approx.)",
+// "1,350 SF +/-", "1,350 SF minimum", "1,350 SF or more".
+const BOUND_AFTER_RE = /^\s*[(\[]?\s*(?:\+\/-|±|~|approx\.?|approximately|approximate|est\.?|estimated|minimum|maximum|min\b|max\b|or\s+(?:more|less)|and\s+up|more\s+or\s+less)/i;
 const BOUND_BEFORE_RE = /\b(?:up\s+to|from|starting\s+at|as\s+low\s+as|as\s+much\s+as|minimum|maximum|min|max|approximately|approx\.?|about|around|roughly|nearly|over|under|less\s+than|more\s+than)\s*$|[~±]\s*$/i;
 // "1,200 - 2,400 SF", "1,200–2,400 SF", "1,200 to 2,400 sq ft": a range.
 // "Suite 103 — 1,350 SF" is not: the figure before the dash is the suite.
@@ -266,6 +269,7 @@ function figureIsPlain(t, idx, len) {
   if (TOTAL_BEFORE_RE.test(t.slice(Math.max(0, idx - 48), idx))) return false;
   if (BOUND_BEFORE_RE.test(t.slice(Math.max(0, idx - 20), idx))) return false;
   if (CONTEXT_BEFORE_RE.test(t.slice(Math.max(0, idx - 20), idx))) return false;
+  if (BOUND_AFTER_RE.test(t.slice(idx + len, idx + len + 24))) return false;
   if (TOTAL_AFTER_WORDS_RE.test(nounPhraseAfter(t.slice(idx + len, idx + len + 120)))) return false;
   return true;
 }

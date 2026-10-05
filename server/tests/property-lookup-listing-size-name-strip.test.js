@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
 });
 const resolved = { current: null };
 jest.mock('../services/commercial-suite-size', () => ({
-  resolveCommercialSuiteSize: jest.fn(async () => resolved.current),
+  resolveCommercialSuiteSize: jest.fn(async (input, opts) => { resolved.lastOpts = opts; return resolved.current; }),
   SOURCES: { LISTING_VERIFIED_TEXT: 'listing_verified_text', LICENSE_SEATS: 'license_seats', SUITE_TYPE_DEFAULT: 'suite_type_default' },
 }));
 
@@ -93,4 +93,14 @@ test('a license-backed listing stamp ages on the license\'s 30 days, a plain lis
   expect(commercialSuiteSizeStampIsFresh({ ...base, licenseBacked: true, resolvedAt: at(20) })).toBe(true);
   expect(commercialSuiteSizeStampIsFresh({ ...base, licenseBacked: true, resolvedAt: at(31) })).toBe(false);
   expect(commercialSuiteSizeStampIsFresh({ ...base, resolvedAt: at(31) })).toBe(true);
+});
+
+test('a unit known only from the Places listing never starts the listing leg; a typed suite does', async () => {
+  resolved.current = { value: 1500, source: 'suite_type_default', confidence: 'low', evidence: [] };
+  await applyCommercialSuiteSize(profile(), {});
+  expect(resolved.lastOpts).toMatchObject({ skipListing: true });
+  const typed = profile();
+  typed._commercialSuiteCandidate = { ...typed._commercialSuiteCandidate, address: '14617 SR 70 E Suite 103, Bradenton, FL 34202', unitHint: null };
+  await applyCommercialSuiteSize(typed, {});
+  expect(resolved.lastOpts.skipListing).toBeUndefined();
 });

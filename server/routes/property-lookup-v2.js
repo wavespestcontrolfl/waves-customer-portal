@@ -3396,7 +3396,11 @@ async function applyCommercialSuiteSize(profile, opts = {}) {
       businessNameHint: candidate.businessNameHint || null,
       commercialRiskType: null,
       commercialSubtype: candidate.commercialSubtype,
-    }, opts);
+      // A listing size needs a suite the operator TYPED. A unit known only
+      // from the Places listing (unitHint) may match a license row, but it
+      // never starts the listing leg: a size read and stored on a
+      // Places-supplied unit would be Places content kept by another name.
+    }, (candidate.unitHint && !parts.unit) ? { ...opts, skipListing: true } : opts);
     // The listing's name was a hint for the match only. Unless a public
     // record (a license row) vouched for the result, the resolver just echoes
     // the hint back as businessName — and the suite size is stored, so the
