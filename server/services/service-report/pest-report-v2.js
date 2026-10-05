@@ -24,7 +24,7 @@
 
 const { validateCustomerCopy } = require('./premium-experience');
 const { detectServiceLine } = require('./service-line-configs');
-const { pestReportExpectationsGateOn, buildPestExpectations } = require('./pest-report-expectations');
+const { pestReportExpectationsGateOn, pestRainCardOn, buildPestExpectations } = require('./pest-report-expectations');
 
 // propertyDefenseStatus.overallLabel → the customer-facing protection status.
 // tone drives the client accent (good = green, watch = amber, attention = red).
@@ -394,7 +394,9 @@ function pestReportV2PdfSignature(service = {}) {
   // Bumped from '-pex1' when the expectation wording changed (owner
   // 2026-10-01), and from '-pex2' when the rain card came off the report
   // (owner 2026-10-04), so PDFs cached under the old content re-render once.
-  const pexSuffix = pestReportExpectationsGateOn() ? '-pex3' : '';
+  // '-rain1' joins it while the rain card is on (PEST_RAIN_CARD), so a flip
+  // either way re-renders cached documents once.
+  const pexSuffix = pestReportExpectationsGateOn() ? `-pex3${pestRainCardOn() ? '-rain1' : ''}` : '';
   if (process.env.PEST_REPORT_V2 !== 'true') return `${tonSuffix}${pexSuffix}`;
   // Cockroach-family typed reports dropped the V2 dashboard entirely (owner
   // 2026-07-27) — their PDFs compose from the typed record instead, so a

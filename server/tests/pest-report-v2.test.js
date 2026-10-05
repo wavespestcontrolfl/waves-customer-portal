@@ -448,6 +448,23 @@ describe('pestReportV2PdfSignature — expectations gate suffix', () => {
     }
   });
 
+  it('keys the rain card state too, so a PEST_RAIN_CARD flip re-renders cached PDFs', () => {
+    process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
+    const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
+    const ORIGINAL_RAIN = process.env.PEST_RAIN_CARD;
+    delete process.env.PEST_REPORT_V2;
+    try {
+      delete process.env.PEST_RAIN_CARD;
+      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex3');
+      process.env.PEST_RAIN_CARD = 'true';
+      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex3-rain1');
+    } finally {
+      process.env.PEST_REPORT_V2 = ORIGINAL_V2;
+      if (ORIGINAL_RAIN === undefined) delete process.env.PEST_RAIN_CARD;
+      else process.env.PEST_RAIN_CARD = ORIGINAL_RAIN;
+    }
+  });
+
   it('is absent when the gate is off', () => {
     delete process.env.GATE_PEST_REPORT_EXPECTATIONS;
     expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('');
