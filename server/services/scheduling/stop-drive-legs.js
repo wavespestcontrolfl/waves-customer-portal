@@ -11,7 +11,6 @@
 // read as "next door".
 
 const { driveMin } = require('../auto-dispatch/geo');
-
 // Visits the tech will not drive to.
 const NOT_A_STOP = new Set(['cancelled', 'skipped', 'no_show']);
 
@@ -42,7 +41,10 @@ function stopOrder(a, b) {
 
 /**
  * Sets `driveFromPrevMin` / `driveToNextMin` (number or null) and
- * `firstStop` / `lastStop` in place on one technician's services.
+ * `firstStop` / `lastStop` in place on one technician's services. Each leg
+ * in is also stamped once (`driveInShown`, on the stop's first card) with
+ * the stop it comes from (`drivePrevName`). A leg that cannot be measured
+ * marks its stop's first card `driveLegUnknown`.
  */
 function attachDriveLegs(services) {
   // A stop with no start time (the grid's all-day strip) has no place in
@@ -53,6 +55,9 @@ function attachDriveLegs(services) {
     s.driveToNextMin = null;
     s.firstStop = false;
     s.lastStop = false;
+    s.driveInShown = false;
+    s.drivePrevName = null;
+    s.driveLegUnknown = false;
   }
   // A visit group is one stop wherever its rows sort (route-model.js
   // physicalStops groups every visit_id the same way): placed at its
@@ -94,6 +99,12 @@ function attachDriveLegs(services) {
     const leg = hasGeo(prev.anchor) && hasGeo(cur.anchor) ? Math.max(1, driveMin(prev.anchor, cur.anchor)) : null;
     prev.legs.forEach((s) => { s.driveToNextMin = leg; });
     cur.legs.forEach((s) => { s.driveFromPrevMin = leg; });
+    // A leg without coordinates: the day total cannot claim to be whole.
+    if (leg == null) { cur.legs[0].driveLegUnknown = true; continue; }
+    cur.legs[0].driveInShown = true;
+    // The tech leaves a stop after its last piece of work: name that one.
+    const lastWorked = prev.members[prev.members.length - 1];
+    cur.legs[0].drivePrevName = String(lastWorked.customerName || '').trim() || null;
   }
 }
 

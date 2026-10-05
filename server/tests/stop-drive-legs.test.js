@@ -97,4 +97,35 @@ describe('attachDriveLegs', () => {
     expect(by.allday).toMatchObject({ driveFromPrevMin: null, driveToNextMin: null, firstStop: false, lastStop: false });
     expect(by.n).toMatchObject({ lastStop: true, driveFromPrevMin: by.g1.driveToNextMin });
   });
+
+  it('stamps each leg once with the stop it comes from', () => {
+    const services = [
+      stop('a', '08:00', A, { customerName: 'Sample A' }),
+      stop('b1', '10:00', B, { visitId: 'v1', customerName: 'Sample B' }),
+      stop('b2', '10:00', B, { visitId: 'v1', customerName: 'Sample B' }),
+      stop('c', '13:00', C, { customerName: 'Sample C' }),
+    ];
+    attachDriveLegs(services);
+    const by = Object.fromEntries(services.map((s) => [s.id, s]));
+    expect(by.a).toMatchObject({ driveInShown: false, drivePrevName: null });
+    expect(by.b1).toMatchObject({ driveInShown: true, drivePrevName: 'Sample A' });
+    expect(by.b2).toMatchObject({ driveInShown: false, drivePrevName: null });
+    expect(by.c).toMatchObject({ driveInShown: true, drivePrevName: 'Sample B' });
+  });
+
+  it('marks a leg it cannot measure', () => {
+    const services = [stop('a', '08:00', A), stop('b', '10:00', null), stop('c', '13:00', C)];
+    attachDriveLegs(services);
+    expect(services.map((s) => s.driveLegUnknown)).toEqual([false, true, true]);
+  });
+
+  it('names the customer the tech leaves last at a shared pin', () => {
+    const services = [
+      stop('a1', '09:00', A, { windowEnd: '10:00', customerName: 'Sample One', customerId: 'c1', address: '1 Sample St, Unit 1' }),
+      stop('a2', '10:00', A, { windowEnd: '11:00', customerName: 'Sample Two', customerId: 'c2', address: '1 Sample St, Unit 2' }),
+      stop('c', '12:00', C),
+    ];
+    attachDriveLegs(services);
+    expect(services[2].drivePrevName).toBe('Sample Two');
+  });
 });

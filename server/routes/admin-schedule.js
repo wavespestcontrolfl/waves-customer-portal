@@ -6483,7 +6483,8 @@ router.get('/', async (req, res, next) => {
       Object.values(byTech).forEach((tech) => require('../services/schedule-tie-proximity').stampTieProximityDisplayOrder(tech.services));
     }
 
-    // "~N min from last stop / to next" on the day list (display only).
+    // Drive legs and the stop each leg comes from, for the day list
+    // (display only).
     Object.values(byTech).forEach((tech) => require('../services/scheduling/stop-drive-legs').attachDriveLegs(tech.services));
 
     // Calculate tech summaries
