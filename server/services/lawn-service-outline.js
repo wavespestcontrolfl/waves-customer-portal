@@ -214,8 +214,31 @@ function protocolLines(text) {
     .filter(Boolean);
 }
 
+// The v13 program names exact products and rates on every line, which a customer
+// outline must never carry: each line becomes its treatment category, first match
+// wins, and a line no category covers is left out rather than quoted.
+const V13_OUTLINE_CATEGORIES = [
+  [/scout visit|inspect/i, 'Lawn inspection'],
+  [/stonewall 0\.43%|dimension 0\.21%/i, 'Pre-emergent weed control with fertilizer'],
+  [/stonewall|dimension/i, 'Pre-emergent weed control'],
+  [/nutra-tech/i, 'Micronutrients'],
+  [/\d{2}-\d-\d{2}/, 'Fertilizer and nutrition'],
+  [/tetrino|arena|talak|acelepryn|dylox/i, 'Insect control'],
+  [/artavia|velista|gravex/i, 'Disease control'],
+  [/celsius|certainty|blindside|dismiss/i, 'Weed spot treatment'],
+  [/dispatch|surfactant/i, 'Wetting agent'],
+];
+
+function v13OutlineBullets(visit) {
+  const lines = [...protocolLines(visit.primary), ...protocolLines(visit.secondary)];
+  const labels = lines.map((line) => V13_OUTLINE_CATEGORIES.find(([pattern]) => pattern.test(line))?.[1]).filter(Boolean);
+  return [...new Set(labels)].slice(0, 8)
+    .map((label) => `${label} may be relevant when turf condition, weather, label directions, and local rules allow.`);
+}
+
 function customerProtocolBullets(visit) {
   if (!visit) return [];
+  if (featureGates.lawnV13Live?.() === true) return v13OutlineBullets(visit);
   const lines = [...protocolLines(visit.primary), ...protocolLines(visit.secondary)];
   return lines
     .filter((line) => !/material|labor|cost/i.test(line))
@@ -751,6 +774,7 @@ module.exports = {
   buildOutline,
   createPublicToken,
   currentMonthNumber,
+  customerProtocolBullets,
   estimateHasLawnService,
   hashNullable,
   hashToken,

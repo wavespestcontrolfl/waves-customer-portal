@@ -77,7 +77,7 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
     makeDb(tables);
     // Gate on: the first reconcile has nothing stored (not stale); the nightly sync creates the v13 entries.
     expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
-    await withGate('true', () => KB.autoSync({ lawnProtocolsOnly: true }));
+    await withGate('true', () => KB.syncLawnProtocolEntries());
     for (const track of TRACKS) {
       const row = kbRow(tables, slugOf(track));
       expect(tagsOf(row)).toContain('lawn-v13');

@@ -11,6 +11,7 @@ const protocolsJson = require('../config/protocols.json');
 const v13 = require('../config/lawn-protocol-v13.json');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const outlineService = require('../services/lawn-service-outline');
+const { resolveRecordedProtocolVersion } = require('../services/service-report/report-data');
 const { buildLawnReportV2 } = require('../services/service-report/lawn-report-v2');
 const lineModule = require('../services/service-report/lawn-program-line');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
@@ -161,5 +162,90 @@ describe('service outline protocol stamp', () => {
     expect(withGate(undefined, () => outlineService.protocolVersion())).toBe('lawn-v4');
     expect(withGate('true', () => outlineService.protocolVersion())).toBe('lawn-v13');
     expect(outlineService.PROTOCOL_VERSION).toBeUndefined();
+  });
+});
+
+describe('the protocol version a completed visit recorded (resolveRecordedProtocolVersion)', () => {
+  // A table-keyed fake: first() resolves the table's row; every table read is logged.
+  function fakeKnex(rows, reads = []) {
+    const knex = (table) => ({
+      where: () => ({ first: async () => { reads.push(table); if (rows[table] instanceof Error) throw rows[table]; return rows[table]; } }),
+    });
+    knex.reads = reads;
+    return knex;
+  }
+  const service = { id: 'rec-1', scheduled_service_id: 'ss-1' };
+
+  test('a completion row names its version; the scheduled pin is never read', async () => {
+    const knex = fakeKnex({ lawn_protocol_service_completions: { protocol_version: LAWN_V13_VERSION }, scheduled_services: { lawn_protocol_version: '2026.06' } });
+    expect(await resolveRecordedProtocolVersion(knex, service)).toBe(LAWN_V13_VERSION);
+    expect(knex.reads).toEqual(['lawn_protocol_service_completions']);
+  });
+
+  test('a completion row with no version (attribution none) is authoritative: no version, whatever the visit was pinned to', async () => {
+    const knex = fakeKnex({ lawn_protocol_service_completions: { protocol_version: null }, scheduled_services: { lawn_protocol_version: LAWN_V13_VERSION } });
+    expect(await resolveRecordedProtocolVersion(knex, service)).toBeNull();
+    expect(knex.reads).toEqual(['lawn_protocol_service_completions']);
+    // ... and the program line it feeds is the legacy one.
+    withGate('true', () => expect(buildProgramLine({ programVisit: true, grassType: 'bermuda', month: 10, protocolVersion: null })).toBe(PROGRAM_LINES.bermuda[10].line));
+  });
+
+  test('no completion row at all: the scheduled visit\'s pin, else nothing', async () => {
+    expect(await resolveRecordedProtocolVersion(fakeKnex({ scheduled_services: { lawn_protocol_version: LAWN_V13_VERSION } }), service)).toBe(LAWN_V13_VERSION);
+    expect(await resolveRecordedProtocolVersion(fakeKnex({ scheduled_services: { lawn_protocol_version: null } }), service)).toBeNull();
+    expect(await resolveRecordedProtocolVersion(fakeKnex({}), service)).toBeNull();
+    const knex = fakeKnex({ scheduled_services: { lawn_protocol_version: LAWN_V13_VERSION } });
+    expect(await resolveRecordedProtocolVersion(knex, { id: 'rec-2' })).toBeNull();
+    expect(knex.reads).toEqual(['lawn_protocol_service_completions']);
+  });
+
+  test('a failed read throws (the report build then drops the program line)', async () => {
+    await expect(resolveRecordedProtocolVersion(fakeKnex({ lawn_protocol_service_completions: new Error('connection lost') }), service)).rejects.toThrow('connection lost');
+  });
+});
+
+describe('the service outline bullets with GATE_LAWN_V13 on name treatment categories, never products or rates', () => {
+  const recipeNames = (() => {
+    const names = new Set();
+    for (const visit of v13.st_augustine.visits) {
+      for (const line of `${visit.primary}\n${visit.secondary}`.split('\n')) if (line.includes(' — ')) names.add(line.split(' — ')[0]);
+    }
+    return [...names];
+  })();
+  const ALLOWED = ['Lawn inspection', 'Pre-emergent weed control with fertilizer', 'Pre-emergent weed control', 'Micronutrients', 'Fertilizer and nutrition', 'Insect control', 'Disease control', 'Weed spot treatment', 'Wetting agent'];
+
+  test('every month of every grass: only category bullets, no product name, number or rate', () => {
+    withGate('true', () => {
+      for (const grass of GRASSES) {
+        for (const visit of v13[grass].visits) {
+          const bullets = outlineService.customerProtocolBullets(visit);
+          expect({ grass, month: visit.month, any: bullets.length > 0 }).toEqual({ grass, month: visit.month, any: true });
+          for (const bullet of bullets) {
+            expect(ALLOWED.some((label) => bullet.startsWith(`${label} may be relevant`))).toBe(true);
+            for (const name of recipeNames) expect(bullet.toLowerCase()).not.toContain(name.toLowerCase().split(' ')[0] === 'lesco' ? name.toLowerCase() : name.toLowerCase().split(' ')[0]);
+            expect(bullet).not.toMatch(/\d|fl oz|per 1,?000|lb\b|—/i);
+          }
+        }
+      }
+    });
+  });
+
+  test('October and May read as the categories the recipe applies (Stonewall 15-0-15 and its spots; Tetrino)', () => {
+    withGate('true', () => {
+      const oct = outlineService.customerProtocolBullets(v13.bermuda.visits.find((v) => v.month === 'Oct')).map((b) => b.split(' may be')[0]);
+      expect(oct).toEqual(expect.arrayContaining(['Pre-emergent weed control with fertilizer', 'Disease control', 'Insect control', 'Weed spot treatment']));
+      const may = outlineService.customerProtocolBullets(v13.bermuda.visits.find((v) => v.month === 'May')).map((b) => b.split(' may be')[0]);
+      expect(may).toEqual(expect.arrayContaining(['Insect control', 'Weed spot treatment']));
+    });
+  });
+
+  test('gate off: the legacy bullets from the raw protocol lines, unchanged', () => {
+    withGate(undefined, () => {
+      const visit = protocolsJson.lawn.bermuda.visits[0];
+      const bullets = outlineService.customerProtocolBullets(visit);
+      expect(bullets.length).toBeGreaterThan(0);
+      expect(bullets.every((b) => b.endsWith(' may be relevant when turf condition, weather, label directions, and local rules allow.'))).toBe(true);
+      expect(bullets[0]).toContain(String(visit.primary).split('\n')[0].replace(/\([^)]*\$[^)]*\)/g, '').replace(/\s+/g, ' ').trim());
+    });
   });
 });

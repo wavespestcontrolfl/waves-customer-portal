@@ -7628,9 +7628,8 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {
     try {
-      await runExclusive('lawn-knowledge-reconcile', async () => {
-        await require('./knowledge-base').reconcileLawnProtocolKnowledge();
-      });
+      // Under the nightly's 'knowledge-index-sync' lock (see runLawnKnowledgeReconcile).
+      await require('./knowledge-base').runLawnKnowledgeReconcile();
     } catch (err) {
       logger.error(`[kb-sync] lawn knowledge reconcile failed: ${err.message}`);
     }
