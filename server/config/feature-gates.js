@@ -1168,6 +1168,10 @@ const gates = {
   smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
+  // Owner 2026-10-04: an access code saves from the client's own wording
+  // ("Gate code is 1234"), not only from the strict sentence form. Read at
+  // call time in sms-operational-extractor.js. Off = strict form only.
+  accessCodeCapture: gateEnvValue('GATE_ACCESS_CODE_CAPTURE'),
 
   // Email asks + staff promises, same shape as the SMS lane above. Also
   // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
