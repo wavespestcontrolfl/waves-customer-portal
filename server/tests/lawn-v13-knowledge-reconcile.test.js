@@ -75,16 +75,16 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
       knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'protocol', source_id: 'x', chunk_index: 0, content_hash: 'h' }],
     };
     makeDb(tables);
-    // Gate on: the first reconcile has nothing stored (not stale); the nightly sync creates the v13 entries.
-    expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
-    await withGate('true', () => KB.syncLawnProtocolEntries());
+    // Gate on with the index in use and no corpus marker yet: stale, so the first reconcile
+    // creates the v13 entries and syncs both corpora.
+    expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(true);
     for (const track of TRACKS) {
       const row = kbRow(tables, slugOf(track));
       expect(tagsOf(row)).toContain('lawn-v13');
       expect(row.content).toContain(v13[track].visits[0].primary.split('\n')[0]);
       expect(row.title).toBe(v13[track].name);
     }
-    // lawnProtocolsOnly writes nothing but the four lawn entries.
+    // The reconcile writes nothing to the KB but the four lawn entries.
     expect(tables.knowledge_base).toHaveLength(4);
 
     // Gate unset: stale now; the reconcile replaces every entry with the old program.
@@ -119,5 +119,74 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
     // Same source ids both ways: replaced in place, nothing stale left behind.
     const ids = tables.knowledge_embeddings.filter((r) => r.source_id.startsWith('lawn.')).map((r) => `${r.source_id}/${r.chunk_index}`);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+});
+
+describe('a corpus failure after the entries were rewritten is retried, not forgotten', () => {
+  const ingest = require('../services/knowledge-index/ingest');
+  const seeded = () => ({ knowledge_base: [], knowledge_embeddings: [{ id: 'seed', source: 'protocol', source_id: 'x', chunk_index: 0, content_hash: 'h' }] });
+  const marker = (tables, key) => (tables.system_settings || []).find((r) => r.key === key)?.value;
+
+  afterEach(() => jest.restoreAllMocks());
+
+  test('syncCorpus throws once after the entries synced: the next tick finishes both corpora; then steady state is two small reads', async () => {
+    const tables = seeded();
+    makeDb(tables);
+    const real = ingest.syncCorpus;
+    const spy = jest.spyOn(ingest, 'syncCorpus').mockRejectedValueOnce(new Error('index down')).mockImplementation(real);
+    await expect(withGate('true', () => KB.reconcileLawnProtocolKnowledge())).rejects.toThrow('index down');
+    // The entries already match the gate, but no corpus marker was written.
+    expect(TRACKS.every((t) => tagsOf(kbRow(tables, slugOf(t))).includes('lawn-v13'))).toBe(true);
+    expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBeUndefined();
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
+    // Next tick: retried and completed, both markers written.
+    const retry = await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+    expect(retry.stale).toBe(true);
+    expect(Object.keys(retry.index)).toEqual(['protocol', 'kb']);
+    expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBe('v13');
+    expect(marker(tables, 'lawn_knowledge.kb_corpus')).toBe('v13');
+    // Steady state: not stale, no corpus work, two table reads.
+    spy.mockClear(); db.mockClear();
+    expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
+    expect(db.mock.calls.map(([table]) => table)).toEqual(['knowledge_base', 'system_settings']);
+  });
+
+  test('the kb corpus fails after the protocol corpus finished: the retry runs only the kb corpus', async () => {
+    const tables = seeded();
+    makeDb(tables);
+    const real = ingest.syncCorpus;
+    let failKbOnce = true;
+    const spy = jest.spyOn(ingest, 'syncCorpus').mockImplementation(async (connector) => {
+      if (connector.source === 'kb' && failKbOnce) { failKbOnce = false; throw new Error('kb corpus down'); }
+      return real(connector);
+    });
+    await expect(withGate('true', () => KB.reconcileLawnProtocolKnowledge())).rejects.toThrow('kb corpus down');
+    expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBe('v13');
+    expect(marker(tables, 'lawn_knowledge.kb_corpus')).toBeUndefined();
+    spy.mockClear();
+    await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+    expect(spy.mock.calls.map(([c]) => c.source)).toEqual(['kb']);
+    expect(marker(tables, 'lawn_knowledge.kb_corpus')).toBe('v13');
+  });
+
+  test('gate flipped back off with a corpus failure: the legacy marker waits for the successful sync', async () => {
+    const tables = seeded();
+    makeDb(tables);
+    await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
+    const real = ingest.syncCorpus;
+    jest.spyOn(ingest, 'syncCorpus').mockRejectedValueOnce(new Error('index down')).mockImplementation(real);
+    await expect(withGate(undefined, () => KB.reconcileLawnProtocolKnowledge())).rejects.toThrow('index down');
+    expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBe('v13');
+    expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(true);
+    await withGate(undefined, () => KB.reconcileLawnProtocolKnowledge());
+    expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBe('legacy');
+    expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(false);
+  });
+
+  test('the index not in use: markers are ignored (stale only by the entry tags)', async () => {
+    const tables = { knowledge_base: [] };
+    makeDb(tables);
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
   });
 });

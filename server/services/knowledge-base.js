@@ -267,6 +267,11 @@ function cogsTotalLine(terms) {
 
 // Tag on the four lawn protocol entries while they hold the v13 program.
 const LAWN_V13_TAG = 'lawn-v13';
+// Which program each index corpus last finished syncing ('v13' | 'legacy'), written to
+// system_settings only AFTER that corpus's sync succeeds. The four entry tags say what the
+// KB entries hold; these say what the index chunks hold, so a failure after the entries
+// were rewritten still reads as stale on the next tick. An absent marker reads 'legacy'.
+const LAWN_CORPUS_MARKERS = { protocol: 'lawn_knowledge.protocol_corpus', kb: 'lawn_knowledge.kb_corpus' };
 const LAWN_TRACK_SLUGS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'].map((trackId) => `protocol-${slugify(trackId)}`);
 
 // Upsert one auto-synced entry by slug: 'created' | 'updated' | 'skipped' (unchanged,
@@ -359,6 +364,24 @@ function lawnProtocolEntries() {
   return Object.entries(lawnProtocols() || {})
     .map(([trackId, track]) => protocolEntry(trackId, track, ['lawn', trackId, ...v13Tags]))
     .filter(Boolean);
+}
+
+// The index corpora still on the other program (empty while the index is not in use).
+async function staleCorpora(gateOn) {
+  const want = gateOn ? 'v13' : 'legacy';
+  const keys = Object.values(LAWN_CORPUS_MARKERS);
+  const stored = Object.fromEntries((await db('system_settings').whereIn('key', keys).select('key', 'value')).map((row) => [row.key, row.value]));
+  const stale = Object.keys(LAWN_CORPUS_MARKERS).filter((source) => (stored[LAWN_CORPUS_MARKERS[source]] || 'legacy') !== want);
+  if (!stale.length || !(await db('knowledge_embeddings').where({ source: 'protocol' }).first('id'))) return [];
+  return stale;
+}
+
+// One writer at a time (the knowledge-index lock): update, else insert.
+async function setCorpusMarker(source, gateOn) {
+  const key = LAWN_CORPUS_MARKERS[source];
+  const value = gateOn ? 'v13' : 'legacy';
+  const updated = await db('system_settings').where({ key }).update({ value, updated_at: new Date() });
+  if (!updated) await db('system_settings').insert({ key, value, category: 'knowledge', updated_at: new Date() });
 }
 
 const KnowledgeBaseService = {
@@ -988,13 +1011,16 @@ const KnowledgeBaseService = {
     return tally;
   },
 
-  // True when a stored lawn protocol entry holds the other program than the one
-  // GATE_LAWN_V13 selects now (v13 stored with the gate off, or the old program
-  // stored with the gate on). No entry yet is not stale: the nightly sync creates it.
+  // True when the stored lawn knowledge holds the other program than the one
+  // GATE_LAWN_V13 selects now: a KB entry tagged for the other program, or (only while the
+  // knowledge index is in use) an index corpus whose last finished sync was for the other
+  // program. No entry yet is not stale: the nightly sync creates it. Two small reads
+  // when nothing changed.
   async lawnKnowledgeStale() {
     const gateOn = require('../config/feature-gates').lawnV13Live?.() === true;
     const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
-    return rows.some((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG) !== gateOn);
+    if (rows.some((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG) !== gateOn)) return true;
+    return (await staleCorpora(gateOn)).length > 0;
   },
 
   // The reconcile under the nightly knowledge-index lock ('knowledge-index-sync', the
@@ -1018,15 +1044,18 @@ const KnowledgeBaseService = {
   // The index rows re-embed on the next nightly run; full-text search is current now.
   async reconcileLawnProtocolKnowledge() {
     if (!(await this.lawnKnowledgeStale())) return { stale: false };
+    const gateOn = require('../config/feature-gates').lawnV13Live?.() === true;
     const kb = await this.syncLawnProtocolEntries();
     const index = {};
-    if (await db('knowledge_embeddings').where({ source: 'protocol' }).first('id')) {
-      const { syncCorpus } = require('./knowledge-index/ingest');
-      const { CONNECTORS } = require('./knowledge-index/connectors');
-      // kb after the entries above, so the index never re-persists the old text.
-      for (const source of ['protocol', 'kb']) {
-        index[source] = await syncCorpus(CONNECTORS.find((connector) => connector.source === source));
-      }
+    // Each corpus that still holds the other program, kb after the entries above so the
+    // index never re-persists the old text; its marker is written only once its sync
+    // succeeded, so a failure here is retried on the next tick (with the finished
+    // corpora skipped).
+    const { syncCorpus } = require('./knowledge-index/ingest');
+    const { CONNECTORS } = require('./knowledge-index/connectors');
+    for (const source of await staleCorpora(gateOn)) {
+      index[source] = await syncCorpus(CONNECTORS.find((connector) => connector.source === source));
+      await setCorpusMarker(source, gateOn);
     }
     logger.info(`[kb-sync] Lawn protocol knowledge reconciled: ${JSON.stringify({ kb, index })}`);
     return { stale: true, kb, index };
