@@ -125,9 +125,6 @@ const NOTE_COVERS = Object.freeze({
 });
 
 const ALL_CLEAR_RATINGS = Object.freeze({ Excellent: 'excellent', Good: 'good' });
-// A note that says anything about a problem keeps the "all clear" line out, even
-// when the closed list has no word for it (a bark beetle, say).
-const PROBLEM_HINT_RE = /\b(?:problem|issue|damage\w*|dying|dead|die[sd]?|disease\w*|infest\w*|pests?|bugs?|insects?|beetles?|borers?|weevils?|rot\w*|wilt\w*|spots?|mou?ld|mildew|fung\w*|stress\w*|deficien\w*|yellow\w*|brown\w*|chew\w*|holes?|scale|mites?|aphids?|worms?|caterpillars?|thrips|sooty|dieback|concern\w*|worr\w*|bad|poor|declin\w*)\b/i;
 
 // ── Note checks ───────────────────────────────────────────────────────────
 
@@ -208,10 +205,11 @@ function joinList(items) {
 
 /**
  * Turn verified observations and the inputs into slots: ids only, never text.
- * `extractionFailed` (a note exists but the model gave no usable answer) keeps the
- * "all clear" line out, because the note was not read.
+ * The "all clear" line needs a visit with NO technician note: a note speaks for the
+ * visit, and no word list can tell every concern ("leaves curling") from a
+ * routine remark, so any note keeps the line out (fail closed, Codex r5).
  */
-function buildSlots(inputs, observed, { extractionFailed = false } = {}) {
+function buildSlots(inputs, observed) {
   const note = inputs.technicianNote;
   const maybe = inputs.findings
     .filter((f) => f.kind === 'maybe' && !NOTE_COVERS[f.key].test(note))
@@ -219,7 +217,7 @@ function buildSlots(inputs, observed, { extractionFailed = false } = {}) {
   const confirmed = inputs.findings.filter((f) => f.kind === 'confirmed').map((f) => f.key).slice(0, MAX_CONFIRMED);
   const products = inputs.products.map((p) => p.name);
   const quiet = !observed.length && !maybe.length && !confirmed.length;
-  const allClear = quiet && !extractionFailed && inputs.landscapeCondition && !PROBLEM_HINT_RE.test(note)
+  const allClear = quiet && !note && inputs.landscapeCondition
     ? ALL_CLEAR_RATINGS[inputs.landscapeCondition]
     : null;
   return {
@@ -326,6 +324,11 @@ function buildPrompt(inputs) {
 function validateExtraction(answer, rawInputs) {
   const inputs = normalizeInputs(rawInputs);
   if (!answer || typeof answer !== 'object' || !Array.isArray(answer.observations)) return { ok: false, problems: ['no_answer'] };
+  // An item outside the schema (unknown condition or plant, a missing key) makes
+  // the whole answer a miss, so the dispatcher tries its backup (Codex r5).
+  const wellFormed = (o) => o && typeof o === 'object' && Object.hasOwn(CONDITIONS, o.condition)
+    && (o.plant === NO_PLANT || Object.hasOwn(PLANTS, o.plant));
+  if (!answer.observations.every(wellFormed)) return { ok: false, problems: ['malformed_item'] };
   const slots = buildSlots(inputs, verifyObservations(answer.observations, inputs.technicianNote));
   return { ok: true, paragraph: render(slots), slots, problems: [] };
 }
@@ -362,22 +365,17 @@ const engine = createTechParagraphEngine({
 
 /**
  * Never throws. With a note, one extraction call; without one (or when the call
- * fails, times out or answers malformed), only the deterministic lines. When the
- * call fails with a note present the "all clear" line is withheld (the note was
- * not read). Returns { ok: false, reason: 'nothing_to_say' } when no sentence applies.
+ * fails, times out or answers malformed), only the deterministic lines (never the
+ * "all clear" line, which needs a visit with no note). Returns { ok: false, reason: 'nothing_to_say' } when no sentence applies.
  */
 async function generateTechParagraph(rawInputs, deps = {}) {
   const inputs = normalizeInputs(rawInputs);
-  let extractionFailed = false;
   // Any note at all is read: "Aphids." is a full observation.
   if (inputs.technicianNote) {
     const result = await engine.generateTechParagraph(inputs, deps);
     if (result.ok && result.paragraph) return result;
-    // A well formed reply with nothing to say is a read of the note; every other
-    // miss (no answer, timeout, error) is a failure to read it.
-    extractionFailed = !result.ok;
   }
-  const slots = buildSlots(inputs, [], { extractionFailed });
+  const slots = buildSlots(inputs, []);
   const text = render(slots);
   if (!text) return { ok: false, reason: 'nothing_to_say' };
   return { ok: true, paragraph: text, slots, inputsHash: engine.inputsHash(inputs) };

@@ -340,8 +340,8 @@ saw {items}." (up to 3 closed-list conditions, each optionally "on the {plant}")
 kept photo findings the note does not cover, at most 2), "Our technician confirmed
 signs of {labels}." (findings the technician confirmed), "Today we applied
 {products}." (product display names only) and "Your landscape looked {excellent|good}
-today." (only when nothing else applies and the technician rated the landscape
-Excellent or Good). No model text is ever printed. It is written ONCE, at completion
+today." (only when nothing else applies, the visit has NO technician note, and the
+technician rated the landscape Excellent or Good). No model text is ever printed. It is written ONCE, at completion
 (`freezeTreeShrubTechParagraph`, `tree-shrub-tech-paragraph-gate.js`), with at most
 one model call (lane `ts_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second
 deadline across the whole step) that only EXTRACTS closed-list `{ condition, plant }`

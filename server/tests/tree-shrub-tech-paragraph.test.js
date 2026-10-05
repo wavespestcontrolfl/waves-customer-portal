@@ -55,7 +55,7 @@ describe('TS_SENTENCES is the only source of words', () => {
   });
 
   test('the all-clear line comes last', () => {
-    expect(textFor({ landscapeCondition: 'Excellent', technicianNote: 'Routine visit.' }, [])).toBe('Today we applied Merit 2F and Palm Gro 8-2-12. Your landscape looked excellent today.');
+    expect(textFor({ landscapeCondition: 'Excellent', technicianNote: '' }, [])).toBe('Today we applied Merit 2F and Palm Gro 8-2-12. Your landscape looked excellent today.');
   });
 });
 
@@ -207,8 +207,8 @@ describe('deterministic lines', () => {
     expect(textFor({ technicianNote: '', products: [{ name: 'Merit 2F' }] }, [])).toBe('Today we applied Merit 2F.');
   });
 
-  test('all clear: only with no item at all, a note free of problem words, and a rating of Excellent or Good', () => {
-    const base = { technicianNote: 'Routine visit, everything looks fine.', products: [] };
+  test('all clear: only with no item, no technician note, and a rating of Excellent or Good', () => {
+    const base = { technicianNote: '', products: [] };
     expect(textFor({ ...base, landscapeCondition: 'Excellent' }, [])).toBe('Your landscape looked excellent today.');
     expect(textFor({ ...base, landscapeCondition: 'Good' }, [])).toBe('Your landscape looked good today.');
     for (const rating of ['Fair', 'Poor', 'Declining', 'Recovering', null, 'Great', 'good']) expect(textFor({ ...base, landscapeCondition: rating }, [])).toBe('');
@@ -216,10 +216,11 @@ describe('deterministic lines', () => {
     expect(textFor({ ...base, landscapeCondition: 'Good', findings: [{ key: 'pest_activity', kind: 'maybe' }] }, [])).not.toMatch(/looked good/);
     expect(textFor({ ...base, technicianNote: 'Scale on the hedges.', landscapeCondition: 'Good' }, [obs('scale', 'hedges')])).not.toMatch(/looked good/);
     expect(textFor({ ...base, landscapeCondition: 'Good', findings: [{ key: 'pest_activity', kind: 'confirmed' }] }, [])).not.toMatch(/looked good/);
-    // A note that talks about a problem the closed list cannot name blocks it.
-    expect(textFor({ ...base, technicianNote: 'Bark beetle holes in the pine.', landscapeCondition: 'Good' }, [])).toBe('');
-    // A failed read of the note blocks it.
-    expect(textFor({ ...base, landscapeCondition: 'Good' }, [], { extractionFailed: true })).toBe('');
+    // Any note at all blocks it: no word list tells every concern from a routine
+    // remark (Codex r5: "Leaves are curling on the hibiscus.").
+    for (const note of ['Leaves are curling on the hibiscus.', 'Bark beetle holes in the pine.', 'Routine visit, everything looks fine.']) {
+      expect(textFor({ ...base, technicianNote: note, landscapeCondition: 'Good' }, [])).toBe('');
+    }
   });
 
   test('nothing applies: no sentence, no paragraph', () => {
@@ -266,13 +267,22 @@ describe('the model call (extraction only)', () => {
     expect(options.validate({ ok: true, json: { paragraph: 'Prune the hedge.' } })).toMatch(/no_answer/);
   });
 
-  test('an answer whose every item fails verification is a good read: deterministic lines only, all-clear still allowed', async () => {
+  test('an answer whose every item fails verification is a good read: deterministic lines only (no all-clear beside a note)', async () => {
     dispatchWithFallback.mockImplementation(async (_p, _pl, options) => {
       const result = { ok: true, json: { observations: [obs('thrips', 'palms')] } };
       return options.validate(result) ? { ok: false, reason: 'x' } : result;
     });
-    const out = await tech.generateTechParagraph(inputs({ technicianNote: 'Routine visit, all fine.', products: [], landscapeCondition: 'Good' }));
-    expect(out).toMatchObject({ ok: true, paragraph: 'Your landscape looked good today.' });
+    const out = await tech.generateTechParagraph(inputs({ technicianNote: 'Routine visit, all fine.', landscapeCondition: 'Good' }));
+    expect(out).toMatchObject({ ok: true, paragraph: 'Today we applied Merit 2F and Palm Gro 8-2-12.' });
+  });
+
+  test('an item outside the schema makes the whole answer a miss, so the backup provider runs (Codex r5)', () => {
+    const v = (observations) => tech.validateExtraction({ observations }, inputs({ technicianNote: 'Scale on the hedges.' }));
+    expect(v([{ condition: 'made_up', plant: 'none' }])).toMatchObject({ ok: false, problems: ['malformed_item'] });
+    expect(v([{}])).toMatchObject({ ok: false, problems: ['malformed_item'] });
+    expect(v([{ condition: 'scale' }])).toMatchObject({ ok: false, problems: ['malformed_item'] });
+    expect(v([{ condition: 'scale', plant: 'hedges' }, { condition: 'scale', plant: 'lawn' }])).toMatchObject({ ok: false });
+    expect(v([{ condition: 'scale', plant: 'hedges' }])).toMatchObject({ ok: true });
   });
 
   test('model failure, timeout or a malformed answer: deterministic lines only, and no all-clear (the note was not read)', async () => {
