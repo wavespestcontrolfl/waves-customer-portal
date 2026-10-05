@@ -17746,6 +17746,23 @@ const CallRecordingProcessor = {
                   const fuStart = fuPlan.windowStart;
                   const [fuH, fuM] = fuStart.split(':').map(Number);
                   const fuEndH = fuH >= 23 ? 23 : fuH + 1;
+                  // A package visit 2 is the same treatment as visit 1, so it
+                  // holds the same block: visit 1's window length (or the
+                  // catalog duration when longer), never the bare one hour a
+                  // 90-minute flea or 120-minute bed bug job would outrun.
+                  let fuWindowEnd = `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`;
+                  if (packageFollowUp) {
+                    const toMin = (v) => { const m = String(v || '').match(/^(\d{1,2}):(\d{2})/); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+                    const pStart = toMin(primaryRow.window_start);
+                    const pEnd = toMin(primaryRow.window_end);
+                    const blockMin = Math.max(
+                      60,
+                      pStart != null && pEnd != null && pEnd > pStart ? pEnd - pStart : 0,
+                      Number(callBookingCatalogRow?.default_duration_minutes) || 0,
+                    );
+                    const endMin = Math.min(fuH * 60 + fuM + blockMin, 23 * 60 + 59);
+                    fuWindowEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+                  }
                   try {
                     return await trx.transaction(async (sp) => {
                       // The follow-up inherits the primary's tech; if that tech
@@ -17802,7 +17819,7 @@ const CallRecordingProcessor = {
                           service_address_zip: primaryRow.service_address_zip || null,
                           scheduled_date: fuPlan.scheduledDate,
                           window_start: fuStart,
-                          window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
+                          window_end: fuWindowEnd,
                           window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
                           service_type: serviceType,
                           service_id: callBookingCatalogRow?.id || null,
@@ -17822,7 +17839,12 @@ const CallRecordingProcessor = {
                           // its partial unique index blocks a duplicate
                           // follow-up off this visit and carries no free
                           // semantics of its own.
-                          ...callFollowUpBillingShape(priceInfo.price),
+                          // A package visit 2 is ALWAYS the $0 included
+                          // shape, priced primary or not: the package price
+                          // on visit 1 covers both treatments, and
+                          // followup_included is what stops its completion
+                          // from owing a third visit.
+                          ...callFollowUpBillingShape(packageFollowUp ? 0 : priceInfo.price),
                           followup_source_service_id: primaryRow.id,
                           estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                           // Customer-safe only: once dispatch confirms this row
@@ -17834,7 +17856,7 @@ const CallRecordingProcessor = {
                           // so the child needs no marker in notes.
                           notes: [
                             'Follow-up treatment (visit 2) booked from your phone call.',
-                            priceInfo.price != null ? 'Included in the package price on the initial visit.' : null,
+                            priceInfo.price != null || packageFollowUp ? 'Included in the package price on the initial visit.' : null,
                           ].filter(Boolean).join(' '),
                           internal_notes: [
                             packageFollowUp
