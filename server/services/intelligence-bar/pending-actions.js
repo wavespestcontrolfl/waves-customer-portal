@@ -120,43 +120,54 @@ const SUPERSEDE_RULES = {
   },
 };
 
-// Cancels this actor's still-pending cards from EARLIER requests of the same
-// conversation that the new card replaces. Runs in the transaction that
-// stores the new card. A card already claimed by a Confirm is not pending and
-// is left alone (the claim and this UPDATE both test status='pending').
-async function cancelSupersededCards(trx, { taskId, requestedBy, toolName, params, newRowId }) {
+// Decides, under a per-intent advisory lock, how the card being stored relates
+// to this actor's other cards for the same intent in the same conversation:
+//   olderIds - pending cards from OLDER requests that the new card replaces
+//              (cancelled right after the insert, in the same transaction);
+//   stale    - a card from a NEWER request (still pending, or already
+//              confirmed) already covers this one, so this card must not be
+//              confirmable: the caller stores it as cancelled.
+// "Older" and "newer" follow the REQUEST (ib_tasks.created_at, task id as the
+// tie-break), never the commit order, so a request that finishes late cannot
+// cancel the newer request's card.
+// Lock order: the caller already holds its own ib_tasks row (FOR UPDATE), then
+// takes this advisory key. Every proposer takes "own task row, then intent
+// key", and the key is held only to the end of the transaction, so two
+// proposers can wait on each other's key but never on each other's task row.
+async function planSupersession(trx, { task, requestedBy, toolName, params }) {
   const rule = SUPERSEDE_RULES[toolName];
-  const newKey = rule && rule.key(params || {});
-  if (!newKey) return 0;
-  const task = await trx('ib_tasks').where({ id: taskId }).first('session_id');
-  if (!task?.session_id) return 0;
-  const older = await trx('ib_pending_actions as pa')
+  const key = rule && task?.session_id ? rule.key(params || {}) : null;
+  if (!key) return { olderIds: [], stale: false };
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+    [`ib-supersede:${requestedBy}:${task.session_id}:${toolName}:${key}`]);
+  // Statements after the lock see every card the earlier lock holder committed.
+  const rows = await trx('ib_pending_actions as pa')
     .join('ib_tasks as t', 't.id', 'pa.task_id')
     .where('t.session_id', task.session_id)
     .where('pa.requested_by', String(requestedBy))
     .where('pa.tool_name', toolName)
-    .where('pa.status', 'pending')
-    .where('pa.expires_at', '>', trx.fn.now())
-    .whereNot('pa.task_id', taskId)
-    .whereNot('pa.id', newRowId)
-    .select('pa.id', 'pa.params');
-  const ids = older.filter(row => {
-    const prior = typeof row.params === 'string' ? JSON.parse(row.params) : (row.params || {});
-    return rule.key(prior) === newKey && rule.covers(params || {}, prior);
-  }).map(row => row.id);
-  if (!ids.length) return 0;
-  const count = await trx('ib_pending_actions').whereIn('id', ids).where({ status: 'pending' })
-    .update({ status: 'cancelled', updated_at: trx.fn.now() });
-  if (count) logger.info(`[intelligence-bar:pending] Cancelled ${count} card(s) superseded by pending action ${newRowId}`);
-  return count;
+    .whereNot('pa.task_id', task.id)
+    .where(q => q.where('pa.status', 'confirmed')
+      .orWhere(r => r.where('pa.status', 'pending').where('pa.expires_at', '>', trx.fn.now())))
+    .select('pa.id', 'pa.params', 'pa.status',
+      // Compared in SQL against this task's own row: a JS Date would drop microseconds.
+      trx.raw('(t.created_at, t.id::text) > (SELECT o.created_at, o.id::text FROM ib_tasks o WHERE o.id = ?) AS newer', [task.id]));
+  const same = rows.filter(row => rule.key(typeof row.params === 'string' ? JSON.parse(row.params) : (row.params || {})) === key);
+  const priorOf = row => (typeof row.params === 'string' ? JSON.parse(row.params) : (row.params || {}));
+  const stale = same.some(row => row.newer && rule.covers(priorOf(row), params || {}));
+  const olderIds = stale ? [] : same.filter(row => !row.newer && row.status === 'pending'
+    && rule.covers(params || {}, priorOf(row))).map(row => row.id);
+  return { olderIds, stale };
 }
 
 async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash, taskId, stepKey: actionStepKey, runnerToken }) {
   const persist = async trx => {
+  let taskRow = null;
   if (taskId) {
     const task = await trx('ib_tasks').where({ id: taskId, actor_id: String(requestedBy), runner_token: runnerToken, state: 'running' })
-      .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id');
+      .where('lease_expires_at', '>', trx.fn.now()).forUpdate().first('id', 'session_id');
     if (!task) throw new Error('Task execution was superseded');
+    taskRow = task;
     const previous = await trx('ib_pending_actions').where({ task_id: taskId, requested_by: String(requestedBy) });
     const existing = previous.find(row => row.tool_name === toolName && row.step_key === actionStepKey)
       || previous.find(row => row.tool_name === toolName && row.params?._ib_step_key_version !== 2 && legacyStepKey(row) === actionStepKey);
@@ -176,6 +187,8 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
     if (scope.error) throw Object.assign(new Error(scope.error), { code: scope.code });
     params = { ...params, _ib_task_context: scope };
   }
+  const plan = taskRow ? await planSupersession(trx, { task: taskRow, requestedBy, toolName, params })
+    : { olderIds: [], stale: false };
   let insert = trx('ib_pending_actions').insert({
     tool_name: toolName,
     params: JSON.stringify(params || {}),
@@ -183,7 +196,9 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
     summary: summary || null,
     requested_by: String(requestedBy),
     context: context || null,
-    status: 'pending',
+    // A card from an older request that a newer request already covers is
+    // stored cancelled: it is never confirmable.
+    status: plan.stale ? 'cancelled' : 'pending',
     expires_at: new Date(Date.now() + TTL_MINUTES * 60 * 1000),
     // W0B authorization contract: the structured effect set the card shows;
     // its hash is what the operator's Confirm must echo.
@@ -195,8 +210,14 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
   const [created] = await insert.returning('*');
   const row = created || await trx('ib_pending_actions').where({ task_id: taskId, step_key: actionStepKey, requested_by: String(requestedBy) }).first();
   if (!row) throw new Error('Pending action could not be recorded');
-  if (taskId && created) {
-    await cancelSupersededCards(trx, { taskId, requestedBy, toolName, params, newRowId: row.id });
+  if (created && plan.olderIds.length) {
+    const count = await trx('ib_pending_actions').whereIn('id', plan.olderIds).where({ status: 'pending' })
+      .update({ status: 'cancelled', updated_at: trx.fn.now() });
+    if (count) logger.info(`[intelligence-bar:pending] Cancelled ${count} card(s) superseded by pending action ${row.id}`);
+  }
+  if (created && plan.stale) {
+    logger.info(`[intelligence-bar:pending] Pending action ${row.id} was already superseded by a newer request; stored cancelled`);
+    return { ...row, superseded_by_newer_request: true };
   }
 
   logger.info(`[intelligence-bar:pending] Proposed ${toolName} as pending action ${row.id}`);

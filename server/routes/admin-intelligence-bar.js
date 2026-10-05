@@ -1798,6 +1798,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     ...(task ? { taskId: task.id, runnerToken: task.runner_token, stepKey: PendingActions.stepKey(toolUse.name, params, preview) } : {}),
   });
 
+  // A request that finished after a newer request already replaced its card:
+  // nothing is prepared and no card is shown.
+  if (row.superseded_by_newer_request) {
+    return { failed: true, modelResult: { error: 'A newer request in this conversation already replaced this proposal. Nothing was prepared and nothing was changed. Do not propose it again; tell the operator to use the newer card.' } };
+  }
   if (task && row.status !== 'pending') {
     const receipt = await PendingActions.getActionReceipt(row.id, getAdminActorId(req));
     return { failed: !receipt.success, modelResult: { outcome: receipt.outcome, result: receipt.result,

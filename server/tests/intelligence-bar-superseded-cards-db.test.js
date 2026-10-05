@@ -133,4 +133,71 @@ suite('IB superseded confirmation cards in isolated Postgres', () => {
     const claimed = await Pending.claimForConfirm(b.id, actorId, { contractHash: b.contract_hash });
     expect(claimed.action.params.first_name).toBe('Beta');
   });
+
+  // Requests are ordered by when their task was created, not by who commits first.
+  const beginTask = sessionId => Tasks.begin({ actorId, sessionId, requestKey: crypto.randomUUID(), request: { prompt: 'Synthetic request' }, pageContext: {} }).then(r => r.task);
+  const confirmable = async (rows) => (await db('ib_pending_actions').whereIn('id', rows.map(r => r.id)).where({ status: 'pending' }).select('id')).map(r => r.id);
+
+  test('overlapping proposals for one intent leave exactly one confirmable card, the newest request', async () => {
+    for (let round = 0; round < 8; round++) {
+      const session = crypto.randomUUID();
+      const tasks = [await beginTask(session), await beginTask(session), await beginTask(session)];
+      const rows = await Promise.all(tasks.map((task, i) => propose(session, 'create_appointment', booking({ time_window: `${9 + i}:00 AM` }), { task })));
+      expect(await confirmable(rows)).toEqual([rows[2].id]);
+    }
+  });
+
+  test('a proposal waits for the intent lock, then sees the card the lock holder committed', async () => {
+    const session = crypto.randomUUID();
+    const older = await beginTask(session), newer = await beginTask(session);
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    let locked;
+    const lockTaken = new Promise(resolve => { locked = resolve; });
+    // A second connection holds the intent lock and, while holding it, stores the NEWER request's card.
+    const holder = db.transaction(async trx => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`ib-supersede:${actorId}:${session}:create_appointment:${[customerId, 'synthetic pest service', '2030-01-15'].join('|')}`]);
+      locked();
+      await gate;
+      return trx('ib_pending_actions').insert({ tool_name: 'create_appointment', params: JSON.stringify(booking({ time_window: '10:00 AM' })), params_hash: 'x'.repeat(64),
+        requested_by: actorId, status: 'pending', expires_at: new Date(Date.now() + 600000), task_id: newer.id, step_key: 'gate-step' }).returning('id');
+    });
+    await lockTaken;
+    let settled = false;
+    const late = propose(session, 'create_appointment', booking(), { task: older }).then(row => { settled = true; return row; });
+    await new Promise(resolve => setTimeout(resolve, 400));
+    const blocked = !settled; // blocked on the advisory lock, not racing past it
+    release(); // always release, so a failed run cannot leave the connection held
+    expect(blocked).toBe(true);
+    const [[held]] = [await holder];
+    const lateRow = await late;
+    expect(lateRow.superseded_by_newer_request).toBe(true);
+    expect(await status(lateRow.id)).toBe('cancelled');
+    expect(await status(held.id)).toBe('pending');
+  });
+
+  test('an older request that finishes late is stored cancelled and does not cancel the newer card', async () => {
+    const session = crypto.randomUUID();
+    const older = await beginTask(session), newer = await beginTask(session);
+    const newCard = await propose(session, 'create_appointment', booking({ time_window: '10:00 AM' }), { task: newer });
+    const lateCard = await propose(session, 'create_appointment', booking(), { task: older });
+    expect(lateCard.superseded_by_newer_request).toBe(true);
+    expect(await status(lateCard.id)).toBe('cancelled');
+    expect(await Pending.claimForConfirm(lateCard.id, actorId, { contractHash: lateCard.contract_hash })).toEqual({ error: 'cancelled' });
+    expect(await status(newCard.id)).toBe('pending');
+    expect((await Pending.claimForConfirm(newCard.id, actorId, { contractHash: newCard.contract_hash })).action.params.time_window).toBe('10:00 AM');
+  });
+
+  test('a late older request is also stale when the newer card was already confirmed, but a different target is not', async () => {
+    const session = crypto.randomUUID();
+    const older = await beginTask(session), olderToo = await beginTask(session), newer = await beginTask(session);
+    const newCard = await propose(session, 'create_appointment', booking({ time_window: '10:00 AM' }), { task: newer });
+    await Pending.claimForConfirm(newCard.id, actorId, { contractHash: newCard.contract_hash });
+    const lateCard = await propose(session, 'create_appointment', booking(), { task: older });
+    expect(await status(lateCard.id)).toBe('cancelled');
+    expect(await status(newCard.id)).toBe('confirmed');
+    const other = await propose(session, 'create_appointment', booking({ customer_id: otherCustomerId }), { task: olderToo });
+    expect(other.superseded_by_newer_request).toBeUndefined();
+    expect(await status(other.id)).toBe('pending');
+  });
 });
