@@ -5915,49 +5915,64 @@ AppointmentReminders.confirmationLoggedForVisitPhone = confirmationLoggedForVisi
 // visit's lifetime: the same phone (last 10), message_type 'confirmation' and
 // visit is never re-sent. Returns { sent, reason }; the caller decides which
 // reasons are final (recipient-optin's REPLAY_TERMINAL_REASONS).
+// Replay stage 1 — the visit: { reason } when nothing can be sent for it now,
+// else its rows. Throws on an unreadable read (the replay retries).
+async function replayVisit({ customerId, scheduledServiceId }) {
+  const [svc, reminder = {}, acct, apptTime] = await Promise.all([
+    // Only a confirmed visit (not over, called off, under way or being rescheduled).
+    db('scheduled_services').where({ id: scheduledServiceId, customer_id: customerId, status: 'confirmed' })
+      .first('id', 'service_type'),
+    // A CANCELLED reminder row means the slot was pulled.
+    db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId })
+      .first('cancelled', 'service_type', 'confirmation_sent'),
+    db('customers').where({ id: customerId }).first(),
+    // The canonical customer-promised arrival (reservation arrival: a
+    // combined allocation's later member resolves to the group's arrival,
+    // not its own work slot).
+    scheduledServiceApptTime(scheduledServiceId, { throwOnError: true }),
+  ]);
+  if (!svc || reminder.cancelled || !(apptTime?.getTime() > Date.now())) return { reason: 'visit_not_live' };
+  // The visit's own confirmation is still pending (held for the send window
+  // or a move): its fan-out owns this recipient now. Wait for it; once it
+  // has gone out the dedupe sees it and ends the replay.
+  if (reminder.confirmation_sent === false) return { reason: 'primary_confirmation_pending' };
+  // A callback-number hold (the caller disclaimed the number the visit was
+  // booked under) holds every appointment text for the visit, exactly as
+  // safeSendAppointment holds them; it fails closed, and can clear later.
+  if (await callbackNumberHoldActiveForVisit(scheduledServiceId)) return { reason: 'callback_number_hold' };
+  return { svc, reminder, acct, apptTime };
+}
+
+// Replay stage 2 — the recipient: { reason } when this phone gets no text,
+// else the resolved contact. Throws on an unreadable read (the replay retries).
+async function replayRecipient({ customerId, scheduledServiceId, contactKey, acct }) {
+  // The account's confirmation choices apply to this text exactly as to the
+  // primary's: confirmations off or an email-only channel = no text.
+  const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
+  if (prefs.unavailable) throw new Error('prefs unavailable');
+  if (!prefs.appointmentConfirmation || !prefs.smsEnabled || apptChannel(prefs.confirmationChannel) === 'email') return { reason: 'sms_not_chosen' };
+  // Revalidated at send time (a retry can run from the sweep days after the
+  // YES): the phone must still be one of the account's appointment
+  // recipients through the SAME resolver every appointment text uses (slot
+  // membership, consent stamp, the per-phone unconsented hold), and its
+  // opt-in for this customer must still be confirmed. The opt-in row is read
+  // directly so an unreadable one throws (retry), never reads as a refusal.
+  const recipient = getAppointmentContacts(acct, prefs.raw).find((c) => String(c.phone).replace(/\D/g, '').slice(-10) === contactKey);
+  const optin = await db('recipient_optin').where({ customer_id: customerId, phone_key: contactKey }).first('status');
+  if (!recipient || optin?.status !== 'confirmed') return { reason: 'not_a_recipient' };
+  if (await confirmationLoggedForVisitPhone({ scheduledServiceId, phone: contactKey })) return { reason: 'already_sent' };
+  return { recipient };
+}
+
 async function sendConfirmationToServiceContact({ customerId, scheduledServiceId, phone, inReplyToYes = false } = {}) {
   const contactKey = String(phone || '').replace(/\D/g, '').slice(-10);
   if (!customerId || !scheduledServiceId || !contactKey) return { sent: false, reason: 'missing_input' };
   try {
-    const [svc, reminder = {}, acct, apptTime] = await Promise.all([
-      // Only a confirmed visit (not over, called off, under way or being rescheduled).
-      db('scheduled_services').where({ id: scheduledServiceId, customer_id: customerId, status: 'confirmed' })
-        .first('id', 'service_type'),
-      // A CANCELLED reminder row means the slot was pulled.
-      db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId })
-        .first('cancelled', 'service_type', 'confirmation_sent'),
-      db('customers').where({ id: customerId }).first(),
-      // The canonical customer-promised arrival (reservation arrival: a
-      // combined allocation's later member resolves to the group's arrival,
-      // not its own work slot).
-      scheduledServiceApptTime(scheduledServiceId, { throwOnError: true }),
-    ]);
-    if (!svc || reminder.cancelled || !(apptTime?.getTime() > Date.now())) return { sent: false, reason: 'visit_not_live' };
-    // The visit's own confirmation is still pending (held for the send window
-    // or a move): its fan-out owns this recipient now. Wait for it; once it
-    // has gone out the dedupe below sees it and ends the replay.
-    if (reminder.confirmation_sent === false) return { sent: false, reason: 'primary_confirmation_pending' };
-    // A callback-number hold (the caller disclaimed the number the visit was
-    // booked under) holds every appointment text for the visit, exactly as
-    // safeSendAppointment holds them; it fails closed, and can clear later.
-    if (await callbackNumberHoldActiveForVisit(scheduledServiceId)) return { sent: false, reason: 'callback_number_hold' };
-    // The account's confirmation choices apply to this text exactly as to the
-    // primary's: confirmations off or an email-only channel = no text. An
-    // unreadable prefs row throws below and retries.
-    const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
-    if (prefs.unavailable) throw new Error('prefs unavailable');
-    if (!prefs.appointmentConfirmation || !prefs.smsEnabled || apptChannel(prefs.confirmationChannel) === 'email') return { sent: false, reason: 'sms_not_chosen' };
-    // Revalidated at send time (a retry can run from the sweep days after the
-    // YES): the phone must still be one of the account's appointment
-    // recipients through the SAME resolver every appointment text uses (slot
-    // membership, consent stamp, the per-phone unconsented hold), and its
-    // opt-in for this customer must still be confirmed. The opt-in row is read
-    // directly so an unreadable one throws (retry), never reads as a refusal.
-    const recipient = getAppointmentContacts(acct, prefs.raw).find((c) => String(c.phone).replace(/\D/g, '').slice(-10) === contactKey);
-    const optin = await db('recipient_optin').where({ customer_id: customerId, phone_key: contactKey }).first('status');
-    if (!recipient || optin?.status !== 'confirmed') return { sent: false, reason: 'not_a_recipient' };
-    const priorSend = await confirmationLoggedForVisitPhone({ scheduledServiceId, phone: contactKey });
-    if (priorSend) return { sent: false, reason: 'already_sent' };
+    const visit = await replayVisit({ customerId, scheduledServiceId });
+    if (visit.reason) return { sent: false, reason: visit.reason };
+    const { svc, reminder, acct, apptTime } = visit;
+    const { recipient, reason } = await replayRecipient({ customerId, scheduledServiceId, contactKey, acct });
+    if (reason) return { sent: false, reason };
     const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
     const body = await renderConfirmationBody({
       scheduledServiceId,
@@ -5999,7 +6014,7 @@ async function sendConfirmationToServiceContact({ customerId, scheduledServiceId
   } catch (err) {
     // A send that threw AFTER the provider took it (err.providerOutcome) may
     // have reached the person: final, never resent.
-    if (err && err.providerOutcome && classifyDeliveryCertainty(err.providerOutcome) !== 'not_sent') {
+    if (err?.providerOutcome && classifyDeliveryCertainty(err.providerOutcome) !== 'not_sent') {
       logger.warn(`[appt-remind] confirmation replay threw after the provider handoff (${err.name}); not retried`);
       return { sent: false, reason: 'delivery_uncertain' };
     }
