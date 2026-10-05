@@ -89,14 +89,15 @@ test('schedule view confines itself to one customer when asked, inside the task 
   expect(db.__queries).toHaveLength(0);
 });
 
-test('schedule view reports the whole arrival window, not the start alone', async () => {
+test('schedule view reports the customer arrival window, never the scheduling block end', async () => {
   db.__rows = () => [
-    { id: 'windowed', window_start: '09:00:00', window_end: '11:00:00' },
-    { id: 'open-ended', window_start: '13:00:00', window_end: null },
+    // A 90-minute service: the stored block ends 10:30, the customer is told 9 to 11.
+    { id: 'ninety-minute-block', window_start: '09:00:00', window_end: '10:30:00' },
+    { id: 'no-stored-end', window_start: '13:00:00', window_end: null },
     { id: 'untimed', window_start: null, window_end: null },
   ];
   const result = await executeTool('get_schedule_view', {});
-  expect(result.appointments.map(a => a.time_window)).toEqual(['09:00:00-11:00:00', '13:00:00', null]);
+  expect(result.appointments.map(a => a.time_window)).toEqual(['09:00-11:00', '13:00-15:00', null]);
 });
 
 test('tech next stop skips skipped jobs and reads the rental destination', async () => {

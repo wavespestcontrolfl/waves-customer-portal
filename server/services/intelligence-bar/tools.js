@@ -12,6 +12,7 @@ const db = require('../../models/db');
 const { lockCustomerComms, lockSmsPhone } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
+const { arrivalWindowRange } = require('../../utils/sms-time-format');
 const logger = require('../logger');
 const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
@@ -927,9 +928,11 @@ async function getScheduleView(input, readCustomerIds = []) {
       date: a.scheduled_date,
       service_type: a.service_type,
       status: a.status,
-      // Start and end, the shape get_customer_detail returns: a start alone
-      // reads as an exact arrival time.
-      time_window: a.window_start ? (a.window_end ? `${a.window_start}-${a.window_end}` : a.window_start) : null,
+      // The customer's ARRIVAL window (start + 120 min, arrivalWindowRange),
+      // not the stored window_end: that is a scheduling block (a 90-minute
+      // service at 09:00 ends 10:30) and would read as "arriving by 10:30".
+      // A start alone read as an exact arrival time.
+      time_window: a.window_start ? (arrivalWindowRange(a.window_start) || a.window_start) : null,
       route_order: a.route_order,
       customer_id: a.customer_id,
       customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim(),
