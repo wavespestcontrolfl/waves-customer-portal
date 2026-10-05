@@ -105,6 +105,12 @@ const idPart = value => (value === undefined || value === null || value === '' ?
 //     'refuse' - a second card would repeat a one-off effect (a booking): the
 //                new card is refused, the operator moves the visit instead.
 //     'allow'  - a later edit is a legitimate new edit and stays confirmable.
+const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email'];
+function leadFieldsChanged(p) {
+  const approved = p._approved_changes;
+  const isSet = approved && typeof approved === 'object' && !Array.isArray(approved);
+  return LEAD_CONTACT_FIELDS.filter(f => (isSet ? approved[f] !== undefined : approved == null && p[f] !== undefined));
+}
 const SUPERSEDE_RULES = {
   // A booking is one event: a new proposal for the same customer, catalog
   // service and day replaces the earlier one (a changed time or price is the
@@ -121,14 +127,21 @@ const SUPERSEDE_RULES = {
     afterConfirmed: 'refuse',
     confirmedMessage: 'An earlier card for this booking was already confirmed. Nothing was prepared. Tell the operator to move that visit instead of booking it again.',
   },
-  // A lead edit replaces an earlier edit only when it writes every field the
-  // earlier one wrote ("Jay" then "Jason"); a card for another field stays.
+  // A lead edit replaces an earlier edit only when it changes every field the
+  // earlier one would change ("Jay" then "Jason"); a card for another field
+  // stays. "Changes" is the card's approved change set (params._approved_changes,
+  // { field: { from, to } }, pinned from the preview and holding only fields
+  // whose value really differs), not the raw input: a raw field that already had
+  // that value is not part of the card's effect. Rows with no approved set (older
+  // rows) fall back to the raw contact fields. A card whose approved set is
+  // empty or malformed changes nothing (its Confirm is refused by the tool), so
+  // it is never treated as replaced and is left alone.
   update_lead_contact: {
     key: p => idPart(p.lead_id ?? p.leadId),
     covers: (newer, older) => {
-      const fields = x => ['first_name', 'last_name', 'phone', 'email'].filter(f => x[f] !== undefined);
-      const written = fields(older);
-      return written.length > 0 && written.every(f => newer[f] !== undefined);
+      const written = leadFieldsChanged(older);
+      const covered = leadFieldsChanged(newer);
+      return written.length > 0 && written.every(f => covered.includes(f));
     },
     afterConfirmed: 'allow',
   },

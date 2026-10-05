@@ -81,6 +81,35 @@ suite('IB superseded confirmation cards in isolated Postgres', () => {
     expect(await status(c.id)).toBe('pending');
   });
 
+  test('a lead edit is judged by the fields its card really changes, not the raw input', async () => {
+    const change = (from, to) => ({ from, to });
+    // The first card sends first_name (already Jay) and a new email; only the email is approved.
+    const older = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Jay', email: 'new@example.invalid', _approved_changes: { email: change('old@example.invalid', 'new@example.invalid') } }, { noTask: true, startedAt: at(-5000) });
+    // A later card that approves a different field only does not replace it.
+    const name = await propose('update_lead_contact', { lead_id: leadId, last_name: 'Smith', _approved_changes: { last_name: change(null, 'Smith') } }, { noTask: true, startedAt: at(-4000) });
+    expect(await status(older.id)).toBe('pending');
+    // A later email-only correction replaces it, although it omits first_name.
+    const fix = await propose('update_lead_contact', { lead_id: leadId, email: 'fixed@example.invalid', _approved_changes: { email: change('old@example.invalid', 'fixed@example.invalid') } }, { noTask: true, startedAt: at(-3000) });
+    expect(await status(older.id)).toBe('cancelled');
+    expect(await claim(older)).toEqual({ error: 'cancelled' });
+    expect(await status(name.id)).toBe('pending');
+    expect(await status(fix.id)).toBe('pending');
+    // The newer card's raw first_name does not count when it approves only the email.
+    const jason = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Jason', email: 'x@example.invalid', _approved_changes: { email: change('fixed@example.invalid', 'x@example.invalid') } }, { noTask: true, startedAt: at(-2000) });
+    const firstOnly = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Ann', _approved_changes: { first_name: change('Jay', 'Ann') } }, { noTask: true, startedAt: at(-1000) });
+    expect(await status(jason.id)).toBe('pending'); // first_name was not in its approved set, so the first_name card covers nothing of it
+    expect(await status(firstOnly.id)).toBe('pending');
+    expect(await status(fix.id)).toBe('cancelled'); // replaced by the later email card
+  });
+
+  test('a lead card with no approved set uses the raw fields; one with an empty set is left alone', async () => {
+    const raw = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Raw' }, { noTask: true, startedAt: at(-5000) });
+    const empty = await propose('update_lead_contact', { lead_id: leadId, last_name: 'Empty', _approved_changes: {} }, { noTask: true, startedAt: at(-4000) });
+    await propose('update_lead_contact', { lead_id: leadId, first_name: 'Newer', last_name: 'Newer', _approved_changes: { first_name: { from: 'Raw', to: 'Newer' }, last_name: { from: null, to: 'Newer' } } }, { noTask: true, startedAt: at(-3000) });
+    expect(await status(raw.id)).toBe('cancelled');
+    expect(await status(empty.id)).toBe('pending'); // changes nothing, never "replaced"
+  });
+
   test('a lead edit that rewrites the same field cancels the older edit; other fields or leads stay', async () => {
     const jay = await propose('update_lead_contact', { lead_id: leadId, first_name: 'Jay' }, { noTask: true, startedAt: at(-5000) });
     const email = await propose('update_lead_contact', { lead_id: leadId, email: 'synthetic@example.invalid' }, { noTask: true, startedAt: at(-4000) });
