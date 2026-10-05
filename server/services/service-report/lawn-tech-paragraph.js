@@ -383,6 +383,60 @@ function haystacks(inputs) {
   };
 }
 
+// ── Closed vocabulary: a word the paragraph may use comes from here, from a known
+// condition term, from an applied product's name, or from the inputs themselves.
+// Anything else ("nematodes", "Zorbex", a neighbor's name) rejects the paragraph:
+// the model cannot name a diagnosis, product or person the record does not carry.
+const PARAGRAPH_WORDS = new Set(`
+a an the and or but so nor of to in on at for from with by as into onto over under across along near
+around between through about after before during while than then this that these those it its they
+them their there here we our us you your is are was were be been being has have had do does did not
+no can may might could should would will also too very more most less least few some any all each
+every both either much many such only just still even again back out up down off away well now today
+right left top bottom middle rest part parts whole entire full main
+lawn lawns turf grass yard yards area areas spot spots section sections front side sides rear corner
+corners edge edges border strip bed beds driveway walkway sidewalk street curb fence fenceline house
+home property shade shaded sun sunny soil ground
+treat treated treating treatment treatments apply applied application put went go going gone down fed
+feed feeding fertilize fertilized spray sprayed spread cover covered covering keep keeping kept watch
+watching watched check checking checked look looking looked looks see seeing saw seen find finding found
+notice noticed spotted observe observed show showing showed shows explain explains explained
+work working worked help helps helped helping
+product products granular liquid fertilizer fertilizers insecticide fungicide herbicide control preventive
+thin thinning thick thicker thickness fill filling filled full fuller growth grow growing grown green
+greener color colour healthy health strong stronger weak weaker stressed stress damage damaged recover
+recovering recovery repair repairing settle settling
+eye close closer note notes visit visits time trouble
+photo photos picture pictures image images
+which what where when why how who
+good better best normal usual same new old little small large big ok fine
+technician team technicians
+against ahead behind compared compare last prior previous protect protects protected protecting recovered recovers
+schedule shape signs since steady track expected early progress improving improved improvement other own make got sure
+worse worst think thinks thought suspect suspects possible possibly maybe likely seem seems appear appears
+s t re ve ll d m
+`.split(/\s+/).filter(Boolean));
+
+// Every word of a candidate paragraph, minus the ones the rules above allow.
+function wordsOutsideVocabulary(text, inputs, hay) {
+  const known = new Set(words([
+    hay.note, hay.findingHigh, hay.findingLow, hay.prior, hay.progress, hay.fact, hay.targets,
+    ...inputs.products.flatMap((p) => [p.name, p.activeIngredient]),
+  ].filter(Boolean).join(' ')));
+  const out = [];
+  for (const sentence of splitSentences(text)) {
+    const covered = new Set();
+    for (const term of TERMS) {
+      for (const m of sentence.matchAll(new RegExp(term.re.source, 'gi'))) for (const w of words(m[0])) covered.add(w);
+    }
+    for (const w of words(sentence)) {
+      if (/^\d+$/.test(w) || PARAGRAPH_WORDS.has(w) || covered.has(w) || known.has(w) || GRASS_AND_PLACE_WORDS.has(w) || GENERIC_NAME_TOKENS.has(w)) continue;
+      out.push(w);
+    }
+  }
+  return out;
+}
+
 // ── Stance: does a text say a condition IS there, is NOT there, or MIGHT be? ──
 // A cue ("no", "not", "none", "didn't", "without", "free of", "ruled out") within
 // eight words before the term, or "not found / none / absent" right after it, makes
@@ -590,6 +644,8 @@ function validateParagraph(answer, rawInputs) {
 
   // Conditions, per sentence, against the inputs and the sentence's own sources.
   const hay = haystacks(inputs);
+  // Closed vocabulary, fixed code: the offending word may be a name.
+  if (wordsOutsideVocabulary(text, inputs, hay).length) fail('word_not_in_inputs');
   sentences.forEach((rawSentence, i) => {
     const sentence = rawSentence.replace(/\bWaves\s+Pest\s+Control\b/gi, 'we');
     const from = fromBySentence[i] || [];
@@ -864,6 +920,7 @@ module.exports = {
   buildUserMessage,
   techParagraphSchema,
   validateParagraph,
+  wordsOutsideVocabulary,
   generateTechParagraph,
   storedTechParagraphFor,
   readFrozenTechParagraph,
