@@ -1781,6 +1781,21 @@ postgres('access codes section', () => {
       expect(a).toBeTruthy();
     });
 
+    test('the only home changes: a door code equal to the mirrored garage code is not retired', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      const [a] = c.propertyIds;
+      await mirror();
+      const door = await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '2468', propertyId: a });
+      const b = randomUUID();
+      await trx('customer_properties').insert({
+        id: b, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      await trx('customer_properties').where({ id: a }).update({ active: false });
+      await mirror();
+      expect((await trx('customer_access_codes').where({ id: door.row.id }).first()).status).toBe('active');
+    });
+
     test('the only home changes: an office row the mirror adopted by value retires too', async () => {
       const c = await customer({ prefs: { garage_code: '2468' } });
       const [a] = c.propertyIds;

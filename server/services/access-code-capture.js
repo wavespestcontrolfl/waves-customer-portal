@@ -565,7 +565,7 @@ async function mirrorCustomer(conn, customerId) {
     const prefs = await trx('property_preferences').where({ customer_id: customerId }).forUpdate()
       .first(...PROFILE_KINDS.map((k) => PROFILE_FIELD[k]));
     const state = await trx('access_code_profile_mirror').where({ subject_id: customerId }).forUpdate().first();
-    const hashes = { ...(state?.hashes || {}) };
+    const hashes = { ...state?.hashes };
     const oneHome = homes.length === 1;
     if (oneHome && prefs) {
       const home = homes[0];
@@ -574,12 +574,13 @@ async function mirrorCustomer(conn, customerId) {
       // the home that remains are mirrored below.
       // Adopted rows (an office or text row the mirror matched by value) count
       // as mirrored too: they are found by the hashes the receipt recorded.
-      const recorded = Object.entries(hashes).filter(([k]) => k !== '_home').map(([, h]) => h).filter(Boolean);
+      const recorded = Object.entries(hashes).filter(([k, h]) => k !== '_home' && h);
       const former = await trx('customer_access_codes')
         .where({ customer_id: customerId, status: 'active', life: 'standing' })
         .where(function mirrored() {
           this.where('source_type', 'profile');
-          if (recorded.length) this.orWhereIn('value_hash', recorded);
+          // each saved hash only for the kind it was saved for
+          for (const [kind, h] of recorded) this.orWhere({ kind, value_hash: h });
         })
         .whereNotNull('property_id').whereNot('property_id', home).forUpdate();
       for (const row of former) {
