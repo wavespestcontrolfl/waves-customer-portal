@@ -203,7 +203,7 @@ describe('buildReportAskFacts', () => {
     expect(facts.report_sections).toHaveLength(2);
     expect(facts.weather_during_visit).toBe('about 86°F, wind about 6 mph, no rain in the last 24 hours');
     expect(facts.pest_pressure).toEqual({ label: 'Low', trend: 'improving', score_out_of_5: null, what_it_means: null, trend_summary: null });
-    expect(facts.next_visit).toEqual({ service: 'Quarterly Pest Control', date: 'Tuesday, January 5, 2027', arrival_window: '9 to 11 AM' });
+    expect(facts.next_visit).toEqual({ service: 'Quarterly Pest Control', date: 'Tuesday, January 5, 2027', arrival_window: 'between 9:00 AM and 11:00 AM' });
     expect(facts.reentry).toEqual([{ area: 'outside', status: 'dry time has passed' }]);
   });
 
@@ -250,7 +250,7 @@ describe('buildReportAskFacts', () => {
 
   test('a report with no applications says so', () => {
     const out = buildReportAskFacts({ data: reportData({ applications: [] }), now: NOW });
-    expect(out.products).toEqual([]);
+    expect(out.products).toBeUndefined();
     expect(out.products_note).toMatch(/No product applications/);
   });
 });
@@ -271,6 +271,14 @@ describe('buildReportAskPrompt', () => {
     expect(prompt.user).toContain('Alpine WSG');
     expect(prompt.user).not.toContain('Taurus SC');
     expect(prompt.user).not.toContain('Advion Roach Gel');
+  });
+
+  test('the question is scrubbed like the concern before it reaches the prompt', () => {
+    const question = 'Call me at 941-555-0100 or pat@example.com, gate code A1B2, I live at 4821 Example Lane. Was the kitchen done?';
+    const { user } = buildReportAskPrompt({ question, data: reportData(), nextAppointment, now: NOW });
+    const questionLine = user.split('\n')[0];
+    expect(questionLine).not.toMatch(/555|example\.com|A1B2|4821/);
+    expect(questionLine).toMatch(/Was the kitchen done\?/);
   });
 
   test('a question that names no product gets every product', () => {
@@ -311,6 +319,21 @@ describe('screenAskAnswer', () => {
     ['', 'empty'],
   ])('rejects %j (%s)', (answer, reason) => {
     expect(screen(answer)).toBe(reason);
+  });
+
+  test('a target named in the selected products approved wording is allowed; one known only from the targets is not', () => {
+    const wording = reportData();
+    wording.applications[1].product.report_copy.how_it_works = 'Taurus SC builds an outdoor barrier that stops ants.';
+    wording.applications[1].targets = ['ants', 'termites'];
+    const wordingFacts = buildReportAskFacts({ data: wording, now: NOW });
+    const run = (answer) => screenAskAnswer(answer, { question: 'What is Taurus SC?', data: wording, facts: wordingFacts });
+    expect(run('Taurus SC builds an outdoor barrier that stops ants.')).toBeNull();
+    expect(run('Taurus SC also works on termites.')).toBe('target_list');
+  });
+
+  test('more than four sentences is rejected', () => {
+    expect(screen('We treated the outside. We treated the kitchen. We checked the garage. We looked at the entry points.')).toBeNull();
+    expect(screen('We treated the outside. We treated the kitchen. We checked the garage. We looked at the entry points. We wrote it up.')).toBe('too_many_sentences');
   });
 
   test('a target pest the customer named is not a leak', () => {

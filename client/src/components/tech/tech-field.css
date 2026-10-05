@@ -31,7 +31,6 @@
   --tfx-amber-tint: rgba(133, 77, 14, .1);
   --tfx-red-tint: rgba(163, 45, 45, .1);
   --tfx-font: "Roboto", system-ui, sans-serif;
-  min-height: 100dvh;
   background: var(--surface-page, #fafaf9);
   color: var(--tf-ink);
   font-family: "Roboto", system-ui, sans-serif;
@@ -39,12 +38,14 @@
   line-height: 1.5;
   font-variant-numeric: tabular-nums;
 }
-.tf-header { position: sticky; top: 0; z-index: 50; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 16px; padding-top: calc(8px + env(safe-area-inset-top, 0px)); background: var(--tf-surface); border-bottom: 0.5px solid var(--tf-line); }
-.tf-brand { display: flex; align-items: center; gap: 7px; color: var(--tf-ink); font-size: 16px; font-weight: 500; text-decoration: none; min-height: 44px; white-space: nowrap; }
-.tf-brand strong { font-weight: 500; }
-.tf-brand svg { color: var(--tf-ink); width: 20px; height: 20px; }
-.tf-profile { font-size: 14px; color: var(--tf-muted); overflow-wrap: anywhere; text-align: right; }
-.tf-main { width: 100%; box-sizing: border-box; max-width: 1200px; margin: auto; padding: 16px 12px calc(108px + env(safe-area-inset-bottom, 0px)); }
+.tf-main { width: 100%; box-sizing: border-box; max-width: 1200px; margin: auto; padding: 16px 0 0; }
+/* Page-level section tabs (Today, Tools, More), styled like the admin line tabs
+   (.ui-tab): 14px, hairline rule under the row, ink underline on the current one. */
+.tf-tabs { display: flex; gap: 16px; max-width: 1200px; margin: 0 auto; border-bottom: 1px solid var(--tf-line); }
+.tf-tabs a { display: inline-flex; align-items: center; min-height: 44px; padding: 0 4px; margin-bottom: -1px; border-bottom: 2px solid transparent; color: var(--tf-muted); font-size: 14px; font-weight: 500; text-decoration: none; }
+.tf-tabs a:hover { color: var(--tf-ink); }
+.tf-tabs a[aria-current="page"] { color: var(--tf-ink); border-bottom-color: var(--tf-ink); }
+.tf-tabs a[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
 .tf-nav { position: fixed; bottom: 0; left: 0; right: 0; z-index: 50; display: flex; justify-content: center; padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px)); background: var(--tf-surface); border-top: 0.5px solid var(--tf-line); }
 .tf-nav a { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; min-height: 52px; flex: 1; max-width: 240px; color: var(--tf-faint); font-size: 11px; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; text-decoration: none; border-radius: 6px; }
 .tf-nav a svg { width: 20px; height: 20px; }
@@ -127,7 +128,7 @@
    surfaces in the admin look through the --tfx-* tokens above. */
 .tf-existing { color: var(--tf-ink); margin-top: 16px; }
 @media (min-width: 768px) {
-  .tf-main { padding: 20px 20px calc(108px + env(safe-area-inset-bottom, 0px)); }
+  .tf-main { padding: 20px 0 0; }
   .tf-today-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); align-items: start; gap: 16px; }
   /* Nothing rendered on the right (follow-through dark, no other cards): one
      full-width column instead of a blank one (Codex #5794). */
@@ -144,11 +145,3 @@
   @media (pointer: fine) { .tf-button, .tf-chip { min-height: 32px; } }
   .tf-primary { width: auto; }
 }
-
-/* Embedded in Waves Admin (/admin/today): .admin-main is the scroll container
-   and has a fixed height, so the shell fills it exactly and the main scrolls
-   on its own; the header and the field nav stay in view at any page length. */
-.tech-field.tf-embedded { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.tech-field.tf-embedded .tf-header { position: static; flex: none; }
-.tech-field.tf-embedded .tf-main { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding-bottom: 24px; }
-.tech-field.tf-embedded .tf-nav { position: static; flex: none; }
