@@ -181,7 +181,8 @@ function DriveLine({ service }) {
   // Only a stop the tech has not reached can run late: marking it en route
   // updates the status before the next refresh clears driveLateMin.
   const late = canMarkEnRoute(service) && Number.isFinite(service.driveLateMin) && service.driveLateMin > 0;
-  const start = parseHHMM(service.windowStart);
+  // The promise missed: a later visit at the stop can be the late one.
+  const start = parseHHMM(service.driveLateWindowStart || service.windowStart);
   const from = service.drivePrevName ? ` from ${service.drivePrevName}` : '';
   return (
     <div
