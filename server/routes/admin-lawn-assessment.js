@@ -482,9 +482,22 @@ router.get('/customers', async (req, res, next) => {
 // reject so a tech can't accidentally attach one customer's assessment
 // to another customer's appointment.
 // =========================================================================
+// Cloudflare fronts the portal API and answers 524 to the technician once an
+// origin response passes 100 s, while the AI calls below kept running against
+// the dispatcher's 4-minute default budget (and the legacy Gemini scorer had no
+// deadline at all). The whole AI phase of one /assess request now shares this
+// wall-clock budget, leaving room for the photo upload and the DB work around
+// it; a photo that misses it falls to the existing "enter scores manually" path.
+const LAWN_ASSESS_AI_BUDGET_MS = 70 * 1000;
+
 router.post('/assess', async (req, res, next) => {
   try {
     const { customerId, serviceId, photos } = req.body;
+    // What is left of the budget when a call starts; zero or less once it has
+    // run out, which the services read as "skip the call" (a queued photo in
+    // the pool below then takes the manual-scores path instead of a fresh call).
+    const aiDeadline = Date.now() + LAWN_ASSESS_AI_BUDGET_MS;
+    const aiTimeoutMs = () => aiDeadline - Date.now();
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
     // GATE_LAWN_VISIT_ASSESSMENT (services/lawn-visit-assessment.js): one
     // multimodal call over every photo of the visit in place of the per-photo
@@ -591,7 +604,7 @@ router.post('/assess', async (req, res, next) => {
     let qualityResults = visitAssessmentEnabled
       ? photos.map(() => ({ passed: true, issues: [] }))
       : await withConcurrency(photos, 3, (photo) =>
-        LawnIntel.assessPhotoQuality(photo.data, photo.mimeType || 'image/jpeg'),
+        LawnIntel.assessPhotoQuality(photo.data, photo.mimeType || 'image/jpeg', { timeoutMs: aiTimeoutMs() }),
       );
 
     // Track quality outcomes by ORIGINAL photo index. The downstream
@@ -768,7 +781,7 @@ router.post('/assess', async (req, res, next) => {
     // at 6 concurrent vision calls per /assess request, which is
     // well inside both providers' burst limits.
     const photoResults = visitAssessmentEnabled ? [] : await withConcurrency(photosToAnalyze, 3, (photo) =>
-      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg', visionContext),
+      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg', visionContext, { timeoutMs: aiTimeoutMs() }),
     );
 
     // Map AI result back to original photo index. validResults preserves
@@ -807,7 +820,7 @@ router.post('/assess', async (req, res, next) => {
     let mergedComposite;
     let displayScores;
     if (visitAssessmentEnabled) {
-      visitAnalysis = await visitAssessment.analyzeVisit({ photos, visionContext, shotList: shotListEnabled });
+      visitAnalysis = await visitAssessment.analyzeVisit({ photos, visionContext, shotList: shotListEnabled, timeoutMs: aiTimeoutMs() });
       let allPoor;
       ({ qualityResults, resultByPhotoIndex, allPoor } = visitResult.photoRowInputs(visitAnalysis));
       // The model answered but called every photo unusable: the legacy
