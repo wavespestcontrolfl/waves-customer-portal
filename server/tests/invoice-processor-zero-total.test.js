@@ -10,7 +10,7 @@ const mockWrites = [];
 jest.mock('../models/db', () => {
   const chain = (table) => {
     const q = {
-      where: () => q, whereILike: () => q, whereIn: () => q,
+      where: () => q, whereILike: () => q, whereIn: () => q, whereRaw: () => q,
       first: async () => null,
       update: async (row) => { mockWrites.push([table, 'update', row]); return 1; },
       insert: (row) => { mockWrites.push([table, 'insert', row]); return { returning: async () => [{ id: 'exp-1' }] }; },
