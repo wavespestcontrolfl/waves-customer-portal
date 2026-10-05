@@ -149,7 +149,7 @@ postgres('access codes section', () => {
       const read = stub([gateItem()]);
       for (const bad of [undefined, '', '2040-01-01', '2040-01-01T00:00:00', 'soon']) {
         if (bad === undefined) delete process.env.GATE_ACCESS_CODES_SECTION_SINCE; else process.env.GATE_ACCESS_CODES_SECTION_SINCE = bad;
-        expect(await sweep(read)).toEqual({ skipped: 'activation_time_required', movedRetired: 0 });
+        expect(await sweep(read)).toMatchObject({ skipped: 'activation_time_required', movedRetired: 0, mirror: { failed: 0 } });
       }
       expect(read).not.toHaveBeenCalled();
     });
@@ -408,7 +408,8 @@ postgres('access codes section', () => {
         gateItem({ kind: 'door', code: '#4821', quote: 'The gate code is #4821' }),
       ]);
       expect(await sweep(read)).toMatchObject({ found: 2 });
-      const filed = (await rows(c.id)).map((r) => [r.kind, r.code]).sort();
+      // (the profile's own two codes are mirrored as `profile` rows, not read from the text)
+      const filed = (await rows(c.id)).filter((r) => r.source_type === 'sms').map((r) => [r.kind, r.code]).sort();
       expect(filed).toEqual([['door', '#4821'], ['garage', '2468']]);
     });
 
@@ -461,7 +462,8 @@ postgres('access codes section', () => {
       await text(c.id, 'The gate code is #4821, press 2 first');
       const read = stub([gateItem({ instructions: 'press 2 first', quote: 'The gate code is #4821, press 2 first' })]);
       expect(await sweep(read)).toMatchObject({ found: 1 });
-      expect((await rows(c.id))[0]).toMatchObject({ code: '#4821', instructions: 'press 2 first', status: 'found' });
+      // (the profile's own #4821 is mirrored as an active `profile` row beside it)
+      expect((await rows(c.id)).filter((r) => r.source_type === 'sms')).toMatchObject([{ code: '#4821', instructions: 'press 2 first', status: 'found' }]);
     });
 
     test('a gate turned off during the model call files nothing and leaves no receipt', async () => {
@@ -554,13 +556,20 @@ postgres('access codes section', () => {
       expect((await profile(c.id)).lockbox_code).toBe('5-5-5');
     });
 
-    test('never overwrites a filled field', async () => {
+    test('on a one-home account the accepted code replaces an older profile value (one list)', async () => {
       const c = await customer({ prefs: { neighborhood_gate_code: '#1111' } });
       const row = await found(c.id);
       const out = await access.accept(trx, row.id, { adminUserId: ADMIN_ID });
-      expect(out).toMatchObject({ ok: true, profileField: null });
+      expect(out).toMatchObject({ ok: true, profileField: 'neighborhood_gate_code' });
       expect(out.row.status).toBe('active');
-      expect((await profile(c.id)).neighborhood_gate_code).toBe('#1111');
+      expect((await profile(c.id)).neighborhood_gate_code).toBe('#4821');
+    });
+
+    test('the same value already on the profile is not rewritten', async () => {
+      const c = await customer({ prefs: { neighborhood_gate_code: '# 4821' } });
+      const row = await found(c.id);
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: true, profileField: null });
+      expect((await profile(c.id)).neighborhood_gate_code).toBe('# 4821');
     });
 
     test('an empty string in the field counts as empty, a space-only value too', async () => {
@@ -951,8 +960,8 @@ postgres('access codes section', () => {
       await sweep(stub([gateItem({ kind: 'garage', code: '1357', quote: 'The garage code is 1357' })]));
       const moved = (await rows(winner.id))[0];
       const keep = await found(winner.id, { kind: 'garage', code: '2468' });
-      await access.accept(trx, keep.id, {});
       await access.accept(trx, moved.id, {});
+      await access.accept(trx, keep.id, {});
       await trx('sms_log').where({ id }).update({ customer_id: loser.id });
       const out = await access.retire(trx, keep.id, {});
       expect(out).toMatchObject({ ok: true, promoted: false });
@@ -1162,6 +1171,32 @@ postgres('access codes section', () => {
       expect(await sweep(stub([gateItem({ kind: 'door', code: '1234', quote: 'The door code is 1234' })]))).toMatchObject({ found: 1 });
     });
 
+    test('an office save of a new code on a one-home account retires the old code of that kind at once', async () => {
+      const c = await customer();
+      const first = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468' });
+      const second = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '1357' });
+      expect(second).toMatchObject({ ok: true });
+      expect((await trx('customer_access_codes').where({ id: first.row.id }).first()).status).toBe('retired');
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBe('1357');
+      expect((await access.listForCustomer(trx, c.id)).active.map((r) => r.code)).toEqual(['1357']);
+    });
+
+    test('an office save also retires an older home-less code of that kind on a one-home account', async () => {
+      const c = await customer();
+      const old = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468' });
+      await trx('customer_access_codes').where({ id: old.row.id }).update({ property_id: null });
+      await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '1357' });
+      expect((await trx('customer_access_codes').where({ id: old.row.id }).first()).status).toBe('retired');
+    });
+
+    test('with no active home an office save never replaces the profile code', async () => {
+      const c = await customer();
+      await trx('property_preferences').insert({ customer_id: c.id, garage_code: '2468' }).onConflict('customer_id').merge();
+      await trx('customer_properties').where({ customer_id: c.id }).update({ active: false });
+      await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '1357' });
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBe('2468');
+    });
+
     test('home choices name the unit and the property label', async () => {
       const c = await customer({ properties: 2 });
       const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
@@ -1210,7 +1245,7 @@ postgres('access codes section', () => {
       const later = await visit(c.id, etDateString(addETDays(new Date(), 5)));
       const done = await visit(c.id, etDateString(new Date()), 'completed');
       await trx('scheduled_services').whereIn('id', [today, later, done]).update({ technician_id: techId });
-      const row = await found(c.id, { kind: 'garage', code: '2468' });
+      const row = await found(c.id, { kind: 'door', code: '2468' });
       await access.accept(trx, row.id, {});
       const asTech = { techRole: 'technician', technicianId: techId };
       const out = await access.listForVisit(trx, asTech, today);
@@ -1228,7 +1263,7 @@ postgres('access codes section', () => {
       const theirs = await visit(c.id, etDateString(addETDays(new Date(), 1)));
       await trx('scheduled_services').where({ id: mine }).update({ technician_id: techId });
       await trx('scheduled_services').where({ id: theirs }).update({ technician_id: other });
-      const standing = await found(c.id, { kind: 'garage', code: '2468' });
+      const standing = await found(c.id, { kind: 'door', code: '2468' });
       await access.accept(trx, standing.id, {});
       const forMine = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
       const forTheirs = await found(c.id, { kind: 'door', code: '#8080', life: 'visit' });
@@ -1261,21 +1296,24 @@ postgres('access codes section', () => {
       expect((await profile(c.id)).garage_code).toBe('1357');
     });
 
-    test('retire hands the profile field to another active code of the same kind', async () => {
+    test('on a one-home account a newer save replaces the older code, so retiring it leaves the field empty', async () => {
       const c = await customer();
       const first = await found(c.id, { kind: 'garage', code: '2468' });
       await access.accept(trx, first.id, {});
       const second = await found(c.id, { kind: 'garage', code: '1357' });
       await access.accept(trx, second.id, {});
-      expect((await profile(c.id)).garage_code).toBe('2468');
-      expect(await access.retire(trx, first.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: true, clearedField: 'garage_code', promoted: true });
+      // One source: the newer save retired the older code in the same transaction.
+      expect((await trx('customer_access_codes').where({ id: first.id }).first()).status).toBe('retired');
       expect((await profile(c.id)).garage_code).toBe('1357');
+      expect(await access.retire(trx, second.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: true, clearedField: 'garage_code', promoted: false });
+      expect((await profile(c.id)).garage_code).toBeNull();
     });
 
     test('retire leaves a profile field that holds a different value', async () => {
-      const c = await customer({ prefs: { garage_code: '9999' } });
+      const c = await customer();
       const row = await found(c.id, { kind: 'garage', code: '2468' });
       await access.accept(trx, row.id, {});
+      await trx('property_preferences').where({ customer_id: c.id }).update({ garage_code: '9999' });
       const out = await access.retire(trx, row.id, { adminUserId: ADMIN_ID });
       expect(out.clearedField).toBeNull();
       expect((await profile(c.id)).garage_code).toBe('9999');
@@ -1389,6 +1427,390 @@ postgres('access codes section', () => {
       const logged = JSON.stringify(logger.error.mock.calls);
       expect(logged).toContain('XX000');
       expect(logged).not.toContain('4821');
+    });
+  });
+
+  describe('profile mirror (one list)', () => {
+    const mirror = () => access.mirrorProfileCodes(trx);
+    const profile = (customerId) => trx('property_preferences').where({ customer_id: customerId }).first();
+    // A later profile edit gets its own updated_at (a test transaction's now() never moves).
+    let tick = 0;
+    const edit = (customerId, fields) => trx('property_preferences').where({ customer_id: customerId })
+      .update({ ...fields, updated_at: new Date(Date.parse('2040-03-10T16:00:00Z') + (tick += 1) * 60000) });
+    const live = (customerId, kind) => trx('customer_access_codes')
+      .where({ customer_id: customerId, status: 'active', ...(kind ? { kind } : {}) }).orderBy('created_at').orderBy('id');
+    const tech = async () => {
+      const id = randomUUID();
+      await trx('technicians').insert({ id, name: 'Sample Tech' });
+      return id;
+    };
+    const staffRow = async (customerId, extra = {}) => {
+      const row = await found(customerId, extra);
+      await trx('customer_access_codes').where({ id: row.id }).update({ status: 'active', source_type: 'staff', source_id: null });
+      return row;
+    };
+    const atVisit = async (customerId, propertyId) => {
+      const id = await visit(customerId, etDateString(new Date()));
+      await trx('scheduled_services').where({ id }).update({ property_id: propertyId });
+      return id;
+    };
+
+    test('a one-home profile code becomes one active profile row bound to the home, and a re-run changes nothing', async () => {
+      const c = await customer({ prefs: { neighborhood_gate_code: '# 4821', garage_code: '2468' } });
+      expect(await mirror()).toMatchObject({ checked: 1, created: 2, retired: 0, failed: 0 });
+      const filed = await live(c.id);
+      expect(filed.map((r) => [r.kind, r.code]).sort()).toEqual([['garage', '2468'], ['neighborhood_gate', '# 4821']]);
+      for (const r of filed) {
+        expect(r).toMatchObject({ source_type: 'profile', source_id: null, life: 'standing', property_id: c.propertyIds[0], decided_by: null });
+      }
+      expect(filed.find((r) => r.kind === 'neighborhood_gate').value_hash).toBe(access.valueHash('#4821', null));
+      // the profile fields are never written by the mirror
+      expect(await profile(c.id)).toMatchObject({ neighborhood_gate_code: '# 4821', garage_code: '2468' });
+      expect(await mirror()).toMatchObject({ checked: 0, created: 0 });
+      expect(await live(c.id)).toHaveLength(2);
+      const events = await trx('audit_log').where({ action: 'access_code.profile_mirrored' }).whereIn('resource_id', filed.map((r) => r.id));
+      expect(events).toHaveLength(2);
+      expect(events.every((e) => e.actor_type === 'system')).toBe(true);
+      expect(JSON.stringify(events)).not.toMatch(/4821|2468/);
+    });
+
+    test('an edit of the field retires the old row and adds the new one', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await mirror();
+      await edit(c.id, { garage_code: '1357' });
+      expect(await mirror()).toMatchObject({ checked: 1, created: 1, retired: 1 });
+      expect((await live(c.id)).map((r) => r.code)).toEqual(['1357']);
+      const old = await trx('customer_access_codes').where({ customer_id: c.id, code: '2468' }).first();
+      expect(old).toMatchObject({ status: 'retired', decided_by: null });
+      expect((await profile(c.id)).garage_code).toBe('1357');
+      const ev = await trx('audit_log').where({ action: 'access_code.profile_superseded', resource_id: old.id }).first('actor_type', 'metadata');
+      expect(ev.actor_type).toBe('system');
+      expect(JSON.stringify(ev.metadata)).not.toContain('2468');
+    });
+
+    test('clearing the field retires the mirrored row only', async () => {
+      const c = await customer({ prefs: { garage_code: '2468', lockbox_code: '1212' } });
+      const door = await staffRow(c.id, { kind: 'door', code: '7716' });
+      await mirror();
+      await edit(c.id, { garage_code: null });
+      expect(await mirror()).toMatchObject({ retired: 1, created: 0 });
+      expect((await live(c.id)).map((r) => [r.kind, r.code]).sort()).toEqual([['door', '7716'], ['lockbox', '1212']]);
+      expect((await trx('customer_access_codes').where({ id: door.id }).first()).status).toBe('active');
+    });
+
+    test('a profile change on a one-home account retires the office rows of that kind too (one source)', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      const staff = await staffRow(c.id, { kind: 'garage', code: '1357' });
+      const staffSameValue = await staffRow(c.id, { kind: 'garage', code: '2468' });
+      const directionsOnly = await staffRow(c.id, { kind: 'garage', code: null, instructions: 'Side door of the garage' });
+      await mirror();
+      const status = async (r) => (await trx('customer_access_codes').where({ id: r.id }).first()).status;
+      expect(await status(staff)).toBe('retired');
+      // a row that already holds the profile's value is the row: no second copy
+      expect(await status(staffSameValue)).toBe('active');
+      expect(await status(directionsOnly)).toBe('active');
+      expect((await live(c.id, 'garage')).filter((r) => r.code)).toHaveLength(1);
+      expect((await profile(c.id)).garage_code).toBe('2468');
+    });
+
+    test('a field the editor empties takes the office rows of its kind with it, once the sweep had mirrored a value', async () => {
+      const c = await customer({ prefs: { lockbox_code: '1212' } });
+      await mirror();
+      const staff = await staffRow(c.id, { kind: 'lockbox', code: '3434' });
+      await edit(c.id, { lockbox_code: null });
+      await mirror();
+      expect((await trx('customer_access_codes').where({ id: staff.id }).first()).status).toBe('retired');
+      expect(await live(c.id, 'lockbox')).toEqual([]);
+    });
+
+    test('a field that never held a mirrored value leaves older office rows alone', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      const staff = await staffRow(c.id, { kind: 'lockbox', code: '3434' });
+      await mirror();
+      expect((await trx('customer_access_codes').where({ id: staff.id }).first()).status).toBe('active');
+    });
+
+    test('retiring the mirrored row in the office clears the same value from the profile, and the mirror leaves it cleared', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await mirror();
+      const [row] = await live(c.id, 'garage');
+      expect(await access.retire(trx, row.id, { adminUserId: ADMIN_ID })).toMatchObject({ ok: true, clearedField: 'garage_code' });
+      expect((await profile(c.id)).garage_code).toBeNull();
+      await mirror();
+      expect(await live(c.id, 'garage')).toEqual([]);
+    });
+
+    test('an office accept replaces the profile value and the mirror keeps it (the accept is not undone)', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await mirror();
+      const row = await found(c.id, { kind: 'garage', code: '1357' });
+      await access.accept(trx, row.id, { adminUserId: ADMIN_ID });
+      await edit(c.id, {});
+      await mirror();
+      expect((await live(c.id, 'garage')).map((r) => [r.code, r.source_type])).toEqual([['1357', 'sms']]);
+      expect((await profile(c.id)).garage_code).toBe('1357');
+    });
+
+    test('a customer with several homes is skipped, and a value the table cannot hold is left out', async () => {
+      const multi = await customer({ properties: 2, prefs: { garage_code: '2468' } });
+      const odd = await customer({ prefs: { lockbox_code: 'x'.repeat(41), garage_code: '1357' } });
+      expect(await mirror()).toMatchObject({ checked: 2, created: 1, failed: 0 });
+      expect(await live(multi.id)).toEqual([]);
+      expect((await live(odd.id)).map((r) => r.code)).toEqual(['1357']);
+    });
+
+    test('gate off: the tick mirrors nothing', async () => {
+      process.env.GATE_ACCESS_CODES_SECTION = 'false';
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      expect(await sweep(stub([]))).toMatchObject({ skipped: 'gate_off' });
+      expect(await live(c.id)).toEqual([]);
+      expect(await trx('access_code_profile_mirror').where({ subject_id: c.id })).toEqual([]);
+    });
+
+    test('the tick mirrors with the gate on, and a failure fails the job', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      expect(await sweep(stub([]))).toMatchObject({ mirror: { checked: 1, created: 1, failed: 0 } });
+      expect((await live(c.id)).map((r) => r.source_type)).toEqual(['profile']);
+      delete process.env.GATE_ACCESS_CODES_SECTION_SINCE;
+      const d = await customer({ prefs: { lockbox_code: '1212' } });
+      expect(await sweep(stub([]))).toMatchObject({ skipped: 'activation_time_required', mirror: { created: 1 } });
+      expect((await live(d.id)).map((r) => r.kind)).toEqual(['lockbox']);
+    });
+
+    test('a deleted customer is not mirrored', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await trx('customers').where({ id: c.id }).update({ deleted_at: new Date() });
+      expect(await mirror()).toMatchObject({ checked: 0 });
+      expect(await live(c.id)).toEqual([]);
+    });
+
+    test('the visit read marks the profile-backed kinds profileBacked on a one-home account and drops nothing', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await mirror();
+      await staffRow(c.id, { kind: 'door', code: '7716' });
+      await staffRow(c.id, { kind: 'call_box', code: '55' });
+      const v = await atVisit(c.id, c.propertyIds[0]);
+      const out = await access.listForVisit(trx, { techRole: 'admin' }, v);
+      expect(out.codes.map((r) => [r.kind, r.code, r.profileBacked === true]).sort())
+        .toEqual([['call_box', '55', false], ['door', '7716', false], ['garage', '2468', true]]);
+      // the office list still has the mirrored row
+      expect((await access.listForCustomer(trx, c.id)).active.map((r) => r.sourceType)).toContain('profile');
+    });
+
+    test('the visit read marks standing code rows of a profile-backed kind, not directions-only or visit-life rows', async () => {
+      const c = await customer();
+      const bare = await staffRow(c.id, { kind: 'lockbox', code: '1212' });
+      const directions = await staffRow(c.id, { kind: 'lockbox', code: null, instructions: 'Behind the water meter' });
+      const v = await atVisit(c.id, c.propertyIds[0]);
+      const out = await access.listForVisit(trx, { techRole: 'admin' }, v);
+      expect(out.codes.find((r) => r.id === bare.id)).toMatchObject({ profileBacked: true });
+      expect(out.codes.find((r) => r.id === directions.id)).not.toHaveProperty('profileBacked');
+      expect(Object.keys(out.codes.find((r) => r.id === bare.id)).sort())
+        .toEqual(['code', 'id', 'instructions', 'kind', 'life', 'profileBacked', 'scheduledServiceId']);
+    });
+
+    test('the visit read keeps every kind for a multi-home account', async () => {
+      const c = await customer({ properties: 2, prefs: { garage_code: '2468' } });
+      const [a, b] = c.propertyIds;
+      const row = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, row.id, { propertyId: a });
+      const atA = await atVisit(c.id, a);
+      const atB = await atVisit(c.id, b);
+      const out = await access.listForVisit(trx, { techRole: 'admin' }, atA);
+      expect(out.codes.map((r) => r.code)).toEqual(['2468']);
+      expect(out.codes[0]).not.toHaveProperty('profileBacked');
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, atB)).codes).toEqual([]);
+    });
+
+    test('a home added after the mirror: the customer is skipped and no row moves', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await mirror();
+      const [row] = await live(c.id, 'garage');
+      expect(row.property_id).toBe(c.propertyIds[0]);
+      const second = randomUUID();
+      await trx('customer_properties').insert({
+        id: second, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      // the profile changes too: a multi-home account is not mirrored, so the old row stays on its own home
+      await edit(c.id, { garage_code: '1357' });
+      expect(await mirror()).toMatchObject({ checked: 1, created: 0, retired: 0 });
+      const after = await live(c.id, 'garage');
+      expect(after.map((r) => [r.id, r.code, r.property_id])).toEqual([[row.id, '2468', c.propertyIds[0]]]);
+      // strict home rule: shown at the first home only
+      const atFirst = await atVisit(c.id, c.propertyIds[0]);
+      const atSecond = await atVisit(c.id, second);
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, atFirst)).codes.map((r) => r.code)).toEqual(['2468']);
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, atSecond)).codes).toEqual([]);
+    });
+
+    test('a customer who drops back to one home is mirrored again', async () => {
+      const c = await customer({ properties: 2, prefs: { garage_code: '2468' } });
+      await mirror();
+      expect(await live(c.id)).toEqual([]);
+      await trx('customer_properties').where({ id: c.propertyIds[1] }).update({ active: false });
+      expect(await mirror()).toMatchObject({ checked: 1, created: 1 });
+      expect((await live(c.id)).map((r) => [r.code, r.property_id])).toEqual([['2468', c.propertyIds[0]]]);
+    });
+
+    test('a technician reads a one-home visit with the mirrored code marked profileBacked', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await mirror();
+      const techId = await tech();
+      const v = await visit(c.id, etDateString(new Date()));
+      await trx('scheduled_services').where({ id: v }).update({ technician_id: techId });
+      const out = await access.listForVisit(trx, { techRole: 'technician', technicianId: techId }, v);
+      expect(out).toMatchObject({ ok: true, codes: [{ kind: 'garage', code: '2468', profileBacked: true }] });
+    });
+
+    test('a field edited to a value the table cannot hold retires the mirrored row, keeping the profile', async () => {
+      const c = await customer({ prefs: { garage_code: '2468', lockbox_code: '1212' } });
+      await mirror();
+      const long = 'x'.repeat(41);
+      await edit(c.id, { garage_code: long });
+      expect(await mirror()).toMatchObject({ retired: 1, created: 0 });
+      expect((await live(c.id)).map((r) => [r.kind, r.code])).toEqual([['lockbox', '1212']]);
+      expect((await profile(c.id)).garage_code).toBe(long);
+      // control characters too, and an adopted office row of the old value goes with it
+      const staff = await staffRow(c.id, { kind: 'lockbox', code: '1212' });
+      await edit(c.id, { lockbox_code: '12\n12' });
+      await mirror();
+      expect(await live(c.id)).toEqual([]);
+      expect((await trx('customer_access_codes').where({ id: staff.id }).first()).status).toBe('retired');
+    });
+
+    test('mirror-only path (no activation time): a failed mirror fails the job with the tally', async () => {
+      delete process.env.GATE_ACCESS_CODES_SECTION_SINCE;
+      await customer({ prefs: { garage_code: '2468' } });
+      const failing = new Proxy((...args) => trx(...args), {
+        get(_t, key) {
+          if (key === 'transaction') return () => Promise.reject(Object.assign(new Error('boom'), { code: 'XX000' }));
+          const value = trx[key];
+          return typeof value === 'function' ? value.bind(trx) : value;
+        },
+      });
+      await expect(access.runAccessCodeNet({ now: NOW, conn: failing, read: stub([]) })).rejects
+        .toMatchObject({ code: 'ACCESS_NET_FAILURES', tally: { skipped: 'activation_time_required', mirror: { failed: 1 } } });
+    });
+
+    test('the only home changes: the former home\'s profile rows retire at once and the new home gets them', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await mirror();
+      const [a] = c.propertyIds;
+      const b = randomUUID();
+      await trx('customer_properties').insert({
+        id: b, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      await mirror();
+      expect((await live(c.id)).map((r) => r.property_id)).toEqual([a]);
+      await trx('customer_properties').where({ id: a }).update({ active: false });
+      // no profile edit, no day passed: the changed sole home alone makes it due
+      expect(await mirror()).toMatchObject({ checked: 1, created: 1, retired: 1 });
+      expect((await live(c.id)).map((r) => [r.code, r.property_id])).toEqual([['2468', b]]);
+      const old = await trx('customer_access_codes').where({ customer_id: c.id, property_id: a }).first();
+      expect(old.status).toBe('retired');
+      expect(await mirror()).toMatchObject({ checked: 0 });
+    });
+
+    test('a profile code that differs only by letter case adopts the office row and keeps its directions', async () => {
+      const c = await customer({ prefs: { garage_code: 'AB12' } });
+      const [a] = c.propertyIds;
+      const office = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: 'ab12', instructions: 'Side keypad', propertyId: a });
+      await trx('property_preferences').where({ customer_id: c.id }).update({ garage_code: 'AB12', updated_at: trx.fn.now() });
+      await mirror();
+      expect((await trx('customer_access_codes').where({ id: office.row.id }).first()).status).toBe('active');
+    });
+
+    test('the receipt table is invisible to the customer merge (no customer_id column, no foreign key)', async () => {
+      const cols = await trx('information_schema.columns').where({ table_name: 'access_code_profile_mirror' }).pluck('column_name');
+      expect(cols).toContain('subject_id');
+      expect(cols).not.toContain('customer_id');
+      const fks = await trx.raw("SELECT 1 FROM pg_constraint WHERE conrelid = 'access_code_profile_mirror'::regclass AND contype = 'f'");
+      expect(fks.rows).toHaveLength(0);
+    });
+
+    test('rows that differ only by case collapse to one, and the receipt keeps the adopted row\'s hash', async () => {
+      const c = await customer({ prefs: { garage_code: 'AB12' } });
+      const [a] = c.propertyIds;
+      const one = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: 'ab12', propertyId: a });
+      const [two] = await trx('customer_access_codes').insert({ customer_id: c.id, property_id: a, kind: 'garage', code: 'Ab12', life: 'standing',
+        status: 'active', source_type: 'staff', value_hash: access.valueHash('Ab12'), created_at: new Date(Date.now() + 1000) }).returning('*');
+      await trx('property_preferences').where({ customer_id: c.id }).update({ garage_code: 'AB12', updated_at: trx.fn.now() });
+      await mirror();
+      expect((await live(c.id)).map((r) => r.id)).toEqual([one.row.id]);
+      expect((await trx('customer_access_codes').where({ id: two.id }).first()).status).toBe('retired');
+      expect((await trx('access_code_profile_mirror').where({ subject_id: c.id }).first()).hashes.garage).toBe(access.valueHash('ab12'));
+    });
+
+    test('a mirrored row stays in view after its hashes were cleared, so an emptied field still retires it', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      await mirror();
+      const b = randomUUID();
+      await trx('customer_properties').insert({
+        id: b, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      await mirror();
+      await trx('customer_properties').where({ id: b }).update({ active: false });
+      await trx('property_preferences').where({ customer_id: c.id }).update({ garage_code: null, updated_at: trx.fn.now() });
+      await mirror();
+      expect(await live(c.id)).toEqual([]);
+    });
+
+    test('an adopted older row with no home is bound to the sole home', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      const [a] = c.propertyIds;
+      const old = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: a });
+      await trx('customer_access_codes').where({ id: old.row.id }).update({ property_id: null });
+      await mirror();
+      expect((await trx('customer_access_codes').where({ id: old.row.id }).first()).property_id).toBe(a);
+    });
+
+    test('a multi-home pass forgets the per-kind hashes, so a later return to one home starts fresh', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      const [a] = c.propertyIds;
+      await mirror();
+      const b = randomUUID();
+      await trx('customer_properties').insert({
+        id: b, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      await mirror();
+      expect((await trx('access_code_profile_mirror').where({ subject_id: c.id }).first()).hashes).toEqual({});
+      expect(a).toBeTruthy();
+    });
+
+    test('the only home changes: a door code equal to the mirrored garage code is not retired', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      const [a] = c.propertyIds;
+      await mirror();
+      const door = await access.addByStaff(trx, { customerId: c.id, kind: 'door', life: 'standing', code: '2468', propertyId: a });
+      const b = randomUUID();
+      await trx('customer_properties').insert({
+        id: b, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      await trx('customer_properties').where({ id: a }).update({ active: false });
+      await mirror();
+      expect((await trx('customer_access_codes').where({ id: door.row.id }).first()).status).toBe('active');
+    });
+
+    test('the only home changes: an office row the mirror adopted by value retires too', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      const [a] = c.propertyIds;
+      const staff = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: a });
+      await mirror();
+      expect((await live(c.id)).map((r) => r.id)).toEqual([staff.row.id]);
+      const b = randomUUID();
+      await trx('customer_properties').insert({
+        id: b, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      await trx('customer_properties').where({ id: a }).update({ active: false });
+      await mirror();
+      expect((await trx('customer_access_codes').where({ id: staff.row.id }).first()).status).toBe('retired');
+      expect((await live(c.id)).map((r) => [r.code, r.property_id])).toEqual([['2468', b]]);
     });
   });
 });

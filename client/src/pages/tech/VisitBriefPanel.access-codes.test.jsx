@@ -77,6 +77,60 @@ describe('VisitBriefPanel access codes', () => {
     expect(await screen.findByText('Door or lock:')).toBeInTheDocument();
   });
 
+  const withFacts = (codes) => ({ status: 'ready', byService: { 'svc-1': { brief: { brief: null, facts: { access: { codes, alerts: [] } } } } } });
+  const garageRow = (over = {}) => code({ id: 'g1', kind: 'garage', code: '2468', instructions: null, profileBacked: true, ...over });
+
+  it('one-home visit, profile facts received: the profileBacked row is hidden and the profile code shows once', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [garageRow(), code({ id: 'd1', kind: 'door', code: '4321', instructions: null })] }));
+    render(<VisitBriefPanel stop={stop} detail={withFacts({ garage: '2468', neighborhoodGate: '#4821' })} request={request} />);
+    expect(await screen.findByText('Door or lock:')).toBeInTheDocument();
+    expect(screen.getAllByText('2468')).toHaveLength(1);
+    expect(screen.getAllByText('#4821')).toHaveLength(1);
+  });
+
+  it('one-home visit, profile facts missing: the profileBacked row is shown', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [garageRow()] }));
+    render(<VisitBriefPanel stop={stop} detail={{ status: 'ready', byService: {} }} request={request} />);
+    expect(await screen.findByText('2468')).toBeInTheDocument();
+    expect(screen.getByText('Garage:')).toBeInTheDocument();
+  });
+
+  it('one-home visit: facts for another kind do not hide the row, and a row with directions for the same code stays', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [garageRow(), garageRow({ id: 'g2', instructions: 'Side keypad' })] }));
+    render(<VisitBriefPanel stop={stop} detail={withFacts({ lockbox: '1212' })} request={request} />);
+    expect(await screen.findAllByText('2468')).toHaveLength(2);
+    cleanup();
+    render(<VisitBriefPanel stop={stop} detail={withFacts({ garage: '2468' })} request={vi.fn(() => Promise.resolve({ accessCodes: [garageRow(), garageRow({ id: 'g2', instructions: 'Side keypad' })] }))} />);
+    expect(await screen.findByText(/Side keypad/)).toBeInTheDocument();
+    // the profile line plus the row with directions
+    expect(screen.getAllByText('2468')).toHaveLength(2);
+  });
+
+  it('a code that differs from the profile code only by spaces is shown once', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [garageRow({ code: '#4821', kind: 'neighborhood_gate' })] }));
+    render(<VisitBriefPanel stop={stop} detail={withFacts({ neighborhoodGate: '# 4821' })} request={request} />);
+    expect(await screen.findByText('# 4821')).toBeInTheDocument();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByText('#4821')).toBeNull();
+  });
+
+  it('one-home visit: a stale cached profile code does not hide the current row', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [garageRow({ code: '1357' })] }));
+    render(<VisitBriefPanel stop={stop} detail={withFacts({ garage: '2468' })} request={request} />);
+    expect(await screen.findByText('1357')).toBeInTheDocument();
+  });
+
+  it('multi-home visit: rows carry no flag, so only the same-kind value dedupe applies', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [
+      garageRow({ profileBacked: undefined }),
+      garageRow({ id: 'g3', code: '9999', profileBacked: undefined }),
+    ] }));
+    render(<VisitBriefPanel stop={stop} detail={withFacts({ garage: '2468' })} request={request} />);
+    // 2468 is the same kind and value as the profile line (deduped); 9999 is a different code and shows
+    expect(await screen.findByText('9999')).toBeInTheDocument();
+    expect(screen.getAllByText('2468')).toHaveLength(1);
+  });
+
   it('does not ask without a request function', () => {
     render(<VisitBriefPanel stop={stop} detail={{ status: 'ready', byService: {} }} />);
     expect(screen.queryByText('Access codes')).toBeNull();
