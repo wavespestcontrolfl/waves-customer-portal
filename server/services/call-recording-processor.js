@@ -20525,6 +20525,14 @@ const CallRecordingProcessor = {
                           scheduledServiceId, phone: contact.phone, entryPoint: 'recipient_optin_confirmed_replay', sinceMs: 10 * 60 * 1000,
                         }).catch(() => false)) continue;
                         if (!(await claimStillOwned())) return false;
+                        // One sender at a time for this phone + visit: the
+                        // replay in flight owns the text ('busy'); otherwise
+                        // the fan-out holds the row claim across its send.
+                        const followUpClaim = await require('./recipient-optin').claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);
+                        if (followUpClaim === 'busy') continue;
+                        const releaseFollowUpClaim = () => (followUpClaim === 'claimed'
+                          ? require('./recipient-optin').releaseFanOutFollowUpClaim(customerId, contact.phone, scheduledServiceId)
+                          : null);
                         const contactResult = await sendCustomerMessage({
                           to: contact.phone,
                           body: contactBody,
@@ -20554,7 +20562,7 @@ const CallRecordingProcessor = {
                             // The replay's per-visit dedupe reads this.
                             scheduled_service_id: scheduledServiceId,
                           },
-                        });
+                        }).finally(releaseFollowUpClaim);
                         if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
                           && contactResult.deferred && contactResult.nextAllowedAt
                           && confirmationRearmed) {

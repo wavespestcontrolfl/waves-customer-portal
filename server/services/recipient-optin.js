@@ -413,6 +413,44 @@ async function rearmOnSiteFollowUp(customerId, phoneKey, visitId) {
   }
 }
 
+// The call pipeline's contact fan-out and the follow-up's replay can both be
+// about to text one visit's confirmation to one phone (the contact answered
+// YES while the booking was still processing). The fan-out takes the SAME row
+// claim the replay takes, so only one of them sends at a time and the other
+// then sees the send in sms_log:
+//   'claimed' — the fan-out holds it: send, then releaseFanOutFollowUpClaim.
+//   'busy'    — the replay is in flight for this visit: it owns the text; skip.
+//   'none'    — no unfinished follow-up for this phone + visit (or dark):
+//               nothing to coordinate with; send as before.
+// A claim never released (a crash) expires with the 10-minute lease. A failed
+// read answers 'none': the fan-out is never blocked by this coordination.
+async function claimFollowUpForFanOut(customerId, phone, visitId) {
+  const phoneKey = recipientPhoneKey(phone);
+  if (!customerId || !phoneKey || !visitId || !isOnSiteFollowUpLive()) return 'none';
+  try {
+    const open = () => db('recipient_optin')
+      .where({ customer_id: customerId, phone_key: phoneKey, visit_id: visitId, status: 'confirmed' })
+      .whereNull('followup_done_at');
+    const claimed = await open()
+      .where((q) => q.whereNull('followup_claimed_at').orWhere('followup_claimed_at', '<', new Date(Date.now() - FOLLOWUP_CLAIM_TTL_MS)))
+      .update({ followup_claimed_at: new Date() });
+    if (claimed) return 'claimed';
+    return (await open().first('phone_key')) ? 'busy' : 'none';
+  } catch (err) {
+    logger.warn(`[recipient-optin] fan-out follow-up claim failed (${err.code || err.name || 'error'})`);
+    return 'none';
+  }
+}
+
+async function releaseFanOutFollowUpClaim(customerId, phone, visitId) {
+  const phoneKey = recipientPhoneKey(phone);
+  if (!customerId || !phoneKey || !visitId) return;
+  await db('recipient_optin')
+    .where({ customer_id: customerId, phone_key: phoneKey, visit_id: visitId })
+    .update({ followup_claimed_at: null })
+    .catch(() => {});
+}
+
 // A NO / STOP declined this phone: the review card says so (best-effort — a
 // card outage must never roll back an opt-out). The phone stays on any
 // unconsented list (it never consented).
@@ -1164,6 +1202,8 @@ module.exports = {
   settleOnSiteFollowUps,
   sweepOnSiteFollowUps,
   rearmOnSiteFollowUp,
+  claimFollowUpForFanOut,
+  releaseFanOutFollowUpClaim,
   visitAskState,
   recipientPhoneKey,
   optinBlocksSend,

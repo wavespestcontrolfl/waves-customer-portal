@@ -407,6 +407,38 @@ describe('rearmOnSiteFollowUp: a phone that already said YES gets no new ask at 
   });
 });
 
+describe('one sender at a time: the call fan-out takes the replay\'s row claim', () => {
+  test('the fan-out claims an unfinished row for its visit; the replay then finds nothing to run until it is released', async () => {
+    const { optin, state, sendReplay } = load({ rows: [row()], customer: spouse() });
+    expect(await optin.claimFollowUpForFanOut('c1', '+1 (555) 010-0123', 'v1')).toBe('claimed');
+    expect(await optin.settleOnSiteFollowUps(['c1'], { replyPhoneKey: KEY })).toBe(0);
+    expect(sendReplay).not.toHaveBeenCalled();
+    await optin.releaseFanOutFollowUpClaim('c1', '+15550100123', 'v1');
+    expect(state.optin[0].followup_claimed_at).toBeNull();
+    expect(await optin.settleOnSiteFollowUps(['c1'])).toBe(1);
+  });
+
+  test('a replay in flight owns the text (busy); no unfinished row, another visit, or dark = nothing to coordinate (none)', async () => {
+    const busy = load({ rows: [row({ followup_claimed_at: new Date() })], customer: spouse() });
+    expect(await busy.optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('busy');
+    const done = load({ rows: [row({ followup_done_at: new Date() })], customer: spouse() });
+    expect(await done.optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('none');
+    const other = load({ rows: [row()], customer: spouse() });
+    expect(await other.optin.claimFollowUpForFanOut('c1', '+15550100123', 'v9')).toBe('none');
+    expect(await other.optin.claimFollowUpForFanOut('c1', '+15550100999', 'v1')).toBe('none');
+    const dark = load({ rows: [row()], customer: spouse(), demoteGateOn: false });
+    expect(await dark.optin.claimFollowUpForFanOut('c1', '+15550100123', 'v1')).toBe('none');
+    expect(dark.state.optin[0].followup_claimed_at).toBeNull();
+  });
+
+  test('wiring: the fan-out skips a busy contact, holds the claim across its send and releases it', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    expect(src).toContain("claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);\n                        if (followUpClaim === 'busy') continue;");
+    expect(src).toContain('}).finally(releaseFollowUpClaim);');
+    expect(src).toContain('scheduled_service_id: scheduledServiceId,\n                          },\n                        }).finally(releaseFollowUpClaim);');
+  });
+});
+
 describe('account-wide demotion', () => {
   test('a saved property\'s own "send these to me too" choice is cleared with the demotion', () => {
     const src = require('fs').readFileSync(require.resolve('../services/recipient-optin.js'), 'utf8');
