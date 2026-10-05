@@ -259,6 +259,19 @@ it("a failed first load keeps the tab with a retry", async () => {
   expect(await screen.findByText("Door code is 9876")).toBeInTheDocument();
 });
 
+it("a row the server changed starts a fresh draft, so Save never sends the old life back", async () => {
+  let version = 1;
+  rawAdminFetch.mockImplementation((path, init) => (path.startsWith("/admin/access-codes/found")
+    ? response({ total: 1, items: [version === 1 ? FOUND_ROW : { ...FOUND_ROW, life: "visit", updatedAt: "2026-10-04T10:00:00.000Z" }] })
+    : foundRoutes()(path, init)));
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: /Found in messages/ }));
+  await screen.findByText("Door code is 9876");
+  version = 2;
+  fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "This visit only" })).toHaveAttribute("aria-pressed", "true"));
+});
+
 it("shows the server's message when a save is refused", async () => {
   rawAdminFetch.mockImplementation((path, init) => (init?.method === "POST"
     ? response({ error: "That customer already has this code", code: "duplicate_active" }, { ok: false, status: 409 })

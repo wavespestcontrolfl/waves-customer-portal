@@ -186,7 +186,7 @@ function FoundInMessages({ items, total, loading, error, onRetry, onMore, onSave
       <div className="grid gap-3">
         {items.map((row) => (
           <FoundCodeCard
-            key={row.id}
+            key={`${row.id}:${row.updatedAt || ""}`}
             row={row}
             visits={row.visitChoices || []}
             onSave={onSave}

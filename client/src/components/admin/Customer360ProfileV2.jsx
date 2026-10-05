@@ -7580,7 +7580,7 @@ export function CustomerAccessCodesBlock({ customerId }) {
           <div className="grid gap-2">
             {codes.found.map((row) => (
               <FoundCodeCard
-                key={row.id}
+                key={`${row.id}:${row.updatedAt || ""}`}
                 row={row}
                 visits={codes?.visits || []}
                 homes={codes?.properties || []}
