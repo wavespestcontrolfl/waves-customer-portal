@@ -8486,7 +8486,7 @@ async function generateLeadSynopsis(transcription) {
     // enough.
     const response = await ledgerCall('anthropic', MODELS.ROUTINE, () => client.messages.create({
       model: MODELS.ROUTINE,
-      ...anthropicEffortConfig(MODELS.ROUTINE),
+      ...anthropicEffortConfig(MODELS.ROUTINE, 'low'),
       max_tokens: anthropicMaxTokens(MODELS.ROUTINE, 1200),
       messages: [{
         role: 'user',

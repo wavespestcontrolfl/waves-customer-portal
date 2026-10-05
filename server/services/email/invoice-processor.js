@@ -129,7 +129,7 @@ async function processVendorInvoice(email, classification) {
 
       const parseResponse = await ledgerCall('anthropic', MODELS.ROUTINE, () => anthropic.messages.create({
         model: MODELS.ROUTINE,
-        ...anthropicEffortConfig(MODELS.ROUTINE),
+        ...anthropicEffortConfig(MODELS.ROUTINE, 'low'),
         max_tokens: anthropicMaxTokens(MODELS.ROUTINE, 1024),
         messages: [{
           role: 'user',
