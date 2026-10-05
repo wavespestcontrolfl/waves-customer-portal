@@ -369,6 +369,27 @@ async function restoreDemotedCallers(h, phoneKey = null) {
   return restore.length;
 }
 
+// Is this customer's appointment_notify_primary = false the on-site flow's
+// doing (a confirmed contact carries caller_demoted_at and the holder has not
+// since made the setting their own)? The demotion is about TEXTS: the email
+// resolver (appointment-email.js) reads this to keep the holder on appointment
+// emails. An unreadable row answers false (the holder's emails then follow the
+// stored setting, as before this read existed). Never throws.
+async function callerDemotedForTextsOnly(customerId, h = db) {
+  if (!customerId) return false;
+  try {
+    const row = await h('recipient_optin')
+      .where({ customer_id: customerId, status: 'confirmed' })
+      .whereNotNull('caller_demoted_at')
+      .whereNull('caller_choice_at')
+      .first('phone_key');
+    return !!row;
+  } catch (err) {
+    logger.warn(`[recipient-optin] texts-only demotion read failed (${err.code || err.name || 'error'})`);
+    return false;
+  }
+}
+
 // A settings save (portal or office) that names appointment_notify_primary
 // after this flow switched it off: from now on the value is the holder's own
 // choice, so a later STOP / removal of the contact never overwrites it. Runs in
@@ -1403,6 +1424,7 @@ module.exports = {
   sweepOnSiteFollowUps,
   rearmOnSiteFollowUp,
   noteHolderSetNotifyPrimary,
+  callerDemotedForTextsOnly,
   isOnSiteFollowUpLive,
   claimFollowUpForFanOut,
   releaseFanOutFollowUpClaim,

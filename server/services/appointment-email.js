@@ -171,7 +171,15 @@ async function resolveRecipients(customer, { scheduledServiceId = null } = {}) {
   // skipConsentGate: the consent artifact attests to receiving TEXTS; email
   // routing follows notification prefs alone (see the recipient spec in
   // tests/appointment-email-recipients.test.js).
-  for (const c of getAppointmentContacts(customer, prefs || {}, { skipConsentGate: true })) {
+  // The on-site flow's caller demotion (GATE_ONSITE_CALLER_DEMOTE) switches
+  // the holder's appointment TEXTS off; their emails are untouched. A false it
+  // wrote (and the holder has not since made their own) reads as true here.
+  // The holder's own opt-out stays an opt-out.
+  const emailPrefs = (prefs?.appointment_notify_primary === false
+    && await require('./recipient-optin').callerDemotedForTextsOnly(customer.id))
+    ? { ...prefs, appointment_notify_primary: true }
+    : (prefs || {});
+  for (const c of getAppointmentContacts(customer, emailPrefs, { skipConsentGate: true })) {
     const ownEmail = slotEmailByRole.has(c.role) ? slotEmailByRole.get(c.role) : c.email;
     if (ownEmail) add(ownEmail, c.name);
     else add(primary.email, primary.name);
