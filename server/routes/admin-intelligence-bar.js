@@ -1709,6 +1709,7 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
       // adjust_stock only: the unit the model passed must appear in the operator's own words (owner-direct and card alike).
       unit: toolUse.name === 'adjust_stock' ? (params.unit ?? null) : undefined,
+      amount: toolUse.name === 'adjust_stock' ? (params.quantity ?? params.set_total) : undefined,
     });
     if (target.error) return { failed: true, modelResult: target };
     if (toolUse.name !== 'update_restock_request') {

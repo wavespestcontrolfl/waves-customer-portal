@@ -466,6 +466,19 @@ suite('inventory UI and Intelligence Bar through shared operations', () => {
     expect(await onHand(row.id)).toBe(12);
   }, 40000);
 
+  test('a container noun grounds a unit only as a whole-container conversion; anything else writes nothing', async () => {
+    const row = await product(); // 2 lb containers, counted in lb
+    // "2 bags" entered as 2 kg is not 2 x 2 lb (1.81 kg): refused.
+    const refused = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 2, unit: 'kg' }, `We received 2 bags of ${row.name}`);
+    expect(refused.body.pendingActions || []).toHaveLength(0);
+    expect(await onHand(row.id)).toBe(10);
+    expect(await db('product_inventory_movements').where({ product_id: row.id })).toHaveLength(0);
+    // 2 x 2 lb = 4 lb: admitted and committed.
+    const proposed = await propose('adjust_stock', { product_id: row.id, movement_type: 'restock', quantity: 4, unit: 'lb' }, `We received 2 bags of ${row.name}`);
+    expect((await confirm(proposed)).body.success).toBe(true);
+    expect(await onHand(row.id)).toBe(14);
+  }, 40000);
+
   test('model duplicate override requires explicit operator intent', async () => {
     const row = await product();
     await requestFor(row);

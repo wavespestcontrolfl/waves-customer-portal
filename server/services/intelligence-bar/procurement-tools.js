@@ -17,7 +17,7 @@ const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const inventory = require('../inventory-operations');
-const { normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
+const { convertInventoryQuantity, normalizeInventoryUnit, unitDefinition } = require('../inventory-units');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 
 const PROCUREMENT_TOOLS = [
@@ -1604,15 +1604,16 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
-async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq, unit }) {
+async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq, unit, amount }) {
   const trace = { texts: [prompt] };
   const target = await resolveInventoryTarget({ toolName, prompt, pageData, preview, actorId, threadId, threadSeq, trace });
-  // `unit` is the unit the model passed to adjust_stock (the route always supplies it for that tool, null when absent).
+  // `unit` and `amount` (quantity or set_total) are what the model passed to adjust_stock (the route always supplies `unit`
+  // for that tool, null when absent).
   // A stock-changing call is admitted only when the operator's own words, the same trusted text the product and the
   // operation were grounded on, contain that unit. A unit the model took from the catalog is refused for both the
   // owner-direct write and the card.
   if (target.error || toolName !== 'adjust_stock' || unit === undefined) return target;
-  return unitGroundedIn(unit, trace.texts, preview?.product) ? target : unitRequiredRefusal(preview?.product);
+  return unitGroundedIn(unit, trace.texts, preview?.product, amount) ? target : unitRequiredRefusal(preview?.product);
 }
 
 async function resolveInventoryTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq, trace }) {
@@ -1848,7 +1849,37 @@ const UNIT_WORDS = {
 };
 const CONTAINER_WORDS = /\b(?:bottles?|jugs?|bags?|cases?|containers?|pails?|buckets?|boxes|box|cans?|tubes?|packs?|drums?)\b/i;
 
-function unitGroundedIn(unit, texts, product) {
+// The container size column is free text ("96 fl oz", "2.5 gal", "21 oz can", but also "4 x 30g tubes", "1 station"). Only the
+// plain shapes "<number> <unit>" and "<number> <unit> <container noun>" are read; the unit must be one the writer's own unit
+// table knows. Anything else returns null, and a container noun then grounds nothing for that product.
+function parseContainerSize(text) {
+  const match = String(text || '').trim().toLowerCase()
+    .match(/^(\d+(?:\.\d+)?)\s*([a-z_. ]+?)(?:\s+(?:bottles?|jugs?|bags?|cases?|containers?|pails?|buckets?|boxes|box|cans?|tubes?|packs?|drums?))?$/);
+  if (!match || !(Number(match[1]) > 0)) return null;
+  let token = match[2].replace(/\./g, '').trim();
+  if (/^(?:fluid\s+ounces?|fl\s*oz|floz)$/.test(token)) token = 'fl_oz';
+  token = token.replace(/\s+/g, '_');
+  if (!unitDefinition(token)) return null;
+  const normalized = normalizeInventoryUnit(token);
+  return { amount: Number(match[1]), unit: UNIT_ALIASES[normalized] || normalized };
+}
+
+// The numbers the operator stated in the trusted text: digits and decimals, spelled numbers the repo already parses
+// (one to nineteen, twenty to ninety, a tens-plus-ones compound), and a singular container noun ("a jug", "the spilled bag") as 1.
+function statedNumbers(texts) {
+  const out = [];
+  const spelled = new RegExp(`\\b(${PERCENT_NUMBER_WORD_ALT})\\b`, 'gi');
+  const singular = /\b(?:bottle|jug|bag|case|container|pail|bucket|box|can|tube|pack|drum)\b/i;
+  for (const raw of texts || []) {
+    const text = String(raw || '');
+    for (const m of text.matchAll(/\d+(?:\.\d+)?/g)) out.push(Number(m[0]));
+    for (const m of text.matchAll(spelled)) { const v = percentWordsToValue(m[1]); if (v != null) out.push(v); }
+    if (singular.test(text)) out.push(1);
+  }
+  return out;
+}
+
+function unitGroundedIn(unit, texts, product, amount) {
   if (!String(unit ?? '').trim()) return false;
   if (!unitDefinition(unit)) return true; // an unsupported unit never writes; the writer refuses it in its own words
   const normalized = normalizeInventoryUnit(unit);
@@ -1857,7 +1888,16 @@ function unitGroundedIn(unit, texts, product) {
   const named = (canonical === 'fl_oz' ? [UNIT_WORDS.fl_oz, UNIT_WORDS.oz] : [UNIT_WORDS[canonical]])
     .some(re => re && words.some(t => re.test(t)));
   if (named) return true;
-  return !!product?.container_size && words.some(t => CONTAINER_WORDS.test(t));
+  // Admitted only through a container noun ("two jugs"): the amount must be a whole-container conversion, N x the
+  // catalog container size (in the writer's own conversion) for some number N the operator stated, within 0.5%.
+  if (!words.some(t => CONTAINER_WORDS.test(t))) return false;
+  const size = parseContainerSize(product?.container_size);
+  const target = Math.abs(Number(amount));
+  if (!size || !(target > 0)) return false;
+  return statedNumbers(words).some((n) => {
+    const converted = convertInventoryQuantity(n * size.amount, size.unit, unit);
+    return converted != null && Math.abs(converted - target) <= target * 0.005;
+  });
 }
 
 // The one refusal for a stock write whose unit the operator did not state. It never hands the model a unit to retry with:

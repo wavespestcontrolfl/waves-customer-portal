@@ -561,6 +561,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
   describe('adjust_stock unit grounding', () => {
     const preview = { product: { id: TAURUS.id, name: TAURUS.name, container_size: '78 fl oz' }, movement_type: 'restock' };
     const resolve = (prompt, unit, extra = {}) => resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview, unit, ...extra });
+    const withContainer = (container_size) => ({ product: { ...preview.product, container_size }, movement_type: 'restock' });
 
     test.each([
       ['We bought 2 gallons of Taurus SC', 'gal'],
@@ -572,7 +573,6 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       ['We bought 5 lbs of Taurus SC', 'lb'],
       ['We bought 5 pounds of Taurus SC', 'lbs'],
       ['We bought 3 quarts of Taurus SC', 'qt'],
-      ['We bought 2 jugs of Taurus SC', 'fl_oz'],
     ])('"%s" admits the unit %s', async (prompt, unit) => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
       expect(await resolve(prompt, unit)).toEqual({ productId: TAURUS.id });
@@ -592,6 +592,60 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       expect(result.productId).toBeUndefined();
       expect(result.error).not.toContain('fl_oz');
       expect(result.error).toMatch(/operator's own words/);
+    });
+
+    // A unit admitted only through a container noun must be a whole-container conversion: N x the catalog container size,
+    // for some number N the operator stated, within 0.5%. Taurus here is a 78 fl oz container.
+    test.each([
+      ['We bought 2 jugs of Taurus SC', 'fl_oz', 156],
+      ['We bought two jugs of Taurus SC', 'fl_oz', 156],
+      ['We bought a jug of Taurus SC', 'fl_oz', 78],
+      ['We bought 3 bottles of Taurus SC', 'gal', 1.828125], // 234 fl oz
+      ['Write off the spilled bag of Taurus SC', 'fl_oz', 78], // a singular container noun is one container
+      ['We bought 2 jugs of Taurus SC', 'fl_oz', 155.9], // inside the 0.5% tolerance
+    ])('"%s" admits %s x %s only as a whole-container conversion', async (prompt, unit, amount) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      expect(await resolve(prompt, unit, { amount })).toEqual({ productId: TAURUS.id });
+    });
+
+    test.each([
+      ['We bought 2 jugs of Taurus SC', 'fl_oz', 2],
+      ['We bought 2 jugs of Taurus SC', 'fl_oz', 157.5],
+      ['We bought 2 jugs of Taurus SC', 'fl_oz', undefined],
+      ['We bought 2 jugs of Taurus SC', 'lb', 156], // not convertible from a volume container
+      ['We bought some jugs of Taurus SC', 'fl_oz', 156], // no number the operator stated
+    ])('"%s" refuses %s x %s admitted only through a container noun', async (prompt, unit, amount) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      expect(await resolve(prompt, unit, { amount })).toMatchObject({ code: 'unit_required' });
+    });
+
+    test('2 jugs of a 2.5 gal container equals 5 gal, and 640 fl oz', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const big = withContainer('2.5 gal');
+      for (const [unit, amount] of [['gal', 5], ['fl_oz', 640]]) {
+        expect(await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'We bought 2 jugs of Taurus SC', preview: big, unit, amount }))
+          .toEqual({ productId: TAURUS.id });
+      }
+    });
+
+    test.each([null, undefined, '', '4 x 30g tubes', '1 station', '20 count', 'case'])('a container noun grounds nothing when the container size is %p', async (size) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const result = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'We bought 2 jugs of Taurus SC',
+        preview: withContainer(size), unit: 'fl_oz', amount: 156 });
+      expect(result).toMatchObject({ code: 'unit_required' });
+    });
+
+    test('a container size with a trailing container noun still reads ("21 oz can")', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      expect(await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'We bought 2 cans of Taurus SC',
+        preview: withContainer('21 oz can'), unit: 'oz', amount: 42 })).toEqual({ productId: TAURUS.id });
+    });
+
+    test('a spoken unit word still admits without the container check, even beside a container noun', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      expect(await resolve('We bought 2 jugs of Taurus SC, 64 fl oz', 'fl_oz', { amount: 64 })).toEqual({ productId: TAURUS.id });
+      expect(await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'We bought 2 jugs of Taurus SC, 64 fl oz',
+        preview: withContainer(null), unit: 'fl_oz', amount: 64 })).toEqual({ productId: TAURUS.id });
     });
 
     test('the same words ground the owner-direct and the card path alike (one resolver, no preview-only exception)', async () => {
