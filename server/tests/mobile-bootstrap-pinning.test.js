@@ -57,6 +57,9 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(source).toContain('ApplicationDelegateProxy.shared.application(UIApplication.shared, open: context.url');
     expect(source).toContain('$(PRODUCT_MODULE_NAME).SceneDelegate');
     expect(source).toContain('UISceneStoryboardFile string Main');
+    // A push tapped while the app was closed reaches Capacitor's push handler.
+    expect(source).toContain('connectionOptions.notificationResponse');
+    expect(source).toContain('router.userNotificationCenter(center, didReceive: response');
     // CocoaPods' embed-frameworks script cannot run inside Xcode's user-script sandbox.
     expect(source).toContain('s/ENABLE_USER_SCRIPT_SANDBOXING = YES;/ENABLE_USER_SCRIPT_SANDBOXING = NO;/g');
     // The manifest is written only after the delegate is in the target.

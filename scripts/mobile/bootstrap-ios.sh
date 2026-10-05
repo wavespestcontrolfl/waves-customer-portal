@@ -267,6 +267,7 @@ SCENE_SWIFT="ios/App/App/SceneDelegate.swift"
 if [ ! -f "$SCENE_SWIFT" ]; then
   cat > "$SCENE_SWIFT" <<'SWIFT'
 import UIKit
+import UserNotifications
 import Capacitor
 
 // Written by scripts/mobile/bootstrap-ios.sh. Apps built with the iOS 27 SDK
@@ -283,6 +284,26 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         if let activity = connectionOptions.userActivities.first {
             _ = ApplicationDelegateProxy.shared.application(UIApplication.shared, continue: activity, restorationHandler: { _ in })
+        }
+        // A push tapped while the app was closed. With scenes, Capacitor's
+        // NotificationRouter becomes the notification-center delegate only
+        // when its bridge loads, after launch, so UIKit hands this tap only to
+        // the scene. Pass it on once the push plugin's handler exists; the
+        // plugin retains pushNotificationActionPerformed until JS listens.
+        if let response = connectionOptions.notificationResponse {
+            deliverNotificationResponse(response, attemptsLeft: 100)
+        }
+    }
+
+    private func deliverNotificationResponse(_ response: UNNotificationResponse, attemptsLeft: Int) {
+        let center = UNUserNotificationCenter.current()
+        if let router = center.delegate as? NotificationRouter, router.pushNotificationHandler != nil {
+            router.userNotificationCenter(center, didReceive: response, withCompletionHandler: {})
+        } else if attemptsLeft > 0 {
+            // Up to 10 s for the bridge and its plugins to load.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.deliverNotificationResponse(response, attemptsLeft: attemptsLeft - 1)
+            }
         }
     }
 
