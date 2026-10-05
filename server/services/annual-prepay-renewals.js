@@ -2720,6 +2720,12 @@ async function soldPriceCentsForVisit(term, row, conn) {
   return byVisit?.get(String(row.id)) ?? null;
 }
 
+// A held visit's current price for the log and the office alert.
+function heldPriceNow(row) {
+  const cents = priceCents(row.estimated_price);
+  return cents == null ? 'no price' : `$${(cents / 100).toFixed(2)}`;
+}
+
 // Splits `rows` (coverage rows in canonical slot order) into the visits the
 // term may stamp and the ones held for a changed price.
 async function holdPriceDriftedRows(term, rows, conn, { skipRow = null, includeCompleted = false } = {}) {
@@ -2744,20 +2750,35 @@ async function holdPriceDriftedRows(term, rows, conn, { skipRow = null, includeC
   const eligible = rows.filter((row) => !isLiveStampOfTerm(row) && !statusExempt(row)
     && !(skipRow && skipRow(row)));
   const candidates = eligible.filter((row) => priceCents(row.estimated_price) != null);
-  if (!candidates.length) return none;
+  const mintMode = prepayMintPriceHoldMode();
+  // Gate off, a pass with no priced row reads nothing (unchanged). Gate on, a
+  // visit whose price was CLEARED since the mint must still be judged.
+  if (mintMode === 'off' ? !candidates.length : !eligible.length) return none;
   const soldCents = await securePlanSoldPerVisitCents(term, conn);
   if (soldCents == null) {
-    // Not a /secure pick: judge each visit against its own mint price.
-    const byVisit = await mintVisitPriceCents(term, conn);
+    if (mintMode === 'off') return none;
+    // Not a /secure pick: judge each visit against its own mint price. A
+    // price cleared to NULL after the mint is a change, not an unknown: the
+    // record proves the visit had a price when the term was created.
+    let byVisit;
+    try {
+      byVisit = await mintVisitPriceCents(term, conn);
+    } catch (err) {
+      // Shadow only observes: a failed read must not stop a stamp that
+      // would run with the gate off. Under `true` it fails closed.
+      if (mintMode !== 'shadow') throw err;
+      logger.warn(`[annual-prepay] shadow: mint visit prices unreadable for term ${term.id}: ${err.message}`);
+      return none;
+    }
     if (!byVisit) return none;
     const inBaseline = (row) => byVisit.has(String(row.id));
-    for (const row of candidates.filter(inBaseline)) {
+    for (const row of eligible.filter(inBaseline)) {
       const sold = byVisit.get(String(row.id));
       if (priceCents(row.estimated_price) !== sold) held.push({ row, soldCents: sold, mintPrice: true });
     }
-    if (prepayMintPriceHoldMode() !== 'true') {
+    if (mintMode !== 'true') {
       for (const { row, soldCents: sold } of held) {
-        logger.warn(`[annual-prepay] shadow: term ${term.id} would hold visit ${row.id} (${dateOnly(row.scheduled_date) || 'undated'}) out of coverage: priced $${(priceCents(row.estimated_price) / 100).toFixed(2)} now, $${(sold / 100).toFixed(2)} when the term was created`);
+        logger.warn(`[annual-prepay] shadow: term ${term.id} would hold visit ${row.id} (${dateOnly(row.scheduled_date) || 'undated'}) out of coverage: ${heldPriceNow(row)} now, $${(sold / 100).toFixed(2)} when the term was created`);
       }
       return none;
     }
@@ -2767,6 +2788,7 @@ async function holdPriceDriftedRows(term, rows, conn, { skipRow = null, includeC
       guardedIds: new Set(eligible.filter(inBaseline).map((row) => String(row.id))),
     };
   }
+  if (!candidates.length) return none;
   // ONLY the term's own SEEDED visits may carry the discounted per-visit
   // price (ensureCoverageRowsForTerm's seededVisitPrice); every other row must
   // still be at the sold price. Seeded = linked to this term AND carrying the
@@ -2813,9 +2835,10 @@ async function fileHeldPriceDriftAlerts(term, held, notifyScope) {
     // price from the day the prepay was created.
     const soldAt = mintPrice ? 'created with this visit priced at' : 'sold at';
     const perVisit = mintPrice ? '' : ' per visit';
-    logger.warn(`[annual-prepay] term ${term.id}: visit ${row.id} (${date}) held out of coverage — repriced to $${(priceCents(row.estimated_price) / 100).toFixed(2)} after the term was ${soldAt} $${(soldCents / 100).toFixed(2)}${perVisit}`);
+    const repriced = priceCents(row.estimated_price) == null ? 'left with no price' : `repriced to ${heldPriceNow(row)}`;
+    logger.warn(`[annual-prepay] term ${term.id}: visit ${row.id} (${date}) held out of coverage — ${repriced} after the term was ${soldAt} $${(soldCents / 100).toFixed(2)}${perVisit}`);
     await fileCoverageExceptionAfterCommit(notifyScope, term, `${PRICE_DRIFT_HELD_REASON}:${row.id}`,
-      `The ${date} ${row.service_type || 'service'} visit was repriced to $${(priceCents(row.estimated_price) / 100).toFixed(2)} after this annual prepay was ${soldAt} $${(soldCents / 100).toFixed(2)}${perVisit}, so it was NOT marked as covered and will bill normally (its sold slot stays unused). To cover it, edit the visit back to exactly $${(soldCents / 100).toFixed(2)} (the schedule editor allows that) and it is covered on the next refresh; changing it to any other price stays blocked while this prepay is held. Or adjust the term.`,
+      `The ${date} ${row.service_type || 'service'} visit was ${repriced} after this annual prepay was ${soldAt} $${(soldCents / 100).toFixed(2)}${perVisit}, so it was NOT marked as covered and will bill normally (its sold slot stays unused). To cover it, edit the visit back to exactly $${(soldCents / 100).toFixed(2)} (the schedule editor allows that) and it is covered on the next refresh; changing it to any other price stays blocked while this prepay is held. Or adjust the term.`,
       { title: 'Annual prepay: repriced visit left uncovered', dedupeDays: null });
   }
 }
