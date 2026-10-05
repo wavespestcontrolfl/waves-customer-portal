@@ -757,6 +757,47 @@ async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory =
   return { ok: true, recipient, customer, authorityInput };
 }
 
+// The caller's last check, fail closed: allowed only when it returns exactly true (a throw refuses). No
+// check passed = allowed.
+async function callerHandoffAllows(beforeProviderHandoff, facts) {
+  if (typeof beforeProviderHandoff !== 'function') return true;
+  try { return (await beforeProviderHandoff(facts)) === true; } catch { return false; }
+}
+
+// What an email send is about to hand the provider: the recipient and the amount it prints (2 decimals).
+function receiptHandoffFacts(recipient, amountDue, invoice) {
+  return {
+    channel: 'email',
+    to: recipient.email,
+    amount: Number.isFinite(amountDue) ? Number(amountDue).toFixed(2) : '0.00',
+    // The paid instant (ms) the email and its PDF state, as loaded by this send.
+    paid: invoice?.paid_at ? new Date(invoice.paid_at).getTime() : null,
+  };
+}
+
+// The caller's last check as an email-library provider handoff (see sendReceiptEmail). undefined when there
+// is no check, or on the routed path (the billing email authority owns that boundary).
+// `facts` is what this send is about to hand the provider ({ channel: 'email', to, amount }, the recipient and
+// the amount the email prints), passed to the check so the caller can bind them to what it approved.
+function callerReceiptHandoff(beforeProviderHandoff, authorityInput, facts) {
+  if (authorityInput || typeof beforeProviderHandoff !== 'function') return undefined;
+  return async (dispatch) => {
+    await dispatch(undefined, async () => {
+      if (!(await callerHandoffAllows(beforeProviderHandoff, facts))) {
+        const refusal = new Error('Receipt email handoff aborted by the caller');
+        refusal.providerBoundaryBlocked = true;
+        throw refusal;
+      }
+    });
+    return { ok: true };
+  };
+}
+
+// beforeProviderHandoff (optional, async, returns true to proceed): a caller's last check, run through the
+// email library's own provider-boundary hook (sendTemplate withProviderHandoff -> dispatch's providerBoundaryCheck,
+// awaited inside sendOne right before the SendGrid request, after rendering, the PDF and the queued row). Anything
+// but `true` (or a throw) aborts before the request: a definite non-send. Honored on the manual path only (the routed
+// receipt rides the billing email authority's own boundary check); every other caller passes nothing.
 async function sendReceiptEmail(invoiceId, options = {}) {
   let memo = typeof options.memo === 'string' ? options.memo.trim().slice(0, 400) : '';
   // Optional dedupe key. Auto-send paths (Stripe webhook) pass one so a
@@ -797,6 +838,8 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const amountDue = refundedAmount > 0
     ? Math.max(0, Number(payment.amount || 0) - refundedAmount)
     : invoiceAmountDue(invoice);
+  // What this send is about to hand the provider, for a caller's handoff check (see sendReceiptEmail).
+  const handoffFacts = receiptHandoffFacts(recipient, amountDue, invoice);
 
   const domain = publicPortalUrl();
   const longReceiptUrl = `${domain}/receipt/${invoice.token}`;
@@ -910,6 +953,8 @@ async function sendReceiptEmail(invoiceId, options = {}) {
         idempotencyKey,
         categories: ['invoice_receipt'],
         attachments: [pdfAttachment(`receipt-${invoice.invoice_number}.pdf`, pdfBuffer)],
+        // (undefined = sendTemplate's default; the authority spread below replaces it on the routed path)
+        withProviderHandoff: callerReceiptHandoff(options.beforeProviderHandoff, authorityInput, handoffFacts),
         ...(authorityInput ? {
           withProviderHandoff: (dispatch) => dispatchUnderBillingEmailAuthority({
             input: authorityInput,
@@ -943,7 +988,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     } catch (err) {
       if (!canFallbackFromTemplateEmailError(err)) {
         logger.error(`[invoice-email] Template receipt send failed for ${invoice.invoice_number}: ${err.message}`);
-        return { ok: false, error: err.message };
+        // deliveryOutcome: uncertain when the request was handed to SendGrid
+        // and nothing conclusive came back (callers must not send again).
+        return { ok: false, error: err.message, deliveryOutcome: EmailTemplateLibrary.thrownSendDeliveryOutcome(err) };
       }
       logger.warn(`[invoice-email] Template unavailable for receipt ${invoice.invoice_number}; falling back to SMTP: ${err.message}`);
     }
@@ -956,6 +1003,12 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 
   const transporter = getTransporter();
   if (!transporter) return { ok: false, error: 'Email not configured' };
+
+  // The caller's last check guards this handoff too (same fail-closed rule as
+  // callerReceiptHandoff): anything but true is a definite non-send.
+  if (!(await callerHandoffAllows(options.beforeProviderHandoff, handoffFacts))) {
+    return { ok: false, error: 'Receipt email handoff aborted', code: 'receipt_handoff_aborted' };
+  }
 
   try {
     await transporter.sendMail({
@@ -974,7 +1027,8 @@ async function sendReceiptEmail(invoiceId, options = {}) {
     return { ok: true };
   } catch (err) {
     logger.error(`[invoice-email] Receipt send failed for ${invoice.invoice_number}: ${err.message}`);
-    return { ok: false, error: err.message };
+    // The SMTP fallback (non-production only) has no handoff marker: once sendMail ran, a failure is uncertain.
+    return { ok: false, error: err.message, deliveryOutcome: 'uncertain' };
   }
 }
 

@@ -22,18 +22,18 @@ const API = import.meta.env.VITE_API_URL || '';
 const MAX_PHOTOS = 5;
 
 // Inside the field workspace (.tech-field, tech-field.css) these resolve to the
-// Waves Admin look; the flag-off page has no --tfx-* and keeps the tech-portal
-// dark palette it is drawn on. `white` is text on an accent fill, `head` is a
+// Waves Admin look; the fallbacks are the same light values, for a render
+// outside it. `white` is text on an accent fill, `head` is a
 // heading, `sunk` is a field or sub-card sitting on a card.
 const D = {
-  bg: 'var(--tfx-bg, #0f1923)', card: 'var(--tfx-card, #1e293b)', border: 'var(--tfx-border, #334155)',
-  teal: 'var(--tfx-accent, #0ea5e9)', green: 'var(--tfx-ok, #10b981)', amber: 'var(--tfx-amber, #f59e0b)', red: 'var(--tfx-red, #ef4444)',
-  text: 'var(--tfx-text, #e2e8f0)', muted: 'var(--tfx-muted, #94a3b8)',
-  white: 'var(--tfx-on-accent, #fff)', head: 'var(--tfx-text, #fff)',
-  sunk: 'var(--tfx-bg, #0b131b)', redBg: 'var(--tfx-red-bg, #2a1416)', okBg: 'var(--tfx-card, #0f2a1c)',
+  bg: 'var(--tfx-bg, #fafaf9)', card: 'var(--tfx-card, #ffffff)', border: 'var(--tfx-border, #d6d3d1)',
+  teal: 'var(--tfx-accent, #1c1917)', green: 'var(--tfx-ok, #1c1917)', amber: 'var(--tfx-amber, #854d0e)', red: 'var(--tfx-red, #a32d2d)',
+  text: 'var(--tfx-text, #1c1917)', muted: 'var(--tfx-muted, #57534e)',
+  white: 'var(--tfx-on-accent, #ffffff)', head: 'var(--tfx-text, #1c1917)',
+  sunk: 'var(--tfx-bg, #fafaf9)', redBg: 'var(--tfx-red-bg, #fcebeb)', okBg: 'var(--tfx-card, #ffffff)',
 };
-const HEAD = "var(--tfx-font, 'Montserrat', system-ui, sans-serif)";
-const BODY = "var(--tfx-font, 'DM Sans', system-ui, sans-serif)";
+const HEAD = "var(--tfx-font, 'Roboto', system-ui, sans-serif)";
+const BODY = "var(--tfx-font, 'Roboto', system-ui, sans-serif)";
 
 const SEVERITY_COLOR = { mild: D.green, moderate: D.amber, severe: D.red };
 const MODE_LABEL = {

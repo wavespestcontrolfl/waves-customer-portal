@@ -20,8 +20,8 @@ beforeEach(() => {
   };
   db.mockReset().mockImplementation(table => {
     let id, ids, ownerIds, activeOnly = false, nameMatch = false, threadProjection = false;
-    const q = { where: (key, value) => { if (key === 'active') activeOnly = value === true; else id = typeof key === 'object' ? key.id : value; return q; },
-      first: async () => rows[table]?.find(row => row.id === id),
+    const q = { where: (key, value) => { if (key === 'active') activeOnly = value === true; else id = typeof key === 'object' ? (key.id ?? key.invoice_number) : value; return q; },
+      first: async () => rows[table]?.find(row => row.id === id || (row.invoice_number && row.invoice_number === id)),
       whereRaw: () => { nameMatch = true; return q; }, whereNull: () => q,
       whereIn: (key, values) => { if (key === 'id') ids = values; else if (key === 'customer_id') ownerIds = values; return q; }, limit: () => q,
       distinct: () => { threadProjection = true; return q; },
@@ -1115,4 +1115,18 @@ test('merge_customers binds both role-named ids as customer records of the task'
   rows.customers = rows.customers.filter(row => row.id !== B);
   const vanished = await Context.validateRecordTarget({ winner_customer_id: A, loser_customer_id: B }, task, { toolName: 'merge_customers' });
   expect(vanished.code).toBe('record_unavailable');
+});
+
+test('resend_receipt by invoice number is bound as the invoice record: only the task customer\'s own invoice passes', async () => {
+  const task = await Context.resolve({ prompt: 'Show open invoices for this customer', pageData: { customer_id: A } });
+  rows.invoices = [
+    { id: '40000000-0000-4000-8000-000000000001', customer_id: A, invoice_number: 'WPC-2026-0001' },
+    { id: '40000000-0000-4000-8000-000000000002', customer_id: B, invoice_number: 'WPC-2026-0002' },
+  ];
+  const own = await Context.validateRecordTarget({ invoice_number: ' wpc-2026-0001 ' }, task, { toolName: 'resend_receipt' });
+  expect(own).toBeNull();
+  const other = await Context.validateRecordTarget({ invoice_number: 'WPC-2026-0002' }, task, { toolName: 'resend_receipt' });
+  expect(other).toMatchObject({ code: 'target_clarification_required' });
+  const unknown = await Context.validateRecordTarget({ invoice_number: 'WPC-2026-9999' }, task, { toolName: 'resend_receipt' });
+  expect(unknown).toMatchObject({ code: 'record_unavailable' });
 });

@@ -37,20 +37,20 @@ function humanizeCategory(category) {
 }
 
 // Inside the field workspace (.tech-field, tech-field.css) these resolve to the
-// Waves Admin look; the flag-off page has no --tfx-* and keeps the tech-portal
-// dark palette it is drawn on.
+// Waves Admin look; the fallbacks are the same light values, for a render
+// outside it.
 const DARK = {
-  bg: 'var(--tfx-bg, #0f1923)',
-  card: 'var(--tfx-card, #1e293b)',
-  border: 'var(--tfx-border, #334155)',
-  teal: 'var(--tfx-accent, #0ea5e9)',
-  text: 'var(--tfx-text, #e2e8f0)',
-  muted: 'var(--tfx-muted, #94a3b8)',
-  amber: 'var(--tfx-amber, #f59e0b)',
-  red: 'var(--tfx-red, #ef4444)',
-  tealTint: 'var(--tfx-accent-tint, #0ea5e922)',
-  amberTint: 'var(--tfx-amber-tint, #f59e0b22)',
-  redTint: 'var(--tfx-red-tint, #ef444422)',
+  bg: 'var(--tfx-bg, #fafaf9)',
+  card: 'var(--tfx-card, #ffffff)',
+  border: 'var(--tfx-border, #d6d3d1)',
+  teal: 'var(--tfx-accent, #1c1917)',
+  text: 'var(--tfx-text, #1c1917)',
+  muted: 'var(--tfx-muted, #57534e)',
+  amber: 'var(--tfx-amber, #854d0e)',
+  red: 'var(--tfx-red, #a32d2d)',
+  tealTint: 'var(--tfx-accent-tint, rgba(28, 25, 23, .06))',
+  amberTint: 'var(--tfx-amber-tint, rgba(133, 77, 14, .1))',
+  redTint: 'var(--tfx-red-tint, rgba(163, 45, 45, .1))',
 };
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -153,7 +153,7 @@ export default function TechProtocolsPage() {
         </button>
         <h1 style={{
           margin: 0, fontSize: 20, fontWeight: 700, color: DARK.text,
-          fontFamily: "var(--tfx-font, 'Montserrat', sans-serif)",
+          fontFamily: "var(--tfx-font, 'Roboto', system-ui, sans-serif)",
         }}>
           Protocols
         </h1>

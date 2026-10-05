@@ -409,11 +409,31 @@ function completionOutcome(result) {
   return { closed: status === 200 && body.success === true, status, code: body.code || null, error: body.error || null };
 }
 
+const issuedCloseoutIdempotencyKey = (invoiceId) => `invoice-issued:${invoiceId}`;
+
+// Read-only: the visit closeOutVisitForIssuedInvoice would complete (or finish
+// resuming) for this invoice right now, or null — gate off, no linked visit, or
+// any refusal. The same resolver and resume probe the closeout runs, writing
+// no audit row, for the Intelligence Bar card to disclose the effect before it
+// happens. A probe that cannot read throws; the caller treats that as unknown.
+async function issuedCloseoutTarget(invoice, { trigger = 'paid', conn = db, today = etDateString() } = {}) {
+  if (!isEnabled('invoiceIssuedClosesVisit')) return null;
+  const resolved = await resolveVisitForIssuedInvoice(conn, invoice, { today, trigger });
+  let visit = resolved.svc;
+  let resuming = false;
+  if (!visit && resolved.reason === 'visit_completed'
+    && await resumableIssuedCloseoutAttempt(conn, { serviceId: resolved.visit.id, idempotencyKey: issuedCloseoutIdempotencyKey(invoice.id) })) {
+    visit = resolved.visit;
+    resuming = true;
+  }
+  return visit ? { visitId: visit.id, serviceType: visit.service_type || null, date: dateOnly(visit.scheduled_date), resuming } : null;
+}
+
 async function loadCloseoutInvoice(run) {
   run.invoice = await run.conn('invoices').where({ id: run.invoiceId }).first();
   if (!run.invoice) return false;
   run.label = `invoice ${run.invoice.invoice_number || run.invoice.id} ${run.trigger}`;
-  run.idempotencyKey = `invoice-issued:${run.invoice.id}`;
+  run.idempotencyKey = issuedCloseoutIdempotencyKey(run.invoice.id);
   return true;
 }
 
@@ -463,4 +483,5 @@ module.exports = {
   resolveVisitForIssuedInvoice,
   resumableIssuedCloseoutAttempt,
   closeOutVisitForIssuedInvoice,
+  issuedCloseoutTarget,
 };

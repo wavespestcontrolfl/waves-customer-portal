@@ -23,6 +23,7 @@ const MODULES = [
   ['schedule-tools', 'SCHEDULE_TOOLS', 'executeScheduleTool'],
   ['closeout-tools', 'CLOSEOUT_TOOLS', 'executeCloseoutTool'],
   ['closeout-repair-tools', 'CLOSEOUT_REPAIR_TOOLS', 'executeCloseoutRepairTool'],
+  ['receipt-resend-tools', 'RECEIPT_RESEND_TOOLS', 'executeReceiptResendTool'],
   ['dashboard-tools', 'DASHBOARD_TOOLS', 'executeDashboardTool'],
   ['seo-tools', 'SEO_TOOLS', 'executeSeoTool'],
   ['procurement-tools', 'PROCUREMENT_TOOLS', 'executeProcurementTool'],

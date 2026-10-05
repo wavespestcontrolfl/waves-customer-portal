@@ -2966,7 +2966,48 @@ The identical detection table is shared with `resolveLeadSource`
 (`server/services/lead-source-resolver.js`), the classifier
 `/api/public/estimator/property-lookup` and `/api/public/quote/calculate`
 use — see those entries below — so an AI-referred visitor is classified
-the same way regardless of which endpoint their lead lands on),
+the same way regardless of which endpoint their lead lands on. Abuse
+guards on both endpoints: honeypot silent-200, then Turnstile, enforced
+under `GATE_LEAD_TURNSTILE`. An enforced Turnstile failure answers 403
+`{ error: 'Verification failed. Please try again.' }` with no write, with
+ONE exception, the unverified hold (`GATE_LEAD_UNVERIFIED_HOLD`, default
+on, `false` = no exception): when the verdict is `missing_token` AND
+`isHoldableTokenlessPost` (`server/utils/lead-abuse.js`) passes — both
+token fields (`turnstile_token`, `cf-turnstile-response`) are genuinely
+absent, null or a blank string (a non-string value is a crafted credential
+and keeps the 403), and the browser-set `Origin` (else `Referer`) header
+names a site in the explicit fleet list (`SPOKE_SITE_KEYS`, with or without
+`www.`). That check does not read the Turnstile secret configuration, so a
+single catch-all secret cannot make a foreign host eligible, and the body's
+`page_url` / `landing_url` / `domain` never count — and the
+submission carries a 10-digit phone and no unit conflict,
+`server/services/lead-unverified-hold.js` writes exactly one customer-less
+`leads` row (`lead_type 'form_submission'`, `status 'new'`, `customer_id`
+NULL, `first_contact_channel 'form_unverified'`,
+`extracted_data.stage = 'lead_webhook_unverified'`, the visitor's
+`message` capped at 1000 code points in `extracted_data.message`; `timeline`
+mapped onto `leads.urgency` and the commercial verdict onto
+`is_commercial` / `is_residential` exactly as on the verified path;
+`sign_host` and any additional properties quoted on the activity note; `phone`
+and `email` are NULL on the row and the submitted values live only in
+`extracted_data.unverified_contact` and the activity note, because every
+reader that trusts a lead's contact — ad audiences, the email
+spam-blocker's known-lead bypass, the outbound-call and collections
+consent probes, call/SMS lead matching — keys on those two columns or on a
+customer-originated `first_contact_channel`; the office adds them to the
+lead after confirming them with the person), one
+`lead_activities` row and one Leads bell, and the response is 200
+`{ success: true }` (no `customerId`). The hold never creates or updates a
+`customers` row, never drafts an estimate, never texts, emails or calls the
+visitor, and never starts the Lead Response Agent, the drip or the
+auto-bridge. A repeat from the same phone inside 24 hours returns the same
+200 and writes nothing. A rejected or oversized token, a foreign or absent
+Origin/Referer, a non-string token field, a
+hold that declines or fails, and the gate set `false` all keep the 403. A
+diff that lets a held submission reach any customer-facing or paid side
+effect, that stores a held submission's phone or email in `leads.phone` /
+`leads.email`, that gives it a customer-originated `first_contact_channel`,
+or that widens the hold beyond `missing_token`, is a P0),
 `/api/public/newsletter/*` (subscribe, confirm, unsubscribe, posts,
 posts/by-slug/:slug, rss, quiz/:token/:quizId/:answer,
 feedback/:token/:reaction, e/:token/:eventId (event click-through:
