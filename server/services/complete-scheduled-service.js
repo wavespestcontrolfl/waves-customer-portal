@@ -5788,7 +5788,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             const ScheduledInvoiceMint = require('../services/scheduled-invoice-mint');
             await ScheduledInvoiceMint.acquireScheduledInvoiceMintLock(trx, svc.id);
-            const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at');
+            const issuedNow = await trx('invoices').where({ id: issuedInvoiceCloseout.invoiceId }).forUpdate().first('id', 'status', 'scheduled_service_id', 'payer_statement_id', 'paid_at', 'sent_at', 'sms_sent_at', 'email_sent_at');
             const InvoiceServiceForIssued = require('../services/invoice');
             if (!issuedNow || InvoiceServiceForIssued.CANCELLED_SERVICE_RESOLVED_STATUSES.includes(String(issuedNow.status))
               || String(issuedNow.scheduled_service_id) !== String(svc.id)) {
@@ -5904,7 +5904,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // invoice re-resolves it on its new day.
           if (issuedInvoiceCloseout) {
             const lockedDay = serviceDateOnly(lockedSvcRow?.scheduled_date);
-            const { issuedCloseoutVisitRefusal, invoiceIssuedDay, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
+            const { issuedCloseoutVisitRefusal, issuedDayForInvoice, visitJobTimerRunning } = require('../services/invoice-issued-closeout');
+            // The prepayment proof, from the invoice row LOCKED above (and its
+            // statement's delivery stamp, for a statement child).
+            const lockedIssuedDay = await issuedDayForInvoice(trx, lockedIssuedInvoice, issuedInvoiceCloseout.trigger);
             // ONE rule for status and day, re-derived on the LOCKED row — the
             // same function the wrapper's unlocked resolver used (Codex round
             // 16 P2 #4131: a NULL status is live in both). An arrived
@@ -5916,12 +5919,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : issuedCloseoutVisitRefusal(lockedSvcRow?.status, lockedDay, {
                 today: etDateString(),
                 trigger: issuedInvoiceCloseout.trigger,
-                // The prepayment proof, from the invoice row LOCKED above: a
+                // The prepayment proof (lockedIssuedDay): a
                 // visit nobody arrived at closes only on an invoice settled /
                 // delivered after its day — re-decided here against the
                 // locked visit, so no reschedule between any earlier read
                 // and this lock can complete a prepaid, unworked visit.
-                issuedDay: invoiceIssuedDay(lockedIssuedInvoice, issuedInvoiceCloseout.trigger),
+                issuedDay: lockedIssuedDay,
               });
             // A refusal of the DAY (moved, now in the future, a day the
             // trigger does not close, or a day the invoice does not prove)

@@ -65,6 +65,24 @@ function invoiceIssuedDay(invoice, trigger) {
   return times.length ? etDateString(new Date(Math.max(...times))) : null;
 }
 
+// invoiceIssuedDay plus the one stamp that lives on another row: a payer
+// statement delivers its children as ONE document, so a child invoice
+// carries no delivery stamp of its own — the statement's sent_at is its
+// delivery proof (its paid_at is copied onto every child at settlement, so
+// the 'paid' trigger needs nothing extra). Used by the resolver and by the
+// completion's locked recheck, so both read the same proof.
+async function issuedDayForInvoice(conn, invoice, trigger) {
+  if (!invoice) return null;
+  if (trigger === 'paid' || !invoice.payer_statement_id) return invoiceIssuedDay(invoice, trigger);
+  const statement = await conn('payer_statements').where({ id: invoice.payer_statement_id }).first('sent_at');
+  return invoiceIssuedDay({ ...invoice, sent_at: newestStamp(invoice.sent_at, statement?.sent_at) }, trigger);
+}
+
+function newestStamp(...values) {
+  const times = values.map((value) => (value ? new Date(value).getTime() : NaN)).filter(Number.isFinite);
+  return times.length ? new Date(Math.max(...times)) : null;
+}
+
 // THE status + day rule, shared by the unlocked resolver, the canonical
 // completion's locked recheck and (as SQL prefilters) the retry sweeps, so
 // they can never drift apart. Returns null when the visit may close, else
@@ -184,7 +202,13 @@ async function resolveVisitForIssuedInvoice(conn, invoice, { today = etDateStrin
   // #4131), an arrived visit closes on a past day or on money received
   // today, and a visit nobody arrived at closes only on an invoice settled
   // or delivered after its day.
-  const refusedByState = issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger, issuedDay: invoiceIssuedDay(invoice, trigger) });
+  let issuedDay;
+  try {
+    issuedDay = await issuedDayForInvoice(conn, invoice, trigger);
+  } catch (err) {
+    throw Object.assign(err instanceof Error ? err : new Error(String(err)), { linkedVisit: svc });
+  }
+  const refusedByState = issuedCloseoutVisitRefusal(svc.status, svc.scheduled_date, { today, trigger, issuedDay });
   if (refusedByState) return leaveOpen(refusedByState);
   // Every read from here on is against a visit already in hand: a failed
   // one is an outage of THIS visit's closeout, rethrown carrying the visit
@@ -300,14 +324,18 @@ const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempt
 // closeout was still running audited `visit_completed`, and if that worker
 // then died the parked attempt is the truth, not the audit row. System
 // actor: nobody is behind a retry.
-// The same rule as issuedCloseoutVisitRefusal for trigger 'paid', as SQL: an
-// unstarted visit on a past day or an arrived one through today — or a visit
-// already completed with THIS closeout's own attempt still parked.
-function retryableVisitFilter(q, today) {
+// The rule's status + day admission, as SQL, for both sweeps: an unstarted
+// visit on a past day; an arrived one on a past day, or today when the
+// invoice / statement is SETTLED (`settledSql`, a boolean SQL expression —
+// a send never closes a same-day visit) — or a visit already completed with
+// THIS closeout's own attempt still parked.
+function retryableVisitFilter(q, today, settledSql) {
   return q
     .where((open) => open
       .where((unstarted) => unstarted.where((live) => live.whereIn('s.status', OPEN_VISIT_STATUSES).orWhereNull('s.status')).where('s.scheduled_date', '<', today))
-      .orWhere((arrived) => arrived.whereIn('s.status', ARRIVED_VISIT_STATUSES).where('s.scheduled_date', '<=', today)))
+      .orWhere((arrived) => arrived.whereIn('s.status', ARRIVED_VISIT_STATUSES)
+        .where((day) => day.where('s.scheduled_date', '<', today)
+          .orWhere((sameDay) => sameDay.where('s.scheduled_date', '=', today).whereRaw(settledSql)))))
     .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL));
 }
 
@@ -366,44 +394,61 @@ function prepaidAndNobodyArrived(row) {
 // `column` settled / delivered on a later ET day than the visit's day.
 const settledAfterServiceDaySql = (column) => `((${column}) AT TIME ZONE 'America/New_York')::date > s.scheduled_date`;
 
+// A statement the payer HAS but has not settled (NET terms: weeks, or never),
+// and one that is settled.
+const DELIVERED_STATEMENT_STATUSES = ['sent', 'viewed', 'processing'];
+
+// The statement children's sweep: the same retry as retryIssuedInvoiceCloseouts,
+// for invoices that are delivered and settled through their payer statement
+// (the name predates GitHub r5 P1 #5886, when only SETTLED statements were
+// swept; a delivered, unpaid statement's children had no retry for a `sent`
+// closeout that failed or was refused while a timer ran). A child is retried
+// when its closeout never ran — the statement's delivery or settlement is the
+// only trigger it gets — or was refused for a state that has since changed.
+// Trigger and proof come from the statement: 'paid' + paid_at when settled,
+// else 'sent' + sent_at.
 async function retrySettledStatementCloseouts({ conn = db, today = etDateString(), sinceDays = 7 } = {}) {
   if (!isEnabled('invoiceIssuedClosesVisit')) return { candidates: 0, retried: 0, closed: 0 };
+  const since = new Date(Date.now() - sinceDays * 86400000);
+  const STATEMENT_ISSUED_AT_SQL = "CASE WHEN ps.status = 'paid' THEN ps.paid_at ELSE ps.sent_at END";
   let rows = [];
   try {
     rows = await conn('payer_statements as ps')
       .join('invoices as i', 'i.payer_statement_id', 'ps.id')
       .join('scheduled_services as s', 's.id', 'i.scheduled_service_id')
-      .where('ps.status', 'paid')
-      .where('ps.paid_at', '>=', new Date(Date.now() - sinceDays * 86400000))
-      .where((q) => retryableVisitFilter(q, today))
+      .where((issued) => issued
+        .where((settled) => settled.where('ps.status', 'paid').where('ps.paid_at', '>=', since))
+        .orWhere((delivered) => delivered.whereIn('ps.status', DELIVERED_STATEMENT_STATUSES).where('ps.sent_at', '>=', since)))
+      .where((q) => retryableVisitFilter(q, today, "ps.status = 'paid'"))
       .orderBy(['ps.id', 'i.id'])
-      .select('ps.id as statement_id', 'i.id as invoice_id', 's.id as visit_id', 's.status as visit_status',
-        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${settledAfterServiceDaySql('ps.paid_at')} as issued_after_service_day`));
+      .select('ps.id as statement_id', 'ps.status as statement_status', 'i.id as invoice_id', 's.id as visit_id', 's.status as visit_status',
+        conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${settledAfterServiceDaySql(STATEMENT_ISSUED_AT_SQL)} as issued_after_service_day`));
   } catch (err) {
-    logger.error(`[invoice-issued-closeout] settled-statement retry: candidate lookup failed: ${err.message}`);
+    logger.error(`[invoice-issued-closeout] statement retry: candidate lookup failed: ${err.message}`);
     return { candidates: 0, retried: 0, closed: 0 };
   }
   let retried = 0;
   let closed = 0;
   for (const row of rows) {
+    const trigger = row.statement_status === 'paid' ? 'paid' : 'sent';
     if (!row.own_attempt_parked) {
       if (prepaidAndNobodyArrived(row)) continue;
       let last;
       try {
-        last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id, trigger: 'paid' });
+        last = await latestCloseoutAudit(conn, { visitId: row.visit_id, invoiceId: row.invoice_id, trigger });
       } catch (err) {
-        logger.error(`[invoice-issued-closeout] settled-statement retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
+        logger.error(`[invoice-issued-closeout] statement retry: audit lookup failed for invoice ${row.invoice_id}: ${err.message}`);
         continue;
       }
-      // Never ran (the settlement is the only trigger a child gets), or
-      // refused for the moment; a real refusal is left alone.
+      // Never ran for THIS trigger, or refused for a state that changed; a
+      // refusal about what the visit is is left alone.
       if (last && !refusedForTheMoment(last)) continue;
     }
     retried += 1;
-    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger: 'paid', conn, today });
+    const out = await closeOutVisitForIssuedInvoice({ invoiceId: row.invoice_id, trigger, conn, today });
     if (out?.closed) closed += 1;
   }
-  if (retried) logger.info(`[invoice-issued-closeout] settled-statement retry: ${rows.length} open linked child(ren), ${retried} retried, ${closed} closed`);
+  if (retried) logger.info(`[invoice-issued-closeout] statement retry: ${rows.length} open linked child(ren), ${retried} retried, ${closed} closed`);
   return { candidates: rows.length, retried, closed };
 }
 
@@ -454,15 +499,7 @@ async function retryIssuedInvoiceCloseouts({ conn = db, today = etDateString(), 
       .whereNull('i.payer_statement_id')
       .whereIn('i.status', [...SETTLED_INVOICE_STATUSES, ...DELIVERED_INVOICE_STATUSES])
       .whereRaw(`${ISSUED_AT_SQL} >= ?`, [new Date(Date.now() - sinceDays * 86400000)])
-      .where((q) => q
-        // The same rule as issuedCloseoutVisitRefusal, as SQL: an unstarted
-        // visit closes on a past day; an arrived one on a past day, or today
-        // when the invoice is settled.
-        .where((unstarted) => unstarted.where((live) => live.whereIn('s.status', OPEN_VISIT_STATUSES).orWhereNull('s.status')).where('s.scheduled_date', '<', today))
-        .orWhere((arrived) => arrived.whereIn('s.status', ARRIVED_VISIT_STATUSES)
-          .where((day) => day.where('s.scheduled_date', '<', today)
-            .orWhere((sameDay) => sameDay.where('s.scheduled_date', '=', today).whereIn('i.status', SETTLED_INVOICE_STATUSES))))
-        .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
+      .where((q) => retryableVisitFilter(q, today, "i.status IN ('paid', 'prepaid')"))
       .orderBy('i.id')
       .select('i.id as invoice_id', 'i.status as invoice_status', 's.id as visit_id', 's.status as visit_status',
         conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`), conn.raw(`${ISSUED_AFTER_SERVICE_DAY_SQL} as issued_after_service_day`));
@@ -706,6 +743,7 @@ module.exports = {
   isArrivedVisitStatus,
   issuedCloseoutVisitRefusal,
   invoiceIssuedDay,
+  issuedDayForInvoice,
   resolveVisitForIssuedInvoice,
   resumableIssuedCloseoutAttempt,
   closeOutVisitForIssuedInvoice,

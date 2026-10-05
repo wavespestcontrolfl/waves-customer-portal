@@ -112,6 +112,26 @@ describe('Bouncie geofence timer maintenance interlock', () => {
     expect(timeTracking.endJob).not.toHaveBeenCalled();
   });
 
+  test('a visit completed between the job lookup and the timer start is a silent no-op — no start reminder for a visit that cannot be started', async () => {
+    process.env.STAFF_MAINTENANCE_MODE = 'false';
+    matcher.getMode.mockResolvedValue('automatic');
+    matcher.getCooldownMinutes.mockResolvedValue(10);
+    matcher.isDuplicateEnter.mockResolvedValue(false);
+    matcher.getActiveJobTimer.mockResolvedValue(null);
+    timeTracking.startJob.mockRejectedValue(Object.assign(new Error('This visit is already completed.'), { status: 409, code: 'job_already_completed' }));
+    db.mockClear();
+    matcher.logEvent.mockClear();
+
+    await geofenceHandler.handleGeozoneEvent(payload('ENTER'));
+
+    expect(timeTracking.startJob).toHaveBeenCalled();
+    // No notification row is written (sendTechNotification goes through db).
+    expect(db).not.toHaveBeenCalled();
+    expect(matcher.logEvent).toHaveBeenCalledTimes(1);
+    expect(matcher.logEvent).toHaveBeenCalledWith(expect.objectContaining({ action_taken: 'skipped_job_completed', matched_job_id: 'job-1', technician_id: 'tech-1' }));
+    expect(trackTransitions.markOnProperty).not.toHaveBeenCalled();
+  });
+
   test('ends a job normally for EXIT while disabled', async () => {
     process.env.STAFF_MAINTENANCE_MODE = 'false';
     matcher.getActiveJobTimer.mockResolvedValue({

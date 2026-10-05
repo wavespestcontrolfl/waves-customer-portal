@@ -528,13 +528,43 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     const v15 = await visit(); await invoice({ status: 'paid', payer_statement_id: advanceSettled, scheduled_service_id: v15.id });
     // 16. ARRIVED, settled on the visit day, never ran → retried: the technician was there
     const v16 = await visit({ status: 'on_site' }); await invoice({ status: 'paid', payer_statement_id: sameDaySettled, scheduled_service_id: v16.id });
+    // ── DELIVERED, unpaid statements (NET terms): the 'sent' trigger, proof = the statement's sent_at (GitHub r5 P1 #5886) ──
+    const deliveredStatement = async (sentAt, status = 'sent') => {
+      const [id] = await trx('payer_statements').insert({
+        payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status, terms_snapshot: 'net30',
+        token: randomUUID().replace(/-/g, ''), sent_at: sentAt,
+      }).returning('id').then((r) => r.map((x) => x.id ?? x));
+      return id;
+    };
+    const delivered = await deliveredStatement(new Date('2040-03-04T15:00:00Z'));
+    const sentAudit = (visitId, invoiceId, code) => trx('audit_log').insert({
+      actor_type: 'system', action: 'visit.completion_on_invoice_issued_refused', resource_type: 'scheduled_services', resource_id: visitId,
+      metadata: JSON.stringify({ invoiceId, trigger: 'sent', code }),
+    });
+    // 17. arrived child, refused at delivery while its job timer ran; the timer has stopped → retried with 'sent'
+    const v17 = await visit({ status: 'on_site' }); const i17 = await invoice({ status: 'sent', payer_statement_id: delivered, scheduled_service_id: v17.id });
+    await sentAudit(v17.id, i17.id, 'visit_timer_running');
+    // 18. unstarted child, delivery closeout failed with an outage → retried with 'sent' (the statement went out after the visit day)
+    const v18 = await visit(); const i18 = await invoice({ status: 'sent', payer_statement_id: delivered, scheduled_service_id: v18.id });
+    await sentAudit(v18.id, i18.id, 'error');
+    // 19. arrived TODAY on a delivered statement → not a candidate: a send never closes a same-day visit
+    const v19 = await visit({ status: 'on_site', date: TODAY }); await invoice({ status: 'sent', date: TODAY, payer_statement_id: delivered, scheduled_service_id: v19.id });
+    // 20. a 'viewed' statement delivered ON the visit day, unstarted child → left alone (prepayment rule)
+    const viewedSameDay = await deliveredStatement(new Date('2040-03-03T15:00:00Z'), 'viewed');
+    const v20 = await visit(); await invoice({ status: 'sent', payer_statement_id: viewedSameDay, scheduled_service_id: v20.id });
+    // 21. a FINALIZED (never delivered) statement → not a candidate
+    const [finalized] = await trx('payer_statements').insert({ payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status: 'finalized', terms_snapshot: 'net30', token: randomUUID().replace(/-/g, '') }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const v21 = await visit({ status: 'on_site' }); await invoice({ status: 'draft', payer_statement_id: finalized, scheduled_service_id: v21.id });
     // 12. en_route → not a candidate
     const v12 = await visit({ status: 'en_route' }); await invoice({ status: 'paid', payer_statement_id: recent, scheduled_service_id: v12.id });
 
     const out = await retrySettledStatementCloseouts({ conn: trx, today: TODAY });
-    expect(out).toEqual({ candidates: 10, retried: 6, closed: 6 });
+    expect(out).toEqual({ candidates: 13, retried: 8, closed: 8 });
     const retriedIds = mockCompleteScheduledService.mock.calls.map(([args]) => args.serviceId).sort();
-    expect(retriedIds).toEqual([v1.id, v2.id, v7.id, v9.id, v13.id, v16.id].sort());
+    expect(retriedIds).toEqual([v1.id, v2.id, v7.id, v9.id, v13.id, v16.id, v17.id, v18.id].sort());
+    const triggerOf = (id) => mockCompleteScheduledService.mock.calls.find(([args]) => args.serviceId === id)[0].issuedInvoiceCloseout.trigger;
+    expect([triggerOf(v17.id), triggerOf(v18.id), triggerOf(v1.id)]).toEqual(['sent', 'sent', 'paid']);
+    for (const left of [v19, v20, v21]) expect(retriedIds).not.toContain(left.id);
     for (const left of [v11, v14, v15]) expect(retriedIds).not.toContain(left.id);
     expect(retriedIds).not.toContain(v10.id);
     expect(retriedIds).not.toContain(v12.id);
@@ -693,6 +723,22 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     // An ARRIVED visit is never a prepayment case.
     await trx('scheduled_services').where({ id: svc.id }).update({ status: 'on_site' });
     expect((await resolveVisitForIssuedInvoice(trx, inv, { today: TODAY, trigger: 'paid' })).svc.id).toBe(svc.id);
+  });
+
+  test('a statement child reads its delivery proof from the STATEMENT: delivered on or before the visit day it is a prepayment for a visit nobody arrived at; delivered after, it closes', async () => {
+    const [payerId] = await trx('payers').insert({ display_name: 'Fixture Bill-To' }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const [statementId] = await trx('payer_statements').insert({
+      payer_id: payerId, period_start: '2040-02-01', period_end: '2040-02-29', status: 'sent', terms_snapshot: 'net30',
+      token: randomUUID().replace(/-/g, ''), sent_at: new Date('2040-03-02T15:00:00Z'),
+    }).returning('id').then((r) => r.map((x) => x.id ?? x));
+    const before = await visit({ date: '2040-03-01' });
+    const onTheDay = await visit({ date: '2040-03-02' });
+    const child = (svc) => invoice({ scheduled_service_id: svc.id, date: '2040-03-01', payer_statement_id: statementId });
+    expect((await resolveVisitForIssuedInvoice(trx, await child(before), { today: TODAY, trigger: 'sent' })).svc.id).toBe(before.id);
+    expect(await resolveVisitForIssuedInvoice(trx, await child(onTheDay), { today: TODAY, trigger: 'sent' })).toMatchObject({ svc: null, reason: 'visit_prepaid' });
+    // Arrived: never a prepayment case.
+    await trx('scheduled_services').where({ id: onTheDay.id }).update({ status: 'on_site' });
+    expect((await resolveVisitForIssuedInvoice(trx, await child(onTheDay), { today: TODAY, trigger: 'sent' })).svc.id).toBe(onTheDay.id);
   });
 
   test('issued-invoice retry: an ARRIVED visit with a delivered or settled invoice is retried whether or not a closeout ever ran; an UNSTARTED one only after a closeout that ran and failed; real refusals, prepayments, statement children and old invoices are left alone (GitHub r1 P1, r3 P1 ×2 #5886)', async () => {

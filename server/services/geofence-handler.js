@@ -239,6 +239,27 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
     try {
       entry = await timeTracking.startJob(tech.id, job ? job.id : null, { lat, lng });
     } catch (err) {
+      // The visit was completed between the job lookup above and the timer
+      // start (the office closed it out on its paid invoice): there is
+      // nothing to start and nothing to remind about — tapping a reminder
+      // would only answer "job not found" (GitHub r5 P2 #5886). Logged, no
+      // notification.
+      if (err && err.code === 'job_already_completed') {
+        logger.info(`[geofence-handler] auto startJob skipped: visit ${job ? job.id : null} is already completed`);
+        await matcher.logEvent({
+          bouncie_imei: imei,
+          technician_id: tech.id,
+          event_type: 'ENTER',
+          latitude: lat,
+          longitude: lng,
+          matched_customer_id: customer.id,
+          matched_job_id: job ? job.id : null,
+          action_taken: 'skipped_job_completed',
+          raw_payload: payload,
+          event_timestamp: eventTime,
+        });
+        return;
+      }
       // Most common cause: tech not clocked in. Surface as a reminder instead.
       logger.warn(`[geofence-handler] auto startJob failed, falling back to reminder: ${err.message}`);
       await sendTechNotification(tech.id, {

@@ -166,7 +166,10 @@ describe('source contracts', () => {
     // profile re-resolve, through the ONE function the wrapper's resolver
     // uses (issuedCloseoutVisitRefusal — Codex round 16 P2 #4131 kept NULL
     // live in both; owner 2026-10-04 admits an arrived visit in both).
-    expect(completion).toMatch(/issuedCloseoutVisitRefusal\(lockedSvcRow\?\.status, lockedDay, \{[\s\S]{0,200}?trigger: issuedInvoiceCloseout\.trigger,[\s\S]{0,500}?issuedDay: invoiceIssuedDay\(lockedIssuedInvoice, issuedInvoiceCloseout\.trigger\),[\s\S]{0,700}?code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,600}?if \(lockedRefusal\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,3000}?const lockedProfile = await resolveLockedProfile/);
+    // The proof is read from the invoice row LOCKED in this transaction (plus its statement's delivery stamp).
+    expect(completion).toMatch(/const lockedIssuedDay = await issuedDayForInvoice\(trx, lockedIssuedInvoice, issuedInvoiceCloseout\.trigger\);/);
+    expect(completion).toMatch(/lockedIssuedInvoice = issuedNow;/);
+    expect(completion).toMatch(/issuedCloseoutVisitRefusal\(lockedSvcRow\?\.status, lockedDay, \{[\s\S]{0,200}?trigger: issuedInvoiceCloseout\.trigger,[\s\S]{0,500}?issuedDay: lockedIssuedDay,[\s\S]{0,700}?code: 'issued_visit_rescheduled' \}\);\s*\}[\s\S]{0,600}?if \(lockedRefusal\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);[\s\S]{0,3000}?const lockedProfile = await resolveLockedProfile/);
     // …and a job timer started on the visit since the wrapper's read refuses under the same lock (r1 P1 #5886).
     expect(completion).toMatch(/if \(await visitJobTimerRunning\(trx, svc\.id\)\) \{\s*throw Object\.assign\(new Error\([^)]*\), \{ code: 'issued_visit_in_progress' \}\);\s*\}[\s\S]{0,800}?fromStatus = lockedSvcRow\.status;/);
   });
