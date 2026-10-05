@@ -149,6 +149,28 @@ describe('buildReportAskFacts', () => {
     expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], pressureIndex: null } }).pest_pressure).toBeUndefined();
   });
 
+  test('scrubs contact details and digit runs from the customer concern', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'Call Pat at 941-555-0100 or pat@example.com, gate 4821, roaches in kitchen' } });
+    expect(facts.customer_concern).not.toMatch(/555|example\.com|4821/);
+    expect(facts.customer_concern).toMatch(/roaches in kitchen/);
+  });
+
+  test('a full product name wins over a shared first word; an ambiguous first word names none', () => {
+    const apps = [
+      { product: { name: 'Advion Ant Bait Gel' }, applicationArea: 'Kitchen' },
+      { product: { name: 'Advion Cockroach Gel Bait' }, applicationArea: 'Kitchen' },
+    ];
+    const exact = buildReportAskFacts({ question: 'Why was Advion Cockroach Gel Bait used?', data: { serviceLine: 'pest', applications: apps } });
+    expect(exact.products.map((p) => p.name)).toEqual(['Advion Cockroach Gel Bait']);
+    const vague = buildReportAskFacts({ question: 'Why was Advion used?', data: { serviceLine: 'pest', applications: apps } });
+    expect(vague.products).toHaveLength(2);
+  });
+
+  test('strips the concentration from the active ingredient', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [{ product: { name: 'Alpine WSG', active_ingredient: 'Dinotefuran 40.0%' }, applicationArea: 'Kitchen' }] } });
+    expect(facts.products[0].active_ingredient).toBe('Dinotefuran');
+  });
+
   test('reads a pg-hydrated DATE as its calendar date', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], serviceDate: new Date(2026, 9, 2) } });
     expect(facts.service_date).toBe('Friday, October 2, 2026');

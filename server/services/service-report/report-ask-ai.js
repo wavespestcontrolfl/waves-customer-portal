@@ -221,7 +221,11 @@ function productFacts(app = {}) {
     || null;
   const row = {
     name,
-    active_ingredient: cleanText(product.active_ingredient || product.activeIngredient) || null,
+    // The catalog stores a concentration ("Dinotefuran 40.0%"); percentages
+    // are never said to a customer, so the fact carries the name only (Codex
+    // P2 r1 #5957).
+    active_ingredient: cleanText(String(product.active_ingredient || product.activeIngredient || '')
+      .replace(/\s*\d+(?:\.\d+)?\s*%/g, '')) || null,
     applied_where: placeOfApplication(app.applicationArea || app.area),
     what_it_does: whatItDoes ? clip(whatItDoes, 260) : null,
     labeled_for: cleanText(copy.also_labeled_for) || null,
@@ -240,13 +244,30 @@ function productFacts(app = {}) {
 function productsNamedIn(question, products) {
   const q = ` ${normalizeKey(question)} `;
   if (!q.trim()) return [];
-  return products.filter((product) => {
+  // A full-name match wins; the first-word fallback ("Why was Alpine used?")
+  // applies only when no full name matched and it picks out one product, so
+  // "Advion Cockroach Gel Bait" never pulls in "Advion Ant Bait Gel" (Codex
+  // P2 r1 #5957).
+  const exact = products.filter((product) => {
     const name = normalizeKey(product.name);
-    if (!name) return false;
-    if (q.includes(` ${name} `)) return true;
-    const first = name.split(' ')[0];
+    return name && q.includes(` ${name} `);
+  });
+  if (exact.length) return exact;
+  const byFirst = products.filter((product) => {
+    const first = normalizeKey(product.name).split(' ')[0];
     return first.length >= 4 && q.includes(` ${first} `);
   });
+  return byFirst.length === 1 ? byFirst : [];
+}
+
+// The customer's concern is free text a technician typed: phones and emails
+// are scrubbed (redactContact), and any other digit run (a house number, a
+// gate code) is masked before it reaches a model (Codex P1 r1 #5957).
+function concernFact(value) {
+  const text = clip(value, 400);
+  if (!text) return null;
+  const { redactContact } = require('../../utils/redact-contact');
+  return cleanText(redactContact(text).replace(/\d{3,}/g, '[number]')) || null;
 }
 
 // ── The fact sheet ──────────────────────────────────────────────────────
@@ -386,7 +407,7 @@ function buildReportAskFacts({
     service: cleanText(data.serviceDisplayName || data.serviceType) || null,
     service_date: longDate(etDateIso(data.serviceDate)),
     technician_first_name: firstNameOf(data),
-    customer_concern: clip(data.customerConcern, 400) || null,
+    customer_concern: concernFact(data.customerConcern),
     report_sections: sections.length ? sections : null,
     // The visit summary is only needed when the reviewed sections are absent.
     visit_summary: sections.length || !keep(clip(data.summary, 700)) ? null : (clip(data.summary, 700) || null),
