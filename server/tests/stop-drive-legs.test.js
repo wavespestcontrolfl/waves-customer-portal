@@ -199,4 +199,18 @@ describe('attachDriveLegs', () => {
     const lateFilled = 9 * 60 + 30 + leg - (9 * 60 + 120);
     expect(filled[2].driveLateMin).toBe(lateFilled > 0 ? lateFilled : null);
   });
+
+  it('adds up two visit groups and a loose row that share one pin', () => {
+    const services = [
+      stop('g1', '09:00', A, { visitId: 'v1', windowEnd: '09:30' }),
+      stop('h1', '09:00', A, { visitId: 'v2', windowEnd: '09:30' }),
+      stop('x', '09:00', A, { windowEnd: '09:30' }),
+      stop('c', '09:00', C),
+    ];
+    attachDriveLegs(services);
+    const leg = services[3].driveFromPrevMin;
+    // 30 + 30 + 30 minutes of work from 09:00: the tech leaves at 10:30.
+    const late = 10 * 60 + 30 + leg - (9 * 60 + 120);
+    expect(services[3].driveLateMin).toBe(late > 0 ? late : null);
+  });
 });

@@ -49,14 +49,17 @@ function realEstimate(s) {
   return Number.isFinite(dur) && dur > 0 ? dur : 0;
 }
 
-// When the tech leaves a stop. A visit group's rows run one after another
-// (arrival-route.js groupRouteStops sums a visit's work), so two 60-minute
-// rows of one visit booked at 09:00 leave at 11:00. Ungrouped rows merged
-// by sharing a pin follow route-reorder-window-fit.js coVisitWork: the sum
-// of their real estimates, floored by the longest row's own work, so two
-// span-only rows sharing an hour stay one hour (the phantom hour).
+// When the tech leaves a stop. One crew at one pin does every piece of
+// work there in turn, starting at the stop's earliest booked time:
+// - a visit group's rows add up (arrival-route.js groupRouteStops), so two
+//   60-minute rows of one visit at 09:00 leave at 11:00;
+// - ungrouped rows sharing the pin count as one co-visit, as
+//   route-reorder-window-fit.js coVisitWork does: the sum of their real
+//   estimates, floored by the longest row's own work, so two span-only
+//   rows sharing an hour stay one hour (the phantom hour);
+// - those pieces then add up with each other.
+// No row leaves before its own booked work ends.
 function departure(rows) {
-  const ends = [];
   const groups = new Map();
   const loose = [];
   for (const m of rows) {
@@ -64,17 +67,16 @@ function departure(rows) {
     if (!groups.has(m.visitId)) groups.set(m.visitId, []);
     groups.get(m.visitId).push(m);
   }
-  for (const g of groups.values()) {
-    const starts = g.map((m) => minutesOf(m.windowStart));
-    const summed = Math.min(...starts) + g.reduce((sum, m) => sum + workMinutes(m), 0);
-    ends.push(Math.max(summed, ...g.map((m, i) => starts[i] + workMinutes(m))));
-  }
+  let work = 0;
+  for (const g of groups.values()) work += g.reduce((sum, m) => sum + workMinutes(m), 0);
   if (loose.length) {
-    const starts = loose.map((m) => minutesOf(m.windowStart));
-    const estimates = loose.reduce((sum, m) => sum + realEstimate(m), 0);
-    ends.push(Math.max(Math.min(...starts) + estimates, ...loose.map((m, i) => starts[i] + workMinutes(m))));
+    work += Math.max(
+      loose.reduce((sum, m) => sum + realEstimate(m), 0),
+      ...loose.map(workMinutes),
+    );
   }
-  return Math.max(...ends);
+  const starts = rows.map((m) => minutesOf(m.windowStart));
+  return Math.max(Math.min(...starts) + work, ...rows.map((m, i) => starts[i] + workMinutes(m)));
 }
 
 // Visits the tech has not reached yet: only these can still run late.
