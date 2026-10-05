@@ -347,6 +347,10 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     const seen = [];
     expect(await request(async (trx, locked) => { seen.push(locked.id); return 'not_now'; })).toMatchObject({ status: 409, body: { code: 'locked_visit_guard_refused', reason: 'not_now' } });
     expect(seen).toEqual([visitId]);
+    // The second argument is the locked row, the third the row the completion loaded.
+    let loadedId = null;
+    await request(async (trx, locked, loaded) => { loadedId = loaded.id; return 'not_now'; });
+    expect(loadedId).toBe(visitId);
     expect((await row(visitId)).status).toBe('on_site');
     expect(await mockPg('service_records').where({ scheduled_service_id: visitId })).toHaveLength(0);
     // Not a function (a request body can never smuggle one in): ignored.
@@ -444,7 +448,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     };
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
     expect((await row(reclassifiedVisit)).status).toBe('on_site');
-    expect(await audits(reclassifiedVisit, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'not_assessment' }) })]);
+    expect(await audits(reclassifiedVisit, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_changed' }) })]);
 
     const moved = await customer();
     const movedVisit = await visit(moved, { day: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
@@ -454,7 +458,35 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     };
     await closeAssessmentsWithSentEstimates({ conn: mockPg });
     expect((await row(movedVisit)).status).toBe('on_site');
-    expect(await audits(movedVisit, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_moved' }) })]);
+    expect(await audits(movedVisit, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_changed' }) })]);
+
+    // Past day → another past day (the posture does not change): the record
+    // would carry the old service day, so it is refused too…
+    const corrected = await customer();
+    const twoDaysAgo = etDateString(addETDays(new Date(), -2));
+    const correctedVisit = await visit(corrected, { day: twoDaysAgo, en_route_at: minutesAgo(60 * 50), arrived_at: minutesAgo(60 * 49), check_in_time: minutesAgo(60 * 49) });
+    await estimate(corrected, { sentAt: minutesAgo(60 * 20) });
+    mockRace.beforeClaim = async () => {
+      await mockPg('scheduled_services').where({ id: correctedVisit }).update({ scheduled_date: YESTERDAY });
+    };
+    await closeAssessmentsWithSentEstimates({ conn: mockPg });
+    expect((await row(correctedVisit)).status).toBe('on_site');
+    expect(await mockPg('service_records').where({ scheduled_service_id: correctedVisit })).toHaveLength(0);
+    // …and so is a customer reassignment, even though the new customer has a sent estimate of their own.
+    const from = await customer();
+    const to = await customer();
+    const reassigned = await visit(from);
+    await estimate(from);
+    await estimate(to);
+    mockRace.beforeClaim = async () => {
+      await mockPg('scheduled_services').where({ id: reassigned }).update({ customer_id: to });
+    };
+    await closeAssessmentsWithSentEstimates({ conn: mockPg });
+    expect((await row(reassigned)).status).toBe('on_site');
+    expect(await mockPg('service_records').where({ scheduled_service_id: reassigned })).toHaveLength(0);
+    for (const id of [correctedVisit, reassigned]) {
+      expect(await audits(id, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_changed' }) })]);
+    }
   });
 
   test('gate off: nothing is read and nothing closes', async () => {

@@ -3465,7 +3465,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const issuedInvoiceCloseout = completionInput.issuedInvoiceCloseout || null;
     // A service caller's own recheck, run under the visit row lock in the
     // record transaction (assessment-estimate-closeout.js): `async (trx,
-    // lockedVisitRow) => null | reason`. A reason refuses the completion
+    // lockedVisitRow, loadedVisitRow) => null | reason`. `loadedVisitRow` is
+    // the unlocked row this completion loaded and builds its record from, so
+    // the caller can refuse a visit that drifted between that load and the lock. A reason refuses the completion
     // before anything is written (409 locked_visit_guard_refused). Never
     // read from a request body — only an in-process caller can pass a function.
     const lockedVisitGuard = typeof completionInput.lockedVisitGuard === 'function' ? completionInput.lockedVisitGuard : null;
@@ -5990,7 +5992,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // decided again here, so nothing that changed in between is
           // completed over.
           if (lockedVisitGuard && lockedSvcRow) {
-            const guardReason = await lockedVisitGuard(trx, lockedSvcRow);
+            const guardReason = await lockedVisitGuard(trx, lockedSvcRow, svc);
             if (guardReason) {
               throw Object.assign(new Error(`visit refused by its caller's locked recheck: ${guardReason}`), { code: 'locked_visit_guard_refused', guardReason: String(guardReason) });
             }

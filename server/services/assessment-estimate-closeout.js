@@ -39,6 +39,13 @@ const AUDIT_REFUSED = 'visit.assessment_close_on_estimate_sent_refused';
 // between two attempts, or between a commit and its resume, would otherwise
 // change the hash and strand the retry (pre-push audit P1 ×3). Identity is
 // re-decided where it belongs: on the locked row, by lockedVisitGuard.
+// What the completion's record is built from; compared between the row it
+// loaded and the row it locked.
+const IDENTITY_FIELDS = ['customer_id', 'scheduled_date', 'service_type', 'service_id'];
+const identityValue = (visit, field) => (field === 'scheduled_date'
+  ? (visit && visit.scheduled_date ? dateOnlyString(visit.scheduled_date) : null)
+  : String((visit && visit[field]) ?? ''));
+
 const KEY_PREFIX = 'assessment-estimate:';
 const idempotencyKeyFor = (visitId, posture) => `${KEY_PREFIX}${visitId}:${posture}`;
 const postureOfKey = (key) => (String(key || '').split(':')[2] === 'backfill' ? 'backfill' : 'live');
@@ -217,7 +224,13 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
     // A RESUME carries no guard: that attempt already committed the visit as
     // completed on evidence that was good then, and only its post-commit
     // work is owed.
-    lockedVisitGuard: resuming ? null : async (trx, lockedVisit) => {
+    lockedVisitGuard: resuming ? null : async (trx, lockedVisit, loadedVisit) => {
+      // The completion builds its record (customer, service day, service
+      // line) from the row it LOADED before this lock. If the locked row
+      // differs from that load in any of them, the verdict below would be
+      // about one visit and the record about another: refuse, and the next
+      // tick reads the visit as it now is.
+      if (IDENTITY_FIELDS.some((field) => identityValue(lockedVisit, field) !== identityValue(loadedVisit, field))) return 'visit_changed';
       if (!(await isAssessmentBooking(lockedVisit, trx))) return 'not_assessment';
       const lockedToday = etDateString();
       if ((dateOnlyString(lockedVisit.scheduled_date) < lockedToday) !== pastDay) return 'visit_moved';
