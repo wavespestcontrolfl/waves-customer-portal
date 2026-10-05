@@ -168,7 +168,7 @@ function addressWords(value) {
 }
 
 // The street addresses a text names, for a text with no customer (so no
-// properties to compare): { addresses: [{ number, street: [words], unit }], zips }.
+// properties to compare): { addresses: [{ number, street: [words], unit, zip }] }.
 // An address is a number then up to four words that end in a street suffix
 // ("4455 Example Lane"), then a directional when one follows ("100 Main St N")
 // and a unit when the text names one ("Apt 5"); the street words, directional
@@ -178,7 +178,8 @@ function addressesIn(body) {
   const words = addressWords(body);
   const addresses = [];
   for (let i = 0; i < words.length - 1; i += 1) {
-    if (!/^\d{1,6}$/.test(words[i]) || !/^[a-z]/.test(words[i + 1])) continue;
+    // A number after "FL" is the ZIP, not a house number ("FL 34202. View ...").
+    if (!/^\d{1,6}$/.test(words[i]) || !/^[a-z]/.test(words[i + 1]) || /^(?:fl|florida)$/.test(words[i - 1])) continue;
     const street = [];
     let j = i + 1;
     for (; j < words.length && street.length < STREET_WORDS_MAX; j += 1) {
@@ -195,8 +196,21 @@ function addressesIn(body) {
     const unit = next > unitStart && words[next] ? words[next].replace(/[^a-z0-9]/g, '') : null;
     addresses.push({ number: words[i], street, unit });
   }
-  const zips = [...String(body || '').matchAll(/\b(?:FL|Florida)\.?,?\s+(\d{5})(?:-\d{4})?\b/gi)].map((m) => m[1]);
-  return { addresses, zips };
+  // Each address takes the ZIP written after it and before the next address,
+  // so a ZIP never qualifies another address in the same text.
+  const text = String(body || '');
+  const starts = [];
+  let from = 0;
+  for (const a of addresses) {
+    const at = Math.max(text.toLowerCase().indexOf(a.number, from), from);
+    starts.push(at);
+    from = at + a.number.length;
+  }
+  addresses.forEach((a, k) => {
+    const span = text.slice(starts[k], starts[k + 1]);
+    a.zip = (/\b(?:FL|Florida)\.?,?\s+(\d{5})(?:-\d{4})?\b/i.exec(span) || [])[1] || null;
+  });
+  return { addresses };
 }
 
 // Digits that are the property's own number (house number, ZIP) or the
@@ -205,7 +219,9 @@ function addressesIn(body) {
 function digitsToRefuse(message, properties) {
   const refuse = new Set();
   if (!message.customer_id) {
-    const { addresses, zips } = addressesIn(message.message_body);
+    const { addresses } = addressesIn(message.message_body);
+    // every Florida ZIP the text writes, with or without a street before it
+    const zips = [...String(message.message_body || '').matchAll(/\b(?:FL|Florida)\.?,?\s+(\d{5})(?:-\d{4})?\b/gi)].map((m) => m[1]);
     for (const a of addresses) refuse.add(a.number);
     for (const z of zips) refuse.add(z);
   }
@@ -401,7 +417,7 @@ async function loadContext(conn, message) {
 // one, unit all match an address in the text (a differing ZIP in the text rules
 // a home out). Two matches, or none, suggest nobody: the office picks.
 async function suggestCustomer(conn, body) {
-  const { addresses, zips } = addressesIn(body);
+  const { addresses } = addressesIn(body);
   if (!addresses.length) return null;
   const numbers = [...new Set(addresses.map((a) => a.number))].slice(0, 5);
   const homes = await conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
@@ -410,10 +426,11 @@ async function suggestCustomer(conn, body) {
     .select('p.id', 'p.customer_id', 'p.address_line1', 'p.address_line2', 'p.zip');
   const matches = homes.filter((home) => {
     const [number, ...street] = addressWords(stripTrailingUnit(home.address_line1));
-    if (zips.length && normalizeZip(home.zip) && !zips.includes(normalizeZip(home.zip))) return false;
     const unit = unitKey(streetEmbeddedUnitKey(home.address_line1) || home.address_line2);
+    const zip = normalizeZip(home.zip);
+    // Street, unit and ZIP of the SAME address in the text.
     return addresses.some((a) => a.number === number && a.street.join(' ') === street.join(' ')
-      && (!a.unit || a.unit === unit));
+      && (!a.unit || a.unit === unit) && (!a.zip || !zip || a.zip === zip));
   });
   return matches.length === 1 ? matches[0].customer_id : null;
 }
@@ -1342,21 +1359,21 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       if (refused) return refused;
       // A one-visit candidate lives 14 days from the day it was sent; one past
       // that is refused whatever visit is named, never activated late.
-      if (next.life === 'visit' && !isLive({ ...row, life: 'visit', status: 'active', scheduled_service_id: null }, now)) {
-        return fail(409, 'expired');
+      let visit = { id: null };
+      if (next.life === 'visit') {
+        if (!isLive({ ...row, life: 'visit', status: 'active', scheduled_service_id: null }, now)) return fail(409, 'expired');
+        visit = await visitFor(trx, row.customer_id, { from: row.source_at ? new Date(row.source_at) : now, chosenId });
       }
-      const visit = next.life === 'visit'
-        ? await visitFor(trx, row.customer_id, { from: row.source_at ? new Date(row.source_at) : now, chosenId }) : { id: null };
       if (visit.error) return fail(400, visit.error);
       const scheduledServiceId = visit.id;
       if (await visitTwin(trx, row.customer_id, next, scheduledServiceId, row.id)) return fail(409, 'duplicate_active');
+      // (standingHome's own error was answered above)
       const home = next.life === 'standing' ? standingHome : { propertyId: visit.propertyId || null };
-      if (home.error) return fail(400, home.error);
       const profileField = await syncProfileField(trx, row.customer_id, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));
       const [updated] = await trx('customer_access_codes').where({ id }).update({
         kind: next.kind, life: next.life, code: next.code, instructions: next.instructions, value_hash: next.value_hash,
-        scheduled_service_id: scheduledServiceId, status: 'active', decided_by: adminUserId || null,
+        scheduled_service_id: scheduledServiceId, status: 'active', decided_by: adminUserId,
         // The named visit or the named home says which home the code is for.
         property_id: home.propertyId,
         decided_at: trx.fn.now(), updated_at: trx.fn.now(),

@@ -2020,7 +2020,7 @@ postgres('access codes section', () => {
       // The owner sees its own pass (not marked shared); nothing is in the directory.
       expect((await readVisit(await visitAtHome(owner))).codes.map((r) => [r.id, r.shared])).toEqual([[passId, undefined]]);
       expect(await directoryRows()).toEqual([]);
-      expect((await trx('customer_access_codes').where({ id: passId }).first()).neighborhood_access_id).toBeNull();
+      expect(await trx('information_schema.columns').where({ table_name: 'customer_access_codes', column_name: 'neighborhood_access_id' })).toEqual([]);
       // The directory gate off: the pass is the owner's alone.
       process.env.GATE_NEIGHBORHOOD_ACCESS = 'false';
       expect((await readVisit(atNeighbor)).codes).toEqual([]);
@@ -2173,6 +2173,11 @@ postgres('access codes section', () => {
         const north5 = await home('100 Main St N', 'Apt 5');
         await home('100 Main St S', 'Apt 4');
         expect(await access.suggestCustomer(trx, BODY)).toBe(north5);
+      });
+      test('a ZIP qualifies only the address it follows', async () => {
+        await home('100 Main St N', 'Apt 5');
+        const two = 'Pass for 100 Main St N, Apt 5, FL 34231 and 200 Oak St, FL 34202';
+        expect(await access.suggestCustomer(trx, two)).toBeNull();
       });
       test('a different directional or unit suggests nobody', async () => {
         await home('100 Main St S', 'Apt 4');

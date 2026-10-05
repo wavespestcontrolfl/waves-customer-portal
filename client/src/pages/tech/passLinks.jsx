@@ -2,7 +2,8 @@
 // ruling 2026-10-05): an https link in an access line becomes one button that
 // opens in a new tab; the rest of the line stays as written. Only https links
 // qualify, so a javascript: or plain http address stays text.
-const PASS_LINK = /https:\/\/[^\s<>"']+/g;
+// The scheme is case-insensitive, as the server's grounding reads it.
+const PASS_LINK = /https:\/\/[^\s<>"']+/gi;
 
 // The link as the server grounded it: the whole https token of the text. Only
 // punctuation that belongs to the sentence around it is dropped: trailing

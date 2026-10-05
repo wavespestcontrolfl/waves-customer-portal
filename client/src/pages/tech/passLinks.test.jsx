@@ -22,6 +22,10 @@ describe('withPassLinks', () => {
     expect(hrefOf('Your pass: https://pass.example.com/v?x=[1]')).toBe('https://pass.example.com/v?x=[1]');
   });
 
+  it('reads the https scheme in any letter case', () => {
+    expect(hrefOf('Your pass: HTTPS://pass.example.com/v/abc')).toBeTruthy();
+  });
+
   it('drops a sentence period or comma, and a closing bracket the link did not open', () => {
     expect(hrefOf('Show https://pass.example.com/v/abc.')).toBe('https://pass.example.com/v/abc');
     expect(hrefOf('Show https://pass.example.com/v/abc, then go in')).toBe('https://pass.example.com/v/abc');
