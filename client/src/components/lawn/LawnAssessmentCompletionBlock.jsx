@@ -152,6 +152,18 @@ function resolveAiScores(assessment = {}, visitAssessment, serverAiScores) {
   };
 }
 
+// What the block's buttons can do right now: one rule for the in-flow buttons,
+// the sheet's bar button and the ref handle. A photo still being read (from any
+// picker) holds Analyze, so it never runs on fewer photos than the tech picked.
+function abilities({ disabled, hasResult, confirmed, analyzing, confirming, modeKnown, photoCount, photoCap, readsInFlight }) {
+  const idle = !disabled && !analyzing;
+  return {
+    addPhoto: !hasResult && idle && modeKnown && photoCount < photoCap,
+    analyze: !hasResult && idle && photoCount > 0 && readsInFlight === 0,
+    confirm: hasResult && !confirmed && !disabled && !confirming,
+  };
+}
+
 function LawnAssessmentCompletionBlock({
   service,
   // The fetcher the lookup, analyze and confirm calls go through: the host
@@ -209,6 +221,7 @@ function LawnAssessmentCompletionBlock({
   // Shots whose photo is still being read: held so a second tap on the same
   // one-photo shot cannot queue a duplicate while the first decode is in flight.
   const [readingShots, setReadingShots] = useState([]);
+  const [readsInFlight, setReadsInFlight] = useState(0); // every picker, tagged or not
   // Photos being decoded right now (total, and per tapped shot): counted so two
   // quick picks cannot each decode a full batch.
   const inFlightRef = useRef({ total: 0, byShot: {} });
@@ -318,6 +331,7 @@ function LawnAssessmentCompletionBlock({
     setError(describeAddResult({ rejected: skipped }));
     if (picked.length === 0) { if (fileRef.current) fileRef.current.value = ""; return; }
     if (pendingZone) setReadingShots((prev) => [...prev, pendingZone]);
+    setReadsInFlight((n) => n + 1);
     if (shotList) {
       inFlightRef.current.total += picked.length;
       if (pendingZone) inFlightRef.current.byShot[pendingZone] = (inFlightRef.current.byShot[pendingZone] || 0) + picked.length;
@@ -350,6 +364,7 @@ function LawnAssessmentCompletionBlock({
         if (pendingZone) inFlightRef.current.byShot[pendingZone] -= picked.length;
       }
       if (pendingZone) setReadingShots((prev) => { const at = prev.indexOf(pendingZone); return at < 0 ? prev : prev.filter((_, i) => i !== at); });
+      setReadsInFlight((n) => n - 1);
       if (fileRef.current) fileRef.current.value = "";
     }
   }
@@ -520,21 +535,19 @@ function LawnAssessmentCompletionBlock({
   // reported to the sheet and enforced again by the handle below. A photo still
   // being read holds Analyze for the sheet's button, so it cannot run on fewer
   // photos than the tech just added.
-  const canAddPhoto = !hasResult && !(disabled || photos.length >= photoCap || analyzing || !modeKnown);
-  const canAnalyze = !hasResult && !(disabled || photos.length === 0 || analyzing) && readingShots.length === 0;
-  const canConfirm = hasResult && !confirmed && !(disabled || confirming);
+  const can = abilities({ disabled, hasResult, confirmed, analyzing, confirming, modeKnown, photoCount: photos.length, photoCap, readsInFlight });
   function openPhotoPicker() {
     pendingShotRef.current = null;
     fileRef.current?.click();
   }
   useImperativeHandle(ref, () => ({
-    analyze: () => { if (canAnalyze) analyze(); },
-    confirm: () => { if (canConfirm) confirm(); },
-    openPhotoPicker: () => { if (canAddPhoto) openPhotoPicker(); },
+    analyze: () => { if (can.analyze) analyze(); },
+    confirm: () => { if (can.confirm) confirm(); },
+    openPhotoPicker: () => { if (can.addPhoto) openPhotoPicker(); },
   }));
   useEffect(() => {
-    onProgress?.({ photos: photos.length, assessed: hasResult, canAddPhoto, canAnalyze, canConfirm, analyzing, confirming });
-  }, [photos.length, hasResult, canAddPhoto, canAnalyze, canConfirm, analyzing, confirming]);
+    onProgress?.({ photos: photos.length, assessed: hasResult, canAddPhoto: can.addPhoto, canAnalyze: can.analyze, canConfirm: can.confirm, analyzing, confirming });
+  }, [photos.length, hasResult, can.addPhoto, can.analyze, can.confirm, analyzing, confirming]);
   // The lawn sheet (compact, with the shot list) shows lawn length as one more
   // row under the photo slots; everywhere else it stays beside the photo button.
   const gaugeInSlots = compact && shotList && !hasResult;
@@ -690,7 +703,7 @@ function LawnAssessmentCompletionBlock({
           <Button
             className={PILL}
             onClick={analyze}
-            disabled={disabled || photos.length === 0 || analyzing}
+            disabled={!can.analyze}
           >
             {analyzing ? "Analyzing..." : "Analyze lawn"}
           </Button>
@@ -773,7 +786,7 @@ function LawnAssessmentCompletionBlock({
               <Button
                 className={`flex-1 ${PILL}`}
                 onClick={confirm}
-                disabled={disabled || confirming}
+                disabled={!can.confirm}
               >
                 {confirming ? "Confirming..." : "Confirm assessment"}
               </Button>
