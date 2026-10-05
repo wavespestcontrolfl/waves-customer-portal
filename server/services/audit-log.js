@@ -494,6 +494,26 @@ async function auditInternalAdminAlertDeliveryIssue({
   });
 }
 
+/**
+ * A customer's lawn size set from an accepted estimate's confirmed size
+ * (lawn-size-sync.js; estimate acceptance and the backfill script). Written
+ * critical, on the caller's transaction, so the size change and its audit
+ * row commit or roll back together. before/after hold the three places the
+ * size lives: turf profile, primary property_sqft, customers.property_sqft.
+ */
+async function auditLawnSqftFromEstimate({ customer_id, estimate_id, sqft, before, after, trigger, field = null, basis = null, source = null, actor_id = null, trx = null }) {
+  return recordAuditEvent({
+    actor_type: actor_id ? 'admin' : 'system',
+    actor_id,
+    action: 'customer.lawn_sqft.set_from_estimate',
+    resource_type: 'customer',
+    resource_id: customer_id,
+    metadata: { estimate_id, sqft, before, after, trigger, field, basis, source },
+    critical: true,
+    trx,
+  });
+}
+
 function ipFromReq(req) {
   return (req.headers?.['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || null;
 }
@@ -523,6 +543,7 @@ async function auditVendorOrder({ vendor_order_id, restock_request_id, vendor_id
 
 module.exports = {
   recordAuditEvent,
+  auditLawnSqftFromEstimate,
   auditVendorOrder,
   auditTerminalHandoffMint,
   auditTerminalHandoffRateLimited,
