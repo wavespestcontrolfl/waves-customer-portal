@@ -238,12 +238,12 @@ async function findSameNoticeExpense(conn, emailId, amount, description) {
     .first('x.id');
 }
 
-// expenses.amount is decimal(12,2): round to cents first (Postgres would),
-// then the largest storable value is 9,999,999,999.99.
+// expenses.amount is decimal(12,2). The value is returned as given, so
+// Postgres does the cent rounding exactly as before; a value that would
+// round past 9,999,999,999.99 is refused (JS cent rounding is not used: it
+// drifts, 1.005 -> 1.00).
 function inColumnRange(n) {
-  if (!Number.isFinite(n)) return null;
-  const cents = Math.round(n * 100) / 100;
-  return cents < 1e10 ? cents : null;
+  return Number.isFinite(n) && n < 9999999999.995 ? n : null;
 }
 
 // The expense date: the parsed invoice's date, else the classifier's, else

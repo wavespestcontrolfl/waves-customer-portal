@@ -14,7 +14,8 @@ test.each([
   ['  $ 7.5 ', 7.5],
   ['200', 200],
   [12.34, 12.34],
-  [12.345, 12.35],
+  [12.345, 12.345],
+  [1.005, 1.005],
   [9999999999.99, 9999999999.99],
 ])('reads %p as %p', (input, expected) => {
   expect(classifierAmount(input)).toBe(expected);
