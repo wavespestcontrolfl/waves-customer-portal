@@ -270,11 +270,19 @@ async function writeLawnSqft(trx, customerId, sqft) {
  *
  * Returns { status: 'written' | 'unchanged' | 'skipped', reason?, sqft?, before?, after?, ... }.
  */
-async function applyEstimateLawnSqft(database, { customerId, estimate, estimateData, trigger = 'acceptance', actorId = null }) {
+async function applyEstimateLawnSqft(database, { customerId, estimate, estimateData, trigger = 'acceptance', actorId = null, revalidate = null }) {
   const confirmed = confirmedLawnSqftFromEstimate(estimateData ?? estimate?.estimate_data);
   if (confirmed.sqft === null) return { status: 'skipped', reason: confirmed.reason, basis: confirmed.basis || null };
   const { withTurfProfileFence } = require('./customer-pricing-ai');
   return withTurfProfileFence(database, customerId, async (trx) => {
+    // A caller that chose this estimate from reads made BEFORE the fence
+    // (the backfill) re-checks its choice here, with fresh reads on the locked
+    // customer: a concurrent acceptance that committed first must not be
+    // overwritten by an older selection. Returns a reason string to abort.
+    if (revalidate) {
+      const stale = await revalidate(trx);
+      if (stale) return { status: 'skipped', reason: 'changed_since_read', detail: stale, sqft: confirmed.sqft };
+    }
     const customer = await trx('customers').where({ id: customerId }).first();
     const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
     const targets = estimateTargetsPrimary(estimate, customer, primary);

@@ -167,6 +167,39 @@ describeDb('lawn size from the estimate (real PostgreSQL)', () => {
     expect(rerun.rows[0].class).toBe('same');
     expect(rerun.applied).toEqual([]);
   });
+
+  test('a newer estimate accepted between the backfill read and its write is not overwritten (re-checked inside the fence)', async () => {
+    const older = estimateRow({ accepted_at: '2026-06-01T00:00:00Z' });
+    const newer = estimateRow({ accepted_at: '2026-10-04T00:00:00Z', estimate_data: lawnData(6100) });
+    await knex('estimates').insert(older);
+    let links = [older.id];
+    const dynamicLoad = async () => [{ customer_id: customerId, estimate_ids: links }];
+    let firstReadDone; const readDone = new Promise((resolve) => { firstReadDone = resolve; });
+    let reads = 0;
+    const realLoadRows = (k, entries) => script.loadRowsForTest(k, entries);
+    // Acceptance holds the customer lock while the backfill reads, then commits.
+    // Real lock order: property-preferences advisory lock, then the customers row.
+    const acceptance = await knex.transaction();
+    await acceptance.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+    await acceptance('customers').where({ id: customerId }).forUpdate().first('id');
+    const pending = script.runBackfill({ knex, today: '2026-10-04', apply: true }, {
+      loadLawnCustomers: dynamicLoad,
+      loadRows: async (k, entries) => { const out = await realLoadRows(k, entries); reads += 1; if (reads === 1) firstReadDone(); return out; },
+    });
+    await readDone;
+    await acceptance('estimates').insert(newer);
+    await sync.applyEstimateLawnSqft(acceptance, { customerId, estimate: newer, estimateData: newer.estimate_data });
+    links = [newer.id];
+    await acceptance.commit();
+    const out = await pending;
+    expect(out.rows[0]).toMatchObject({ class: 'differs', estimate_id: older.id, confirmed_sqft: 5200 });
+    expect(out.applied).toEqual([expect.objectContaining({ status: 'skipped_changed_since_read', reason: expect.stringContaining(`${older.id} -> ${newer.id}`) })]);
+    const s = await state();
+    expect([s.turf.lawn_sqft, s.customer.property_sqft, s.property.property_sqft]).toEqual([6100, 6100, 6100]);
+    const audits = await knex('audit_log').where({ resource_id: customerId });
+    expect(audits).toHaveLength(1);
+    expect(audits[0].metadata).toMatchObject({ estimate_id: newer.id, trigger: 'acceptance' });
+  });
 });
 
 describeDb('mirror-only repair (real PostgreSQL)', () => {

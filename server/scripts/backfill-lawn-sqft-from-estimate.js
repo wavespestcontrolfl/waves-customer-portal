@@ -42,6 +42,10 @@
 // --apply writes ONLY turf_profile_empty, differs and mirrors_differ, through the SAME
 // function estimate acceptance uses (lawn-size-sync.applyEstimateLawnSqft:
 // customer fence, three places in sync, audit row), and never reprices anyone.
+// Inside that fence --apply re-selects and re-classifies the customer with
+// fresh reads and writes only if the class, the chosen estimate and its size
+// are unchanged since the dry-run read; otherwise it records
+// skipped_changed_since_read (a concurrent acceptance wins).
 //
 // This script has no hard-coded connection: it reads DATABASE_URL only.
 const fs = require('fs');
@@ -243,6 +247,34 @@ async function loadRows(knex, entries) {
   return { customers, primaries, turfs, estimates, acceptedBy };
 }
 
+function classifyLoaded(customer, entry, loaded, deps) {
+  const linked = (entry.estimate_ids || []).map((id) => loaded.estimates.get(id)).filter((e) => e && String(e.customer_id) === String(customer.id));
+  return classifyCustomer({
+    customer, primary: loaded.primaries.get(customer.id) || null, turf: loaded.turfs.get(customer.id) || null,
+    linked, accepted: loaded.acceptedBy.get(customer.id) || [],
+  }, deps);
+}
+
+/**
+ * Re-select and re-classify one customer with FRESH reads on `handle` (the
+ * locked transaction) and compare with the decision the dry-run read made.
+ * Returns null when nothing changed, else a short reason. Reads made before
+ * the customer fence can be stale: a newer lawn estimate accepted in between
+ * would otherwise be overwritten with the older estimate's size.
+ */
+async function changedSinceRead(handle, { customerId, decided, today }, deps) {
+  const [entry] = await (deps.loadLawnCustomers || loadLawnCustomers)(handle, { today, only: customerId });
+  if (!entry) return 'no longer a live recurring lawn customer';
+  const loaded = await (deps.loadRows || loadRows)(handle, [entry]);
+  const customer = loaded.customers.get(customerId);
+  if (!customer) return 'customer row missing';
+  const fresh = classifyLoaded(customer, entry, loaded, deps);
+  if (String(fresh.estimate_id) !== String(decided.estimate_id)) return `estimate ${decided.estimate_id} -> ${fresh.estimate_id}`;
+  if (fresh.class !== decided.class) return `class ${decided.class} -> ${fresh.class}`;
+  if (String(fresh.confirmed_sqft) !== String(decided.confirmed_sqft)) return `size ${decided.confirmed_sqft} -> ${fresh.confirmed_sqft}`;
+  return null;
+}
+
 /**
  * Plan (and with apply:true, execute) the backfill. `deps.applyEstimateLawnSqft`
  * is injectable for tests; the default is the shared acceptance writer.
@@ -258,21 +290,22 @@ async function runBackfill({ knex, today, apply = false, only = null, limit = nu
     for (const entry of slice) {
       const customer = loaded.customers.get(entry.customer_id);
       if (!customer) continue;
-      const linked = (entry.estimate_ids || []).map((id) => loaded.estimates.get(id)).filter((e) => e && String(e.customer_id) === String(customer.id));
-      const result = classifyCustomer({
-        customer, primary: loaded.primaries.get(customer.id) || null, turf: loaded.turfs.get(customer.id) || null,
-        linked, accepted: loaded.acceptedBy.get(customer.id) || [],
-      }, deps);
+      const result = classifyLoaded(customer, entry, loaded, deps);
       const { estimate, ...row } = result;
       rows.push(row);
       if (!apply || !APPLY_CLASSES.has(row.class)) continue;
       try {
-        const outcome = await applyFn(knex, { customerId: customer.id, estimate, estimateData: estimate.estimate_data, trigger: 'backfill' });
-        applied.push({ customer_id: customer.id, class: row.class, estimate_id: estimate.id, status: outcome.status, reason: outcome.reason || '',
+        const outcome = await applyFn(knex, {
+          customerId: customer.id, estimate, estimateData: estimate.estimate_data, trigger: 'backfill',
+          revalidate: (trx) => changedSinceRead(trx, { customerId: customer.id, decided: row, today }, deps),
+        });
+        const changed = outcome.reason === 'changed_since_read';
+        applied.push({ customer_id: customer.id, class: row.class, estimate_id: estimate.id,
+          status: changed ? 'skipped_changed_since_read' : outcome.status, reason: changed ? outcome.detail : (outcome.reason || ''),
           sqft: outcome.sqft ?? '', before_turf: outcome.before?.turf_lawn_sqft ?? '', after_turf: outcome.after?.turf_lawn_sqft ?? '',
           before_property: outcome.before?.primary_property_sqft ?? '', after_property: outcome.after?.primary_property_sqft ?? '',
           before_customer: outcome.before?.customer_property_sqft ?? '', after_customer: outcome.after?.customer_property_sqft ?? '' });
-        log(`applied customer=${customer.id} ${row.class} ${outcome.status}${outcome.status === 'written' ? ` turf ${outcome.before.turf_lawn_sqft ?? 'none'} -> ${outcome.after.turf_lawn_sqft}` : ''}`);
+        log(`applied customer=${customer.id} ${row.class} ${changed ? `skipped_changed_since_read (${outcome.detail})` : outcome.status}${outcome.status === 'written' ? ` turf ${outcome.before.turf_lawn_sqft ?? 'none'} -> ${outcome.after.turf_lawn_sqft}` : ''}`);
       } catch (err) {
         applied.push({ customer_id: customer.id, class: row.class, estimate_id: estimate.id, status: 'error', reason: err.message });
         log(`ERROR customer=${customer.id}: ${err.message}`);
@@ -337,4 +370,4 @@ if (require.main === module) {
   main().then(() => process.exit(0)).catch((err) => { console.error(`[lawn-size-backfill] ${err.message}`); process.exit(1); });
 }
 
-module.exports = { parseArgs, describeDatabase, classifyCustomer, runBackfill, toCsv, summarize, summaryText, loadLawnCustomers, buildKnex, CLASSES, APPLY_CLASSES, CSV_COLUMNS, main };
+module.exports = { parseArgs, describeDatabase, classifyCustomer, runBackfill, toCsv, summarize, summaryText, loadLawnCustomers, loadRowsForTest: loadRows, changedSinceRead, buildKnex, CLASSES, APPLY_CLASSES, CSV_COLUMNS, main };

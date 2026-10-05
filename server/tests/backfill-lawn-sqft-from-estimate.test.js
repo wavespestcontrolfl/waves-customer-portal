@@ -158,6 +158,55 @@ describe('runBackfill apply path', () => {
   });
 });
 
+describe('concurrent acceptance between the read and the write', () => {
+  // The first read decides "c1: turf 4000, estimate e1 (5200) -> differs". A newer
+  // estimate e2 (6100) is then accepted and commits before the backfill's fence.
+  const setup = () => {
+    const state = { links: ['e1'], accepted: false };
+    const e1 = est('e1', { accepted_at: '2026-06-01T00:00:00Z' });
+    const e2 = est('e2', { accepted_at: '2026-10-04T00:00:00Z', estimate_data: data(6100) });
+    const deps = {
+      loadLawnCustomers: async () => [{ customer_id: 'c1', estimate_ids: state.links }],
+      loadRows: async () => ({
+        customers: new Map([['c1', customer()]]), primaries: new Map([['c1', primary()]]),
+        turfs: new Map([['c1', { lawn_sqft: state.accepted ? 6100 : 4000 }]]),
+        estimates: new Map([['e1', e1], ['e2', e2]]), acceptedBy: new Map([['c1', state.accepted ? [e1, e2] : [e1]]]),
+      }),
+    };
+    const acceptNewer = () => { state.accepted = true; state.links = ['e2']; };
+    return { deps, acceptNewer };
+  };
+
+  test('the write is skipped (skipped_changed_since_read) when the re-read inside the fence finds a newer estimate', async () => {
+    const { deps, acceptNewer } = setup();
+    const wrote = jest.fn();
+    // Stand-in for the shared writer: acceptance commits, then the fence is taken and revalidate runs.
+    const applyFn = jest.fn(async (_k, args) => {
+      acceptNewer();
+      const stale = await args.revalidate({ tag: 'locked-trx' });
+      if (stale) return { status: 'skipped', reason: 'changed_since_read', detail: stale };
+      wrote(args);
+      return { status: 'written', sqft: 5200, before: {}, after: {} };
+    });
+    const out = await script.runBackfill({ knex: {}, today: '2026-10-04', apply: true }, { ...deps, applyEstimateLawnSqft: applyFn });
+    expect(wrote).not.toHaveBeenCalled();
+    expect(out.applied).toEqual([expect.objectContaining({ customer_id: 'c1', status: 'skipped_changed_since_read', reason: expect.stringContaining('e1 -> e2') })]);
+  });
+
+  test('revalidation reads through the locked handle it is given, and passes when nothing changed', async () => {
+    const { deps } = setup();
+    const seen = [];
+    const spyDeps = { ...deps, loadLawnCustomers: async (h, o) => { seen.push(h); return deps.loadLawnCustomers(h, o); } };
+    const applyFn = jest.fn(async (_k, args) => {
+      const stale = await args.revalidate({ tag: 'locked-trx' });
+      return stale ? { status: 'skipped', reason: 'changed_since_read', detail: stale } : { status: 'written', sqft: 5200, before: {}, after: {} };
+    });
+    const out = await script.runBackfill({ knex: { tag: 'pool' }, today: '2026-10-04', apply: true }, { ...spyDeps, applyEstimateLawnSqft: applyFn });
+    expect(out.applied[0].status).toBe('written');
+    expect(seen).toEqual([{ tag: 'pool' }, { tag: 'locked-trx' }]);
+  });
+});
+
 describe('dry run is read-only at the session level', () => {
   const fakeFactory = () => { const f = jest.fn((config) => ({ config, destroy: async () => {} })); return f; };
   const query = (config) => { const calls = []; const conn = { query: (sql, cb) => { calls.push(sql); cb(null); } }; const done = jest.fn(); config.pool.afterCreate(conn, done); return { calls, done, conn }; };

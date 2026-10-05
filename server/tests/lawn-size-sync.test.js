@@ -220,6 +220,17 @@ describe('applyEstimateLawnSqft', () => {
     expect(db.state.turf.lawn_sqft).toBe(5200);
   });
 
+  test('revalidate runs inside the fence before any read or write; a reason aborts the write', async () => {
+    const db = fakeDb({ turf: { lawn_sqft: 4000 } });
+    const revalidate = jest.fn(async (trx) => { expect(trx).toBe(db.__trx); return 'estimate e1 -> e2'; });
+    const out = await sync.applyEstimateLawnSqft(db, { customerId: 'c1', estimate, estimateData: adminEstimate(), revalidate });
+    expect(out).toMatchObject({ status: 'skipped', reason: 'changed_since_read', detail: 'estimate e1 -> e2' });
+    expect(db.state.writes).toEqual([]);
+    expect(mockAudit).not.toHaveBeenCalled();
+    const ok = await sync.applyEstimateLawnSqft(db, { customerId: 'c1', estimate, estimateData: adminEstimate(), revalidate: async () => null });
+    expect(ok.status).toBe('written');
+  });
+
   test('a database error propagates so the acceptance caller can fail soft', async () => {
     const db = fakeDb({ turf: { lawn_sqft: 4000 } });
     mockAudit.mockRejectedValueOnce(new Error('audit insert failed'));
