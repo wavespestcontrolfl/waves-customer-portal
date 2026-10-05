@@ -19,6 +19,7 @@ import {
   DRAFT_RETENTION_MS,
   deleteFastCompletionAttempt,
   getFastCompletionAttempt,
+  FAST_COMPLETION_TIMEOUT_MS,
   hasFastCompletionMarker,
   listFastCompletionMarkers,
   listFastCompletionAttempts,
@@ -126,6 +127,27 @@ describe("completion resume store (IndexedDB)", () => {
     expect(await deleteFastCompletionAttempt("svc-m", "tech-m", body)).toBe(true);
     expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(false);
     expect(listFastCompletionMarkers("tech-m")).toEqual([]);
+  });
+
+  it("a Fast Complete read that never answers times out without holding the next one (GitHub Codex P2 on #5979)", async () => {
+    vi.useFakeTimers();
+    const factory = globalThis.indexedDB;
+    try {
+      globalThis.indexedDB = { open: () => ({}) };
+      const stalled = getFastCompletionAttempt("svc-stall", "tech-s");
+      await vi.advanceTimersByTimeAsync(FAST_COMPLETION_TIMEOUT_MS);
+      expect(await stalled).toEqual({ available: false, attempt: null });
+      const listed = listFastCompletionAttempts("tech-s");
+      await vi.advanceTimersByTimeAsync(FAST_COMPLETION_TIMEOUT_MS);
+      expect(await listed).toEqual({ available: false, attempts: [] });
+    } finally {
+      globalThis.indexedDB = factory;
+      vi.useRealTimers();
+    }
+    // The same visit's queue moved on: a write and read now go through.
+    const body = { idempotencyKey: "after-stall", technicianNotes: "After" };
+    expect(await putFastCompletionAttempt("svc-stall", "tech-s", { body, summary: "After" })).toBe(true);
+    expect((await getFastCompletionAttempt("svc-stall", "tech-s")).attempt.body).toEqual(body);
   });
 
   it("survives the legacy unmarked-body pruner in an older open tab", async () => {

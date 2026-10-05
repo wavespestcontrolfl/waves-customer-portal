@@ -168,8 +168,23 @@ export function hasFastCompletionMarker(serviceId, operatorId) {
   }
 }
 
-function withFastCompletionKey(key, operation) {
-  const pending = (fastCompletionOperations.get(key) || Promise.resolve()).then(() => operation(key));
+// A Fast Complete storage operation that has not answered after this long
+// counts as unavailable: the per-key queue moves on, so one stalled open or
+// read never holds every later read and write for that visit (GitHub Codex
+// P2s on #5979). A late answer is ignored; IndexedDB's transaction lock and
+// the compare predicates still fence it against the operations after it.
+export const FAST_COMPLETION_TIMEOUT_MS = 5000;
+function boundedFastCompletion(operation, timedOut) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(timedOut), FAST_COMPLETION_TIMEOUT_MS);
+    Promise.resolve().then(operation).then(resolve, () => resolve(timedOut))
+      .finally(() => clearTimeout(timer));
+  });
+}
+
+function withFastCompletionKey(key, operation, timedOut = false) {
+  const pending = (fastCompletionOperations.get(key) || Promise.resolve())
+    .then(() => boundedFastCompletion(() => operation(key), timedOut));
   fastCompletionOperations.set(key, pending);
   void pending.finally(() => {
     if (fastCompletionOperations.get(key) === pending) fastCompletionOperations.delete(key);
@@ -177,9 +192,9 @@ function withFastCompletionKey(key, operation) {
   return pending;
 }
 
-function withFastCompletionAttempt(serviceId, operatorId, operation) {
+function withFastCompletionAttempt(serviceId, operatorId, operation, timedOut) {
   const key = fastCompletionAttemptKey(serviceId, operatorId);
-  return key ? withFastCompletionKey(key, operation) : Promise.resolve(null);
+  return key ? withFastCompletionKey(key, operation, timedOut) : Promise.resolve(null);
 }
 
 // One readwrite transaction protects a Fast Complete row across browser tabs.
@@ -266,7 +281,7 @@ export function getFastCompletionAttempt(serviceId, operatorId) {
   const unavailable = {};
   return withFastCompletionAttempt(serviceId, operatorId, (scopedKey) => (
     withStore(FAST_COMPLETION_DB_NAME, "readonly", unavailable, (store) => store.get(scopedKey))
-  )).then((record) => {
+  ), unavailable).then((record) => {
     if (record === unavailable) return { available: false, attempt: null };
     const matches = record?.version === 1
       && record.operatorId === String(operatorId)
@@ -278,9 +293,13 @@ export function getFastCompletionAttempt(serviceId, operatorId) {
 
 // The index cursor exposes only metadata keys, so a menu scan never clones
 // photo-bearing bodies. The exact request is loaded only on explicit open.
-export async function listFastCompletionAttempts(operatorId) {
+export function listFastCompletionAttempts(operatorId) {
   const unavailable = { available: false, attempts: [] };
-  if (!operatorId) return unavailable;
+  if (!operatorId) return Promise.resolve(unavailable);
+  return boundedFastCompletion(() => scanFastCompletionAttempts(operatorId, unavailable), unavailable);
+}
+
+async function scanFastCompletionAttempts(operatorId, unavailable) {
   const db = await openDb(FAST_COMPLETION_DB_NAME);
   if (!db) return unavailable;
   return new Promise((resolve) => {

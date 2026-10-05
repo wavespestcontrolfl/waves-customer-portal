@@ -31,8 +31,8 @@ vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => 
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
-  default: ({ service }) => (
-    <div data-testid="sheet" data-service={JSON.stringify(service)}>Fast Complete sheet for {service.id}</div>
+  default: ({ service, onClose }) => (
+    <div data-testid="sheet" data-service={JSON.stringify(service)}>Fast Complete sheet for {service.id}<button type="button" onClick={() => onClose?.()}>Close sheet</button></div>
   ),
 }));
 vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: () => <div data-testid="tree-sheet" /> }));
@@ -292,17 +292,24 @@ it('after a reload whose device reads all fail, a marked visit off the route is 
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
 });
 
-it('a device scan that never answers stops holding the Project Report tool (GitHub Codex P2 on #5979)', async () => {
-  vi.useFakeTimers({ shouldAdvanceTime: true });
-  try {
-    mocks.listAttempts.mockImplementation(() => new Promise(() => {}));
-    rows = [row('svc-live', { fastCompleteReportEnabled: true })];
-    mount();
-    expect(await screen.findByRole('button', { name: /Checking Saved Completions/ })).toBeDisabled();
-    await act(async () => { vi.advanceTimersByTime(5000); });
-    const tool = await screen.findByRole('button', { name: /Project Report/ });
-    expect(tool).not.toBeDisabled();
-  } finally { vi.useRealTimers(); }
+it('a failed rescan still lists a visit saved since the last good scan (GitHub Codex P2 on #5979)', async () => {
+  rows = [row('svc-open', { fastCompleteReportEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByText('Fast Complete sheet for svc-open')).toBeInTheDocument();
+  // The sheet saved an attempt for a visit the route no longer shows; the
+  // rescan on close cannot list the device.
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  mocks.listMarkers.mockImplementation((operatorId) => (operatorId === 'tech-fixture' ? ['moved-visit'] : []));
+  mocks.getAttempt.mockImplementation(async (serviceId) => (serviceId === 'moved-visit'
+    ? { available: true, attempt: { body: { idempotencyKey: 'moved-key', reportDraftBase: {} }, summary: 'Moved' } }
+    : { available: true, attempt: null }));
+  const scans = mocks.listAttempts.mock.calls.length;
+  fireEvent.click(screen.getByRole('button', { name: 'Close sheet' }));
+  await waitFor(() => expect(mocks.listAttempts.mock.calls.length).toBeGreaterThan(scans));
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  fireEvent.click(await screen.findByText(/Saved completion/));
+  expect(await screen.findByText('Fast Complete sheet for moved-visit')).toBeInTheDocument();
 });
 
 it('with unreadable storage and no saved marker, a visit opens as usual', async () => {
