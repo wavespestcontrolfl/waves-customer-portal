@@ -115,12 +115,15 @@ function anthropicAcceptsEffort(model, level) {
 // that omits `thinking` (5.5, Fable and Mythos cannot turn it off), and
 // thinking spends from max_tokens ahead of the text block — a cap sized for
 // a no-thinking reply ends the turn with no text. Sonnet 5 also thinks by
-// default, but its lanes' caps were already tuned against it in production
-// (previsit brief 1000 → 2000 → 3000), so it is left out and this stays
-// inert for today's traffic. Sonnet 5.5 and later cannot turn thinking off
+// default; it was left out once because its lanes' caps had been tuned by
+// hand (previsit brief 1000 → 2000 → 3000), but the hand tuning did not hold:
+// with the global MODEL_ANTHROPIC_EFFORT=high, 40 Sonnet 5 calls in 10 days
+// (2026-10-04 audit: SMS pathology 400/500, event normalizer 500, SMS drafts
+// 2000, estimate follow-ups) ended with no text and fell to the backup
+// provider. So bare Sonnet 5 takes the floor too. Sonnet 5.5 and later cannot turn thinking off
 // (even `between_tools` returns progress-update thinking blocks), so they
 // take the floor like Opus 5.5.
-const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
+const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5(?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
 
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
@@ -145,7 +148,9 @@ const DEFAULTS = Object.freeze({
   FLAGSHIP: 'claude-opus-4-8',
   WORKHORSE: 'claude-sonnet-5',
   // Routine internal lanes that used to ride the flagship (owner 2026-10-04):
-  // staff wiki Q&A, expense categories, vendor invoice PDFs, lead synopsis.
+  // staff wiki Q&A, vendor invoice PDFs, lead synopsis. Expense categories
+  // stay on the flagship (2026-10-04 bake-off: Sonnet 5.5 filed equipment as
+  // Depreciation where the books use Supplies).
   // Hero alt text is published on the site, so it stays on VISION. Sonnet 5.5, not Sonnet 5: same list price, and it is in the
   // thinking floor below, so these lanes' short caps (200 to 2000 tokens)
   // are not spent on thinking. Roll back with MODEL_ROUTINE=claude-opus-4-8.

@@ -537,7 +537,7 @@ async function loadPreviousRecommendations({ customerId, serviceType, serviceId,
 // hub posts matching every typed word, newest first, at most eight, each as
 // { id, title, url } under the one link rule (report-blog-post.js). The pick
 // rides /complete as blogPostId and is frozen there for every service but
-// WDO, termite pre-treat, lawn and tree, shrub & palm (blogPostAllowedFor,
+// WDO, termite pre-treat, and tree, shrub & palm (blogPostAllowedFor,
 // the completion's own rule), so any other visit answers { available: false }
 // too. Read-only; off = the answer is { available: false } with no database
 // read.
@@ -2582,6 +2582,8 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // recovery vehicle: re-attempt it directly (dedup-guarded,
         // fire-and-forget; Codex r4).
         {
+          // The package visit 2 retire (job-status no-show cascade) re-runs too.
+          void require('../services/call-booking-catalog').cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: svc.id, packageOnly: true }).catch(() => {});
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
         }

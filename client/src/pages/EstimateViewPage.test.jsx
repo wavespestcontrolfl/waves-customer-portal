@@ -2153,6 +2153,25 @@ describe('ReviewPhase — site-confirmation hold copy', () => {
 });
 
 describe('ContactGapFields — missing-contact capture on accept', () => {
+  it('asks for a mobile number only when the estimate has none, and saves it on request', () => {
+    const onPhoneSave = vi.fn();
+    const { rerender } = render(<ContactGapFields gaps={{ lastName: false, email: false, phone: false }} />);
+    expect(screen.queryByLabelText('Mobile number')).not.toBeInTheDocument();
+    rerender(<ContactGapFields gaps={{ lastName: false, email: false, phone: true }} phone="941555" onPhoneSave={onPhoneSave} />);
+    expect(screen.getByLabelText('Mobile number')).toHaveValue('941555');
+    // Not a full number yet: the save stays off.
+    expect(screen.getByRole('button', { name: 'Save number' })).toBeDisabled();
+    rerender(<ContactGapFields gaps={{ lastName: false, email: false, phone: true }} phone="(941) 555-0142" onPhoneSave={onPhoneSave} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Save number' }));
+    expect(onPhoneSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the server refusal under the mobile number field', () => {
+    render(<ContactGapFields gaps={{ phone: true }} phone="(941) 555-0142" phoneError="We could not complete this booking online — please call the Waves office." />);
+    expect(screen.getByRole('alert')).toHaveTextContent('please call the Waves office');
+    expect(screen.getByLabelText('Mobile number')).toHaveAttribute('aria-invalid', 'true');
+  });
+
   const noop = () => {};
 
   it('renders nothing when there are no gaps', () => {

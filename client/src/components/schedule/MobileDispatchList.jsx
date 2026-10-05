@@ -10,7 +10,7 @@
 // ET-anchored: "today," week anchoring, and section headers all compute
 // against America/New_York — the business is in SW Florida. No UTC.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BookOpen, Leaf, MapPin, ShieldCheck } from 'lucide-react';
 import WavesMark from '../brand/WavesMark';
 import { Badge } from '../ui';
@@ -164,29 +164,60 @@ function headerLabel(dateStr) {
   });
 }
 
-// "~14 min from last stop · ~9 min to next" — straight-line estimates the
-// day route computes (GET /admin/schedule). Absent fields (week view, older
-// payload) render nothing; a missing leg is left out, never shown as 0.
-function DriveLegs({ service }) {
-  const chips = [];
-  if (service.firstStop) chips.push({ key: 'in', text: 'First stop', muted: true });
-  else if (Number.isFinite(service.driveFromPrevMin)) chips.push({ key: 'in', text: `~${service.driveFromPrevMin} min from last stop` });
-  if (service.lastStop) chips.push({ key: 'out', text: 'Last stop', muted: true });
-  else if (Number.isFinite(service.driveToNextMin)) chips.push({ key: 'out', text: `~${service.driveToNextMin} min to next` });
-  if (!chips.length) return null;
+// The drive into a stop, drawn as a thin line above its card (owner
+// 2026-10-05): "~59 min drive from <previous stop>". The server stamps each
+// leg on one card only (driveInShown) and names the stop it comes from, so
+// the line stays right when techs' stops interleave. Red when the tech would
+// land past the customer's 2-hour arrival window (driveLateMin). Absent
+// fields (week view, older payload) and a leg without coordinates render
+// nothing, never "~0 min".
+const ON_THE_WAY = new Set(['en_route', 'on_site', 'in_progress']);
+
+function DriveLine({ service, statusById }) {
+  if (!service.driveInShown || !Number.isFinite(service.driveFromPrevMin)) return null;
+  // The server names the unreached visits that make the stop late
+  // (driveLateServiceIds; a completed first card can sit on a stop still
+  // at risk). Marking them en route changes their status before the next
+  // refresh, so the red drops once every one of them is on the way.
+  const atRisk = Array.isArray(service.driveLateServiceIds) && service.driveLateServiceIds.length
+    ? service.driveLateServiceIds : [service.id];
+  const late = Number.isFinite(service.driveLateMin) && service.driveLateMin > 0
+    && atRisk.some((id) => !ON_THE_WAY.has(statusById?.get(id) ?? service.status));
+  const from = service.drivePrevName ? ` from ${service.drivePrevName}` : '';
   return (
-    <div className="flex flex-wrap gap-1.5" style={{ marginTop: 6 }}>
-      {chips.map((c) => (
-        <span
-          key={c.key}
-          className={'u-nums rounded-full border-hairline border-zinc-200 bg-zinc-50 ' + (c.muted ? 'text-ink-tertiary' : 'text-ink-secondary')}
-          style={{ fontSize: 14, padding: '2px 8px' }}
-        >
-          {c.text}
-        </span>
-      ))}
+    <div
+      className={'flex items-center u-nums border-b border-hairline ' + 'border-zinc-200 ' + (late ? 'bg-alert-bg text-alert-fg font-medium' : 'bg-zinc-50 text-ink-tertiary')}
+      style={{ fontSize: 14, padding: '5px 14px 5px 22px', gap: 8 }}
+    >
+      <span aria-hidden style={{ width: 2, height: 14, borderRadius: 1, background: 'currentColor', opacity: late ? 1 : 0.4, flexShrink: 0 }} />
+      <span className="min-w-0">
+        ~{service.driveFromPrevMin} min drive{from}
+        {late && ` · ~${service.driveLateMin} min past the 2-hour arrival window`}
+      </span>
     </div>
   );
+}
+
+// "AT" for Alex Tech: two techs sharing a first initial still read apart.
+function techInitials(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  return parts.map((p) => p[0]).join('').slice(0, 3).toUpperCase() || '?';
+}
+
+// The day's drive, each leg counted once: "~2h 10m". Hidden when any leg
+// could not be measured: a partial sum would read as the whole day.
+function dayDriveLabel(services) {
+  if (services.some((s) => s.driveLegUnknown)) return null;
+  const total = services.reduce((sum, s) => (s.driveInShown && Number.isFinite(s.driveFromPrevMin) ? sum + s.driveFromPrevMin : sum), 0);
+  if (total <= 0) return null;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return h ? `~${h}h ${m}m` : `~${m}m`;
+}
+
+// The word under a card button's icon.
+function ButtonLabel({ children }) {
+  return <span className="block max-w-full truncate leading-tight" style={{ fontSize: 14 }}>{children}</span>;
 }
 
 function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPlan, onViewAudit, owesCompletion, technicians, onQuickAction, onRefresh }) {
@@ -239,10 +270,13 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
   const hasActions =
     canAssignTechnician || showTreatmentPlan || showProtocol || showAudit || showEnRoute || showNavigate;
 
+  // Icon over a one-word label (owner 2026-10-05), so a new tech can tell
+  // the buttons apart.
   const actionBtnClass =
-    'inline-flex items-center justify-center h-11 flex-1 min-w-0 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
+    'inline-flex flex-col items-center justify-center flex-1 min-w-0 border-hairline border-zinc-300 rounded-xs text-zinc-700 bg-white hover:bg-zinc-50 active:bg-zinc-100 font-medium';
   const primaryBtnClass =
-    'inline-flex items-center justify-center h-11 flex-1 min-w-0 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 font-medium';
+    'inline-flex flex-col items-center justify-center flex-1 min-w-0 border-hairline border-zinc-900 rounded-xs text-white bg-zinc-900 hover:bg-zinc-800 font-medium';
+  const btnStyle = { height: 56, gap: 2 };
 
   return (
     <div
@@ -313,7 +347,6 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             {formatWindow(service)}
           </span>
         </button>
-        <DriveLegs service={service} />
         <DispatchReadinessStrip readiness={service.readiness} onOpen={onProtocol ? () => onProtocol(service) : null} className="mt-2" />
         {hasActions && (
           <div className="flex items-stretch gap-2 flex-wrap" style={{ marginTop: 10 }}>
@@ -323,7 +356,7 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                   type="button"
                   onClick={(e) => { e.stopPropagation(); setShowTechPicker(!showTechPicker); }}
                   className={primaryBtnClass}
-                  style={{ fontSize: 13 }}
+                  style={{ ...btnStyle, fontSize: 14 }}
                   title={service.technicianName
                     ? `${service.technicianName} — tap to reassign`
                     : 'Assign technician'}
@@ -331,7 +364,8 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                     ? `Technician: ${service.technicianName}`
                     : 'Assign technician'}
                 >
-                  {techInitial || 'Assign'}
+                  <span>{techInitial || '+'}</span>
+                  <ButtonLabel>{techInitial ? 'Tech' : 'Assign'}</ButtonLabel>
                 </button>
                 {showTechPicker && (
                   <InlineTechPicker
@@ -350,10 +384,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onTreatmentPlan(service); }}
                 className={actionBtnClass}
+                style={btnStyle}
                 title="Treatment plan"
                 aria-label="Treatment plan"
               >
                 <Leaf size={16} strokeWidth={1.75} />
+                <ButtonLabel>Plan</ButtonLabel>
               </button>
             )}
             {showProtocol && (
@@ -365,10 +401,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                   onProtocol(service);
                 }}
                 className={actionBtnClass}
+                style={btnStyle}
                 title="Protocol"
                 aria-label="Protocol"
               >
                 <BookOpen size={16} strokeWidth={1.75} />
+                <ButtonLabel>Protocol</ButtonLabel>
               </button>
             )}
             {showAudit && (
@@ -376,10 +414,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onViewAudit(service); }}
                 className={actionBtnClass}
+                style={btnStyle}
                 title="View completion audit"
                 aria-label="View completion audit"
               >
                 <ShieldCheck size={16} strokeWidth={1.75} />
+                <ButtonLabel>Audit</ButtonLabel>
               </button>
             )}
             {showEnRoute && (
@@ -387,10 +427,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 type="button"
                 onClick={(e) => { e.stopPropagation(); onEnRoute(service); }}
                 className={actionBtnClass}
+                style={btnStyle}
                 title="Tech En Route"
                 aria-label="Tech En Route"
               >
                 <WavesMark size={16} fill="#009CDE" title="Waves logo" />
+                <ButtonLabel>En route</ButtonLabel>
               </button>
             )}
             {showNavigate && (
@@ -400,10 +442,12 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
                 rel="noopener noreferrer"
                 onClick={(e) => e.stopPropagation()}
                 className={primaryBtnClass}
+                style={btnStyle}
                 title="Open in Google Maps"
                 aria-label={`Open ${service.address} in Google Maps`}
               >
                 <MapPin size={16} strokeWidth={1.75} />
+                <ButtonLabel>Map</ButtonLabel>
               </a>
             )}
           </div>
@@ -425,7 +469,11 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
 
 // An empty hour in the day list: tapping it opens New appointment with the
 // day and hour filled in.
-function OpenHourRow({ hour, onBook }) {
+// `free` names who can take the hour when more than one tech works the day
+// (owner 2026-10-05): the list mixes techs, so a booked hour can still read
+// Open for someone else.
+function OpenHourRow({ hour, onBook, free }) {
+  const names = (free || []).map((t) => t.name).filter(Boolean);
   return (
     <div className="bg-zinc-50 border-b border-hairline border-zinc-200" style={{ padding: '6px 10px' }}>
       <button
@@ -434,10 +482,26 @@ function OpenHourRow({ hour, onBook }) {
         className="flex items-center w-full text-left rounded-xs border border-dashed border-zinc-300 bg-zinc-50 hover:border-zinc-900 hover:bg-white active:bg-white u-focus-ring"
         style={{ height: 44, padding: '0 12px', gap: 12 }}
         aria-label={`Book open hour ${formatOpenHour(hour)}`}
+        aria-description={names.length ? `Free: ${names.join(', ')}` : undefined}
+        title={names.length ? `Free: ${names.join(', ')}` : undefined}
       >
         <span className="u-nums font-medium text-zinc-900" style={{ fontSize: 14, minWidth: 92 }}>
           {formatOpenHour(hour)}
         </span>
+        {free && free.length > 0 && (
+          <span className="flex items-center" style={{ gap: 3 }} aria-hidden>
+            {free.slice(0, 3).map((t) => (
+              <span
+                key={t.id}
+                className="inline-flex items-center justify-center rounded-full bg-zinc-900 text-white font-medium u-nums"
+                style={{ minWidth: 28, height: 24, padding: '0 6px', fontSize: 14 }}
+              >
+                {techInitials(t.name)}
+              </span>
+            ))}
+            {free.length > 3 && <span className="text-ink-tertiary" style={{ fontSize: 14 }}>+{free.length - 3}</span>}
+          </span>
+        )}
         <span className="text-ink-tertiary" style={{ fontSize: 14 }}>Open</span>
         <span className="ml-auto font-medium text-ink-secondary" style={{ fontSize: 14 }}>+ Book</span>
       </button>
@@ -497,6 +561,12 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
     const ids = freeTechs.get(hour);
     return ids && ids.length === 1 ? ids[0] : undefined;
   };
+  // Who is free in an hour, shown only when more than one tech works.
+  const freeFor = (hour) => (working.length > 1
+    ? (freeTechs.get(hour) || []).map((id) => working.find((t) => t.id === id)).filter(Boolean)
+    : null);
+  const driveLabel = useMemo(() => dayDriveLabel(services || []), [services]);
+  const statusById = useMemo(() => new Map((services || []).map((s) => [s.id, s.status])), [services]);
   const today = isETToday(dateStr);
   return (
     <section>
@@ -534,6 +604,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
           {openHours.length > 0 && (
             <span className="text-zinc-900 font-medium" style={{ fontSize: 14 }}> · {openHours.length} open</span>
           )}
+          {driveLabel && <span style={{ fontSize: 14 }}> · {driveLabel} driving</span>}
         </span>
       </header>
       {rows.length === 0 ? (
@@ -545,8 +616,9 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
         </div>
       ) : (
         rows.map(({ svc, hour }) => (svc ? (
+          <Fragment key={svc.id}>
+          <DriveLine service={svc} statusById={statusById} />
           <AppointmentRow
-            key={svc.id}
             service={svc}
             onEdit={onEdit}
             onEnRoute={onEnRoute}
@@ -558,10 +630,12 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
             onQuickAction={onQuickAction}
             onRefresh={onRefresh}
           />
+          </Fragment>
         ) : (
           <OpenHourRow
             key={`open-${hour}`}
             hour={hour}
+            free={freeFor(hour)}
             onBook={() => onCreateSlot({
               date: dateStr,
               windowStart: hourToHHMM(hour),

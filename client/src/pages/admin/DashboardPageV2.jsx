@@ -97,7 +97,7 @@ export default function DashboardPageV2() {
   );
   const {
     data, kpis, compare, salesCapture, funnel, aging, mrrTrend, cohort, capAlloc,
-    callsBySource, leadsBySource, channelMix, leadFunnel, channelRoi, mix,
+    callsBySource, leadsBySource, channelMix, leadFunnel, channelRoi, serviceLines, mix,
     revenueByCity, reviewTrend, today, billing, alerts, kpiHistory, ebitda,
     mrrBridge, revenueOverview, churnReasons, staleVisits,
   } = values;
@@ -244,6 +244,8 @@ export default function DashboardPageV2() {
           leadFunnelError={errors.leadFunnel}
           channelRoiLoading={pending.channelRoi}
           channelRoiError={errors.channelRoi}
+          serviceLines={serviceLines}
+          serviceLinesError={errors.serviceLines}
           onDrillSource={drillToSource}
           isMobile={isMobile}
           {...kpiStripProps}

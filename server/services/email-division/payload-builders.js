@@ -635,12 +635,15 @@ function planService(deps, rows) {
     visitRow: visit,
   };
   const own = deps.normalizeRecurringPattern(visit.recurring_pattern);
-  if (own) return { pattern: own, ...identity };
-  if (!visit.recurring_parent_id) return { pattern: '', ...identity };
+  if (!visit.recurring_parent_id) return { pattern: own || '', ...identity };
+  // A child keeps the recurring_pattern it was generated with: after the plan's
+  // cadence changes, a completed child still carries the OLD one. The series
+  // root holds the plan's current cadence, so the root's wins; the child's own
+  // is used only when the root states none (or is not a pest series).
   const parent = rows.root;
-  const inherited = parent && deps.detectServiceLine(parent.service_type) === 'pest'
+  const current = parent && deps.detectServiceLine(parent.service_type) === 'pest'
     ? deps.normalizeRecurringPattern(parent.recurring_pattern) : null;
-  return { pattern: inherited || '', ...identity };
+  return { pattern: current || own || '', ...identity };
 }
 
 // Once-per-customer (B5) / once-per-estimate (C1) is a SEND-TIME rule, not the
@@ -1166,7 +1169,7 @@ async function estimateAddressingVerdict(conn, run, { lock = false, expiresOn = 
 }
 
 async function buildExpiredNurture({
-  run, payload: basePayload = {}, conn = db, deps = defaultDeps(), mode = 'live',
+  run, payload: basePayload = {}, conn = db, deps = defaultDeps(), mode = 'live', lock = false,
 }) {
   const templateKey = 'nurture.expired_1';
   const estimate = await conn('estimates').where({ id: run.entity_id }).first();
@@ -1201,8 +1204,12 @@ async function buildExpiredNurture({
   // rule the consultation offer uses) — never "the customer's newest lead",
   // which can be about something else entirely.
   const leadId = await deps.linkedLeadIdFor(estimate.id, parsedEstimateData(estimate.estimate_data), conn);
+  // `lock` (the provider-boundary rebuild): the resolved lead is share-locked by
+  // its OWN id. lockEstimateEvidence locks the leads that point at the estimate
+  // (leads.estimate_id); a lead linked only through estimate_data.lead_id is not
+  // among them, and its service_interest feeds the fingerprinted payload.
   const lead = leadId
-    ? await conn('leads').where({ id: leadId }).whereNull('deleted_at').first('service_interest')
+    ? await shared(conn('leads').where({ id: leadId }).whereNull('deleted_at'), lock).first('service_interest')
     : null;
 
   const serviceQuoted = clean(deps.inferEstimateServiceInterest({ ...estimate, estimateData: estimate.estimate_data }));

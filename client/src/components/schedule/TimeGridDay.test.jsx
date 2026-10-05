@@ -456,3 +456,32 @@ describe('TimeGridDay open hours', () => {
     expect(screen.getByRole('button', { name: 'Book open hour 11 AM–12 PM for Alex Tech' })).toBeInTheDocument();
   });
 });
+
+describe('TimeGridDay drive labels', () => {
+  it('shows the drive into a one-hour block once, and nothing on the block it leaves', () => {
+    const first = { ...SERVICES[0], driveToNextMin: 59 };
+    const next = { ...SERVICES[1], driveInShown: true, driveFromPrevMin: 59, lastStop: true };
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[first, next]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    const label = screen.getByText('~59 min drive in');
+    expect(label).toHaveStyle({ fontSize: '14px' });
+    expect(screen.getAllByText(/min drive in|min out/)).toHaveLength(1);
+  });
+
+  it('shows nothing for a leg it could not measure', () => {
+    const next = { ...SERVICES[1], driveInShown: false, driveFromPrevMin: null, driveLegUnknown: true };
+    render(
+      <TimeGridDay
+        date="2026-07-15"
+        services={[SERVICES[0], next]}
+        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
+      />,
+    );
+    expect(screen.queryByText(/min drive in/)).toBeNull();
+  });
+});

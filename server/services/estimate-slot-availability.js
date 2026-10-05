@@ -471,12 +471,15 @@ function selectedPricingFrequency(estimate = {}, estData = {}, selectedFrequency
   return selectedGeneratedPricingFrequency(estimate, estData, selectedFrequency);
 }
 
-function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency = '', serviceCadences = null) {
+function recurringRowsForEstimate(estimate = {}, estData = {}, selectedFrequency = '', serviceCadences = null, { keepCompanions = false } = {}) {
   const frequency = selectedPricingFrequency(estimate, estData, selectedFrequency);
   const stored = storedRecurringRowsForEstimate(estimate, estData);
   const selected = Array.isArray(frequency?.perServiceTreatments)
     ? frequency.perServiceTreatments.map((row) => ({ ...row })) : [];
-  if (estimate.show_one_time_option || estimate.showOneTimeOption) {
+  // keepCompanions: the customer picked the 'best' offer tier
+  // (GATE_ESTIMATE_OFFER_TIERS), which books every quoted program — the
+  // one-time toggle's pest-only sizing must not shrink that visit.
+  if (!keepCompanions && (estimate.show_one_time_option || estimate.showOneTimeOption)) {
     const { shouldPersistPestOnlyRecurringChoice, isPestServiceName } = require('../routes/estimate-public');
     if (shouldPersistPestOnlyRecurringChoice(estimate, estData)) {
       return (selected.length ? selected : stored)
@@ -794,7 +797,8 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   if (serviceMode === 'one_time') {
     services = oneTimeProfileServices(estimate, estData);
   } else {
-    recurringSelection = recurringRowsForEstimate(estimate, estData, selectedFrequency, combinedPolicy ? cadences : null);
+    recurringSelection = recurringRowsForEstimate(estimate, estData, selectedFrequency, combinedPolicy ? cadences : null,
+      { keepCompanions: userOpts.offerTier === 'best' });
     if (combinedPolicy) {
       const converter = require('./estimate-converter');
       const isLegacyRodentRow = require('./billing-cadence').legacyRodentRowPredicateFor(estData);
@@ -868,6 +872,8 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
     serviceMode,
     selectedFrequency: normalizeFrequencyKey(selectedFrequency) || null,
     mosquitoCadence: mosquitoAxis || null,
+    // Part of the profile identity: a 'best' tier sizes the full bundle.
+    offerTier: userOpts.offerTier === 'best' ? 'best' : null,
     durationMinutes,
     serviceLabel,
     services,
@@ -1869,6 +1875,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     serviceProfile.serviceMode,
     serviceProfile.selectedFrequency || 'default',
     serviceProfile.mosquitoCadence || 'noaxis',
+    serviceProfile.offerTier || 'notier',
     JSON.stringify(serviceProfile.services),
     serviceProfile.durationMinutes,
     opts.minimumLeadMinutes,
@@ -2259,6 +2266,7 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
       serviceMode: userOpts.serviceMode,
       selectedFrequency: userOpts.selectedFrequency,
       serviceCadences: userOpts.serviceCadences,
+      offerTier: userOpts.offerTier,
     }))) {
       maxDaysOut = seasonalMaxHorizonDays();
     }
@@ -2275,6 +2283,7 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
     serviceMode: userOpts.serviceMode,
     selectedFrequency: userOpts.selectedFrequency,
     serviceCadences: userOpts.serviceCadences,
+    offerTier: userOpts.offerTier,
     dateFrom: when.dateFrom,
     dateTo: when.dateTo,
     timeOfDay: when.timeOfDay,

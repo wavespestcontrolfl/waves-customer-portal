@@ -666,6 +666,7 @@ function mapV1ToLegacyShape(v1Result) {
       annualAfterCredits: palmAnnualAfterCredits,
       monthlyAfterCredits: palmMonthlyAfterCredits,
       treatmentLabel: palmLI.treatmentLabel,
+      ...(palmLI.scopeNote ? { scopeNote: palmLI.scopeNote } : {}),
       measurements: palmLI.measurements,
       palmCountSource: palmLI.palmCountSource,
       palmCountWasManualOverride: palmLI.palmCountWasManualOverride,

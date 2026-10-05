@@ -753,6 +753,43 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     return conn;
   };
 
+  // A term that is not a /secure pick: no secure record; the mint prices
+  // record (GATE_PREPAY_MINT_PRICE_HOLD) names v1 at $100.
+  const withMintPrices = (base) => {
+    let reads = 0;
+    const conn = (table) => {
+      if (table === 'activity_log') {
+        reads += 1;
+        return fakeQuery(reads === 1 ? [] : [{ metadata: { term_id: 't1', prices: { v1: 10000 } } }]);
+      }
+      return base(table);
+    };
+    conn.schema = base.schema; conn.raw = base.raw;
+    return conn;
+  };
+
+  describe('mint price baseline (GATE_PREPAY_MINT_PRICE_HOLD)', () => {
+    const ORIGINAL_GATE = process.env.GATE_PREPAY_MINT_PRICE_HOLD;
+    afterEach(() => {
+      if (ORIGINAL_GATE === undefined) delete process.env.GATE_PREPAY_MINT_PRICE_HOLD;
+      else process.env.GATE_PREPAY_MINT_PRICE_HOLD = ORIGINAL_GATE;
+    });
+
+    test('true: an edit that puts a held visit back at its own mint price is allowed', async () => {
+      process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'true';
+      const v1 = visit({ estimated_price: 125, _proposedPrice: 100 });
+      const covered = await findBillingCoveredVisits(withMintPrices(fixture({ visits: [v1] })), [v1], { liveInvoice: true });
+      expect(covered.has('v1')).toBe(false);
+    });
+
+    test('shadow: nothing is held, so the same edit stays blocked as today', async () => {
+      process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'shadow';
+      const v1 = visit({ estimated_price: 125, _proposedPrice: 100 });
+      const covered = await findBillingCoveredVisits(withMintPrices(fixture({ visits: [v1] })), [v1], { liveInvoice: true });
+      expect(covered.has('v1')).toBe(true);
+    });
+  });
+
   test('D: an edit that puts a HELD (unstamped, drifted) visit back at the sold price is allowed', async () => {
     const v1 = visit({ estimated_price: 125, _proposedPrice: 100 });
     const conn = withSoldBaseline(fixture({ visits: [v1] }));

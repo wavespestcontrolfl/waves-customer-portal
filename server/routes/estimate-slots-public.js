@@ -70,7 +70,28 @@ const {
   resolveEstimateAcceptance,
   estimateRendersMonthlyBilling,
   verifyEstimateAskToken,
+  offerTierMemberBlock,
 } = require('./estimate-public');
+const { resolveBestOfferTierForSlots } = require('../services/estimate-offer-tiers');
+const featureGates = require('../config/feature-gates');
+
+// Offer tier (GATE_ESTIMATE_OFFER_TIERS): 'best' sizes the visit from every
+// quoted program, and only when the gate, the stored bundle and the live
+// member judgement (linked customer, else the prospective phone match) all
+// allow it (fail-closed). Anything else sizes as today. `database` is the
+// reservation transaction when re-judged under the locked row.
+async function bestOfferTierForSlots(estimate, raw, database = db) {
+  return resolveBestOfferTierForSlots({
+    db: database,
+    estimateId: estimate?.id,
+    raw,
+    gateOn: typeof featureGates.estimateOfferTiersLive === 'function'
+      ? featureGates.estimateOfferTiersLive()
+      : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true',
+    buildPricingBundle,
+    isBlockedMember: (row) => offerTierMemberBlock(row, database),
+  });
+}
 
 // Termite trenching review-before-booking 409 — mirrors the accept-time gate so a
 // slot hold or Stripe intent is never created for a priced trenching-only quote
@@ -243,7 +264,8 @@ function isCommercialAutoEstimate(estimate = {}) {
 // The estimate columns the page's slot gate reads (slotBrowseRefusal).
 // The estimate columns the park verdict (contact_review) reads: an unlinked estimate's phone / email / address.
 // (+ estimate_group_id: a grouped sibling the accept resolves through its accepted sibling is never parked.)
-const ESTIMATE_PARK_COLUMNS = ['customer_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'estimate_group_id'];
+// (+ customer_phone_typed: a phone the customer typed on the accept card never resolves to an existing customer.)
+const ESTIMATE_PARK_COLUMNS = ['customer_id', 'customer_name', 'customer_phone', 'customer_email', 'address', 'estimate_group_id', 'customer_phone_typed'];
 const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest', ...ESTIMATE_PARK_COLUMNS];
 
 // B18 park: the estimate's phone belongs to another customer, so it cannot self-book (contact_review, decided by
@@ -457,6 +479,8 @@ router.get('/:token/available-slots', async (req, res) => {
     if (typeof req.query.selectedFrequency === 'string' && req.query.selectedFrequency.trim()) {
       opts.selectedFrequency = req.query.selectedFrequency.trim();
     }
+    const browseOfferTier = await bestOfferTierForSlots(estimate, req.query.offerTier);
+    if (browseOfferTier) opts.offerTier = browseOfferTier;
     // Bundle combo axes arrive JSON-encoded (?serviceCadences={"mosquito":
     // "seasonal9"}): the mosquito tier changes the seasonal filter/horizon
     // while selectedFrequency stays the pest cadence (codex r14 P1).
@@ -625,9 +649,10 @@ router.post('/:token/find-slots', findSlotsLimiter, async (req, res) => {
       && !Array.isArray(req.body.serviceCadences)
       ? req.body.serviceCadences
       : undefined;
+    const findOfferTier = (await bestOfferTierForSlots(estimate, req.body?.offerTier)) || undefined;
     try {
       const result = await findEstimateSlots(estimate.id, {
-        query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences,
+        query, serviceMode, selectedFrequency, serviceCadences: findServiceCadences, offerTier: findOfferTier,
       });
       return res.json(result);
     } catch (svcErr) {
@@ -703,6 +728,10 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     }
     const gatedReserve = rejectGatedSuppressionEstimate(res, estimate);
     if (gatedReserve) return gatedReserve;
+    // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a 'best' hold sizes the visit
+    // from every quoted program — the same profile the accept commits.
+    const reserveOfferTier = await bestOfferTierForSlots(estimate, req.body?.offerTier);
+    if (reserveOfferTier) slotOpts.offerTier = reserveOfferTier;
     if (isCommercialAutoEstimate(estimate)) {
       return res.status(409).json({
         error: 'Commercial service is scheduled by our team — no self-booking.',
@@ -730,7 +759,19 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
         // (an estimate that turned trenching-review or contact_review after the pre-transaction read must
         // not consume capacity).
         revalidateEstimate: async (row, trx) => {
-          return lockedContactReviewRefusal(row, trx);
+          const contactRefusal = await lockedContactReviewRefusal(row, trx);
+          if (contactRefusal) return contactRefusal;
+          // Offer tier (Codex #5921 r1 P2): a 'best' hold is re-judged on the
+          // LOCKED row inside the reservation transaction — an edit that
+          // removed the tier, or a customer who became a member meanwhile,
+          // must not mint a full-bundle hold the accept then refuses.
+          if (slotOpts.offerTier === 'best' && (await bestOfferTierForSlots(row, 'best', trx)) !== 'best') {
+            return {
+              status: 409,
+              body: { error: 'That plan option is no longer available — reload the page and pick again.', code: 'offer_tier_unavailable' },
+            };
+          }
+          return null;
         },
       });
       return res.status(201).json({

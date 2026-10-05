@@ -544,7 +544,7 @@ describe('model-switchboard', () => {
     expect(MODELS.ROUTINE_EFFORT).toBe(MODELS.anthropicThinkingAlwaysOn(MODELS.ROUTINE) ? 'low' : undefined);
     const routineLeg = { provider: 'anthropic', model: MODELS.ROUTINE, ...(MODELS.ROUTINE_EFFORT ? { effort: MODELS.ROUTINE_EFFORT } : {}) };
     expect(MODELS.TEXT_POLICIES.routineAnswer.primary).toEqual(routineLeg);
-    for (const id of ['wiki_qa_staff', 'expense_categorize', 'invoice_pdf', 'lead_synopsis']) {
+    for (const id of ['wiki_qa_staff', 'invoice_pdf', 'lead_synopsis']) {
       expect(lanes.find((l) => l.id === id).primary.selector).toBe('ROUTINE');
     }
     // The ROUTINE picker never offers Fable / Mythos, and the registry refuses a hand-set one.
@@ -566,6 +566,8 @@ describe('model-switchboard', () => {
     } finally {
       if (prevRoutine === undefined) delete process.env.MODEL_ROUTINE; else process.env.MODEL_ROUTINE = prevRoutine;
     }
+    // Expense categories stay on the flagship (owner, 2026-10-04 bake-off).
+    expect(lanes.find((l) => l.id === 'expense_categorize').primary.selector).toBe('FLAGSHIP');
     // Published alt text is customer-visible: it stays on the vision policy.
     expect(lanes.find((l) => l.id === 'hero_alt').primary.selector).toBe('VISION');
     // Customer-facing wiki answers stay on the flagship policy.

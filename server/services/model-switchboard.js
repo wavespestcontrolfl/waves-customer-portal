@@ -407,7 +407,7 @@ const LANES = [
   // for one file's two policies.
   L('events_curation', 'Community events curation (scoring)', 'event-curation.js', 'fastText', P('newsletterWriter', 'primary'), P('newsletterWriter', 'fallback')),
   L('events_editorial', 'Community events normalizing (venue/type cleanup)', 'event-normalizer.js', 'fastText', P('contentDraft', 'primary'), P('contentDraft', 'fallback')),
-  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('routineAnswer', 'primary'), P('routineAnswer', 'fallback'), { note: 'routine categories on the ROUTINE tier (owner 2026-10-04)' }),
+  L('expense_categorize', 'Expense categorization', 'expense-categorizer.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { note: 'flagship: Sonnet 5.5 filed equipment as Depreciation in the 2026-10-04 bake-off (owner kept it on Opus)' }),
 
   // ── Multimodal ──
   // Sequential ladder, not a fan-out (owner ruling 2026-09-26,
@@ -533,6 +533,7 @@ const LANES = [
   // ── Report writer ──
   L('report_copy', 'Completed-service report copy', 'routes/admin-schedule.js', 'report', P('report', 'primary'), P('report', 'fallback'), { note: 'deterministic safe copy if both miss' }),
   L('treatment_narrative', 'Treatment narrative', 'service-report/treatment-narrative.js', 'report', P('report', 'primary'), P('report', 'fallback')),
+  L('lawn_tech_paragraph', 'Lawn report · "From your technician" paragraph', 'service-report/lawn-tech-paragraph.js', 'report', P('report', 'primary'), P('report', 'fallback'), { note: 'GATE_LAWN_TECH_PARAGRAPH, dark; one call at completion, frozen, code-validated; nothing stored on a miss' }),
   L('rodent_narrative', 'Rodent / typed report narrative', 'service-report/rodent-report-narrative.js', 'report', P('report', 'primary'), P('report', 'fallback')),
   L('project_report', 'Project report draft', 'routes/admin-projects.js', 'report', P('report', 'primary'), P('report', 'fallback')),
   L('lawn_diag_writer', 'Lawn diagnostic · customer narrative', 'lawn-diagnostic-prompt.js', 'report', D('LAWN_WRITER_MODEL', 'gpt-5.5', { accepts: { providers: ['openai'], cap: 'text' } }), T('FLAGSHIP')),
@@ -732,6 +733,7 @@ const LANE_AREA = {
   retention_drafts: 'estimates',
   report_copy: 'reports',
   treatment_narrative: 'reports',
+  lawn_tech_paragraph: 'reports',
   rodent_narrative: 'reports',
   project_report: 'reports',
   completion_recap: 'reports',
@@ -897,6 +899,7 @@ const LANE_DESCRIBE = {
   retention_drafts: 'Drafts the retention outreach you approve',
   report_copy: 'Writes the completed-service report',
   treatment_narrative: 'Writes the treatment narrative',
+  lawn_tech_paragraph: 'Writes the lawn report\'s "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH)',
   rodent_narrative: 'Writes rodent and typed reports',
   project_report: 'Writes the project report',
   completion_recap: 'Writes the short recap the customer gets',

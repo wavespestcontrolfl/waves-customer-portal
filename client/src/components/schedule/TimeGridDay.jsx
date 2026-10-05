@@ -333,20 +333,19 @@ function CloseoutOwedChip({ onClick }) {
   return <span className={className}>Closeout owed</span>;
 }
 
-// "~14 min in · ~9 min out" from the day route's straight-line legs
-// (GET /admin/schedule); null when the payload carries none.
-function driveLegsLabel(service) {
-  const into = service.firstStop ? 'first stop'
-    : Number.isFinite(service.driveFromPrevMin) ? `~${service.driveFromPrevMin} min in` : null;
-  const out = service.lastStop ? 'last stop'
-    : Number.isFinite(service.driveToNextMin) ? `~${service.driveToNextMin} min out` : null;
-  return [into, out].filter(Boolean).join(' · ') || null;
+// "~9 min drive in": the drive into this stop, from the day route's
+// straight-line legs (GET /admin/schedule), as the phone list shows it
+// (owner 2026-10-05). The server stamps each leg on one card only
+// (driveInShown), so it shows once; null when the payload carries none.
+function driveInLabel(service) {
+  if (!service.driveInShown || !Number.isFinite(service.driveFromPrevMin)) return null;
+  return `~${service.driveFromPrevMin} min drive in`;
 }
 
 function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false }) {
   // A move awaiting confirmation changes the route: the server's legs are
   // stale until the refresh, so they hide.
-  const drive = routeStale ? null : driveLegsLabel(service);
+  const drive = routeStale ? null : driveInLabel(service);
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -539,8 +538,10 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
       {effectiveHeight > SLOT_HEIGHT && (
         <div className="opacity-80 truncate">{serviceDisplayName(service)}</div>
       )}
-      {drive && effectiveHeight > SLOT_HEIGHT * 2 && (
-        <div className="opacity-70 truncate u-nums">{drive}</div>
+      {/* A one-hour block has room for this line unless the readiness
+          strip sits at its foot; the tooltip always carries it. */}
+      {drive && effectiveHeight >= SLOT_HEIGHT * 2 && !(service.readiness && onProtocol && effectiveHeight <= SLOT_HEIGHT * 2) && (
+        <div className="opacity-70 truncate u-nums" style={{ fontSize: 14 }}>{drive}</div>
       )}
       {service.address && effectiveHeight > SLOT_HEIGHT * 2 && (
         <div className="opacity-70 truncate">{service.address}</div>

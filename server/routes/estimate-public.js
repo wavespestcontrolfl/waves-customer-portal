@@ -29,6 +29,8 @@ const {
   sanitizeContactLastName,
   sanitizeContactFirstName,
   sanitizeContactEmail,
+  saveAcceptContactPhone,
+  phoneTypedByCustomer,
   fillExistingCustomerLastName,
   fillExistingCustomerEmail,
   cleanedNameTokens: contactGapNameTokens,
@@ -147,6 +149,33 @@ const {
   savedFloorReplaySignals,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
+const OfferTiers = require('../services/estimate-offer-tiers');
+// GATE_ESTIMATE_OFFER_TIERS read at call time. Tests mock feature-gates with
+// a partial object, so the env read is the fallback when the reader is absent.
+function offerTiersGateOn() {
+  return typeof featureGates.estimateOfferTiersLive === 'function'
+    ? featureGates.estimateOfferTiersLive()
+    : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
+}
+// A LIVE active member never takes an offer tier (the member ladder is the
+// office's). "Member" is judged the way the accept will resolve the customer:
+// the linked customer_id when there is one, otherwise the prospective PHONE
+// match the accept lands on (matchAcceptCustomerByPhone) — an unlinked
+// estimate whose phone belongs to a member must not see the picker, reserve
+// a Best hold, or set up payment only to be refused at accept (Codex #5921 r1
+// P1). Strict and fail-closed: any read error reads as "member".
+async function offerTierMemberBlock(estimate, database = db) {
+  if (!estimate) return true;
+  try {
+    if (estimate.customer_id) {
+      return !!(await isActivePlanCustomer(database, estimate.customer_id, { strict: true }));
+    }
+    const { match } = await matchAcceptCustomerByPhone(estimate, database);
+    return !!match && match.active !== false && isMembershipCustomerRow(match);
+  } catch (_) {
+    return true;
+  }
+}
 const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
@@ -594,7 +623,23 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
     .orderBy('updated_at', 'desc');
   if (lockShare) candidateQuery = candidateQuery.forShare().noWait();
   const candidates = await candidateQuery;
-  let contradicted = candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate);
+  // A phone the customer typed on the accept card (PUT /:token/contact-phone; estimates.customer_phone_typed) proves
+  // nothing about who typed it, so it NEVER resolves to an existing customer, however many share the number and
+  // whatever their email or address: any candidate is a contradiction, and the standing B18 park answers it (nothing
+  // created, no card captured, the office told). This is the one matcher every card and accept route reads, so the
+  // rule holds at the save and for every later request, including a customer who acquired the number afterwards.
+  // The mark is a column. A caller that loaded a PROJECTION without it (an estimate row with an id but no
+  // customer_phone_typed key) would read every typed phone as the office's, so the matcher loads the one column
+  // itself rather than trust each projection to include it. A snapshot (no id) must carry the value.
+  let typedMark = estimate.customer_phone_typed;
+  if (typedMark === undefined && estimate.id) {
+    const markRow = await database('estimates').where({ id: estimate.id }).first('customer_phone_typed');
+    typedMark = markRow?.customer_phone_typed ?? null;
+  }
+  const typedPhone = phoneTypedByCustomer({ customer_phone: estimate.customer_phone, customer_phone_typed: typedMark });
+  let contradicted = typedPhone
+    ? candidates.length > 0
+    : candidates.length === 1 && acceptLoneCandidateContradicted(candidates[0], estimate);
   // The accept resolves a customer-unlinked GROUPED estimate through its accepted sibling BEFORE it ever matches by
   // phone (the sibling is the deterministic owner; a second property's address naturally differs), so that estimate
   // never reaches the phone match this contradiction rule guards: it is not parked, and every reader of the matcher
@@ -602,12 +647,17 @@ async function matchAcceptCustomerByPhone(estimate, database = db, { authoritati
   // phone match, which runs after its sibling lookup already found no owner. The lookup is the shared read-only
   // owner resolver (RecurringCards.resolveGroupedEstimateOwnerId, the accept's sibling query minus its advisory
   // lock) and it throws on an unreadable owner: an unknown owner is not guessed either way (callers decide).
-  if (contradicted && !afterSiblingResolution && estimate.estimate_group_id
+  // A typed phone is never un-contradicted by the grouped-owner rule: its candidates stay parked for every reader
+  // (the group's owner is the sibling, not whoever holds the typed number, and a candidate's saved card must never
+  // read as covering this booking).
+  if (contradicted && !typedPhone && !afterSiblingResolution && estimate.estimate_group_id
     && await require('../services/recurring-card-on-file').resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true })) {
     contradicted = false;
   }
   const verdict = {
-    match: candidates.length === 1 && !contradicted ? candidates[0] : pickAcceptCustomerMatch(candidates, estimate),
+    match: typedPhone && contradicted
+      ? null
+      : candidates.length === 1 && !contradicted ? candidates[0] : pickAcceptCustomerMatch(candidates, estimate),
     candidateCount: candidates.length,
     ...(contradicted ? { contradicted: true, rejectedCustomerId: candidates[0].id } : {}),
   };
@@ -742,6 +792,53 @@ async function refuseParkedWrite(estimate, rejectedCustomerId) {
 // recurrence after the row was completed (marked Done) or auto-cleared reopens it and rings. The episode is versioned by the
 // rejected customer id, so a phone later changed to a DIFFERENT customer's number is a new version that refreshes and rings.
 // ALERT_EPISODES killed (the shared kill switch): the plain deduped raise this alert always had (rings once per estimate).
+// The contact gaps the PAGE is told about. The phone gap exists only while its capture endpoint does
+// (GATE_ESTIMATE_ACCEPT_PHONE, default on): with the gate off the page never asks for a phone it could not save.
+function pageContactGaps(args) {
+  const gaps = computeContactGaps(args);
+  if (!featureGates.isEnabled('estimateAcceptPhone')) gaps.phone = false;
+  return gaps;
+}
+
+// Accept-card phone capture (owner 2026-10-04): the number a customer typed on a phone-less estimate already belongs to a
+// customer on file. A typed phone proves nothing about who is typing, so the accept is NOT attached to that account and
+// nothing is written: the office finishes it. One row per estimate; the typed number is in the detail for the call back.
+// Best-effort: a failed alert never changes the refusal.
+async function raiseAcceptTypedPhoneMatchAlert({ estimate, typedPhone, candidateCount }) {
+  try {
+    const { fitAction } = require('../services/admin-alert-names');
+    await require('../services/admin-alert-compose').raiseAdminAlert('estimate', {
+      area: 'Estimates',
+      action: fitAction('Estimates', estimate.customer_name || 'this customer', [
+        (n) => `call ${n} to finish their estimate`,
+        (n) => `call ${n} about their estimate`,
+        (n) => `call ${n}`,
+      ]),
+      why: 'The phone they typed to accept is already a customer\u2019s, so it was not booked online.',
+      severity: 'needs-you',
+      link: `/admin/estimates?estimateId=${encodeURIComponent(estimate.id)}`,
+      subject: { type: 'estimate', id: String(estimate.id) },
+      doneWhen: 'estimate_accepted',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `accept-typed-phone-match:${estimate.id}`,
+      // One row per estimate, kept current: a different typed number (a corrected typo) refreshes the row's detail
+      // and match count without ringing again, so the office never calls back the first, wrong number.
+      dedupeVersion: `typed:${String(typedPhone).replace(/\D/g, '').slice(-10)}:${candidateCount}`,
+      refreshOnDedupe: true,
+      ringOnRefresh: () => false,
+      detail: `The estimate had no phone. On the accept card the customer typed ${typedPhone}, which matches ${candidateCount} customer record${candidateCount === 1 ? '' : 's'} on file. `
+        + 'Nothing was saved to the estimate, no customer was created or changed and no card was taken. '
+        + 'A visit time they picked before this step stays on hold until that hold runs out; it is not booked. '
+        + 'Confirm who this is, then link the estimate to the right customer or put the phone on the estimate, and they can accept.',
+      metadata: { estimateId: String(estimate.id), typedPhoneMatches: candidateCount },
+    });
+  } catch (err) {
+    logger.warn(`[estimate-accept] typed-phone-match office alert failed for estimate ${estimate.id}: ${err.code || err.name || 'error'}`);
+  }
+}
+
 async function raiseAcceptParkedAlert({ estimate, rejectedCustomerId }) {
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     try {
@@ -764,7 +861,10 @@ async function raiseAcceptParkedAlert({ estimate, rejectedCustomerId }) {
         who: 'person',
       };
       const detail = `The phone number on this estimate belongs to ${rejectedName} (customer id ${rejectedCustomerId}), `
-        + 'whose email and address do not match the estimate, so online accepting and booking are held for the office: no customer was created or changed, no card was taken and no time is held. '
+        + (phoneTypedByCustomer(estimate)
+          ? 'and the customer typed that number on the estimate page, which does not prove it is theirs, '
+          : 'whose email and address do not match the estimate, ')
+        + 'so online accepting and booking are held for the office: no customer was created or changed, no card was taken and no time is held. '
         + 'Fix the phone on the estimate, or link the estimate to the right customer, and then they can accept.';
       const metadata = { estimateId: String(estimate.id), rejectedCustomerId: String(rejectedCustomerId) };
       let filed;
@@ -4217,6 +4317,9 @@ function recurringServicesWithSupplements(estResult = {}) {
         // never renders/sends the auto-priced line without it.
         detail: item.detail || item.disclaimer || null,
         disclaimer: item.disclaimer || null,
+        // Lethal bronzing injection disclosure (owner 2026-10-05): the card
+        // and the rendered page show it under the treatment row.
+        ...(key === 'palm_injection' && item.scopeNote ? { scopeNote: String(item.scopeNote) } : {}),
         mo: monthly || null,
         monthly: monthly || null,
         annual: annual || (monthly ? Math.round(monthly * 12 * 100) / 100 : null),
@@ -4286,6 +4389,7 @@ function recurringServicesWithSupplements(estResult = {}) {
       visitsPerYear: appsPerYear,
       cadenceLabel: resultStats.injection?.treatmentLabel || 'Palm treatment',
       detail: resultStats.injection?.detail || null,
+      ...(resultStats.injection?.scopeNote ? { scopeNote: String(resultStats.injection.scopeNote) } : {}),
       waveGuardDiscountEligible: false,
       tierLabel: 'Recurring service',
     });
@@ -9233,8 +9337,8 @@ async function handleEstimateView(req, res, next) {
         const linkedCustomerForGaps = estimate.customer_id
           ? await db('customers').where({ id: estimate.customer_id }).first('first_name', 'last_name', 'email')
           : null;
-        const gaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
-        contactGapsForceReactView = !!(gaps.firstName || gaps.lastName || gaps.email);
+        const gaps = pageContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
+        contactGapsForceReactView = !!(gaps.firstName || gaps.lastName || gaps.email || gaps.phone);
       } catch (e) {
         // Fail CLOSED toward the React view: it can collect the fields,
         // the legacy page cannot (codex #5102 r7).
@@ -10148,6 +10252,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       const raw = req.body?.selectedFrequency;
       return typeof raw === 'string' ? raw.trim() : '';
     })();
+    // Offer tier (GATE_ESTIMATE_OFFER_TIERS): good | better | best. Resolved
+    // against the STORED tiers once the pricing bundle is built below —
+    // never from the body alone.
+    const selectedOfferTierRaw = req.body?.selectedTier;
     // Invoice-mode: admin opted the estimate into legacy auto-invoicing, OR
     // the estimate is a guarantee-only renewal (derived — see
     // resolveEstimateInvoiceMode): no visit to book, so accept creates the
@@ -10346,7 +10454,37 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       return res.status(409).json({ error: 'existing appointment belongs to a different customer' });
     }
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
-    const pricingBundle = await buildPricingBundle(estimateForPricing);
+    const pricingBundleAsOffered = await buildPricingBundle(estimateForPricing);
+    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS, owner 2026-10-05): the
+    // customer's `selectedTier` must name a tier the bundle STORED, and its
+    // service mode must agree with `serviceMode`; anything else is a 400.
+    // 'good' and 'better' are today's one-time / pest-only paths untouched.
+    // 'best' keeps the companion programs the one-time toggle drops
+    // (keepCompanions below) and prices off the tier's own full-bundle
+    // ladder — the bundle view the rest of this handler already understands.
+    // A multi-service plan never prepays (estimate-public combos rule), so
+    // prepay on 'best' is refused up front rather than half-way through.
+    const { tier: offerTier, error: offerTierError } = OfferTiers.resolveSelectedOfferTier(
+      pricingBundleAsOffered,
+      selectedOfferTierRaw,
+      { serviceMode, gateOn: offerTiersGateOn() },
+    );
+    if (offerTierError) {
+      return res.status(400).json({ error: offerTierError, code: 'offer_tier_unavailable' });
+    }
+    if (offerTier && offerTier.key === 'best' && annualPrepaySelected) {
+      return res.status(400).json({ error: 'annual prepay is not available on the full-bundle option — pick pay_at_visit instead' });
+    }
+    // A LIVE active member never takes a tier (the member ladder is the
+    // office's — the same strict, fail-closed check the /data projection
+    // and the slot routes make; stored evidence alone can miss a customer
+    // who became a member after the quote was built). Re-judged inside the
+    // money-bearing transaction below.
+    if (offerTier && await offerTierMemberBlock(estimate, db)) {
+      return res.status(400).json({ error: 'offer tiers are not available for this estimate', code: 'offer_tier_unavailable' });
+    }
+    const keepCompanions = OfferTiers.offerTierKeepsCompanions(offerTier);
+    const pricingBundle = OfferTiers.pricingBundleForOfferTier(pricingBundleAsOffered, offerTier);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle, estData);
     if (quoteRequirement.quoteRequired) {
       const needsManagerApproval = quoteRequirement.reason === 'st_augustine_dethatching';
@@ -10388,7 +10526,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         reason: 'termite_trenching_review',
       });
     }
-    if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
+    if (estimate.show_one_time_option && !keepCompanions && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
       recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
     }
     const isOneTimeOnly = isStructuralOneTimeOnlyEstimate(estData, estimate);
@@ -11398,7 +11536,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       const acceptedLists = acceptanceServiceLists(acceptedEstDataForPricing);
       recurringSvcList = acceptedLists.recurringSvcList;
       oneTimeList = acceptedLists.oneTimeList;
-      if (estimate.show_one_time_option && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
+      if (estimate.show_one_time_option && !keepCompanions && recurringSvcList.some((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service))) {
         recurringSvcList = recurringSvcList.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service));
       }
     }
@@ -11595,7 +11733,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       ? await slotReservation.prepareReservationCommit(capacityHold.id, { estimate: {
         ...estimate, estimate_data: acceptedEstDataForPricing || estimate.estimate_data },
         serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
-        selectedFrequency: acceptedSchedulingFrequencyKey, serviceCadences }) : null;
+        selectedFrequency: acceptedSchedulingFrequencyKey, serviceCadences,
+        // Offer tier (GATE_ESTIMATE_OFFER_TIERS): the prepared capacity must
+        // size the same full-bundle visit the hold and the commit do.
+        offerTier: offerTier ? offerTier.key : null }) : null;
     const txResult = await db.transaction(async (trx) => {
       // RUNG 1 FIRST (ORDERING CONTRACT, services/scheduling/occupancy.js —
       // the row-lock rule). When this accept will graduate a held slot,
@@ -11758,9 +11899,15 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // independently — recorded for the receipt/admin; the chosen tiers are
           // already rewritten into the recurring rows for scheduling/billing.
           ...(serviceCadences ? { serviceCadences } : {}),
+          // Offer tier the customer picked (GATE_ESTIMATE_OFFER_TIERS) —
+          // recorded beside the cadence choice for the receipt/admin.
+          ...(offerTier ? { offerTier: offerTier.key } : {}),
           selectedAt: new Date().toISOString(),
         };
-        const persistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData);
+        // A resolved 'best' tier keeps every quoted program: the pest-only
+        // rewrite below is the one-time toggle's companion exclusion.
+        const persistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice(estimate, nextEstimateData)
+          && !keepCompanions;
         if (persistPestOnlyRecurringChoice && Array.isArray(nextEstimateData.result?.recurring?.services)) {
           nextEstimateData.result = {
             ...nextEstimateData.result,
@@ -11776,6 +11923,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             services: nextEstimateData.recurring.services.filter((svc) => isPestServiceName(svc?.name || svc?.label || svc?.service)),
           };
         }
+        acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
+      }
+      // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a Good (one-time) accept has
+      // no selectedFrequency branch to ride, so the chosen tier is recorded
+      // here for every tiered accept (the recurring branch above wrote it
+      // already for Better / Best; this is idempotent on the same key).
+      if (offerTier && nextEstimateData && nextEstimateData.customerSelection?.offerTier !== offerTier.key) {
+        nextEstimateData.customerSelection = {
+          ...(nextEstimateData.customerSelection || {}),
+          offerTier: offerTier.key,
+          selectedAt: nextEstimateData.customerSelection?.selectedAt || new Date().toISOString(),
+        };
         acceptedUpdates.estimate_data = JSON.stringify(nextEstimateData);
       }
       const acceptedEstimateForScheduling = nextEstimateData
@@ -12182,7 +12341,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // profile whose email/address uniquely matches — splitting the
         // estimate off the existing account. pickAcceptCustomerMatch needs the
         // full set to judge ambiguity.
-        acceptedPhoneIdentity = { customer_phone: estimate.customer_phone, customer_email: estimate.customer_email, address: estimate.address };
+        // customer_phone_typed carries the accept-card provenance onto the snapshot.
+        acceptedPhoneIdentity = { customer_phone: estimate.customer_phone, customer_email: estimate.customer_email, address: estimate.address, customer_phone_typed: estimate.customer_phone_typed };
         const { match: existing, candidateCount, contradicted: phoneContradicted, rejectedCustomerId: phoneRejectedCustomerId } = await matchAcceptCustomerByPhone(acceptedPhoneIdentity, trx, { authoritative: true, afterSiblingResolution: true });
         // B18: the card policy, hold auto-satisfy and prepay quote were decided on the PREFLIGHT identity. A
         // contradiction here the preflight did not see (the candidate or the phone's candidate set moved in
@@ -12241,7 +12401,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // the phone-grouping key (same primitive as proposal-win / quick-add).
           // Lazy require: admin-customers is a route module (load-cycle risk).
           const { ensureCustomerAccount } = require('./admin-customers');
+          // A phone the customer typed on the accept card never joins an existing account, even one created
+          // after the matcher above ran: forceNewAccount (without ignorePhoneMatch) mints a fresh account and
+          // fails closed with PHONE_MATCH_CONFIRM when a customer holds the number right now. That is the same
+          // situation the matcher parks, so it gets the same park (nothing commits; the office is told).
+          const typedAcceptPhone = phoneTypedByCustomer(estimate);
           const account = await ensureCustomerAccount(trx, {
+            ...(typedAcceptPhone ? { forceNewAccount: true } : {}),
             // A multi-word first name the page collected stays whole.
             firstName: contactFillFirstName || nameParts[0] || 'New',
             // The accept-card surname verbatim (codex #5102 r3 P2): the
@@ -12250,6 +12416,20 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             lastName: contactFillLastName || acceptContactSurname || nameParts.slice(1).join(' ') || 'Customer',
             phone: estimate.customer_phone,
             email: newProfileEmail,
+          }).catch(async (accountErr) => {
+            if (typedAcceptPhone && accountErr?.code === 'PHONE_MATCH_CONFIRM') {
+              if (recurringCardVerification?.ok && recurringCardVerification.setupIntentId) {
+                droppedCaptureToRetire = { estimate, setupIntentId: recurringCardVerification.setupIntentId };
+              }
+              // The park alert names the customer who holds the number (the helper's match carries only the
+              // account): the same live-customer read the matcher makes, on the transaction's own handle.
+              const holder = (await matchAcceptCustomerByPhone({ customer_phone: estimate.customer_phone, customer_phone_typed: estimate.customer_phone_typed }, trx, { authoritative: true }).catch(() => null));
+              throw Object.assign(new Error(ACCEPT_OFFICE_REVIEW_MESSAGE), {
+                status: 409, isOperational: true, code: ACCEPT_NEEDS_OFFICE_REVIEW,
+                parkedRejectedCustomerId: holder?.rejectedCustomerId || null, parkedEstimate: estimate,
+              });
+            }
+            throw accountErr;
           });
           // Structured address when the free-text snapshot parses ("street,
           // city, ST zip" — the Places shape the builder stores); the legacy
@@ -12308,6 +12488,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // turns a blank first name into the surname (codex #5612 r4).
         firstName = contactFillFirstName
           || await estimateGreetingFirstName(trx, { ...estimate, customer_id: customerId || estimate.customer_id });
+      }
+
+      // Offer tier (GATE_ESTIMATE_OFFER_TIERS): the live member exclusion,
+      // re-judged on the customer the accept ACTUALLY landed on — the linked,
+      // sibling, or phone-matched profile resolved above, never only the
+      // estimate's pre-read link — on the row locked FOR UPDATE under the
+      // already-locked estimate row (estimate → customer, the opt-out write's
+      // and the converter's order). A profile this accept just minted cannot
+      // be a member. Fails closed on a read error.
+      if (offerTier && customerId && !customerCreatedThisAccept) {
+        let liveMemberInTrx = true;
+        try {
+          const lockedCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
+          liveMemberInTrx = !!lockedCustomer && lockedCustomer.active !== false && isMembershipCustomerRow(lockedCustomer);
+        } catch (_) { liveMemberInTrx = true; }
+        if (liveMemberInTrx) {
+          throw Object.assign(new Error('offer tiers are not available for this estimate'), {
+            status: 409, isOperational: true, code: 'offer_tier_unavailable',
+          });
+        }
       }
 
       // Bank tender re-judged UNDER THE CUSTOMER LOCK against the customer the
@@ -12559,6 +12759,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
             selectedFrequency: acceptedSchedulingFrequencyKey,
             serviceCadences,
+            // Offer tier (GATE_ESTIMATE_OFFER_TIERS): a 'best' commit sizes
+            // the visit from every quoted program, as the hold did.
+            offerTier: offerTier ? offerTier.key : null,
             // Rung 1 was pre-acquired on this key at the top of this txn —
             // commitReservation re-checks the hold still sits on it.
             preLockedDate: acceptPreLockedDate,
@@ -12631,6 +12834,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
               serviceMode: treatAsOneTime ? 'one_time' : serviceMode,
               selectedFrequency: acceptedSchedulingFrequencyKey,
               serviceCadences,
+              offerTier: offerTier ? offerTier.key : null,
               // Rung 1 was pre-acquired on this key at the top of this txn —
               // commitReservation re-checks the hold still sits on it.
               preLockedDate: acceptPreLockedDate,
@@ -18753,6 +18957,132 @@ async function transferGroupFollowupOwnership(estimate) {
   }
 }
 
+// PUT /api/estimates/:token/contact-phone  { contactPhone }
+// Accept-card PHONE capture (owner 2026-10-04: a missing phone is asked for at accept and logged, like the last name
+// and the email). It is its own write, ahead of the card step and the accept, because a phone is the identity every
+// later decision is made on: /recurring-card-intent and /card-hold-intent refuse a phone-less unlinked estimate before
+// any card is captured, and the accept creates the customer from the estimate's phone. Saving it here means every one
+// of those routes simply reads an estimate that has a phone; none of them takes a typed value.
+//   - Only the gap the server itself sees is ever filled: an estimate with a phone or a linked customer answers
+//     { saved: false, alreadyOnFile: true } and writes nothing, whatever was sent.
+//   - A typed phone proves nothing about who typed it. If it already belongs to ANY live customer, nothing is written,
+//     the office gets one bell with the number, and the answer is the standing "call the office" refusal
+//     (409 CUSTOMER_CONTACT_REQUIRED). It can therefore never attach this estimate, a saved card or a hold to an
+//     existing account.
+//   - Otherwise it is saved on the estimate (guarded: still unlinked, still phone-less) and the page reloads /data.
+// The 200/409 difference tells a token holder whether a number is a customer's. That is bounded by design: a number
+// that is NOT a customer's is saved and closes the gap (one guess per estimate), a number that IS rings the office, and
+// the limiter caps attempts per token and client.
+const contactPhoneLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Gate off = the route does not exist: its 404 must not turn into a 429.
+  skip: () => !featureGates.isEnabled('estimateAcceptPhone'),
+  keyGenerator: (req) => `${require('../middleware/rate-limit-key').rateLimitKey(req)}:${req.params.token}`,
+  message: { error: 'Too many attempts. Please wait a moment and try again, or call our office.' },
+});
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like mapImagePreGuard. It stamps the
+// privacy headers first, so EVERY response of this route carries them: router.param's malformed-token 404, the global
+// limiter's 429, this route's own 429 and the handler's answers. With the gate off it answers the route's 404 here, so
+// a dark route can never read as a 429. Raw-path match (one non-slash token segment, optional trailing slash).
+const CONTACT_PHONE_PATH_RE = /^\/[^/]+\/contact-phone\/?$/i;
+function stampContactPhoneHeaders(res) {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Referrer-Policy', 'no-referrer');
+}
+function contactPhonePreGuard(req, res, next) {
+  if (req.method !== 'PUT' || !CONTACT_PHONE_PATH_RE.test(req.path || '')) return next();
+  stampContactPhoneHeaders(res);
+  if (!featureGates.isEnabled('estimateAcceptPhone')) return res.status(404).json({ error: 'Estimate not found' });
+  return next();
+}
+router.put('/:token/contact-phone', contactPhoneLimiter, async (req, res, next) => {
+  try {
+    // Also stamped here: the handler must be correct on its own, without the pre-guard mount.
+    stampContactPhoneHeaders(res);
+    if (!featureGates.isEnabled('estimateAcceptPhone')) return res.status(404).json({ error: 'Estimate not found' });
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (estimate && await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
+      return res.status(404).json({ error: 'Estimate not found' });
+    }
+    if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
+    if (!isEstimateAcceptActive(estimate)) {
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
+    }
+    // The decision and the write live in services/estimate-contact-gaps (saveAcceptContactPhone) so they are tested
+    // without the route; the matcher and the office alert are this route's own.
+    // LIVE call-linkage revalidation ATOMIC with the write, as the decline does: one transaction, the estimate row
+    // locked first (estimates → leads → call_log, the repo-wide order), the call row locked by staleCallLinkageReason
+    // and held through the UPDATE. A linkage correction committing after the pre-check above therefore makes this a
+    // generic 404, never a phone written onto a wrong-lead estimate. The office bell for a matched number is raised
+    // after the transaction (no notification I/O under the row locks).
+    let pendingAlert = null;
+    const locked = await db.transaction(async (trx) => {
+      const { staleCallLinkageReason } = require('../services/admin-estimate-persistence');
+      const lockedRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('id', 'status', 'estimate_data');
+      if (!lockedRow) return { stale: true };
+      let linkData = null;
+      try {
+        linkData = typeof lockedRow.estimate_data === 'string' ? JSON.parse(lockedRow.estimate_data) : (lockedRow.estimate_data || null);
+      } catch { linkData = null; }
+      if (linkData?.lead_id && ['sid', 'stamp'].includes(linkData?.lead_linkage)) {
+        await trx('leads').where({ id: String(linkData.lead_id) }).forUpdate().first('id');
+      }
+      if (linkData && await staleCallLinkageReason(trx, linkData, { lockCallRow: true, estimateStatus: lockedRow.status })) {
+        return { stale: true };
+      }
+      return { outcome: await saveAcceptContactPhone({
+      estimate,
+      rawPhone: req.body?.contactPhone,
+      database: trx,
+      // On the transaction's own connection: it holds the estimate / lead / call locks, so a second pool connection
+      // here could starve the pool under load.
+      countCustomersWithPhone: async (phone) => (await matchAcceptCustomerByPhone({ customer_phone: phone }, trx, { authoritative: true })).candidateCount,
+      onExistingCustomerPhone: ({ typedPhone, candidateCount }) => { pendingAlert = { typedPhone, candidateCount }; },
+      // TOCTOU: the accept-active check above ran on a pre-read. The UPDATE itself refuses a row a concurrent accept,
+      // decline, archive, expiry or off-surface marker has since made ineligible: the same predicates the
+      // /preferences and /select-tier writes carry, plus the pre-read's updated_at (any concurrent write = reload).
+      guardUpdate: (qb) => {
+        qb.whereNotIn('status', ['accepted', 'declined', 'expired', 'send_failed', 'draft', 'scheduled'])
+          .whereNull('price_locked_at')
+          .whereNull('archived_at')
+          .whereRaw('(expires_at IS NULL OR expires_at >= NOW())')
+          .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+          .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+          .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+          .whereRaw(REPRICE_PENDING_ABSENT_SQL)
+          .whereRaw(ADDRESS_UNVERIFIED_ABSENT_SQL);
+        if (estimate.updated_at) {
+          qb.andWhere(db.raw(
+            "date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', ?::timestamptz)",
+            [estimate.updated_at],
+          ));
+        }
+      },
+    }) };
+    });
+    if (locked.stale) return res.status(404).json({ error: 'Estimate not found' });
+    const { outcome } = locked;
+    if (pendingAlert) await raiseAcceptTypedPhoneMatchAlert({ estimate, ...pendingAlert });
+    if (outcome.zeroRows) {
+      // Nothing was written. Either a concurrent writer closed the gap (already on file), or the estimate stopped
+      // being eligible / changed under the request: the zero-row answer every atomic public write gives.
+      const fresh = await db('estimates').where({ id: estimate.id }).first('customer_id', 'customer_phone');
+      if (fresh && (fresh.customer_id || String(fresh.customer_phone || '').replace(/\D/g, '').length >= 10)) {
+        return res.json({ saved: false, alreadyOnFile: true });
+      }
+      const zeroRowStatus = await zeroRowMutationStatus(estimate.id);
+      return res.status(zeroRowStatus).json(zeroRowMutationBody(zeroRowStatus));
+    }
+    if (outcome.body.saved) logger.info(`[estimate-public] accept-card phone saved on estimate ${estimate.id}`);
+    return res.status(outcome.status).json(outcome.body);
+  } catch (err) { next(err); }
+});
+
 // PUT /api/estimates/:token/decline
 router.put('/:token/decline', acceptDeclineLimiter, async (req, res, next) => {
   try {
@@ -24764,6 +25094,47 @@ function serviceCadenceComboKey(selection = {}) {
     .join('|');
 }
 
+// Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS, owner 2026-10-05): the
+// payload fields for an eligible v1-shaped one-time-toggle bundle. Eligibility
+// is the pure predicate in estimate-offer-tiers.js; the 'best' ladder and
+// combos are the SAME shapeFromV1 / buildServiceCadenceCombos calls the
+// non-toggle bundle makes, with pestOnly:false. Manual-discount estimates are
+// excluded: withManualDiscount nets the discount into payload.frequencies
+// only, and a second ladder it never touched could show a different number.
+function buildOfferTierFieldsForV1({ estimate, estData, v1, prefs, pestOnlyChoice, v1FloorOptions, anchorOneTimePrice }) {
+  if (!pestOnlyChoice) return {};
+  // A row already accepted on 'best' keeps its tier view even after the gate
+  // is turned off: what was booked must keep reading as what was booked
+  // (the /data projection never serves the picker on an accepted row).
+  const acceptedBest = OfferTiers.acceptedOfferTierKey(estData) === 'best';
+  if (!offerTiersGateOn() && !acceptedBest) return {};
+  if (normalizeManualDiscountSummary(estData)) return {};
+  const OptOut = require('../services/estimate-service-opt-out');
+  const recurringKeys = Array.from(new Set(v1.services.map(recurringServiceKey).filter(Boolean)));
+  const verdict = OfferTiers.offerTierEligibility({
+    gateOn: true,
+    estimate,
+    recurringKeys,
+    optedOutKeys: OptOut.currentlyOptedOutKeys(estData),
+    memberEvidence: OptOut.memberEvidenceInEstimateData(estData) || !!estData?.membershipSnapshot?.isExistingCustomer,
+    oneTimeChoicePrice: anchorOneTimePrice,
+    hasPestLadder: v1.pestTiers.length > 0,
+  });
+  if (!verdict.eligible) return {};
+  const bestFrequencies = [];
+  for (const [v1Label, ladder] of Object.entries(V1_LABEL_TO_LADDER)) {
+    const pestTier = v1.pestTiers.find((t) => t?.label === v1Label) || null;
+    bestFrequencies.push(shapeFromV1(v1, ladder, pestTier, prefs, { pestOnly: false, ...v1FloorOptions }));
+  }
+  const bestServiceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: false, ...v1FloorOptions });
+  return OfferTiers.buildOfferTiers({
+    oneTimeChoicePrice: anchorOneTimePrice,
+    recurringKeys,
+    bestFrequencies,
+    bestServiceCadenceCombos,
+  });
+}
+
 // Precompute every selectable cadence combination for a bundle so the view can
 // look up the authoritative total locally (no per-change round-trip) and the
 // accept handler can resolve the exact same number. Returns null when there is
@@ -26570,10 +26941,40 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
   // Presentation relabels apply LAST — attachPublicPricingContract rebuilds
   // the section list via buildPricingServices, so an earlier rename pass
   // would be overwritten for recomputed bundles (codex P2 on #2947 round 3).
-  const withContract = applyPresentationOverridesToBundle(
+  const withContractBase = applyPresentationOverridesToBundle(
     hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(withQuoteState, estimate, estData), estData),
     estData,
   );
+  // Good / Better / Best: the page renders the Best tier's sections, combined
+  // summary and WaveGuard tier from the tier itself, so give it the same
+  // contract view the bundle gets (built through the SAME attach / floor-hide
+  // / presentation chain, from the tier's own ladder). The tier object is
+  // replaced, not mutated: the payload's array can be a cached bundle's.
+  // `services` stays the key list; the page's section objects ride on
+  // `sections`.
+  const bestOfferTier = OfferTiers.offerTiersOf(withContractBase).find((tier) => tier && tier.key === 'best');
+  let withContract = withContractBase;
+  if (bestOfferTier) {
+    const bestView = applyPresentationOverridesToBundle(
+      hideFlooredLawnCadencesFromBundle(attachPublicPricingContract(
+        OfferTiers.pricingBundleForOfferTier({ ...withContractBase, offerTiers: undefined }, bestOfferTier),
+        estimate,
+        estData,
+      ), estData),
+      estData,
+    );
+    withContract = {
+      ...withContractBase,
+      offerTiers: withContractBase.offerTiers.map((tier) => (tier === bestOfferTier
+        ? {
+          ...tier,
+          sections: bestView.services,
+          combinedRecurring: bestView.combinedRecurring ?? null,
+          waveGuardTier: bestView.waveGuardTier ?? withContractBase.waveGuardTier ?? null,
+        }
+        : tier)),
+    };
+  }
   const quoteState = resolveEstimateQuoteRequirement(withContract, estData);
   return {
     ...withContract,
@@ -27291,11 +27692,35 @@ function stampTreeShrubPalmCount(bundle, count) {
         return { ...c, perServiceTreatments: nextRows };
       })
     : bundle.serviceCadenceCombos;
+  // Offer tiers: the Best tier carries its own ladder, sections and combos
+  // (finalizePricingBundle), built before this stamp runs — stamp them the
+  // same way, as a bundle of their own.
+  let offerTiers = bundle.offerTiers;
+  if (Array.isArray(offerTiers)) {
+    offerTiers = offerTiers.map((tier) => {
+      if (!tier || tier.key !== 'best') return tier;
+      const stampedTier = stampTreeShrubPalmCount({
+        frequencies: tier.frequencies,
+        services: tier.sections,
+        serviceCadenceCombos: tier.serviceCadenceCombos,
+      }, count);
+      if (stampedTier.frequencies === tier.frequencies
+        && stampedTier.services === tier.sections
+        && stampedTier.serviceCadenceCombos === tier.serviceCadenceCombos) return tier;
+      touched = true;
+      return {
+        ...tier,
+        frequencies: stampedTier.frequencies,
+        ...(tier.sections !== undefined ? { sections: stampedTier.services } : {}),
+        ...(tier.serviceCadenceCombos !== undefined ? { serviceCadenceCombos: stampedTier.serviceCadenceCombos } : {}),
+      };
+    });
+  }
   // Byte-identical passthrough when nothing needed a change (no T&S
   // row/frequency present at all, or every one already carried the
   // resolved count).
   if (!touched) return bundle;
-  return { ...bundle, frequencies, services, serviceCadenceCombos };
+  return { ...bundle, frequencies, services, serviceCadenceCombos, ...(Array.isArray(offerTiers) ? { offerTiers } : {}) };
 }
 
 function pricingBundleViolatesLawnPolicy(bundle = {}, programMinMonthly) {
@@ -27616,7 +28041,31 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
     : addMissingBilledPerApplicationFlags(bundle);
 }
 
-async function buildPricingBundleInner(estimate) {
+// Offer tiers (Codex #5921 r1 P1): a bundle frozen while the gate was dark
+// (every send snapshot of an already-sent quote, and any cached payload from
+// before the flip) carries no tier verdict. The gate is read at call time, so
+// such a bundle is AUGMENTED on read: the live v1 build decides the tiers and
+// only its tier fields are grafted on — the frozen prices themselves stay
+// exactly as sent. A bundle built under the gate is stamped
+// offerTiersEvaluated so an ineligible estimate is not rebuilt on every read.
+function offerTiersVerdictMissing(bundle, estimate) {
+  return offerTiersGateOn()
+    && !!estimate?.show_one_time_option
+    && bundle && typeof bundle === 'object'
+    && bundle.offerTiersEvaluated !== true
+    && !Array.isArray(bundle.offerTiers);
+}
+function offerTierFieldsFrom(liveBundle) {
+  if (!liveBundle || typeof liveBundle !== 'object') return { offerTiersEvaluated: true };
+  return {
+    offerTiersEvaluated: true,
+    ...(Array.isArray(liveBundle.offerTiers) && liveBundle.offerTiers.length
+      ? { offerTiers: liveBundle.offerTiers, offerTierDefaultKey: liveBundle.offerTierDefaultKey }
+      : {}),
+  };
+}
+
+async function buildPricingBundleInner(estimate, { liveOnly = false } = {}) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
@@ -27725,7 +28174,13 @@ async function buildPricingBundleInner(estimate) {
     // builders — fast-pathing them would bill the undiscounted row a
     // discounted quote displayed. Already-netted legacy snapshots pass.
     && !pricingBundleLacksManualDiscountNetting(snapshotBundle, estData, estimate)
+    && !liveOnly
   ) {
+    // Offer tiers: graft the live tier verdict onto a pre-gate snapshot
+    // (prices untouched — see offerTiersVerdictMissing).
+    const offerTierGraft = offerTiersVerdictMissing(snapshotBundle, estimate)
+      ? offerTierFieldsFrom(await buildPricingBundleInner(estimate, { liveOnly: true }))
+      : {};
     // Chokepoint stamp AFTER finalizePricingBundle (Codex r5 P0 on #4789):
     // attachPublicPricingContract rebuilds services[] split cards there and
     // would drop an earlier stamp. Never a price field, never written back;
@@ -27733,6 +28188,7 @@ async function buildPricingBundleInner(estimate) {
     // corrected on every read.
     return stampTreeShrubPalmCount(finalizePricingBundle(withChoiceOneTimePrice(withManualDiscount({
       ...snapshotBundle,
+      ...offerTierGraft,
       source: snapshotBundle.source || 'send_snapshot',
       snapshotHit: true,
     })), estimate, estData), treeShrubPalmCountForEstData(estData) ?? stampedTreeShrubPalmCountInBundle(snapshotBundle));
@@ -27752,12 +28208,14 @@ async function buildPricingBundleInner(estimate) {
     if (hasRodentTrapping) clearEstimatePricingCache(estimate);
   }
 
-  const cached = getEstimatePricingCache(estimate);
+  const cached = liveOnly ? null : getEstimatePricingCache(estimate);
   // Same missing-fee guard as the snapshot fast path: a cached bundle built
   // before the fee rule (or restored oddly) must not serve a first-visit
-  // total the converter won't bill.
+  // total the converter won't bill. A cached bundle with no offer-tier
+  // verdict under a live gate rebuilds (offerTiersVerdictMissing).
   if (cached && !pricingBundleMissingRequiredSetupFee(cached, estData)
-    && !pricingBundleLacksManualDiscountNetting(cached, estData, estimate)) {
+    && !pricingBundleLacksManualDiscountNetting(cached, estData, estimate)
+    && !offerTiersVerdictMissing(cached, estimate)) {
     // Stamped after finalize for the same reason as the snapshot path; a
     // cache entry written before this deploy must never serve a stale count.
     return stampTreeShrubPalmCount(
@@ -27940,8 +28398,17 @@ async function buildPricingBundleInner(estimate) {
     // backing combo pricing is present — the two never desync across snapshot /
     // engine / recompute paths.
     const serviceCadenceCombos = buildServiceCadenceCombos(v1, prefs, recurringResultStats(estData), { pestOnly: pestOnlyChoice, ...v1FloorOptions });
+    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): on an eligible one-time-toggle
+    // bundle, ALSO price the full-bundle ladder + combos (pestOnly:false, the
+    // very shape a non-toggle bundle serves) for the 'best' tier. Omitted
+    // entirely when ineligible so the payload stays byte-identical.
+    const offerTierFields = buildOfferTierFieldsForV1({
+      estimate, estData, v1, prefs, pestOnlyChoice, v1FloorOptions, anchorOneTimePrice,
+    });
     const payload = stampTreeShrubPalmCount(finalizePricingBundle(withManualDiscount({
       frequencies: finalFreqs,
+      ...(pestOnlyChoice && offerTiersGateOn() ? { offerTiersEvaluated: true } : {}),
+      ...offerTierFields,
       waveGuardTier: v1.waveGuardTier || estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice,
       // Back-compat: keep `setupFee` populated with the first waivable entry
@@ -29172,7 +29639,14 @@ async function composeEstimateDataPayload(estimate, {
     // cta.monthlyBilled below are read by the same page, so resolving twice
     // risks handing it two different answers (pre-push audit P1).
     const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
-    const pricingBundle = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
+    const pricingBundleAsBuilt = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
+    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): once a 'best' accept is on the
+    // row (customerSelection.offerTier, written with the price lock), every
+    // read serves the Best tier's own view — what was booked — instead of the
+    // one-time toggle's pest-only ladder; the picker fields are dropped.
+    const pricingBundle = (estimate.status === 'accepted' || estimate.price_locked_at)
+      ? OfferTiers.acceptedBestPricingView(pricingBundleAsBuilt, estimateDataForIntelligence)
+      : pricingBundleAsBuilt;
     const {
       defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance,
     } = await resolveEstimateAcceptance(estimate, estimateDataForIntelligence, pricingBundle);
@@ -29613,6 +30087,20 @@ async function composeEstimateDataPayload(estimate, {
       try { addStampBlockedByMembership = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
       catch (_) { addStampBlockedByMembership = true; }
     }
+    // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): served only on a live,
+    // accept-active customer surface, and never to a LIVE active member
+    // (the member ladder is the office's — same fail-closed verdict as the
+    // add stamp; a lookup error withholds the tiers). The bundle may carry
+    // them (it is cached and send-snapshotted); this projection decides.
+    let offerTiersBlockedByMembership = false;
+    if (Array.isArray(pricingBundle?.offerTiers)) {
+      offerTiersBlockedByMembership = await offerTierMemberBlock(estimate, db);
+    }
+    const offerTiersServed = offerTiersGateOn()
+      && Array.isArray(pricingBundle?.offerTiers)
+      && !offerTiersBlockedByMembership
+      && !adminDraftPreview
+      && isEstimateAcceptActive(estimate);
 
     const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms')
       && acceptanceTermsApplyTo(estimate);
@@ -29642,7 +30130,7 @@ async function composeEstimateDataPayload(estimate, {
       const linkedCustomerForGaps = estimate.customer_id
         ? await db('customers').where({ id: estimate.customer_id }).first('first_name', 'last_name', 'email')
         : null;
-      contactGaps = computeContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
+      contactGaps = pageContactGaps({ estimate, linkedCustomer: linkedCustomerForGaps });
     }
 
     // "Want us to come look first?" consultation offer (GATE_ESTIMATE_
@@ -29766,6 +30254,11 @@ async function composeEstimateDataPayload(estimate, {
       // more" in three places.
       ...((() => {
         if (!serviceOptOutGateOn()) return {};
+        // A tiered estimate offers its choices through the tier picker: the
+        // remove / add-a-service rails are withheld so the page never shows
+        // two ways to change the same plan (and a 'best' accept keeps every
+        // quoted program, which a removal would contradict).
+        if (offerTiersServed) return {};
         const {
           currentlyOptedOutKeys, serviceOptOutLabel, serviceOptOutBlockedByProposal,
           serviceOptOutTierSelectionActive, serviceOptOutAddableKeys, staffOfferedKeys,
@@ -30057,6 +30550,9 @@ async function composeEstimateDataPayload(estimate, {
       },
       pricing: {
         ...stripInternalMarginFieldsDeep(pricingBundle),
+        // Offer tiers ride the bundle; drop them unless this projection
+        // serves them (undefined keys never reach the JSON).
+        ...(offerTiersServed ? {} : { offerTiers: undefined, offerTierDefaultKey: undefined }),
         // Review-lane enums on PRICED one-time items are pure exposure to
         // the token holder — the client reads them only on quote-required
         // items (quoteRequiredReasonCandidates), so keep them exactly there
@@ -30572,6 +31068,7 @@ module.exports = router;
 // Codex round 2 on #4608: exported so estimate-annual-guard.js's content-derivation regex tests can assert exact parity against the canonical token format gate, instead of a hand-copied literal that could silently drift from it.
 module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
 module.exports.mapImagePreGuard = mapImagePreGuard;
+module.exports.contactPhonePreGuard = contactPhonePreGuard;
 module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
@@ -30810,5 +31307,6 @@ module.exports.treeShrubFrequenciesFromResultStats = treeShrubFrequenciesFromRes
 module.exports.treeShrubPalmCountForEstData = treeShrubPalmCountForEstData;
 module.exports.shapeFromV1 = shapeFromV1;
 module.exports.stampTreeShrubPalmCount = stampTreeShrubPalmCount;
+module.exports.offerTierMemberBlock = offerTierMemberBlock;
 module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBundle;
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;
