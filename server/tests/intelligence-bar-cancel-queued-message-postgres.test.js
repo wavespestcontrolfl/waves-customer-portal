@@ -283,6 +283,12 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     const sentId = await scheduledSms(custId, { status: 'sent', scheduled_for: null, message_body: 'Synthetic sent text', created_at: new Date(Date.now() - 7200000) });
     const keptId = await scheduledSms(custId, { message_body: 'Synthetic staff text that gets cancelled', created_at: new Date(Date.now() - 3600000) });
     const queuedId = await scheduledSms(custId, { message_body: 'Synthetic text still queued', created_at: new Date(Date.now() - 1800000) });
+    // A requeue after a send attempt (stale-claim recovery) and a claimed row: the provider may already have accepted both.
+    await scheduledSms(custId, {
+      message_body: 'Synthetic text requeued after an attempt', created_at: new Date(Date.now() - 1700000),
+      metadata: JSON.stringify({ scheduled_sms_recovered_at: new Date().toISOString() }),
+    });
+    await scheduledSms(custId, { message_body: 'Synthetic text being sent', status: 'sending', created_at: new Date(Date.now() - 1600000) });
     const preview = await executeCommsTool('cancel_queued_message', { message_id: keptId, customer_id: custId, channel: 'sms' });
     const confirmed = await executeCommsTool('cancel_queued_message', {
       message_id: keptId, customer_id: custId, channel: 'sms', confirmed: true, _verified_message_version: preview._version,
@@ -292,12 +298,23 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     const thread = await executeCommsTool('get_conversation_thread', { customer_id: custId, phone: '+19415550100' });
     expect(thread.error).toBeUndefined();
     const byBody = Object.fromEntries(thread.messages.map((m) => [m.body, m]));
-    expect(thread.messages).toHaveLength(3);
+    expect(thread.messages).toHaveLength(5);
     expect(byBody['Synthetic staff text that gets cancelled']).toMatchObject({
       direction: 'outbound', status: 'canceled', canceled: true, from: 'Waves',
       note: 'Scheduled text, cancelled before it was sent. The customer never received it.',
     });
-    expect(byBody['Synthetic text still queued']).toMatchObject({ status: 'scheduled', not_sent_yet: true });
+    expect(byBody['Synthetic text still queued']).toMatchObject({
+      status: 'scheduled', not_sent_yet: true, note: 'Scheduled text, not sent yet. The customer has not received it.',
+    });
+    expect(byBody['Synthetic text still queued'].delivery_uncertain).toBeUndefined();
+    for (const body of ['Synthetic text requeued after an attempt', 'Synthetic text being sent']) {
+      expect(byBody[body]).toMatchObject({
+        delivery_uncertain: true, note: 'A send was attempted and the outcome is not known. The customer may have received it.',
+      });
+      expect(byBody[body].not_sent_yet).toBeUndefined();
+    }
+    expect(byBody['Synthetic text requeued after an attempt'].status).toBe('scheduled');
+    expect(byBody['Synthetic text being sent'].status).toBe('sending');
     expect(byBody['Synthetic sent text']).toMatchObject({ status: 'sent' });
     expect(byBody['Synthetic sent text'].canceled).toBeUndefined();
     expect(byBody['Synthetic sent text'].not_sent_yet).toBeUndefined();
@@ -307,6 +324,23 @@ postgres('cancel_queued_message / list_queued_messages (real PostgreSQL, SMS-onl
     expect(found.messages[0]).toMatchObject({ id: keptId, status: 'canceled', canceled: true });
     expect(sentId).toBeTruthy();
     expect(queuedId).toBeTruthy();
+  });
+
+  test('the shared reader guard hides a cancelled-and-kept text from every general reader, and keepNeverSent lets the bar show it', async () => {
+    const { excludeUnresolvedSendReservations, isNeverSentSms } = require('../services/messaging/review-ask-reservation');
+    const custId = await customer();
+    const liveId = await scheduledSms(custId, { status: 'sent', scheduled_for: null, message_body: 'Synthetic delivered text' });
+    const keptId = await scheduledSms(custId, { message_body: 'Synthetic cancelled text' });
+    const britishId = await scheduledSms(custId, { status: 'cancelled', message_body: 'Synthetic cancelled text, other spelling' });
+    await trx('sms_log').where({ id: keptId }).update({ status: 'canceled' });
+
+    const general = await excludeUnresolvedSendReservations(trx('sms_log').where({ customer_id: custId })).pluck('id');
+    expect(general).toEqual([liveId]);
+    const labelled = await excludeUnresolvedSendReservations(trx('sms_log').where({ customer_id: custId }), 'sms_log', { keepNeverSent: true }).pluck('id');
+    expect(labelled.sort()).toEqual([liveId, keptId, britishId].sort());
+    expect(isNeverSentSms({ status: 'canceled' })).toBe(true);
+    expect(isNeverSentSms({ status: 'Cancelled' })).toBe(true);
+    expect(isNeverSentSms({ status: 'sent' })).toBe(false);
   });
 
   test('a cancelled-and-kept text does not count as a reply or as sent in the stats and today readers', async () => {
