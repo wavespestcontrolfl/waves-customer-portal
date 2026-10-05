@@ -20,7 +20,7 @@
  * question answers a 0..1 probability that the statement is true.
  */
 const crypto = require('crypto');
-const { appointmentConfirmedRules } = require('../prompts/appointment-confirmed-rules');
+const { auditAppointmentContract } = require('../prompts/appointment-confirmed-rules');
 
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -74,7 +74,7 @@ const CALL_JUDGE_V3 = {
   version: 3,
   questions: {
     ...CALL_JUDGE.questions,
-    appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time line does not apply.)\n${appointmentConfirmedRules('the date the call took place')}`),
+    appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${auditAppointmentContract('the date the call took place')}`),
   },
 };
 

@@ -641,18 +641,25 @@ describe('AUDIT_PROMPT appointment definition', () => {
   // extractor's own rule text, not a paraphrase (10-05 #5994: a paraphrase
   // counted promised callbacks and existing-visit ETAs as appointments).
   const { AUDIT_PROMPT } = require('../services/call-self-audit');
-  const { appointmentConfirmedRules } = require('../services/prompts/appointment-confirmed-rules');
+  const { auditAppointmentContract, EXISTING_APPOINTMENT_RULE, RESCHEDULE_RULE } = require('../services/prompts/appointment-confirmed-rules');
   const { PACKAGES } = require('../services/typed-decisions/packages');
   test('carries the production appointment_confirmed rules verbatim', () => {
-    expect(AUDIT_PROMPT).toContain(appointmentConfirmedRules('the date the call took place'));
+    expect(AUDIT_PROMPT).toContain(auditAppointmentContract('the date the call took place'));
   });
-  test('the typed judge asks the same rules (call_judge.v3)', () => {
+  test('the typed judge asks the same contract (call_judge.v3)', () => {
     expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions)
-      .toContain(appointmentConfirmedRules('the date the call took place'));
+      .toContain(auditAppointmentContract('the date the call took place'));
   });
   test('the extractor renders the shared rules, not its own copy', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src).toContain('${appointmentConfirmedRules(callDateET)}');
     expect(src).not.toContain('- Only set appointment_confirmed to true if BOTH');
+  });
+  test('the contract keeps an existing visit out, with the V2 extractor\'s own lines', () => {
+    const v2 = require('../services/prompts/call-extraction-v1').buildExtractionPrompt('', '', '2026-10-05');
+    expect(v2).toContain(EXISTING_APPOINTMENT_RULE);
+    expect(v2).toContain(RESCHEDULE_RULE);
+    expect(AUDIT_PROMPT).toContain(EXISTING_APPOINTMENT_RULE);
+    expect(AUDIT_PROMPT).toContain(RESCHEDULE_RULE);
   });
 });

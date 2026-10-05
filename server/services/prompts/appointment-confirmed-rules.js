@@ -4,6 +4,13 @@
 // production against the same text, so the auditor never asks a looser or
 // stricter question than the field it audits (10-05: a paraphrase drifted).
 // Editing this text changes BOTH prompts: the extraction's and the audit's.
+// The V2 extractor's (call-extraction-v1.js buildExtractionPrompt) two lines
+// that keep an existing visit out of "confirmed": rendered there byte-identically,
+// and given to the self-audit, because with CALL_EXTRACTION_V2_DRIVES_ROUTING on
+// an approved V2 extraction sets production's appointment_confirmed (Codex #5994 r2).
+const EXISTING_APPOINTMENT_RULE = '  - EXISTING APPOINTMENT: a caller who is re-confirming, double-checking, or coordinating an appointment that ALREADY EXISTS ("just checking — are we still on for Tuesday at 10?") is NOT booking. Status is "none" (or "reschedule_requested"/"canceled" if they change it) and you set the existing_appointment_coordination triage flag. "confirmed" is ONLY for a NEW visit agreed on this call.';
+const RESCHEDULE_RULE = '- "reschedule_requested": Caller wants to change an existing appointment. A reschedule that ENDS with a new agreed date+time stays "reschedule_requested" with confirmed_start_at set to the new slot — never plain "confirmed" (the office must move the existing visit, not add a second one).';
+
 function appointmentConfirmedRules(callDateET) {
   return `IMPORTANT — appointment_confirmed rules:
 - Only set appointment_confirmed to true if BOTH a specific DATE and a specific TIME were explicitly agreed to by the caller.
@@ -17,4 +24,15 @@ function appointmentConfirmedRules(callDateET) {
 - Do not set appointment_confirmed to true for follow-up/admin calls about an invoice, payment, receipt, compliance report, sticker, certificate, W-9, report, or paperwork unless the caller and agent also explicitly book a new Waves field-service visit.`;
 }
 
-module.exports = { appointmentConfirmedRules };
+// What a grader of production's appointment_confirmed answers by: the V1 rules
+// plus the V2 lines that keep an existing visit out (V2 drives routing live, and
+// a reconfirmed or rescheduled visit is never a new booking). One builder for
+// the self-audit prompt and the call_judge package, so they cannot drift.
+function auditAppointmentContract(callDateText) {
+  return `${appointmentConfirmedRules(callDateText)}
+- Only a NEW visit agreed on this call counts. These rules from the V2 extractor also apply ("confirmed" means appointment_confirmed true; "reschedule_requested" means false):
+${EXISTING_APPOINTMENT_RULE}
+${RESCHEDULE_RULE}`;
+}
+
+module.exports = { appointmentConfirmedRules, auditAppointmentContract, EXISTING_APPOINTMENT_RULE, RESCHEDULE_RULE };

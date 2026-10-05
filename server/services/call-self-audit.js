@@ -31,13 +31,13 @@ const DISPOSITION_MISMATCH_ALERT = 0.05;
 
 // appointment_agreed is graded by the extractor's own rule text (one source):
 // a paraphrase here drifted from production twice (10-05, #5994).
-const { appointmentConfirmedRules } = require('./prompts/appointment-confirmed-rules');
+const { auditAppointmentContract } = require('./prompts/appointment-confirmed-rules');
 
 const AUDIT_PROMPT = `You are auditing one phone-call analysis for Waves Pest Control (pest control + lawn care, SW Florida; "Agent" = staff, "Caller" = the external customer/contact). Judge ONLY from the transcript. Return ONLY JSON:
 {"is_lead": boolean, "is_spam": boolean, "is_voicemail": boolean, "appointment_agreed": boolean, "quote_promised": boolean, "complaint": boolean, "excerpt": "<=25 words supporting your most important judgment"}
 Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead. Each transcript is preceded by a CALL DIRECTION line — read it, since it can warn that the printed speaker labels are unreliable and tell you to judge by what each party says instead.
-appointment_agreed is production's appointment_confirmed field: answer it exactly as these production extraction rules decide it (the preferred_date_time line does not apply to you):
-${appointmentConfirmedRules('the date the call took place')}`;
+appointment_agreed is production's appointment_confirmed field: answer it exactly as these production extraction rules decide it (the preferred_date_time and confirmed_start_at details do not apply to you):
+${auditAppointmentContract('the date the call took place')}`;
 
 
 const OUTBOUND_DIRECTION_SQL = "COALESCE(direction, '') LIKE 'outbound%'";
