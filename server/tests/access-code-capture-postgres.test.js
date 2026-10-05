@@ -1056,6 +1056,17 @@ postgres('access codes section', () => {
       expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes).toEqual([]);
     });
 
+    test('on a multi-home account a code with no home is shown at no visit', async () => {
+      const c = await customer({ properties: 2 });
+      const [, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const v = await visit(c.id, day(1));
+      await trx('scheduled_services').where({ id: v }).update({ property_id: b.id });
+      const row = await found(c.id, { kind: 'door', code: '2468' });
+      await access.accept(trx, row.id, { propertyId: b.id });
+      await trx('customer_access_codes').where({ id: row.id }).update({ property_id: null });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes).toEqual([]);
+    });
+
     test('the found list carries each row\'s visit choices', async () => {
       const c = await customer();
       const soon = await visit(c.id, etDateString(addETDays(new Date(), 2)));

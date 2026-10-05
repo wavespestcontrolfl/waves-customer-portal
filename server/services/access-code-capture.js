@@ -648,7 +648,9 @@ async function listForVisit(conn, req, visitId) {
   // that one active home.
   const homes = await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id');
   const visitHome = visit.property_id || (homes.length === 1 ? homes[0] : null);
-  const sameHome = (r) => !r.propertyId || (!!visitHome && r.propertyId === visitHome);
+  // Fail closed: on a multi-home account a code with no home (an old row, or a
+  // home since deleted) is shown at no visit until the office names its home.
+  const sameHome = (r) => (r.propertyId ? !!visitHome && r.propertyId === visitHome : homes.length <= 1);
   // Only what a stop needs: never the customer's message, its source or who decided.
   return { ok: true, codes: active.filter((r) => (r.life === 'standing' && sameHome(r)) || r.scheduledServiceId === visit.id)
     .map((r) => ({ id: r.id, kind: r.kind, code: r.code, instructions: r.instructions, life: r.life, scheduledServiceId: r.scheduledServiceId })) };
