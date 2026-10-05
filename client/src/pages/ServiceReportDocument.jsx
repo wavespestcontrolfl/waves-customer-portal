@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL, WAVES_SUPPORT_PHONE_DISPLAY } from '../constants/business';
-import { cleanVisitSummary, reserviceCardView } from './ReportViewPage';
+import { cleanVisitSummary, hidesTreatedAreas, reserviceCardView } from './ReportViewPage';
 import { epaReg, isProductApplication, reportHasRodenticide } from '../lib/product-application';
 import { TERMITE_V2_DASHBOARD_FIELD_KEYS } from '../components/report/termiteV2/TermiteReportV2';
 import { COCKROACH_V2_DASHBOARD_FIELD_KEYS } from '../components/report/cockroachV2/CockroachReportV2';
@@ -863,7 +863,10 @@ export default function ServiceReportDocument({ data, token }) {
   // document was dropping entirely.
   // ⛔ customerDescription ONLY — items also carry internalDescription,
   // which is staff copy and must never egress (same rule as technician_notes).
-  const coverageItems = (data.serviceCoverage?.enabled !== false
+  // A pest report names no treated areas (owner 2026-10-05, same rule as the
+  // web report): no "Areas serviced" section and no per-product areas line.
+  const hideAreas = hidesTreatedAreas(data);
+  const coverageItems = (data.serviceCoverage?.enabled !== false && !hideAreas
     ? (data.serviceCoverage?.items || []) : [])
     .filter((item) => item && item.areaName);
   const coverageSummary = data.serviceCoverage?.summary || null;
@@ -1132,19 +1135,9 @@ export default function ServiceReportDocument({ data, token }) {
           </div>
         )}
 
-        {/* Rain / spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
-            pestV2.expectations is built server-side (pest-report-v2.js) with
-            forecastHeavyRain always false for this render (mode !== 'live'
-            in reports-public.js) — the NWS forecast piece never reaches a
-            permanent PDF; everything here is already PDF-safe as delivered. */}
-        {pestV2?.expectations?.rain?.lines?.length > 0 && (
-          <div className="doc-keep">
-            <SectionHeader>Rain and your treatment</SectionHeader>
-            {pestV2.expectations.rain.lines.map((line) => (
-              <p key={line} style={{ margin: '3px 0', fontSize: 11.5, lineHeight: 1.5, color: INK }}>{line}</p>
-            ))}
-          </div>
-        )}
+        {/* Spiders / what-to-expect (GATE_PEST_REPORT_EXPECTATIONS, dark).
+            pestV2.expectations is built server-side (pest-report-v2.js) and
+            is already PDF-safe as delivered. */}
         {pestV2?.expectations?.spiders?.expectation && (
           <div className="doc-keep">
             <SectionHeader>{pestV2.expectations.spiders.headline || 'Spiders'}</SectionHeader>
@@ -1404,10 +1397,16 @@ export default function ServiceReportDocument({ data, token }) {
                           <div style={{ fontSize: 10.5, color: MUTED, lineHeight: 1.5 }}>
                             {product.active_ingredient && <div><strong style={{ color: INK, fontWeight: 600 }}>Active ingredient:</strong> {product.active_ingredient}</div>}
                             {app.methodLabel && <div><strong style={{ color: INK, fontWeight: 600 }}>Method:</strong> {app.methodLabel}</div>}
-                            {Array.isArray(app.targets) && app.targets.length > 0 && (
+                            {/* A pest product prints no per-product Target (the
+                                label line on the web card replaces the
+                                three-pest list) and no Areas line (owner
+                                2026-10-05). Other lines keep both. */}
+                            {!hideAreas && Array.isArray(app.targets) && app.targets.length > 0 && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Target:</strong> {app.targets.join(', ')}</div>
                             )}
-                            <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones, data.serviceLine)}</div>
+                            {!hideAreas && (
+                              <div><strong style={{ color: INK, fontWeight: 600 }}>Areas:</strong> {zoneNames(app, data.zones, data.serviceLine)}</div>
+                            )}
                             {(product.precaution_summary || product.reentry_summary) && (
                               <div><strong style={{ color: INK, fontWeight: 600 }}>Label safety:</strong> {[product.precaution_summary, product.reentry_summary].map(sanitizeReentryCopy).filter(Boolean).filter((part, i, all) => all.indexOf(part) === i).join(' ')}</div>
                             )}

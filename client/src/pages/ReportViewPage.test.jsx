@@ -95,6 +95,22 @@ describe('ReportViewPage report chrome helpers', () => {
     })).toContain('What does Pest Pressure mean?');
   });
 
+  it('suggests the treated-areas question only off the pest line (owner 2026-10-05)', () => {
+    const data = { serviceCoverage: { enabled: true, items: [{ id: 'c1', areaName: 'Front perimeter', status: 'completed' }] } };
+    expect(reportAskPrompts(data, 'pest')).not.toContain('What areas were treated?');
+    expect(reportAskPrompts(data)).not.toContain('What areas were treated?');
+    expect(reportAskPrompts(data, 'tree_shrub')).toContain('What areas were treated?');
+  });
+
+  it('visitWorkSummary counts serviced areas off the pest line only', () => {
+    const base = {
+      applications: [{ product: { name: 'Taurus SC' }, method: 'broadcast_spray' }],
+      serviceCoverage: { enabled: true, items: [{ id: 'c1', areaName: 'Front perimeter', status: 'completed' }, { id: 'c2', areaName: 'Kitchen', status: 'completed' }] },
+    };
+    expect(visitWorkSummary({ ...base, serviceLine: 'pest' }, 'fallback')).toBe('1 product applied');
+    expect(visitWorkSummary({ ...base, serviceLine: 'tree_shrub' }, 'fallback')).toBe('1 product applied · 2 areas serviced');
+  });
+
   it('does not show a readiness status badge without re-entry context', () => {
     expect(readinessStatusBadge(null)).toBeNull();
   });
@@ -1318,6 +1334,70 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     }, 'static');
     expect(status.heading).toBe('your service is complete!');
     expect(status.result).toBe('Service completed. Visit details are below.');
+  });
+
+  // Owner 2026-10-04: on a routine pest visit "Today's result" says where we
+  // treated and the activity the customer is shown, not the generic line.
+  describe("Today's result on a routine Pest V2 visit", () => {
+    const pestVisit = (overrides = {}) => ({
+      serviceType: 'Quarterly Pest Control Service',
+      isCallback: false,
+      applications: [{ applicationArea: 'Perimeter, Entry points' }, { applicationArea: 'Kitchen, Bathrooms' }],
+      pestReportV2: { status: { key: 'protected', label: 'Protected' } },
+      treatmentPerformed: true,
+      // Re-entry timers are guidance, never the source of the location.
+      dynamicContext: { reentry: { targets: [{ key: 'exterior' }, { key: 'interior' }] } },
+      pestPressure: { enabled: true, showOnCustomerReport: true, label: 'Very Low' },
+      ...overrides,
+    });
+
+    it('names both sides and the pressure', () => {
+      expect(smartStatusSummary(pestVisit(), 'static').result)
+        .toBe('We treated outside and inside. Pest pressure: very low.');
+    });
+
+    it('names one side only when only one was recorded', () => {
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Perimeter' }] }), 'static').result)
+        .toBe('We treated outside. Pest pressure: very low.');
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Kitchen' }] }), 'static').result)
+        .toBe('We treated inside. Pest pressure: very low.');
+    });
+
+    it('reads the Fast Complete sheet\'s own Outside and Inside chips', () => {
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Outside' }] }), 'static').result)
+        .toBe('We treated outside. Pest pressure: very low.');
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Inside, Outside' }] }), 'static').result)
+        .toBe('We treated outside and inside. Pest pressure: very low.');
+    });
+
+    it('ignores a station or monitor row: a device checked is not an area treated', () => {
+      expect(smartStatusSummary(pestVisit({
+        applications: [
+          { applicationArea: 'Perimeter' },
+          { applicationArea: 'Garage', method: 'station_check', product: { name: 'Rodent Bait Station', category: 'rodent station' } },
+        ],
+      }), 'static').result).toBe('We treated outside. Pest pressure: very low.');
+    });
+
+    it('makes no location claim from re-entry timers alone, or without the server\'s treatment verdict', () => {
+      // An application with no recorded area keeps a default interior timer.
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: '' }] }), 'static').result)
+        .toBe('Pest pressure: very low.');
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: false }), 'static').result)
+        .toBe('Pest pressure: very low.');
+      // null = the product load failed.
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: null }), 'static').result)
+        .toBe('Pest pressure: very low.');
+      expect(smartStatusSummary(pestVisit({ pestPressure: { enabled: true, showOnCustomerReport: false, label: 'Very Low' } }), 'static').result)
+        .toBe('We treated outside and inside.');
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: false, pestPressure: null }), 'static').result)
+        .toBe('Service completed. Visit details are below.');
+    });
+
+    it('leaves a visit with no Pest V2 block on the generic line', () => {
+      expect(smartStatusSummary(pestVisit({ pestReportV2: null }), 'static').result)
+        .toBe('Service completed. Visit details are below.');
+    });
   });
 
 });

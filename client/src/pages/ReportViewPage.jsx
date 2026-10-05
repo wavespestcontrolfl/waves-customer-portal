@@ -61,6 +61,7 @@ import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
 import { etDateString } from '../lib/timezone';
+import TREATMENT_AREA_SCOPES from '../../../shared/treatment-area-scopes.json';
 import ReferralShareCard from '../components/referral/ReferralShareCard';
 import ActivityCard from '../components/ActivityCard';
 import { WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
@@ -678,6 +679,16 @@ export function latestPendingReentryTarget(targets = [], nowMs = Date.now()) {
   }, null)?.target || null;
 }
 
+// Pest reports name no treated areas (owner 2026-10-05: "the areas treated
+// needs to be removed from the report"). The product card, the "What Waves
+// did today" cell, the status fallback line and the Ask Waves suggestions all
+// ask this. Other lines keep their area wording: their zones are part of the
+// work (lawn "front yard", tree and shrub beds). A payload with no
+// serviceLine reads as pest, like applicationPurpose does.
+export function hidesTreatedAreas(data = {}) {
+  return (data?.serviceLine || 'pest') === 'pest';
+}
+
 // "What Waves did today" cell: the actual work, not "service areas were
 // completed today" (owner 2026-07-21 — the customer knows it completed; the
 // cell must say what happened: treatments applied, areas covered, photos
@@ -723,7 +734,9 @@ export function visitWorkSummary(data = {}, fallback = '') {
     .map((list) => (Array.isArray(list) ? list.length : 0))
     .reduce((max, n) => Math.max(max, n), 0);
   const coverage = normalizeServiceCoverage(data);
-  const completed = (coverage?.items || []).filter((item) => isCompletedCoverageStatus(item.status));
+  const completed = hidesTreatedAreas(data)
+    ? []
+    : (coverage?.items || []).filter((item) => isCompletedCoverageStatus(item.status));
   const parts = [
     appCount ? `${appCount} product${appCount === 1 ? '' : 's'} applied` : null,
     completed.length ? `${completed.length} area${completed.length === 1 ? '' : 's'} serviced` : null,
@@ -785,7 +798,10 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
 function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
   const coverage = normalizeServiceCoverage(data);
   const coverageItems = Array.isArray(coverage?.items) ? coverage.items : [];
-  const completedItems = coverageItems.filter((item) => isCompletedCoverageStatus(item.status));
+  // No "N areas completed · …" status line on a pest report (hidesTreatedAreas).
+  const completedItems = hidesTreatedAreas(data)
+    ? []
+    : coverageItems.filter((item) => isCompletedCoverageStatus(item.status));
   const actionNeededItems = coverageItems.filter((item) => isActionNeededCoverageStatus(item.status));
   const completedAreas = shortList(completedItems.map((item) => item.areaName || item.name), 4);
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
@@ -1063,12 +1079,49 @@ function statusSummaryCore(data = {}, mode = 'live', nowMs = Date.now()) {
     heading: 'your service is complete!',
     status: allReady ? 'Ready now' : 'Service complete',
     statusTone: allReady ? 'ready' : 'neutral',
-    result: 'Service completed. Visit details are below.',
+    result: pestVisitResultLine(data) || 'Service completed. Visit details are below.',
     completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
     detail: data.techVisitCard
       ? ''
       : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
   };
+}
+
+// "Today's result" on a routine Pest V2 visit (owner 2026-10-04: "Service
+// completed. Visit details are below." says nothing). Two facts the record
+// already carries: where we treated and the pressure the customer is shown
+// on the gauge. No treatment and no shown pressure => null, and the caller
+// keeps the generic line.
+// Where = the areas the technician recorded on the applied products, read
+// through the shared interior/exterior area list, on a visit the server
+// confirms was treated (treatmentPerformed === true; null means the product
+// load failed). Never the re-entry targets: a record with no area keeps a
+// default interior timer, which is guidance, not a location (Codex P1).
+function pestVisitResultLine(data = {}) {
+  if (!data.pestReportV2) return null;
+  const areas = data.treatmentPerformed === true && Array.isArray(data.applications)
+    // A station, cartridge or monitor row is a device checked, not a
+    // product applied (isProductApplication, the Products Applied rule).
+    ? data.applications.filter(isProductApplication)
+      .flatMap((app) => String(app?.applicationArea || '').split(',').map((area) => area.trim()))
+    : [];
+  // The Fast Complete sheet records its own two chips, "Outside" and
+  // "Inside", which the shared list does not carry (Codex P2 r4 #5888).
+  const outside = areas.some((area) => area === 'Outside' || TREATMENT_AREA_SCOPES.exterior.includes(area));
+  const inside = areas.some((area) => area === 'Inside' || TREATMENT_AREA_SCOPES.interior.includes(area));
+  let where = null;
+  if (outside && inside) where = 'We treated outside and inside.';
+  else if (outside) where = 'We treated outside.';
+  else if (inside) where = 'We treated inside.';
+  const pressure = data.pestPressure;
+  const pressureLabel = pressure?.enabled && pressure?.showOnCustomerReport && typeof pressure.label === 'string'
+    ? pressure.label.trim().toLowerCase()
+    : '';
+  // "Pest pressure", the gauge's own name: the score can blend the review
+  // window's reports, re-services and risk factors, so it is not "today's
+  // activity" (Codex P2 r2 #5888).
+  const activity = pressureLabel ? `Pest pressure: ${pressureLabel}.` : null;
+  return [where, activity].filter(Boolean).join(' ') || null;
 }
 
 function dynamicHeroSummary(data) {
@@ -1968,7 +2021,8 @@ function ReentryTargetTile({ target, nowMs, mode, timezone }) {
 function PressureTrendChart({ points = [], neighborhood, summary }) {
   const width = 320;
   const height = 120;
-  const padding = { top: 12, right: 16, bottom: 24, left: 36 };
+  // Equal side padding, so a single point sits in the middle of the plot.
+  const padding = { top: 12, right: 36, bottom: 24, left: 36 };
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
   const xFor = (index, count = points.length) => {
@@ -2820,7 +2874,11 @@ export function ReserviceReportCard({ data, mode }) {
 
 // "Your plan" section (owner ask 2026-09-28): an active plan member's visit +
 // re-service COUNTS for this year — never a price, owner rule that prices
-// only ever appear on estimate pages. The server sends it for members only.
+// only ever appear on estimate pages, and no "at no charge" claim (a member's
+// callback can still be billed). The server sends it for members only.
+// Owner 2026-10-04: the bare count line "says nothing", so the card also
+// names the membership, the next visit and how to reach us between visits,
+// each only when the payload carries it.
 // Live view only; the payload field itself is stripped from
 // pdf/static/sms_preview renders server-side (stripLiveOnlyScheduleFields),
 // so `mode` is a belt-and-braces check here, same as the other live-only
@@ -2834,8 +2892,20 @@ function PlanSummaryCard({ data, mode }) {
   const visitWord = visits === 1 ? 'visit' : 'visits';
   const reserviceWord = reservices === 1 ? 're-service' : 're-services';
   const yearLine = reservices > 0
-    ? `This year: ${visits} ${visitWord}, including ${reservices} ${reserviceWord}`
-    : `This year: ${visits} ${visitWord}`;
+    ? `We've completed ${visits} ${visitWord} for you this year, including ${reservices} ${reserviceWord}.`
+    : `We've completed ${visits} ${visitWord} for you this year.`;
+  // The current tier the server sends with the counts, never the tier frozen
+  // on this visit (data.waveGuardTier): an old report must not name a tier
+  // the customer has since left.
+  const tier = String(plan.tier || '').trim();
+  // The upcoming-visits card already lists the dates when it is on the page.
+  // nextAppointment is the account-wide pick (the plan is account-level) and
+  // prefers this report's own service line, so the line names the service:
+  // another line's visit may come sooner. Not nextSameServiceAppointment,
+  // which is scoped to this property for the "What's next" section.
+  const nextAppointment = data.upcomingVisitsCard ? null : data.nextAppointment;
+  const nextVisit = planNextVisitDateLabel(nextAppointment);
+  const nextVisitService = String(nextServiceName(nextAppointment?.serviceType) || '').replace(/\s+service$/i, '').trim();
   return (
     <section data-glass="card" className="sr-section plan-summary-section" id="your-plan">
       {/* h2, not .section-eyebrow: the glass theme hides every
@@ -2843,9 +2913,28 @@ function PlanSummaryCard({ data, mode }) {
           with no visible title (codex P2 on #5177; same fix as
           UpcomingVisitsCard). */}
       <h2>Your plan</h2>
+      {tier && <p className="map-context-copy">You&apos;re a WaveGuard {tier} member.</p>}
       <p className="map-context-copy">{yearLine}</p>
+      {nextVisit && nextVisitService && (
+        <p className="map-context-copy">Your next {nextVisitService} visit is {nextVisit}.</p>
+      )}
+      {/* An invitation only, no promise to come back: reserviceEligible
+          does not say this report's own service line is covered. */}
+      {data.reserviceEligible === true && (
+        <p className="map-context-copy">Something come up between visits? Text us.</p>
+      )}
     </section>
   );
+}
+
+// "Mon, Jan 4" for the plan card, or null for a missing, unreadable or past
+// date (a report opened months later must not promise a visit that has gone).
+// Past is judged on the Eastern calendar, whatever the browser's zone.
+function planNextVisitDateLabel(nextAppointment, todayEt = etDateString()) {
+  const date = calendarDateFromDateOnlyValue(nextAppointment?.scheduledDate);
+  if (!date) return null;
+  if (date.toISOString().slice(0, 10) < todayEt) return null;
+  return date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 // "Near you" line on a lawn report (owner ask 2026-09-28, "lawn only",
@@ -3114,7 +3203,7 @@ export function reportAskPrompts(data = {}, serviceLine = 'pest') {
   // EXTRA_FORBIDDEN bans it for narrative on this exact page) — "re-enter"
   // still routes to the assistant's re-entry answer
   if (hasReentry) add('When can I re-enter treated areas?');
-  if (hasCoverage) add('What areas were treated?');
+  if (hasCoverage && serviceLine !== 'pest') add('What areas were treated?');
   if (product) add(`Why was ${product} used?`);
   else if ((data.applications || []).length) add('Why were these products used?');
   if (hasPressure) add('What does Pest Pressure mean?');
@@ -3670,6 +3759,9 @@ function CrossSellCard({ data, token, mode }) {
   };
   return (
     <section data-glass="card" className="report-card cross-sell-card" data-section="cross-sell">
+      {/* The card was a bare button; say what the button asks for (owner 2026-10-05). */}
+      <h2>{`Want a quote for ${String(offer.label || '').toLowerCase()}?`}</h2>
+      <p className="map-context-copy">Tap below and we&apos;ll follow up with the details. Nothing is booked or charged.</p>
       <div className="cross-sell-cta-row">
         {requestState === 'sent' ? (
           <p className="cross-sell-confirm">
@@ -3803,6 +3895,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
     );
   }
   const isLawn = data.serviceLine === 'lawn';
+  const hideAreas = hidesTreatedAreas(data);
   const zoneById = new Map((data.zones || []).map((zone) => [String(zone.id), zone]));
   const substitutions = Array.isArray(data.dynamicContext?.lawnProtocol?.application?.substitutions)
     ? data.dynamicContext.lawnProtocol.application.substitutions
@@ -3836,7 +3929,7 @@ function AppliedProductsSection({ data, mode = 'live' }) {
             const epa = applicationEpaReg(app);
             const purpose = applicationPurpose(app, data.serviceLine);
             const why = applicationPurposeCopy(app, data.serviceLine, { diagnosis: data.reportV2?.diagnosis });
-            const usedIn = applicationZoneText(app, zoneById, data.serviceLine);
+            const usedIn = hideAreas ? null : applicationZoneText(app, zoneById, data.serviceLine);
             const productSummary = applicationProductSummary(app);
             const precautionSummary = applicationPrecautionSummary(app);
             const reentrySummary = applicationReentrySummary(app);
@@ -3862,10 +3955,12 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                     <div className="sr-cell-label">Purpose</div>
                     <p>{purpose}</p>
                   </div>
-                  <div>
-                    <div className="sr-cell-label">Used in</div>
-                    <p>{usedIn}</p>
-                  </div>
+                  {!hideAreas && (
+                    <div>
+                      <div className="sr-cell-label">Used in</div>
+                      <p>{usedIn}</p>
+                    </div>
+                  )}
                   {active && (
                     <div>
                       <div className="sr-cell-label">Active ingredient</div>
@@ -3879,25 +3974,33 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                     </div>
                   )}
                 </div>
-                <div className="product-why">
-                  <div className="sr-cell-label">Why used today</div>
-                  <p>
-                    {substitution
-                      ? `This approved seasonal equivalent was used for today's protocol window. ${why}`
-                      : why}
-                  </p>
-                </div>
+                {/* Approved report_copy (How it works / On the label / Pets &
+                    kids, below) says why the product is used and what the
+                    re-entry rule is, so the generic "Why used today", "Safety
+                    & re-entry" and "Product note" lines are filler next to it
+                    (owner 2026-10-05). A seasonal substitution keeps its
+                    "Why used today" line: the swap needs saying. */}
+                {(!reportCopy || substitution) && (
+                  <div className="product-why">
+                    <div className="sr-cell-label">Why used today</div>
+                    <p>
+                      {substitution
+                        ? `This approved seasonal equivalent was used for today's protocol window. ${why}`
+                        : why}
+                    </p>
+                  </div>
+                )}
                 {/* Label-derived safety protocol, visible on the card face —
                     not buried in Details (owner 2026-07-21). Sourced from the
                     approved per-product label facts only. */}
-                {(precautionSummary || reentrySummary) && (
+                {!reportCopy && (precautionSummary || reentrySummary) && (
                   <div className="product-why">
                     <div className="sr-cell-label">Safety &amp; re-entry</div>
                     {precautionSummary && <p>{precautionSummary}</p>}
                     {reentrySummary && <p>{reentrySummary}</p>}
                   </div>
                 )}
-                {productSummary && (
+                {!reportCopy && productSummary && (
                   <div className="product-why">
                     <div className="sr-cell-label">Product note</div>
                     <p>{productSummary}</p>
@@ -6261,6 +6364,14 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           --report-action: ${ESTIMATE_BUTTON_BG};
           --report-surface: var(--paper);
           --shadow-soft: none;
+          /* Report type scale (owner 2026-10-05): 28 greeting, 20 card
+             titles, 16 reading text, 14 only for uppercase labels, buttons,
+             chips and times. The glass sheet reads these for h1/h2. */
+          --gt-h1-size: 28px;
+          --gt-h1-line: 1.2;
+          --gt-h2-size: 20px;
+          --gt-h2-line: 1.3;
+          --gt-ask-row-size: 16px;
           min-height: 100vh;
           background: var(--page);
           color: var(--text);
@@ -6379,8 +6490,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin: 0;
           color: var(--text);
           font-family: ${FONTS.serif};
-          font-size: clamp(34px, 5vw, 48px);
-          line-height: 1.1;
+          font-size: 28px;
+          line-height: 1.2;
           font-weight: 500;
           letter-spacing: 0;
         }
@@ -6389,13 +6500,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           /* var(--muted): one supporting gray on this surface (was ESTIMATE_BODY,
              a third ink — owner palette reduction 2026-07-09) */
           color: var(--muted);
-          font-size: 15px;
+          font-size: 16px;
           line-height: 1.5;
         }
         .smart-status-result {
           color: var(--text);
-          font-size: 24px;
-          line-height: 1.2;
+          font-size: 20px;
+          line-height: 1.3;
           font-weight: 700;
           letter-spacing: 0;
         }
@@ -6417,7 +6528,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           margin-top: 16px;
           color: var(--muted);
           font-family: ${FONT_BODY};
-          font-size: 14px;
+          font-size: 16px;
           line-height: 1.5;
           font-weight: 600;
           letter-spacing: 0;
@@ -6469,13 +6580,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .tech-role {
           margin-top: 4px;
           color: var(--muted);
-          font-size: 14px;
+          font-size: 16px;
           line-height: 1.35;
         }
         .tech-visit-times {
           margin-top: 3px;
           color: var(--text);
-          font-size: 14px;
+          font-size: 16px;
           line-height: 1.35;
           font-weight: 600;
         }
@@ -6525,7 +6636,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .hero-conditions-copy p {
           margin: 0;
           color: var(--muted);
-          font-size: 14px;
+          font-size: 16px;
           line-height: 1.5;
           text-align: right;
         }
@@ -7716,19 +7827,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-cell-note {
           margin-top: 3px;
           color: var(--muted);
-          font-size: 14px;
+          font-size: 16px;
           line-height: 1.4;
         }
         .sr-cell-label { font-size: 14px; color: var(--soft); }
-        .sr-cell-value { margin-top: 8px; font-size: 15px; color: var(--text); }
         /* Customer-facing body copy floor is 16px; 14px stays reserved for
-           labels (codex round-2 P2). Scoped to the upcoming-visits card only
-           — .sr-cell-value/.sr-cell-note are shared with other cards whose
-           existing 15px/14px sizing is unchanged here. */
-        .upcoming-visits-card .sr-cell-value,
-        .upcoming-visits-card .sr-cell-note {
-          font-size: 16px;
-        }
+           labels (codex round-2 P2, owner type scale 2026-10-05). */
+        .sr-cell-value { margin-top: 8px; font-size: 16px; color: var(--text); }
         .sr-list { display: grid; gap: 12px; }
         .sr-row {
           border: 1px solid var(--line);
@@ -7745,10 +7850,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .sr-advisory { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
         .sr-advisory strong { font-size: 20px; font-weight: 500; display: block; }
         .sr-advisory span { color: var(--muted); font-size: 14px; }
-        .sr-footer { color: var(--soft); font-size: 14px; line-height: 1.5; padding: 24px 0 0; }
+        .sr-footer { color: var(--soft); font-size: 16px; line-height: 1.5; padding: 24px 0 0; }
         .ai-summary-card h2 {
           color: var(--text);
-          font-size: 24px;
+          font-size: 20px;
           line-height: 1.2;
           max-width: ${DOC_COLUMN_MAX}px;
           font-weight: 600;
@@ -7879,8 +7984,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .solution-product-name {
           color: var(--text);
-          font-size: 15px;
-          font-weight: 700;
+          font-size: 16px;
+          font-weight: 600;
           line-height: 1.35;
         }
         .solution-product-facts {
@@ -7905,6 +8010,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .poison-control-note {
           margin: 16px 0 0;
+          font-size: 16px;
         }
         .poison-control-note a {
           color: var(--text);
@@ -7913,6 +8019,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .poison-control-applicator {
           margin-top: 8px;
+          font-size: 16px;
           font-weight: 600;
         }
         .applied-product-maker {
@@ -7947,6 +8054,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .product-purpose-grid {
           display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
           gap: 12px;
           margin-top: 12px;
         }
@@ -7965,6 +8073,11 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .product-why p {
           margin-top: 4px;
           color: var(--text);
+        }
+        /* The report_copy block stacks three labeled paragraphs: air above
+           each label after a paragraph (owner 2026-10-05). */
+        .product-why p + .sr-cell-label {
+          margin-top: 14px;
         }
         .product-group-card {
           min-height: 0;
@@ -8332,7 +8445,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .hero-reentry-status h2 {
           margin: 0;
           color: var(--text);
-          font-size: 18px;
+          font-size: 20px;
           line-height: 1.2;
           font-weight: 700;
           letter-spacing: 0;
@@ -8405,10 +8518,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-size: 16px;
           line-height: 1.5;
         }
+        /* One 320-wide viewBox drawn at its own size and centered (owner
+           2026-10-05); its labels keep the 14px customer floor. */
         .pressure-trend-chart {
+          display: block;
           width: 100%;
-          max-width: 420px;
-          justify-self: end;
+          max-width: 320px;
+          margin: 0 auto;
         }
         .pressure-line {
           stroke: ${B.glassNavy};
@@ -8448,6 +8564,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           font-weight: 700;
           pointer-events: none;
         }
+        /* Labels keep the 14px customer floor (owner 2026-10-05, "keep 14px"). */
         .neighborhood-pressure-line {
           stroke: var(--report-muted);
           stroke-width: 1;
@@ -8704,7 +8821,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           background: ${B.blueSurface};
         }
         .the-one-thing h2 {
-          font-size: 24px;
+          font-size: 20px;
           line-height: 1.2;
           margin-bottom: 0;
         }
@@ -8948,8 +9065,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         }
         .sr-section h2,
         .report-card h2 {
-          font-size: 28px;
-          line-height: 1.2;
+          font-size: 20px;
+          line-height: 1.3;
         }
         .sr-band,
         .sr-grid-3,
@@ -9115,7 +9232,6 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .treatment-overlay-key { grid-template-columns: 1fr; }
           .where-row { grid-template-columns: 1fr; }
           .reentry-target-grid, .pressure-trend-layout { grid-template-columns: 1fr; }
-          .pressure-trend-chart { justify-self: stretch; max-width: none; }
           .review-request-card { grid-template-columns: 1fr; }
         }
         /* ---------- liquid glass (live mode only) ----------
