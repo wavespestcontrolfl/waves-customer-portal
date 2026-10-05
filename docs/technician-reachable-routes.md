@@ -337,6 +337,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 
 | Method | Path | Router |
 |---|---|---|
+| GET | `/api/admin/access-codes/visits/:visitId` | admin-access-codes |
 | GET | `/api/admin/assessment-analytics/tech-context/:customerId` | admin-assessment-analytics |
 | POST | `/api/admin/communications/call` | admin-communications |
 | GET | `/api/admin/communications/collections-voice-status` | admin-communications |

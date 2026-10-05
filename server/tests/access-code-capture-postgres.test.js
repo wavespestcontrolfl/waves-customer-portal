@@ -1016,6 +1016,37 @@ postgres('access codes section', () => {
     });
   });
 
+  describe('technician visit read', () => {
+    const tech = async () => {
+      const id = randomUUID();
+      await trx('technicians').insert({ id, name: 'Sample Tech' });
+      return id;
+    };
+
+    test('a technician reads the codes of a visit assigned to them, and only those', async () => {
+      const c = await customer();
+      const techId = await tech();
+      const other = await tech();
+      const mine = await visit(c.id, day(1));
+      const theirs = await visit(c.id, day(2));
+      await trx('scheduled_services').where({ id: mine }).update({ technician_id: techId });
+      await trx('scheduled_services').where({ id: theirs }).update({ technician_id: other });
+      const standing = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, standing.id, {});
+      const forMine = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      await access.accept(trx, forMine.id, { scheduledServiceId: mine, now: NOW });
+      const forTheirs = await found(c.id, { kind: 'door', code: '#8080', life: 'visit' });
+      await access.accept(trx, forTheirs.id, { scheduledServiceId: theirs, now: NOW });
+      const asTech = { techRole: 'technician', technicianId: techId };
+      const out = await access.listForVisit(trx, asTech, mine);
+      expect(out.ok).toBe(true);
+      expect(out.codes.map((r) => r.code).sort()).toEqual(['#9090', '2468']);
+      expect(await access.listForVisit(trx, asTech, theirs)).toMatchObject({ ok: false, status: 403, code: 'service_not_assigned' });
+      expect(await access.listForVisit(trx, asTech, randomUUID())).toMatchObject({ ok: false, status: 404 });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, theirs)).codes.map((r) => r.code).sort()).toEqual(['#8080', '2468']);
+    });
+  });
+
   describe('dismiss, retire, add', () => {
     const profile = (customerId) => trx('property_preferences').where({ customer_id: customerId }).first();
 

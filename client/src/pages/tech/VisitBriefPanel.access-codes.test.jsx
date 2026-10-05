@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // Visit brief: the customer's access codes, read only. Active standing codes
-// plus one-visit codes tied to a visit of this stop; nothing when the office
-// list refuses (section off or no office access). Synthetic data only.
+// plus one-visit codes tied to a visit of this stop, read per visit; nothing
+// when the read is refused (section off, or not this technician's visit). Synthetic data only.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
@@ -26,18 +26,18 @@ const renderPanel = (request, detail = { status: 'ready', byService: {} }) => re
 
 describe('VisitBriefPanel access codes', () => {
   it('shows standing codes and codes tied to this visit, not another visit', async () => {
-    const request = vi.fn(() => Promise.resolve({ active: [
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [
       code(),
       code({ id: 'c2', kind: 'door', code: '5555', instructions: null, life: 'visit', scheduledServiceId: 'svc-1' }),
       code({ id: 'c3', kind: 'garage', code: '7777', instructions: null, life: 'visit', scheduledServiceId: 'svc-other' }),
-    ], found: [] }));
+    ] }));
     renderPanel(request);
     expect(await screen.findByText('1234')).toBeInTheDocument();
     expect(screen.getByText('5555')).toBeInTheDocument();
     expect(screen.getByText('Door or lock (this visit):')).toBeInTheDocument();
     expect(screen.getByText(/On the back fence/)).toBeInTheDocument();
     expect(screen.queryByText('7777')).toBeNull();
-    expect(request).toHaveBeenCalledWith('/admin/access-codes?customerId=cust-1');
+    expect(request).toHaveBeenCalledWith('/admin/access-codes/visits/svc-1');
   });
 
   it('shows nothing, with no error, when the list is refused', async () => {

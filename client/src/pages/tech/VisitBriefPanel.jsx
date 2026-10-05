@@ -277,8 +277,8 @@ function AccessSection({ alerts, access, gate = null }) {
 
 // Access codes the customer gave (access codes section, read only): the
 // active standing codes plus one-visit codes tied to a visit of this stop.
-// Read through the office's access-codes list, so a viewer without office
-// access, or a section that is off, gets nothing and the block stays hidden.
+// Read per visit (owner 2026-10-05: a technician sees the codes of a visit
+// assigned to them); a section that is off answers 404 and the block hides.
 const ACCESS_KIND_LABELS = {
   neighborhood_gate: 'Neighborhood gate', property_gate: 'Property gate', door: 'Door or lock',
   lockbox: 'Lockbox', garage: 'Garage', call_box: 'Call box', pass: 'Visitor pass', other: 'Access code',
@@ -290,12 +290,17 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
   useEffect(() => {
     if (!request || !customerId) return undefined;
     let cancelled = false;
-    Promise.resolve()
-      .then(() => request(`/admin/access-codes?customerId=${encodeURIComponent(customerId)}`))
-      .then((data) => { if (!cancelled) setRows(Array.isArray(data?.active) ? data.active : []); })
-      .catch(() => { if (!cancelled) setRows([]); });
+    const ids = visitKey ? visitKey.split(',') : [];
+    Promise.all(ids.map((id) => request(`/admin/access-codes/visits/${encodeURIComponent(id)}`)
+      .then((data) => (Array.isArray(data?.accessCodes) ? data.accessCodes : []))
+      .catch(() => [])))
+      .then((lists) => {
+        if (cancelled) return;
+        const seen = new Set();
+        setRows(lists.flat().filter((r) => (seen.has(r.id) ? false : seen.add(r.id))));
+      });
     return () => { cancelled = true; };
-  }, [request, customerId]);
+  }, [request, customerId, visitKey]);
   const ids = visitKey ? visitKey.split(',') : [];
   const shown = new Set(shownCodes.map((c) => String(c).trim().toLowerCase()));
   const mine = rows.filter((r) => (r.life === 'standing' || ids.includes(r.scheduledServiceId))

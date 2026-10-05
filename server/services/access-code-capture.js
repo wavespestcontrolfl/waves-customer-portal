@@ -597,6 +597,23 @@ async function listForCustomer(conn, customerId) {
 }
 
 // Every customer's codes waiting for a decision, newest first.
+// The codes a technician needs at one stop: the customer's active standing
+// codes plus one-visit codes bound to this visit. A technician reaches only a
+// visit assigned to them inside the current access window; the office reaches
+// any visit. Returns { ok, codes } or a typed refusal.
+async function listForVisit(conn, req, visitId) {
+  const { technicianCurrentVisitFilter, isTechnicianRequest } = require('./technician-visit-scope');
+  const q = conn('scheduled_services').where('scheduled_services.id', visitId);
+  technicianCurrentVisitFilter(req, q);
+  const visit = await q.first('scheduled_services.id', 'scheduled_services.customer_id');
+  if (!visit) {
+    if (isTechnicianRequest(req) && await conn('scheduled_services').where({ id: visitId }).first('id')) return fail(403, 'service_not_assigned');
+    return fail(404, 'not_found');
+  }
+  const { active } = await listForCustomer(conn, visit.customer_id);
+  return { ok: true, codes: active.filter((r) => r.life === 'standing' || r.scheduledServiceId === visit.id) };
+}
+
 async function listFound(conn, { limit = 50, offset = 0 } = {}) {
   const base = () => conn('customer_access_codes as a')
     .join('customers as c', 'c.id', 'a.customer_id')
@@ -922,6 +939,7 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
 }
 
 module.exports = {
+  listForVisit,
   VERSION,
   KINDS,
   LIVES,

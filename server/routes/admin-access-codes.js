@@ -20,17 +20,36 @@
 const express = require('express');
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const access = require('../services/access-code-capture');
 
 const router = express.Router();
-router.use(adminAuthenticate, requireAdmin);
+router.use(adminAuthenticate);
 router.use((req, res, next) => {
   // no-store first, so the disabled answer is never cached past a gate flip.
   res.set('Cache-Control', 'no-store');
   if (!access.enabled()) return res.status(404).json({ enabled: false });
   return next();
 });
+
+// Owner 2026-10-05 ("tech route"): a technician reads the access codes of a
+// visit assigned to them, and nothing else here. Declared BEFORE the router's
+// requireAdmin below; every other route is office only.
+router.get('/visits/:visitId', requireTechOrAdmin, async (req, res) => {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(req.params.visitId))) {
+    return res.status(404).json({ error: 'That visit was not found', code: 'not_found' });
+  }
+  try {
+    const out = await access.listForVisit(db, req, req.params.visitId);
+    if (!out.ok) return res.status(out.status).json({ error: out.status === 403 ? 'Not assigned to this visit' : 'That visit was not found', code: out.code });
+    return res.json({ accessCodes: out.codes });
+  } catch (err) {
+    logger.error(`[admin-access-codes] visit read failed (${(err && (err.code || err.name)) || 'error'})`);
+    return res.status(500).json({ error: 'Request failed', code: 'server_error' });
+  }
+});
+
+router.use(requireAdmin);
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DEFAULT_LIMIT = 50;
