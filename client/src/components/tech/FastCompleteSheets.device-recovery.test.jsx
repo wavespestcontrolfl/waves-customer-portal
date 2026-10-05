@@ -50,6 +50,20 @@ for (const [name, Sheet, reportFlow] of [
     expect(completed).toHaveBeenCalledTimes(1);
   });
 
+  test(`${name} shows a refused copy found after a reload to discard only, then a fresh form (GitHub Codex P2 on #5967)`, async () => {
+    const body = { idempotencyKey: 'refused-key', technicianNotes: 'Refused work' };
+    await putFastCompletionAttempt('visit-a', 'tech-a', { body, summary: 'Refused visit', refused: true });
+    const request = vi.fn(async () => { throw Object.assign(new Error('Context unavailable'), { status: 503 }); });
+    render(<Sheet service={{ id: 'visit-a', reportFlow }} operatorId="tech-a" request={request}
+      onClose={vi.fn()} onCompleted={vi.fn()} onFullForm={vi.fn()} />);
+    expect(await screen.findByText(/server refused this saved completion/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry', exact: true })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Discard saved retry' }));
+    await waitFor(() => expect(screen.queryByText(/server refused this saved completion/)).not.toBeInTheDocument());
+    expect((await getFastCompletionAttempt('visit-a', 'tech-a')).attempt).toBeNull();
+    expect(request.mock.calls.filter(([path]) => path.endsWith('/complete'))).toHaveLength(0);
+  });
+
   test(`${name} keeps a refused completion whose copy will not clear, to discard (GitHub Codex P2 on 102b99cb1b)`, async () => {
     const body = { idempotencyKey: 'saved-key', technicianNotes: 'Retained exact work' };
     await putFastCompletionAttempt('visit-a', 'tech-a', { body, summary: 'Retained visit summary' });
