@@ -5800,12 +5800,39 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
                 : 'unknown',
             };
           }
+          // GATE_LAWN_LIGHTING (owner 2026-10-04), read at call time: color is
+          // compared between the two visits only in known, compatible light, and
+          // the overall direction is decided without color. The two visits' stored
+          // light is read ONLY by the live /data render (opts.lawnLighting, the same
+          // opt-in as lawnRainfastWatch): the Q&A endpoint and the PDF builder pay
+          // for nothing and see both lights as unknown, so they never speak to
+          // color. A failed read is unknown too (fewer sentences, never a claim),
+          // and it is not a render input anything stores: the lines it feeds are
+          // live-view only, so the PDF key needs no stamp for this gate.
+          let colorGuard = null;
+          if (typeof featureGates.lawnLightingLive === 'function' && featureGates.lawnLightingLive()) {
+            colorGuard = { currentLight: null, priorLight: null };
+            if (opts.lawnLighting === true && opts.mode === 'live' && priorForProgress && lawnAssessment.assessmentId != null) {
+              try {
+                const lights = await require('../lawn-lighting').loadVisitLights(
+                  knex,
+                  [lawnAssessment.assessmentId, priorForProgress.assessmentId],
+                  { customerId: service.customer_id },
+                );
+                colorGuard = {
+                  currentLight: lights.get(String(lawnAssessment.assessmentId)) ?? null,
+                  priorLight: lights.get(String(priorForProgress.assessmentId)) ?? null,
+                };
+              } catch { /* unreadable light = unknown light: color stays uncompared */ }
+            }
+          }
           lawnProgress = buildLawnProgress({
             current,
             prior: priorForProgress,
             sinceLast: visitMemorySinceLast || null,
             // P19b kill switch on the READ: gate off = a stored photo_pair recheck is ignored.
             photoPair: typeof featureGates.lawnPairedRecheckLive === 'function' && featureGates.lawnPairedRecheckLive(),
+            ...(colorGuard ? { colorGuard } : {}),
           });
         } catch {
           lawnProgress = null;

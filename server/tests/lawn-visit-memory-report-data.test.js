@@ -1126,3 +1126,109 @@ describe('GATE_LAWN_RAINFAST_WATCH on the report payload (P31)', () => {
     expect(JSON.stringify(data)).not.toMatch(/retreat|rainfast_breach/);
   });
 });
+
+// GATE_LAWN_LIGHTING (owner 2026-10-04) through the real report builder: the two
+// visits' stored light is read by the live /data render only, color is compared
+// only in known, compatible light, a failed read is unknown light, and the PDF
+// cache key does not move (the lines it feeds are live-view only).
+describe('GATE_LAWN_LIGHTING on the report builder', () => {
+  const ENV = ['GATE_LAWN_VISIT_MEMORY', 'GATE_LAWN_PROPERTY_HISTORY', 'GATE_IRRIGATION_WEEK_PLAN', 'GATE_LAWN_LIGHTING'];
+  const saved = {};
+  beforeEach(() => {
+    ENV.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; });
+    jest.clearAllMocks();
+    process.env.GATE_LAWN_VISIT_MEMORY = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    setHistory([PRIOR, CUR]);
+  });
+  afterEach(() => { ENV.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }); });
+
+  const WEEK = { assessmentId: 'la-cur', serviceDate: '2026-09-30', rainInches: 1, et0Inches: 1, dailyRain: [], rainConfidence: 'high' };
+  const records = () => ({
+    'svc-cur': { structured_notes: { lawnWeekWeather: { 'la-cur': WEEK } } },
+    'svc-prior': { structured_notes: { lawnVisitMemory: { 'la-prior': PRIOR_ENTRY } } },
+  });
+  const run = (assessmentId, light) => ({
+    assessment_id: assessmentId, customer_id: CUSTOMER, photo_ids: [`${assessmentId}-1`],
+    photo_quality: [{ photo: 1, quality: 'adequate', issue: '', ...light }],
+  });
+  // three adequate photos a visit: enough for a comparable (moderate or better) read
+  const photoRows = (assessmentId) => [1, 2, 3].map((n) => ({
+    id: `${assessmentId}-${n}`, assessment_id: assessmentId, customer_id: CUSTOMER, customer_visible: true, is_best_photo: n === 1, quality_score: 80, photo_order: n, zone: 'front',
+  }));
+  const SUN = { lighting: 'full_sun', hard_shadows: 'no' };
+  const CLOUD = { lighting: 'overcast', hard_shadows: 'no' };
+
+  // Same fixtures as the other renders, plus the runs; every table read is logged.
+  const render = async ({ runs = [], runsFail = false, options = { mode: 'live', lawnLighting: true } } = {}) => {
+    const f = fixtures();
+    f.lawn_assessment_photos = [...photoRows('la-cur'), ...photoRows('la-prior')];
+    f.lawn_assessment_runs = runsFail ? FAIL : runs;
+    const recs = records();
+    const { knex } = withRecords(f, recs);
+    const tables = [];
+    const logged = (table) => { tables.push(table); return knex(table); };
+    logged.raw = knex.raw;
+    const data = await buildReportV1Data(service(recs['svc-cur'].structured_notes), 'token-lighting', logged, options);
+    return { data, tables };
+  };
+
+  test('gate off: no run read, no color guard, the progress block is what it was', async () => {
+    const { data, tables } = await render({ runs: [run('la-cur', SUN), run('la-prior', SUN)] });
+    expect(tables).not.toContain('lawn_assessment_runs');
+    expect(data.reportV2.progress.color).toBeUndefined();
+    expect(data.reportV2.progress.overall).not.toHaveProperty('drivers');
+  });
+
+  test('gate on, live /data render: both visits\' stored light decides whether color may be compared', async () => {
+    process.env.GATE_LAWN_LIGHTING = 'true';
+    const same = await render({ runs: [run('la-cur', SUN), run('la-prior', SUN)] });
+    expect(same.tables.filter((t) => t === 'lawn_assessment_runs')).toHaveLength(1);
+    expect(same.data.reportV2.progress.color).toEqual({ comparable: true, reason: null, band: 8 });
+    const differs = await render({ runs: [run('la-cur', CLOUD), run('la-prior', SUN)] });
+    expect(differs.data.reportV2.progress.color).toMatchObject({ comparable: false, reason: 'light_differs' });
+    // a visit from before the gate: its run has no read on the row
+    const preGate = await render({ runs: [run('la-cur', SUN), run('la-prior', {})] });
+    expect(preGate.data.reportV2.progress.color).toMatchObject({ comparable: false, reason: 'light_unknown' });
+    // no run at all
+    expect((await render({ runs: [] })).data.reportV2.progress.color).toMatchObject({ comparable: false, reason: 'light_unknown' });
+    // the overall direction is decided without color
+    expect(same.data.reportV2.progress.overall).toMatchObject({ direction: 'flat', drivers: 0 });
+  });
+
+  test('a FAILED run read is unknown light (no claim), the report still builds, and nothing marks it healthy', async () => {
+    process.env.GATE_LAWN_LIGHTING = 'true';
+    const { data } = await render({ runsFail: true });
+    expect(data.reportV2.progress.color).toMatchObject({ comparable: false, reason: 'light_unknown' });
+    expect(data.reportV2.sinceLast.priorAssessmentId).toBe('la-prior');
+  });
+
+  test('the Q&A endpoint\'s build (no lawnLighting opt-in) and any non-live build read nothing and see both lights as unknown', async () => {
+    process.env.GATE_LAWN_LIGHTING = 'true';
+    const runs = [run('la-cur', SUN), run('la-prior', SUN)];
+    for (const options of [{ mode: 'live' }, {}, { mode: 'pdf', lawnLighting: true }, { mode: 'live', lawnLighting: false }]) {
+      const { data, tables } = await render({ runs, options });
+      expect(tables).not.toContain('lawn_assessment_runs');
+      expect(data.reportV2.progress.color).toMatchObject({ comparable: false, reason: 'light_unknown' });
+    }
+  });
+
+  test('the PDF cache key does not move with the gate and the signature read touches no run (the lines it feeds are live-view only)', async () => {
+    const { resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+    const sig = async () => {
+      const f = fixtures();
+      f.lawn_assessment_runs = [run('la-cur', SUN), run('la-prior', CLOUD)];
+      const { knex } = withRecords(f, records());
+      const tables = [];
+      const logged = (table) => { tables.push(table); return knex(table); };
+      logged.raw = knex.raw;
+      const out = await resolveCanonicalLawnRender({ id: 'svc-cur', customer_id: CUSTOMER, service_line: 'lawn', service_date: '2026-09-30' }, logged);
+      return { signature: out.signature, tables };
+    };
+    const off = await sig();
+    process.env.GATE_LAWN_LIGHTING = 'true';
+    const on = await sig();
+    expect(on.signature).toBe(off.signature);
+    expect(on.tables).not.toContain('lawn_assessment_runs');
+  });
+});

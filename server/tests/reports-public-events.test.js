@@ -642,6 +642,30 @@ describe('nearYou opt-in (lawn "Near you" line, GATE_REPORT_NEAR_YOU)', () => {
   });
 });
 
+describe('lawnLighting opt-in (lawn lighting-aware color, GATE_LAWN_LIGHTING)', () => {
+  // Same shape as nearYou: the two visits' stored-light read runs only for the
+  // /data render, the one caller that prints the "Since your last visit" lines.
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/reports-public.js'), 'utf8');
+  const builder = require('fs').readFileSync(require('path').join(__dirname, '../services/service-report/report-data.js'), 'utf8');
+  const queue = require('fs').readFileSync(require('path').join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+
+  test('the option defaults to OFF and rides its own line after nearYou in the builder call', () => {
+    expect(src).toMatch(/lawnLighting = false,/);
+    expect(src).toMatch(/\bnearYou,\n\s*lawnLighting,\n/);
+  });
+
+  test('exactly one call site opts in, the /data render; the Q&A call and the PDF queue do not', () => {
+    expect(src.match(/lawnLighting: true/g) || []).toHaveLength(1);
+    expect(src).toMatch(/nearYou: true, lawnPhotoFindings: true,\n\s*lawnLighting: true,/);
+    expect(src).toMatch(/buildServiceReportV1ResponseData\(service, req\.params\.token, \{ mode: 'live' \}\)/);
+    expect(queue).not.toMatch(/lawnLighting/);
+  });
+
+  test('the builder reads the stored light only for an opted-in live render', () => {
+    expect(builder).toMatch(/opts\.lawnLighting === true && opts\.mode === 'live'/);
+  });
+});
+
 describe('report ask event metadata (topic only, owner ruling 2026-09-28)', () => {
   // The service-report /:token/ask handler records what the answer covered,
   // never what the customer typed.

@@ -761,6 +761,9 @@ describe('ships dark', () => {
     expect(required).toEqual([
       '../../../shared/lawn-scores.cjs',
       '../../utils/datetime-et',
+      // GATE_LAWN_LIGHTING: the light-compatibility table and the color dead band.
+      // lawn-lighting.js is pure (its one reader takes the caller's knex).
+      '../lawn-lighting',
       './lawn-expectations',
       './lawn-seasonality',
     ]);

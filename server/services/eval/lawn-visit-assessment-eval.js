@@ -28,7 +28,7 @@
 const { DEFAULTS } = require('../../config/models');
 const { applySeasonalAdjustment, getSeason } = require('../lawn-assessment');
 const { deriveLegacyScores, adjustAvailableScores } = require('../lawn-visit-scores');
-const { contextHash, normalizePhotoZone, promptFor, PROMPT_VERSION, SHOT_LIST_PROMPT_VERSION } = require('../lawn-visit-input');
+const { contextHash, normalizePhotoZone, promptFor, variantOfVersion, PROMPT_VERSION } = require('../lawn-visit-input');
 const { PHOTO_VOCABULARY, capturedUnderShotList, maxPerShot } = require('../lawn-photo-shots');
 const { SUMMARY_CAUSE_RE } = require('../lawn-diagnostic-report');
 const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
@@ -446,7 +446,7 @@ function renderMarkdown(summary, results = [], { title = 'Lawn visit assessment 
 // so a report is never one pooled experiment: results are grouped by the prompt
 // version each one actually ran under (a result without one is legacy), and each
 // group carries its own version, digest, summary and rows.
-const digestForVersion = (version) => promptFor({ shotList: version === SHOT_LIST_PROMPT_VERSION }).digest;
+const digestForVersion = (version) => promptFor(variantOfVersion(version)).digest;
 function promptVariants(results = []) {
   const groups = new Map();
   for (const r of results) {
@@ -528,7 +528,7 @@ async function runEval(cases, deps, { repeat = 1, concurrency = 2, thinkingLevel
           log(`skip ${testCase.assessmentId} run ${i + 1}/${repeat}: ${err.message}`);
           break;
         }
-        results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext, shotList: shotListMode }), contextOmitted: Array.isArray(testCase.context?.omitted) ? testCase.context.omitted : [] });
+        results.push({ ...scoreResult(testCase, analysis), repeatIndex: i, inputHash: contextHash({ photos, photoZones, visionContext, shotList: shotListMode, lighting: variantOfVersion(analysis.promptVersion).lighting }), contextOmitted: Array.isArray(testCase.context?.omitted) ? testCase.context.omitted : [] });
         log(`${testCase.assessmentId} run ${i + 1}/${repeat}: ${analysis.status}${analysis.status === 'complete' ? ` via ${analysis.provider}${analysis.fallbackUsed ? ' (fallback)' : ''}` : ` (${analysis.reason})`} ${analysis.latencyMs} ms`);
       }
     }

@@ -2621,6 +2621,41 @@ selected at render from the frozen memory and the two visits' scores, so a
 permanent token repeats them while those inputs stand; approving an expectation
 row later adds that row's line to reports already delivered.
 
+`GATE_LAWN_LIGHTING` (dark, owner 2026-10-04; effective only where
+`GATE_LAWN_SINCE_LAST` is live; off leaves every payload key and sentence
+unchanged, key for key) adds NO payload key and NO route read to
+`GET /api/reports/:token/data`: it only REMOVES sentences from
+`reportV2.lead.sinceLast.lines` (live views only, `mode: 'live'`; PDF and static
+builds never carry that block, so PDF content and its cache signature are
+unchanged by this gate and no signature stamp rides it). Sun, shade and cloud
+change how green turf looks in a photo, so, gate on: (1) a color line
+("Color is ahead of schedule.", "Color is on track.", "Color is holding steady.",
+"Color is behind where we expected.", "The color change since then is mostly
+seasonal.", and "It is too early to judge the color response.") is
+spoken only when BOTH visits have a stored light read (the run's `photo_quality`
+rows, written by the visit assessment under `lawn-visit-v1-lighting` /
+`lawn-visit-v1-shot-list-lighting`) and the two are compatible (full sun with full
+sun; overcast and open shade with each other; mixed sun and shade, low light and
+unknown are never compatible). A color move under 8 points (`COLOR_NO_CHANGE_POINTS`, the category band) is
+"holding steady", never "behind". (2) The overall sentence ("Your overall lawn
+score is up / down since then." / "…is holding steady.") is decided by thickness,
+weeds and stress damage, never by color alone: when only color moved the printed
+overall score, or the printed score and the non-color blend disagree, there is no
+overall sentence. A visit assessed before the gate has no light read, so its color
+is never compared: for every existing customer the six color lines above and the
+color-driven overall sentence stop appearing on reopened reports (the sentences
+are re-selected from the frozen memory and the two visits' scores on every live
+view, so a permanent token loses them at gate-on; the frozen memory entry and
+the frozen v6 copy are never rewritten). The two visits' light is read once per
+live `/data` render (one `lawn_assessment_runs` read and one `lawn_assessment_photos`
+read, only while the gate is on and a prior visit exists); `/api/reports/:token/ask`
+and the PDF builder pass no `lawnLighting` opt-in, read nothing, and treat both
+lights as unknown. An unreadable run reads as unknown light (fewer sentences,
+never a claim). The paired-photo recheck reads under `lawn-paired-recheck-v3`
+(each pair's two lights in the request; color dropped from any pair in
+incompatible or unknown light); a recheck verdict already frozen on a visit memory
+is first-writer-wins and is never rewritten.
+
 `GATE_LAWN_RAINFAST_WATCH` (dark; effective only while `GATE_LAWN_VISIT_MEMORY` is
 live, and the sentence prints only while `GATE_LAWN_REPORT_LEAD` is live; off
 leaves the lawn payload and render unchanged, key for key, with no weather read

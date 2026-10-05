@@ -39,6 +39,17 @@
  *
  * Perception hygiene: the model gets the photos, the view name and the watch
  * topic's plain name. No score, no product, no prior verdict or status.
+ *
+ * Lighting (GATE_LAWN_LIGHTING, owner 2026-10-04): read under lawn-paired-recheck-v3.
+ * Each photo's stored light read (the visit assessment's, never a new model call)
+ * rides the request, and a pair whose two photos are not in compatible light
+ * (lawn-lighting.js: full_sun with full_sun, overcast and open_shade with each
+ * other; everything else, and any photo with no read, is NOT comparable) is told
+ * to judge density, weeds and damaged patches only. The server enforces it too:
+ * `color` is dropped from such a pair's what_changed, and a better / worse verdict
+ * that rested on color alone is not written. A failed read of the stored light
+ * writes nothing (the job is a miss), so a degraded read is never frozen as a
+ * healthy one. Gate off: v2, byte for byte.
  */
 const MODELS = require('../config/models');
 const logger = require('./logger');
@@ -47,9 +58,12 @@ const { dispatchWithFallback } = require('./llm/call');
 const shotList = require('./lawn-photo-shots');
 const { photoIsUsable } = require('./service-report/lawn-progress');
 const { recordPairedRecheck } = require('./service-report/lawn-visit-memory');
-const { lawnPairedRecheckLive } = require('../config/feature-gates');
+const { lawnPairedRecheckLive, lawnLightingLive } = require('../config/feature-gates');
+const lighting = require('./lawn-lighting');
 
 const PROMPT_VERSION = 'lawn-paired-recheck-v2';
+// The version a read is stamped with while GATE_LAWN_LIGHTING is live.
+const LIGHTING_PROMPT_VERSION = 'lawn-paired-recheck-v3';
 const LANE_ID = 'lawn_paired_recheck';
 const RECHECK_SOURCE = 'photo_pair';
 const VERDICTS = ['better', 'same', 'worse', 'cannot_tell'];
@@ -114,6 +128,17 @@ Rules:
 - pairs: one entry for EVERY pair number you were given, the whole-lawn comparison of that pair.
 - items: one entry for EVERY watch item named in the request, using its key exactly as given. Judge that item only from the pairs where it can be seen, and list those pair numbers in pairs. If no pair shows it, answer cannot_tell with an empty pairs list.
 - For an item, answer only whether the affected areas look better, the same or worse in AFTER than in BEFORE. Never say which direction the problem runs (for example too dry versus too wet) or what caused it.
+Return JSON only, matching the schema.`;
+
+// v3 (GATE_LAWN_LIGHTING): v2 plus the light rule. Appended to the v2 text, so v2
+// stays exactly as it was and v3 differs from it only by this block.
+const LIGHTING_RULE = `
+
+Light (each pair line below states the light of its BEFORE and AFTER photo and whether color may be compared):
+- Sun, shade and cloud change how green turf looks. When a pair line says color may NOT be compared, the two photos are in different or unknown light: do not use color or greenness for that pair or for any watch item you judge from it. Judge only density (how thick the turf is, how much bare ground shows), weeds and how far damaged patches reach, and never list color in what_changed for that pair.
+- Never read shadowed turf as thinner, darker or more stressed turf, and never read sunlit turf as yellower or paler turf. If the only difference you can see is color or shadow, answer same or cannot_tell.
+- When a pair line says color may be compared, the two photos are in compatible light and color counts as it did before.`;
+const LIGHTING_SYSTEM_PROMPT = `${SYSTEM_PROMPT.replace(/\n?Return JSON only, matching the schema\.$/, '')}${LIGHTING_RULE}
 Return JSON only, matching the schema.`;
 
 const parseJson = (value) => {
@@ -197,10 +222,13 @@ function watchItemsFrom(sinceLast) {
  * `afterImage` are { data, mimeType }. Nothing but the view labels and watch
  * item names is ever put into the text or labels.
  */
-function buildRequest({ pairs, items }) {
+function buildRequest({ pairs, items, lighting: lightingOn = false }) {
+  const lightLine = (pair) => (lightingOn
+    ? ` (BEFORE light: ${pair.beforeLight || 'unknown'}; AFTER light: ${pair.afterLight || 'unknown'}; color ${pair.colorComparable === true ? 'may be compared' : 'may NOT be compared'})`
+    : '');
   const lines = [
     `${pairs.length} pair${pairs.length === 1 ? '' : 's'} of same-spot photos follow, each labeled BEFORE then AFTER:`,
-    ...pairs.map((pair, i) => `- Pair ${i + 1}: ${pair.label}`),
+    ...pairs.map((pair, i) => `- Pair ${i + 1}: ${pair.label}${lightLine(pair)}`),
     '',
     'Watch items (answer each one by its key):',
     ...items.map((item) => `- ${item.key}: ${item.name}`),
@@ -210,7 +238,7 @@ function buildRequest({ pairs, items }) {
     { data: pair.afterImage.data, mimeType: pair.afterImage.mimeType, label: `Pair ${i + 1} AFTER (${pair.label})` },
   ]);
   return {
-    system: SYSTEM_PROMPT,
+    system: lightingOn ? LIGHTING_SYSTEM_PROMPT : SYSTEM_PROMPT,
     text: lines.join('\n'),
     images,
     jsonMode: true,
@@ -220,7 +248,7 @@ function buildRequest({ pairs, items }) {
     reasoningEffort: 'low',
     timeoutMs: MAX_MS,
     laneId: 'lawn_paired_recheck', // literal on purpose: llm-call-ledger-coverage.test.js greps the call site for it
-    promptVersion: PROMPT_VERSION,
+    promptVersion: lightingOn ? LIGHTING_PROMPT_VERSION : PROMPT_VERSION,
   };
 }
 
@@ -281,8 +309,15 @@ function answerProblem(json, { pairCount, itemKeys } = {}) {
  * and anything unsupported writes NOTHING (the engine then says "unclear").
  * @returns {{rechecks: Object, photoPairs: Array}}
  */
-function normalizeAnswer(json, { pairs, items }) {
-  const byPair = new Map(json.pairs.map((p) => [p.pair, p]));
+function normalizeAnswer(json, { pairs, items, promptVersion = PROMPT_VERSION }) {
+  // A pair whose two photos are not in compatible light (`colorComparable === false`,
+  // only ever set while GATE_LAWN_LIGHTING is live) cannot speak to color: color is
+  // dropped from its what_changed, and a better / worse verdict that rested on
+  // color alone is read as cannot_tell. Pairs with no such mark are untouched.
+  const colorBlocked = (n) => pairs[n - 1]?.colorComparable === false;
+  const pairChanges = (p) => (p.verdict === 'same' ? [] : orderedChanges(p.what_changed).filter((d) => !(d === 'color' && colorBlocked(p.pair))));
+  const verdictOf = (p) => (colorBlocked(p.pair) && (p.verdict === 'better' || p.verdict === 'worse') && !pairChanges(p).length ? 'cannot_tell' : p.verdict);
+  const byPair = new Map(json.pairs.map((p) => [p.pair, { ...p, verdict: verdictOf(p) }]));
   const askedKeys = new Set(items.map((item) => item.key));
   const rechecks = {};
   for (const answer of json.items) {
@@ -290,23 +325,25 @@ function normalizeAnswer(json, { pairs, items }) {
     if (!askedKeys.has(key) || !WRITABLE_VERDICTS.has(answer.verdict)) continue;
     const cited = [...new Set(answer.pairs)].filter((n) => (byPair.get(n)?.verdict || 'cannot_tell') !== 'cannot_tell');
     if (!cited.length) continue;
-    const changed = answer.verdict === 'same' ? [] : orderedChanges(answer.what_changed);
+    // An item may name color only when at least one pair it rests on can speak to it.
+    const colorAllowed = cited.some((n) => !colorBlocked(n));
+    const changed = answer.verdict === 'same' ? [] : orderedChanges(answer.what_changed).filter((d) => d !== 'color' || colorAllowed);
     if (answer.verdict !== 'same' && !changed.length) continue;
     rechecks[key] = {
       verdict: answer.verdict,
       source: RECHECK_SOURCE,
       whatChanged: changed,
       pairs: cited.sort((a, b) => a - b).map((n) => pairs[n - 1].zone),
-      promptVersion: PROMPT_VERSION,
+      promptVersion,
     };
   }
-  const photoPairs = json.pairs
+  const photoPairs = [...byPair.values()]
     .filter((p) => WRITABLE_VERDICTS.has(p.verdict))
     .sort((a, b) => a.pair - b.pair)
     .map((p) => ({
       zone: pairs[p.pair - 1].zone,
       verdict: p.verdict,
-      whatChanged: p.verdict === 'same' ? [] : orderedChanges(p.what_changed),
+      whatChanged: pairChanges(p),
     }));
   return { rechecks, photoPairs };
 }
@@ -324,6 +361,26 @@ async function loadInputs({ knex, assessmentId, priorAssessmentId }) {
   return {
     current: find(assessmentId), prior: find(priorAssessmentId), currentPhotos: photosOf(assessmentId), priorPhotos: photosOf(priorAssessmentId),
   };
+}
+
+// GATE_LAWN_LIGHTING: the stored light of each of the two visits' photos, by
+// photo row id (a photo with no read, or from a run before the gate, is
+// 'unknown'). THROWS on a failed read; runPairedRecheck's catch then writes
+// nothing, so a degraded read is never frozen as a healthy one.
+async function loadPhotoLights({ knex, assessmentId, priorAssessmentId }) {
+  const runs = await knex('lawn_assessment_runs')
+    .whereIn('assessment_id', [assessmentId, priorAssessmentId])
+    .select('assessment_id', 'photo_ids', 'photo_quality');
+  const byPhotoId = new Map();
+  for (const run of runs) for (const entry of lighting.photoLightsFromRun(run)) byPhotoId.set(entry.photoId, entry.light);
+  return byPhotoId;
+}
+
+// A formed pair with each photo's light and whether color may be compared on it.
+function markPairLight(pair, lightByPhotoId) {
+  const beforeLight = lightByPhotoId.get(String(pair.before.id)) || 'unknown';
+  const afterLight = lightByPhotoId.get(String(pair.after.id)) || 'unknown';
+  return { ...pair, beforeLight, afterLight, colorComparable: lighting.colorComparability(afterLight, beforeLight).comparable };
 }
 
 async function loadImage(photoService, row) {
@@ -355,9 +412,9 @@ async function loadPairImages(formed, photoService, assessmentId) {
 }
 
 // The one model call over every pair. { outcome } on a conforming answer, else { miss }.
-async function askModel({ loaded, items, assessmentId, dispatch, deadlineMs }) {
+async function askModel({ loaded, items, assessmentId, dispatch, deadlineMs, lighting: lightingOn = false }) {
   const itemKeys = items.map((item) => item.key);
-  const payload = buildRequest({ pairs: loaded, items });
+  const payload = buildRequest({ pairs: loaded, items, lighting: lightingOn });
   const started = Date.now();
   const outcome = await withDeadline(
     Promise.resolve().then(() => dispatch(MODELS.TEXT_POLICIES.lawnPairedRecheck, payload, {
@@ -390,8 +447,8 @@ function preflight(ctx) {
 }
 
 // Score the answer into records and store them; the job's final status.
-async function storeVerdicts({ ctx, knex, loaded, items, outcome, latencyMs }) {
-  const { rechecks, photoPairs } = normalizeAnswer(outcome.json, { pairs: loaded, items });
+async function storeVerdicts({ ctx, knex, loaded, items, outcome, latencyMs, lighting: lightingOn = false }) {
+  const { rechecks, photoPairs } = normalizeAnswer(outcome.json, { pairs: loaded, items, promptVersion: lightingOn ? LIGHTING_PROMPT_VERSION : PROMPT_VERSION });
   const usage = outcome.usage || null;
   logger.info(`[lawn-paired-recheck] ${ctx.assessmentId}: ${loaded.length} pair(s), ${Object.keys(rechecks).length} recheck(s), `
     + `${outcome.provider}/${outcome.model}, ${latencyMs}ms, tokens in ${usage?.input_tokens ?? '?'} out ${usage?.output_tokens ?? '?'}`);
@@ -415,17 +472,22 @@ async function runPairedRecheck(ctx = {}, deps = {}) {
     const { done, priorAssessmentId, items } = preflight(ctx);
     if (done) return done;
     const { assessmentId } = ctx;
-    const formed = formPairs(await loadInputs({ knex, assessmentId, priorAssessmentId }));
+    // GATE_LAWN_LIGHTING, read at call time: v3 prompt, each photo's stored light,
+    // and no color claim across different light. Off, none of this runs.
+    const lightingOn = lawnLightingLive();
+    const inputs = await loadInputs({ knex, assessmentId, priorAssessmentId });
+    const lightByPhotoId = lightingOn ? await loadPhotoLights({ knex, assessmentId, priorAssessmentId }) : null;
+    const formed = formPairs(inputs).map((pair) => (lightByPhotoId ? markPairLight(pair, lightByPhotoId) : pair));
     const loaded = formed.length ? await loadPairImages(formed, deps.photoService || require('./photos'), assessmentId) : [];
     if (!loaded.length) {
       logger.info(`[lawn-paired-recheck] no pair for ${assessmentId} (prior ${priorAssessmentId})`);
       return { status: 'no_pairs' };
     }
     const asked = await askModel({
-      loaded, items, assessmentId, dispatch: deps.dispatch || dispatchWithFallback, deadlineMs: deps.deadlineMs,
+      loaded, items, assessmentId, dispatch: deps.dispatch || dispatchWithFallback, deadlineMs: deps.deadlineMs, lighting: lightingOn,
     });
     if (asked.miss) return asked.miss;
-    return await storeVerdicts({ ctx, knex, loaded, items, outcome: asked.outcome, latencyMs: asked.latencyMs });
+    return await storeVerdicts({ ctx, knex, loaded, items, outcome: asked.outcome, latencyMs: asked.latencyMs, lighting: lightingOn });
   } catch (err) {
     logger.warn(`[lawn-paired-recheck] failed for ${ctx.assessmentId}: ${err.message}`);
     return { status: 'unavailable' };
@@ -449,6 +511,8 @@ function scheduleAfterFreeze(ctx, deps = {}) {
 
 module.exports = {
   PROMPT_VERSION,
+  LIGHTING_PROMPT_VERSION,
+  LIGHTING_SYSTEM_PROMPT,
   LANE_ID,
   RECHECK_SOURCE,
   VERDICTS,
