@@ -461,6 +461,19 @@ postgres('access codes section', () => {
       expect(list.active.map((r) => r.id)).toEqual([standing.id]);
     });
 
+    test('a door code sent again after its visit ended is found again', async () => {
+      const c = await customer();
+      const first = await visit(c.id, day(2));
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      await access.accept(trx, row.id, { now: NOW });
+      await text(c.id, 'The door code is #9090');
+      const read = stub([gateItem({ kind: 'door', code: '#9090', life: 'visit', quote: 'The door code is #9090' })]);
+      expect(await sweep(read)).toMatchObject({ found: 0 });
+      await trx('scheduled_services').where({ id: first }).update({ status: 'completed' });
+      await trx('data_hygiene_source_extractions').where({ extractor_version: 'access-net-v1' }).del();
+      expect(await sweep(read)).toMatchObject({ found: 1 });
+    });
+
     test('with no visit in the window the code stays attached to nothing and stays listed', async () => {
       const c = await customer();
       await visit(c.id, day(40));
@@ -509,6 +522,30 @@ postgres('access codes section', () => {
   });
 
   describe('dismiss, retire, add', () => {
+    const profile = (customerId) => trx('property_preferences').where({ customer_id: customerId }).first();
+
+    test('retire clears the same value from the profile field, and its replacement can then fill it', async () => {
+      const c = await customer();
+      const first = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, first.id, {});
+      expect((await profile(c.id)).garage_code).toBe('2468');
+      const out = await access.retire(trx, first.id, { adminUserId: ADMIN_ID });
+      expect(out).toMatchObject({ ok: true, clearedField: 'garage_code' });
+      expect((await profile(c.id)).garage_code).toBeNull();
+      const second = await found(c.id, { kind: 'garage', code: '1357' });
+      await access.accept(trx, second.id, {});
+      expect((await profile(c.id)).garage_code).toBe('1357');
+    });
+
+    test('retire leaves a profile field that holds a different value', async () => {
+      const c = await customer({ prefs: { garage_code: '9999' } });
+      const row = await found(c.id, { kind: 'garage', code: '2468' });
+      await access.accept(trx, row.id, {});
+      const out = await access.retire(trx, row.id, { adminUserId: ADMIN_ID });
+      expect(out.clearedField).toBeNull();
+      expect((await profile(c.id)).garage_code).toBe('9999');
+    });
+
     test('dismiss moves found to dismissed and retire moves active to retired, each audited', async () => {
       const c = await customer();
       const toDismiss = await found(c.id);

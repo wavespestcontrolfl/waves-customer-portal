@@ -256,6 +256,11 @@ const canonicalLower = (v) => String(v || '').trim().replace(/\s+/g, '').toLower
 
 // Insert the kept items as `found` and write the receipt, in one transaction.
 // Returns how many rows went in.
+// A row the office still sees: waiting, standing, or a visit code whose visit
+// has not ended. One rule for the live list and for the sweep's duplicate check.
+const isLive = (r) => r.status === 'found' || r.life === 'standing' || !r.scheduled_service_id
+  || !ENDED_VISIT_STATUSES.includes(r.service_status || 'pending');
+
 async function fileFoundItems(conn, { message, properties }, items, receipt) {
   return conn.transaction(async (trx) => {
     const customer = await trx('customers').where({ id: message.customer_id }).whereNull('deleted_at').first('id');
@@ -266,12 +271,15 @@ async function fileFoundItems(conn, { message, properties }, items, receipt) {
     let toInsert = [];
     if (items.length) {
       const prefs = await trx('property_preferences').where({ customer_id: customer.id }).first() || {};
-      const existing = await trx('customer_access_codes')
-        // A retired or dismissed value the customer sends again is news: only a row
-        // still waiting or still live makes a new one redundant.
-        .where({ customer_id: customer.id }).whereIn('status', ['found', 'active'])
-        .whereIn('value_hash', items.map((i) => i.value_hash))
-        .select('kind', 'value_hash');
+      // A retired or dismissed value the customer sends again is news, and so is
+      // a visit code whose visit has ended (the live list no longer shows it):
+      // only a row still waiting or still live makes a new one redundant.
+      const existing = (await trx('customer_access_codes as a')
+        .leftJoin('scheduled_services as ss', 'ss.id', 'a.scheduled_service_id')
+        .where('a.customer_id', customer.id).whereIn('a.status', ['found', 'active'])
+        .whereIn('a.value_hash', items.map((i) => i.value_hash))
+        .select('a.kind', 'a.value_hash', 'a.status', 'a.life', 'a.scheduled_service_id', 'ss.status as service_status'))
+        .filter(isLive);
       const taken = new Set(existing.map((r) => `${r.kind}:${r.value_hash}`));
       toInsert = items.filter((item) => {
         if (taken.has(`${item.kind}:${item.value_hash}`)) return false;
@@ -388,9 +396,7 @@ async function listForCustomer(conn, customerId) {
     .where('a.customer_id', customerId).whereIn('a.status', ['active', 'found'])
     .select('a.*', conn.raw('ss.scheduled_date::text AS scheduled_date'), 'ss.status as service_status')
     .orderBy('a.created_at', 'desc').orderBy('a.id');
-  const live = (r) => r.status === 'found' || r.life === 'standing' || !r.scheduled_service_id
-    || !ENDED_VISIT_STATUSES.includes(r.service_status || 'pending');
-  const kept = rows.filter(live);
+  const kept = rows.filter(isLive);
   return {
     active: kept.filter((r) => r.status === 'active').map(serialize),
     found: kept.filter((r) => r.status === 'found').map(serialize),
@@ -539,7 +545,41 @@ async function decide(conn, id, { from, to, action, adminUserId }) {
 }
 
 const dismiss = (conn, id, { adminUserId = null } = {}) => decide(conn, id, { from: 'found', to: 'dismissed', action: 'access_code.dismissed', adminUserId });
-const retire = (conn, id, { adminUserId = null } = {}) => decide(conn, id, { from: 'active', to: 'retired', action: 'access_code.retired', adminUserId });
+
+// Retire an active code. A standing gate, lockbox or garage code may also sit
+// in its profile field (accept and addByStaff fill an empty one): the same
+// value there is cleared under the preference lock, so existing profile
+// readers stop showing a dead code and its replacement can fill the field. A
+// field that holds a different value is left alone. The shared neighborhood
+// directory entry is not touched: other homes rely on it, and the office
+// retires it on the Gate codes page.
+async function retire(conn, id, { adminUserId = null } = {}) {
+  if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
+  const head = await conn('customer_access_codes').where({ id }).first('customer_id');
+  if (!head) return fail(404, 'not_found');
+  return conn.transaction(async (trx) => {
+    if (!(await lockCustomer(trx, head.customer_id))) return fail(404, 'customer_not_found');
+    const row = await trx('customer_access_codes').where({ id }).forUpdate().first();
+    if (!row) return fail(404, 'not_found');
+    if (row.status !== 'active') return fail(409, 'not_active');
+    let clearedField = null;
+    const field = PROFILE_FIELD[row.kind];
+    if (row.life === 'standing' && field && row.code) {
+      const prefs = await trx('property_preferences').where({ customer_id: row.customer_id }).forUpdate().first('id', field);
+      if (prefs && canonicalLower(prefs[field]) === canonicalLower(row.code)) {
+        await trx('property_preferences').where({ id: prefs.id }).update({ [field]: null, updated_at: trx.fn.now() });
+        clearedField = field;
+      }
+    }
+    const [updated] = await trx('customer_access_codes').where({ id }).update({
+      status: 'retired', decided_by: adminUserId || null, decided_at: trx.fn.now(), updated_at: trx.fn.now(),
+    }).returning('*');
+    await audit(trx, adminUserId, 'access_code.retired', id, {
+      customer_id: row.customer_id, kind: row.kind, life: row.life, profile_field_cleared: clearedField,
+    });
+    return { ok: true, row: serialize(updated), clearedField };
+  });
+}
 
 // The office adds a code itself: active at once.
 async function addByStaff(conn, { customerId, kind, life, code, instructions, adminUserId = null, now = new Date() } = {}) {
