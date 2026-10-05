@@ -38,6 +38,9 @@ const DEAD_STATUSES = ['cancelled', 'no_show', 'skipped', 'rescheduled'];
 // retried on the next tick, never rested.
 const RACE_CODES = ['visit_changed', 'service_reassigned', 'visit_identity_changed'];
 const AUDIT_CLOSED = 'visit.assessment_closed_on_estimate_sent';
+// The estimate ↔ assessment pairing, written INSIDE the completion's record
+// transaction by the locked guard, so it commits exactly when the close does.
+const AUDIT_PAIRED = 'visit.assessment_estimate_paired';
 const AUDIT_REFUSED = 'visit.assessment_close_on_estimate_sent_refused';
 // The close ALWAYS runs in the backfill posture, on the visit day too
 // (completeScheduledService admits the same day for a system quiet
@@ -162,7 +165,7 @@ function candidateVisits(conn, { today, now }) {
             .whereRaw(`${HANDOFF_SQL} >= ?`, [estimateSince])
             .whereNotExists(function closedAnother() {
               this.select(conn.raw('1')).from('audit_log as used')
-                .where('used.action', AUDIT_CLOSED)
+                .where('used.action', AUDIT_PAIRED)
                 .whereRaw("used.resource_type = 'scheduled_services' AND used.metadata ->> 'estimateId' = estimates.id::text AND used.resource_id <> s.id");
             })
             // One estimate, one assessment (matchedAssessmentId): the
@@ -273,10 +276,11 @@ async function matchedAssessmentId(conn, customerId, estimate) {
 // An estimate that already closed ONE assessment closes no other (pre-push
 // audit P1): resent, or accepted, after a later assessment it would match
 // that one too under the date heuristic. The pairing is the closed audit row
-// this module writes (metadata.estimateId), read back here and in SQL.
+// row the locked guard writes in the completion's own transaction
+// (AUDIT_PAIRED, metadata.estimateId), read back here and in SQL.
 async function estimateClosedAnother(conn, estimateId, visitId) {
   const used = await conn('audit_log')
-    .where({ action: AUDIT_CLOSED, resource_type: 'scheduled_services' })
+    .where({ action: AUDIT_PAIRED, resource_type: 'scheduled_services' })
     .whereRaw("metadata ->> 'estimateId' = ?", [String(estimateId)])
     .whereNot('resource_id', visitId)
     .first('id');
@@ -371,8 +375,22 @@ async function closeAssessment(visit, { today, now, resumeKey = null }) {
       const lockedToday = etDateString();
       const estimate = await estimateForAssessment(trx, lockedVisit, { now });
       if (!estimate) return 'estimate_not_sent';
-      return assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: lockedToday })
+      const refusal = assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: lockedToday })
         || await liveRefusal(trx, lockedVisit);
+      if (refusal) return refusal;
+      // Admitted: record the pairing in THIS transaction, so it commits with
+      // the completion or not at all, and a resume keeps it (pre-push audit
+      // P1). Not best-effort: a failed insert aborts the close.
+      await require('./audit-log').recordAuditEvent({
+        actor_type: 'system',
+        action: AUDIT_PAIRED,
+        resource_type: 'scheduled_services',
+        resource_id: lockedVisit.id,
+        metadata: { estimateId: estimate.id },
+        critical: true,
+        trx,
+      });
+      return null;
     },
   });
   const body = (result && result.body) || {};
@@ -454,5 +472,6 @@ module.exports = {
   assessmentEstimateCloseRefusal,
   closeAssessmentsWithSentEstimates,
   AUDIT_CLOSED,
+  AUDIT_PAIRED,
   AUDIT_REFUSED,
 };

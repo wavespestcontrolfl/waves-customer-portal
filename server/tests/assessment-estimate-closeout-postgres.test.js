@@ -51,6 +51,7 @@ const {
   assessmentEstimateCloseRefusal,
   closeAssessmentsWithSentEstimates,
   AUDIT_CLOSED,
+  AUDIT_PAIRED,
   AUDIT_REFUSED,
 } = require('../services/assessment-estimate-closeout');
 
@@ -693,6 +694,32 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
       estimate_data: JSON.stringify({ deliveryState: { firstDeliveredAt: minutesAgo(60 * 72).toISOString(), lastDeliveredAt: resentAt, deliveredAt: [minutesAgo(60 * 72).toISOString(), resentAt] } }) });
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 0, closed: 0 });
     expect((await row(b)).status).toBe('on_site');
+  });
+
+  test('the pairing commits with the close itself: a lost closed-audit row does not free the estimate, and a refused close writes no pairing', async () => {
+    const customerId = await customer();
+    const a = await visit(customerId, { day: etDateString(addETDays(new Date(), -3)), en_route_at: minutesAgo(60 * 74), arrived_at: minutesAgo(60 * 73), check_in_time: minutesAgo(60 * 73) });
+    const estimateId = await estimate(customerId, { sentAt: minutesAgo(60 * 72) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect(await audits(a, AUDIT_PAIRED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ estimateId }) })]);
+    // The post-commit closed row is lost (a crash after the commit, a failed insert).
+    await mockPg('audit_log').where({ resource_id: a, action: AUDIT_CLOSED }).del();
+    const b = await visit(customerId);
+    const resentAt = minutesAgo(5).toISOString();
+    await mockPg('estimates').where({ id: estimateId }).update({ estimate_data: JSON.stringify({ deliveryState: { lastDeliveredAt: resentAt, firstDeliveredAt: resentAt, deliveredAt: [resentAt] } }) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 0, closed: 0 });
+    expect((await row(b)).status).toBe('on_site');
+    // A close refused under the lock writes no pairing (it rolls back with the completion).
+    const other = await customer();
+    const refusedVisit = await visit(other);
+    const refusedRow = await row(refusedVisit);
+    await estimate(other);
+    mockRace.beforeClaim = async () => {
+      await mockPg('time_entries').insert({ id: randomUUID(), technician_id: refusedRow.technician_id, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: minutesAgo(120) });
+      await mockPg('time_entries').insert({ id: randomUUID(), technician_id: refusedRow.technician_id, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(), job_id: refusedVisit });
+    };
+    await closeAssessmentsWithSentEstimates({ conn: mockPg });
+    expect(await audits(refusedVisit, AUDIT_PAIRED)).toHaveLength(0);
   });
 
   test('money is a person\'s: a priced assessment, a prepaid one and one with a linked invoice are never candidates', async () => {
