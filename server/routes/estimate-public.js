@@ -11928,23 +11928,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // estimates → leads → call_log. This lock also removes the
         // read-then-update gap on the verdict below.
         const freshLinkRow = await trx('estimates').where({ id: estimate.id }).forUpdate().first('estimate_data', 'status');
-        // Offer tier (GATE_ESTIMATE_OFFER_TIERS): the live member exclusion,
-        // re-judged on the customer row LOCKED under the already-locked
-        // estimate row (estimate → customer, the order the opt-out write and
-        // the converter use), so a membership landing mid-accept cannot
-        // slip past the pre-transaction read. Fails closed on a read error.
-        if (offerTier && estimate.customer_id) {
-          let liveMemberInTrx = true;
-          try {
-            const lockedCustomer = await trx('customers').where({ id: estimate.customer_id }).forUpdate().first();
-            liveMemberInTrx = !!lockedCustomer && lockedCustomer.active !== false && isMembershipCustomerRow(lockedCustomer);
-          } catch (_) { liveMemberInTrx = true; }
-          if (liveMemberInTrx) {
-            const err = new Error('offer tiers are not available for this estimate');
-            err.status = 409;
-            throw err;
-          }
-        }
         let freshLinkData = null;
         try {
           freshLinkData = typeof freshLinkRow?.estimate_data === 'string'
@@ -12468,6 +12451,26 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         // turns a blank first name into the surname (codex #5612 r4).
         firstName = contactFillFirstName
           || await estimateGreetingFirstName(trx, { ...estimate, customer_id: customerId || estimate.customer_id });
+      }
+
+      // Offer tier (GATE_ESTIMATE_OFFER_TIERS): the live member exclusion,
+      // re-judged on the customer the accept ACTUALLY landed on — the linked,
+      // sibling, or phone-matched profile resolved above, never only the
+      // estimate's pre-read link — on the row locked FOR UPDATE under the
+      // already-locked estimate row (estimate → customer, the opt-out write's
+      // and the converter's order). A profile this accept just minted cannot
+      // be a member. Fails closed on a read error.
+      if (offerTier && customerId && !customerCreatedThisAccept) {
+        let liveMemberInTrx = true;
+        try {
+          const lockedCustomer = await trx('customers').where({ id: customerId }).forUpdate().first();
+          liveMemberInTrx = !!lockedCustomer && lockedCustomer.active !== false && isMembershipCustomerRow(lockedCustomer);
+        } catch (_) { liveMemberInTrx = true; }
+        if (liveMemberInTrx) {
+          throw Object.assign(new Error('offer tiers are not available for this estimate'), {
+            status: 409, isOperational: true, code: 'offer_tier_unavailable',
+          });
+        }
       }
 
       // Bank tender re-judged UNDER THE CUSTOMER LOCK against the customer the
