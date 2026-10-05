@@ -21723,13 +21723,10 @@ router.put('/:id/status', async (req, res, next) => {
         // recovery vehicle: re-attempt it directly (dedup-guarded,
         // fire-and-forget; Codex r4). Mirrors admin-dispatch.
         {
+          // The package visit 2 retire (job-status no-show cascade) re-runs too.
+          void require('../services/call-booking-catalog').cancelCallFollowUpsForParentCancel({ conn: db, parentServiceId: svc.id, packageOnly: true }).catch(() => {});
           const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
           void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
-          // …and the package visit 2 retire (job-status.js no-show cascade),
-          // whose per-child failure the original transition swallowed.
-          void require('../services/call-booking-catalog').cancelCallFollowUpsForParentCancel({
-            conn: db, parentServiceId: svc.id, packageOnly: true,
-          }).catch(() => {});
         }
         // The invoice-void + credit-reversal seam is also recoverable here
         // (Codex #3178 r26 P2) — this is the route's ONLY reachable
