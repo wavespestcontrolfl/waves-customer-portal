@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const protocols = require('../config/protocols.json');
+const { lawnProtocols, LAWN_V13_VERSION } = require('./lawn-program');
+const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
@@ -122,7 +123,7 @@ function productAliases(productOrName) {
   ].filter((alias, index, arr) => alias && alias.length > 5 && arr.indexOf(alias) === index);
 }
 
-function parseProtocolLines(text, role) {
+function parseProtocolLines(text, role, { exactName = false } = {}) {
   if (!text) return [];
   return String(text)
     .split('\n')
@@ -133,6 +134,7 @@ function parseProtocolLines(text, role) {
       role,
       conditional: role !== 'base' || /^if\b/i.test(raw) || /\bif\b/i.test(raw),
       product: null,
+      ...(exactName ? { exactName: true } : {}),
       ...classifyProtocolLine(raw, role),
     }));
 }
@@ -161,12 +163,16 @@ function matchCatalogProduct(line, products) {
       if (!direct && !reverse && !tokenMatch) return null;
       const hasInventoryPrice = Number(product.cost_per_unit || 0) > 0 || Number(product.best_price || 0) > 0;
       const needsPricingPenalty = product.needs_pricing === true ? -75 : 0;
+      // A line that spells a product's whole catalog name (the v13 lawn program,
+      // `exact_catalog_names`) always outranks a product that only shares a
+      // generic word with it ("Insecticide"), whatever either one's price is.
+      const exactNameBonus = line.exactName && normalizedLine.includes(name) ? 300 : 0;
       const npkScore = lineNpk && productNpk
         ? (lineNpk.n === productNpk.n && lineNpk.p === productNpk.p && lineNpk.k === productNpk.k ? 150 : -250)
         : 0;
       return {
         product,
-        score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore,
+        score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore + exactNameBonus,
       };
     })
     .filter(Boolean)
@@ -468,7 +474,53 @@ function resolveProtocolItems(lines, products, options = {}, context = {}) {
   });
 }
 
+// The staged v13 protocol's product rows by catalog id, only while GATE_LAWN_V13
+// is live and that version is the one resolved; empty otherwise.
+function v13ProtocolRows(structuredProtocol) {
+  if (featureGates.lawnV13Live?.() !== true || structuredProtocol?.version !== LAWN_V13_VERSION) return new Map();
+  return new Map((structuredProtocol.products || []).filter((row) => row.productId).map((row) => [String(row.productId), row]));
+}
+
+// GATE_LAWN_V13: a visit with no pinned version plans from the staged v13
+// protocol or not at all. Without it (migration not run, or the track had no
+// active baseline) the v13 recipe would pair with another version's windows,
+// gates and catalog-default rates, so the plan is blocked.
+function lawnV13ProtocolMissing({ trackKey, service, structuredProtocol }) {
+  return featureGates.lawnV13Live?.() === true && Boolean(trackKey) && !service?.lawn_protocol_version
+    && structuredProtocol?.version !== LAWN_V13_VERSION;
+}
+
+// The same rows for a reader with no visit (the tank sheet, the cost audit): one
+// track and month, read from the database. Empty with the gate off. With the gate
+// on and no staged v13 protocol it throws (code lawn_v13_protocol_missing): the v13
+// recipe must never be priced or mixed at catalog-default rates.
+async function loadV13RowsForMonth(knex, trackKey, monthName) {
+  if (featureGates.lawnV13Live?.() !== true) return new Map();
+  const serviceDate = new Date(Date.UTC(2026, MONTH_ABBR.indexOf(monthName), 15, 16));
+  const summary = summarizeProtocolContext(await getProtocolWindowContext(knex, { serviceDate, grassTrack: trackKey, strict: true }));
+  if (summary?.version !== LAWN_V13_VERSION) {
+    throw Object.assign(new Error(`GATE_LAWN_V13 is on but the staged ${LAWN_V13_VERSION} protocol is missing for ${trackKey}`), { code: 'lawn_v13_protocol_missing' });
+  }
+  return v13ProtocolRows(summary);
+}
+
+// How a matched staged v13 protocol row sets the planned rate: its own stated
+// rate, else (a lb_n / lb_k nutrition row) the visit's nutrient target. Spread
+// into calculateProductAmount; {} for no row (gate off, or no v13 match).
+function v13RateOptions(row) {
+  if (!row) return {};
+  if (Number(row.ratePer1000) > 0) return { protocolRate: { rate: row.ratePer1000, unit: row.rateUnit } };
+  if (/^lb_[nk]/i.test(String(row.rateUnit || ''))) return { deriveNutrientFirst: true };
+  return {};
+}
+
+// A whole-lawn product the v13 program limits to sunny turf (Tetrino): the share
+// of the lawn that is sunny, from the turf profile's sun exposure. No sun
+// exposure on file is the half the cost model assumed.
+const SUNNY_TURF_SHARE = { full_sun: 1, partial_shade: 0.5, heavy_shade: 0 };
+
 function effectiveAreaFactor(line, property = {}) {
+  if (line?.scope === 'BROADCAST_FULL' && line.sunnyTurfOnly) return SUNNY_TURF_SHARE[property.sunExposure] ?? 0.5;
   if (line?.scope === 'BROADCAST_FULL' || line?.scope === 'BRANCH_ONE_OF') return 1;
   if (line?.scope === 'INSPECTION_ONLY') return 0;
   if (line?.scope === 'FIRST_YEAR_ONLY' && property.isFirstYear === false) return 0;
@@ -518,8 +570,19 @@ function derivedNutrientRate(product, nutrient, targetPer1000) {
 }
 
 function productRatePer1000(product, options = {}) {
+  // The matched staged v13 protocol row's own rate (GATE_LAWN_V13) comes first:
+  // a catalog row can carry no default rate (Stonewall 4FL) yet the program
+  // states one.
+  if (Number(options.protocolRate?.rate) > 0) {
+    return { rate: Number(options.protocolRate.rate), unit: options.protocolRate.unit || product?.rate_unit || null, source: 'protocol_rate' };
+  }
+  // A v13 nutrition row (rate unit lb_n / lb_k) states a nutrient target, not a
+  // bag rate: derive from the visit's N / K target before any catalog default
+  // (the catalog's 4.2 lb default is one bag rate, not every month's target).
+  const deriveFirst = options.deriveNutrientFirst === true;
   const catalogRate = Number(product?.default_rate_per_1000 || 0);
-  if (catalogRate > 0) {
+  if (catalogRate > 0 && !(deriveFirst && (derivedNutrientRate(product, 'analysis_n', options.targetNPer1000) != null
+    || derivedNutrientRate(product, 'analysis_k', options.targetKPer1000) != null))) {
     return {
       rate: catalogRate,
       unit: product?.rate_unit || null,
@@ -609,10 +672,12 @@ function calculateProductAmount({
   areaFactor = 1,
   targetNPer1000 = null,
   targetKPer1000 = null,
+  protocolRate = null,
+  deriveNutrientFirst = false,
 } = {}) {
   const factor = Math.max(0, Number(areaFactor ?? 1));
   const treatedUnits = (Number(lawnSqft || 0) * factor) / 1000;
-  const rateInfo = productRatePer1000(product, { targetNPer1000, targetKPer1000 });
+  const rateInfo = productRatePer1000(product, { targetNPer1000, targetKPer1000, protocolRate, deriveNutrientFirst });
   const rate = Number(rateInfo.rate || 0);
   const unit = rateInfo.unit || null;
   const amount = treatedUnits > 0 && rate > 0 ? Number((treatedUnits * rate).toFixed(3)) : null;
@@ -967,7 +1032,7 @@ function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: 
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
     || (recorded || requireKnownGrass ? null : 'st_augustine');
-  const track = trackKey ? protocols.lawn?.[trackKey] : null;
+  const track = trackKey ? lawnProtocols()?.[trackKey] : null;
   const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
   return { trackKey, track, month, visit };
@@ -1406,8 +1471,9 @@ async function buildPlanForService(serviceId, options = {}) {
   const visit = completionDefaultsEnabled && service.lawn_protocol_window_key && !structuredProtocolContext?.window
     ? null : selection.visit;
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
-  const baseLines = parseProtocolLines(visit?.primary, 'base');
-  const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional');
+  const exactName = track?.exact_catalog_names === true;
+  const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
+  const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional', { exactName });
   const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
   const candidateItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,
@@ -1434,8 +1500,12 @@ async function buildPlanForService(serviceId, options = {}) {
   const lawnSqft = completionContext
     ? Number(options.lawnSqft !== undefined ? options.lawnSqft : (completionContext.propertyMatchesProfile ? profile?.lawn_sqft : 0)) || 0
     : Number(profile?.lawn_sqft || 0);
+  // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
+  // own protocol row supplies its rate and its sunny-turf limit.
+  const v13Rows = v13ProtocolRows(structuredProtocol);
   const planItems = candidateItems.map((item) => {
     const substitution = item.product ? substitutions.get(String(item.product.id)) : null;
+    const v13Row = !substitution && item.product ? v13Rows.get(String(item.product.id)) : null;
     const plannedProduct = substitution
       ? {
           ...substitution.substitute,
@@ -1449,7 +1519,8 @@ async function buildPlanForService(serviceId, options = {}) {
       product: plannedProduct,
       lawnSqft,
       carrierGalPer1000: carrier,
-      areaFactor: effectiveAreaFactor(item, {
+      areaFactor: effectiveAreaFactor(v13Row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item, {
+        sunExposure: profile?.sun_exposure,
         plan: options.plan || service.waveguard_tier,
         weedPressure: options.weedPressure,
         conditionFlags: options.conditionFlags,
@@ -1458,6 +1529,7 @@ async function buildPlanForService(serviceId, options = {}) {
         isFirstYear: options.isFirstYear,
       }),
       ...nutrientTargets,
+      ...v13RateOptions(v13Row),
     }) : null;
     return {
       raw: item.raw,
@@ -1538,6 +1610,9 @@ async function buildPlanForService(serviceId, options = {}) {
   }
   if (completionContext && !completionContext.propertyMatchesProfile) {
     blocks.push({ code: 'lawn_property_unresolved', severity: 'block', message: 'The saved turf profile does not prove this service property; suggested amounts are unavailable.' });
+  }
+  if (lawnV13ProtocolMissing({ trackKey, service, structuredProtocol })) {
+    blocks.push({ code: 'lawn_v13_protocol_missing', severity: 'block', message: `The staged ${LAWN_V13_VERSION} lawn protocol is missing for this track; suggested amounts are unavailable.` });
   }
   if (completionDefaultsEnabled && !matchesLawnCompletionProtocol(structuredProtocol, {
     protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version, windowKey: service.lawn_protocol_window_key,
@@ -1785,6 +1860,10 @@ module.exports = {
   parseVisitNutrientTargets,
   summarizeMaterialCost,
   effectiveAreaFactor,
+  v13ProtocolRows,
+  v13RateOptions,
+  loadV13RowsForMonth,
+  lawnV13ProtocolMissing,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,

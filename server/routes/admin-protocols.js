@@ -12,10 +12,14 @@ const {
   parseProtocolLines,
   resolveProtocolItems,
   summarizeMaterialCost,
+  loadV13RowsForMonth,
+  v13RateOptions,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
-const { gateEnvValue } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+
+const { gateEnvValue } = featureGates;
 const { treeShrubFieldGuide } = require('../services/tree-shrub-field-guide');
 const { isTechnicianRequest, technicianCurrentVisitFilter } = require('../services/technician-visit-scope');
 const { scopeFromText } = require('../services/service-report/action-scope');
@@ -26,6 +30,7 @@ const {
   protocolReferenceSyncIssues,
   lockDraftProtocol,
 } = require('../services/lawn-protocol-operating-layer');
+const { lawnProtocols } = require('../services/lawn-program');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -914,9 +919,8 @@ function stripLawnMixItemPricing(item) {
 
 router.get('/lawn-mix', async (req, res, next) => {
   try {
-    const protocols = require('../config/protocols.json');
     const trackKey = TRACK_MAP[req.query.track] || req.query.track || 'st_augustine';
-    const track = protocols.lawn?.[trackKey];
+    const track = lawnProtocols()?.[trackKey];
     if (!track) return res.status(404).json({ error: 'Lawn protocol track not found' });
 
     const month = monthAbbr(req.query.month);
@@ -926,8 +930,9 @@ router.get('/lawn-mix', async (req, res, next) => {
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
     const products = await getProtocolProducts();
-    const baseLines = parseProtocolLines(visit.primary, 'base');
-    const conditionalLines = parseProtocolLines(visit.secondary, 'conditional');
+    const exactName = track.exact_catalog_names === true;
+    const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
+    const conditionalLines = parseProtocolLines(visit.secondary, 'conditional', { exactName });
     const allLines = [...baseLines, ...conditionalLines];
     const nutrientTargets = parseVisitNutrientTargets(visit.notes);
 
@@ -942,9 +947,19 @@ router.get('/lawn-mix', async (req, res, next) => {
       includePremiumOnly: req.query.includePremiumOnly === 'true',
     });
 
+    // GATE_LAWN_V13: the tank sheet uses the staged protocol's stated rates and
+    // nutrient-target derivation, as the plan does; no staged protocol = no sheet.
+    let v13Rows;
+    try {
+      v13Rows = await loadV13RowsForMonth(db, trackKey, month);
+    } catch (err) {
+      if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
+      throw err;
+    }
     const items = resolvedLines.map((line) => {
       const product = line.product;
       const selected = line.selected;
+      const rateOptions = v13RateOptions(product ? v13Rows.get(String(product.id)) : null);
       const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
       const areaContext = {
         plan: req.query.plan,
@@ -956,7 +971,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       };
       const areaFactor = effectiveAreaFactor(line, areaContext);
       const jobMix = selected && product && carrier
-        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets })
+        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...rateOptions })
         : null;
       // plannedMix mirrors jobMix for unselected conditionals: the mix a tech
       // would put down if the line's trigger fired (rescue threshold met,
@@ -967,15 +982,15 @@ router.get('/lawn-mix', async (req, res, next) => {
         ? areaFactor
         : effectiveAreaFactor({ ...line, selected: true }, { ...areaContext, includePremiumOnly: true });
       const plannedMix = jobMix || (product && carrier && plannedAreaFactor > 0
-        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor: plannedAreaFactor, ...nutrientTargets })
+        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor: plannedAreaFactor, ...nutrientTargets, ...rateOptions })
         : null);
       const tankCapacity = Number(calibration?.tank_capacity_gal || 0);
       const tankCoverageSqft = carrier && tankCapacity ? (tankCapacity / carrier) * 1000 : 0;
       const fullTankMix = selected && product && carrier && tankCoverageSqft
-        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets })
+        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets, ...rateOptions })
         : null;
       const plannedFullTankMix = fullTankMix || (product && carrier && tankCoverageSqft && plannedAreaFactor > 0
-        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets })
+        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets, ...rateOptions })
         : null);
 
       return {
@@ -1153,7 +1168,7 @@ router.get('/completion-actions', async (req, res, next) => {
     if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
       programKey = 'lawn';
       track = lawnTrackFromInput(req.query.lawnType || req.query.grassType || req.query.track);
-      program = protocols.lawn?.[track] || protocols.lawn?.st_augustine;
+      program = lawnProtocols()?.[track] || lawnProtocols()?.st_augustine;
       month = monthAbbr(req.query.month);
       visit = program?.visits?.find((v) => v.month === month) || program?.visits?.[0] || null;
     } else {
@@ -1166,8 +1181,9 @@ router.get('/completion-actions', async (req, res, next) => {
 
     if (!program || !visit) return res.status(404).json({ error: 'Protocol actions not found' });
 
-    const baseLines = parseProtocolLines(visit.primary, 'base');
-    const conditionalLines = parseProtocolLines(visit.secondary, 'conditional');
+    const exactName = program.exact_catalog_names === true;
+    const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
+    const conditionalLines = parseProtocolLines(visit.secondary, 'conditional', { exactName });
     const actions = buildCompletionActions({
       lines: [...baseLines, ...conditionalLines],
       products,
@@ -1814,12 +1830,13 @@ router.get('/programs', async (req, res, next) => {
     // Backward compat: map old track letters to new keys
     const TRACK_MAP = { A_St_Aug_Sun: 'st_augustine', B_St_Aug_Shade: 'st_augustine', C1_Bermuda: 'bermuda', C2_Zoysia: 'zoysia', D_Bahia: 'bahia' };
     const resolvedTrack = TRACK_MAP[track] || track;
-    if (resolvedTrack && protocols.lawn[resolvedTrack]) {
-      return res.json(protocolCatalogForViewer(req, { track: protocols.lawn[resolvedTrack] }));
+    const lawn = lawnProtocols();
+    if (resolvedTrack && lawn[resolvedTrack]) {
+      return res.json(protocolCatalogForViewer(req, { track: lawn[resolvedTrack] }));
     }
 
     // Return summary of all tracks
-    const summary = Object.entries(protocols.lawn).map(([key, t]) => ({
+    const summary = Object.entries(lawn).map(([key, t]) => ({
       key, name: t.name, visits: t.visits.length, notes: t.notes.length,
     }));
 
@@ -1852,7 +1869,7 @@ router.get('/programs/:track/visit/:num', async (req, res, next) => {
 
     const VISIT_TRACK_MAP = { A_St_Aug_Sun: 'st_augustine', B_St_Aug_Shade: 'st_augustine', C1_Bermuda: 'bermuda', C2_Zoysia: 'zoysia', D_Bahia: 'bahia' };
     const resolvedVisitTrack = VISIT_TRACK_MAP[track] || track;
-    const trackData = protocols.lawn[resolvedVisitTrack];
+    const trackData = lawnProtocols()[resolvedVisitTrack];
     if (!trackData) return res.status(404).json({ error: 'Track not found' });
 
     const visit = trackData.visits.find(v => v.visit === parseInt(num));

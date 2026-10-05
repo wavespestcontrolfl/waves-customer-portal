@@ -7,6 +7,7 @@
  */
 
 const protocols = require('../config/protocols.json');
+const { lawnProtocols } = require('./lawn-program');
 
 const LAWN_TRACK_ALIASES = Object.freeze({
   a: 'st_augustine',
@@ -64,13 +65,13 @@ function availablePrograms() {
 }
 
 function availableLawnTracks() {
-  return Object.keys(protocols.lawn || {});
+  return Object.keys(lawnProtocols() || {});
 }
 
 function normalizeLawnTrack(value) {
   const requested = String(value || '').trim().toLowerCase();
   if (!requested) return 'st_augustine';
-  if (protocols.lawn?.[requested]) return requested;
+  if (lawnProtocols()?.[requested]) return requested;
   return LAWN_TRACK_ALIASES[requested] || null;
 }
 
@@ -93,8 +94,8 @@ function getProtocol({ service_type: serviceType, lawn_track: lawnTrack } = {}) 
 
   if (key === 'lawn') {
     const track = normalizeLawnTrack(lawnTrack);
-    if (track && protocols.lawn?.[track]) {
-      return { protocol: protocols.lawn[track], track, type: 'lawn_care' };
+    if (track && lawnProtocols()?.[track]) {
+      return { protocol: lawnProtocols()[track], track, type: 'lawn_care' };
     }
     return {
       available_tracks: availableLawnTracks(),
