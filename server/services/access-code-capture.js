@@ -570,8 +570,15 @@ async function mirrorCustomer(conn, customerId) {
       // A mirrored row bound to a home this customer no longer has as its only
       // one (deactivated, or another home now stands alone) goes; the codes of
       // the home that remains are mirrored below.
+      // Adopted rows (an office or text row the mirror matched by value) count
+      // as mirrored too: they are found by the hashes the receipt recorded.
+      const recorded = Object.entries(hashes).filter(([k]) => k !== '_home').map(([, h]) => h).filter(Boolean);
       const former = await trx('customer_access_codes')
-        .where({ customer_id: customerId, status: 'active', life: 'standing', source_type: 'profile' })
+        .where({ customer_id: customerId, status: 'active', life: 'standing' })
+        .where(function mirrored() {
+          this.where('source_type', 'profile');
+          if (recorded.length) this.orWhereIn('value_hash', recorded);
+        })
         .whereNotNull('property_id').whereNot('property_id', home).forUpdate();
       for (const row of former) {
         await retireLocked(trx, row, { action: 'access_code.profile_superseded', keepProfile: true });
@@ -960,8 +967,10 @@ async function syncProfileField(trx, customerId, { kind, life, code }) {
   if (life !== 'standing' || !field || !code) return null;
   // Profile fields are customer-wide and every visit of the customer reads
   // them: a multi-home account's code stays on its own home only.
+  // Exactly one home: with none, a code has no home to belong to and the
+  // profile's own value is kept.
   const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).count({ n: '*' }).first();
-  if (Number(homes?.n || 0) > 1) return null;
+  if (Number(homes?.n || 0) !== 1) return null;
   const existing = await trx('property_preferences').where({ customer_id: customerId }).forUpdate().first('id', field);
   if (existing && canonicalLower(existing[field]) === canonicalLower(code)) return null;
   const proposal = { scope_id: customerId, field, resource_id: existing ? existing.id : null };
@@ -981,7 +990,9 @@ async function retireReplacedRows(trx, customerId, { kind, life, code, property_
   const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
   if (homes.length !== 1 || homes[0] !== home) return 0;
   const rows = await trx('customer_access_codes')
-    .where({ customer_id: customerId, kind, status: 'active', life: 'standing', property_id: home })
+    .where({ customer_id: customerId, kind, status: 'active', life: 'standing' })
+    // An older row with no home is the sole home's code too.
+    .where(function atHome() { this.where('property_id', home).orWhereNull('property_id'); })
     .whereNotNull('code').whereNot('id', keepId).forUpdate();
   for (const row of rows) await retireLocked(trx, row, { adminUserId, action: 'access_code.replaced', keepProfile: true });
   return rows.length;

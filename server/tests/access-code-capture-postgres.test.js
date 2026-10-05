@@ -1181,6 +1181,22 @@ postgres('access codes section', () => {
       expect((await access.listForCustomer(trx, c.id)).active.map((r) => r.code)).toEqual(['1357']);
     });
 
+    test('an office save also retires an older home-less code of that kind on a one-home account', async () => {
+      const c = await customer();
+      const old = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468' });
+      await trx('customer_access_codes').where({ id: old.row.id }).update({ property_id: null });
+      await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '1357' });
+      expect((await trx('customer_access_codes').where({ id: old.row.id }).first()).status).toBe('retired');
+    });
+
+    test('with no active home an office save never replaces the profile code', async () => {
+      const c = await customer();
+      await trx('property_preferences').insert({ customer_id: c.id, garage_code: '2468' }).onConflict('customer_id').merge();
+      await trx('customer_properties').where({ customer_id: c.id }).update({ active: false });
+      await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '1357' });
+      expect((await trx('property_preferences').where({ customer_id: c.id }).first()).garage_code).toBe('2468');
+    });
+
     test('home choices name the unit and the property label', async () => {
       const c = await customer({ properties: 2 });
       const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
@@ -1695,6 +1711,23 @@ postgres('access codes section', () => {
       const old = await trx('customer_access_codes').where({ customer_id: c.id, property_id: a }).first();
       expect(old.status).toBe('retired');
       expect(await mirror()).toMatchObject({ checked: 0 });
+    });
+
+    test('the only home changes: an office row the mirror adopted by value retires too', async () => {
+      const c = await customer({ prefs: { garage_code: '2468' } });
+      const [a] = c.propertyIds;
+      const staff = await access.addByStaff(trx, { customerId: c.id, kind: 'garage', life: 'standing', code: '2468', propertyId: a });
+      await mirror();
+      expect((await live(c.id)).map((r) => r.id)).toEqual([staff.row.id]);
+      const b = randomUUID();
+      await trx('customer_properties').insert({
+        id: b, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false,
+        address_line1: '810 Other Court', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID(),
+      });
+      await trx('customer_properties').where({ id: a }).update({ active: false });
+      await mirror();
+      expect((await trx('customer_access_codes').where({ id: staff.row.id }).first()).status).toBe('retired');
+      expect((await live(c.id)).map((r) => [r.code, r.property_id])).toEqual([['2468', b]]);
     });
   });
 });
