@@ -11,8 +11,10 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 // ONE reference instant for the whole suite, captured at module load: every relative date is derived from it with the
 // repo's ET calendar-day helper (calendar days, never 24-hour multiples), and nothing below reads the clock again.
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
 const REFERENCE = new Date();
+// The receipt fact the readers state: the ET time receipt_sent_at was stamped, or null.
+const RECEIPT_SENT = `${etDateString(REFERENCE)} ${formatETTime(REFERENCE)} ET`;
 
 const databaseUrl = process.env.IB_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
@@ -82,7 +84,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     B = await customer(`Orville${run}`, SURNAME);
     H = await customer('Marguerite', `Holdout${run}`);
     // Terminal invoices: paid by a recorded manual payment (linked by the portal's description rule), and void.
-    const paid = await invoice('paid', A, { total: 120, status: 'paid', paid_at: REFERENCE, due_date: day(-30), payment_method: 'check',
+    const paid = await invoice('paid', A, { total: 120, status: 'paid', paid_at: REFERENCE, receipt_sent_at: REFERENCE, due_date: day(-30), payment_method: 'check',
       payment_reference: 'CHK-1001', payment_recorded_by: 'Synthetic Operator', payment_recorded_at: REFERENCE });
     await db('payments').insert({ customer_id: A, payment_date: day(-29), amount: 120, status: 'paid', description: `Invoice ${paid.invoice_number} — check (CHK-1001)` });
     await invoice('voided', A, { total: 77, status: 'void' });
@@ -305,7 +307,9 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
     expect(by(list, 'archived')).toMatchObject({ archived: true, collectible: true, balance_due: 33 });
     expect(by(list, 'failsup')).toMatchObject({ collectible: true, balance_due: 66 });
     // Terminal statuses report the status and no balance.
-    expect(by(list, 'paid')).toMatchObject({ status: 'paid', collectible: false, balance_due: null, needs_reconciliation: false, reason: expect.stringMatching(/already paid/) });
+    expect(by(list, 'paid')).toMatchObject({ status: 'paid', collectible: false, balance_due: null, needs_reconciliation: false, reason: expect.stringMatching(/already paid/), receipt_sent_at: RECEIPT_SENT });
+    // No receipt recorded as sent reads null — the model states it, never guesses.
+    expect(by(list, 'credited')).toMatchObject({ receipt_sent_at: null });
     expect(by(list, 'voided')).toMatchObject({ status: 'void', collectible: false, balance_due: null, reason: expect.stringMatching(/void/) });
     expect(by(list, 'processing')).toMatchObject({ collectible: false, balance_due: null, reason: expect.stringMatching(/already processing/) });
     // The fence's three holds: an unresolved attempt, an ambiguous attempt, an unrecorded charge, a failed row flagged ambiguous.
@@ -542,7 +546,7 @@ suite('billing readers (get_customer_invoices, get_invoice_detail)', () => {
 
   test('invoice detail: the fence decides the balance; recorded payments are informational rows with no received verdict', async () => {
     const paid = await read('get_invoice_detail', { invoice_id: inv.paid.id });
-    expect(paid.invoice).toMatchObject({ status: 'paid', collectible: false, balance_due: null, payment_method: 'check', payment_reference: 'CHK-1001' });
+    expect(paid.invoice).toMatchObject({ status: 'paid', collectible: false, balance_due: null, payment_method: 'check', payment_reference: 'CHK-1001', receipt_sent_at: RECEIPT_SENT });
     expect(paid.recorded_payments).toEqual([expect.objectContaining({ amount: 120, status: 'paid', method: 'check', refunded_amount: 0 })]);
     expect(paid.recorded_payments_note).toMatch(/no verdict/);
     const held = await read('get_invoice_detail', { invoice_id: inv.open.id });

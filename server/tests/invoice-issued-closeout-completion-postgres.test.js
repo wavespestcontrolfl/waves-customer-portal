@@ -68,11 +68,20 @@ describe('source contracts', () => {
     expect(source).toMatch(/const persistRecord = async \(trx\) => \{[\s\S]{0,6000}if \(issuedInvoiceCloseout\) \{[\s\S]{0,3200}?const issuedNow = await trx\('invoices'\)\.where\(\{ id: issuedInvoiceCloseout\.invoiceId \}\)\.forUpdate\(\)/);
     expect(source).toMatch(/if \(err && err\.code === 'issued_invoice_not_reusable'\) \{\s*\n\s*await CompletionAttempts\.markCompletionAttemptFailed\(completionAttempt, err, db\);/);
   });
-  test('the operator\'s resend-receipt route is the reachable retry for the payment-triggered closeout, ahead of both legs', () => {
-    const source = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
-    // After the receipt-job claim (a queued receipt cannot deliver during the
-    // closeout), before either leg.
-    expect(source).toMatch(/router\.post\('\/:id\/send-receipt'[\s\S]{0,1200}receipt can only be sent for paid invoices[\s\S]{0,600}claimReceiptJobForOperatorSend\(id, \{ sawUnsent: !invoice\.receipt_sent_at \}\)[\s\S]{0,2000}closeOutVisitForIssuedInvoice\(\{ invoiceId: id, trigger: 'paid', actorTechnicianId: req\.technicianId \|\| null \}\);[\s\S]{0,400}if \(via === 'email' \|\| via === 'both'\) \{\s*emailResult = await sendReceiptEmail/);
+  test('the operator\'s resend-receipt writer is the reachable retry for the payment-triggered closeout, ahead of both legs', () => {
+    // The route and the IB resend_receipt tool share this one writer.
+    const route = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
+    expect(route).toMatch(/router\.post\('\/:id\/send-receipt'[\s\S]{0,600}await sendInvoiceReceipt\(req\.params\.id/);
+    const source = fs.readFileSync(path.join(__dirname, '../services/invoice-receipt-resend.js'), 'utf8');
+    // The send lock wraps the whole locked flow, whose steps run in order: the receipt-job claim (a queued
+    // receipt cannot deliver during the closeout), the approved-version re-check, then delivery — which runs
+    // the closeout ahead of BOTH legs (email-only resends retry it too).
+    expect(source).toMatch(/receipt can only be sent for paid invoices[\s\S]{0,1200}withReceiptSendLock\(invoiceId, \(owner\) => lockedSend\(s, owner\)\)/);
+    expect(source).toMatch(/async function lockedSend\(s, owner\) \{[\s\S]{0,900}await acquireClaim\(s, stillHeld\)[\s\S]{0,500}await verifyApproved\(s, claim\)[\s\S]{0,200}await deliver\(s, claim, stillHeld\)/);
+    expect(source).toMatch(/async function deliver\(s, claim, stillHeld\) \{\s*await runCloseout\(s, stillHeld\);[\s\S]{0,300}await runEmailLeg\(s, claim, stillHeld\);[\s\S]{0,200}await runTextLeg\(s, claim, stillHeld\)/);
+    // The claim is taken before anything else, and the closeout is the paid trigger.
+    expect(source).toMatch(/async function acquireClaim\(s, stillHeld\) \{[\s\S]{0,900}claimReceiptJobForOperatorSend\(s\.id, \{ sawUnsent: s\.sawUnsent \?\? !s\.invoice\.receipt_sent_at \}\)/);
+    expect(source).toMatch(/async function runCloseout\(s, stillHeld\) \{[\s\S]{0,400}closeOutVisitForIssuedInvoice\(\{ invoiceId: s\.id, trigger: 'paid', actorTechnicianId: s\.actorTechnicianId \}\)/);
   });
   test('the recovered-delivery branch of sendViaSMS runs the closeout too — a recovered send is a durable send', () => {
     const source = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');

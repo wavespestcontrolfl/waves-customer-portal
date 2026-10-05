@@ -4,20 +4,20 @@ import { getAdminAuthToken } from '../../lib/adminAuth';
 const API = import.meta.env.VITE_API_URL || '';
 
 // Inside the field workspace (.tech-field, tech-field.css) these resolve to the
-// Waves Admin look; the flag-off page has no --tfx-* and keeps the tech-portal
-// dark palette it is drawn on.
+// Waves Admin look; the fallbacks are the same light values, for a render
+// outside it.
 const DARK = {
-  bg: 'var(--tfx-bg, #0f1923)',
-  card: 'var(--tfx-card, #1e293b)',
-  border: 'var(--tfx-border, #334155)',
-  teal: 'var(--tfx-accent, #0ea5e9)',
-  green: 'var(--tfx-ok, #22c55e)',
-  red: 'var(--tfx-red, #ef4444)',
-  text: 'var(--tfx-text, #e2e8f0)',
-  muted: 'var(--tfx-muted, #94a3b8)',
-  onAccent: 'var(--tfx-on-accent, #fff)',
-  redTint: 'var(--tfx-red-tint, #ef444422)',
-  greenTint: 'var(--tfx-ok-tint, #22c55e22)',
+  bg: 'var(--tfx-bg, #fafaf9)',
+  card: 'var(--tfx-card, #ffffff)',
+  border: 'var(--tfx-border, #d6d3d1)',
+  teal: 'var(--tfx-accent, #1c1917)',
+  green: 'var(--tfx-ok, #1c1917)',
+  red: 'var(--tfx-red, #a32d2d)',
+  text: 'var(--tfx-text, #1c1917)',
+  muted: 'var(--tfx-muted, #57534e)',
+  onAccent: 'var(--tfx-on-accent, #ffffff)',
+  redTint: 'var(--tfx-red-tint, rgba(163, 45, 45, .1))',
+  greenTint: 'var(--tfx-ok-tint, rgba(28, 25, 23, .06))',
 };
 
 const QUICK_TAGS = [
@@ -224,7 +224,7 @@ export default function VisualNotesPanel({ service }) {
             fontSize: 13,
             fontWeight: 500,
             color: DARK.text,
-            fontFamily: "var(--tfx-font, 'Montserrat', sans-serif)",
+            fontFamily: "var(--tfx-font, 'Roboto', system-ui, sans-serif)",
           }}>
             Visual Notes
           </div>
@@ -462,7 +462,7 @@ export default function VisualNotesPanel({ service }) {
               color: DARK.text,
               fontSize: 12,
               fontWeight: 500,
-              fontFamily: "var(--tfx-font, 'Montserrat', sans-serif)",
+              fontFamily: "var(--tfx-font, 'Roboto', system-ui, sans-serif)",
             }}>
               Saved moments
             </div>

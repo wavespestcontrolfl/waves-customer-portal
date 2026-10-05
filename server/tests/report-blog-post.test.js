@@ -529,6 +529,61 @@ describe('searchReportBlogPosts', () => {
     expect((await searchReportBlogPosts(knex, 'rats')).map((post) => post.title)).toEqual(['Roof Rat Season in Bradenton']);
   });
 
+  // Owner 2026-10-04: typing "Co" answered "No post covers “Co” yet" while 58
+  // live posts held a word starting with it.
+  describe('a word still being typed', () => {
+    const rows = () => [
+      registryRow('aaaaaaaa-0000-4000-8000-000000000031', 'German Cockroaches in the Kitchen'),
+      registryRow('aaaaaaaa-0000-4000-8000-000000000032', 'Ghost Ant Control That Works'),
+      registryRow('aaaaaaaa-0000-4000-8000-000000000033', 'Pest Control Rates Explained'),
+      registryRow('aaaaaaaa-0000-4000-8000-000000000034', 'Chinch Bugs in St. Augustine'),
+    ];
+    const lastWordPatterns = (knex) => knex.calls
+      .filter(([name]) => name === 'content_registry inner orWhereRaw')
+      .map(([, , bindings]) => bindings[0]);
+
+    test('no post holds it whole: it matches the start of a word, and those posts start the search, none exact', async () => {
+      const knex = recordingKnex({ content_registry: rows() });
+      const posts = await searchReportBlogPosts(knex, 'Co');
+      expect(posts.map((post) => post.title).sort()).toEqual(['German Cockroaches in the Kitchen', 'Ghost Ant Control That Works', 'Pest Control Rates Explained']);
+      expect(posts.every((post) => post.exact === false && post.starts === true)).toBe(true);
+      // The second read asks the database for the start of a word.
+      expect(lastWordPatterns(knex)).toEqual(expect.arrayContaining(['\\m(?:co|coes|cos)\\M', '\\m(?:co)']));
+      expect((await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'cockr')).map((post) => post.title)).toEqual(['German Cockroaches in the Kitchen']);
+    });
+
+    test('only the last word, with the words before it whole: "ghost con" starts with the Ghost Ant Control post', async () => {
+      const posts = await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'ghost con');
+      expect(posts.map((post) => [post.title, post.exact, post.starts])).toEqual([
+        ['Ghost Ant Control That Works', false, true],
+        ['Pest Control Rates Explained', false, false],
+      ]);
+      // A first word is never read by its start.
+      expect(await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'cockr kitchen'))
+        .toEqual([expect.objectContaining({ title: 'German Cockroaches in the Kitchen', exact: false })]);
+      expect((await searchReportBlogPosts(recordingKnex({ content_registry: rows() }), 'cockr kitchen'))[0]).not.toHaveProperty('starts');
+    });
+
+    test('a post holds it whole: nothing is read by its start, so "rat" still never finds "Rates"', async () => {
+      const knex = recordingKnex({
+        content_registry: [...rows(), registryRow('aaaaaaaa-0000-4000-8000-000000000035', 'Roof Rat Season in Bradenton')],
+      });
+      const posts = await searchReportBlogPosts(knex, 'rat');
+      expect(posts).toEqual([expect.objectContaining({ title: 'Roof Rat Season in Bradenton', exact: true })]);
+      expect(posts[0]).not.toHaveProperty('starts');
+      expect(knex.calls.filter(([name]) => name === 'table')).toHaveLength(1);
+    });
+
+    test('a search that ends in a space, in a filler word, or past the fourth word is never read by a start', async () => {
+      for (const query of ['co ', 'co.', 'ghost co in', 'ghost ant chinch bugs co']) {
+        const knex = recordingKnex({ content_registry: rows() });
+        const posts = await searchReportBlogPosts(knex, query);
+        expect(posts.some((post) => 'starts' in post)).toBe(false);
+        expect(knex.calls.filter(([name]) => name === 'table').length).toBeLessThanOrEqual(1);
+      }
+    });
+  });
+
   test('a post the sweep did not verify live on the hub never comes back', async () => {
     const knex = recordingKnex({
       content_registry: [
