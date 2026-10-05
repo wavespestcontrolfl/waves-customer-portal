@@ -490,6 +490,11 @@ async function processServiceReportDelivery(delivery, knex = db) {
     });
     if (result.ok) {
       await markDeliverySent(delivery, result, knex);
+      // The email division's visit follow-ups (lc.first_visit_pest,
+      // lc.why_91_days) start here, behind the report they refer to. Never
+      // throws; reads and writes nothing while the automations gate is off.
+      await require('../email-template-automation-emitters')
+        .emitPestReportDelivered({ serviceRecordId: delivery.service_record_id });
       return { status: 'sent', result };
     }
     if (result.skipped) {

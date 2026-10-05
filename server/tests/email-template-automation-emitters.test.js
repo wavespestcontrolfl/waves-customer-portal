@@ -19,7 +19,7 @@ const db = require('../models/db');
 const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 const AutomationExecutor = require('../services/email-template-automation-executor');
 const {
-  INTENT_MAX_AGE_MS, MAX_INTENT_ATTEMPTS, emitEstimateExpired, emitReviewLinked5Star, emitVisitCompletedFirst, recordAutomationIntent, recordAutomationIntents, sweepMissedLifecycleEvents,
+  INTENT_MAX_AGE_MS, MAX_INTENT_ATTEMPTS, emitEstimateExpired, emitReviewLinked5Star, emitVisitCompletedFirst, emitServiceReportReady, emitPestReportDelivered, recordAutomationIntent, recordAutomationIntents, sweepMissedLifecycleEvents,
 } = require('../services/email-template-automation-emitters');
 
 beforeEach(() => {
@@ -129,7 +129,7 @@ describe('emitReviewLinked5Star', () => {
   });
 });
 
-describe('emitVisitCompletedFirst (the email division\'s lc.first_visit_pest; no caller wired yet)', () => {
+describe('emitVisitCompletedFirst (the email division\'s lc.first_visit_pest)', () => {
   test('hands the executor ids only, keyed per service record, for the customer recipient', async () => {
     await emitVisitCompletedFirst({ serviceRecordId: 'rec-1', customerId: 'cust-1' });
     expect(AutomationExecutor.processTrigger).toHaveBeenCalledWith({
@@ -149,6 +149,115 @@ describe('emitVisitCompletedFirst (the email division\'s lc.first_visit_pest; no
     isEnabled.mockReturnValue(false);
     expect(await emitVisitCompletedFirst({ serviceRecordId: 'rec-1', customerId: 'cust-1' })).toBeNull();
     expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+  });
+});
+
+describe('emitServiceReportReady (the email division\'s lc.why_91_days)', () => {
+  test('names its ONE automation, so the catalog\'s active service.report_ready automation on the same trigger never gets the event (no second report email)', async () => {
+    await emitServiceReportReady({ serviceRecordId: 'rec-1', customerId: 'cust-1' });
+    expect(AutomationExecutor.processTrigger).toHaveBeenCalledTimes(1);
+    expect(AutomationExecutor.processTrigger).toHaveBeenCalledWith({
+      triggerEventKey: 'service_report.ready',
+      executeImmediately: true,
+      automationKey: 'lc.why_91_days',
+      triggerEventId: 'lc_report_ready:rec-1',
+      entityType: 'service_record',
+      entityId: 'rec-1',
+      recipient: { type: 'customer', id: 'cust-1' },
+      payload: { service_record_id: 'rec-1', customer_id: 'cust-1' },
+    });
+  });
+
+  test('no record or no customer -> nothing emitted; gate off -> a no-op', async () => {
+    expect(await emitServiceReportReady({ serviceRecordId: 'rec-1' })).toBeNull();
+    expect(await emitServiceReportReady({ customerId: 'cust-1' })).toBeNull();
+    isEnabled.mockReturnValue(false);
+    expect(await emitServiceReportReady({ serviceRecordId: 'rec-1', customerId: 'cust-1' })).toBeNull();
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+  });
+});
+
+describe('emitPestReportDelivered (the producer the report delivery queue calls)', () => {
+  // service_records lookup + the intents table (insert a marker, settle it).
+  function mockReportTables(record) {
+    const inserted = [];
+    const settled = [];
+    db.mockImplementation((table) => {
+      if (table === 'service_records') return { where: jest.fn(() => ({ first: jest.fn(async () => record) })) };
+      if (table !== 'email_template_automation_intents') throw new Error(`unexpected table ${table}`);
+      return {
+        insert: jest.fn((row) => {
+          inserted.push(row);
+          const id = `marker:${row.trigger_event_key}`;
+          return { onConflict: () => ({ ignore: () => ({ returning: async () => [{ id, entity_id: row.entity_id }] }) }) };
+        }),
+        where: jest.fn((cond) => ({ update: jest.fn(async (patch) => { settled.push({ ...cond, status: patch.status }); return 1; }) })),
+      };
+    });
+    return { inserted, settled };
+  }
+  const pestRecord = { id: 'rec-1', customer_id: 'cust-1', service_line: 'pest', service_type: 'Quarterly Pest Control Service' };
+
+  test('a pest report: one durable marker per trigger, then both emits, each settling its own marker', async () => {
+    const { inserted, settled } = mockReportTables(pestRecord);
+    await emitPestReportDelivered({ serviceRecordId: 'rec-1' });
+    expect(inserted.map((row) => [row.trigger_event_key, row.entity_type, row.entity_id])).toEqual([
+      ['visit.completed_first', 'service_record', 'rec-1'],
+      ['service_report.ready', 'service_record', 'rec-1'],
+    ]);
+    expect(inserted.map((row) => JSON.parse(row.payload))).toEqual([
+      { service_record_id: 'rec-1', customer_id: 'cust-1' },
+      { service_record_id: 'rec-1', customer_id: 'cust-1' },
+    ]);
+    const calls = AutomationExecutor.processTrigger.mock.calls.map(([args]) => [args.triggerEventKey, args.automationKey]);
+    expect(calls).toEqual([['visit.completed_first', undefined], ['service_report.ready', 'lc.why_91_days']]);
+    expect(settled).toEqual([
+      { id: 'marker:visit.completed_first', status: 'processed' },
+      { id: 'marker:service_report.ready', status: 'processed' },
+    ]);
+  });
+
+  test('a legacy record with no service_line is classified by its service type, like the report builder', async () => {
+    mockReportTables({ ...pestRecord, service_line: null });
+    await emitPestReportDelivered({ serviceRecordId: 'rec-1' });
+    expect(AutomationExecutor.processTrigger).toHaveBeenCalledTimes(2);
+  });
+
+  test('a lawn report, a record with no customer, or a missing record: no marker, no emit', async () => {
+    for (const record of [
+      { ...pestRecord, service_line: 'lawn', service_type: 'Lawn Care Service' },
+      { ...pestRecord, customer_id: null },
+      undefined,
+    ]) {
+      const { inserted } = mockReportTables(record);
+      expect(await emitPestReportDelivered({ serviceRecordId: 'rec-1' })).toBeNull();
+      expect(inserted).toHaveLength(0);
+    }
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+  });
+
+  test('gate off: reads and writes NOTHING (no marker accumulates while the catalog is dark)', async () => {
+    isEnabled.mockReturnValue(false);
+    db.mockImplementation((table) => { throw new Error(`unexpected table ${table}`); });
+    expect(await emitPestReportDelivered({ serviceRecordId: 'rec-1' })).toBeNull();
+    expect(db).not.toHaveBeenCalled();
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+  });
+
+  test('never throws into the delivery queue: a failed lookup is logged and swallowed', async () => {
+    db.mockImplementation(() => { throw new Error('connection lost'); });
+    await expect(emitPestReportDelivered({ serviceRecordId: 'rec-1' })).resolves.toBeNull();
+  });
+
+  test('the sweep replays a pending marker of either trigger through its own emitter', async () => {
+    const old = new Date(Date.now() - 10 * 60 * 1000);
+    mockIntentsTable([
+      { id: 'm1', trigger_event_key: 'visit.completed_first', occurred_at: old, payload: JSON.stringify({ service_record_id: 'rec-1', customer_id: 'cust-1' }) },
+      { id: 'm2', trigger_event_key: 'service_report.ready', occurred_at: old, payload: JSON.stringify({ service_record_id: 'rec-1', customer_id: 'cust-1' }) },
+    ]);
+    await sweepMissedLifecycleEvents();
+    const calls = AutomationExecutor.processTrigger.mock.calls.map(([args]) => [args.triggerEventKey, args.automationKey]);
+    expect(calls).toEqual([['visit.completed_first', undefined], ['service_report.ready', 'lc.why_91_days']]);
   });
 });
 

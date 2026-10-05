@@ -120,9 +120,8 @@ const TRIGGER_MAPPINGS = {
     emailKeys: ['customer_email', 'email'],
   },
   // A customer's first performed visit on a service line. Mapped for the
-  // email division's lc.first_visit_pest; the producer call (an emitter at
-  // the completion site) is a separate step — see
-  // email-template-automation-emitters.js emitVisitCompletedFirst.
+  // email division's lc.first_visit_pest; produced by
+  // email-template-automation-emitters.js emitPestReportDelivered.
   'visit.completed_first': {
     entityType: 'service_record',
     entityIdKeys: ['service_record_id', 'id'],

@@ -10,10 +10,11 @@
  * executor (processTrigger's resolveEmailForTrigger), not duplicated here.
  *
  * customer.churned is intentionally NOT wired here yet — see the PR body for
- * why (deferred to a follow-up PR). visit.completed_first has its emitter
- * below (emitVisitCompletedFirst, the email division's lc.first_visit_pest)
- * but NO caller yet: the producer call belongs at the completion site, after
- * the closeout commits, and is a separate step.
+ * why (deferred to a follow-up PR). visit.completed_first and
+ * service_report.ready (the email division's lc.first_visit_pest and
+ * lc.why_91_days) are both produced by emitPestReportDelivered below, which
+ * the service-report delivery queue calls once a pest visit's report email
+ * has been marked sent.
  *
  * codex round 3 on #5154 — STRUCTURAL rewrite of the recovery sweep. Round 2
  * re-derived "missed events" by guessing from entity timestamps
@@ -238,21 +239,90 @@ async function emitReviewLinked5Star({ reviewId, customerId, locationId, starRat
 }
 
 // visit.completed_first — a customer's FIRST performed visit on a service
-// line, fired by the completion site after the closeout commits (no caller is
-// wired yet; see the header). Ids only: the email division's payload builder
+// line. Ids only: the email division's payload builder
 // (email-division/payload-builders.js) reads the visit itself and re-judges
 // that it really is the customer's first performed, customer-visible pest
 // visit, so a wrong or repeated emit can only produce a skipped run, never a
-// send. No intent marker: the completion transaction does not record one.
-async function emitVisitCompletedFirst({ serviceRecordId, customerId } = {}) {
-  if (!serviceRecordId || !customerId) return null;
+// send. Produced by emitPestReportDelivered (below).
+async function emitVisitCompletedFirst({ serviceRecordId, customerId } = {}, intentId = null) {
+  if (!serviceRecordId || !customerId) {
+    await settleUndispatchable(intentId, 'marker payload has no service record or customer');
+    return null;
+  }
   return emitTrigger('visit.completed_first', {
     triggerEventId: `visit_completed_first:${serviceRecordId}`,
     entityType: 'service_record',
     entityId: serviceRecordId,
     recipient: { type: 'customer', id: customerId },
     payload: { service_record_id: serviceRecordId, customer_id: customerId },
-  });
+  }, intentId);
+}
+
+// service_report.ready, for the email division ONLY. The trigger key is shared
+// with the catalog's own `service.report_ready` automation (seeded ACTIVE), and
+// the report email itself is sent DIRECTLY by service-report/email-delivery.js,
+// never through the executor. An untargeted emit would therefore hand that
+// automation the event and mail the customer a SECOND copy of the report. So
+// this emit names its one automation: processTrigger loads only that key.
+const WHY_91_DAYS_AUTOMATION_KEY = 'lc.why_91_days';
+async function emitServiceReportReady({ serviceRecordId, customerId } = {}, intentId = null) {
+  if (!serviceRecordId || !customerId) {
+    await settleUndispatchable(intentId, 'marker payload has no service record or customer');
+    return null;
+  }
+  return emitTrigger('service_report.ready', {
+    automationKey: WHY_91_DAYS_AUTOMATION_KEY,
+    // Not `service_report_ready:<record>`: that prefix is the direct report
+    // email's own event id / idempotency key (email-delivery.js).
+    triggerEventId: `lc_report_ready:${serviceRecordId}`,
+    entityType: 'service_record',
+    entityId: serviceRecordId,
+    recipient: { type: 'customer', id: customerId },
+    payload: { service_record_id: serviceRecordId, customer_id: customerId },
+  }, intentId);
+}
+
+// THE producer of both visit triggers: called by the service-report delivery
+// queue right after a report email is marked sent. That is the one point where
+// a visit is known to be performed, committed and customer-visible (an
+// incomplete, declined or report-suppressed closeout never delivers a report,
+// and the builders refuse those anyway), and it puts the follow-up behind the
+// report it refers to. Pest records only — both automations are pest-line; the
+// builders still re-judge everything (first visit, second quarterly visit,
+// residential plan), so an extra emit is a skipped run, never a send.
+//
+// NEVER throws, and with the gate off it reads and writes nothing: no marker
+// accumulates while the catalog is dark (unlike estimate.expired there is no
+// transition transaction to share, and a follow-up is not owed for a report
+// delivered while the feature was off). With the gate on, each trigger gets a
+// durable intent marker first, so a crash or a transient failure between the
+// marker and the emit is replayed by the sweep (retryPendingIntents).
+async function emitPestReportDelivered({ serviceRecordId } = {}) {
+  if (!serviceRecordId) return null;
+  try {
+    if (!isEnabled('emailTemplateAutomations')) return null;
+    const record = await db('service_records')
+      .where({ id: serviceRecordId })
+      .first('id', 'customer_id', 'service_line', 'service_type');
+    if (!record || !record.customer_id) return null;
+    // Classified EXACTLY as the report builder does (report-data.js).
+    const { detectServiceLine } = require('./service-report/service-line-configs');
+    if ((record.service_line || detectServiceLine(record.service_type)) !== 'pest') return null;
+    const ids = { serviceRecordId: record.id, customerId: record.customer_id };
+    const payload = { service_record_id: record.id, customer_id: record.customer_id };
+    const occurredAt = new Date();
+    const marker = (triggerEventKey) => recordAutomationIntent(db, {
+      triggerEventKey, entityType: 'service_record', entityId: record.id, occurredAt, payload,
+    });
+    const firstVisitMarker = await marker('visit.completed_first');
+    const reportReadyMarker = await marker('service_report.ready');
+    const firstVisit = await emitVisitCompletedFirst(ids, firstVisitMarker ? firstVisitMarker.id : null);
+    const reportReady = await emitServiceReportReady(ids, reportReadyMarker ? reportReadyMarker.id : null);
+    return { firstVisit, reportReady };
+  } catch (err) {
+    logger.warn(`[email-template-automation-emitters] report-delivered emit failed for ${serviceRecordId}: ${safeErrorText(err)}`);
+    return null;
+  }
 }
 
 // Best-effort marker insert, isolated from the caller's transaction (codex
@@ -405,6 +475,10 @@ async function retryPendingIntents() {
         result = await emitReviewLinked5Star({
           reviewId: payload.review_id, customerId: payload.customer_id, locationId: payload.location_id, starRating: payload.star_rating,
         }, marker.id);
+      } else if (marker.trigger_event_key === 'visit.completed_first') {
+        result = await emitVisitCompletedFirst({ serviceRecordId: payload.service_record_id, customerId: payload.customer_id }, marker.id);
+      } else if (marker.trigger_event_key === 'service_report.ready') {
+        result = await emitServiceReportReady({ serviceRecordId: payload.service_record_id, customerId: payload.customer_id }, marker.id);
       } else {
         // A marker for a trigger key this module has no replay logic for
         // (e.g. written by a newer build mid rolling deploy) — counted as a
@@ -446,6 +520,8 @@ module.exports = {
   emitEstimateExpired,
   emitReviewLinked5Star,
   emitVisitCompletedFirst,
+  emitServiceReportReady,
+  emitPestReportDelivered,
   recordAutomationIntent,
   recordAutomationIntents,
   sweepMissedLifecycleEvents,
