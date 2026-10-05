@@ -81,6 +81,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
     } else {
       ({ json: assessed, referee } = await refereeVisit({
         policy, payload, geminiJson: outcome.json, visit: { photoCount: photos.length, images, context, lighting },
+        deadline: timeoutMs ? started + timeoutMs : null,
       }));
       // The model-claimed findings after a settled tie-break (pre-normalization,
       // like `raw`), so the eval measures naming discipline on the final answer.

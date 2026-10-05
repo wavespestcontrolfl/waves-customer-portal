@@ -127,6 +127,17 @@ describe('second-opinion trigger (unsure or serious)', () => {
     expect(result.referee).toMatchObject({ triggered: false, outcome: 'skipped', reason: 'no_dispute' });
   });
 
+  test('a caller budget (POST /assess) caps the second opinion at what is left of it', async () => {
+    const overrides = { findings: [named('Chinch bug damage', { confidence: 'low' })] };
+    dispatchWithFallback.mockResolvedValue(ok(answer(overrides), { model: 'gemini-x' }));
+    dispatch.mockResolvedValue(solOk(answer(overrides)));
+    await analyzeVisit({ photos, timeoutMs: 10 * 1000 });
+    expect(dispatchWithFallback.mock.calls[0][1].timeoutMs).toBe(10 * 1000);
+    const { timeoutMs } = dispatch.mock.calls[0][1];
+    expect(timeoutMs).toBeGreaterThanOrEqual(1000);
+    expect(timeoutMs).toBeLessThanOrEqual(10 * 1000);
+  });
+
   test('a Gemini miss that the OpenAI backup answered is never second-guessed', async () => {
     dispatchWithFallback.mockResolvedValue(ok(gemini(), { provider: 'openai', model: MODELS.OPENAI_LAWN_ASSESSMENT, fallbackUsed: true }));
     const result = await analyzeVisit({ photos });
