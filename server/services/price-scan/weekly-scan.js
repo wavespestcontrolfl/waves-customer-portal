@@ -74,7 +74,7 @@ function parseMatches(m) {
 
 function shippingKey(sh) {
   if (!sh) return '-';
-  return [sh.basis || '', Number(sh.amount) || 0, sh.promo ? 'promo' : ''].join(':');
+  return [sh.basis || '', Number(sh.amount) || 0].join(':');
 }
 
 // Content key for ONE opportunity line — product + competitor URL + both prices. A
@@ -86,7 +86,7 @@ function matchKey(m) {
     String((m && m.competitor && m.competitor.source_url) || ''),
     Number(m && m.competitor && m.competitor.price) || 0,
     Number(m && m.baseline && m.baseline.price) || 0,
-    // Delivered basis: a corrected shipping basis / amount / promo is a different ask, not a
+    // Delivered basis: a corrected shipping basis / amount is a different ask, not a
     // duplicate of an older active draft that was priced on the old shipping.
     shippingKey(m && m.competitor && m.competitor.shipping),
     shippingKey(m && m.baseline && m.baseline.shipping),

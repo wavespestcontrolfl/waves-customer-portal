@@ -234,24 +234,32 @@ describe('mark-email delivered prices + shipping proof', () => {
   });
 });
 
-describe('mark-email keeps every shipping field the proof text reads', () => {
-  test('a forwarded SeedBarn promo is not called firm', () => {
-    const seed = {
-      product: 'Grass Seed',
-      baseline: { vendor: 'SiteOne', price: 95, quantity: '1 gal' },
-      competitor: {
-        vendor: 'SeedBarn', price: 60, quantity: '1 gal', source_url: 'https://seedbarn.com/products/x',
-        shipping: { amount: 0, basis: 'free', promo: true, note: 'free shipping (time-limited promo, recheck)' },
-      },
-    };
-    const out = composeMarkEmail([seed]);
-    expect(out.text).toContain('free shipping (current promo, recheck)');
-    expect(out.text).not.toMatch(/SeedBarn[^\n]*free shipping \(firm\)/);
-    expect(out.html).toContain('free shipping (current promo, recheck)');
-    expect(shippingOfSide(seed.competitor)).toMatchObject({ promo: true, amount: 0, basis: 'free' });
+describe('mark-email firm / estimated wording by vendor', () => {
+  const line = (competitor) => composeMarkEmail([{
+    product: 'Grass Seed',
+    baseline: { vendor: 'SiteOne', price: 95, quantity: '1 gal' },
+    competitor: { vendor: 'V', price: 60, quantity: '1 gal', ...competitor },
+  }]);
+  test('SeedBarn is an estimate in the email, never firm', () => {
+    const out = line({ source_url: 'https://seedbarn.com/products/x' });
+    expect(out.text).toContain('shipping estimated ~$15.00 (not a quote)');
+    expect(out.text).not.toMatch(/V[^\n]*free shipping \(firm\)/);
   });
-  test('compare keeps promo too when it normalizes an attached shipping object', () => {
+  test('only free-on-everything vendors read "(firm)" for free shipping', () => {
+    expect(line({ source_url: 'https://www.domyown.com/x-p-1.html' }).text).toContain('free shipping (firm)');
+    expect(line({ source_url: 'https://diypestcontrol.com/x' }).text).toContain('free shipping (firm)');
+    expect(line({ source_url: 'https://www.solutionsstores.com/x' }).text).toContain('shipping estimated');
+    expect(line({ source_url: 'https://golfcourselawn.store/products/x' }).text).toContain('shipping estimated');
+  });
+  test('a Gemplers special-freight item is estimated in the email, a clean table item is firm', () => {
+    const g = { source_url: 'https://gemplers.com/products/x', weight_lb: 3 };
+    expect(line(g).text).toContain('$10.99 shipping by published rule (firm)');
+    expect(line({ ...g, special_freight: true }).text).toContain('shipping estimated');
+  });
+  test('normalizeShipping keeps every field of an attached shipping object', () => {
     const { shippingOfCandidate } = require('../services/price-scan/compare');
-    expect(shippingOfCandidate({ price: 1, shipping: { amount: 0, basis: 'free', promo: true } }).promo).toBe(true);
+    const sh = { amount: 10.99, basis: 'weight_table', note: 'n', extra: 'kept' };
+    expect(shippingOfCandidate({ price: 1, shipping: sh })).toMatchObject(sh);
+    expect(shippingOfSide({ price: 1, shipping: sh })).toMatchObject(sh);
   });
 });

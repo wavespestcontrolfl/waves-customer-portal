@@ -13,17 +13,17 @@ describe('shippingFor — free hosts', () => {
   ])('%s ships free', (host) => {
     expect(shippingFor({ vendorHost: host, price: 50, quantity: '1 gal' })).toMatchObject({ amount: 0, basis: 'free' });
   });
-  test('SeedBarn promo is never a permanent free: estimated unless the offer is flagged free', () => {
+  test('SeedBarn promo is a plain estimate with a recheck note, never firm', () => {
     const r = shippingFor({ vendorHost: 'seedbarn.com', price: 20, quantity: '5 lb' });
     expect(r).toMatchObject({ amount: 15, basis: 'estimated' });
     expect(r.note).toMatch(/time-limited promo, recheck/);
     expect(shippingProofText(r)).toBe('shipping estimated ~$15.00 (not a quote)');
     expect(shippingProofText(r)).not.toMatch(/firm/);
-    const flagged = shippingFor({ vendorHost: 'seedbarn.com', price: 20, quantity: '5 lb', freeShipping: true });
-    expect(flagged).toMatchObject({ amount: 0, basis: 'free', promo: true });
-    expect(flagged.note).toMatch(/recheck/);
-    expect(shippingProofText(flagged)).toBe('free shipping (current promo, recheck)');
-    expect(shippingProofText(flagged)).not.toMatch(/firm/);
+  });
+  test('no input flag can turn an estimated vendor into free (copy/markup detection is gone)', () => {
+    for (const host of ['seedbarn.com', 'solutionsstores.com', 'golfcourselawn.store']) {
+      expect(shippingFor({ vendorHost: host, price: 20, quantity: '5 lb', freeShipping: true, free_shipping: true }).basis).toBe('estimated');
+    }
   });
   test('a $0 default allowance keeps an estimate labelled an estimate (label and proof text)', () => {
     process.env.PRICE_SCAN_DEFAULT_SHIPPING_USD = '0';
@@ -44,110 +44,116 @@ describe('shippingFor — free hosts', () => {
   });
 });
 
-describe('shippingFor — Gemplers', () => {
-  test('free at/over $149 (free_over), not under', () => {
+// The table as printed on gemplers.com/pages/orders-shipping-returns (2026-10-05): [upper lb, usd].
+const PUBLISHED = [
+  [5, 10.99], [10, 11.99], [20, 14.99], [30, 16.99], [40, 21.99], [50, 26.99], [60, 29.99], [70, 32.99], [80, 39.99],
+  [90, 49.99], [100, 59.99], [150, 79.99], [200, 99.99], [250, 125.99], [300, 149.99], [350, 175.99], [400, 199.99],
+];
+const gem = (quantity, extra = {}) => shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity, ...extra });
+
+describe('shippingFor — Gemplers published weight table (exact, complete)', () => {
+  test('the table holds all 17 published bands, in order, exactly as printed', () => {
+    expect(GEMPLERS_WEIGHT_TABLE.map((b) => [b.upToLb, b.usd])).toEqual(PUBLISHED);
+  });
+  test.each(PUBLISHED)('a real weight at the top of the band (%s lb) is exactly $%s and firm', (upTo, price) => {
+    expect(gem(`${upTo} lb`)).toMatchObject({ amount: price, basis: 'weight_table' });
+  });
+  test.each(PUBLISHED.slice(0, -1).map(([upTo], i) => [upTo, PUBLISHED[i + 1][1]]))('just over %s lb (%s.01) moves to the next band, $%s', (upTo, nextPrice) => {
+    expect(shippingFor({ vendorHost: 'gemplers.com', price: 30, weightLb: upTo + 0.01 })).toMatchObject({ amount: nextPrice, basis: 'weight_table' });
+  });
+  test('no folding: the weights the old table skipped now have their own prices', () => {
+    expect(gem('7 lb').amount).toBe(11.99); // 5.01-10
+    expect(gem('25 lb').amount).toBe(16.99); // 20.01-30
+    expect(gem('65 lb').amount).toBe(32.99); // 60.01-70
+    expect(gem('85 lb').amount).toBe(49.99); // 80.01-90
+    expect(gem('120 lb').amount).toBe(79.99);
+    expect(gem('225 lb').amount).toBe(125.99);
+  });
+  test('above the top band (over 400 lb) there is no published price -> estimated, never interpolated', () => {
+    const r = shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity: '401 lb' });
+    expect(r.basis).toBe('estimated');
+    expect(r.amount).toBe(214.99); // $199.99 top band + $15 allowance
+    expect(r.note).toMatch(/top band/);
+    expect(shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity: '400 lb' }).basis).toBe('weight_table');
+  });
+  test('unknown weight under the threshold is an estimate, not a table price', () => {
+    expect(gem('each').basis).toBe('estimated');
+  });
+});
+
+describe('shippingFor — Gemplers free-over threshold', () => {
+  test('free at/over $149 (free_over, firm), not under', () => {
     expect(shippingFor({ vendorHost: 'gemplers.com', price: 149, quantity: '1 gal' })).toMatchObject({ amount: 0, basis: 'free_over' });
     expect(shippingFor({ vendorHost: 'gemplers.com', price: 200, quantity: '50 lb' })).toMatchObject({ amount: 0, basis: 'free_over' });
     expect(shippingFor({ vendorHost: 'gemplers.com', price: 148.99, quantity: '1 lb' }).basis).toBe('weight_table');
   });
-  test.each([
-    ['2 lb', 10.99], ['5 lb', 10.99], ['12 lb', 14.99], ['20 lb', 14.99], ['35 lb', 21.99],
-    ['45 lb', 26.99], ['55 lb', 29.99], ['75 lb', 39.99], ['95 lb', 49.99],
-  ])('weight band for %s is $%s', (qty, usd) => {
-    expect(shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity: qty })).toMatchObject({ amount: usd, basis: 'weight_table' });
-  });
-  test('a weight in a gap between published bands is charged the next band up', () => {
-    const at = (qty) => shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity: qty }).amount;
-    expect(at('7 lb')).toBe(14.99); // 5-10 gap -> 10-20 band
-    expect(at('25 lb')).toBe(21.99); // 20-30 gap -> 30-40 band
-    expect(at('65 lb')).toBe(39.99); // 60-70 gap -> 70-80 band
-    expect(at('85 lb')).toBe(49.99); // 80-90 gap -> 90-100 band
-  });
-  test('liquids use ~9 lb per gallon', () => {
-    expect(weightLbFromQuantity('1 gal')).toBeCloseTo(9, 5);
-    expect(shippingFor({ vendorHost: 'gemplers.com', price: 40, quantity: '1 gal' }).amount).toBe(14.99); // 9 lb -> 5-20 band
-    expect(shippingFor({ vendorHost: 'gemplers.com', price: 40, quantity: '1 qt' }).amount).toBe(10.99); // 2.25 lb
-  });
-  test('beyond the published table is interpolated and labelled estimated', () => {
-    const r = shippingFor({ vendorHost: 'gemplers.com', price: 120, quantity: '150 lb' });
-    expect(r.basis).toBe('estimated');
-    expect(r.amount).toBeGreaterThan(GEMPLERS_WEIGHT_TABLE[GEMPLERS_WEIGHT_TABLE.length - 1].usd);
-    expect(r.amount).toBeLessThanOrEqual(199.99);
-  });
-  test('unknown weight under the threshold is an estimate, not a table price', () => {
-    expect(shippingFor({ vendorHost: 'gemplers.com', price: 40, quantity: 'each' }).basis).toBe('estimated');
-  });
 });
 
 describe('shippingFor — Gemplers weight must be a real weight to be firm', () => {
-  const g = (quantity, extra = {}) => shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity, ...extra });
   test('explicit lb / kg / g quantities are real weights -> firm table price', () => {
-    expect(g('5 lb')).toMatchObject({ amount: 10.99, basis: 'weight_table' });
-    expect(g('2 kg')).toMatchObject({ amount: 10.99, basis: 'weight_table' });
-    expect(g('500 g').basis).toBe('weight_table');
+    expect(gem('5 lb')).toMatchObject({ amount: 10.99, basis: 'weight_table' });
+    expect(gem('2 kg')).toMatchObject({ amount: 10.99, basis: 'weight_table' });
+    expect(gem('500 g').basis).toBe('weight_table');
   });
-  test('a volume-derived weight (9 lb/gal) stays estimated, even far from a band boundary', () => {
-    const r = g('1 gal');
-    expect(r).toMatchObject({ amount: 14.99, basis: 'estimated' });
+  test('liquids use ~9 lb per gallon, and that guess is only an estimate', () => {
+    expect(weightLbFromQuantity('1 gal')).toBeCloseTo(9, 5);
+    const r = gem('1 gal');
+    expect(r).toMatchObject({ amount: 11.99, basis: 'estimated' }); // 9 lb -> 5.01-10 band
     expect(r.note).toMatch(/weight estimated/);
     expect(shippingProofText(r)).toMatch(/shipping estimated/);
   });
   test('a liquid whose guessed weight sits right at a band boundary is estimated either side of it', () => {
-    // 9 lb/gal: 20 lb ~ 2.22 gal -> 2.2 gal = 19.8 lb (14.99 band), 2.3 gal = 20.7 lb (21.99 band)
-    expect(g('2.2 gal')).toMatchObject({ amount: 14.99, basis: 'estimated' });
-    expect(g('2.3 gal')).toMatchObject({ amount: 21.99, basis: 'estimated' });
+    // 9 lb/gal: 2.2 gal = 19.8 lb (14.99 band), 2.3 gal = 20.7 lb (16.99 band)
+    expect(gem('2.2 gal')).toMatchObject({ amount: 14.99, basis: 'estimated' });
+    expect(gem('2.3 gal')).toMatchObject({ amount: 16.99, basis: 'estimated' });
   });
-  test('a plain or weight "oz" is ambiguous -> estimated', () => {
-    expect(g('17 oz')).toMatchObject({ amount: 10.99, basis: 'estimated' });
-    expect(g('17 fl oz').basis).toBe('estimated');
+  test('a plain or fluid "oz" is ambiguous -> estimated', () => {
+    expect(gem('17 oz')).toMatchObject({ amount: 10.99, basis: 'estimated' });
+    expect(gem('17 fl oz').basis).toBe('estimated');
   });
   test('an explicit listing weight (variant grams) is firm, whatever the quantity text says', () => {
-    expect(g('1 gal', { weightLb: 6 })).toMatchObject({ amount: 14.99, basis: 'weight_table' });
-    expect(g('1 gal', { weightLb: 6 }).note).not.toMatch(/weight estimated/);
-  });
-  test('beyond the table is still an estimate even with a real weight', () => {
-    expect(g('150 lb').basis).toBe('estimated');
+    expect(gem('1 gal', { weightLb: 6 })).toMatchObject({ amount: 11.99, basis: 'weight_table' });
+    expect(gem('1 gal', { weightLb: 6 }).note).not.toMatch(/weight estimated/);
   });
 });
 
-describe('shippingFor — Gemplers hazardous items are never firm', () => {
-  test('a hazmat item under the threshold is estimated (table floor + hazmat allowance), not weight_table', () => {
-    const r = shippingFor({ vendorHost: 'gemplers.com', price: 33.99, quantity: '17 oz', hazmat: true });
-    expect(r.basis).toBe('estimated');
-    expect(r.amount).toBe(25.99); // $10.99 table floor + $15 default allowance
-    expect(r.note).toMatch(/hazmat fee/);
+describe('shippingFor — Gemplers special freight is never firm', () => {
+  test('a special-freight item under the threshold is estimated (table floor + default allowance)', () => {
+    const r = gem('2 lb', { specialFreight: true });
+    expect(r).toMatchObject({ amount: 25.99, basis: 'estimated' }); // $10.99 + $15
+    expect(r.note).toMatch(/special freight/);
     expect(shippingProofText(r)).toBe('shipping estimated ~$25.99 (not a quote)');
     expect(shippingProofText(r)).not.toMatch(/firm/);
   });
-  test('a hazmat item over the free threshold is still estimated (free-over may exclude hazmat)', () => {
-    const r = shippingFor({ vendorHost: 'gemplers.com', price: 274.99, quantity: '1 gal', hazmat: true });
+  test('a special-freight item over the free threshold is still estimated', () => {
+    const r = shippingFor({ vendorHost: 'gemplers.com', price: 274.99, quantity: '1 gal', specialFreight: true });
     expect(r).toMatchObject({ amount: 15, basis: 'estimated' });
-    expect(shippingProofText(r)).not.toMatch(/firm/);
   });
-  test('the hazmat allowance follows the env default', () => {
+  test('the allowance follows the env default', () => {
     process.env.PRICE_SCAN_DEFAULT_SHIPPING_USD = '20';
-    expect(shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity: '2 lb', hazmat: true }).amount).toBe(30.99);
+    expect(gem('2 lb', { specialFreight: true }).amount).toBe(30.99);
   });
-  test('a non-hazmat Gemplers item keeps its firm table / free-over result', () => {
-    expect(shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity: '2 lb', hazmat: false }).basis).toBe('weight_table');
+  test('without the tag the same item keeps its firm table / threshold result', () => {
+    expect(gem('2 lb', { specialFreight: false }).basis).toBe('weight_table');
     expect(shippingFor({ vendorHost: 'gemplers.com', price: 200, quantity: '2 lb' }).basis).toBe('free_over');
   });
-  test('the hazmat flag does not change vendors whose rule has no hazmat extra', () => {
-    expect(shippingFor({ vendorHost: 'domyown.com', price: 30, quantity: '1 gal', hazmat: true }).basis).toBe('free');
+  test('the flag does not change vendors that ship free on everything', () => {
+    expect(shippingFor({ vendorHost: 'domyown.com', price: 30, quantity: '1 gal', specialFreight: true }).basis).toBe('free');
   });
-  test('compare carries the flag from a scanned candidate into the delivered price', () => {
+  test('compare carries the candidate tag flag and real weight into the delivered price', () => {
     const { rankCandidates } = require('../services/price-scan/compare');
-    const [c] = rankCandidates([{ price: 33.99, quantity: '17 oz', vendor: 'Gemplers', source_url: 'https://gemplers.com/products/x', hazmat_shipping: true }]);
-    expect(c.shipping.basis).toBe('estimated');
-    expect(c.landedPrice).toBe(59.98);
+    const base = { price: 33.99, quantity: '17 oz', vendor: 'Gemplers', source_url: 'https://gemplers.com/products/x', weight_lb: 1.2 };
+    const [firm] = rankCandidates([base]);
+    expect(firm.shipping).toMatchObject({ amount: 10.99, basis: 'weight_table' }); // real listing weight
+    const [flagged] = rankCandidates([{ ...base, special_freight: true }]);
+    expect(flagged.shipping.basis).toBe('estimated');
+    expect(flagged.landedPrice).toBe(59.98);
   });
 });
 
-describe('shippingFor — flagged-free and estimated vendors', () => {
-  test.each(['solutionsstores.com', 'golfcourselawn.store'])('%s is estimated unless the offer is flagged free', (host) => {
+describe('shippingFor — estimated vendors', () => {
+  test.each(['solutionsstores.com', 'golfcourselawn.store'])('%s is a plain estimate (no per-item free detection)', (host) => {
     expect(shippingFor({ vendorHost: host, price: 40, quantity: '1 gal' })).toMatchObject({ amount: 15, basis: 'estimated' });
-    expect(shippingFor({ vendorHost: host, price: 40, quantity: '1 gal', freeShipping: true })).toMatchObject({ amount: 0, basis: 'free' });
-    expect(shippingFor({ vendorHost: host, price: 40, quantity: '1 gal', freeShipping: false }).basis).toBe('estimated');
   });
   test.each([
     'gciturfacademy.com', 'intermountainturf.com', 'seedworldusa.com', 'forestrydistributing.com', 'keystonepestsolutions.com',

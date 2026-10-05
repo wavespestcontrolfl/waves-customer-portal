@@ -53,8 +53,7 @@ function shippingOfSide(side, fallbackVendorHost) {
     vendorName: side && typeof side.vendor === 'string' ? side.vendor : undefined,
     price: side && side.price,
     quantity: side && side.quantity,
-    freeShipping: !!(side && (side.free_shipping === true || side.freeShipping === true)),
-    hazmat: !!(side && (side.hazmat_shipping === true || side.hazmat === true)),
+    specialFreight: !!(side && side.special_freight === true),
     weightLb: side && side.weight_lb,
   });
 }

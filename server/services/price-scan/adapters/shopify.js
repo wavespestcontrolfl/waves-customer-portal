@@ -109,37 +109,19 @@ function handlesFromSuggest(json) {
   return [...new Set(list.map((p) => (p && (p.handle || handleOf(p.url))) || null).filter(Boolean))];
 }
 
-// Words that turn "free shipping" into a CONDITIONAL offer (a spend threshold or qualifier).
-const FREE_SHIP_CONDITION = /\b(?:over|above|orders?\s+of|minimum|min\.?|qualif\w*|spend\w*|exceed\w*|at\s+least|when|if|only|select(?:ed)?|certain|excluding|except\w*)\b|\$\s*\d/i;
-
-// PURE: does the product state "free shipping" for THIS item, unconditionally? A positive tag
-// (never an `_F` false-valued tag like the vendor's `shipping_*_F` flags) or a description
-// sentence saying FREE SHIPPING. ANY threshold/condition phrase in the same sentence ("free
-// shipping is available on orders over $99", "applies to orders above $149", "when you spend")
-// makes it conditional -> false, and one conditional sentence anywhere vetoes the flag. The
-// flag zeroes freight, so doubt means false. shipping-rules acts on it for flagged-free vendors.
-function freeShippingFromShopify(data) {
-  if (!data) return false;
-  const tags = Array.isArray(data.tags) ? data.tags : String(data.tags || '').split(',');
-  const tagFree = tags.some((t) => {
-    const tag = String(t).trim();
-    return /free[\s_-]*shipping/i.test(tag) && !/_f(alse)?$/i.test(tag) && !FREE_SHIP_CONDITION.test(tag);
-  });
-  const text = String(data.description || data.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-  const sentences = text.split(/(?<=[.!?])\s+/).filter((x) => /free\s+shipping/i.test(x));
-  if (sentences.some((x) => FREE_SHIP_CONDITION.test(x))) return false;
-  return tagFree || sentences.length > 0;
-}
-
-// PURE: is the item flagged hazardous / DOT for shipping? Vendors tag it ("shipping_hazardous_T",
-// "shipping_full_haz_T"); a `_F` value means NOT hazardous. Used for vendors whose hazmat
-// shipping is an unpublished extra (Gemplers), so their figure is labelled an estimate.
-function hazmatFromShopify(data) {
+// PURE: does the listing carry a SPECIAL-FREIGHT tag? Gemplers tags every product with
+// true/false shipping flags ("shipping_hazardous_T", "shipping_full_haz_F", "shipping_oversize_T",
+// "shipping_oversize2_T", "shipping_truck_T"): a `_T` value means the vendor charges extra it
+// does not publish (hazardous, oversize, truck/LTL freight), so shipping-rules prices the item
+// as an estimate. Any tag naming hazard/hazmat/DOT/oversize/truck/freight/LTL counts unless it
+// ends `_F` / `_false`, so an unfamiliar tag of that kind fails safe (-> estimate).
+const SPECIAL_FREIGHT_TAG = /haz(?:ard|mat)?|\bdot\b|oversiz|truck|freight|\bltl\b/i;
+function specialFreightFromShopify(data) {
   if (!data) return false;
   const tags = Array.isArray(data.tags) ? data.tags : String(data.tags || '').split(',');
   return tags.some((t) => {
     const tag = String(t).trim();
-    return /haz(?:ard|mat)?|\bdot\b/i.test(tag) && !/_f(alse)?$/i.test(tag);
+    return SPECIAL_FREIGHT_TAG.test(tag) && !/_f(alse)?$/i.test(tag);
   });
 }
 
@@ -182,8 +164,7 @@ function buildCandidate(data, offer, proofUrl, ctx) {
     // same-brand siblings, e.g. Bifen I/T vs Bifen XTS).
     text: descriptionText(data),
     competing_same_size: !!offer.competingSameSize, price_type: 'public', vendor_id: ctx.vid, vendor: ctx.vname,
-    free_shipping: freeShippingFromShopify(data), // per-item "ships free" flag (flagged-free vendors only)
-    hazmat_shipping: hazmatFromShopify(data), // hazardous/DOT item: hazmat-extra vendors price it as an estimate
+    special_freight: specialFreightFromShopify(data), // hazardous/oversize/truck tag: priced as an estimate
     weight_lb: grams > 0 ? grams / 453.592 : null,
   };
 }
@@ -270,8 +251,7 @@ module.exports = {
   variantsFromShopify,
   sizeFromWeightGrams,
   handlesFromSuggest,
-  freeShippingFromShopify,
-  hazmatFromShopify,
+  specialFreightFromShopify,
   handleOf,
   baseOrigin,
   isApprovedShopifyHost,

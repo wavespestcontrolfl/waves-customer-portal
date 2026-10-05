@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { JSDOM } = require('jsdom');
 
-const { collectSnapshot, applySizeHint, freeShippingFromJsonLd } = require('../services/price-scan/adapters/base');
+const { collectSnapshot, applySizeHint } = require('../services/price-scan/adapters/base');
 const diypest = require('../services/price-scan/adapters/diypest');
 const forestry = require('../services/price-scan/adapters/forestry');
 const shopify = require('../services/price-scan/adapters/shopify');
@@ -62,7 +62,7 @@ describe('DIY Pest Control adapter (Magento + Klevu)', () => {
     expect(links.length).toBe(4);
   });
 
-  test('product page: size comes from the Packaging spec row, price from JSON-LD, free shipping flagged', () => {
+  test('product page: size comes from the Packaging spec row, price from JSON-LD', () => {
     const snap = snapshotOf(read('diypest-product.html'), diypest.config);
     expect(snap.sizeHint).toMatch(/^1 Gallon/);
     expect(snap.title).toBe('QP Bifenthrin I/T 7.9% F Insecticide');
@@ -70,7 +70,6 @@ describe('DIY Pest Control adapter (Magento + Klevu)', () => {
     expect(snap.title).toMatch(/1 Gallon/);
     const offer = offerFromSnapshot(snap, { targetOz: GAL });
     expect(offer).toMatchObject({ price: 48.55, availability: 'in_stock' });
-    expect(freeShippingFromJsonLd(snap.jsonLd)).toBe(true);
     // the other pack size is NOT guessed from this page
     expect(offerFromSnapshot(snap, { targetOz: PT })).toBeNull();
   });
@@ -201,44 +200,18 @@ describe('Shopify additions: Golf Course Lawn Store + Gemplers', () => {
     expect(wrong && wrong.quantity).not.toBe('10 lb');
   });
 
-  test('free-shipping flag: tags or a threshold-free description only', () => {
-    const data = JSON.parse(read('golfcourselawn-product.json'));
-    expect(shopify.freeShippingFromShopify(data)).toBe(false); // this item's .js carries no flag
-    expect(shopify.freeShippingFromShopify({ tags: ['Free Shipping'] })).toBe(true);
-    expect(shopify.freeShippingFromShopify({ tags: ['free_shipping_F'] })).toBe(false);
-    expect(shopify.freeShippingFromShopify({ description: '<p><b>FREE SHIPPING</b> on orders. Learn more</p>' })).toBe(true);
-    expect(shopify.freeShippingFromShopify({ description: 'Free shipping over $99 only' })).toBe(false);
-    expect(shopify.freeShippingFromShopify(null)).toBe(false);
-  });
-
-  test.each([
-    'Free shipping is available on orders over $99.',
-    'Free shipping applies to orders above $149.',
-    'Get free shipping when you spend $75 or more.',
-    'Free shipping on orders of 3 or more items.',
-    'Free shipping with a minimum purchase.',
-    'Qualifying orders get free shipping.',
-    'FREE SHIPPING on select items only.',
-    'Free shipping if you join the club.',
-  ])('a conditional free-shipping sentence is NOT a free flag: %s', (sentence) => {
-    expect(shopify.freeShippingFromShopify({ description: `<p>${sentence}</p>` })).toBe(false);
-  });
-
-  test('one conditional sentence vetoes the flag even beside an unconditional one', () => {
-    expect(shopify.freeShippingFromShopify({ description: 'FREE SHIPPING on orders. Free shipping is available on orders over $99.' })).toBe(false);
-    expect(shopify.freeShippingFromShopify({ tags: ['free shipping over 99'] })).toBe(false);
-  });
-
-  test('an unconditional sentence still flags (and a $ price elsewhere does not matter)', () => {
-    expect(shopify.freeShippingFromShopify({ description: 'Costs $155.99 per bag. FREE SHIPPING on orders. Learn more.' })).toBe(true);
-  });
-
-  test('hazmat tag detection: _T true, _F false', () => {
-    expect(shopify.hazmatFromShopify(JSON.parse(read('gemplers-suggest.json')).resources.results.products[0])).toBe(true);
-    expect(shopify.hazmatFromShopify({ tags: ['shipping_hazardous_F', 'shipping_full_haz_F'] })).toBe(false);
-    expect(shopify.hazmatFromShopify({ tags: ['shipping_full_haz_T'] })).toBe(true);
-    expect(shopify.hazmatFromShopify({ tags: ['Insecticide'] })).toBe(false);
-    expect(shopify.hazmatFromShopify(null)).toBe(false);
+  test('special-freight tag detection: _T true, _F false, unfamiliar freight tags fail safe', () => {
+    const products = JSON.parse(read('gemplers-suggest.json')).resources.results.products;
+    expect(shopify.specialFreightFromShopify(products[0])).toBe(true); // shipping_hazardous_T on the Shockwave aerosol
+    expect(shopify.specialFreightFromShopify({ tags: ['shipping_hazardous_F', 'shipping_full_haz_F', 'shipping_oversize_F', 'shipping_oversize2_F', 'shipping_truck_F'] })).toBe(false);
+    expect(shopify.specialFreightFromShopify({ tags: ['shipping_full_haz_T'] })).toBe(true);
+    expect(shopify.specialFreightFromShopify({ tags: ['shipping_oversize_T'] })).toBe(true);
+    expect(shopify.specialFreightFromShopify({ tags: ['shipping_oversize2_T'] })).toBe(true);
+    expect(shopify.specialFreightFromShopify({ tags: ['shipping_truck_T'] })).toBe(true);
+    expect(shopify.specialFreightFromShopify({ tags: ['shipping_ltl_freight_T'] })).toBe(true);
+    expect(shopify.specialFreightFromShopify({ tags: ['Insecticide', 'Spec:Size:17 oz.'] })).toBe(false);
+    expect(shopify.specialFreightFromShopify({ tags: 'shipping_truck_T,Other' })).toBe(true);
+    expect(shopify.specialFreightFromShopify(null)).toBe(false);
   });
 
   test('shipping rules for the two stores', () => {
@@ -249,7 +222,6 @@ describe('Shopify additions: Golf Course Lawn Store + Gemplers', () => {
     expect(gem(274.99, '1 gal').basis).toBe('free_over');
     const golf = { vendor: { source_url: 'https://golfcourselawn.store/products/x' }, price: 155.99, quantity: '15 lb' };
     expect(shippingFor(golf).basis).toBe('estimated');
-    expect(shippingFor({ ...golf, freeShipping: true }).basis).toBe('free');
   });
 });
 
@@ -357,20 +329,23 @@ describe('shopify fetchCandidate link sources and weight', () => {
     expect(cand.weight_lb).toBeCloseTo(25, 3);
   });
 
+  test.each([
+    [['shipping_hazardous_T'], true], [['shipping_oversize_T'], true], [['shipping_oversize2_T'], true],
+    [['shipping_truck_T'], true], [['shipping_truck_F', 'shipping_oversize_F', 'shipping_hazardous_F'], false],
+  ])('the candidate carries the special-freight flag from tags %j -> %s, and shipping follows', async (tags, expected) => {
+    const base = JSON.parse(read('golfcourselawn-product.json'));
+    const page = { goto: async () => {}, evaluate: async () => JSON.stringify({ ...base, tags }), $$eval: async () => [] };
+    const gemVendor = { ...vendor, website: 'https://gemplers.com', url: 'https://gemplers.com/products/acelepryn-g-insecticide-grub-and-armyworm-control' };
+    const cand = await shopify.fetchCandidate(page, gemVendor, product);
+    expect(cand.special_freight).toBe(expected);
+    const { shippingOfCandidate } = require('../services/price-scan/compare');
+    // $155.99 is over the $149 threshold: firm free_over unless a special-freight tag is present
+    expect(shippingOfCandidate(cand).basis).toBe(expected ? 'estimated' : 'free_over');
+  });
+
   test('a real listing weight makes a Gemplers weight-table price firm; none keeps it an estimate', () => {
     const src = { source_url: 'https://gemplers.com/products/x' };
     expect(shippingFor({ vendor: src, price: 30, quantity: '1 gal', weightLb: 4 })).toMatchObject({ amount: 10.99, basis: 'weight_table' });
     expect(shippingFor({ vendor: src, price: 30, quantity: '1 gal' }).basis).toBe('estimated');
-  });
-});
-
-describe('freeShippingFromJsonLd', () => {
-  test('true only on an explicit $0 shipping rate', () => {
-    const ld = (v) => JSON.stringify({ '@type': 'Product', offers: [{ '@type': 'Offer', shippingDetails: { shippingRate: { value: v } } }] });
-    expect(freeShippingFromJsonLd([ld(0)])).toBe(true);
-    expect(freeShippingFromJsonLd([ld('0.00')])).toBe(true);
-    expect(freeShippingFromJsonLd([ld(9.99)])).toBe(false);
-    expect(freeShippingFromJsonLd(['{"@type":"Product"}', 'not json'])).toBe(false);
-    expect(freeShippingFromJsonLd([])).toBe(false);
   });
 });

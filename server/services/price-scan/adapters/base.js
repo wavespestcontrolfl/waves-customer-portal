@@ -227,34 +227,6 @@ function collectSnapshot(sel) {
   return { jsonLd, title, priceTexts, availabilityText, bodyText: body.slice(0, 4000), variants, optionCardTexts, sizeHint };
 }
 
-// PURE: does the page's schema.org markup state free shipping for the offer
-// (shippingDetails.shippingRate.value === 0)? Walks every JSON-LD block. True only on an
-// explicit zero rate; absent/unparseable markup is "unknown" (false), never "free".
-function freeShippingFromJsonLd(jsonLdStrings) {
-  const blocks = Array.isArray(jsonLdStrings) ? jsonLdStrings : [jsonLdStrings];
-  let free = false;
-  const walk = (n) => {
-    if (free || n == null) return;
-    if (Array.isArray(n)) { n.forEach(walk); return; }
-    if (typeof n !== 'object') return;
-    const details = n.shippingDetails;
-    if (details) {
-      for (const d of Array.isArray(details) ? details : [details]) {
-        const rate = d && d.shippingRate;
-        const v = rate && typeof rate === 'object' ? rate.value : null;
-        if (v != null && String(v).trim() !== '' && Number(v) === 0) { free = true; return; }
-      }
-    }
-    for (const k of Object.keys(n)) if (n[k] && typeof n[k] === 'object') walk(n[k]);
-  };
-  for (const raw of blocks) {
-    let parsed = null;
-    try { parsed = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (e) { parsed = null; }
-    walk(parsed);
-  }
-  return free;
-}
-
 // Find the first product link on a search-results page. Returns an absolute URL
 // or null. Runs the selector in the browser, resolves relative hrefs via the
 // page's own location.
@@ -468,9 +440,6 @@ function makeAdapter(config) {
       // (the EPA might belong to a different product on the page).
       competing_same_size: !!offer.competingSameSize,
       price_type: config.priceType || 'public',
-      // Page markup states a $0 shipping rate (schema.org shippingDetails). Only
-      // flagged-free vendors (shipping-rules) act on it; everyone else ignores it.
-      free_shipping: freeShippingFromJsonLd(snapshot.jsonLd),
       // The real vendors.id (UUID) the /report worker keys on — a DB vendor row
       // provides `.id`. This is NOT the adapter slug (selectAdapterKey decides that
       // from host/name/url; the two are independent).
@@ -588,6 +557,6 @@ function makeAdapter(config) {
 }
 
 module.exports = {
-  makeAdapter, collectSnapshot, applySizeHint, freeShippingFromJsonLd, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
+  makeAdapter, collectSnapshot, applySizeHint, firstProductLink, rankedMatchingLinks, selectSearchCandidates, bestMatchingLink, searchTokens,
   searchQuery, targetOzOf, priceValue, availabilityValue, PRICE_VALUE_ATTRS, AVAILABILITY_VALUE_ATTRS, DEFAULT_TIMEOUT,
 };

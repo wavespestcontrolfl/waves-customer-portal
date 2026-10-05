@@ -129,12 +129,11 @@ describe('price-scan compare — delivered (landed) prices', () => {
     expect(r.estSavingsOnBaseline).toBeCloseTo(20, 1);
   });
 
-  test('a per-item free-shipping flag removes the estimate on flagged-free vendors', () => {
-    const cand = { price: 90, quantity: '78 oz', vendor: 'Solutions', source_url: 'https://www.solutionsstores.com/p' };
-    expect(findOpportunity(baseline, [cand]).isOpportunity).toBe(false);
-    const flagged = findOpportunity(baseline, [{ ...cand, free_shipping: true }]);
-    expect(flagged.best.shipping.basis).toBe('free');
-    expect(flagged.isOpportunity).toBe(true);
+  test('a free_shipping flag on a candidate is ignored: Solutions stays an estimate', () => {
+    const cand = { price: 90, quantity: '78 oz', vendor: 'Solutions', source_url: 'https://www.solutionsstores.com/p', free_shipping: true };
+    const r = findOpportunity(baseline, [cand]);
+    expect(r.best.shipping.basis).toBe('estimated');
+    expect(r.isOpportunity).toBe(false);
   });
 
   test('a shipping object attached by the caller wins over the rule lookup', () => {

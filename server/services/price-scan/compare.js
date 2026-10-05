@@ -25,8 +25,8 @@ const round2 = (n) => Math.round(Number(n) * 100) / 100;
 
 // A shipping object the caller already attached ({ amount, basis }) wins; otherwise the
 // vendor's rule is looked up from the candidate's own host (source_url / website / url) or,
-// failing any host, its display name. `free_shipping` / `freeShipping` is the adapter's
-// per-item "ships free" flag (used only by flagged-free vendors).
+// failing any host, its display name. `special_freight` is the adapter's tag-derived flag
+// (hazardous / oversize / truck), and `weight_lb` the priced variant's real weight.
 function shippingOfCandidate(c) {
   const attached = normalizeShipping(c && c.shipping);
   if (attached) return attached;
@@ -35,8 +35,7 @@ function shippingOfCandidate(c) {
     vendorName: c && typeof c.vendor === 'string' ? c.vendor : undefined,
     price: c && c.price,
     quantity: c && c.quantity,
-    freeShipping: !!(c && (c.free_shipping === true || c.freeShipping === true)),
-    hazmat: !!(c && (c.hazmat_shipping === true || c.hazmat === true)),
+    specialFreight: !!(c && c.special_freight === true),
     weightLb: c && c.weight_lb,
   });
 }
