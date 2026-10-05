@@ -77,6 +77,15 @@ describe('VisitBriefPanel access codes', () => {
     expect(await screen.findByText('Door or lock:')).toBeInTheDocument();
   });
 
+  it('one-home visit: the profile codes show once and the response carries no profile-kind rows', async () => {
+    // The server leaves gate, garage and lockbox rows out for a one-home customer.
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [code({ id: 'd1', kind: 'door', code: '4321', instructions: null })] }));
+    render(<VisitBriefPanel stop={stop} detail={{ status: 'ready', byService: { 'svc-1': { brief: { brief: null, facts: { access: { codes: { garage: '2468', neighborhoodGate: '#4821' }, alerts: [] } } } } } }} request={request} />);
+    expect(await screen.findByText('Door or lock:')).toBeInTheDocument();
+    expect(screen.getAllByText('2468')).toHaveLength(1);
+    expect(screen.getAllByText('#4821')).toHaveLength(1);
+  });
+
   it('does not ask without a request function', () => {
     render(<VisitBriefPanel stop={stop} detail={{ status: 'ready', byService: {} }} />);
     expect(screen.queryByText('Access codes')).toBeNull();
