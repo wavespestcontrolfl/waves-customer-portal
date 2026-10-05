@@ -98,6 +98,14 @@ else
   echo "==> 3/5  Native iOS project already exists — skipping cap add."
 fi
 
+# Xcode 27 builds only for iOS 15 and later; the Capacitor 7 template says
+# 14.0, and every target (App + Pods) then fails to build. Raise the floor in
+# the Podfile (Pods targets) and the App project before sync runs pod install.
+IOS_MIN="15.0"
+sed -i '' -E "s/^platform :ios, '[0-9.]+'/platform :ios, '${IOS_MIN}'/" ios/App/Podfile
+sed -i '' -E "s/IPHONEOS_DEPLOYMENT_TARGET = 1[0-4]\.[0-9]+;/IPHONEOS_DEPLOYMENT_TARGET = ${IOS_MIN};/g" ios/App/App.xcodeproj/project.pbxproj
+echo "==> iOS deployment target set to ${IOS_MIN} (Xcode 27 minimum) ✓"
+
 echo "==> 4/5  Syncing web + plugins into the iOS project…"
 npx cap sync ios
 
@@ -188,6 +196,26 @@ PLIST
   echo "==> PrivacyInfo.xcprivacy written (Filesystem file-timestamp declaration) ✓"
 else
   echo "==> PrivacyInfo.xcprivacy already present ✓"
+fi
+
+# The privacy manifest only counts when it is in the App target's resources;
+# App Review rejects a build without it. Attach it with the xcodeproj gem that
+# Homebrew's CocoaPods ships (idempotent). Without that gem, say so and leave
+# the manual Xcode step below.
+POD_GEM_HOME="$(grep -o 'GEM_HOME="[^"]*"' "$(readlink -f "$(command -v pod)")" 2>/dev/null | head -1 | cut -d'"' -f2)"
+if [ -n "$POD_GEM_HOME" ] && (cd ios/App && GEM_HOME="$POD_GEM_HOME" ruby -e '
+  require "xcodeproj"
+  project = Xcodeproj::Project.open("App.xcodeproj")
+  target = project.targets.find { |t| t.name == "App" } or abort("no App target")
+  group = project.main_group.find_subpath("App", false) or abort("no App group")
+  if group.files.none? { |f| f.path == "PrivacyInfo.xcprivacy" }
+    target.resources_build_phase.add_file_reference(group.new_reference("PrivacyInfo.xcprivacy"), true)
+    project.save
+  end
+'); then
+  echo "==> PrivacyInfo.xcprivacy is in the App target ✓"
+else
+  echo "==> WARN: could not attach PrivacyInfo.xcprivacy automatically — add it to the App target in Xcode (step below)."
 fi
 
 # Universal links: portal.wavespestcontrol.com URLs open the installed app

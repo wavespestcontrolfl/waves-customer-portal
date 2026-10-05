@@ -28,6 +28,16 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(source).not.toMatch(/WKAppBoundDomains:0 string portal\./);
   });
 
+  test('bootstrap-ios raises the iOS floor to 15.0 and attaches the privacy manifest to the App target', () => {
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    expect(source).toContain('IOS_MIN="15.0"');
+    expect(source).toMatch(/platform :ios, '\$\{IOS_MIN\}'/);
+    expect(source).toContain('IPHONEOS_DEPLOYMENT_TARGET = ${IOS_MIN};');
+    expect(source).toContain('resources_build_phase.add_file_reference');
+    // The floor is raised before `npx cap sync ios`, which runs pod install.
+    expect(source.indexOf('IOS_MIN="15.0"')).toBeLessThan(source.indexOf('\nnpx cap sync ios'));
+  });
+
   test('bootstrap-ios installs the tracked icon into a clean catalog repeatably', () => {
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'waves-ios-assets-'));
     const assetCatalog = path.join(fixture, 'Assets.xcassets');
