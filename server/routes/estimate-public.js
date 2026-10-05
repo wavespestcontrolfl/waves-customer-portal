@@ -17415,6 +17415,87 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
   return { disclosures, wouldChargeBundled, afterPerApplication };
 }
 
+// Good / Better / Best tiles for the customer page (GATE_ESTIMATE_OFFER_TIERS).
+// A VIEW over the rail below: the row is in one of two ordinary states —
+// 'best' (pest + lawn, as quoted) or 'pest_only' (lawn removed through the
+// rail) — and the other state's numbers come from the rail's OWN dry run, so
+// a tile never shows a price the rail would not persist. Served only on a
+// live accept-active surface for a row the office marked, when the rail
+// itself would allow the move (its resolvers decide). null = no picker, the
+// page renders exactly as today.
+async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDraftPreview = false, mixChange = applyServiceMixChange }) {
+  const OfferTiers = require('../services/estimate-offer-tiers');
+  if (!OfferTiers.offerTiersGateLive() || !serviceOptOutGateOn()) return null;
+  if (adminDraftPreview || !OfferTiers.offerTiersRequested(estData)) return null;
+  if (!isEstimateAcceptActive(estimate) || estimate.price_locked_at) return null;
+  const OptOut = require('../services/estimate-service-opt-out');
+  const key = OfferTiers.COMPANION_KEY;
+  const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
+  const rowKey = (row) => recurringServiceKey({ service: row?.service ?? row?.s, name: row?.label ?? row?.name ?? row?.s });
+  const perApp = (row) => {
+    const net = Number(row?.displayPrice);
+    const list = Number(row?.perTreatment);
+    return net > 0 ? net : (list > 0 ? list : null);
+  };
+  let state;
+  let dry;
+  try {
+    if (OptOut.currentlyOptedOutKeys(estData).includes(key)) {
+      if (OptOut.serviceOptOutRestoreBlockedKeys(estData).includes(key)) return null;
+      if (OptOut.serviceOptOutBlockedByProposal(estData)
+        || OptOut.serviceOptOutTierSelectionActive(estData, estimate.waveguard_tier)) return null;
+      state = 'pest_only';
+      dry = await mixChange({ estimate: { ...estimate }, body: { serviceKey: key, included: true, dryRun: true }, actor: 'customer' });
+    } else {
+      const removable = Array.from(OptOut.serviceOptOutRemovableKeys(
+        estData, sections, estimate.waveguard_tier, { category: estimate.category },
+      ) || []);
+      if (!removable.includes(key)) return null;
+      state = 'best';
+      dry = await mixChange({ estimate: { ...estimate }, body: { serviceKey: key, included: false, dryRun: true }, actor: 'customer' });
+    }
+  } catch (err) {
+    logger.warn(`[estimate-data] offer tiers preview skipped for estimate ${estimate.id}: ${err.message}`);
+    return null;
+  }
+  if (!dry || dry.status !== 200 || dry.body?.dryRun !== true) return null;
+
+  const currentFrequency = defaultFrequencyFromList(Array.isArray(pricingBundle?.frequencies) ? pricingBundle.frequencies : []);
+  const currentRows = (Array.isArray(currentFrequency?.perServiceTreatments) ? currentFrequency.perServiceTreatments : [])
+    .map((row) => ({ service: rowKey(row), perApplication: perApp(row), visitsPerYear: Number(row?.visitsPerYear) || null }))
+    .filter((row) => row.service && row.perApplication != null);
+  const otherRows = (Array.isArray(dry.body.perApplication) ? dry.body.perApplication : [])
+    .map((row) => ({ service: rowKey(row), perApplication: Number(row?.pa) > 0 ? Number(row.pa) : null }))
+    .filter((row) => row.service && row.perApplication != null);
+  const current = {
+    rows: currentRows,
+    oneTimeTotal: Number(estimate.onetime_total || 0),
+    waveGuardTier: pricingBundle?.waveGuardTier || estimate.waveguard_tier || null,
+  };
+  const other = {
+    rows: otherRows,
+    oneTimeTotal: Number(dry.body.next?.onetimeTotal || 0),
+    waveGuardTier: dry.body.next?.waveGuardTier || null,
+  };
+  const pestOnlyView = (view) => ({ ...view, rows: view.rows.filter((row) => row.service === 'pest_control') });
+  const better = pestOnlyView(state === 'best' ? other : current);
+  const best = state === 'best' ? current : other;
+  if (!better.rows.length || best.rows.length < 2) return null;
+  // Good: the one-time pest visit, priced the way the one-time option prices
+  // it — from the pest plan's own per-application list price.
+  const goodTotal = (state === 'pest_only' && estimate.show_one_time_option
+    ? resolveAcceptOneTimeTotal(estimate, pricingBundle)
+    : 0) || oneTimePestChoiceAmountFromResultStats(estData) || 0;
+  return {
+    state,
+    companionKey: key,
+    companionLabel: OfferTiers.COMPANION_LABEL,
+    good: goodTotal > 0 ? { oneTimeTotal: goodTotal } : null,
+    better,
+    best,
+  };
+}
+
 // The service-mix change rail — ONE implementation for a customer removal /
 // restore / add (PUT /:token/service-opt-out) and the staff send-time
 // "lead with one service" removal (admin-estimates sendEstimateNow, actor
@@ -17750,6 +17831,10 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       return { status: 200, body: ({
         success: true, dryRun: true, serviceKey, label, included, mode,
         previous, next, disclosures: impact.disclosures,
+        // The per-application terms the digest binds, as data (the Good /
+        // Better / Best tiles read them; the disclosures say the same thing
+        // in sentences).
+        perApplication: impact.afterPerApplication,
         // Echo this back on the commit; the write refuses if the row, the
         // pricing config, or the membership verdict moved since this preview.
         previewBasis: previewDigest,
@@ -17841,6 +17926,12 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     const serviceInterest = require('../services/estimate-service-lines')
       .inferEstimateServiceInterest({ estimate_data: parsedData });
 
+    // Good / Better / Best: on a row the office marked for tiers the one-time
+    // option follows the lawn line (on when lawn is removed, ALWAYS off when
+    // it is added back) — see oneTimeOptionUpdateForMixChange.
+    const offerTierOptionUpdate = require('../services/estimate-offer-tiers')
+      .oneTimeOptionUpdateForMixChange({ actor, serviceKey, mode, estData: parsedData, next });
+
     // One transaction for the price mutation and its audit row. The
     // activity_log row is the specified audit surface for a customer-visible
     // price rewrite — a best-effort insert after the update commits could
@@ -17926,6 +18017,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
           // dropped line is costed in every future audit forever.
           pricing_authority: 'SERVER',
           server_computed_price: next.annualTotal,
+          ...offerTierOptionUpdate,
           updated_at: trx.fn.now(),
         }));
       if (!updateCount) return;
@@ -29838,6 +29930,12 @@ async function composeEstimateDataPayload(estimate, {
       catch (_) { addStampBlockedByMembership = true; }
     }
 
+    // Good / Better / Best tiles (GATE_ESTIMATE_OFFER_TIERS): null unless
+    // the office marked this row and the opt-out rail would allow the move.
+    const offerTiersBlock = await buildOfferTiersBlock({
+      estimate, estData: estimateDataForIntelligence, pricingBundle, adminDraftPreview,
+    });
+
     const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms')
       && acceptanceTermsApplyTo(estimate);
     // The scope the served drawer carries (codex #5434 r1 P0): 'plan' only
@@ -29988,6 +30086,7 @@ async function composeEstimateDataPayload(estimate, {
       // this AND suppresses the mirror add-service offer with it — without the
       // suppression the page answers "remove lawn" with "Add Lawn Care and save
       // more" in three places.
+      ...(offerTiersBlock ? { offerTiers: offerTiersBlock } : {}),
       ...((() => {
         if (!serviceOptOutGateOn()) return {};
         const {
@@ -31037,3 +31136,4 @@ module.exports.shapeFromV1 = shapeFromV1;
 module.exports.stampTreeShrubPalmCount = stampTreeShrubPalmCount;
 module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBundle;
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;
+module.exports.buildOfferTiersBlock = buildOfferTiersBlock;

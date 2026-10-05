@@ -6054,6 +6054,25 @@ router.post('/calculate-estimate', async (req, res) => {
       .withTrustedCatalogPricing(v1Input);
     const v1 = pricingEngine.generateEstimate(v1Input);
     const mapped = mapV1ToLegacyShape(v1);
+    // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): tell the estimate tool
+    // when this result may be marked for the tier picker, so it can default
+    // the option on. Same stored-facts predicate the save applies (plus the
+    // account evidence this request resolved); never a price field.
+    try {
+      const OfferTiers = require('../services/estimate-offer-tiers');
+      if (OfferTiers.offerTiersGateLive()) {
+        const { isCommercialEstimateData } = require('../services/estimate-delivery-options');
+        const memberEvidence = (Array.isArray(v1Input.priorQualifyingServices) && v1Input.priorQualifyingServices.length > 0)
+          || v1Input.recurringCustomer === true || v1Input.isRecurringCustomer === true;
+        const verdict = OfferTiers.offerTiersSaveEligibility({
+          gateOn: true,
+          estData: { result: mapped },
+          commercial: isCommercialEstimateData({ result: mapped }),
+          memberEvidence,
+        });
+        if (verdict.eligible) mapped.offerTiersAvailable = true;
+      }
+    } catch (_) { /* a convenience flag; the save decides */ }
     res.json(mapped);
   } catch (err) {
     console.error('[estimate-v1-adapter] Calculation error:', err.message, err.stack);

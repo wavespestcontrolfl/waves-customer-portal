@@ -2657,6 +2657,16 @@ const gates = {
   // Enable with GATE_ESTIMATE_SERVICE_ADD=true (with the opt-out gate on).
   estimateServiceAdd: process.env.GATE_ESTIMATE_SERVICE_ADD === 'true',
 
+  // Good / Better / Best on a pest + lawn estimate (owner 2026-10-05): a
+  // three-tile picker that is a VIEW over the service opt-out rail — Best is
+  // the estimate as quoted, Better is lawn removed through the rail's own
+  // canonical re-price, Good is the one-time choice on that pest-only row.
+  // The stored row is always an ordinary valid estimate. Needs the opt-out
+  // gate. Read at call time via estimateOfferTiersLive(); this map entry is
+  // for logGateStatus only. STRICT opt-in.
+  // Enable with GATE_ESTIMATE_OFFER_TIERS=true.
+  estimateOfferTiers: process.env.GATE_ESTIMATE_OFFER_TIERS === 'true',
+
   // Send-time "lead with one service": when a NEW residential customer's
   // estimate carries EXACTLY two recurring lines (the non-lead one removable),
   // sendEstimateNow parks the second as a staff-authored opt-out event
@@ -4704,6 +4714,11 @@ function autoDispatchSharedModelLive() {
 // reader server/services/estimate-consultation-offer.js uses. The offer
 // additionally requires leadInspectionLinkLive() (the /inspection/:token page
 // itself must be live too) — checked by the builder, not duplicated here.
+// GATE_ESTIMATE_OFFER_TIERS read at CALL time — strict `'true'` only.
+function estimateOfferTiersLive() {
+  return process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
+}
+
 function estimateConsultationOfferLive() {
   return process.env.GATE_ESTIMATE_CONSULTATION_OFFER === 'true';
 }
@@ -5730,3 +5745,5 @@ module.exports.relayUnbookedHandoffLive = relayUnbookedHandoffLive;
 module.exports.lawnTechParagraphLive = lawnTechParagraphLive;
 // GATE_PREPAY_MINT_PRICE_HOLD reader, on its own line so gate PRs never conflict.
 module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
+// GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
+module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
