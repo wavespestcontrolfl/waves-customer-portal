@@ -116,38 +116,22 @@
       "contract_calls": 0
     },
     "W2-dev-01": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "other_account_facts_in_brief",
-      "failures": [
-        {
-          "point": "target_resolution",
-          "code": "other_account_facts_in_brief",
-          "detail": "Pellham (3 of id, phone, name) appears in the result of get_schedule_view for a brief of Quill Fennimore"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 66
+        "first_tool_result_ms": 21,
+        "verified_completion_ms": 119
       },
       "notes": [],
       "strength": null,
       "contract_calls": 0
     },
     "W2-dev-02": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "other_account_facts_in_brief",
-      "failures": [
-        {
-          "point": "target_resolution",
-          "code": "other_account_facts_in_brief",
-          "detail": "Pellham (2 of id, phone, name) appears in the result of get_schedule_view for a brief of Quill Fennimore"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 50
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 95
       },
       "notes": [],
       "strength": null,
@@ -176,19 +160,11 @@
       "contract_calls": 0
     },
     "W2-dev-05": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "schedule_view_window_has_no_end",
-      "failures": [
-        {
-          "point": "tool_result",
-          "code": "schedule_view_window_has_no_end",
-          "detail": "schedule view window \"09:00:00\" carries the start only, seeded 09:00-11:00"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 29
+        "first_tool_result_ms": 17,
+        "verified_completion_ms": 76
       },
       "notes": [],
       "strength": null,

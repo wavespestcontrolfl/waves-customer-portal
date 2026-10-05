@@ -7498,6 +7498,8 @@ const EstimateConverter = {
     let draftInvoicePayUrl = null;
     let invoiceDelivery = null;
     let annualPrepayTermId = null;
+    // Set by createTermForAnnualPrepay when THIS accept inserted the term.
+    const prepayVisitPriceRecord = {};
     // Set below when this accept is a termite-annual-plan sign-before-pay
     // deferral — surfaced on the return value so callers (and the estimate
     // detail API) can tell the accept succeeded but money is on hold for a
@@ -7967,6 +7969,9 @@ const EstimateConverter = {
             const annualPrepayTerm = await AnnualPrepayRenewals.createTermForAnnualPrepay({
               customerId,
               sourceEstimateId: estimateId,
+              // Recorded below, after the existing-service extension has
+              // written its prices.
+              deferVisitPriceRecord: prepayVisitPriceRecord,
               prepayInvoiceId: draftInvoiceId,
               planLabel: `${prepayPlanPrefix} Annual Prepay`,
               monthlyRate: termMonthlyRate,
@@ -8452,6 +8457,13 @@ const EstimateConverter = {
           monthlyRateReviewNeeded: false,
         };
       }
+    }
+    // Stamp-time price check baseline for the year this accept created: the
+    // covered visits' prices as the accept leaves them (the extension above is
+    // the accept's last visit price write). Never for a term this accept only
+    // reused: its baseline is the one from its own mint.
+    if (annualPrepayTermId && prepayVisitPriceRecord.termCreated) {
+      await require('./annual-prepay-renewals').recordMintVisitPrices(annualPrepayTermId, database);
     }
     const extensionApplied = extension?.applied === true;
     // A frozen plan that applied NOTHING but parked work (all rows drifted,

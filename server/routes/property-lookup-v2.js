@@ -1333,6 +1333,30 @@ function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
   };
 }
 
+// The county roll's own answer for the address status line (PR 4), read off
+// the lookup's evidence and never inferred from an absence:
+// The audit of the TYPED number comes first: the lookup deliberately keeps
+// both a record and a negative audit when the record is for another house
+// number (typed 1010, record for 1012).
+//   not_found  the audit RAN for a county (it answered whether the street
+//              exists) and has no exact match for the typed number
+//   found      the audit matched the typed number exactly, or (with no
+//              completed audit) a county-backed record came back
+//   unknown    anything else: no audit and no record, an audit that could
+//              not run (outage, out of area), or only a snapped-record marker
+function countyRollAnswer(result) {
+  const record = result?.propertyRecord;
+  const audit = result?.addressAudit || record?._addressAudit || null;
+  if (audit?.hasExactMatch === true) return 'found';
+  if (audit && audit.county && typeof audit.streetExists === 'boolean' && audit.hasExactMatch === false) return 'not_found';
+  if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId || record._raw?.parcelId || hasCountyEvidence(record))) {
+    // A snapped-record marker with no completed audit: the record is for
+    // another number and the roll did not answer for the typed one.
+    return audit?.snappedRecord ? 'unknown' : 'found';
+  }
+  return 'unknown';
+}
+
 // ─────────────────────────────────────────────
 // MAIN ROUTE — admin/tech-gated thin wrapper over performPropertyLookup
 // ─────────────────────────────────────────────
@@ -1351,8 +1375,18 @@ router.post('/property-lookup', async (req, res) => {
     // office "Suite" address — size the whole property, never the suite.
     // occupancy ('suite' | 'building' | 'none'): staff's answer to "just your space
     // or the whole building?" (GATE_LOOKUP_BUSINESS_IDENTITY); absent unless sent.
+    // Address status line (PR 4, GATE_LOOKUP_ADDRESS_STATUS): asked beside the
+    // lookup, never ahead of it; resolves null while the gate is off and
+    // never rejects.
+    const addressStatusPromise = require('../services/property-lookup/address-status').resolveAddressStatus(address).catch(() => null);
     const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: wholeProperty !== true, ...occupancyOption(req.body?.occupancy) });
     result.meta.providerStatus ||= buildProviderStatus();
+    const addressStatus = await addressStatusPromise;
+    if (addressStatus) {
+      // The county roll's own answer rides beside it, never folded into it:
+      // an address Google confirms can still be missing from the roll.
+      result.meta.addressStatus = { ...addressStatus, countyRoll: countyRollAnswer(result) };
+    }
     // A whole-property (association) lookup skips the business check. The
     // tool is told so it can ask for a fresh lookup if the business type
     // later stops being an association. Absent while the gate is off.
@@ -2660,7 +2694,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     && parcelTurfBoundApplies
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
-  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup });
+  const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit, { parcelTurfBoundApplies, residentialUnitLookup: unitLookup, commercialProfile });
   // Permit building facts for the profile (R2-B): undefined = no stamp,
   // null = withheld (unit lookup, commercial, unconfirmed address, size
   // known, gate off), object = usable estimate. A permit story count fills
@@ -4340,7 +4374,7 @@ function calcPestPressureMult(pressure) {
 // ─────────────────────────────────────────────
 // FIELD VERIFY FLAGS
 // ─────────────────────────────────────────────
-function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false } = {}) {
+function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApplies = true, residentialUnitLookup = false, commercialProfile } = {}) {
   const flags = [];
 
   // Geocoder snapped the typed house number to a different premise — this
@@ -4637,7 +4671,26 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null, { parcelTurfBoundApp
   // — a 2–4 address parcel is more likely a duplex/small multi-unit and
   // gets neutral copy.
   const parkParcel = detectMultiSitusMasterParcel(rc);
-  if (parkParcel) {
+  // A COMMERCIAL profile (the lookup's own read, or the category the
+  // business-scope answer resolved: `commercialProfile`) on a shared parcel
+  // the roll did not positively identify as a park must not be told it is
+  // "homes on a land-lease community" (seen 2026-10-05: a salon in a
+  // 24-address plaza). The roll's address count alone cannot tell a plaza
+  // from a campus or a park whose attributes did not load, so the copy
+  // states only what is known: several addresses, one parcel.
+  // The supplied resolved category is authoritative (a unit lookup the
+  // guardrails reclassified to residential must keep residential copy);
+  // the record's own read is used only when no category was supplied.
+  const commercialRead = typeof commercialProfile === 'boolean'
+    ? commercialProfile : detectCategory(rc, ai || {}) === 'COMMERCIAL';
+  const sharedCommercialParcel = Boolean(parkParcel) && parkParcel.parkConfirmed !== true && commercialRead;
+  if (sharedCommercialParcel) {
+    flags.push({
+      field: 'parkParcel',
+      reason: `Address is one of ${parkParcel.situsCount} addresses on a single county parcel (a plaza, a center or another shared property), so this address's own sq ft, lot size, and stories are not on the roll. Get them from the customer or on site and save them as field-verified.`,
+      priority: 'HIGH',
+    });
+  } else if (parkParcel) {
     flags.push({
       field: 'parkParcel',
       reason: (parkParcel.parkConfirmed || parkParcel.situsCount >= 5)
@@ -6320,6 +6373,7 @@ module.exports.parcelOverlayEnabled = parcelOverlayEnabled;
 module.exports.buildParcelOverlayParam = buildParcelOverlayParam;
 module.exports._private = {
   applyCommercialSuiteSize,
+  countyRollAnswer,
   reconcileCommercialSuiteSubtype,
   resolveCommercialSuiteScope,
   buildResultFromCachedLookup,
