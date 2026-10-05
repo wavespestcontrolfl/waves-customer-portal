@@ -19,6 +19,7 @@ import {
   DRAFT_RETENTION_MS,
   deleteFastCompletionAttempt,
   getFastCompletionAttempt,
+  hasFastCompletionMarker,
   listFastCompletionAttempts,
   pruneFastCompletionAttempts,
   putFastCompletionAttempt,
@@ -108,6 +109,19 @@ describe("completion resume store (IndexedDB)", () => {
     expect(await getFastCompletionAttempt("svc-2", "tech-a")).toEqual({ available: true, attempt: null });
     expect(await deleteFastCompletionAttempt("svc-1", "tech-a", attempt.body)).toBe(true);
     expect((await getFastCompletionAttempt("svc-1", "tech-a")).attempt).toBeNull();
+  });
+
+  it("marks a saved Fast Complete attempt outside IndexedDB and clears the mark with the row (GitHub Codex P2 on #5979)", async () => {
+    localStorage.clear();
+    const body = { idempotencyKey: "marker-key", technicianNotes: "Marked" };
+    expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(false);
+    expect(await putFastCompletionAttempt("svc-m", "tech-m", { body, summary: "Marked" })).toBe(true);
+    expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(true);
+    expect(hasFastCompletionMarker("svc-m", "tech-other")).toBe(false);
+    expect(await deleteFastCompletionAttempt("svc-m", "tech-m", { ...body, technicianNotes: "Other" })).toBe(false);
+    expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(true);
+    expect(await deleteFastCompletionAttempt("svc-m", "tech-m", body)).toBe(true);
+    expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(false);
   });
 
   it("survives the legacy unmarked-body pruner in an older open tab", async () => {

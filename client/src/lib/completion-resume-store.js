@@ -128,6 +128,28 @@ function fastCompletionAttemptKey(serviceId, operatorId) {
   return `${FAST_COMPLETION_PREFIX}${String(operatorId)}:${String(serviceId)}`;
 }
 
+// Which Fast Complete rows exist, kept outside IndexedDB: after a reload a
+// device whose store cannot be read still knows a saved attempt is there,
+// so Tech Home opens no fresh completion over it (GitHub Codex P2 on #5979).
+const FAST_COMPLETION_MARKER_PREFIX = "waves_fast_complete_saved:";
+function setFastCompletionMarker(key, present) {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return;
+    if (present) storage.setItem(FAST_COMPLETION_MARKER_PREFIX + key, "1");
+    else storage.removeItem(FAST_COMPLETION_MARKER_PREFIX + key);
+  } catch { /* best effort */ }
+}
+export function hasFastCompletionMarker(serviceId, operatorId) {
+  const key = fastCompletionAttemptKey(serviceId, operatorId);
+  if (!key) return false;
+  try {
+    return globalThis.localStorage?.getItem(FAST_COMPLETION_MARKER_PREFIX + key) === "1";
+  } catch {
+    return false;
+  }
+}
+
 function withFastCompletionKey(key, operation) {
   const pending = (fastCompletionOperations.get(key) || Promise.resolve()).then(() => operation(key));
   fastCompletionOperations.set(key, pending);
@@ -152,6 +174,7 @@ function mutateFastCompletionRow(key, mutate) {
     return new Promise((resolve) => {
       let settled = false;
       let result = false;
+      let wrote = null;
       const done = (value) => {
         if (settled) return;
         settled = true;
@@ -166,6 +189,7 @@ function mutateFastCompletionRow(key, mutate) {
           try {
             const mutation = mutate(read.result);
             if (!mutation) return;
+            wrote = mutation.delete ? "delete" : "put";
             const write = mutation.delete ? store.delete(key) : store.put(mutation.value, key);
             write.onsuccess = () => { result = true; };
             write.onerror = () => done(false);
@@ -174,7 +198,10 @@ function mutateFastCompletionRow(key, mutate) {
           }
         };
         read.onerror = () => done(false);
-        tx.oncomplete = () => done(result);
+        tx.oncomplete = () => {
+          if (result && wrote) setFastCompletionMarker(key, wrote === "put");
+          done(result);
+        };
         tx.onerror = () => done(false);
         tx.onabort = () => done(false);
       } catch {

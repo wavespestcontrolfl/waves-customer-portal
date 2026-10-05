@@ -11,13 +11,14 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), attempts: new Map(), getAttempt: vi.fn(), listAttempts: vi.fn(), prune: vi.fn() }));
+const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), attempts: new Map(), getAttempt: vi.fn(), listAttempts: vi.fn(), prune: vi.fn(), hasMarker: vi.fn() }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../lib/completion-resume-store', () => ({
   getFastCompletionAttempt: mocks.getAttempt,
   listFastCompletionAttempts: (...args) => mocks.listAttempts(...args),
   pruneFastCompletionAttempts: (...args) => mocks.prune(...args),
+  hasFastCompletionMarker: (...args) => mocks.hasMarker(...args),
   pruneRecapClipDrafts: () => Promise.resolve(0),
 }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
@@ -75,6 +76,8 @@ beforeEach(() => {
   mocks.listAttempts.mockReset();
   mocks.listAttempts.mockImplementation(async (operatorId) => ({ available: true, attempts: operatorId === 'tech-fixture' ? [...mocks.attempts].map(([serviceId, attempt]) => ({ ...attempt, serviceId })) : [] }));
   mocks.prune.mockReset();
+  mocks.hasMarker.mockReset();
+  mocks.hasMarker.mockReturnValue(false);
   mocks.prune.mockResolvedValue(0);
   mocks.getAttempt.mockReset();
   mocks.getAttempt.mockImplementation(async (serviceId, operatorId) => ({
@@ -259,6 +262,26 @@ it('after a failed read, a tap on the tool scans again (GitHub Codex P2 on 458cc
   fireEvent.click(tool);
   await waitFor(() => expect(mocks.listAttempts.mock.calls.length).toBeGreaterThan(scans));
   await waitFor(() => expect(screen.queryByText(/Could not read the completion saved on this device/)).not.toBeInTheDocument());
+});
+
+it('after a reload whose device reads all fail, a visit marked as saved on this device opens nothing (GitHub Codex P2 on #5979)', async () => {
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  mocks.hasMarker.mockImplementation((serviceId, operatorId) => serviceId === 'svc-live' && operatorId === 'tech-fixture');
+  rows = [row('svc-live', { fastCompleteReportEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it('with unreadable storage and no saved marker, a visit opens as usual', async () => {
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  rows = [row('svc-live', { fastCompleteReportEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByTestId('sheet')).toBeInTheDocument();
 });
 
 it('a device that cannot store saved completions at all stays quiet (GitHub Codex P2 on 458cc517e5)', async () => {
