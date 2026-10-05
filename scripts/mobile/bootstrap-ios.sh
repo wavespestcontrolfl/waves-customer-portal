@@ -227,12 +227,17 @@ fi
 
 # The privacy manifest only counts when it is in the App target's resources;
 # App Review rejects a build without it. Attach it with the xcodeproj gem that
-# Homebrew's CocoaPods ships (idempotent). Without that gem, say so and leave
-# the manual Xcode step below.
+# CocoaPods ships (idempotent). Without that gem, say so and leave the manual
+# Xcode step below.
 # `|| true`: a CocoaPods installed with `gem install` has no Homebrew wrapper,
 # and under `set -o pipefail` a grep with no match would end the bootstrap.
 POD_GEM_HOME="$(grep -o 'GEM_HOME="[^"]*"' "$(readlink -f "$(command -v pod)")" 2>/dev/null | head -1 | cut -d'"' -f2 || true)"
-if [ -n "$POD_GEM_HOME" ] && (cd ios/App && GEM_HOME="$POD_GEM_HOME" ruby -e '
+# Run Ruby with the xcodeproj gem: Homebrew's CocoaPods keeps it under its own
+# GEM_HOME; a `gem install cocoapods` puts it where plain `ruby` finds it.
+xcodeproj_ruby() {
+  if [ -n "$POD_GEM_HOME" ]; then GEM_HOME="$POD_GEM_HOME" ruby "$@"; else ruby "$@"; fi
+}
+if (cd ios/App && xcodeproj_ruby -e '
   require "xcodeproj"
   project = Xcodeproj::Project.open("App.xcodeproj")
   target = project.targets.find { |t| t.name == "App" } or abort("no App target")
@@ -293,7 +298,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 }
 SWIFT
 fi
-if [ -n "$POD_GEM_HOME" ] && (cd ios/App && GEM_HOME="$POD_GEM_HOME" ruby -e '
+if (cd ios/App && xcodeproj_ruby -e '
   require "xcodeproj"
   project = Xcodeproj::Project.open("App.xcodeproj")
   target = project.targets.find { |t| t.name == "App" } or abort("no App target")

@@ -42,6 +42,9 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(source).toContain('post_install do |installer|\\n" + hook + "end');
     // A missing Homebrew wrapper must not end the script under pipefail.
     expect(source).toMatch(/POD_GEM_HOME="\$\(.*\|\| true\)"/);
+    // A gem-installed CocoaPods (no Homebrew GEM_HOME) still runs the xcodeproj steps.
+    expect(source).toContain('if [ -n "$POD_GEM_HOME" ]; then GEM_HOME="$POD_GEM_HOME" ruby "$@"; else ruby "$@"; fi');
+    expect(source).not.toContain('if [ -n "$POD_GEM_HOME" ] && (cd ios/App');
     // The manual add step prints only when the automatic attach failed.
     expect(source).toContain('if [ "${PRIVACY_ATTACHED:-0}" != "1" ]; then');
     // The floor is raised before `npx cap sync ios`, which runs pod install.
