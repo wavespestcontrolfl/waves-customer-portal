@@ -73,7 +73,7 @@ import {
   amountText, categoryLabel, hasAmount, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
-import { PEST_SWEEP_ACTION, pestSweepCompletionFields } from '../../lib/pest-sweep-action';
+import { pestSweepCompletionFields, pestSweepWriterFields } from '../../lib/pest-sweep-action';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import TechServicePhotosModal from './TechServicePhotosModal';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -916,7 +916,7 @@ function writerPayload({ service, visit, form, rows, facts, ratingAllowed, photo
     areasServiced: facts?.areas || [],
     customerInteraction: customerHomeWriterLabel(form.customerHome),
     // The full form's own writer field (owner 2026-10-05): the sweep the tech ticked.
-    ...(form.sweptEaves ? { actionsCompleted: [PEST_SWEEP_ACTION.label] } : {}),
+    ...pestSweepWriterFields(form.sweptEaves),
     // The first-visit 5 is a scoring default, not something the technician
     // saw: the writer gets a rating only once they choose one (codex local
     // r28 on #5538), as the completion recap leaves the default out.
