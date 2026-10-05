@@ -127,12 +127,19 @@ function nameOrNull(v) {
 // senders), there is nothing safe to match on, so no row is a duplicate.
 // The description is compared WHOLE (the exact string the insert below
 // writes), so invoice 12 never matches invoice 12-A or 112.
+// A description over the 300-character column is clipped, and two clipped
+// descriptions can be equal for different invoices, so no duplicate check
+// runs on one (nor on a vendor name over its 200-character column).
+function fullExpenseDescription(vendorName, invoiceNumber) {
+  return `${vendorName} Invoice${invoiceNumber ? ` #${invoiceNumber}` : ''} — via email`;
+}
 function expenseDescription(vendorName, invoiceNumber) {
-  return `${vendorName} Invoice${invoiceNumber ? ` #${invoiceNumber}` : ''} — via email`.slice(0, 300);
+  return fullExpenseDescription(vendorName, invoiceNumber).slice(0, 300);
 }
 
 async function findDuplicateExpense(vendorName, invoiceNumber, amount) {
   if (!invoiceNumber || vendorName === 'Unknown Vendor') return null;
+  if (fullExpenseDescription(vendorName, invoiceNumber).length > 300 || String(vendorName).length > 200) return null;
   return db('expenses')
     .where({ vendor_name: String(vendorName).slice(0, 200), amount, description: expenseDescription(vendorName, invoiceNumber) })
     .first('id');

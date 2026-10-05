@@ -96,3 +96,10 @@ test('the duplicate lookup compares the whole description, so a longer invoice n
   await processVendorInvoice({ id: 'e7', gmail_id: 'g', from_address: 'p@google.com', subject: 'Invoice' }, { extracted: {} });
   expect(mockState.lastDuplicateFilter).toEqual(expect.objectContaining({ vendor_name: 'Google', amount: 16.8, description: 'Google Invoice #12 — via email' }));
 });
+
+test('no duplicate check runs when the description would be clipped', async () => {
+  mockState.duplicate = { id: 'exp-clipped' };
+  extraction({ vendor_name: 'Google', invoice_number: 'N'.repeat(400), invoice_date: '2026-09-01', total: 16.8 });
+  await processVendorInvoice({ id: 'e8', gmail_id: 'g', from_address: 'p@google.com', subject: 'Invoice' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Google', amount: 16.8 }));
+});
