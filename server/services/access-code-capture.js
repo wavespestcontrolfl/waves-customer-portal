@@ -524,10 +524,21 @@ function serialize(row) {
 
 // One customer's codes: `active` (a visit-life row only while its visit has
 // not been completed or cancelled) and `found` (waiting for a decision).
+// A row filed from a text belongs to the customer that text belongs to now. A
+// merge undo moves the text back to the restored customer without knowing
+// about rows derived from it, so every read and decision checks the owner.
+async function sourceStillOwned(trx, row) {
+  if (row.source_type !== 'sms' || !row.source_id) return true;
+  const source = await trx('sms_log').where({ id: row.source_id }).first('customer_id');
+  return !source || source.customer_id === row.customer_id;
+}
+const OWNED_SOURCE_SQL = `(a.source_type <> 'sms' OR a.source_id IS NULL OR NOT EXISTS (
+  SELECT 1 FROM sms_log src WHERE src.id = a.source_id AND src.customer_id IS DISTINCT FROM a.customer_id))`;
+
 async function listForCustomer(conn, customerId) {
   const rows = await conn('customer_access_codes as a')
     .leftJoin('scheduled_services as ss', 'ss.id', 'a.scheduled_service_id')
-    .where('a.customer_id', customerId).whereIn('a.status', ['active', 'found'])
+    .where('a.customer_id', customerId).whereIn('a.status', ['active', 'found']).whereRaw(OWNED_SOURCE_SQL)
     .select('a.*', conn.raw('ss.scheduled_date::text AS scheduled_date'), 'ss.status as service_status')
     .orderBy('a.created_at', 'desc').orderBy('a.id');
   const kept = rows.filter((r) => isLive(r));
@@ -541,7 +552,7 @@ async function listForCustomer(conn, customerId) {
 async function listFound(conn, { limit = 50, offset = 0 } = {}) {
   const base = () => conn('customer_access_codes as a')
     .join('customers as c', 'c.id', 'a.customer_id')
-    .whereNull('c.deleted_at').where('a.status', 'found')
+    .whereNull('c.deleted_at').where('a.status', 'found').whereRaw(OWNED_SOURCE_SQL)
     // A one-visit code older than its window is no longer a candidate.
     .where(function current() {
       this.where('a.life', 'standing')
@@ -677,14 +688,16 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
       const refused = await supersedeOrRefuse(trx, row.customer_id, next, { exceptId: row.id, adminUserId });
       if (refused) return refused;
+      // A one-visit candidate lives 14 days from the day it was sent; one past
+      // that is refused whatever visit is named, never activated late.
+      if (next.life === 'visit' && !isLive({ ...row, life: 'visit', status: 'active', scheduled_service_id: null }, now)) {
+        return fail(409, 'expired');
+      }
+      // A text moved to another customer (a merge undone) is not this one's evidence.
+      if (!(await sourceStillOwned(trx, row))) return fail(409, 'source_moved');
       const visit = next.life === 'visit'
         ? await visitFor(trx, row.customer_id, { from: row.source_at ? new Date(row.source_at) : now, chosenId }) : { id: null };
       if (visit.error) return fail(400, visit.error);
-      // A visit code bound to nothing lives 14 days from the day it was sent; one
-      // past that is refused, never turned into an active code nobody can see.
-      if (next.life === 'visit' && !visit.id && !isLive({ ...row, life: 'visit', status: 'active', scheduled_service_id: null }, now)) {
-        return fail(409, 'expired');
-      }
       const scheduledServiceId = visit.id;
       const profileField = await fillEmptyProfileField(trx, row.customer_id, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));

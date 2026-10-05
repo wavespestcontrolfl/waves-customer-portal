@@ -752,6 +752,27 @@ postgres('access codes section', () => {
       expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, status: 409, code: 'expired' });
     });
 
+    test('an expired one-visit candidate is refused even when a visit in its old window is named', async () => {
+      const c = await customer();
+      const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      const sent = new Date(Date.now() - 20 * 86400000);
+      await trx('customer_access_codes').where({ id: row.id }).update({ source_at: sent });
+      const v = await visit(c.id, etDateString(addETDays(sent, 2)));
+      expect(await access.accept(trx, row.id, { scheduledServiceId: v })).toMatchObject({ ok: false, code: 'expired' });
+    });
+
+    test('a code from a text that moved to another customer is hidden and cannot be accepted', async () => {
+      const winner = await customer();
+      const loser = await customer();
+      const id = await text(winner.id, 'The gate code is #4821');
+      await sweep(stub([gateItem()]));
+      const [row] = await rows(winner.id);
+      await trx('sms_log').where({ id }).update({ customer_id: loser.id });
+      expect((await access.listForCustomer(trx, winner.id)).found).toHaveLength(0);
+      expect((await access.listFound(trx, {})).items.map((r) => r.id)).not.toContain(row.id);
+      expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, status: 409, code: 'source_moved' });
+    });
+
     test('a visit code bound to no visit leaves the live list 14 days after it was sent', async () => {
       const c = await customer();
       const row = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });

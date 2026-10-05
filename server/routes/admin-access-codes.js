@@ -52,6 +52,7 @@ const MESSAGES = {
   invalid_visit: 'scheduledServiceId must be a visit of this customer that has not ended',
   visit_required: 'Choose the visit this code is for',
   expired: 'This one-visit code is more than 14 days old',
+  source_moved: 'The text this code came from now belongs to another customer',
   invalid_body: 'The request body must be a JSON object',
 };
 
