@@ -240,6 +240,33 @@ describe('deterministic lines', () => {
   });
 });
 
+describe('Codex r10', () => {
+  test('"spider mites" never prints twice, whichever id the model gave', () => {
+    const note = 'Found spider mites on the hedges.';
+    const out = tech.verifyObservations([obs('mites', 'hedges', true, 'spider mites on the hedges'), obs('spider_mites', 'hedges')], note);
+    expect(out).toEqual([{ condition: 'spider_mites', plant: 'hedges' }]);
+    expect(tech.verifyObservations([obs('mites', 'hedges', true, 'spider mites on the hedges')], note)).toEqual([{ condition: 'spider_mites', plant: 'hedges' }]);
+  });
+
+  test('the longest paragraph valid slots can render passes the read-time guard', () => {
+    const longest = (map) => Object.entries(map).sort((a, b) => b[1].display.length - a[1].display.length).map(([k]) => k);
+    const conditions = longest(CONDITIONS).slice(0, 3);
+    const plant = longest(PLANTS)[0];
+    const slots = {
+      observed: conditions.map((condition) => ({ condition, plant })),
+      maybe: Object.keys(FINDING_LABELS).sort((a, b) => FINDING_LABELS[b].length - FINDING_LABELS[a].length).slice(0, 2),
+      confirmed: Object.keys(FINDING_LABELS),
+      products: ['A', 'B', 'C', 'D', 'E'].map((c) => `${c}${'x'.repeat(79)}`),
+      allClear: 'excellent',
+    };
+    const text = tech.render(slots);
+    expect(text.length).toBeGreaterThan(700);
+    expect(text.length).toBeLessThanOrEqual(tech.MAX_TEXT_CHARS);
+    const entry = { v: 1, promptVersion: tech.PROMPT_VERSION, assessmentId: '77', text, slots, frozenAt: '2026-10-05T12:00:00.000Z' };
+    expect(tech.readFrozenTechParagraph({ treeShrubTechParagraph: { 77: entry } }, 77)).toBe(text);
+  });
+});
+
 describe('mites stay generic (Codex r8)', () => {
   const verify = (note, ...items) => tech.verifyObservations(items, note);
   test('"mites" renders "mites"; only "spider mites" in the note renders "spider mites"', () => {

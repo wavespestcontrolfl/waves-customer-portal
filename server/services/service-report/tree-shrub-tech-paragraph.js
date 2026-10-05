@@ -47,6 +47,10 @@ const MAX_NOTE_CHARS = 1500;
 const MAX_OBSERVATIONS = 3;
 const MAX_MAYBE = 2;
 const MAX_PRODUCTS = 5;
+const MAX_PRODUCT_NAME_CHARS = 80;
+// The longest text any valid slots can render (pinned by a test): the read-time
+// guard must never reject a paragraph the renderer can legally write (Codex r10).
+const MAX_TEXT_CHARS = 1200;
 
 /**
  * EVERY sentence the paragraph can contain. Draft wording for the owner to read
@@ -163,9 +167,12 @@ function verifyObservations(observations, note) {
   for (const raw of Array.isArray(observations) ? observations : []) {
     if (out.length >= MAX_OBSERVATIONS) break;
     // Object.hasOwn on a closed list rejects every non-id (null, objects, numbers).
-    const { condition, plant, quote: rawQuote, seenToday } = raw || {};
-    if (!Object.hasOwn(CONDITIONS, condition) || seen.has(condition) || seenToday !== true) continue;
+    const { condition: id, plant, quote: rawQuote, seenToday } = raw || {};
     const quote = fold(rawQuote);
+    // "mites" whose quote says "spider mites" is the spider mite item, so the pair
+    // never prints twice (Codex r10).
+    const condition = id === 'mites' && CONDITIONS.spider_mites.re.test(quote) ? 'spider_mites' : id;
+    if (!Object.hasOwn(CONDITIONS, condition) || seen.has(condition) || seenToday !== true) continue;
     if (!quote || quote.length > MAX_QUOTE_CHARS || !sentences.some((sentence) => sentence.includes(quote))) continue;
     if (!CONDITIONS[condition].re.test(quote) || PALM_NAME_RE.test(quote) || PALM_CROWN_RE.test(quote)) continue;
     seen.add(condition);
@@ -184,7 +191,7 @@ function verifyObservations(observations, note) {
 function normalizeInputs(raw = {}) {
   const products = [];
   for (const p of Array.isArray(raw.products) ? raw.products : []) {
-    const name = clean(p && p.name).slice(0, 80);
+    const name = clean(p && p.name).slice(0, MAX_PRODUCT_NAME_CHARS);
     if (name && !products.some((q) => q.name === name)) products.push({ name });
     if (products.length >= MAX_PRODUCTS) break;
   }
@@ -349,7 +356,7 @@ function validateExtraction(answer, rawInputs) {
 // the customer-copy screen.
 function frozenEntryProblem(entry) {
   const text = clean(entry && entry.text);
-  if (!text || text.length > 700) return 'shape';
+  if (!text || text.length > MAX_TEXT_CHARS) return 'shape';
   if (!entry.slots || typeof entry.slots !== 'object' || Array.isArray(entry.slots)) return 'no_slots';
   if (render(entry.slots) !== text) return 'drift';
   if (PALM_NAME_RE.test(text) || PALM_CROWN_RE.test(text) || customerCopyViolations(text).length) return 'copy';
@@ -408,6 +415,7 @@ module.exports = {
   CONDITIONS,
   PLANTS,
   FINDING_LABELS,
+  MAX_TEXT_CHARS,
   SYSTEM_PROMPT,
   normalizeInputs,
   buildPrompt,
