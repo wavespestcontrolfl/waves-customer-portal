@@ -111,7 +111,7 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
       }),
       voidInvoice: jest.fn().mockResolvedValue({ id: 'invoice-1', status: 'void' }),
     };
-    const renewals = { createTermForAnnualPrepay };
+    const renewals = { createTermForAnnualPrepay, recordMintVisitPrices: jest.fn().mockResolvedValue(null) };
     const warn = jest.fn();
 
     jest.doMock('../models/db', () => db);
@@ -651,6 +651,11 @@ describe('estimate converter termite annual-plan sign-before-pay (slice 3a restr
 
       expect(invoiceService.create).toHaveBeenCalledTimes(1);
       expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledTimes(1);
+      // The accept records the stamp-time price baseline itself, once, after
+      // its own price writes: the mint is told not to.
+      expect(renewals.createTermForAnnualPrepay).toHaveBeenCalledWith(expect.objectContaining({ recordVisitPrices: false }));
+      expect(renewals.recordMintVisitPrices).toHaveBeenCalledTimes(1);
+      expect(renewals.recordMintVisitPrices.mock.calls[0][0]).toBe('term-99');
       expect(result.annualPlanActivationStatus).toBe('activated');
       expect(result.annualPrepayTermId).toBe('term-99');
       expect(result.draftInvoiceId).toBe('invoice-1');

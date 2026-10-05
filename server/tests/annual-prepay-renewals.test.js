@@ -7752,6 +7752,158 @@ describe('stamp-time price check (secure-prepay rail, #5387) — a repriced visi
   });
 });
 
+describe('stamp-time price check for every mint (GATE_PREPAY_MINT_PRICE_HOLD) — each visit is judged against its own price at mint', () => {
+  // A staff-minted year: $360 for 4 visits. The amount is typed by the office,
+  // so there is no single sold price; the baseline is each visit's own price
+  // on the day the term was created.
+  const TERM = {
+    id: 'term-m',
+    customer_id: 'customer-1',
+    prepay_invoice_id: 'inv-m',
+    prepay_amount: 360,
+    term_start: '2026-10-01',
+    term_end: '2027-09-30',
+    coverage_service_type: 'Quarterly Pest Control',
+    coverage_visit_count: 4,
+  };
+  const COLUMNS = { prepaid_amount: {}, prepaid_method: {}, prepaid_at: {}, annual_prepay_term_id: {}, updated_at: {} };
+  const visit = (id, scheduled_date, estimated_price, extra = {}) => ({
+    id, customer_id: 'customer-1', scheduled_date, status: 'pending', service_type: 'Quarterly Pest Control',
+    estimated_price, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null, ...extra,
+  });
+  const mintRecord = (prices) => ({ metadata: { term_id: 'term-m', prices } });
+  const { notifyAdmin } = require('../services/notification-service');
+  const ORIGINAL_GATE = process.env.GATE_PREPAY_MINT_PRICE_HOLD;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ locked: true }] });
+    db.transaction = jest.fn(async (cb) => cb(db));
+    _private.resetCachesForTests();
+  });
+  afterEach(() => {
+    if (ORIGINAL_GATE === undefined) delete process.env.GATE_PREPAY_MINT_PRICE_HOLD;
+    else process.env.GATE_PREPAY_MINT_PRICE_HOLD = ORIGINAL_GATE;
+  });
+
+  // svc-2 was $100 at mint and is $125 now. svc-4 was booked after the mint,
+  // so the record does not name it.
+  const ROWS = () => [
+    visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125),
+    visit('svc-3', '2027-04-15', 100), visit('svc-4', '2027-07-15', 140),
+  ];
+  const RECORD = mintRecord({ 'svc-1': 10000, 'svc-2': 10000, 'svc-3': 10000 });
+  function stampQueues({ updates, record = RECORD }) {
+    const updateQueries = updates.map(() => query({ returning: [{ id: 'x' }] }));
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows: ROWS() }), ...updateQueries],
+      // First lookup: the /secure mint record (none). Second: the mint prices.
+      activity_log: [query({ first: undefined }), query({ first: record })],
+      notifications: [query({ first: undefined })],
+    });
+    return updateQueries;
+  }
+  const activityLogReads = () => db.mock.calls.filter(([table]) => table === 'activity_log').length;
+
+  test('true: a visit repriced after a staff mint is held and flagged; a visit the record does not name is stamped as before', async () => {
+    process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'true';
+    const updateQueries = stampQueues({ updates: [1, 2, 3] });
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(3);
+    expect(result.priceHeldRowIds).toEqual(['svc-2']);
+    expect(updateQueries.map((q) => q.where.mock.calls[0][0].id)).toEqual(['svc-1', 'svc-3', 'svc-4']);
+    // A judged visit's stamp is pinned to the price it was judged on; the
+    // visit with no baseline is stamped with no price pin.
+    expect(updateQueries[0].whereRaw).toHaveBeenCalledWith('estimated_price IS NOT DISTINCT FROM ?::numeric', [100]);
+    expect(updateQueries[2].whereRaw).not.toHaveBeenCalled();
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      'Annual prepay: repriced visit left uncovered',
+      expect.stringMatching(/2027-01-15.*repriced to \$125\.00.*created with this visit priced at \$100\.00, so it was NOT marked as covered.*back to exactly \$100\.00/),
+      expect.objectContaining({ metadata: expect.objectContaining({ reason: 'price_drift_held:svc-2' }) }),
+    );
+  });
+
+  test('shadow: the same repriced visit is stamped and no alert is raised', async () => {
+    process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'shadow';
+    const updateQueries = stampQueues({ updates: [1, 2, 3, 4] });
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(4);
+    expect(result.priceHeldRowIds).toEqual([]);
+    expect(updateQueries.every((q) => q.whereRaw.mock.calls.length === 0)).toBe(true);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('off: the mint prices are never read and every visit is stamped', async () => {
+    delete process.env.GATE_PREPAY_MINT_PRICE_HOLD;
+    stampQueues({ updates: [1, 2, 3, 4] });
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(4);
+    expect(activityLogReads()).toBe(1);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('true: a term with no mint record is stamped exactly as before', async () => {
+    process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'true';
+    stampQueues({ updates: [1, 2, 3, 4], record: null });
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(4);
+    expect(result.priceHeldRowIds).toEqual([]);
+  });
+
+  describe('recordMintVisitPrices', () => {
+    test('shadow: writes one record with the price in cents of each covered visit that has a price', async () => {
+      process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'shadow';
+      const insert = query();
+      setDbQueues({
+        scheduled_services: [query({ rows: [visit('svc-1', '2026-10-15', '100.00'), visit('svc-2', '2027-01-15', null), visit('svc-3', '2027-04-15', 89.5)] })],
+        activity_log: [insert],
+      });
+
+      const prices = await AnnualPrepayRenewals.recordMintVisitPrices(TERM);
+
+      expect(prices).toEqual({ 'svc-1': 10000, 'svc-3': 8950 });
+      expect(insert.insert).toHaveBeenCalledWith(expect.objectContaining({
+        customer_id: 'customer-1', action: 'annual_prepay_mint_visit_prices',
+      }));
+      expect(JSON.parse(insert.insert.mock.calls[0][0].metadata)).toEqual({ term_id: 'term-m', prices: { 'svc-1': 10000, 'svc-3': 8950 } });
+    });
+
+    test('off: reads and writes nothing', async () => {
+      delete process.env.GATE_PREPAY_MINT_PRICE_HOLD;
+      setDbQueues({});
+      expect(await AnnualPrepayRenewals.recordMintVisitPrices(TERM)).toBeNull();
+      expect(db).not.toHaveBeenCalled();
+    });
+
+    test('true: a termite annual plan and a renewal successor get no record', async () => {
+      process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'true';
+      setDbQueues({});
+      expect(await AnnualPrepayRenewals.recordMintVisitPrices({ ...TERM, annual_plan_version: 'v1' })).toBeNull();
+      expect(await AnnualPrepayRenewals.recordMintVisitPrices({ ...TERM, renewed_from_term_id: 'term-0' })).toBeNull();
+      expect(db).not.toHaveBeenCalled();
+    });
+
+    test('true: a failed read records nothing and does not throw', async () => {
+      process.env.GATE_PREPAY_MINT_PRICE_HOLD = 'true';
+      const failing = query();
+      failing.then = (resolve, reject) => Promise.reject(new Error('boom')).then(resolve, reject);
+      setDbQueues({ scheduled_services: [failing] });
+      expect(await AnnualPrepayRenewals.recordMintVisitPrices(TERM)).toBeNull();
+    });
+  });
+});
+
 describe('restampUnstampedActiveTerms — the nightly leg for active terms a failed stamp pass left unstamped', () => {
   const termRow = (id, extra = {}) => ({
     id,

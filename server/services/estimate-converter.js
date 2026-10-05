@@ -7967,6 +7967,9 @@ const EstimateConverter = {
             const annualPrepayTerm = await AnnualPrepayRenewals.createTermForAnnualPrepay({
               customerId,
               sourceEstimateId: estimateId,
+              // Recorded below, after the existing-service extension has
+              // written its prices.
+              recordVisitPrices: false,
               prepayInvoiceId: draftInvoiceId,
               planLabel: `${prepayPlanPrefix} Annual Prepay`,
               monthlyRate: termMonthlyRate,
@@ -8452,6 +8455,12 @@ const EstimateConverter = {
           monthlyRateReviewNeeded: false,
         };
       }
+    }
+    // Stamp-time price check baseline for the year this accept created: the
+    // covered visits' prices as the accept leaves them (the extension above is
+    // the accept's last visit price write).
+    if (annualPrepayTermId) {
+      await require('./annual-prepay-renewals').recordMintVisitPrices(annualPrepayTermId, database);
     }
     const extensionApplied = extension?.applied === true;
     // A frozen plan that applied NOTHING but parked work (all rows drifted,
