@@ -121,7 +121,7 @@ describe('scope + date math', () => {
 
 describe('mirrorPrimaryAddressOntoPackageChildren (estimate accept stamps visit 1 after the booking)', () => {
   const { mirrorPrimaryAddressOntoPackageChildren } = require('../services/package-followup-booking');
-  test('copies visit 1 property + address onto its still-unstamped package child; gate off runs no query', async () => {
+  test('copies visit 1 property + address onto its package child, gate on or off', async () => {
     const database = { raw: jest.fn(async () => ({ rowCount: 1 })) };
     expect(await mirrorPrimaryAddressOntoPackageChildren({ database, estimateId: 'est-1' })).toBe(1);
     const [sql, bindings] = database.raw.mock.calls[0];
@@ -134,10 +134,10 @@ describe('mirrorPrimaryAddressOntoPackageChildren (estimate accept stamps visit 
     expect(sql).toMatch(/p\.source_estimate_id = \?/);
     database.raw.mockRejectedValueOnce(new Error('boom'));
     expect(await mirrorPrimaryAddressOntoPackageChildren({ database, estimateId: 'est-1' })).toBe(0);
+    // Gate off still repairs children booked while it was on.
     delete process.env.GATE_PACKAGE_FOLLOWUP_AUTOBOOK;
     database.raw.mockClear();
-    expect(await mirrorPrimaryAddressOntoPackageChildren({ database, estimateId: 'est-1' })).toBe(0);
-    expect(database.raw).not.toHaveBeenCalled();
+    expect(await mirrorPrimaryAddressOntoPackageChildren({ database, estimateId: 'est-1' })).toBe(1);
   });
 });
 

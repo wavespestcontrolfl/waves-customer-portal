@@ -17720,11 +17720,20 @@ const CallRecordingProcessor = {
                   // date re-validates against it; a plan that no longer
                   // resolves fails closed to no child — dispatch books by hand).
                   let fuPlan = callFollowUpPlan;
-                  // A pending office-review primary is not a booking yet: its
-                  // package child books at office confirm (job-status.js), so
-                  // this writer keeps the pending shape for it.
+                  // Package identity comes from the PRIMARY ROW (its persisted
+                  // key snapshot or catalog id): a retry may reuse a row booked
+                  // as a different service than this pass's extraction.
+                  let primaryServiceKey = primaryRow.service_key_snapshot || null;
+                  if (!primaryServiceKey && primaryRow.service_id) {
+                    primaryServiceKey = (await trx('services').where({ id: primaryRow.service_id }).first('service_key'))?.service_key || null;
+                  }
+                  const primaryIsPackage = require('./package-followup-booking').isPackageFollowUpServiceKey(primaryServiceKey);
+                  if (callFollowUpPlan.packageOnly && !primaryIsPackage) return null;
+                  // A pending office-review primary is not a booking yet: it
+                  // gets no package child here (office-confirm booking is a
+                  // follow-up change), so this writer keeps the pending shape.
                   const packageFollowUp = require('../config/feature-gates').packageFollowupAutobookLive()
-                    && require('./package-followup-booking').isPackageFollowUpServiceKey(callBookingCatalogRow?.service_key)
+                    && primaryIsPackage
                     // isUnreviewedDispatchOwned, not only the pending shape: a
                     // voice booking the rebooker moved stays 'confirmed' with
                     // customer_confirmed false and is still unreviewed.
@@ -17746,7 +17755,11 @@ const CallRecordingProcessor = {
                   // Runs in a SAVEPOINT (nested trx): a rejected follow-up
                   // insert must never roll back the confirmed primary
                   // appointment sharing this transaction.
-                  const fuStart = fuPlan.windowStart;
+                  // A package visit 2 is at visit 1's time (owner ruling
+                  // 2026-10-04, "same time") — the time visit 1's own hours
+                  // checks already passed; only the date can come from the call.
+                  const primaryStart = String(primaryRow.window_start || '').slice(0, 5);
+                  const fuStart = packageFollowUp && /^\d{2}:\d{2}$/.test(primaryStart) ? primaryStart : fuPlan.windowStart;
                   const [fuH, fuM] = fuStart.split(':').map(Number);
                   const fuEndH = fuH >= 23 ? 23 : fuH + 1;
                   // A package visit 2 is the same treatment as visit 1, so it

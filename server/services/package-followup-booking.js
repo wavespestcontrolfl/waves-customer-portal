@@ -179,7 +179,7 @@ async function warnOnOverlap(trx, { child, customerId, outerTrx, fenceMissed = f
       windowStart: start,
       windowEnd: end,
       excludeServiceIds: [String(child.id)],
-      excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show'],
+      excludeStatuses: ['cancelled', 'completed', 'skipped', 'no_show', 'rescheduled'],
       technicianId: child.technician_id || null,
     }));
   } catch (err) {
@@ -360,10 +360,12 @@ async function bookInSavepoint(sp, outerTrx, primary, cols) {
 // Visit 2 was written with visit 1, so it copied the fields as they were
 // then — empty, or a fallback address the linkage has since replaced: copy
 // the stamp onto every live package child of this estimate's visits whose
-// property or address differs from its parent's. Never throws; no query
-// while the gate is off.
+// property or address differs from its parent's. Never throws; runs with
+// the gate on or off.
 async function mirrorPrimaryAddressOntoPackageChildren({ database, estimateId } = {}) {
-  if (!packageFollowupAutobookLive() || !database || !estimateId) return 0;
+  // Not gated: a child booked while the gate was on stays on the schedule
+  // after it is turned off, and still needs the right address.
+  if (!database || !estimateId) return 0;
   try {
     const result = await database.raw(
       `UPDATE scheduled_services AS c
