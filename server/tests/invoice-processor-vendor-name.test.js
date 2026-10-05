@@ -16,12 +16,12 @@ jest.mock('../models/db', () => {
       where: (a, b) => { if (a && typeof a === 'object') Object.assign(filters, a); else if (typeof a === 'string' && b !== undefined) filters[a] = b; return q; },
       whereILike: (col, pat) => { filters.ilike = pat; return q; },
       whereIn: (col, vals) => { filters.in = vals; return q; },
-      whereRaw: (sql, binds) => { filters.raw = [sql, binds]; return q; },
+      whereRaw: (sql, binds) => { filters.raw = [sql, binds]; (filters.raws = filters.raws || []).push([sql, binds]); return q; },
       join: () => q, whereNot: () => q, forUpdate: () => q,
       first: async () => {
         if (table === 'expenses' && filters.id) return mockState.existingExpenseIds?.includes(filters.id) ? { id: filters.id } : null;
         if (table === 'expenses') { mockState.lastDuplicateFilter = { ...filters }; return mockState.duplicate; }
-        if (table === 'expenses as x') { mockState.copyFilter = { ...filters }; return mockState.copy || null; }
+        if (table === 'expenses as x') { mockState.copyFilter = { ...filters }; mockState.copyRaws = filters.raws || []; return mockState.copy || null; }
         if (table === 'emails') return mockState.me || null;
         if (table === 'expense_categories') return mockState.categories.find((c) => filters.ilike && c.name.toLowerCase().includes(filters.ilike.replace(/%/g, '').toLowerCase())) || null;
         return null;
@@ -195,7 +195,7 @@ test.each([
 
 test('a copy of a notice (same sender, same second, same amount) links to the booked expense', async () => {
   noPdf();
-  mockState.me = { from_address: 'noreply@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z') };
+  mockState.me = { from_address: 'noreply@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Notice: your card has been charged' };
   mockState.copy = { id: 'exp-first-notice' };
   await processVendorInvoice({ id: 'e17', gmail_id: 'g', from_address: 'noreply@acme-cloud.example', subject: 'Notice: your card has been charged' },
     { extracted: { invoice_amount: '$10.00', invoice_date: '2026-01-15' } });
@@ -210,7 +210,7 @@ test('a receipt with a parsed PDF total skips the subject guard', async () => {
 });
 
 test('a PDF receipt processed after its notice copy links to the booked expense (order does not matter)', async () => {
-  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z') };
+  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Your receipt' };
   mockState.copy = { id: 'exp-notice-first' };
   extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0024', invoice_date: '2026-01-15', total: 30 });
   await processVendorInvoice({ id: 'e24', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Your receipt' }, { extracted: {} });
@@ -218,21 +218,14 @@ test('a PDF receipt processed after its notice copy links to the booked expense 
   expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ expense_id: 'exp-notice-first' })]);
 });
 
-test('the notice-copy check requires the same description, so different invoice numbers never match', async () => {
+test('the notice-copy check requires the same sender, second, subject, body and amount', async () => {
   noPdf();
-  mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z') };
+  mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Receipt' };
   await processVendorInvoice({ id: 'e19', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'Batch Biller', subject: 'Receipt' },
     { extracted: { invoice_number: 'TEST-0019', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
-  expect(mockState.copyFilter).toEqual(expect.objectContaining({ 'x.description': 'Batch Biller Invoice #TEST-0019 — via email' }));
-});
-
-test('the notice-copy check skips a vendor name too long for its column', async () => {
-  noPdf();
-  mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z') };
-  mockState.copy = { id: 'exp-clipped-copy' };
-  await processVendorInvoice({ id: 'e20', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'B'.repeat(250), subject: 'Receipt' },
-    { extracted: { invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
-  expect(inserted()).toEqual(expect.objectContaining({ amount: 25 }));
+  expect(mockState.copyFilter).toEqual(expect.objectContaining({ 'e.from_address': 'billing@batch.example', 'e.subject': 'Receipt' }));
+  expect(mockState.copyRaws.some(([sql]) => /md5/.test(sql))).toBe(true);
+  expect(mockState.copyRaws.some(([sql]) => /date_trunc\('second'/.test(sql))).toBe(true);
 });
 
 test('a parsed PDF with no total falls back to the classifier amount and keeps the subject guard', async () => {

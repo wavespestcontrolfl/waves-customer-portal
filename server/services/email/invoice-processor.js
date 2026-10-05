@@ -194,21 +194,23 @@ async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, inv
 // classifier still prints an amount for them, so they are never booked.
 const NOT_A_CHARGE_SUBJECT = /\b(unsuccessful|not successful|failed|declined|did ?n[o']t go through|(could|can)(not|n't| not) (be )?(process(ed)?|charged?|recharged?|completed?|collect(ed)?)|unable to (process|charge|collect|complete)|problem with your payment|payment (issue|problem)|payout|will (be )?renew(ed|s)?|renewal notice|invoice due|payment due|past due|action required)\b/i;
 
-// A copy of the same notice: an expense already linked to an email from the
-// same sender, received in the same second, for the same amount AND the same
-// description (same vendor, same invoice number or both without one): one
-// receipt delivered twice, or a vendor's "card charged" notice that mirrors
-// the receipt. Two invoices with different numbers never match.
-async function findSameNoticeExpense(conn, emailId, amount, description) {
-  const me = await conn('emails').where({ id: emailId }).first('from_address', 'received_at');
-  if (!me?.from_address || !me?.received_at) return null;
+// The same email delivered twice (to two inboxes, or re-sent): an expense
+// already linked to an email from the same sender, received in the same
+// second, with the same subject and the same body, for the same amount.
+// Nothing weaker counts: separate receipts can share a sender, a second and
+// an amount, and a missed copy only costs a review, while a wrong match
+// silently drops a real expense.
+async function findSameNoticeExpense(conn, emailId, amount) {
+  const me = await conn('emails').where({ id: emailId }).first('from_address', 'received_at', 'subject');
+  if (!me?.from_address || !me?.received_at || !me?.subject) return null;
   return conn('expenses as x')
     .join('emails as e', 'e.expense_id', 'x.id')
     .where('e.from_address', me.from_address)
+    .where('e.subject', me.subject)
+    .whereNot('e.id', emailId)
     // Same second, not the same instant: Gmail keeps milliseconds.
     .whereRaw("date_trunc('second', e.received_at) = date_trunc('second', ?::timestamptz)", [me.received_at])
-    .whereNot('e.id', emailId)
-    .where('x.description', description)
+    .whereRaw("md5(coalesce(e.body_text, '') || coalesce(e.body_html, '')) = (select md5(coalesce(body_text, '') || coalesce(body_html, '')) from emails where id = ?)", [emailId])
     .whereRaw('x.amount = round(?::numeric, 2)', [String(amount)])
     .first('x.id');
 }
@@ -275,22 +277,18 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
       if (current?.expense_id && await trx('expenses').where({ id: current.expense_id }).first('id')) {
         return { alreadyBooked: current.expense_id };
       }
-      // Same clipping guard as duplicateKey: a clipped description is no identity.
-      const fullDescriptionFits = fullExpenseDescription(vendorName, invoiceNumber).length <= 300 && String(vendorName).length <= 200;
       // Every receipt runs it, whatever the amount source, so the match does not
-      // depend on which of two copies is processed first; the per-sender lock
-      // covers two copies processed at once.
-      if (fullDescriptionFits) {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`expense-notice:${String(email.from_address || '').toLowerCase()}`]);
-        const copy = await findSameNoticeExpense(trx, email.id, amount, expenseDescription(vendorName, invoiceNumber));
-        if (copy) {
-          await trx('emails').where({ id: email.id }).update({
-            expense_id: copy.id,
-            auto_action: `expense_duplicate:${amount}`,
-            updated_at: new Date(),
-          });
-          return { duplicateOf: copy.id };
-        }
+      // depend on which copy is processed first; the per-sender lock covers
+      // two copies processed at once.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`expense-notice:${String(email.from_address || '').toLowerCase()}`]);
+      const copy = await findSameNoticeExpense(trx, email.id, amount);
+      if (copy) {
+        await trx('emails').where({ id: email.id }).update({
+          expense_id: copy.id,
+          auto_action: `expense_duplicate:${amount}`,
+          updated_at: new Date(),
+        });
+        return { duplicateOf: copy.id };
       }
       if (key) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
@@ -443,8 +441,8 @@ async function processVendorInvoice(email, classification) {
   // is the extraction's answer, not a missing one — `||` fell through to the
   // classifier's amount and created an expense for it (Codex r18 on #4884).
   const amount = parsedInvoice?.total ?? (classifierAmount(classification.extracted?.invoice_amount) || 0);
-  // The subject guard and the notice-copy check follow where the AMOUNT came
-  // from: a parsed PDF with no total also falls back to the classifier.
+  // The subject guard follows where the AMOUNT came from: a parsed PDF with
+  // no total also falls back to the classifier.
   const amountFromClassifier = parsedInvoice?.total == null;
   const invoiceNumber = parsedInvoice?.invoice_number || classification.extracted?.invoice_number;
   const rawInvoiceDate = parsedInvoice?.invoice_date || classification.extracted?.invoice_date;
