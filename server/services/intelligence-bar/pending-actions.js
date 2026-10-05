@@ -92,6 +92,65 @@ function legacyStepKey(row) {
   return paramsHash(row.tool_name, normalizeStepIds(canonical));
 }
 
+// A newer card supersedes an older pending card only when it is the same
+// intent: same actor, same conversation (session), same tool, same target
+// record, and it re-states everything the older card would have written. An
+// allowlist, not a guess: a second text to one customer, or an edit of a
+// different field on the same lead, is a different intent and stays pending.
+const idPart = value => (value === undefined || value === null || value === '' ? null : String(value).toLowerCase());
+const SUPERSEDE_RULES = {
+  // A booking is one event: a new proposal for the same customer, service and
+  // day replaces the earlier one (a changed time or price is the revision).
+  create_appointment: {
+    key: p => {
+      const parts = [idPart(p.customer_id ?? p.customerId), idPart(p.service_type), idPart(p.scheduled_date)];
+      return parts.every(Boolean) ? parts.join('|') : null;
+    },
+    covers: () => true,
+  },
+  // A lead edit replaces an earlier edit only when it writes every field the
+  // earlier one wrote ("Jay" then "Jason"); a card for another field stays.
+  update_lead_contact: {
+    key: p => idPart(p.lead_id ?? p.leadId),
+    covers: (newer, older) => {
+      const fields = p => ['first_name', 'last_name', 'phone', 'email'].filter(f => p[f] !== undefined);
+      const written = fields(older);
+      return written.length > 0 && written.every(f => newer[f] !== undefined);
+    },
+  },
+};
+
+// Cancels this actor's still-pending cards from EARLIER requests of the same
+// conversation that the new card replaces. Runs in the transaction that
+// stores the new card. A card already claimed by a Confirm is not pending and
+// is left alone (the claim and this UPDATE both test status='pending').
+async function cancelSupersededCards(trx, { taskId, requestedBy, toolName, params, newRowId }) {
+  const rule = SUPERSEDE_RULES[toolName];
+  const newKey = rule && rule.key(params || {});
+  if (!newKey) return 0;
+  const task = await trx('ib_tasks').where({ id: taskId }).first('session_id');
+  if (!task?.session_id) return 0;
+  const older = await trx('ib_pending_actions as pa')
+    .join('ib_tasks as t', 't.id', 'pa.task_id')
+    .where('t.session_id', task.session_id)
+    .where('pa.requested_by', String(requestedBy))
+    .where('pa.tool_name', toolName)
+    .where('pa.status', 'pending')
+    .where('pa.expires_at', '>', trx.fn.now())
+    .whereNot('pa.task_id', taskId)
+    .whereNot('pa.id', newRowId)
+    .select('pa.id', 'pa.params');
+  const ids = older.filter(row => {
+    const prior = typeof row.params === 'string' ? JSON.parse(row.params) : (row.params || {});
+    return rule.key(prior) === newKey && rule.covers(params || {}, prior);
+  }).map(row => row.id);
+  if (!ids.length) return 0;
+  const count = await trx('ib_pending_actions').whereIn('id', ids).where({ status: 'pending' })
+    .update({ status: 'cancelled', updated_at: trx.fn.now() });
+  if (count) logger.info(`[intelligence-bar:pending] Cancelled ${count} card(s) superseded by pending action ${newRowId}`);
+  return count;
+}
+
 async function createPendingAction({ toolName, params, summary, requestedBy, context, contract, contractHash, taskId, stepKey: actionStepKey, runnerToken }) {
   const persist = async trx => {
   if (taskId) {
@@ -136,6 +195,9 @@ async function createPendingAction({ toolName, params, summary, requestedBy, con
   const [created] = await insert.returning('*');
   const row = created || await trx('ib_pending_actions').where({ task_id: taskId, step_key: actionStepKey, requested_by: String(requestedBy) }).first();
   if (!row) throw new Error('Pending action could not be recorded');
+  if (taskId && created) {
+    await cancelSupersededCards(trx, { taskId, requestedBy, toolName, params, newRowId: row.id });
+  }
 
   logger.info(`[intelligence-bar:pending] Proposed ${toolName} as pending action ${row.id}`);
   return row;

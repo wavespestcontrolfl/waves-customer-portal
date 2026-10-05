@@ -25,13 +25,13 @@ Timings from the scripted run (median 7 ms to the first tool result, 29 ms to a 
 | W2 Customer situation before a call | 6 | 4 | 0 |
 | W3 Lead name and contact details | 9 | 1 | 0 |
 | W4 Second property labeled rental | 9 | 1 | 0 |
-| W5 Book one service | 6 | 4 | 0 |
+| W5 Book one service | 7 | 3 | 0 |
 | W6 Move an appointment, then notify | 3 | 2 | 5 |
 | W7 Draft, revise, send an SMS | 6 | 3 | 1 |
 | W8 Lawn estimate, change cadence | 7 | 2 | 1 |
 | W9 What they owe | 3 | 1 | 6 |
 | W10 Record stock that arrived | 3 | 7 | 0 |
-| **Total** | **62** | **25** | **13** |
+| **Total** | **63** | **24** | **13** |
 
 **Not runnable** means the manifest says the case's target behavior needs a capability that does not exist on this branch: its `requires` array names a gap key from `CAPABILITY_GAPS` (`server/tests/fixtures/ib-workflows/execution-matrix.js`). It is never counted as a pass or a fail, and the case is still probed with the nearest existing tools so the report shows what the path does today. The reason recorded for each case is the gap key itself: `invoice_payment_reader` 6 (W9, PR 3a, `#5586`), `reschedule_notice_send` 5 (W6, PR 3c), `series_reschedule_writer` 1 (W6-dev-06, also needs the notice), `secondary_number_customer_link` 1 (W7-dev-03), `estimate_measurement_selector` 1 (W8-dev-05). When a gap lands, add its key to `BUILT_GAPS` in `server/tests/helpers/ib-workflow-capability.js`; its cases are scored from then on and the snapshot diff shows what changed.
 
@@ -43,8 +43,6 @@ Ten of the 24 failing cases fail only because the operator's own wording does no
 |---|---|---|---|
 | `target_resolution` `product_target_not_established` | W10-dev-01, 02, 03, 07, 08, 10 | The receipt wordings name the product, but the procurement grounding only accepts a narrow grammar for `update_restock_request` ("Receive restock request ...", "mark the restock request for ...") and refuses with "Choose the exact product or restock request". Owner-direct does not relax it. W10-dev-07 is a reorder-plus-receipt wording read as one product name. Every later stage passes on the control wording. | PR 2 series (inventory grammar and target grounding). Not yet a named slice; recommend one. |
 | `target_resolution` `customer_target_not_established`, `lead_target_not_established` | W2-dev-09 (admin, no page), W4-dev-06, W6-dev-08, W8-dev-10 (gate off), W3-dev-06 (gate off, lead) | Without owner-direct, a family wording ("the Pellhams", "the Murphy lead") with the page open or closed resolves no task target. Owner-direct cases no longer hit this. | PR 2 series (target from page context and family wording), only matters for non-owner logins and the gate-off path. |
-| `confirm` `superseded_pending_card_still_executable` | W3-dev-06 | With the gate off, two pending cards for the same lead: the superseded one can still be confirmed. | PR 2a (stale cards). |
-| `confirm` `obsolete_booking_proposal_still_executable`, `read_back` `final_booking_wrong`, `side_effect` `nine_am_row_exists` | W5-dev-07 | After "make it 10 instead", the earlier 9 AM card can still be confirmed and commits the old value. | PR 2a (stale cards). |
 | `proposal` `commercial_booking_carded`, `side_effect` `text_sent_for_commercial_booking`, `side_effect` `audit_row_for_commercial_booking`, `domain_rule` `commercial_account_booked_on_price` | W5-dev-06 | A commercial account is offered a booking card on a stated price (the contract expects no card), and confirming it books the visit and texts the customer a confirmation (one provider submission and one audit row). The card check runs before the database check. | PR 3b (booking service extraction). |
 | `domain_rule` `taken_slot_double_booked`, `side_effect` `confirmation_text_for_refused_booking`, `side_effect` `outbound_audit_row_for_refused_booking` | W5-dev-09 | The card confirms onto a slot another booking took after the card was shown. The overlap is only a warning on a partially completed result; the contract re-checks and refuses. Because the booking lands, the customer is also sent a confirmation text (one provider submission and one messaging audit row) for a booking the contract says does not happen. | PR 3b. |
 | `proposal` `half_hour_request_carded` | W5-dev-03 | A model that passes a 2:30 PM start to `create_appointment` gets a booking card; the contract is no card and no new row. Confirming that card saves no row in this run, so the bar was a card on an unsupported time, not a saved half-hour visit. It used to read as a pass because the old check only looked at rows. | PR 3b. |

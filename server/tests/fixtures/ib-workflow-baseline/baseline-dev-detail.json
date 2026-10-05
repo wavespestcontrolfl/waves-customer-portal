@@ -330,16 +330,11 @@
           "point": "target_resolution",
           "code": "lead_target_not_established",
           "detail": "\"actually put Jason\" with the lead page open: no lead target"
-        },
-        {
-          "point": "confirm",
-          "code": "superseded_pending_card_still_executable",
-          "detail": "confirming the superseded Zed card while the Zane card is pending returned 200"
         }
       ],
       "timings": {
-        "first_tool_result_ms": 13,
-        "verified_completion_ms": 71
+        "first_tool_result_ms": 14,
+        "verified_completion_ms": 93
       },
       "notes": [
         "undeclared update_lead_contact allowed: the gate-off supersede scenario edits a second lead twice (Zed, then Zane) to prove the older pending card cannot be confirmed",
@@ -643,29 +638,11 @@
       "contract_calls": 0
     },
     "W5-dev-07": {
-      "outcome": "fail",
-      "point": "confirm",
-      "code": "obsolete_booking_proposal_still_executable",
-      "failures": [
-        {
-          "point": "confirm",
-          "code": "obsolete_booking_proposal_still_executable",
-          "detail": "confirming the superseded 9 AM card returned 200"
-        },
-        {
-          "point": "read_back",
-          "code": "final_booking_wrong",
-          "detail": "rows 09:00"
-        },
-        {
-          "point": "side_effect",
-          "code": "nine_am_row_exists",
-          "detail": "a 9 AM row was saved"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 16,
-        "verified_completion_ms": 967
+        "first_tool_result_ms": 11,
+        "verified_completion_ms": 957
       },
       "notes": [],
       "strength": null,
