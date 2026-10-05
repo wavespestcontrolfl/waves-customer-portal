@@ -108,7 +108,7 @@ describe('attachDriveLegs', () => {
     attachDriveLegs(services);
     const by = Object.fromEntries(services.map((s) => [s.id, s]));
     expect(by.a).toMatchObject({ driveInShown: false, drivePrevName: null });
-    expect(by.b1).toMatchObject({ driveInShown: true, drivePrevName: 'Sample A', drivePrevIds: ['a'] });
+    expect(by.b1).toMatchObject({ driveInShown: true, drivePrevName: 'Sample A' });
     expect(by.b2).toMatchObject({ driveInShown: false, drivePrevName: null });
     expect(by.c).toMatchObject({ driveInShown: true, drivePrevName: 'Sample B' });
   });

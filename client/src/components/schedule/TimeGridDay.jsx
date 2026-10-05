@@ -333,21 +333,19 @@ function CloseoutOwedChip({ onClick }) {
   return <span className={className}>Closeout owed</span>;
 }
 
-// "~9 min out" from the day route's straight-line legs (GET /admin/schedule);
-// null when the payload carries none. Each leg shows once (owner
-// 2026-10-05): on the block it leaves from, or as "~N min in" on the block it
-// leads to when the block it leaves from is too short to show a label.
-function driveLegsLabel(service, showIn) {
-  const into = showIn && service.driveInShown && Number.isFinite(service.driveFromPrevMin)
-    ? `~${service.driveFromPrevMin} min in` : null;
-  const out = !service.lastStop && Number.isFinite(service.driveToNextMin) ? `~${service.driveToNextMin} min out` : null;
-  return [into, out].filter(Boolean).join(' · ') || null;
+// "~9 min drive in": the drive into this stop, from the day route's
+// straight-line legs (GET /admin/schedule), as the phone list shows it
+// (owner 2026-10-05). The server stamps each leg on one card only
+// (driveInShown), so it shows once; null when the payload carries none.
+function driveInLabel(service) {
+  if (!service.driveInShown || !Number.isFinite(service.driveFromPrevMin)) return null;
+  return `~${service.driveFromPrevMin} min drive in`;
 }
 
-function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false, showDriveIn = false }) {
+function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, owesCompletion, isSelected, onToggleSelect, routeOrder, accent, routeStale = false }) {
   // A move awaiting confirmation changes the route: the server's legs are
   // stale until the refresh, so they hide.
-  const drive = routeStale ? null : driveLegsLabel(service, showDriveIn);
+  const drive = routeStale ? null : driveInLabel(service);
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -540,8 +538,10 @@ function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, lane
       {effectiveHeight > SLOT_HEIGHT && (
         <div className="opacity-80 truncate">{serviceDisplayName(service)}</div>
       )}
-      {drive && effectiveHeight > SLOT_HEIGHT * 2 && (
-        <div className="opacity-70 truncate u-nums">{drive}</div>
+      {/* A one-hour block has room for this line unless the readiness
+          strip sits at its foot; the tooltip always carries it. */}
+      {drive && effectiveHeight >= SLOT_HEIGHT * 2 && !(service.readiness && onProtocol && effectiveHeight <= SLOT_HEIGHT * 2) && (
+        <div className="opacity-70 truncate u-nums" style={{ fontSize: 14 }}>{drive}</div>
       )}
       {service.address && effectiveHeight > SLOT_HEIGHT * 2 && (
         <div className="opacity-70 truncate">{service.address}</div>
@@ -745,14 +745,6 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
               return (parseHHMM(a.windowStart) || 0) - (parseHHMM(b.windowStart) || 0);
             })
             .map((s) => s.id);
-          // A block shows its drive label only when taller than two slots;
-          // the leg out of a shorter block moves to the block it leads to.
-          const labelFits = new Set(services.filter((s) => {
-            const st = parseHHMM(s.windowStart);
-            if (st == null) return false;
-            const ds = Math.max(st, DAY_START_HOUR * 60);
-            return Math.max(st + effectiveDuration(s), ds + SLOT_MIN) - ds > SLOT_MIN * 2;
-          }).map((s) => s.id));
           return services.map((svc) => {
             const startMin = parseHHMM(svc.windowStart);
             if (startMin == null || startMin >= DAY_END_HOUR * 60) return null;
@@ -790,8 +782,6 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
                 onToggleSelect={onToggleSelect}
                 routeOrder={routeOrder}
                 accent={accent}
-                showDriveIn={Array.isArray(svc.drivePrevIds) && svc.drivePrevIds.length > 0
-                  && !svc.drivePrevIds.some((id) => labelFits.has(id))}
               />
             );
           });

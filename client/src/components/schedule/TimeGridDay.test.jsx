@@ -458,54 +458,30 @@ describe('TimeGridDay open hours', () => {
 });
 
 describe('TimeGridDay drive labels', () => {
-  it('moves the leg out of a short block onto the block it leads to', () => {
-    const short = { ...SERVICES[0], driveToNextMin: 59 }; // 60 min: too short for a label
-    const tall = {
-      ...SERVICES[1], id: 'svc-tall', windowStart: '10:00', windowEnd: '12:00', windowDisplay: '10 AM–12 PM',
-      driveInShown: true, drivePrevIds: ['svc-1'], driveFromPrevMin: 59, lastStop: true,
-    };
+  it('shows the drive into a one-hour block once, and nothing on the block it leaves', () => {
+    const first = { ...SERVICES[0], driveToNextMin: 59 };
+    const next = { ...SERVICES[1], driveInShown: true, driveFromPrevMin: 59, lastStop: true };
     render(
       <TimeGridDay
         date="2026-07-15"
-        services={[short, tall]}
+        services={[first, next]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    expect(screen.getByText('~59 min in')).toBeInTheDocument();
+    const label = screen.getByText('~59 min drive in');
+    expect(label).toHaveStyle({ fontSize: '14px' });
+    expect(screen.getAllByText(/min drive in|min out/)).toHaveLength(1);
   });
 
-  it('keeps the leg on a tall block and does not repeat it on the next', () => {
-    const tall = { ...SERVICES[0], windowStart: '08:00', windowEnd: '10:00', windowDisplay: '8–10 AM', driveToNextMin: 12 };
-    const next = {
-      ...SERVICES[1], windowStart: '11:00', windowEnd: '13:00', windowDisplay: '11 AM–1 PM',
-      driveInShown: true, drivePrevIds: ['svc-1'], driveFromPrevMin: 12, lastStop: true,
-    };
+  it('shows nothing for a leg it could not measure', () => {
+    const next = { ...SERVICES[1], driveInShown: false, driveFromPrevMin: null, driveLegUnknown: true };
     render(
       <TimeGridDay
         date="2026-07-15"
-        services={[tall, next]}
+        services={[SERVICES[0], next]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
       />,
     );
-    expect(screen.getByText('~12 min out')).toBeInTheDocument();
-    expect(screen.queryByText('~12 min in')).toBeNull();
-  });
-
-  it('does not repeat a leg when a taller row of the same stop already shows it', () => {
-    const short = { ...SERVICES[0], driveToNextMin: 20 };
-    const tallSameStop = { ...SERVICES[0], id: 'svc-1b', windowStart: '08:00', windowEnd: '10:00', windowDisplay: '8–10 AM', driveToNextMin: 20 };
-    const next = {
-      ...SERVICES[1], windowStart: '11:00', windowEnd: '13:00', windowDisplay: '11 AM–1 PM',
-      driveInShown: true, drivePrevIds: ['svc-1', 'svc-1b'], driveFromPrevMin: 20, lastStop: true,
-    };
-    render(
-      <TimeGridDay
-        date="2026-07-15"
-        services={[short, tallSameStop, next]}
-        technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
-      />,
-    );
-    expect(screen.getByText('~20 min out')).toBeInTheDocument();
-    expect(screen.queryByText('~20 min in')).toBeNull();
+    expect(screen.queryByText(/min drive in/)).toBeNull();
   });
 });

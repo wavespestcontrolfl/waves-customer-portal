@@ -186,7 +186,7 @@ function stopOrder(a, b) {
  * Sets `driveFromPrevMin` / `driveToNextMin` (number or null) and
  * `firstStop` / `lastStop` in place on one technician's services. Each leg
  * in is also stamped once (`driveInShown`, on the stop's first card) with
- * the stop it comes from (`drivePrevName`, `drivePrevIds`) and `driveLateMin`: the minutes
+ * the stop it comes from (`drivePrevName`) and `driveLateMin`: the minutes
  * past the customer's 2-hour arrival window (start + 120) the tech lands if
  * the previous stop ends as planned, else null. A leg that cannot be
  * measured marks its stop's first card `driveLegUnknown`.
@@ -204,7 +204,6 @@ function attachDriveLegs(services) {
     s.drivePrevName = null;
     s.driveLateMin = null;
     s.driveLegUnknown = false;
-    s.drivePrevIds = null;
   }
   // A visit group is one stop wherever its rows sort (route-model.js
   // physicalStops groups every visit_id the same way): placed at its
@@ -252,9 +251,6 @@ function attachDriveLegs(services) {
     if (leg == null) { cur.legs[0].driveLegUnknown = true; continue; }
     cur.legs[0].driveInShown = true;
     cur.legs[0].drivePrevName = String(prev.legs[0].customerName || '').trim() || null;
-    // Every card of the previous stop carries this leg out; the desktop
-    // grid shows it on the destination only when none of them can.
-    cur.legs[0].drivePrevIds = prev.legs.map((s) => s.id);
   }
   const late = stops.length > 1 && hasGeo(stops[0].anchor) ? lateByStop(stops, legs) : new Map();
   for (const st of stops.slice(1)) {
