@@ -145,6 +145,8 @@ describe('buildReportAskFacts', () => {
     expect(petPrecautionLost(timed)).toBe(true);
     expect(petPrecautionLost({ dynamicContext: { reentry: { petAdvisory: 'Keep pets off treated zones until dry.' } } })).toBe(false);
     expect(petPrecautionLost({})).toBe(false);
+    // Partly stripped counts as lost too.
+    expect(petPrecautionLost({ advisory: { pet_advisory: 'Keep pets indoors for 2 hours. Keep pets away from bait stations.' } })).toBe(true);
   });
 
   test('carries the visit facts the answer needs', () => {

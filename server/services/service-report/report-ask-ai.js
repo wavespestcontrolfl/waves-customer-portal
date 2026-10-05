@@ -192,8 +192,11 @@ function petPrecautionFact(data = {}) {
   const recorded = recordedPetPrecaution(data);
   return recorded ? reviewedLine(recorded) : null;
 }
+// Lost = any part did not survive: empty, stripped or clipped.
 function petPrecautionLost(data = {}) {
-  return Boolean(recordedPetPrecaution(data)) && !petPrecautionFact(data);
+  const recorded = recordedPetPrecaution(data);
+  if (!recorded) return false;
+  return petPrecautionFact(data) !== recorded;
 }
 
 function productFacts(app = {}) {
