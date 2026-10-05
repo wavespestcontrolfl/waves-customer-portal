@@ -377,3 +377,97 @@ describe('pre-gate send snapshots', () => {
     expect(served.offerTiersEvaluated).toBeUndefined();
   });
 });
+
+describe('tier carrier (office asks for tiers with the one-time option on a pest + companion estimate)', () => {
+  const { validateEstimateDeliveryOptions } = require('../services/estimate-delivery-options');
+  const {
+    shouldPersistPestOnlyRecurringChoice,
+    suppressOfferTierCarrierIfNeeded,
+  } = require('../routes/estimate-public');
+  const originalGate = process.env[GATE];
+  afterEach(() => {
+    if (originalGate === undefined) delete process.env[GATE];
+    else process.env[GATE] = originalGate;
+  });
+  const carrier = (overrides = {}) => {
+    const estimate = pestLawnOneTimeToggleEstimate(overrides);
+    estimate.estimate_data.offerTiersRequested = true;
+    return estimate;
+  };
+  const validate = (estimateData, extra = {}) => validateEstimateDeliveryOptions({
+    showOneTimeOption: true, billByInvoice: false, onetimeTotal: 0, monthlyTotal: 84.08, annualTotal: 1008.9, estimateData, ...extra,
+  });
+
+  test('stored eligibility names the same refusals the bundle builder applies', () => {
+    const data = pestLawnOneTimeToggleEstimate().estimate_data;
+    expect(OfferTiers.storedOfferTierEligibility({ gateOn: true, estData: data })).toEqual({ eligible: true, reason: null });
+    expect(OfferTiers.storedOfferTierEligibility({ gateOn: false, estData: data }).reason).toBe('gate_off');
+    expect(OfferTiers.storedOfferTierEligibility({ gateOn: true, estData: data, category: 'COMMERCIAL' }).reason).toBe('not_residential');
+    expect(OfferTiers.storedOfferTierEligibility({ gateOn: true, estData: { ...data, membershipSnapshot: { isExistingCustomer: true } } }).reason).toBe('member');
+    const discounted = JSON.parse(JSON.stringify(data));
+    discounted.result.manualDiscount = { type: 'PERCENT', value: 10, amount: 100.89 };
+    expect(OfferTiers.storedOfferTierEligibility({ gateOn: true, estData: discounted }).reason).toBe('manual_discount');
+    const pestOnly = JSON.parse(JSON.stringify(data));
+    pestOnly.result.recurring.services = pestOnly.result.recurring.services.filter((s) => s.service === 'pest_control');
+    expect(OfferTiers.storedOfferTierEligibility({ gateOn: true, estData: pestOnly }).reason).toBe('no_companion');
+  });
+
+  test('the delivery validator lets the mix through only for the opted-in save, under the gate, when tiers will build', () => {
+    const data = pestLawnOneTimeToggleEstimate().estimate_data;
+    process.env[GATE] = 'true';
+    // The bare toggle surfaces never opt in: the pest-only rule stands.
+    expect(validate(data)).toMatch(/pest-only recurring estimates/);
+    expect(validate(data, { allowOfferTierCompanions: true })).toBeNull();
+    // A member or a discounted estimate would not build tiers: refused.
+    expect(validate({ ...data, membershipSnapshot: { isExistingCustomer: true } }, { allowOfferTierCompanions: true })).toMatch(/pest-only recurring estimates/);
+    delete process.env[GATE];
+    expect(validate(data, { allowOfferTierCompanions: true })).toMatch(/pest-only recurring estimates/);
+  });
+
+  test('gate off: a carrier row is an ordinary full bundle — no pest-only ladder, no pest-only booking', async () => {
+    delete process.env[GATE];
+    const estimate = carrier({ id: 'carrier-gate-off' });
+    expect(shouldPersistPestOnlyRecurringChoice(estimate, estimate.estimate_data)).toBe(false);
+    const bundle = await buildPricingBundle(estimate, { monthlyBilled: false });
+    expect(bundle.offerTiers).toBeUndefined();
+    expect(bundle.frequencies.find((f) => f.key === 'quarterly').monthly).toBeCloseTo(84.08, 2);
+    // The request-level fallback switches the one-time option off in memory.
+    await expect(suppressOfferTierCarrierIfNeeded(estimate, estimate.estimate_data)).resolves.toBe(true);
+    expect(estimate.show_one_time_option).toBe(false);
+  });
+
+  test('gate on: a carrier row serves the tiers and keeps the pest-only choice for Better', async () => {
+    process.env[GATE] = 'true';
+    const estimate = carrier({ id: 'carrier-gate-on' });
+    expect(shouldPersistPestOnlyRecurringChoice(estimate, estimate.estimate_data)).toBe(true);
+    const bundle = await buildPricingBundle(estimate, { monthlyBilled: false });
+    expect(bundle.offerTiers.map((t) => t.key)).toEqual(['good', 'better', 'best']);
+    expect(bundle.frequencies.find((f) => f.key === 'quarterly').monthly).toBeCloseTo(32.10, 2);
+  });
+
+  test('the fallback leaves non-carrier, accepted and option-off rows alone', async () => {
+    delete process.env[GATE];
+    const legacy = pestLawnOneTimeToggleEstimate();
+    await expect(suppressOfferTierCarrierIfNeeded(legacy, legacy.estimate_data)).resolves.toBe(false);
+    expect(legacy.show_one_time_option).toBe(true);
+    const accepted = carrier({ status: 'accepted' });
+    await expect(suppressOfferTierCarrierIfNeeded(accepted, accepted.estimate_data)).resolves.toBe(false);
+    expect(accepted.show_one_time_option).toBe(true);
+    const off = carrier({ show_one_time_option: false });
+    await expect(suppressOfferTierCarrierIfNeeded(off, off.estimate_data)).resolves.toBe(false);
+  });
+
+  test('a carrier row with the option off serves a frozen tiered snapshot as the full bundle', async () => {
+    process.env[GATE] = 'true';
+    const live = await buildPricingBundle(carrier({ id: 'carrier-snap-src' }), { monthlyBilled: false });
+    const estimate = carrier({ id: 'carrier-snap', show_one_time_option: false });
+    const frozen = JSON.parse(JSON.stringify(live));
+    const q = frozen.frequencies.find((f) => f.key === 'quarterly');
+    estimate.monthly_total = q.monthly; estimate.annual_total = q.annual;
+    estimate.estimate_data.sendSnapshot = { pricingBundle: frozen };
+    const served = await buildPricingBundle(estimate, { monthlyBilled: false });
+    expect(served.offerTiers).toBeUndefined();
+    expect(served.frequencies.find((f) => f.key === 'quarterly').monthly).toBeCloseTo(84.08, 2);
+    expect(served.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
+  });
+});

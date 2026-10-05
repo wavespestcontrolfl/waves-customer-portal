@@ -169,18 +169,76 @@ function acceptedOfferTierKey(estData) {
   return OFFER_TIER_KEYS.includes(key) ? key : null;
 }
 
-function acceptedBestPricingView(pricingBundle, estData) {
-  if (acceptedOfferTierKey(estData) !== 'best') return pricingBundle;
+// The full quoted bundle as an ordinary (untiered) bundle: the Best tier's
+// own ladder, combos, sections and summary, picker fields dropped.
+function bestPricingView(pricingBundle) {
   const best = offerTiersOf(pricingBundle).find((tier) => tier && tier.key === 'best');
   if (!best) return pricingBundle;
-  const { offerTiers: _tiers, offerTierDefaultKey: _def, ...rest } = pricingBundleForOfferTier(pricingBundle, best);
+  const { offerTiers: _tiers, offerTierDefaultKey: _def, offerTierApplied: _applied, ...rest } = pricingBundleForOfferTier(pricingBundle, best);
   return {
     ...rest,
     ...(Array.isArray(best.sections) && best.sections.length ? { services: best.sections } : {}),
     ...(best.combinedRecurring ? { combinedRecurring: best.combinedRecurring } : {}),
     ...(best.waveGuardTier ? { waveGuardTier: best.waveGuardTier } : {}),
-    acceptedOfferTier: 'best',
   };
+}
+
+function acceptedBestPricingView(pricingBundle, estData) {
+  if (acceptedOfferTierKey(estData) !== 'best') return pricingBundle;
+  const view = bestPricingView(pricingBundle);
+  return view === pricingBundle ? pricingBundle : { ...view, acceptedOfferTier: 'best' };
+}
+
+/**
+ * The tier carrier. The office asks for tiers by turning on the one-time
+ * option on a pest + companion estimate — a mix the delivery validator
+ * refuses for the plain one-time toggle (that toggle DROPS companions at
+ * accept). The save stamps `estimate_data.offerTiersRequested` on such a row,
+ * and every read of a carrier row that cannot serve tiers (gate off, member,
+ * a later ineligibility) treats the one-time option as OFF, so the customer
+ * gets the ordinary full bundle — never the legacy toggle that would drop
+ * the companion programs.
+ */
+function offerTiersRequested(estData) {
+  return !!estData && typeof estData === 'object' && estData.offerTiersRequested === true;
+}
+
+/**
+ * Eligibility from STORED facts only (v1 admin-tool shape): what the save,
+ * the tool's preview and the carrier fallback can all judge without a live
+ * read. The bundle builder judges the same predicate from its parsed shape.
+ */
+function storedOfferTierEligibility({ gateOn = false, estData = {}, category = 'RESIDENTIAL', source = '' } = {}) {
+  const data = estData && typeof estData === 'object' ? estData : {};
+  const result = data.result && typeof data.result === 'object' ? data.result : {};
+  const inner = result.results && typeof result.results === 'object' ? result.results : {};
+  const pestTiers = Array.isArray(inner.pestTiers) ? inner.pestTiers : (Array.isArray(result.pestTiers) ? result.pestTiers : []);
+  const rows = Array.isArray(result.recurring?.services) ? result.recurring.services : [];
+  let recurringKeys = [];
+  let optedOutKeys = [];
+  let memberEvidence = !!data.membershipSnapshot?.isExistingCustomer;
+  try {
+    const { recurringServiceKey } = require('./estimate-converter');
+    recurringKeys = Array.from(new Set(rows.map((row) => recurringServiceKey(row)).filter(Boolean)));
+    const OptOut = require('./estimate-service-opt-out');
+    optedOutKeys = OptOut.currentlyOptedOutKeys(data);
+    memberEvidence = memberEvidence || !!OptOut.memberEvidenceInEstimateData(data);
+  } catch (_) {
+    return { eligible: false, reason: 'unreadable' };
+  }
+  const manualCandidates = [result.manualDiscount, result.totals?.manualDiscount, result.summary?.manualDiscount, data.summary?.manualDiscount];
+  if (manualCandidates.some((item) => item && Number(item.amount) > 0)) return { eligible: false, reason: 'manual_discount' };
+  const quarterly = pestTiers.find((tier) => /quarter/i.test(String(tier?.label || tier?.name || ''))) || pestTiers[0] || null;
+  const perApp = Number(quarterly?.pa ?? quarterly?.perApp ?? quarterly?.perTreatment);
+  return offerTierEligibility({
+    gateOn,
+    estimate: { show_one_time_option: true, category, source },
+    recurringKeys,
+    optedOutKeys,
+    memberEvidence,
+    oneTimeChoicePrice: perApp > 0 ? perApp : 0,
+    hasPestLadder: pestTiers.length > 0,
+  });
 }
 
 /**
@@ -245,6 +303,9 @@ module.exports = {
   resolveBestOfferTierForSlots,
   acceptedOfferTierKey,
   acceptedBestPricingView,
+  bestPricingView,
+  offerTiersRequested,
+  storedOfferTierEligibility,
   COMPANION_KEYS,
   DEFAULT_TIER_KEY,
   TIER_LABELS,

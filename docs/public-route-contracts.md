@@ -6604,6 +6604,20 @@ effective post-discount amounts (`annualAfterDiscount`/`visitsPerYear`),
 never the pre-discount list `perTreatment`.
 NOTHING is sent to the customer and no bell rings: one `activity_log` row,
 written ATOMICALLY with the estimate update, is the whole audit surface.
+Tier carrier rows (`estimate_data.offerTiersRequested`, stamped by the
+estimate tool's save when the one-time option rides a pest + companion
+estimate under the gate): whenever such a row cannot serve tiers for a
+request — gate off, a LIVE active member (linked or phone-matched), or
+stored facts that no longer qualify — the HTML page, `/data` and
+`PUT /:token/accept` treat `show_one_time_option` as OFF for that request
+(`suppressOfferTierCarrierIfNeeded`): the payload carries
+`showOneTimeOption:false` and the ordinary full-bundle pricing (a frozen
+tiered snapshot is served as its Best view), a one-time accept is refused
+as on any estimate without the option, and a recurring accept books every
+quoted program. The legacy toggle's companion exclusion never applies to a
+carrier row that is not serving tiers. Accepted / price-locked rows are left
+as booked.
+
 Good / Better / Best offer tiers (`GATE_ESTIMATE_OFFER_TIERS`, owner
 2026-10-05; STRICT opt-in, off = every response and accept byte-identical):
 an eligible one-time-toggle estimate (`show_one_time_option`, v1 shape,

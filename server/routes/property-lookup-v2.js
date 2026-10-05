@@ -6020,6 +6020,26 @@ router.post('/calculate-estimate', async (req, res) => {
       .withTrustedCatalogPricing(v1Input);
     const v1 = pricingEngine.generateEstimate(v1Input);
     const mapped = mapV1ToLegacyShape(v1);
+    // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): tell the estimate tool
+    // when this result would build the three tiers, so it can turn the
+    // carrier option on by default and relax its own pest-only check. Same
+    // stored-facts predicate the save validates with; never a price field.
+    try {
+      const gates = require('../config/feature-gates');
+      const gateOn = typeof gates.estimateOfferTiersLive === 'function'
+        ? gates.estimateOfferTiersLive()
+        : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
+      if (gateOn) {
+        const { isCommercialEstimateData } = require('../services/estimate-delivery-options');
+        const memberEvidence = Array.isArray(v1Input.priorQualifyingServices) && v1Input.priorQualifyingServices.length > 0;
+        const verdict = require('../services/estimate-offer-tiers').storedOfferTierEligibility({
+          gateOn: true,
+          estData: { result: mapped, ...(memberEvidence ? { membershipSnapshot: { isExistingCustomer: true } } : {}) },
+          category: isCommercialEstimateData({ result: mapped }) ? 'COMMERCIAL' : 'RESIDENTIAL',
+        });
+        if (verdict.eligible) mapped.offerTiersAvailable = true;
+      }
+    } catch (_) { /* the flag is a convenience; the save validator decides */ }
     res.json(mapped);
   } catch (err) {
     console.error('[estimate-v1-adapter] Calculation error:', err.message, err.stack);

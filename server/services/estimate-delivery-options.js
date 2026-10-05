@@ -1,5 +1,29 @@
 const { isCommercialRiskType } = require('./pricing-engine/commercial-risk-type');
 
+// Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): a pest + companion
+// estimate may carry the one-time option ONLY as the tier carrier — when the
+// stored facts say the three tiers will build. The caller that can stamp the
+// carrier marker on the row (the estimate tool's save) opts in; the bare
+// toggle surfaces keep the pest-only rule.
+function offerTierCompanionsAllowed(estimateData) {
+  try {
+    const gates = require('../config/feature-gates');
+    const gateOn = typeof gates.estimateOfferTiersLive === 'function'
+      ? gates.estimateOfferTiersLive()
+      : process.env.GATE_ESTIMATE_OFFER_TIERS === 'true';
+    if (!gateOn) return false;
+    const data = parseEstimateData(estimateData);
+    if (!data) return false;
+    return require('./estimate-offer-tiers').storedOfferTierEligibility({
+      gateOn: true,
+      estData: data,
+      category: isCommercialEstimateData(data) ? 'COMMERCIAL' : 'RESIDENTIAL',
+    }).eligible === true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function validateEstimateDeliveryOptions({
   showOneTimeOption,
   billByInvoice,
@@ -7,12 +31,13 @@ function validateEstimateDeliveryOptions({
   monthlyTotal,
   annualTotal,
   estimateData,
+  allowOfferTierCompanions = false,
 }) {
   const oneTimeAmount = Number(onetimeTotal || 0);
   const recurringAmount = Math.max(Number(monthlyTotal || 0), Number(annualTotal || 0));
   if (showOneTimeOption) {
     const nonPestRecurring = nonPestRecurringServicesForOneTimeOption(estimateData);
-    if (nonPestRecurring.length > 0) {
+    if (nonPestRecurring.length > 0 && !(allowOfferTierCompanions && offerTierCompanionsAllowed(estimateData))) {
       const names = nonPestRecurring.slice(0, 3).join(', ');
       const suffix = nonPestRecurring.length > 3 ? ', and other recurring services' : '';
       return `Offer one-time option is only supported for pest-only recurring estimates. Remove ${names}${suffix} or turn off the one-time choice.`;
@@ -968,5 +993,6 @@ module.exports = {
   hasPestRecurringServiceForOneTimeOption,
   normalizeEstimateDethatchingManagerApproval,
   nonPestRecurringServicesForOneTimeOption,
+  offerTierCompanionsAllowed,
   validateEstimateDeliveryOptions,
 };

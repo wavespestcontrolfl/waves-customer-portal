@@ -9220,6 +9220,8 @@ async function handleEstimateView(req, res, next) {
     // Parsed once here (post-reconcile) so the V2 gate's one-time check below
     // can read it; reused by the rest of the handler.
     const estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
+    // Tier carrier fallback BEFORE the page reads the one-time option.
+    await suppressOfferTierCarrierIfNeeded(estimate, estData, db);
 
     // V2 gate — when this estimate's row has use_v2_view=true, or when it
     // uses customer options only implemented in the React view, skip the
@@ -10453,6 +10455,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     ) {
       return res.status(409).json({ error: 'existing appointment belongs to a different customer' });
     }
+    // Tier carrier fallback BEFORE the bundle and every one-time-option read
+    // below: a carrier row that cannot serve tiers books the full bundle.
+    await suppressOfferTierCarrierIfNeeded(estimate, estData, db);
     const estimateForPricing = estData === rawEstData ? estimate : { ...estimate, estimate_data: estData };
     const pricingBundleAsOffered = await buildPricingBundle(estimateForPricing);
     // Offer tiers (GATE_ESTIMATE_OFFER_TIERS, owner 2026-10-05): the
@@ -20918,6 +20923,14 @@ async function adoptedAppointmentCatalogStamp(conn, {
 
 function shouldPersistPestOnlyRecurringChoice(estimate = {}, estData = {}) {
   if (!(estimate.show_one_time_option || estimate.showOneTimeOption)) return false;
+  // A tier carrier row is a pest-only choice only while its tiers would be
+  // served by stored facts; otherwise it books the full bundle (see
+  // suppressOfferTierCarrierIfNeeded — this sync check covers callers that
+  // read the raw row, such as the reservation's own estimate read).
+  if (OfferTiers.offerTiersRequested(estData)
+    && !(offerTiersGateOn() && OfferTiers.storedOfferTierEligibility({
+      gateOn: true, estData, category: estimate.category || 'RESIDENTIAL', source: estimate.source || '',
+    }).eligible === true)) return false;
   return oneTimePestChoiceAmountForEstimate(estimate, estData) > 0;
 }
 
@@ -28025,8 +28038,19 @@ function addMissingBilledPerApplicationFlags(bundle) {
 // by the same page, and a lookup that succeeds for one call and fails for the
 // other would tell it two contradictory things about the same plan.
 async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
-  const bundle = await buildPricingBundleInner(estimate);
+  let bundle = await buildPricingBundleInner(estimate);
   if (!bundle || typeof bundle !== 'object') return bundle;
+  // Tier carrier with the one-time option OFF for this request (suppressed,
+  // or switched off by the office): a frozen snapshot / cached bundle may
+  // still be the pest-only tiered view — serve its Best tier as the ordinary
+  // full bundle instead.
+  if (Array.isArray(bundle.offerTiers) && !(estimate.show_one_time_option || estimate.showOneTimeOption)
+    && estimate.status !== 'accepted' && !estimate.price_locked_at) {
+    let carrierData = null;
+    try { carrierData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data; }
+    catch (_) { carrierData = null; }
+    if (OfferTiers.offerTiersRequested(carrierData)) bundle = OfferTiers.bestPricingView(bundle);
+  }
   // The SAME fail-closed resolver the hero and /data cta use (codex #3128
   // r10). This was the last caller reading the fail-OPEN predicate, and the
   // flags are not merely a disclosure note: PriceCard treats their ABSENCE as
@@ -28039,6 +28063,30 @@ async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
   return billsMonthly
     ? stripBilledPerApplicationDeep(bundle)
     : addMissingBilledPerApplicationFlags(bundle);
+}
+
+// The tier CARRIER fallback (estimate-offer-tiers.js offerTiersRequested): a
+// pest + companion row carries the one-time option only to ask for Good /
+// Better / Best. When this request cannot serve tiers — gate off, a live
+// member (linked or phone-matched), or stored facts that no longer qualify —
+// the row's one-time option reads as OFF for the whole request, so every
+// surface serves and books the ordinary FULL bundle. Without this the legacy
+// toggle would take over and drop the companion programs at accept. Applied
+// in memory on the loaded row (never written back); an accepted or
+// price-locked row is left as booked.
+async function suppressOfferTierCarrierIfNeeded(estimate, estData, database = db) {
+  if (!estimate || !(estimate.show_one_time_option || estimate.showOneTimeOption)) return false;
+  if (!OfferTiers.offerTiersRequested(estData)) return false;
+  if (estimate.status === 'accepted' || estimate.price_locked_at) return false;
+  let serve = offerTiersGateOn()
+    && OfferTiers.storedOfferTierEligibility({
+      gateOn: true, estData, category: estimate.category || 'RESIDENTIAL', source: estimate.source || '',
+    }).eligible === true;
+  if (serve && await offerTierMemberBlock(estimate, database)) serve = false;
+  if (serve) return false;
+  estimate.show_one_time_option = false;
+  if ('showOneTimeOption' in estimate) estimate.showOneTimeOption = false;
+  return true;
 }
 
 // Offer tiers (Codex #5921 r1 P1): a bundle frozen while the gate was dark
@@ -28229,7 +28277,14 @@ async function buildPricingBundleInner(estimate, { liveOnly = false } = {}) {
   // v1 shape (admin UI estimates) — read pre-computed pestTiers directly.
   // This is the dominant path until Session 11 retires the client engine.
   if (v1) {
-    const pestOnlyChoice = !!estimate.show_one_time_option && v1.pestTiers.length > 0;
+    // A tier carrier row serves the pest-only view only when its tiers will
+    // build; otherwise it is an ordinary full bundle (defence in depth behind
+    // suppressOfferTierCarrierIfNeeded).
+    const carrierTiersBuild = !OfferTiers.offerTiersRequested(estData)
+      || (offerTiersGateOn() && OfferTiers.storedOfferTierEligibility({
+        gateOn: true, estData, category: estimate.category || 'RESIDENTIAL', source: estimate.source || '',
+      }).eligible === true);
+    const pestOnlyChoice = !!estimate.show_one_time_option && v1.pestTiers.length > 0 && carrierTiersBuild;
     // v1 shapes cannot carry an operator floor breach today (the operator
     // adjustment channel persists engine-shaped drafts only), so this path
     // fails CLOSED: unbreached program minimum, no breach disarm on the
@@ -29638,6 +29693,8 @@ async function composeEstimateDataPayload(estimate, {
     // ONE resolution for this request — the bundle's flags and the
     // cta.monthlyBilled below are read by the same page, so resolving twice
     // risks handing it two different answers (pre-push audit P1).
+    // Tier carrier fallback BEFORE anything reads the one-time option.
+    await suppressOfferTierCarrierIfNeeded(estimate, estimateDataForIntelligence, db);
     const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
     const pricingBundleAsBuilt = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
     // Offer tiers (GATE_ESTIMATE_OFFER_TIERS): once a 'best' accept is on the
@@ -31308,5 +31365,6 @@ module.exports.treeShrubPalmCountForEstData = treeShrubPalmCountForEstData;
 module.exports.shapeFromV1 = shapeFromV1;
 module.exports.stampTreeShrubPalmCount = stampTreeShrubPalmCount;
 module.exports.offerTierMemberBlock = offerTierMemberBlock;
+module.exports.suppressOfferTierCarrierIfNeeded = suppressOfferTierCarrierIfNeeded;
 module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBundle;
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;

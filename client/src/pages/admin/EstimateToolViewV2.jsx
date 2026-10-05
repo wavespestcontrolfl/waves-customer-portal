@@ -827,6 +827,22 @@ function buildMosquitoRecommendations(form) {
   return recommendations;
 }
 
+// Good / Better / Best default for a freshly generated estimate. Pure: returns
+// the same form object when nothing changes.
+export function nextFormForOfferTiers(form, estimate) {
+  const available = estimate?.offerTiersAvailable === true;
+  if (available && !form.showOneTimeOption && !form._offerTiersDeclined) {
+    return { ...form, showOneTimeOption: true, _autoOneTimeOwned: true };
+  }
+  // The option was auto-set for tiers on an earlier generate and this result
+  // no longer qualifies (and is not the pest-only one-time bundle either).
+  if (!available && form.showOneTimeOption && form._autoOneTimeOwned
+    && !(form.svcPest && form.svcOnetimePest)) {
+    return { ...form, showOneTimeOption: false, _autoOneTimeOwned: false };
+  }
+  return form;
+}
+
 // deferInvoiceTotals: the commercial-proposal handoff saves a manual-quote
 // draft whose totals are zero until the proposal line items are authored —
 // the proposal PUT recomputes the billable totals immediately after, so the
@@ -840,14 +856,19 @@ function validateDeliveryOptions(form, estimate, { deferInvoiceTotals = false } 
     Number(estimate?.recurring?.annualAfterDiscount || 0),
   );
   if (form.showOneTimeOption) {
+    // Good / Better / Best: the server marks a generated estimate whose three
+    // tiers will build (offerTiersAvailable). On such an estimate the option
+    // is the tier carrier, so the pest-only rule and the one-time-total rule
+    // do not apply — the save validates the same thing server-side.
+    const offerTiers = estimate?.offerTiersAvailable === true;
     const nonPestRecurring = nonPestRecurringServicesForDelivery(estimate);
-    if (nonPestRecurring.length > 0) {
+    if (nonPestRecurring.length > 0 && !offerTiers) {
       return `Offer one-time option is only supported for pest-only recurring estimates. Remove ${nonPestRecurring.join(", ")} or turn off the one-time choice.`;
     }
     if (!hasPestRecurringServiceForDelivery(estimate)) {
       return "Offer one-time option requires recurring pest pricing on the generated estimate.";
     }
-    if (oneTimeAmount <= 0) {
+    if (oneTimeAmount <= 0 && !offerTiers) {
       return "Offer one-time option requires a one-time total on the generated estimate.";
     }
   }
@@ -2373,7 +2394,9 @@ export default function EstimateToolViewV2({
     setForm((f) => {
       // Manual customer-options checkbox — own the flag, don't let
       // toggle()'s auto-clear wipe it on the next service toggle.
-      return { ...f, showOneTimeOption: enabled, _autoOneTimeOwned: false };
+      // _offerTiersDeclined: the operator switched the Good / Better / Best
+      // default off for this estimate — a regenerate must not switch it back.
+      return { ...f, showOneTimeOption: enabled, _autoOneTimeOwned: false, _offerTiersDeclined: !enabled };
     });
     setSavedId(null);
     setSavedViewUrl(null);
@@ -4401,6 +4424,11 @@ export default function EstimateToolViewV2({
         );
       }
       setEstimate(result);
+      // Good / Better / Best default (owner 2026-10-05): a generated estimate
+      // the server says will build the three tiers gets the option on, unless
+      // the operator already switched it off for this estimate. Marked
+      // auto-owned so a later service change that ends eligibility clears it.
+      setForm((f) => nextFormForOfferTiers(f, result));
       setSavedId(null);
       setSavedViewUrl(null);
       setPriceRecomputeNotice(null);
@@ -7677,12 +7705,14 @@ export default function EstimateToolViewV2({
                     <span>
                       {" "}
                       <span className="font-medium">
-                        Offer one-time option
+                        {estimate?.offerTiersAvailable === true
+                          ? "Offer Good / Better / Best"
+                          : "Offer one-time option"}
                       </span>{" "}
                       <span className="block text-14 text-ink-secondary">
-                        Customer sees a Recurring / One-time toggle for
-                        pest-only recurring estimates. Mixed service bundles
-                        should be sent without this option.
+                        {estimate?.offerTiersAvailable === true
+                          ? "Customer picks one of three options: a one-time visit, the pest plan, or the full bundle on this estimate. Turn off to send the full bundle as one plan. Mark Won is not available while this is on."
+                          : "Customer sees a Recurring / One-time toggle for pest-only recurring estimates. Mixed service bundles should be sent without this option."}
                       </span>{" "}
                     </span>{" "}
                   </label>{" "}

@@ -9,6 +9,7 @@ const {
   estimateDataHasQuoteRequirement,
   estimateDataHasUnresolvedManagerApproval,
   normalizeEstimateDethatchingManagerApproval,
+  nonPestRecurringServicesForOneTimeOption,
   validateEstimateDeliveryOptions,
   isCommercialEstimateData,
 } = require('./estimate-delivery-options');
@@ -2135,8 +2136,21 @@ async function resolveEstimateWritePayload({
     monthlyTotal: totals.monthlyTotal,
     annualTotal: totals.annualTotal,
     estimateData: trustedEstimateData,
+    // The tool's save may carry the one-time option on a pest + companion
+    // estimate as the Good / Better / Best carrier (gate + stored eligibility).
+    allowOfferTierCompanions: true,
   });
   if (deliveryError) throw errorWithStatus(deliveryError, 400);
+  // Stamp (or clear) the tier carrier marker so every later read knows this
+  // row's one-time option means "offer tiers", never the legacy toggle that
+  // drops companion programs. Stamped only for the mix the validator just
+  // allowed through the tier rule; a pest-only one-time toggle stays unmarked.
+  if (showOneTimeOption
+    && nonPestRecurringServicesForOneTimeOption(trustedEstimateData).length > 0) {
+    trustedEstimateData.offerTiersRequested = true;
+  } else {
+    delete trustedEstimateData.offerTiersRequested;
+  }
 
   return {
     ...buildEstimatePersistenceFields(
