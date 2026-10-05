@@ -420,8 +420,15 @@ async function loadContext(conn, message) {
 // one, unit all match an address in the text (a differing ZIP in the text rules
 // a home out). Two matches, or none, suggest nobody: the office picks.
 async function suggestCustomer(conn, body) {
+  return (await suggestedHome(conn, body)).customerId;
+}
+
+// The one matching live home and its customer (the exact home that matched,
+// so two units at one street number are never confused).
+async function suggestedHome(conn, body) {
+  const none = { customerId: null, propertyId: null };
   const { addresses } = addressesIn(body);
-  if (!addresses.length) return null;
+  if (!addresses.length) return none;
   const numbers = [...new Set(addresses.map((a) => a.number))].slice(0, 5);
   const homes = await conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
     .where('p.active', true).whereNull('c.deleted_at')
@@ -435,17 +442,7 @@ async function suggestCustomer(conn, body) {
     return addresses.some((a) => a.number === number && a.street.join(' ') === street.join(' ')
       && (!a.unit || a.unit === unit) && (!a.zip || !zip || a.zip === zip));
   });
-  return matches.length === 1 ? matches[0].customer_id : null;
-}
-
-// The home that produced the suggestion (its address is what the card shows).
-async function suggestedHome(conn, body) {
-  const customerId = await suggestCustomer(conn, body);
-  if (!customerId) return { customerId: null, propertyId: null };
-  const { addresses } = addressesIn(body);
-  const homes = await conn('customer_properties').where({ customer_id: customerId, active: true }).select('id', 'address_line1');
-  const match = homes.find((h) => addresses.some((a) => addressWords(stripTrailingUnit(h.address_line1))[0] === a.number));
-  return { customerId, propertyId: match ? match.id : null };
+  return matches.length === 1 ? { customerId: matches[0].customer_id, propertyId: matches[0].id } : none;
 }
 
 const canonicalLower = (v) => String(v || '').trim().replace(/\s+/g, '').toLowerCase();

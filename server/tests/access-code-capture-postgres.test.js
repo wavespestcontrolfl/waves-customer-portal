@@ -2189,6 +2189,16 @@ postgres('access codes section', () => {
         ]);
         expect(await access.suggestedHome(trx, BODY)).toEqual({ customerId: c.id, propertyId: second });
       });
+      test('two units at one street number: the unit the text names is the home kept', async () => {
+        const c = await customer({ properties: 0 });
+        const unit4 = randomUUID();
+        const unit5 = randomUUID();
+        await trx('customer_properties').insert([
+          { id: unit4, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: true, address_line1: '100 Main St N', address_line2: 'Apt 4', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID() },
+          { id: unit5, customer_id: c.id, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: false, address_line1: '100 Main St N', address_line2: 'Apt 5', city: 'Lakewood Ranch', zip: '34202', active: true, address_key: randomUUID() },
+        ]);
+        expect(await access.suggestedHome(trx, BODY)).toEqual({ customerId: c.id, propertyId: unit5 });
+      });
       test('a different directional or unit suggests nobody', async () => {
         await home('100 Main St S', 'Apt 4');
         expect(await access.suggestCustomer(trx, BODY)).toBeNull();
