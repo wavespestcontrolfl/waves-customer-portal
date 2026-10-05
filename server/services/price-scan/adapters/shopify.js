@@ -46,29 +46,11 @@ async function fetchProductJs(page, origin, handle, timeout) {
   try { return JSON.parse(txt); } catch (e) { return null; }
 }
 
-// PURE: a clean pack-size string from a Shopify variant's grams (the .js endpoint reports
-// variant.weight in grams), or null. Only a CLEAN weight counts — a whole/quarter pound or a
-// whole/quarter ounce within 0.5% — because a shipping weight with packaging in it (a 9.4 lb
-// "gallon") is not a pack size and must never be guessed into one.
-function sizeFromWeightGrams(grams) {
-  const g = Number(grams);
-  if (!Number.isFinite(g) || g < 28) return null;
-  const clean = (n, step) => {
-    const r = Math.round(n / step) * step;
-    return r > 0 && Math.abs(n - r) / r <= 0.005 ? r : null;
-  };
-  const lb = clean(g / 453.592, 0.25);
-  if (lb != null && lb >= 1) return `${lb} lb`;
-  if (g >= 453.592) return null; // a pound or more that is not a clean pound count: not a pack
-  const oz = clean(g / 28.3495, 0.25);
-  return oz != null ? `${oz} oz` : null;
-}
-
-// PURE: the pack size for one variant, or null when none can be derived (never guessed).
-// Order: the variant title, the product title, the variant's option values, a labelled size in
-// the tags ("Spec:Size:17 oz.") or body ("Size: 10 oz"), then the variant's clean weight.
-// "Default Title" products with no size anywhere but a weight (Golf Course Lawn Store sells
-// 25 lb bags this way) therefore still size-match.
+// PURE: the pack size for one variant, or null when none is STATED (never guessed). Only
+// explicit size text or metadata counts, in order: the variant title, the product title, the
+// variant's option values, a labelled size in the tags ("Spec:Size:17 oz.") or body ("Size:
+// 10 oz"). A shipping weight (variant grams) is NOT a pack size — it includes packaging and
+// says nothing about fluid vs weight ounces — so a product with no stated size stays unmatched.
 function packSizeOfVariant(data, v) {
   if (extractSizeToken(v.title)) return v.title;
   if (extractSizeToken(data.title)) return data.title;
@@ -81,13 +63,13 @@ function packSizeOfVariant(data, v) {
   const text = String(data.description || data.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
   const labelled = text.match(/\b(?:size|net\s*(?:wt|weight)|package\s*size|pack\s*size|contents?)\s*[:\-]\s*([^.;|]{1,40})/i);
   if (labelled && extractSizeToken(labelled[1])) return labelled[1];
-  return sizeFromWeightGrams(v.weight);
+  return null;
 }
 
 // One product's variants -> the {size, price, availabilityRaw} shape pickVariantOffer wants.
 // Shopify price is in cents. A variant whose title isn't a size (e.g. "Default Title" on a
-// single-variant product) borrows the product title, then option/tag/body/weight (see
-// packSizeOfVariant). With no derivable size it keeps the title text, which cannot size-match,
+// single-variant product) borrows the product title, then option/tag/body (see
+// packSizeOfVariant). With no stated size it keeps the title text, which cannot size-match,
 // so pickVariantOffer returns null rather than guessing.
 function variantsFromShopify(data) {
   if (!data || !Array.isArray(data.variants)) return [];
@@ -125,6 +107,19 @@ function specialFreightFromShopify(data) {
   });
 }
 
+// PURE: is the item restricted from sale in Florida? Vendors tag state restrictions as
+// "RESTR:AK" / "RESTR:AK,FL,HI" (one tag per state or a comma list). Case-insensitive, any
+// RESTR: list containing the FL token. We ship to Lakewood Ranch, FL, so such an item is not
+// buyable for us and must never be ranked as a price to match.
+function restrictedInFlorida(data) {
+  if (!data) return false;
+  const tags = Array.isArray(data.tags) ? data.tags : String(data.tags || '').split(',');
+  return tags.some((t) => {
+    const m = String(t).trim().match(/^restr\s*:\s*(.+)$/i);
+    return !!m && m[1].split(/[\s,;/|]+/).some((st) => st.toUpperCase() === 'FL');
+  });
+}
+
 // ORDERED sources of product links for a search term; the first that returns any wins.
 // Shopify's /search?q= page is SERVER-RENDERED for most themes — the result links are in the
 // HTML at domcontentloaded — so we must NOT waitForSelector: a vendor that doesn't carry the
@@ -135,7 +130,8 @@ function specialFreightFromShopify(data) {
 const LINK_SOURCES = [
   (page) => page.$$eval('a[href*="/products/"]', (els) => [...new Set(els.map((e) => e.getAttribute('href')).filter(Boolean))]),
   async (page, origin, q, timeout) => {
-    await page.goto(`${origin}/search/suggest.json?q=${encodeURIComponent(q)}&resources%5Btype%5D=product&resources%5Blimit%5D=10`, { waitUntil: 'domcontentloaded', timeout });
+    const res = await page.goto(`${origin}/search/suggest.json?q=${encodeURIComponent(q)}&resources%5Btype%5D=product&resources%5Blimit%5D=10`, { waitUntil: 'domcontentloaded', timeout });
+    if (res && typeof res.status === 'function' && res.status() >= 400) throw new Error(`suggest.json HTTP ${res.status()}`);
     const txt = await page.evaluate(() => (document.body ? document.body.innerText : ''));
     return handlesFromSuggest(JSON.parse(txt)).map((h) => `/products/${h}`);
   },
@@ -143,10 +139,17 @@ const LINK_SOURCES = [
 
 async function findProductLinks(page, origin, q, timeout) {
   await page.goto(`${origin}/search?q=${encodeURIComponent(q)}`, { waitUntil: 'domcontentloaded', timeout });
+  // A source that FAILS (timeout, HTTP error, bad JSON) is not "no results": if nothing found
+  // links, the last source error is thrown so the scan records fetch_error (retry), and only a
+  // search that worked and found zero products returns [] (-> no_candidate).
+  let lastError = null;
   for (const source of LINK_SOURCES) {
-    const found = await source(page, origin, q, timeout).catch(() => []);
-    if (found.length) return found;
+    try {
+      const found = await source(page, origin, q, timeout);
+      if (found.length) return found;
+    } catch (e) { lastError = e; }
   }
+  if (lastError) throw lastError;
   return [];
 }
 
@@ -158,7 +161,8 @@ function buildCandidate(data, offer, proofUrl, ctx) {
   const variant = (data.variants || []).find((v) => v.id === offer.variantId);
   const grams = Number(variant && variant.weight);
   return {
-    price: offer.price, currency: 'USD', availability: offer.availability,
+    price: offer.price, currency: 'USD',
+    availability: restrictedInFlorida(data) ? 'restricted' : offer.availability, // 'restricted' is unbuyable (compare.UNAVAILABLE)
     name: data.title || null, quantity: offer.quantity, source_url: proofUrl,
     // The description as text, so a body EPA reg can corroborate the match (distinguishing
     // same-brand siblings, e.g. Bifen I/T vs Bifen XTS).
@@ -249,9 +253,9 @@ module.exports = {
   fetchCandidate,
   // exposed for unit tests
   variantsFromShopify,
-  sizeFromWeightGrams,
   handlesFromSuggest,
   specialFreightFromShopify,
+  restrictedInFlorida,
   handleOf,
   baseOrigin,
   isApprovedShopifyHost,

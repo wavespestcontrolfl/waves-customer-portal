@@ -149,23 +149,23 @@ describe('Shopify additions: Golf Course Lawn Store + Gemplers', () => {
     expect(variants[0]).toMatchObject({ price: 155.99, availabilityRaw: 'InStock' });
   });
 
-  test('a "Default Title" product with no size in title/tags takes its pack size from the variant weight', () => {
+  test('a "Default Title" product with no stated size stays unmatched: its weight is NOT a pack size', () => {
     const data = JSON.parse(read('golfcourselawn-product.json'));
     expect(data.title).not.toMatch(/\d\s*(lb|oz)/i); // fixture really has no size in the title
+    expect(data.variants[0].weight).toBe(11340); // it does carry a shipping weight (25 lb) ...
     const [v] = shopify.variantsFromShopify(data);
-    expect(v.size).toBe('25 lb'); // 11340 g
-    expect(pickVariantOffer([v], { targetOz: 400 })).toMatchObject({ price: 155.99, quantity: '25 lb' });
-    expect(pickVariantOffer([v], { targetOz: 160 })).toBeNull(); // a 10 lb catalog size does not match
+    expect(v.size).toBe(data.title); // ... which is not used: the size source falls back to the title text
+    expect(pickVariantOffer([v], { targetOz: 400 })).toBeNull();
+    expect(pickVariantOffer([v], { targetOz: 160 })).toBeNull();
+    expect(shopify.sizeFromWeightGrams).toBeUndefined(); // the weight-as-size path is gone
   });
 
-  test('sizeFromWeightGrams only trusts a clean weight, never a packaged shipping weight', () => {
-    expect(shopify.sizeFromWeightGrams(11340)).toBe('25 lb');
-    expect(shopify.sizeFromWeightGrams(2268)).toBe('5 lb');
-    expect(shopify.sizeFromWeightGrams(283.5)).toBe('10 oz');
-    expect(shopify.sizeFromWeightGrams(35.4)).toBe('1.25 oz');
-    expect(shopify.sizeFromWeightGrams(4150)).toBeNull(); // ~9.15 lb: not a clean pack
-    expect(shopify.sizeFromWeightGrams(0)).toBeNull();
-    expect(shopify.sizeFromWeightGrams(null)).toBeNull();
+  test('the same product with an explicit size source (Size tag) size-matches', () => {
+    const data = { ...JSON.parse(read('golfcourselawn-product.json')), tags: ['Insecticide', 'Size: 25 lb'] };
+    const [v] = shopify.variantsFromShopify(data);
+    expect(v.size).toBe('25 lb');
+    expect(pickVariantOffer([v], { targetOz: 400 })).toMatchObject({ price: 155.99, quantity: '25 lb' });
+    expect(pickVariantOffer([v], { targetOz: 160 })).toBeNull();
   });
 
   test('size is also read from variant options, a Size tag and a labelled body line', () => {
@@ -176,14 +176,24 @@ describe('Shopify additions: Golf Course Lawn Store + Gemplers', () => {
   });
 
   test('no derivable size -> the variant cannot size-match (never guessed)', () => {
-    const data = { title: 'Mystery Granular', description: '<p>Mix 1 gallon of water per 1,000 sq ft.</p>', variants: [{ id: 1, title: 'Default Title', price: 1000, available: true, weight: 4150 }] };
+    const data = { title: 'Mystery Granular', description: '<p>Mix 1 gallon of water per 1,000 sq ft.</p>', variants: [{ id: 1, title: 'Default Title', price: 1000, available: true, weight: 4536 }] }; // 10 lb shipping weight, not a size
     const [v] = shopify.variantsFromShopify(data);
     expect(pickVariantOffer([v], { targetOz: 128 })).toBeNull();
     expect(pickVariantOffer([v], { targetOz: 400 })).toBeNull();
   });
 
-  test('end to end: fixture product -> verified scan candidate at the catalog size', async () => {
+  test('end to end: fixture product with no stated size gives no sized candidate (unverified skip)', async () => {
     const data = JSON.parse(read('golfcourselawn-product.json'));
+    const page = { goto: async () => {}, evaluate: async () => JSON.stringify(data), $$eval: async () => [] };
+    const vendor = { vendor_id: 'v1', name: 'Golf Course Lawn Store', website: 'https://golfcourselawn.store', url: 'https://golfcourselawn.store/products/acelepryn-g-insecticide-grub-and-armyworm-control' };
+    const product = { name: 'Acelepryn G Insecticide', productName: 'Acelepryn G Insecticide', quantity: '25 lb' };
+    const cand = await shopify.fetchCandidate(page, vendor, product);
+    expect(cand === null || cand.quantity === null).toBe(true); // never a "25 lb" candidate
+    if (cand) expect(verifyMatch({ name: cand.name, text: cand.text, quantity: cand.quantity }, product).matched).toBe(false);
+  });
+
+  test('end to end: fixture product with an explicit size -> verified scan candidate at the catalog size', async () => {
+    const data = { ...JSON.parse(read('golfcourselawn-product.json')), tags: ['Insecticide', 'Size: 25 lb'] };
     const page = {
       goto: async () => {},
       evaluate: async () => JSON.stringify(data),
@@ -286,7 +296,7 @@ describe('collectSnapshot variant sources (Magento config, then DOM rows)', () =
 });
 
 describe('shopify fetchCandidate link sources and weight', () => {
-  const data = () => JSON.parse(read('golfcourselawn-product.json'));
+  const data = () => ({ ...JSON.parse(read('golfcourselawn-product.json')), tags: ['Insecticide', 'Size: 25 lb'] });
   const vendor = { vendor_id: 'v1', name: 'Golf Course Lawn Store', website: 'https://golfcourselawn.store' };
   const product = { name: 'Acelepryn G Insecticide', productName: 'Acelepryn G Insecticide', quantity: '25 lb' };
   function pageWith({ dom = [], suggest = null }) {
@@ -323,10 +333,72 @@ describe('shopify fetchCandidate link sources and weight', () => {
     expect(await shopify.fetchCandidate(page, vendor, product)).toBeNull();
   });
 
+  test('suggest.json failing is a fetch error, not "no results"', async () => {
+    const asPage = (fail) => {
+      const page = pageWith({ dom: [], suggest: null });
+      const goto = page.goto;
+      page.goto = async (u) => { await goto(u); if (/suggest\.json/.test(u)) return fail(u); return undefined; };
+      return page;
+    };
+    // timeout / network error
+    await expect(shopify.fetchCandidate(asPage(() => { throw new Error('Timeout 20000ms exceeded'); }), vendor, product)).rejects.toThrow(/Timeout/);
+    // HTTP error status
+    await expect(shopify.fetchCandidate(asPage(() => ({ status: () => 503 })), vendor, product)).rejects.toThrow(/HTTP 503/);
+    // bad JSON body (an HTML error page)
+    const badJson = pageWith({ dom: [], suggest: null });
+    badJson.evaluate = async () => '<html>Bad gateway</html>';
+    await expect(shopify.fetchCandidate(badJson, vendor, product)).rejects.toThrow();
+  });
+
+  test('a failing scan surfaces as fetch_error through scanProduct, a clean empty search as no_candidate', async () => {
+    const { scanProduct } = require('../services/price-scan/scanner');
+    const failing = pageWith({ dom: [], suggest: null });
+    failing.evaluate = async () => 'not json';
+    const run = (page) => scanProduct(product, [vendor], { fetchCandidate: (adapter, v, p) => shopify.fetchCandidate(page, v, p) });
+    expect((await run(failing)).skipped[0]).toMatchObject({ reason: 'fetch_error' });
+    expect((await run(pageWith({ dom: [], suggest: { resources: { results: { products: [] } } } }))).skipped[0]).toMatchObject({ reason: 'no_candidate' });
+  });
+
+  test('a DOM source that succeeded with links never needs suggest.json (its failure is irrelevant)', async () => {
+    const page = pageWith({ dom: ['/products/acelepryn-g-insecticide-grub-and-armyworm-control'], suggest: null });
+    expect((await shopify.fetchCandidate(page, vendor, product)).price).toBe(155.99);
+  });
+
   test('the candidate carries the priced variant weight in pounds (25 lb from 11340 g)', async () => {
     const page = pageWith({ dom: ['/products/acelepryn-g-insecticide-grub-and-armyworm-control'] });
     const cand = await shopify.fetchCandidate(page, vendor, product);
     expect(cand.weight_lb).toBeCloseTo(25, 3);
+  });
+
+  test('state restriction tag: any RESTR: list containing FL (case-insensitive) is a Florida restriction', () => {
+    const products = JSON.parse(read('gemplers-suggest.json')).resources.results.products;
+    expect(shopify.restrictedInFlorida(products[0])).toBe(false); // RESTR:AK, RESTR:HI only
+    expect(shopify.restrictedInFlorida({ tags: ['RESTR:FL'] })).toBe(true);
+    expect(shopify.restrictedInFlorida({ tags: ['restr:fl'] })).toBe(true);
+    expect(shopify.restrictedInFlorida({ tags: ['RESTR:AK,FL,HI'] })).toBe(true);
+    expect(shopify.restrictedInFlorida({ tags: ['RESTR: NY, FL'] })).toBe(true);
+    expect(shopify.restrictedInFlorida({ tags: 'Other,RESTR:FL' })).toBe(true);
+    expect(shopify.restrictedInFlorida({ tags: ['RESTR:AK', 'RESTR:HI', 'RESTR:FLX', 'Spec:FL'] })).toBe(false);
+    expect(shopify.restrictedInFlorida(null)).toBe(false);
+  });
+
+  test('a RESTR:FL candidate is "restricted": never ranked, never an opportunity, never reported', async () => {
+    const { findOpportunity } = require('../services/price-scan/compare');
+    const { buildReportItem } = require('../services/price-scan/scanner');
+    const gemProduct = JSON.parse(read('gemplers-suggest.json')).resources.results.products[0];
+    const base = JSON.parse(read('golfcourselawn-product.json'));
+    const mk = (tags) => ({ goto: async () => {}, evaluate: async () => JSON.stringify({ ...base, tags: [...tags, 'Size: 25 lb'] }), $$eval: async () => [] });
+    const gemVendor = { ...vendor, website: 'https://gemplers.com', url: 'https://gemplers.com/products/acelepryn-g-insecticide-grub-and-armyworm-control' };
+    const ok = await shopify.fetchCandidate(mk(gemProduct.tags.filter((t) => /^RESTR/.test(t))), gemVendor, product); // AK/HI only
+    expect(ok.availability).toBe('in_stock');
+    const restricted = await shopify.fetchCandidate(mk([...gemProduct.tags.filter((t) => /^RESTR/.test(t)), 'RESTR:FL']), gemVendor, product);
+    expect(restricted).toMatchObject({ availability: 'restricted', price: 155.99 });
+    const baseline = { price: 400, quantity: '25 lb', vendor: 'SiteOne' };
+    const opp = findOpportunity(baseline, [restricted]);
+    expect(opp.best).toBeNull();
+    expect(opp.isOpportunity).toBe(false);
+    expect(findOpportunity(baseline, [ok]).isOpportunity).toBe(true); // same item, not restricted, would win
+    expect(buildReportItem({ product_id: 'p' }, restricted)).toBeNull();
   });
 
   test.each([
@@ -334,7 +406,7 @@ describe('shopify fetchCandidate link sources and weight', () => {
     [['shipping_truck_T'], true], [['shipping_truck_F', 'shipping_oversize_F', 'shipping_hazardous_F'], false],
   ])('the candidate carries the special-freight flag from tags %j -> %s, and shipping follows', async (tags, expected) => {
     const base = JSON.parse(read('golfcourselawn-product.json'));
-    const page = { goto: async () => {}, evaluate: async () => JSON.stringify({ ...base, tags }), $$eval: async () => [] };
+    const page = { goto: async () => {}, evaluate: async () => JSON.stringify({ ...base, tags: [...tags, 'Size: 25 lb'] }), $$eval: async () => [] };
     const gemVendor = { ...vendor, website: 'https://gemplers.com', url: 'https://gemplers.com/products/acelepryn-g-insecticide-grub-and-armyworm-control' };
     const cand = await shopify.fetchCandidate(page, gemVendor, product);
     expect(cand.special_freight).toBe(expected);

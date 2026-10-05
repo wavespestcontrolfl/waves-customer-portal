@@ -17,9 +17,10 @@ const DEFAULTS = {
 };
 
 // Availability states that aren't buyable now — never the basis for a savings
-// alert. limited / unknown stay eligible (limited is buyable; unknown can't be
+// alert. 'restricted' = an item the vendor won't sell to a Florida address (RESTR:FL tag).
+// limited / unknown stay eligible (limited is buyable; unknown can't be
 // proven unavailable).
-const UNAVAILABLE = new Set(['out_of_stock', 'backorder']);
+const UNAVAILABLE = new Set(['out_of_stock', 'backorder', 'restricted']);
 
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
 
