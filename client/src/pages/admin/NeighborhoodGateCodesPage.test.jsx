@@ -352,3 +352,26 @@ it("an unlinked code can be dismissed, and a refused link shows the server's mes
   fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
   await waitFor(() => expect(rawAdminFetch.mock.calls.some(([p]) => p === "/admin/access-codes/f2/dismiss")).toBe(true));
 });
+
+it("a new search term clears the old results at once and no result can be picked while a search runs", async () => {
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  rawAdminFetch.mockImplementation((path, init) => {
+    if (path.startsWith("/admin/access-codes/found")) return response({ total: 1, items: [{ ...UNLINKED_ROW, suggestedCustomer: null }] });
+    if (path === "/admin/customers?search=Example&limit=8&sort=name") {
+      return response({ customers: [{ id: "cust-7", firstName: "Lee", lastName: "Example", address: "12 Other Court", phone: "+19415550142" }] });
+    }
+    if (path === "/admin/customers?search=Examples&limit=8&sort=name") return pending.then(() => response({ customers: [] }));
+    return unlinkedRoutes()(path, init);
+  });
+  renderPage();
+  fireEvent.click(await screen.findByRole("button", { name: "Found in messages (1)" }));
+  const box = await screen.findByLabelText("Find a customer");
+  fireEvent.change(box, { target: { value: "Example" } });
+  expect(await screen.findByRole("button", { name: /Lee Example/ })).toBeEnabled();
+  fireEvent.change(box, { target: { value: "Examples" } });
+  expect(screen.queryByRole("button", { name: /Lee Example/ })).toBeNull();
+  release();
+  await waitFor(() => expect(screen.queryByText("Searching…")).toBeNull());
+  expect(screen.queryByRole("button", { name: /Lee Example/ })).toBeNull();
+});

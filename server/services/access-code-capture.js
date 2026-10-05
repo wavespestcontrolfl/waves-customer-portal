@@ -21,8 +21,11 @@
  * number with no customer record is filed unlinked (customer_id null, the
  * sender's phone, and a suggested customer when the text names exactly one
  * home) and the office links it to a customer before it can be accepted. An
- * accepted standing visitor pass is also filed to its neighborhood's directory
- * (GATE_NEIGHBORHOOD_ACCESS) so every technician there sees it.
+ * active standing visitor pass is SHARED at read time: the visit read adds the
+ * active standing passes of other live customers whose home is in the visit
+ * home's neighborhood (GATE_NEIGHBORHOOD_ACCESS), so a pass follows the home's
+ * current neighborhood and leaves with its owner's retirement. Nothing is
+ * copied into the neighborhood directory.
  *
  * Dark behind GATE_ACCESS_CODES_SECTION (read at call time); the sweep also
  * needs GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) so turning the
@@ -37,7 +40,7 @@ const Ajv = require('ajv/dist/2020');
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
+const { gateEnvValue, gateEnvTimestamp, neighborhoodAccessLive } = require('../config/feature-gates');
 const { dispatchWithFallback } = require('./llm/call');
 const { runExclusive } = require('../utils/cron-lock');
 const { scrubSegments } = require('../utils/pan-scrub');
@@ -60,9 +63,7 @@ const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = requi
 const { stringifySmsEvidence } = require('./sms-operational-extractor');
 const { eligibleMessage, loadMessageContext } = require('./sms-operational-actions');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
-const { canonicalizeAddress, stripTrailingUnit, normalizeZip, STREET_SUFFIX_CANON } = require('./customer-property-address-keys');
-const { filePassEntry, retireDirectoryEntry } = require('./neighborhood-access');
-const { neighborhoodAccessLive } = require('../config/feature-gates');
+const { canonicalizeAddress, stripTrailingUnit, normalizeZip, unitKey, streetEmbeddedUnitKey, STREET_SUFFIX_CANON } = require('./customer-property-address-keys');
 
 // data_hygiene_source_extractions.extractor_version is varchar(32).
 const VERSION = 'access-net-v1';
@@ -155,22 +156,44 @@ function codeIsWholeTokenIn(code, quote) {
 
 const SUFFIX_WORDS = new Set(Object.values(STREET_SUFFIX_CANON));
 const STREET_WORDS_MAX = 4;
+const DIRECTIONALS = { n: 'n', north: 'n', s: 's', south: 's', e: 'e', east: 'e', w: 'w', west: 'w',
+  ne: 'ne', northeast: 'ne', nw: 'nw', northwest: 'nw', se: 'se', southeast: 'se', sw: 'sw', southwest: 'sw' };
+const UNIT_WORDS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite']);
+
+// Address words in one canonical spelling: lower case, suffixes in long form,
+// directionals short ("North" = "n"), "#5" as "unit 5".
+function addressWords(value) {
+  return canonicalizeAddress(String(value || '').replace(/#\s*(?=[A-Za-z0-9])/g, ' unit '))
+    .split(/\s+/).filter(Boolean).map((w) => DIRECTIONALS[w] || w);
+}
 
 // The street addresses a text names, for a text with no customer (so no
-// properties to compare): { addresses: [{ number, street: [words] }], zips }.
+// properties to compare): { addresses: [{ number, street: [words], unit }], zips }.
 // An address is a number then up to four words that end in a street suffix
-// ("4455 Example Lane"), a ZIP is the five digits after the state.
+// ("4455 Example Lane"), then a directional when one follows ("100 Main St N")
+// and a unit when the text names one ("Apt 5"); the street words, directional
+// included, are what a home must match in full. A ZIP is the five digits after
+// the state.
 function addressesIn(body) {
-  const words = canonicalizeAddress(body).split(/\s+/).filter(Boolean);
+  const words = addressWords(body);
   const addresses = [];
   for (let i = 0; i < words.length - 1; i += 1) {
     if (!/^\d{1,6}$/.test(words[i]) || !/^[a-z]/.test(words[i + 1])) continue;
     const street = [];
-    for (let j = i + 1; j < words.length && street.length < STREET_WORDS_MAX; j += 1) {
+    let j = i + 1;
+    for (; j < words.length && street.length < STREET_WORDS_MAX; j += 1) {
       if (!/^[a-z][a-z0-9'-]*$/.test(words[j])) break;
       street.push(words[j]);
-      if (SUFFIX_WORDS.has(words[j])) { addresses.push({ number: words[i], street }); break; }
+      // "Park Place Drive": the street runs on while suffix words follow.
+      if (SUFFIX_WORDS.has(words[j]) && !SUFFIX_WORDS.has(words[j + 1])) break;
     }
+    if (!street.length || !SUFFIX_WORDS.has(street[street.length - 1])) continue;
+    let next = i + 1 + street.length;
+    if (Object.values(DIRECTIONALS).includes(words[next]) && !/^\d/.test(words[next + 1] || '')) { street.push(words[next]); next += 1; }
+    const unitStart = next;
+    while (UNIT_WORDS.has(words[next])) next += 1;
+    const unit = next > unitStart && words[next] ? words[next].replace(/[^a-z0-9]/g, '') : null;
+    addresses.push({ number: words[i], street, unit });
   }
   const zips = [...String(body || '').matchAll(/\b(?:FL|Florida)\.?,?\s+(\d{5})(?:-\d{4})?\b/gi)].map((m) => m[1]);
   return { addresses, zips };
@@ -364,9 +387,10 @@ async function loadContext(conn, message) {
   return { message, history: history.reverse(), properties: [], preferences: {} };
 }
 
-// The customer a no-customer text names: the one live home whose house number
-// and street name start match an address in the text (a differing ZIP in the
-// text rules a home out). Two matches, or none, suggest nobody: the office picks.
+// The customer a no-customer text names: the one live home whose house number,
+// full street name (suffix and directional included) and, when the text names
+// one, unit all match an address in the text (a differing ZIP in the text rules
+// a home out). Two matches, or none, suggest nobody: the office picks.
 async function suggestCustomer(conn, body) {
   const { addresses, zips } = addressesIn(body);
   if (!addresses.length) return null;
@@ -374,16 +398,13 @@ async function suggestCustomer(conn, body) {
   const homes = await conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
     .where('p.active', true).whereNull('c.deleted_at')
     .whereRaw(`substring(p.address_line1 from '^\\s*(\\d+)') in (${numbers.map(() => '?').join(', ')})`, numbers)
-    .select('p.id', 'p.customer_id', 'p.address_line1', 'p.zip');
+    .select('p.id', 'p.customer_id', 'p.address_line1', 'p.address_line2', 'p.zip');
   const matches = homes.filter((home) => {
-    const words = canonicalizeAddress(stripTrailingUnit(home.address_line1)).split(/\s+/).filter(Boolean);
-    const [number, ...street] = words;
+    const [number, ...street] = addressWords(stripTrailingUnit(home.address_line1));
     if (zips.length && normalizeZip(home.zip) && !zips.includes(normalizeZip(home.zip))) return false;
-    return addresses.some((a) => {
-      if (a.number !== number || !street.length) return false;
-      const n = Math.min(a.street.length, street.length);
-      return a.street.slice(0, n).join(' ') === street.slice(0, n).join(' ');
-    });
+    const unit = unitKey(streetEmbeddedUnitKey(home.address_line1) || home.address_line2);
+    return addresses.some((a) => a.number === number && a.street.join(' ') === street.join(' ')
+      && (!a.unit || a.unit === unit));
   });
   return matches.length === 1 ? matches[0].customer_id : null;
 }
@@ -859,7 +880,6 @@ function serialize(row) {
     sourceId: row.source_id || null,
     sourceQuote: row.source_quote || null,
     sourceAt: iso(row.source_at),
-    inNeighborhoodDirectory: !!row.neighborhood_access_id,
     decidedBy: row.decided_by || null,
     decidedAt: iso(row.decided_at),
     createdAt: iso(row.created_at),
@@ -987,18 +1007,28 @@ async function listForVisit(conn, req, visitId) {
   // A code tied to one home is shown only at a visit to that home. A visit not
   // stamped with a home matches a home-bound code only when the customer has
   // that one active home.
-  const homes = await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id');
-  const visitHome = visit.property_id || (homes.length === 1 ? homes[0] : null);
+  const homesOf = () => conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).select('id', 'neighborhood_id');
+  const homeAndHood = (stamped, homes) => {
+    const homeId = stamped || (homes.length === 1 ? homes[0].id : null);
+    return { homeId, hoodId: (homes.find((h) => h.id === homeId) || {}).neighborhood_id || null };
+  };
+  const homes = await homesOf();
+  const { homeId: visitHome, hoodId: visitHood } = homeAndHood(visit.property_id, homes);
   // One rule, fail closed: a code shows at a visit only when it is tied to
   // exactly that visit's home. A code with no home (an older row, a home since
   // deleted) or a visit with no known home shows nothing until the office binds it.
   const sameHome = (r) => !!r.propertyId && !!visitHome && r.propertyId === visitHome;
+  // A visitor pass is the neighborhood's too: the active standing passes of
+  // OTHER live customers whose home sits in this home's neighborhood, read now
+  // (never copied), so a pass follows its home's current neighborhood and
+  // leaves when its owner retires it. Only the pass text is projected.
+  const shared = visitHood && neighborhoodAccessLive() ? await neighborPasses(conn, visit.customer_id, visitHood) : [];
   // The visit may have been reassigned or moved to another home while the
-  // codes were read: answer only if it is still in scope with the same home.
+  // codes were read: answer only if it is still in scope with the same home
+  // and neighborhood.
   const again = await scoped().first('scheduled_services.property_id');
-  const homesNow = again ? await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id') : [];
-  const homeNow = again && (again.property_id || (homesNow.length === 1 ? homesNow[0] : null));
-  if (!again || (homeNow || null) !== (visitHome || null)) {
+  const nowHome = again ? homeAndHood(again.property_id, await homesOf()) : null;
+  if (!again || (nowHome.homeId || null) !== (visitHome || null) || (nowHome.hoodId || null) !== (visitHood || null)) {
     return fail(isTechnicianRequest(req) ? 403 : 409, isTechnicianRequest(req) ? 'service_not_assigned' : 'visit_changed');
   }
   // One source per access point: a one-home account's gate, garage and lockbox
@@ -1010,12 +1040,42 @@ async function listForVisit(conn, req, visitId) {
   // reach the profile.
   const profileBacked = (r) => homes.length === 1 && r.life === 'standing' && !!r.code && !!PROFILE_FIELD[r.kind];
   // Only what a stop needs: never the customer's message, its source or who decided.
-  return { ok: true, codes: active.filter((r) => r.life === 'standing' || r.scheduledServiceId === visit.id)
+  const own = active.filter((r) => r.life === 'standing' || r.scheduledServiceId === visit.id)
     .filter(sameHome)
     .map((r) => ({
       id: r.id, kind: r.kind, code: r.code, instructions: r.instructions, life: r.life, scheduledServiceId: r.scheduledServiceId,
       ...(profileBacked(r) ? { profileBacked: true } : {}),
-    })) };
+    }));
+  // The same pass text the customer already has is not listed twice.
+  const have = new Set(own.filter((r) => r.kind === 'pass').map((r) => normalizeText(r.instructions)));
+  return { ok: true, codes: [...own, ...shared.filter((r) => !have.has(normalizeText(r.instructions)))] };
+}
+
+// The neighbours' passes at a neighborhood: active, standing, a pass with only
+// directions (a link or how to show it, no keypad code), bound to an active
+// home in the neighborhood, of a live customer other than the visit's, from a
+// text the same customer still owns. Identical directions collapse to one row.
+// The projection carries no id of the other customer, name, quote or address.
+const NEIGHBOR_PASS_LIMIT = 20;
+async function neighborPasses(conn, customerId, hoodId) {
+  const rows = await conn('customer_access_codes as a')
+    .join('customer_properties as p', 'p.id', 'a.property_id')
+    .join('customers as c', 'c.id', 'a.customer_id')
+    .where({ 'a.status': 'active', 'a.kind': 'pass', 'a.life': 'standing', 'p.active': true, 'p.neighborhood_id': hoodId })
+    .whereNot('a.customer_id', customerId).whereNull('c.deleted_at')
+    .whereNull('a.code').whereRaw("btrim(coalesce(a.instructions, '')) <> ''")
+    .whereRaw(OWNED_SOURCE_SQL)
+    .orderBy('a.decided_at', 'desc').orderBy('a.id').select('a.id', 'a.instructions');
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    const key = normalizeText(r.instructions);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ id: r.id, kind: 'pass', code: null, instructions: r.instructions, life: 'standing', scheduledServiceId: null, shared: true });
+    if (out.length >= NEIGHBOR_PASS_LIMIT) break;
+  }
+  return out;
 }
 
 // Every code waiting for a decision. A row with no customer yet carries the
@@ -1199,7 +1259,7 @@ async function standingTwin(trx, customerId, { kind, life, value_hash: hash, pro
     })
     .whereRaw(OWNED_SOURCE_SQL.replace(/\ba\./g, 'customer_access_codes.'));
   if (exceptId) q.whereNot('id', exceptId);
-  return (await q.forUpdate().first('id', 'instructions', 'neighborhood_access_id')) || null;
+  return (await q.forUpdate().first('id', 'instructions')) || null;
 }
 
 // The same code with the same directions is a duplicate. The same code with
@@ -1212,7 +1272,6 @@ async function supersedeOrRefuse(trx, customerId, next, { exceptId = null, admin
   await trx('customer_access_codes').where({ id: twin.id }).update({
     status: 'retired', decided_by: adminUserId || null, decided_at: trx.fn.now(), updated_at: trx.fn.now(),
   });
-  if (twin.neighborhood_access_id) await retireDirectoryEntry(trx, twin.neighborhood_access_id);
   await recordAuditEvent({ trx, critical: true, actor_type: 'admin', actor_id: adminUserId || null,
     action: 'access_code.superseded', resource_type: 'customer_access_codes', resource_id: twin.id,
     metadata: { customer_id: customerId, kind: next.kind } });
@@ -1241,23 +1300,6 @@ async function officeTransaction(conn, work) {
   }
 }
 
-// A standing visitor pass the office decided on also goes to its home's
-// neighborhood directory (owner ruling 2026-10-05: it acts like a gate code
-// for every tech with a stop there, and it is "always only" standing). The home
-// is the one the code is bound to (the strict home rule: never a guess such as
-// the primary home); no home or no neighborhood, no entry. A visit-life pass
-// stays on its visit: a one-day pass left in the directory would never leave
-// it. Under the customer lock the caller holds; returns the directory row this
-// code created (the only one it may retire), or null.
-async function fileToDirectory(trx, customerId, propertyId, next) {
-  if (next.kind !== 'pass' || next.life !== 'standing' || !propertyId || !neighborhoodAccessLive()) return null;
-  const home = await trx('customer_properties').where({ id: propertyId, customer_id: customerId, active: true }).first('neighborhood_id');
-  if (!home || !home.neighborhood_id) return null;
-  const text = [next.code && `Code ${next.code}`, next.instructions].filter(Boolean).join(' - ');
-  const filed = await filePassEntry(trx, { neighborhoodId: home.neighborhood_id, instructions: text, sourceCustomerId: customerId });
-  return filed.status === 'filed' ? filed.id : null;
-}
-
 // Accept a found code (optionally edited by the office): it becomes active, a
 // visit-life code attaches to the customer's next visit, and a standing code
 // sets the profile field on a one-home account. Only a `found` row can be accepted.
@@ -1278,6 +1320,9 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const next = { ...checked.value, value_hash: valueHash(checked.value.code, checked.value.instructions) };
       if (!(await sourceStillOwned(trx, row))) return fail(409, 'source_moved');
       if (!(await sourceStillSupports(trx, row))) return fail(409, 'source_changed');
+      // The text's own code (not one the office typed) is rechecked against the
+      // homes the customer has now.
+      if (row.source_type === 'sms' && next.code === row.code && await codeIsAddress(trx, row.customer_id, next.code)) return fail(409, 'code_is_address');
       // A standing code's home is settled first: duplicates are per home.
       // (A one-visit code takes its visit's home, below.)
       const standingHome = next.life === 'standing'
@@ -1299,18 +1344,17 @@ async function accept(conn, id, { adminUserId = null, kind, life, code, instruct
       const home = next.life === 'standing' ? standingHome : { propertyId: visit.propertyId || null };
       if (home.error) return fail(400, home.error);
       const profileField = await syncProfileField(trx, row.customer_id, next);
-      const directoryId = await fileToDirectory(trx, row.customer_id, home.propertyId, next);
       const edited = ['kind', 'life', 'code', 'instructions'].some((key) => (next[key] ?? null) !== (row[key] ?? null));
       const [updated] = await trx('customer_access_codes').where({ id }).update({
         kind: next.kind, life: next.life, code: next.code, instructions: next.instructions, value_hash: next.value_hash,
         scheduled_service_id: scheduledServiceId, status: 'active', decided_by: adminUserId || null,
         // The named visit or the named home says which home the code is for.
-        property_id: home.propertyId, neighborhood_access_id: directoryId,
+        property_id: home.propertyId,
         decided_at: trx.fn.now(), updated_at: trx.fn.now(),
       }).returning('*');
       await audit(trx, adminUserId, 'access_code.accepted', id, {
         customer_id: row.customer_id, kind: next.kind, life: next.life, source_type: row.source_type,
-        edited, profile_field: profileField, scheduled_service_id: scheduledServiceId, neighborhood_filed: !!directoryId,
+        edited, profile_field: profileField, scheduled_service_id: scheduledServiceId,
       });
       await retireReplacedRows(trx, row.customer_id, updated, updated.id, adminUserId);
       return { ok: true, row: serialize(updated), profileField };
@@ -1336,6 +1380,16 @@ async function decide(conn, id, { from, to, action, adminUserId }) {
   });
 }
 
+// A numeric code that is a house number or ZIP of one of the customer's live
+// homes is an address, not a credential (the sweep refuses it for a customer's
+// own text; a text from an unknown number is checked here, against the
+// customer the office chose).
+async function codeIsAddress(trx, customerId, code) {
+  if (!code || !NUMERIC_CODE.test(code)) return false;
+  const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).select('address_line1', 'zip');
+  return digitsToRefuse({ customer_id: customerId }, homes).refuse.has(digitsOf(code));
+}
+
 // Link a code found in a text from a number with no customer to the customer
 // the office chose. The customer is locked first (the office writers' order),
 // then the row; the row must still be waiting and unlinked, and its text must
@@ -1355,6 +1409,7 @@ async function link(conn, id, { customerId, adminUserId = null } = {}) {
         const owner = await trx('sms_log').where({ id: row.source_id }).first('customer_id');
         if (owner && owner.customer_id) return fail(409, 'source_moved');
       }
+      if (await codeIsAddress(trx, customerId, row.code)) return fail(409, 'code_is_address');
       const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).select('id');
       const [updated] = await trx('customer_access_codes').where({ id }).update({
         customer_id: customerId, property_id: homes.length === 1 ? homes[0].id : null, sender_phone: null,
@@ -1408,11 +1463,8 @@ async function retireLocked(trx, row, { adminUserId = null, action, keepProfile 
     const [updated] = await trx('customer_access_codes').where({ id: row.id }).update({
       status: 'retired', decided_by: adminUserId || null, decided_at: trx.fn.now(), updated_at: trx.fn.now(),
     }).returning('*');
-    // The directory row this code created leaves with it (no other entry).
-    const directoryRetired = row.neighborhood_access_id ? await retireDirectoryEntry(trx, row.neighborhood_access_id) : false;
     await audit(trx, adminUserId, action, row.id, {
       customer_id: row.customer_id, kind: row.kind, life: row.life, profile_field_cleared: clearedField, profile_field_promoted: promoted,
-      neighborhood_retired: directoryRetired,
     });
     return { ok: true, row: serialize(updated), clearedField, promoted };
 }
@@ -1445,9 +1497,9 @@ async function retireMovedSources(conn, { limit = BATCH } = {}) {
 // in its profile field (accept and addByStaff write it): the same
 // value there is cleared under the preference lock, so existing profile
 // readers stop showing a dead code and its replacement can fill the field. A
-// field that holds a different value is left alone. A pass's directory entry
-// leaves with the code that created it (and only that one); any other shared
-// entry stays, the office retires it on the Gate codes page.
+// field that holds a different value is left alone. The shared neighborhood
+// directory entry is not touched: other homes rely on it, and the office
+// retires it on the Gate codes page.
 async function retire(conn, id, { adminUserId = null } = {}) {
   if (!UUID_RE.test(String(id))) return fail(404, 'not_found');
   const head = await conn('customer_access_codes').where({ id }).first('customer_id');
@@ -1481,16 +1533,14 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
     const home = standingHome || (visit.propertyId ? { propertyId: visit.propertyId } : await resolveHome(trx, customerId, { life: next.life, propertyId }));
     if (home.error) return fail(400, home.error);
     const profileField = await syncProfileField(trx, customerId, next);
-    const directoryId = await fileToDirectory(trx, customerId, home.propertyId, next);
     const [row] = await trx('customer_access_codes').insert({
-      customer_id: customerId, property_id: home.propertyId, neighborhood_access_id: directoryId,
+      customer_id: customerId, property_id: home.propertyId,
       kind: next.kind, code: next.code, instructions: next.instructions, life: next.life,
       scheduled_service_id: scheduledServiceId, status: 'active', source_type: 'staff', source_at: trx.fn.now(),
       value_hash: next.value_hash, decided_by: adminUserId || null, decided_at: trx.fn.now(),
     }).returning('*');
     await audit(trx, adminUserId, 'access_code.added', row.id, {
       customer_id: customerId, kind: next.kind, life: next.life, profile_field: profileField, scheduled_service_id: scheduledServiceId,
-      neighborhood_filed: !!directoryId,
     });
     await retireReplacedRows(trx, customerId, row, row.id, adminUserId);
     return { ok: true, row: serialize(row), profileField };

@@ -32,18 +32,6 @@ it('shows the "Customer sent photos" chip only for a stop the server flagged', (
   expect(screen.getAllByText('📷 Customer sent photos')).toHaveLength(1);
 });
 
-// Owner ruling 2026-10-05: a visitor pass is a link the technician opens, never raw text.
-it('shows a pass link in the next-stop alerts as an Open visitor pass button', () => {
-  const pass = { ...row('pass', 'confirmed'), propertyAlerts: [{ type: 'gate', text: 'Gate: https://pass.example.com/v/abc (neighborhood)' }] };
-  const stops = groupServicesIntoStops([pass]);
-  render(<TechFieldHome section="today" stops={stops} nextStop={nextStopOf(stops)} onOpen={vi.fn()} />);
-  const button = screen.getByRole('link', { name: 'Open visitor pass' });
-  expect(button).toHaveAttribute('href', 'https://pass.example.com/v/abc');
-  expect(button).toHaveAttribute('target', '_blank');
-  expect(button).toHaveAttribute('rel', 'noopener noreferrer');
-  expect(screen.queryByText(/pass\.example\.com/)).toBeNull();
-});
-
 it('keeps a failed route distinct from an empty route and offers retry', () => {
   const onRetry = vi.fn();
   render(<TechFieldHome section="today" stops={[]} error="Route unavailable" onRetry={onRetry} />);

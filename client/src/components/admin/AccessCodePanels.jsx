@@ -273,7 +273,9 @@ function LinkToCustomer({ row, onLink, onSearch, busy, run }) {
   const [searching, setSearching] = useState(false);
   useEffect(() => {
     const term = query.trim();
-    if (term.length < 2) { setResults([]); setSearching(false); return undefined; }
+    // Results from an earlier term are gone at once, so no click can link to a customer the new term did not find.
+    setResults([]);
+    if (term.length < 2) { setSearching(false); return undefined; }
     let cancelled = false;
     setSearching(true);
     const timer = setTimeout(async () => {
@@ -307,7 +309,7 @@ function LinkToCustomer({ row, onLink, onSearch, busy, run }) {
         <Input
           id={`link-${row.id}`}
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onChange={(event) => { setResults([]); setQuery(event.target.value); }}
           placeholder="Name, phone or address"
           autoComplete="off"
           disabled={busy}
@@ -318,7 +320,7 @@ function LinkToCustomer({ row, onLink, onSearch, busy, run }) {
         <ul className="grid gap-1" aria-label="Matching customers">
           {results.map((c) => (
             <li key={c.id}>
-              <Button size="sm" variant="secondary" className="h-auto w-full justify-start whitespace-normal text-left" disabled={busy} onClick={() => link(c.id)}>
+              <Button size="sm" variant="secondary" className="h-auto w-full justify-start whitespace-normal text-left" disabled={busy || searching} onClick={() => link(c.id)}>
                 {customerLabel(c)}
               </Button>
             </li>

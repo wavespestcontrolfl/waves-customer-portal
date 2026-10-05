@@ -59,14 +59,24 @@ describe('VisitBriefPanel access codes', () => {
     expect(screen.getByText(/http:\/\/pass\.example\.com\/v\/x/)).toBeInTheDocument();
   });
 
-  it('shows a neighborhood pass entry in the Access section as the same button', async () => {
+  it('keeps raw text for a note that is not a pass, and for alerts, even when they hold a link', async () => {
     const service = { ...SERVICE, propertyAlerts: [{ type: 'gate', text: 'Gate: https://pass.example.com/v/hood1 (neighborhood)' }] };
-    render(<VisitBriefPanel stop={{ ...stop, services: [service], primary: service }} detail={{ status: 'ready', byService: {} }} request={vi.fn(() => Promise.resolve({ accessCodes: [] }))} />);
-    const button = await screen.findByRole('link', { name: 'Open visitor pass' });
-    expect(button).toHaveAttribute('href', 'https://pass.example.com/v/hood1');
-    expect(button).toHaveAttribute('rel', 'noopener noreferrer');
-    expect(screen.queryByText(/pass\.example\.com/)).toBeNull();
-    expect(screen.getByText(/\(neighborhood\)/)).toBeInTheDocument();
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [
+      code({ id: 'o1', kind: 'other', code: null, instructions: 'Directions: https://maps.example.com/gate' }),
+    ] }));
+    render(<VisitBriefPanel stop={{ ...stop, services: [service], primary: service }} detail={{ status: 'ready', byService: {} }} request={request} />);
+    expect(await screen.findByText(/https:\/\/maps\.example\.com\/gate/)).toBeInTheDocument();
+    expect(screen.getByText(/https:\/\/pass\.example\.com\/v\/hood1/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open visitor pass' })).toBeNull();
+  });
+
+  it('labels a pass shared by a neighbor and shows its link as the button', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [
+      code({ id: 'p9', kind: 'pass', code: null, instructions: 'View your pass: https://pass.example.com/v/n1', shared: true }),
+    ] }));
+    renderPanel(request);
+    expect(await screen.findByText('Visitor pass (neighborhood):')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open visitor pass' })).toHaveAttribute('href', 'https://pass.example.com/v/n1');
   });
 
   it('shows nothing, with no error, when the list is refused', async () => {

@@ -64,6 +64,7 @@ const MESSAGES = {
   not_pending: 'That code was already decided',
   link_required: 'Link this code to a customer first',
   not_unlinked: 'That code already belongs to a customer',
+  code_is_address: 'That code is the same as a house number or ZIP of this customer',
   not_active: 'That code is not active',
   duplicate_active: 'That customer already has this code',
   duplicate: 'Another code from the same text already has this value',

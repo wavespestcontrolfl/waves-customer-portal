@@ -119,6 +119,8 @@ const gateBtnStyle = {
   border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.text,
 };
 
+// A visitor or QR pass the server marks as kind pass is a button that opens
+// the pass in a new tab; free-form notes and alerts keep their raw text.
 const passButtonStyle = { ...gateBtnStyle, display: 'inline-flex', alignItems: 'center', textDecoration: 'none', margin: '0 2px' };
 const passLinks = (text) => withPassLinks(text, { style: passButtonStyle });
 
@@ -245,7 +247,7 @@ function AccessSection({ alerts, access, gate = null }) {
         const canReport = !!gate && !!a?.neighborhoodEntryId;
         return (
           <div key={i} style={alertRowStyle(a, canReport)}>
-            {canReport ? <span>{passLinks(text)}</span> : passLinks(text)}
+            {canReport ? <span>{text}</span> : text}
             {canReport && <GateAlertControl alert={a} actions={gateActions} />}
           </div>
         );
@@ -336,10 +338,10 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
       <SectionLabel>Access codes</SectionLabel>
       {mine.map((r) => (
         <p key={r.id} style={factRowStyle}>
-          <span style={{ color: DARK.muted }}>{ACCESS_KIND_LABELS[r.kind] || 'Access code'}{r.life === 'visit' ? ' (this visit)' : ''}: </span>
+          <span style={{ color: DARK.muted }}>{ACCESS_KIND_LABELS[r.kind] || 'Access code'}{r.shared ? ' (neighborhood)' : ''}{r.life === 'visit' ? ' (this visit)' : ''}: </span>
           {r.code && <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>{r.code}</span>}
           {r.code && r.instructions ? ' · ' : ''}
-          {passLinks(r.instructions)}
+          {r.kind === 'pass' ? passLinks(r.instructions) : r.instructions}
         </p>
       ))}
     </>

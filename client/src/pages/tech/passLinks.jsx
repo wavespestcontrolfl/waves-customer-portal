@@ -4,8 +4,19 @@
 // qualify, so a javascript: or plain http address stays text.
 const PASS_LINK = /https:\/\/[^\s<>"']+/g;
 
+// The link as the server grounded it: the whole https token of the text. Only
+// punctuation that belongs to the sentence around it is dropped: trailing
+// periods and commas, and a closing bracket the link did not open. A link that
+// ends in "!" or in a balanced "(...)" keeps them.
+const count = (text, ch) => text.split(ch).length - 1;
 function passLinkOf(raw) {
-  const link = raw.replace(/[.,;:!?)\]]+$/, '');
+  let link = raw;
+  for (;;) {
+    if (/[.,]$/.test(link)) link = link.slice(0, -1);
+    else if (link.endsWith(')') && count(link, ')') > count(link, '(')) link = link.slice(0, -1);
+    else if (link.endsWith(']') && count(link, ']') > count(link, '[')) link = link.slice(0, -1);
+    else break;
+  }
   try { return new URL(link).protocol === 'https:' ? link : null; } catch { return null; }
 }
 
