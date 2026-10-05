@@ -4,7 +4,9 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { portalUrl } = require('../utils/portal-url');
-const { getPrimaryContact, getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
+const {
+  getPrimaryContact, getServiceContactSlots, getServiceReportEmailRecipients, slotWithheldFromReports, withAccountPrimaryContact,
+} = require('./customer-contact');
 // The summary text waits for a contact's own YES (recipient-optin.js).
 const { resolveServiceContactSmsRecipient } = require('./recipient-optin');
 const ContactReportText = require('./contact-report-text');
@@ -12,13 +14,19 @@ const ContactReportText = require('./contact-report-text');
 // Who gets the summary text. GATE_CONTACT_REPORT_TEXT on: the account holder
 // (the text can carry a pay link), and each confirmed contact gets the plain
 // report text instead (contact-report-text.js). An account holder with no
-// phone, or the gate off: the slot-1 contact rule, unchanged.
+// phone, or the gate off: the slot-1 contact rule, except that a slot-1
+// contact the report is withheld from (a tenant, or an occupant on a
+// property-manager account) never gets the summary: the account holder does,
+// or nobody by text when the holder has no phone.
 async function summarySmsRecipient(customer, opts) {
-  if (ContactReportText.enabled()) {
-    const primary = getPrimaryContact(customer);
-    if (primary.phone) return primary;
+  const primary = getPrimaryContact(customer);
+  if (ContactReportText.enabled() && primary.phone) return primary;
+  const recipient = await resolveServiceContactSmsRecipient(customer, opts);
+  const slot1 = getServiceContactSlots(customer)[0];
+  if (recipient?.role === 'service_contact' && slot1 && slotWithheldFromReports(customer, slot1)) {
+    return { ...primary, role: 'primary' };
   }
-  return resolveServiceContactSmsRecipient(customer, opts);
+  return recipient;
 }
 const { invoiceAmountDue, isInvoiceCollectibleStatus, isQueueSendClaimToken, SUMMARY_TEXT_PLANNED_ERROR } = require('./invoice-helpers');
 const { createDefaultCustomerRows } = require('./customer-default-rows');

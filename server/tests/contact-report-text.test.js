@@ -559,6 +559,18 @@ describe('summarySmsRecipient: who gets the combined-stop summary text', () => {
     expect((await summarySmsRecipient(CUSTOMER, opts)).phone).toBe('(941) 555-0123');
     expect(resolveServiceContactSmsRecipient).toHaveBeenCalledWith(CUSTOMER, opts);
   });
+
+  test('a slot-1 tenant, or a slot-1 occupant on a manager account, never gets the summary: the holder does', async () => {
+    delete process.env.GATE_CONTACT_REPORT_TEXT;
+    expect(await summarySmsRecipient({ ...CUSTOMER, service_contact_role: 'tenant' }))
+      .toMatchObject({ phone: '+19415550100', role: 'primary' });
+    // Gate on but no holder phone: no text at all, never the tenant.
+    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
+    expect((await summarySmsRecipient({ ...CUSTOMER, phone: null, contact_role: 'property_manager' })).phone).toBe('');
+    // A slot-1 manager on a manager account still gets it.
+    expect((await summarySmsRecipient({ ...CUSTOMER, phone: null, contact_role: 'property_manager', service_contact_role: 'property_manager' })).phone)
+      .toBe('(941) 555-0123');
+  });
 });
 
 describe('the portal card mentions the report text under the gate, with the condition in its wording', () => {

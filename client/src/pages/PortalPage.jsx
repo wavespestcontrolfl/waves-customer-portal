@@ -4482,12 +4482,19 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const contactTextsFor = (entry) => (entry?.contactReportTexts === true
     ? 'appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit'
     : 'appointment texts');
+  // The report text never goes to a tenant, or to anyone at a rental a
+  // property manager runs (customer-contact.js slotWithheldFromReports).
+  const contactReportExceptionFor = (entry) => (entry?.contactReportTexts === true
+    ? ' Tenants, and anyone at a rental a property manager runs, get appointment texts only.'
+    : '');
   // The entries the contact card renders (one house, or the profile list).
   const contactCardEntries = perPropertyTexts
     ? propertyPrefs.filter((p) => p.id === activePropertyId)
     : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer?.id) : propertyPrefs;
   // The card's header copy promises the report text only when every entry under it gets it.
-  const contactTexts = contactTextsFor({ contactReportTexts: contactCardEntries.length > 0 && contactCardEntries.every((p) => p.contactReportTexts === true) });
+  const contactCardReportTexts = { contactReportTexts: contactCardEntries.length > 0 && contactCardEntries.every((p) => p.contactReportTexts === true) };
+  const contactTexts = contactTextsFor(contactCardReportTexts);
+  const contactReportException = contactReportExceptionFor(contactCardReportTexts);
 
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
@@ -5481,8 +5488,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     // One profile, several saved houses: contacts and texts are
                     // stored per PROFILE, so a tenant added here hears about
                     // every house — say so (codex #4207 r1c).
-                    ? `Add anyone who should get ${contactTexts} — a spouse, partner, tenant, or property manager. These contacts and settings apply to every property on this profile.`
-                    : `Add anyone who should get ${contactTexts} for this property — a spouse, partner, tenant, or property manager.`}
+                    ? `Add anyone who should get ${contactTexts} — a spouse, partner, tenant, or property manager.${contactReportException} These contacts and settings apply to every property on this profile.`
+                    : `Add anyone who should get ${contactTexts} for this property — a spouse, partner, tenant, or property manager.${contactReportException}`}
                 </div>
               </>
             )}
@@ -5666,7 +5673,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4, flex: compact ? '1 1 100%' : 1, minWidth: 0 }}>
-                        These people receive {contactTextsFor(property)} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
+                        These people receive {contactTextsFor(property)} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}).{contactReportExceptionFor(property)} {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
                       </div>
                       <button
                         type="button"

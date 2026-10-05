@@ -376,6 +376,12 @@ function withAccountPrimaryFallback(row, primaryRow) {
   if (filled.length) {
     out.account_primary_fallback = { customer_id: primaryRow.id, fields: filled };
   }
+  // The account's role (property manager, ...) is an account fact: a
+  // property profile without its own takes the primary's, so the report
+  // rule (slotWithheldFromReports) sees a manager account on every property.
+  if (!clean(row.contact_role) && clean(primaryRow.contact_role)) {
+    out.contact_role = clean(primaryRow.contact_role);
+  }
   return out;
 }
 
@@ -392,12 +398,23 @@ async function loadAccountPrimaryRow(row, { db = null, forShare = false, rethrow
     if (forShare) query = query.forShare();
     const primary = await query
       .whereNull('deleted_at')
-      .first('id', 'first_name', 'phone', 'email');
+      .first('id', 'first_name', 'phone', 'email', 'contact_role');
     return primary && String(primary.id) !== String(row.id) ? primary : null;
   } catch (err) {
     if (rethrow) throw err;
     return null;
   }
+}
+
+// The row with the account's contact_role filled in from the primary profile
+// when the row has none, and nothing else changed. For senders that apply the
+// report rule but keep their own recipient fields. Requires account_id and
+// is_primary_profile on the row. A failed read throws: the caller retries
+// rather than send findings to an occupant of a managed rental.
+async function withAccountContactRole(row, { db = null } = {}) {
+  if (!row || clean(row.contact_role)) return row;
+  const primary = await loadAccountPrimaryRow(row, { db, rethrow: true });
+  return primary && clean(primary.contact_role) ? { ...row, contact_role: clean(primary.contact_role) } : row;
 }
 
 // One-call form: the row with the primary's contact fields filled in where
@@ -435,6 +452,7 @@ module.exports = {
   getServiceContactSlots,
   isServiceContactRole,
   slotWithheldFromReports,
+  withAccountContactRole,
   getBillingContact,
   getAppointmentContacts,
   getInvoiceEmailRecipients,

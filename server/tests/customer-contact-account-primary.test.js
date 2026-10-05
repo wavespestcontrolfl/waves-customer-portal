@@ -10,6 +10,7 @@ const {
   withAccountPrimaryFallback,
   loadAccountPrimaryRow,
   withAccountPrimaryContact,
+  withAccountContactRole,
 } = require('../services/customer-contact');
 
 const primary = { id: 'p1', first_name: 'Lana', phone: '+15551110000', email: 'lana@example.com' };
@@ -88,5 +89,25 @@ describe('account-primary contact fallback', () => {
     expect(out.phone).toBe('+15551110000');
     expect(out.email).toBe('lana@example.com');
     expect(out.account_primary_fallback.fields).toEqual(['phone', 'email']);
+  });
+
+  test('a property profile without its own contact_role takes the account primary\'s', async () => {
+    const managerPrimary = { ...primary, contact_role: 'property_manager' };
+    const sec = { id: 's1', account_id: 'a1', is_primary_profile: false, first_name: 'Lana', phone: '+1', email: 'x@example.com' };
+    expect(withAccountPrimaryFallback(sec, managerPrimary).contact_role).toBe('property_manager');
+    // A role on the property row wins, and it is not a filled contact field.
+    const own = withAccountPrimaryFallback({ ...sec, contact_role: 'owner' }, managerPrimary);
+    expect(own.contact_role).toBe('owner');
+    expect(own.account_primary_fallback).toBeUndefined();
+
+    expect((await withAccountContactRole(sec, { db: knexStub({ primaryRow: managerPrimary }) })).contact_role).toBe('property_manager');
+    // Only the role changes: the sender keeps its own recipient fields.
+    expect(await withAccountContactRole({ ...sec, phone: '' }, { db: knexStub({ primaryRow: managerPrimary }) }))
+      .toEqual({ ...sec, phone: '', contact_role: 'property_manager' });
+    // A failed read throws: the report waits rather than reach an occupant.
+    await expect(withAccountContactRole(sec, { db: knexStub({ throwOnRead: true }) })).rejects.toThrow('boom');
+    // A primary row is never re-read.
+    const prim = { id: 'p1', account_id: 'a1', is_primary_profile: true };
+    expect(await withAccountContactRole(prim, { db: knexStub({ throwOnRead: true }) })).toBe(prim);
   });
 });

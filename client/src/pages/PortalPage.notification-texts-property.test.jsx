@@ -87,10 +87,13 @@ describe('Appointment texts per saved property', () => {
     const view = render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pa" selectedProperty={{ key: 'c1:pa', customerId: 'c1', propertyId: 'pa' }} onSelectProperty={() => {}} />);
     expect(await screen.findByText(/These people receive appointment texts for this property/)).toBeInTheDocument();
     expect(screen.queryByText(/service report link/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/get appointment texts only/)).not.toBeInTheDocument();
     view.unmount();
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: propertyPrefs.map((p) => ({ ...p, contactReportTexts: true })) });
     render(<ScheduleTab customer={customer} properties={entries} activePropertyId="c1:pa" selectedProperty={{ key: 'c1:pa', customerId: 'c1', propertyId: 'pa' }} onSelectProperty={() => {}} />);
     expect(await screen.findByText(/These people receive appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit for this property/)).toBeInTheDocument();
+    // The tenant exception rides with the promise.
+    expect(screen.getByText(/Tenants, and anyone at a rental a property manager runs, get appointment texts only\./)).toBeInTheDocument();
   });
   it('each house reads its own flag', async () => {
     api.getPropertyNotificationPrefs.mockResolvedValue({ properties: [{ ...propertyPrefs[0], contactReportTexts: true }, propertyPrefs[1]] });
