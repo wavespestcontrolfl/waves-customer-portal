@@ -110,3 +110,26 @@ test('a rate unit written with a comma ("lb/1,000 sq ft") is recognized', () => 
   const due = rows => treeShrubDueReason('snapshot', rows, '2028-07-01', 'property-a');
   expect(due([application('Snapshot 2.5TG', '2028-04-01', { rate_unit: 'lb/1,000 sq ft' })])).toBeNull();
 });
+
+describe('DiPel and manganese sulfate guide entries (owner 2026-10-05)', () => {
+  const guide = require('../config/tree-shrub-field-guide.json');
+  const protocols = require('../config/protocols.json');
+  const conditionalKeys = (month) => protocols.tree_shrub.visits
+    .find((v) => v.month === month).fieldGuide.conditional.map((c) => c.key);
+
+  test('both products carry a label source and no fluid-ounce mix for the dry Bt powder', () => {
+    expect(guide.products.dipel.source).toMatch(/EPA 73049-39/);
+    expect(guide.products.dipel.mixes).toBeUndefined();
+    expect(guide.products.mnsulfate.url).toMatch(/MANGANESESULFATE/i);
+    expect(guide.products.mnsulfate.limits.join(' ')).toMatch(/stain/i);
+  });
+
+  test('they are conditional only, in the caterpillar and palm-manganese months', () => {
+    for (const m of ['Mar', 'Apr', 'Jun', 'Jul', 'Dec']) expect(conditionalKeys(m)).toContain('dipel');
+    for (const m of ['Feb', 'May', 'Jun', 'Sep', 'Nov']) expect(conditionalKeys(m)).toContain('mnsulfate');
+    for (const v of protocols.tree_shrub.visits) {
+      expect(v.primary).not.toMatch(/dipel|manganese sulfate/i);
+      expect((v.fieldGuide.routine || []).map((r) => r.key)).not.toEqual(expect.arrayContaining(['dipel', 'mnsulfate']));
+    }
+  });
+});

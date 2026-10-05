@@ -1334,6 +1334,30 @@ function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
   };
 }
 
+// The county roll's own answer for the address status line (PR 4), read off
+// the lookup's evidence and never inferred from an absence:
+// The audit of the TYPED number comes first: the lookup deliberately keeps
+// both a record and a negative audit when the record is for another house
+// number (typed 1010, record for 1012).
+//   not_found  the audit RAN for a county (it answered whether the street
+//              exists) and has no exact match for the typed number
+//   found      the audit matched the typed number exactly, or (with no
+//              completed audit) a county-backed record came back
+//   unknown    anything else: no audit and no record, an audit that could
+//              not run (outage, out of area), or only a snapped-record marker
+function countyRollAnswer(result) {
+  const record = result?.propertyRecord;
+  const audit = result?.addressAudit || record?._addressAudit || null;
+  if (audit?.hasExactMatch === true) return 'found';
+  if (audit && audit.county && typeof audit.streetExists === 'boolean' && audit.hasExactMatch === false) return 'not_found';
+  if (record && (record._parcel?.parcelId || record._parcel?.paoParcelId || record._raw?.parcelId || hasCountyEvidence(record))) {
+    // A snapped-record marker with no completed audit: the record is for
+    // another number and the roll did not answer for the typed one.
+    return audit?.snappedRecord ? 'unknown' : 'found';
+  }
+  return 'unknown';
+}
+
 // ─────────────────────────────────────────────
 // MAIN ROUTE — admin/tech-gated thin wrapper over performPropertyLookup
 // ─────────────────────────────────────────────
@@ -1352,8 +1376,18 @@ router.post('/property-lookup', async (req, res) => {
     // office "Suite" address — size the whole property, never the suite.
     // occupancy ('suite' | 'building' | 'none'): staff's answer to "just your space
     // or the whole building?" (GATE_LOOKUP_BUSINESS_IDENTITY); absent unless sent.
+    // Address status line (PR 4, GATE_LOOKUP_ADDRESS_STATUS): asked beside the
+    // lookup, never ahead of it; resolves null while the gate is off and
+    // never rejects.
+    const addressStatusPromise = require('../services/property-lookup/address-status').resolveAddressStatus(address).catch(() => null);
     const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: wholeProperty !== true, ...occupancyOption(req.body?.occupancy) });
     result.meta.providerStatus ||= buildProviderStatus();
+    const addressStatus = await addressStatusPromise;
+    if (addressStatus) {
+      // The county roll's own answer rides beside it, never folded into it:
+      // an address Google confirms can still be missing from the roll.
+      result.meta.addressStatus = { ...addressStatus, countyRoll: countyRollAnswer(result) };
+    }
     // A whole-property (association) lookup skips the business check. The
     // tool is told so it can ask for a fresh lookup if the business type
     // later stops being an association. Absent while the gate is off.
@@ -6403,6 +6437,7 @@ module.exports._private = {
   applyCommercialSuiteSize,
   commercialSuiteSizeStampIsFresh,
   listingSizeVerifyFlag,
+  countyRollAnswer,
   reconcileCommercialSuiteSubtype,
   resolveCommercialSuiteScope,
   buildResultFromCachedLookup,

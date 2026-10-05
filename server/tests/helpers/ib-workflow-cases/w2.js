@@ -41,7 +41,7 @@ const schedulePages = (range) => Array.from({ length: 12 }, () => (prev) => {
 });
 const allAppointments = (turn) => turn.toolCalls.filter((t) => t.name === 'get_schedule_view').flatMap((t) => (t.result && t.result.appointments) || []);
 
-const briefTools = (id) => [['get_customer_detail', { customer_id: id }], ['get_open_commitments', { customer_id: id }], ['get_conversation_thread', { customer_id: id }], ['get_schedule_view', { date_from: plusDaysET(-30), date_to: plusDaysET(30) }]];
+const briefTools = (id) => [['get_customer_detail', { customer_id: id }], ['get_open_commitments', { customer_id: id }], ['get_conversation_thread', { customer_id: id }], ['get_schedule_view', { customer_id: id, date_from: plusDaysET(-30), date_to: plusDaysET(30) }]];
 
 /** Facts in the detail result against the seeded rows. */
 function checkDetail(ctx, detail, customer, { properties = [], upcoming = [], recentDates = [] } = {}) {
