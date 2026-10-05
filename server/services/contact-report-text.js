@@ -47,10 +47,14 @@ function phoneKey(phone) {
 // The first name the text greets: the slot's OWN name for that phone ("there"
 // when the slot has none). The shared contact list falls back to the account
 // holder's name for a nameless slot, and a contact must not be greeted by it.
+// GSM-safe (messaging/gsm-normalize.js gsmSafeName): the name goes into the
+// body AFTER the renderer's normalization, and one accented or non-Latin
+// character would turn the whole text into UCS-2 segments.
 function greetingName(customer, phone) {
   const { firstNameFrom, getServiceContactSlots } = require('./customer-contact');
+  const { gsmSafeName } = require('./messaging/gsm-normalize');
   const slot = getServiceContactSlots(customer).find((s) => phoneKey(s.phone) === phoneKey(phone));
-  return firstNameFrom(slot?.name || '') || 'there';
+  return gsmSafeName(firstNameFrom(slot?.name || ''), 'there');
 }
 
 // The customer row the contact rule reads. A secondary profile with no phone

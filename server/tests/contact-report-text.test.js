@@ -145,6 +145,16 @@ describe('queueContactReportTexts', () => {
     expect(inserts().map((r) => JSON.parse(r.metadata).contact_report_first_name)).toEqual(['Riley', 'there']);
   });
 
+  test('a name with accents or non-Latin characters is made GSM-safe, so the text stays GSM-7', async () => {
+    queueReads({ ...CUSTOMER, service_contact_name: '\u00c1lvaro N\u00fa\u00f1ez', service_contact2_name: '\u7530\u4e2d \u592a\u90ce' });
+    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(2);
+    const bodies = inserts().map((r) => r.message_body);
+    expect(bodies.map((b) => b.split('!')[0])).toEqual(['Hello Alvaro', 'Hello there']);
+    const { detectEncoding } = require('../services/messaging/segment-counter');
+    for (const body of bodies) expect(detectEncoding(body).encoding).toBe('GSM_7');
+    expect(inserts().map((r) => JSON.parse(r.metadata).contact_report_first_name)).toEqual(['Alvaro', 'there']);
+  });
+
   test('the name comes from the lock-held row: a rename on the same phone before the lock is greeted by the saved name', async () => {
     // The unlocked read sees Riley; the locked read sees the saved contact.
     queue('customers', CUSTOMER, { ...CUSTOMER, service_contact_name: 'Jordan Newtenant' });
