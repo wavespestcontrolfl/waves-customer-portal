@@ -17,8 +17,11 @@ jest.mock('../models/db', () => {
       whereILike: (col, pat) => { filters.ilike = pat; return q; },
       whereIn: (col, vals) => { filters.in = vals; return q; },
       whereRaw: (sql, binds) => { filters.raw = [sql, binds]; return q; },
+      join: () => q, whereNot: () => q,
       first: async () => {
         if (table === 'expenses') { mockState.lastDuplicateFilter = { ...filters }; return mockState.duplicate; }
+        if (table === 'expenses as x') return mockState.copy || null;
+        if (table === 'emails') return mockState.me || null;
         if (table === 'expense_categories') return mockState.categories.find((c) => filters.ilike && c.name.toLowerCase().includes(filters.ilike.replace(/%/g, '').toLowerCase())) || null;
         return null;
       },
@@ -49,6 +52,8 @@ beforeEach(() => {
   mockState.vendors = [{ domain: 'acme-cloud.example', vendor_name: 'Acme Cloud', expense_category: 'Software & Technology' }];
   mockState.duplicate = null;
   mockState.lastDuplicateFilter = undefined;
+  mockState.copy = null;
+  mockState.me = null;
   mockState.categories = [{ id: 'cat-sw', name: 'Software & Technology' }];
 });
 
@@ -165,4 +170,35 @@ test('a receipt with no printed date (today fallback) never drives a duplicate m
   await processVendorInvoice({ id: 'e15', gmail_id: 'g', from_address: 'p@payments.example', subject: 'Invoice' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 12 }));
   expect(mockState.lastDuplicateFilter).toBeUndefined();
+});
+
+test.each([
+  '$12.00 payment to Example Co was unsuccessful',
+  'URGENT: Your Example account couldn\'t be recharged',
+  'Your $45.00 payout for Example Co is on the way',
+  'Your Example subscription will be renewed in 7 days',
+  'Team Invoice Due for Example Projects',
+])('an email whose subject says no money left (%s) is never booked', async (subject) => {
+  noPdf();
+  await processVendorInvoice({ id: 'e16', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject }, { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toBeUndefined();
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:not_a_charge' })]);
+});
+
+test('a copy of a notice (same sender, same second, same amount) links to the booked expense', async () => {
+  noPdf();
+  mockState.me = { from_address: 'noreply@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z') };
+  mockState.copy = { id: 'exp-first-notice' };
+  await processVendorInvoice({ id: 'e17', gmail_id: 'g', from_address: 'noreply@acme-cloud.example', subject: 'Notice: your card has been charged' },
+    { extracted: { invoice_amount: '$10.00', invoice_date: '2026-01-15' } });
+  expect(inserted()).toBeUndefined();
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ expense_id: 'exp-first-notice', auto_action: 'expense_duplicate:10' })]);
+});
+
+test('a receipt with a parsed PDF skips the subject guard and the notice-copy check', async () => {
+  mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z') };
+  mockState.copy = { id: 'exp-should-not-match' };
+  extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0018', invoice_date: '2026-01-15', total: 30 });
+  await processVendorInvoice({ id: 'e18', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Invoice due: paid in full' }, { extracted: {} });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 30 }));
 });

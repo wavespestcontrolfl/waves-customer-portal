@@ -188,6 +188,28 @@ async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, inv
     .first('id');
 }
 
+// With no parsed invoice the subject is the only signal of what the email
+// is. These say money did NOT leave the business (a failed or declined
+// payment, a payout received, a renewal reminder, a bill still due), and the
+// classifier still prints an amount for them, so they are never booked.
+const NOT_A_CHARGE_SUBJECT = /\b(unsuccessful|failed|declined|couldn'?t be (charged|recharged|processed)|could not be (charged|processed)|payout|will (be )?renew(ed|s)?|renewal notice|invoice due|payment due|past due|action required)\b/i;
+
+// A copy of the same notice: an expense already linked to an email from the
+// same sender, received in the same second, for the same amount (one
+// receipt delivered twice, or a vendor's "card charged" notice that mirrors
+// the receipt). Distinct charges are never received in the same second.
+async function findSameNoticeExpense(conn, emailId, amount) {
+  const me = await conn('emails').where({ id: emailId }).first('from_address', 'received_at');
+  if (!me?.from_address || !me?.received_at) return null;
+  return conn('expenses as x')
+    .join('emails as e', 'e.expense_id', 'x.id')
+    .where('e.from_address', me.from_address)
+    .where('e.received_at', me.received_at)
+    .whereNot('e.id', emailId)
+    .whereRaw('x.amount = round(?::numeric, 2)', [String(amount)])
+    .first('x.id');
+}
+
 // The classifier returns the amount as printed ("$10.06", "1,234.50 USD").
 // parseFloat read "$10.06" as NaN, so every such receipt was skipped as
 // "no_amount" (2026-10-05: 96 receipts, about $1,476, mostly Twilio, OpenAI,
@@ -197,7 +219,10 @@ function classifierAmount(value) {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (typeof value !== 'string') return null;
   const m = value.trim().match(/^(?:USD\s*)?\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?\s*(?:USD)?$/i);
-  return m ? Number(m[1].replace(/,/g, '') + (m[2] || '')) : null;
+  if (!m) return null;
+  const n = Number(m[1].replace(/,/g, '') + (m[2] || ''));
+  // expenses.amount is decimal(12,2): the same ceiling isUsableInvoiceTotal applies.
+  return Number.isFinite(n) && n < 1e10 ? n : null;
 }
 
 // Booking phase: the AI category suggestion (outside any transaction), then
@@ -239,6 +264,18 @@ async function bookExpense(email, { vendorName, vendorSource, expenseCategory, p
     // transaction: no lock is held across a model call.
     const key = duplicateKey(vendorName, invoiceNumber, vendorSource, dateFromInvoice);
     const outcome = await db.transaction(async (trx) => {
+      if (!parsedInvoice) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`expense-notice:${String(email.from_address || '').toLowerCase()}`]);
+        const copy = await findSameNoticeExpense(trx, email.id, amount);
+        if (copy) {
+          await trx('emails').where({ id: email.id }).update({
+            expense_id: copy.id,
+            auto_action: `expense_duplicate:${amount}`,
+            updated_at: new Date(),
+          });
+          return { duplicateOf: copy.id };
+        }
+      }
       if (key) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
         const duplicate = await findDuplicateExpense(trx, vendorName, invoiceNumber, amount, invoiceDate);
@@ -400,7 +437,12 @@ async function processVendorInvoice(email, classification) {
   const invoiceDate = candidateDate && taxPeriodFor(candidateDate) ? candidateDate : etDateString();
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
-  if (amount > 0) {
+  if (amount > 0 && !parsedInvoice && NOT_A_CHARGE_SUBJECT.test(String(email.subject || ''))) {
+    await db('emails').where({ id: email.id }).update({
+      auto_action: 'invoice_detected:not_a_charge',
+      updated_at: new Date(),
+    });
+  } else if (amount > 0) {
     await bookExpense(email, {
       vendorName, vendorSource, expenseCategory, parsedInvoice, amount, invoiceNumber, invoiceDate,
       dateFromInvoice: invoiceDate === candidateDate, taxYear, quarter,
@@ -413,4 +455,4 @@ async function processVendorInvoice(email, classification) {
   }
 }
 
-module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates, classifierAmount };
+module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates, classifierAmount, NOT_A_CHARGE_SUBJECT };
