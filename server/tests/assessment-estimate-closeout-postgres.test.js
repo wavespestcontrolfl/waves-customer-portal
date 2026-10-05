@@ -347,6 +347,34 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(await request('refuse')).toMatchObject({ status: 200, body: { success: true } });
   });
 
+  test('refused on the visit day, retried after midnight: the backfill attempt is its own request, never a changed payload under the old key', async () => {
+    const customerId = await customer();
+    const visitId = await visit(customerId);
+    const visitRow = await row(visitId);
+    await estimate(customerId);
+    // The visit-day attempt reaches the completion and is refused under the lock (a timer started).
+    const timerId = randomUUID();
+    mockRace.beforeClaim = async () => {
+      await mockPg('time_entries').insert({ id: randomUUID(), technician_id: visitRow.technician_id, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: minutesAgo(120) });
+      await mockPg('time_entries').insert({ id: timerId, technician_id: visitRow.technician_id, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(), job_id: visitId });
+    };
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
+    expect(await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key')).toEqual([`assessment-estimate:${visitId}:live`]);
+    // Next day: the timer stopped and the visit day has passed → backfill
+    // posture. The completion reads the real clock, so the day passing is
+    // modeled by moving the fixture one day back (visit, stamps and send),
+    // and the six-hour rest by a sweep clock seven hours on.
+    await mockPg('time_entries').where({ id: timerId }).update({ status: 'completed', clock_out: new Date(), duration_minutes: 1 });
+    await mockPg('scheduled_services').where({ id: visitId }).update({ scheduled_date: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
+    await mockPg('estimates').where({ customer_id: customerId }).update({ sent_at: minutesAgo(60 * 24) });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg, now: new Date(Date.now() + 7 * 3600000), today: TODAY })).toEqual({ candidates: 1, closed: 1 });
+    const closed = await row(visitId);
+    expect(closed.status).toBe('completed');
+    expect(closed.service_time_minutes).toBeNull();
+    expect((await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key')).sort())
+      .toEqual([`assessment-estimate:${visitId}:backfill`, `assessment-estimate:${visitId}:live`]);
+  });
+
   test('gate off: nothing is read and nothing closes', async () => {
     process.env.GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT = 'false';
     const customerId = await customer();

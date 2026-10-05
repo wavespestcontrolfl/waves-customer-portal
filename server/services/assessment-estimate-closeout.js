@@ -31,7 +31,14 @@ const UNSTARTED_STATUSES = ['pending', 'confirmed'];
 
 const AUDIT_CLOSED = 'visit.assessment_closed_on_estimate_sent';
 const AUDIT_REFUSED = 'visit.assessment_close_on_estimate_sent_refused';
-const idempotencyKeyFor = (visitId) => `assessment-estimate:${visitId}`;
+// The completion hashes its request, and the posture is part of it: a visit
+// closes live on its own day and in the backfill posture afterwards. One key
+// per (visit, posture), so an attempt refused on the visit day (a running
+// timer, say) does not leave the next day's backfill attempt rejected as a
+// changed payload under the same key (pre-push audit P1).
+const KEY_PREFIX = 'assessment-estimate:';
+const idempotencyKeyFor = (visitId, posture) => `${KEY_PREFIX}${visitId}:${posture}`;
+const postureOfKey = (key) => (String(key || '').endsWith(':backfill') ? 'backfill' : 'live');
 
 // How far back an estimate's send still closes an assessment, how old an
 // assessment may be, and how long a refused visit rests before it is asked
@@ -93,7 +100,19 @@ async function newestSentEstimate(conn, customerId, { now }) {
 // This closeout's own completion attempt, committed but not finished (the
 // canonical completion commits status='completed' before its post-commit
 // work and parks a crashed run under its idempotency key).
-const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempts a WHERE a.service_id = s.id AND a.idempotency_key = 'assessment-estimate:' || s.id::text AND a.status NOT IN ('succeeded', 'failed'))";
+const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempts a WHERE a.service_id = s.id AND a.idempotency_key IN ('assessment-estimate:' || s.id::text || ':live', 'assessment-estimate:' || s.id::text || ':backfill') AND a.status NOT IN ('succeeded', 'failed'))";
+
+// The posture of this closeout's parked attempt, so a resume sends the very
+// request that attempt committed (its key and its backfill flag).
+async function parkedPosture(conn, visitId) {
+  const attempt = await conn('service_completion_attempts')
+    .where({ service_id: visitId })
+    .whereIn('idempotency_key', [idempotencyKeyFor(visitId, 'live'), idempotencyKeyFor(visitId, 'backfill')])
+    .whereNotIn('status', ['succeeded', 'failed'])
+    .orderBy('updated_at', 'desc')
+    .first('idempotency_key');
+  return attempt ? postureOfKey(attempt.idempotency_key) : null;
+}
 
 // The rule and the rest, as SQL, so a row the sweep cannot act on this tick
 // never takes one of its slots (a full page of refused or not-yet rows would
@@ -169,10 +188,10 @@ async function liveRefusal(conn, visit) {
 // span from a days-old arrival to now is not labor). `expectedVisit` makes
 // the completion refuse, under its own row lock, a visit that was moved,
 // reassigned to another customer or reclassified after this module read it.
-async function closeAssessment(visit, { today, now }) {
+async function closeAssessment(visit, { today, now, posture = null }) {
   const { completeScheduledService } = require('./complete-scheduled-service');
-  const key = idempotencyKeyFor(visit.id);
-  const pastDay = dateOnlyString(visit.scheduled_date) < today;
+  const pastDay = posture ? posture === 'backfill' : dateOnlyString(visit.scheduled_date) < today;
+  const key = idempotencyKeyFor(visit.id, pastDay ? 'backfill' : 'live');
   const result = await completeScheduledService({
     serviceId: visit.id,
     idempotencyKey: key,
@@ -225,7 +244,8 @@ async function closeOne(conn, row, { today, now }) {
         return { closed: false, reason: live };
       }
     }
-    const outcome = await closeAssessment(visit, { today, now });
+    const resuming = Boolean(row.own_attempt_parked) && visit.status === 'completed';
+    const outcome = await closeAssessment(visit, { today, now, posture: resuming ? await parkedPosture(conn, visitId) : null });
     if (outcome.closed) {
       logger.info(`[assessment-estimate-closeout] visit ${visitId} completed: estimate ${estimate.id} was sent after it`);
       await audit(AUDIT_CLOSED, { visitId, estimateId: estimate.id, status: outcome.status });
