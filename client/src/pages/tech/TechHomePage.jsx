@@ -59,6 +59,7 @@ import FastCompleteLawnReserviceSheet from '../../components/tech/FastCompleteLa
 import ConsultationOutcomeSheet from '../../components/ConsultationOutcomeSheet';
 import TechRecapCapture from './TechRecapCapture';
 import { pruneRecapClipDrafts } from '../../lib/completion-resume-store';
+import useSavedFastCompletions, { projectReportTool, savedAtLabel, withSavedCompletions } from '../../hooks/useSavedFastCompletions';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
 import { detectServiceCategory } from '../../lib/service-colors';
@@ -207,7 +208,9 @@ function reportFlowFields(service, { stationMapOff = false } = {}) {
   const laneFlow = isLaneReportEligible(service);
   const typedFlow = isTypedReportEligible(service, { stationMapOff });
   return {
-    reportFlow: isFastCompleteReportEligible(service) || laneFlow || typedFlow,
+    // A saved report-flow attempt reopens in the report flow whatever the
+    // row says now (useSavedFastCompletions).
+    reportFlow: service.fastCompletionRecoveryReportFlow === true || isFastCompleteReportEligible(service) || laneFlow || typedFlow,
     laneFlow,
     laneKey: laneFlow ? laneKeyOf(service) : null,
     typedFlow,
@@ -649,6 +652,12 @@ export default function TechHomePage({ section = 'today' }) {
   const myServices = currentTechId
     ? schedule.filter((s) => String(serviceTechnicianId(s)) === String(currentTechId))
     : [];
+  // This device's saved Fast Complete attempts (useSavedFastCompletions).
+  const saved = useSavedFastCompletions({
+    operatorId: staffIdForDevice,
+    schedule,
+    openSheets: [fastCompleteService, treeShrubFastService, lawnReserviceFastService],
+  });
   // "Next Stop" = first non-terminal service in the day's route.
   // Skipping past completed/skipped/cancelled/no_show means a tech with
   // an earlier dead job (skipped or no-showed) sees the actual upcoming
@@ -810,11 +819,12 @@ export default function TechHomePage({ section = 'today' }) {
     if (isLaneReportEligible(service)) setFastCompleteService(service);
     else openProjectOrContinue(service);
   }, [openProjectOrContinue]);
-  const projectServices = (selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
+  const projectServices = withSavedCompletions((selectedVisitKey ? (selectedVisit?.services || []) : myServices).filter((service) => (
     !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service)
+    || saved.serviceIds.has(String(service.id))
     || (!TERMINAL_STATUSES_VISIT.has(service.status)
       && !['sent', 'closed'].includes(service.linkedProject?.status))
-  ));
+  )), { saved, myServices, scheduleError, selectedVisitKey });
   // Shared by every entry point that would otherwise call setRecapService
   // directly: a pest re-service under the gate opens the one-screen Fast
   // Complete sheet instead of the full recap modal. Everything else routes
@@ -835,22 +845,36 @@ export default function TechHomePage({ section = 'today' }) {
     else if (isTypedReportEligible(service, { stationMapOff })) setFastCompleteService(service);
     else openTypedCompletion(service);
   }, [stationMapOff]);
+  // A saved attempt on this device opens the sheet that made it, before any
+  // normal eligibility decision: a successful /complete may already have made
+  // the row terminal while its saved body still needs the same-key retry.
+  const { resolveTap } = saved;
+  const openServiceReport = useCallback(async (service) => {
+    const tap = await resolveTap(service);
+    if (!tap) return;
+    if (tap.kind) {
+      const savedSheet = { tree_shrub: setTreeShrubFastService, lawn_reservice: setLawnReserviceFastService }[tap.kind] || setFastCompleteService;
+      savedSheet({ ...service, fastCompletionRecoveryReportFlow: tap.kind === 'report' });
+      return;
+    }
+    if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
+    // Same routing for the row, the picker and the quick action: a cut-over
+    // typed job must not open CreateProjectModal.
+    if (usesDispatchCompletion(service)) openTypedVisit(service);
+    else if (isPestControlService(service)) openPestCompletion(service);
+    else openProjectOrLane(service);
+  }, [resolveTap, openTypedVisit, openPestCompletion, openProjectOrLane]);
+  const { rescanIfUnread } = saved;
   const handleProjectQuickAction = useCallback(() => {
+    rescanIfUnread();
+    // With nothing to open, a tap after a failed read only scans again.
+    if (projectServices.length === 0) return;
     if (projectServices.length === 1) {
-      const only = projectServices[0];
-      // Same routing as the row/picker handlers — a cut-over typed job must
-      // not open CreateProjectModal through the quick action either.
-      if (usesDispatchCompletion(only)) {
-        openTypedVisit(only);
-      } else if (isPestControlService(only)) {
-        openPestCompletion(only);
-      } else {
-        openProjectOrLane(only);
-      }
+      openServiceReport(projectServices[0]);
       return;
     }
     setShowProjectPicker(true);
-  }, [projectServices, openProjectOrLane, openPestCompletion, openTypedVisit]);
+  }, [projectServices, openServiceReport, rescanIfUnread]);
 
   const openFieldVisit = (stop) => {
     if (navigationBusy) return;
@@ -860,16 +884,10 @@ export default function TechHomePage({ section = 'today' }) {
     if (navigationBusy) return;
     setSearchParams((params) => { params.delete('visit'); return params; });
   };
-  const openServiceReport = (service) => {
-    if (TERMINAL_STATUSES_VISIT.has(service.status) && !service.visitCloseoutPacket && !recordlessVisitNeedsCloseout(service)) return;
-    if (usesDispatchCompletion(service)) openTypedVisit(service);
-    else if (isPestControlService(service)) openPestCompletion(service);
-    else openProjectOrLane(service);
-  };
   const fieldTools = [
     { label: 'Protocols & SOPs', description: 'Treatment references and field procedures', icon: 'protocol', onClick: () => navigate(`${base}/protocols${visitSearch}`) },
     { label: 'Lawn Diagnostic', description: 'Inspect and document lawn conditions', icon: 'lawn', onClick: () => navigate(`${base}/lawn-diagnostic${visitSearch}`) },
-    { label: 'Project Report', description: 'Open the existing service report workflow', icon: 'project', disabled: loading || !!scheduleError || projectServices.length === 0, onClick: handleProjectQuickAction },
+    projectReportTool({ saved, projectServices, loading, onClick: handleProjectQuickAction }),
     ...(currentRole === 'admin' ? [{ label: 'Field Estimator', description: 'Create an estimate in the office pipeline', icon: 'estimate', onClick: () => navigate(`${base}/estimate`) }] : []),
     ...(socialPostEnabled ? [{ label: 'Social Post', description: 'Prepare field photos for a post', icon: 'social', onClick: () => navigate(`${base}/social-post${visitSearch}`) }] : []),
   ];
@@ -900,7 +918,7 @@ export default function TechHomePage({ section = 'today' }) {
       />
         <TechFieldHome
           section={section} stops={stops} nextStop={fieldNextStop}
-          loading={loading} refreshing={refreshing} error={scheduleError} notice={routeNotice} rainChance={rainChance}
+          loading={loading} refreshing={refreshing} error={scheduleError} notice={[routeNotice, saved.readNotice].filter(Boolean).join(' ')} rainChance={rainChance}
           onRetry={fetchSchedule} onOpen={openFieldVisit} busy={navigationBusy}
           tools={fieldTools}
           followThrough={<TechFollowThroughCards />}
@@ -1007,12 +1025,11 @@ export default function TechHomePage({ section = 'today' }) {
       {showProjectPicker && (
         <ProjectServicePicker
           services={projectServices}
+          recoveryServiceIds={saved.serviceIds}
           onClose={() => setShowProjectPicker(false)}
           onSelect={(service) => {
             setShowProjectPicker(false);
-            if (usesDispatchCompletion(service)) openTypedVisit(service);
-            else if (isPestControlService(service)) openPestCompletion(service);
-            else openProjectOrLane(service);
+            openServiceReport(service);
           }}
         />
       )}
@@ -1078,6 +1095,7 @@ export default function TechHomePage({ section = 'today' }) {
             lng: fastCompleteService.lng ?? null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           // GATE_FAST_COMPLETE_VOICE_FILL rides the same schedule row: only an
           // exact true shows the mic, the Check chips and the office note.
           voiceFillEnabled={fastCompleteService.fastCompleteVoiceFillEnabled === true}
@@ -1120,6 +1138,7 @@ export default function TechHomePage({ section = 'today' }) {
             routedAddress: typeof treeShrubFastService.address === 'string' ? treeShrubFastService.address : null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           onClose={(options) => {
             setTreeShrubFastService(null);
             if (options?.refresh) fetchSchedule();
@@ -1152,6 +1171,7 @@ export default function TechHomePage({ section = 'today' }) {
             routedAddress: typeof lawnReserviceFastService.address === 'string' ? lawnReserviceFastService.address : null,
           }}
           request={techRequest}
+          operatorId={staffIdForDevice}
           // One gate for every sheet's voice fill: only an exact true turns it on.
           voiceFillEnabled={lawnReserviceFastService.fastCompleteVoiceFillEnabled === true}
           onClose={(options) => {
@@ -1252,7 +1272,7 @@ export default function TechHomePage({ section = 'today' }) {
   );
 }
 
-function ProjectServicePicker({ services, onClose, onSelect }) {
+function ProjectServicePicker({ services, recoveryServiceIds, onClose, onSelect }) {
   return (
     <div
       role="dialog"
@@ -1316,11 +1336,14 @@ function ProjectServicePicker({ services, onClose, onSelect }) {
                   }}
                 >
                   <div style={{ fontSize: 14, fontWeight: 500 }}>
-                    {service.customer_name || service.customerName || 'Customer'}
+                    {service.fastCompletionRecoveryOnly
+                      ? [service.customerName, savedAtLabel(service.savedAt)].filter(Boolean).join(' · ')
+                      : service.customer_name || service.customerName || 'Customer'}
                   </div>
                   <div style={{ fontSize: 14, color: FIELD.muted, marginTop: 3 }}>
-                    {status.replace(/_/g, ' ')}
+                    {service.fastCompletionRecoveryOnly ? `saved on this device · ${service.serviceType}` : status.replace(/_/g, ' ')}
                     {serviceWindowLabel(service) ? ` · ${serviceWindowLabel(service)}` : ''}
+                    {recoveryServiceIds?.has(String(service.id)) ? ' · saved completion on this device' : ''}
                   </div>
                 </button>
               );

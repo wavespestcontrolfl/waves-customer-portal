@@ -7,13 +7,21 @@
 // routing; a closed visit stays on the recap editor either way.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn() }));
+const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), attempts: new Map(), getAttempt: vi.fn(), listAttempts: vi.fn(), prune: vi.fn(), hasMarker: vi.fn(), listMarkers: vi.fn() }));
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: () => false, useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
+vi.mock('../../lib/completion-resume-store', () => ({
+  getFastCompletionAttempt: mocks.getAttempt,
+  listFastCompletionAttempts: (...args) => mocks.listAttempts(...args),
+  pruneFastCompletionAttempts: (...args) => mocks.prune(...args),
+  hasFastCompletionMarker: (...args) => mocks.hasMarker(...args),
+  listFastCompletionMarkers: (...args) => mocks.listMarkers(...args),
+  pruneRecapClipDrafts: () => Promise.resolve(0),
+}));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
 vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({ default: () => null, wdoFeeSeedFromVisit: () => null }));
@@ -23,11 +31,15 @@ vi.mock('../../components/tech/TechTreatmentZoneModal', () => ({ default: () => 
 vi.mock('../../components/tech/FieldLeadModal', () => ({ default: () => null }));
 vi.mock('../../components/ServiceRecapModal', () => ({ default: ({ service }) => <div>Existing recap form for {service.id}</div> }));
 vi.mock('../../components/tech/FastCompleteSheet', () => ({
-  default: ({ service }) => (
-    <div data-testid="sheet" data-service={JSON.stringify(service)}>Fast Complete sheet for {service.id}</div>
+  default: ({ service, onClose }) => (
+    <div data-testid="sheet" data-service={JSON.stringify(service)}>Fast Complete sheet for {service.id}<button type="button" onClick={() => onClose?.()}>Close sheet</button></div>
   ),
 }));
+vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({ default: () => <div data-testid="tree-sheet" /> }));
+vi.mock('../../components/tech/FastCompleteLawnReserviceSheet', () => ({ default: () => <div data-testid="lawn-sheet" /> }));
 import TechHomePage from './TechHomePage';
+import { etDateString } from '../../lib/timezone';
+import { ROUTE_SNAPSHOT_KEY } from './routeSnapshot';
 
 const row = (id, overrides = {}) => ({
   id,
@@ -61,6 +73,20 @@ function mount(path = '/admin/today/tools') {
 
 beforeEach(() => {
   mocks.navigationBusy.mockClear();
+  mocks.attempts.clear();
+  mocks.listAttempts.mockReset();
+  mocks.listAttempts.mockImplementation(async (operatorId) => ({ available: true, attempts: operatorId === 'tech-fixture' ? [...mocks.attempts].map(([serviceId, attempt]) => ({ ...attempt, serviceId })) : [] }));
+  mocks.prune.mockReset();
+  mocks.hasMarker.mockReset();
+  mocks.hasMarker.mockReturnValue(false);
+  mocks.listMarkers.mockReset();
+  mocks.listMarkers.mockReturnValue([]);
+  mocks.prune.mockResolvedValue(0);
+  mocks.getAttempt.mockReset();
+  mocks.getAttempt.mockImplementation(async (serviceId, operatorId) => ({
+    available: true,
+    attempt: operatorId === 'tech-fixture' ? mocks.attempts.get(String(serviceId)) || null : null,
+  }));
   vi.stubGlobal('fetch', vi.fn(async (path) => {
     if (path.includes('/admin/schedule?')) return { ok: true, status: 200, json: async () => ({ services: rows }) };
     return { ok: true, status: 200, json: async () => ({}) };
@@ -146,5 +172,211 @@ it('offers no report for a completed pest visit, with the switch on', async () =
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   expect(await screen.findByRole('button', { name: /Project Report/ })).toBeDisabled();
   expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it.each([
+  ['report', { reportDraftBase: {}, structuredFindings: { type: 'tree_shrub' } }, {}, 'sheet', true],
+  ['pest', { products: [] }, {}, 'sheet', false],
+  ['lawn', { structuredFindings: { type: 'one_time_lawn_treatment' } }, { completionProfile: { category: 'lawn_care', serviceKey: 'lawn_re_service', findingsType: 'one_time_lawn_treatment' } }, 'lawn-sheet', null],
+  ['tree', { structuredFindings: { type: 'tree_shrub' } }, { completionProfile: { category: 'lawn_care', findingsType: 'tree_shrub' } }, 'tree-sheet', null],
+])('recovers a completed %s attempt in the sheet that prepared its body', async (kind, body, overrides, testId, reportFlow) => {
+  const serviceId = `svc-recover-${kind}`;
+  mocks.attempts.set(serviceId, { body: { idempotencyKey: `${kind}-key`, ...body }, summary: 'Original summary' });
+  rows = [row(serviceId, { status: 'completed', ...overrides })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  const sheet = await screen.findByTestId(testId);
+  if (reportFlow !== null) expect(JSON.parse(sheet.getAttribute('data-service')).reportFlow).toBe(reportFlow);
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
+});
+
+it('keeps an earlier completion reachable when it is absent from today’s route', async () => {
+  mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {}, expectedVisit: { scheduledDate: '2020-01-01' } }, summary: 'Earlier report' });
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  expect(await sheetService()).toMatchObject({ id: 'prior-day', reportFlow: true });
+});
+
+it('a saved completion a tap finds gone leaves the list (GitHub Codex P2 on 102b99cb1b)', async () => {
+  mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {} }, summary: 'Earlier report' });
+  rows = [];
+  mount();
+  const recover = await screen.findByRole('button', { name: /Recover Completion/ });
+  // Another tab discards it after this page's scan.
+  mocks.getAttempt.mockImplementation(async () => ({ available: true, attempt: null }));
+  fireEvent.click(recover);
+  const reportTool = await screen.findByRole('button', { name: /Project Report/ });
+  expect(reportTool).toBeDisabled();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it('an unreadable device says so on the tool and keeps the saved completion (GitHub Codex P2 on 102b99cb1b)', async () => {
+  mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {} }, summary: 'Earlier report' });
+  rows = [];
+  mount();
+  const recover = await screen.findByRole('button', { name: /Recover Completion/ });
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  fireEvent.click(recover);
+  expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Recover Completion/ })).toBeInTheDocument();
+});
+
+it('two off-route saved completions show when each was saved and what it holds (GitHub Codex P2 on 102b99cb1b)', async () => {
+  mocks.attempts.set('prior-a', { body: { idempotencyKey: 'a-key', reportDraftBase: {} }, summary: 'Taurus SC · Perimeter', storedAt: Date.UTC(2026, 9, 2, 19, 15) });
+  mocks.attempts.set('prior-b', { body: { idempotencyKey: 'b-key', reportDraftBase: {} }, summary: 'Advion WDG · Kitchen', storedAt: Date.UTC(2026, 9, 1, 13, 5) });
+  rows = [];
+  mount();
+  await openFromTools();
+  const picker = await screen.findByRole('dialog');
+  expect(within(picker).getByText(/^Saved completion · Oct 2, 3:15\sPM$/)).toBeInTheDocument();
+  expect(within(picker).getByText(/^Saved completion · Oct 1, 9:05\sAM$/)).toBeInTheDocument();
+  expect(within(picker).getByText(/^saved on this device · Taurus SC · Perimeter/)).toBeInTheDocument();
+  expect(within(picker).getByText(/^saved on this device · Advion WDG · Kitchen/)).toBeInTheDocument();
+});
+
+
+it('an unreadable re-scan keeps the saved completions this device listed, and says so (GitHub Codex P2 on 458cc517e5)', async () => {
+  mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {} }, summary: 'Earlier report' });
+  rows = [];
+  mount();
+  const recover = await screen.findByRole('button', { name: /Recover Completion/ });
+  // Opening the sheet scans again, and this time the device cannot be read.
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  fireEvent.click(recover);
+  await screen.findByTestId('sheet');
+  await waitFor(() => expect(mocks.listAttempts.mock.calls.length).toBeGreaterThan(1));
+  expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Recover Completion/ })).toBeInTheDocument();
+});
+
+it('after a failed read, a tap on the tool scans again (GitHub Codex P2 on 458cc517e5)', async () => {
+  mocks.attempts.set('prior-day', { body: { idempotencyKey: 'prior-key', reportDraftBase: {} }, summary: 'Earlier report' });
+  rows = [];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Recover Completion/ }));
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  await screen.findByTestId('sheet');
+  const tool = await screen.findByRole('button', { name: /Recover Completion.*Could not read the completion saved on this device/ });
+  // The device reads again.
+  mocks.listAttempts.mockImplementation(async (operatorId) => ({ available: true, attempts: operatorId === 'tech-fixture' ? [...mocks.attempts].map(([serviceId, attempt]) => ({ ...attempt, serviceId })) : [] }));
+  const scans = mocks.listAttempts.mock.calls.length;
+  fireEvent.click(tool);
+  await waitFor(() => expect(mocks.listAttempts.mock.calls.length).toBeGreaterThan(scans));
+  await waitFor(() => expect(screen.queryByText(/Could not read the completion saved on this device/)).not.toBeInTheDocument());
+});
+
+it('after a reload whose device reads all fail, a visit marked as saved on this device opens nothing (GitHub Codex P2 on #5979)', async () => {
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  mocks.hasMarker.mockImplementation((serviceId, operatorId) => serviceId === 'svc-live' && operatorId === 'tech-fixture');
+  rows = [row('svc-live', { fastCompleteReportEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it('after a reload whose device reads all fail, a marked visit off the route is still listed and opens nothing (GitHub Codex P2 on #5979)', async () => {
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  mocks.listMarkers.mockImplementation((operatorId) => (operatorId === 'tech-fixture' ? ['prior-day'] : []));
+  mocks.hasMarker.mockImplementation((serviceId) => serviceId === 'prior-day');
+  rows = [];
+  mount();
+  const tool = await screen.findByRole('button', { name: /Recover Completion/ });
+  expect(tool).not.toBeDisabled();
+  fireEvent.click(tool);
+  expect((await screen.findAllByText(/Could not read the completion saved on this device/)).length).toBeGreaterThan(0);
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+});
+
+it('a failed rescan still lists a visit saved since the last good scan (GitHub Codex P2 on #5979)', async () => {
+  rows = [row('svc-open', { fastCompleteReportEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByText('Fast Complete sheet for svc-open')).toBeInTheDocument();
+  // The sheet saved an attempt for a visit the route no longer shows; the
+  // rescan on close cannot list the device.
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  mocks.listMarkers.mockImplementation((operatorId) => (operatorId === 'tech-fixture' ? ['moved-visit'] : []));
+  mocks.getAttempt.mockImplementation(async (serviceId) => (serviceId === 'moved-visit'
+    ? { available: true, attempt: { body: { idempotencyKey: 'moved-key', reportDraftBase: {} }, summary: 'Moved' } }
+    : { available: true, attempt: null }));
+  const scans = mocks.listAttempts.mock.calls.length;
+  fireEvent.click(screen.getByRole('button', { name: 'Close sheet' }));
+  await waitFor(() => expect(mocks.listAttempts.mock.calls.length).toBeGreaterThan(scans));
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  fireEvent.click(await screen.findByText(/Saved completion/));
+  expect(await screen.findByText('Fast Complete sheet for moved-visit')).toBeInTheDocument();
+});
+
+it('with unreadable storage and no saved marker, a visit opens as usual', async () => {
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  rows = [row('svc-live', { fastCompleteReportEnabled: true })];
+  mount();
+  fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
+  expect(await screen.findByTestId('sheet')).toBeInTheDocument();
+});
+
+it('a device that cannot store saved completions at all stays quiet (GitHub Codex P2 on 458cc517e5)', async () => {
+  mocks.listAttempts.mockImplementation(async () => ({ available: false, attempts: [] }));
+  rows = [];
+  mount();
+  expect(await screen.findByRole('button', { name: /Project Report/ })).toBeDisabled();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(screen.queryByText(/Could not read the completion saved on this device/)).not.toBeInTheDocument();
+});
+
+it('a visit with a saved retry the device cannot read now opens nothing (GitHub Codex P2 on 458cc517e5)', async () => {
+  mocks.attempts.set('svc-live', { body: { idempotencyKey: 'live-key', reportDraftBase: {} }, summary: 'Saved report' });
+  rows = [row('svc-live', { fastCompleteReportEnabled: true })];
+  mount();
+  const recover = await screen.findByRole('button', { name: /Recover Completion/ });
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  fireEvent.click(recover);
+  expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
+  expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
+  expect(screen.queryByText(/Existing recap form/)).not.toBeInTheDocument();
+});
+
+it('keeps the store\'s own retention: /complete takes an overdue retry at any age, so nothing shorter sweeps (GitHub Codex P2 on b1ebfd50ce)', async () => {
+  rows = [];
+  mount();
+  await screen.findByRole('button', { name: /Project Report/ });
+  expect(mocks.prune).toHaveBeenCalledTimes(1);
+  expect(mocks.prune).toHaveBeenCalledWith();
+});
+
+it('a route row whose saved retry another tab removed leaves the list on the tap (GitHub Codex P2 on b1ebfd50ce)', async () => {
+  mocks.attempts.set('svc-done', { body: { idempotencyKey: 'done-key', reportDraftBase: {} }, summary: 'Saved report' });
+  rows = [row('svc-done', { status: 'completed' })];
+  mount();
+  const recover = await screen.findByRole('button', { name: /Recover Completion/ });
+  mocks.getAttempt.mockImplementation(async () => ({ available: true, attempt: null }));
+  fireEvent.click(recover);
+  expect(await screen.findByRole('button', { name: /Project Report/ })).toBeDisabled();
+  expect(screen.queryByRole('button', { name: /Recover Completion/ })).not.toBeInTheDocument();
+});
+
+it('a recovery read failure on an offline route says so on the tool and opens nothing (GitHub Codex P2 on b1ebfd50ce)', async () => {
+  mocks.attempts.set('svc-live', { body: { idempotencyKey: 'live-key', reportDraftBase: {} }, summary: 'Saved report' });
+  localStorage.setItem(ROUTE_SNAPSHOT_KEY, JSON.stringify({
+    techId: 'tech-fixture', date: etDateString(), savedAt: new Date().toISOString(),
+    data: { services: [row('svc-live', { fastCompleteReportEnabled: true })] },
+  }));
+  vi.stubGlobal('fetch', vi.fn(async (path) => {
+    if (path.includes('/admin/schedule?')) throw new TypeError('Failed to fetch');
+    return { ok: true, status: 200, json: async () => ({}) };
+  }));
+  rows = [];
+  mount('/admin/today/tools');
+  const tool = await screen.findByRole('button', { name: /Recover Completion/ });
+  mocks.getAttempt.mockImplementation(async () => ({ available: false, attempt: null }));
+  fireEvent.click(tool);
+  // The Tools page shows no route notice; the tool's own line says why.
+  expect(await screen.findByText(/Could not read the completion saved on this device/)).toBeInTheDocument();
   expect(screen.queryByTestId('sheet')).not.toBeInTheDocument();
 });
