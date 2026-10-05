@@ -18929,7 +18929,9 @@ router.put('/:token/contact-phone', contactPhoneLimiter, async (req, res, next) 
       estimate,
       rawPhone: req.body?.contactPhone,
       database: trx,
-      countCustomersWithPhone: async (phone) => (await matchAcceptCustomerByPhone({ customer_phone: phone }, db, { authoritative: true })).candidateCount,
+      // On the transaction's own connection: it holds the estimate / lead / call locks, so a second pool connection
+      // here could starve the pool under load.
+      countCustomersWithPhone: async (phone) => (await matchAcceptCustomerByPhone({ customer_phone: phone }, trx, { authoritative: true })).candidateCount,
       onExistingCustomerPhone: ({ typedPhone, candidateCount }) => { pendingAlert = { typedPhone, candidateCount }; },
       // TOCTOU: the accept-active check above ran on a pre-read. The UPDATE itself refuses a row a concurrent accept,
       // decline, archive, expiry or off-surface marker has since made ineligible: the same predicates the
