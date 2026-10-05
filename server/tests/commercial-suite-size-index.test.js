@@ -28,7 +28,7 @@ describe('resolveCommercialSuiteSize — listing rung (PR 5b) sits above the lic
 
   test('a listing size with no license at the suite carries no classification', async () => {
     resolveViaListing.mockResolvedValueOnce({ value: 1350, source: 'listing_verified_text', confidence: 'medium', url: 'https://www.loopnet.com/x', evidence: [] });
-    resolveViaDbprLicense.mockResolvedValue(null);
+    resolveViaDbprLicense.mockImplementation(async (input, opts) => { if (opts.diag) opts.diag.extractLoaded = true; return null; });
     const result = await resolveCommercialSuiteSize({ address: ADDRESS, businessNameHint: 'Hint Co' });
     expect(result).toMatchObject({ value: 1350, source: SOURCES.LISTING_VERIFIED_TEXT, businessName: 'Hint Co', businessType: null });
     expect(result.licenseBacked).toBeUndefined();
@@ -41,6 +41,10 @@ describe('resolveCommercialSuiteSize — listing rung (PR 5b) sits above the lic
     resolveViaDbprLicense.mockRejectedValueOnce(new Error('dbpr down'));
     const failed = await resolveCommercialSuiteSize({ address: ADDRESS });
     expect(failed).toMatchObject({ value: 1350, source: SOURCES.LISTING_VERIFIED_TEXT, licenseChecked: false });
+    // The leg returned null because the extract did not load (outage, timeout): still unchecked.
+    resolveViaListing.mockResolvedValueOnce({ value: 1350, source: 'listing_verified_text', confidence: 'medium', url: 'https://www.loopnet.com/x', evidence: [] });
+    resolveViaDbprLicense.mockImplementation(async (input, opts) => { if (opts.diag) opts.diag.extractLoaded = false; return null; });
+    expect((await resolveCommercialSuiteSize({ address: ADDRESS })).licenseChecked).toBe(false);
   });
 
   test('the cache-hit path (skipWebSearch) and skipListing never call the listing leg', async () => {

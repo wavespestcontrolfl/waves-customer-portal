@@ -137,11 +137,14 @@ async function resolveCommercialSuiteSize(input = {}, opts = {}) {
     if (listing) return listingResult(null);
   } else {
     try {
+      // diag.extractLoaded: the license list really loaded, so a null result
+      // is "no license at this suite", not an outage or a timeout.
+      const dbprDiag = {};
       const dbprOpts = Number.isFinite(dbprRemaining)
-        ? { ...opts, timeoutMs: Math.min(DBPR_DEFAULT_TIMEOUT_MS, dbprRemaining) }
-        : opts;
+        ? { ...opts, diag: dbprDiag, timeoutMs: Math.min(DBPR_DEFAULT_TIMEOUT_MS, dbprRemaining) }
+        : { ...opts, diag: dbprDiag };
       const dbpr = await resolveViaDbprLicense({ address, phone, businessNameHint }, dbprOpts);
-      if (listing) return listingResult(dbpr && (Number(dbpr.value) > 0 || dbpr.businessName) ? dbpr : null, true);
+      if (listing) return listingResult(dbpr && (Number(dbpr.value) > 0 || dbpr.businessName) ? dbpr : null, dbprDiag.extractLoaded === true);
       if (dbpr) {
         businessName = businessName || dbpr.businessName || null;
         if (Number(dbpr.value) > 0) {
