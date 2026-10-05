@@ -563,35 +563,81 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     const resolve = (prompt, unit, extra = {}) => resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview, unit, ...extra });
     const withContainer = (container_size) => ({ product: { ...preview.product, container_size }, movement_type: 'restock' });
 
+    // The unit branch binds the unit to the amount: the amount must equal a stated `<number> <unit word>` phrase converted
+    // into the model's unit (within 0.5%). A unit word elsewhere in the text, or beside a different number, admits nothing.
     test.each([
-      ['We bought 2 gallons of Taurus SC', 'gal'],
-      ['We bought 2 gal of Taurus SC', 'gallon'],
-      ['We bought 64 fl oz of Taurus SC', 'fl_oz'],
-      ['We bought 64 fluid ounces of Taurus SC', 'fl_oz'],
-      ['We bought 64 ounces of Taurus SC', 'oz'],
-      ['We bought 64 ounces of Taurus SC', 'fl_oz'],
-      ['We bought 5 lbs of Taurus SC', 'lb'],
-      ['We bought 5 pounds of Taurus SC', 'lbs'],
-      ['We bought 3 quarts of Taurus SC', 'qt'],
-    ])('"%s" admits the unit %s', async (prompt, unit) => {
+      ['We bought 2 gallons of Taurus SC', 'gal', 2],
+      ['We bought 2 gal of Taurus SC', 'gallon', 2],
+      ['We bought 2 gallons of Taurus SC', 'fl_oz', 256],
+      ['We bought two gallons of Taurus SC', 'gal', 2],
+      ['We bought 64 fl oz of Taurus SC', 'fl_oz', 64],
+      ['We bought 64 fluid ounces of Taurus SC', 'fl_oz', 64],
+      ['We bought 64 ounces of Taurus SC', 'oz', 64],
+      ['We bought 64 ounces of Taurus SC', 'fl_oz', 64],
+      ['We bought 5 lbs of Taurus SC', 'lb', 5],
+      ['We bought 5 pounds of Taurus SC', 'lbs', 5],
+      ['We bought 3 quarts of Taurus SC', 'qt', 3],
+      ['We bought 2 lb and 5 gallons of Taurus SC', 'lb', 2],
+      ['We bought 2 lb and 5 gallons of Taurus SC', 'gal', 5],
+    ])('"%s" admits the unit %s with amount %s', async (prompt, unit, amount) => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
-      expect(await resolve(prompt, unit)).toEqual({ productId: TAURUS.id });
+      expect(await resolve(prompt, unit, { amount })).toEqual({ productId: TAURUS.id });
     });
 
     test.each([
-      ['We bought 2 gallons of Taurus SC', 'lb'],
-      ['We bought 5 lbs of Taurus SC', 'fl_oz'],
-      ['We bought 5 lbs of Taurus SC', 'gal'],
-      ['We bought 2 of Taurus SC', 'fl_oz'],
-      ['We bought 2 of Taurus SC', null],
-      ['We bought 2 of Taurus SC', ''],
-    ])('"%s" refuses a model-supplied unit %s that the operator never said', async (prompt, unit) => {
+      ['We bought 2 gallons of Taurus SC', 'lb', 2],
+      ['We bought 5 lbs of Taurus SC', 'fl_oz', 5],
+      ['We bought 5 lbs of Taurus SC', 'gal', 5],
+      ['We bought 2 of Taurus SC', 'fl_oz', 2],
+      ['We bought 2 of Taurus SC', null, 2],
+      ['We bought 2 of Taurus SC', '', 2],
+      ['We bought 2 gallons of Taurus SC', 'fl_oz', 2], // 2 gallons is 256 fl oz, not 2
+      ['We bought 2 gallons of Taurus SC', 'gal', undefined],
+      ['We bought 2 lb and 5 gallons of Taurus SC', 'lb', 5], // the 5 belongs to gallons
+      ['We bought 2 bottles of Taurus SC, 78 fl oz each', 'fl_oz', 2], // 78 fl oz each describes the container
+      ['We bought 2 bottles of Taurus SC, 78 fl oz per bottle', 'fl_oz', 78],
+      ['We bought 2 bottles of Taurus SC, 78 fl oz/bottle', 'fl_oz', 78],
+    ])('"%s" refuses a model-supplied unit %s with amount %s that the operator never said', async (prompt, unit, amount) => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
-      const result = await resolve(prompt, unit);
+      const result = await resolve(prompt, unit, { amount });
       expect(result).toMatchObject({ success: false, code: 'unit_required' });
       expect(result.productId).toBeUndefined();
       expect(result.error).not.toContain('fl_oz');
       expect(result.error).toMatch(/operator's own words/);
+    });
+
+    // A unit phrase directly followed by a container noun describes the container ("96 oz bottles"), never the amount. The count
+    // "2" is not directly before the noun, so the container branch has no count either: refused, and the operator restates.
+    test.each([2, 96, 192])('"Received 2 96 oz bottles of Taurus SC" refuses quantity %s oz', async (amount) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      expect(await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'Received 2 96 oz bottles of Taurus SC',
+        preview: withContainer('96 oz'), unit: 'oz', amount })).toMatchObject({ code: 'unit_required' });
+    });
+
+    test.each([['2.5-gal jugs', 'gal', 2.5], ['a 50 lb bag', 'lb', 50]])('"%s" describes the container and never admits its own number', async (phrase, unit, amount) => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      expect(await resolve(`We bought ${phrase} of Taurus SC`, unit, { amount })).toMatchObject({ code: 'unit_required' });
+    });
+
+    test('restating works: "Received 192 oz" and "Received 2 bottles" (96 oz container) both admit 192 oz', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      for (const prompt of ['Received 192 oz of Taurus SC', 'Received 2 bottles of Taurus SC']) {
+        expect(await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview: withContainer('96 oz'), unit: 'oz', amount: 192 }))
+          .toEqual({ productId: TAURUS.id });
+      }
+    });
+
+    test('a container size stated beside the count is admitted only through the container branch (2 x 78 fl oz)', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      expect(await resolve('We bought 2 bottles of Taurus SC, 78 fl oz each', 'fl_oz', { amount: 156 })).toEqual({ productId: TAURUS.id });
+    });
+
+    test('a shelf count binds its unit and amount (set_total)', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      const count = (amount) => resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'We have 64 fluid ounces of Taurus SC on the shelf',
+        preview: { ...preview, movement_type: 'correction' }, unit: 'fl_oz', amount });
+      expect(await count(64)).toEqual({ productId: TAURUS.id });
+      expect(await count(46)).toMatchObject({ code: 'unit_required' });
     });
 
     // A unit admitted only through a container noun must be a whole-container conversion: N x the catalog container size,
@@ -674,7 +720,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         preview: withContainer('21 oz can'), unit: 'oz', amount: 42 })).toEqual({ productId: TAURUS.id });
     });
 
-    test('a spoken unit word still admits without the container check, even beside a container noun', async () => {
+    test('a stated unit phrase still admits without the container check, even beside a container noun', async () => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
       expect(await resolve('We bought 2 jugs of Taurus SC, 64 fl oz', 'fl_oz', { amount: 64 })).toEqual({ productId: TAURUS.id });
       expect(await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'We bought 2 jugs of Taurus SC, 64 fl oz',
@@ -691,18 +737,17 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
       IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
       IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We bought 2 gallons of Taurus SC']);
-      expect(await resolve('Yes', 'gal', { actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5 })).toEqual({ productId: TAURUS.id });
+      expect(await resolve('Yes', 'gal', { amount: 2, actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5 })).toEqual({ productId: TAURUS.id });
     });
 
-    test('a one-word unit answer after a refusal grounds only when the thread is readable; with threads off it asks to restate', async () => {
+    test('a one-word unit answer cannot bind to an amount in another turn: the operator restates in one message', async () => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
       IbThreadsMock.threadsEnabled.mockReturnValueOnce(true);
       IbThreadsMock.recentOperatorTurns.mockResolvedValueOnce(['We bought 2 of Taurus SC']);
-      expect(await resolve('gallons', 'gal', { actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5 })).toEqual({ productId: TAURUS.id });
-      // Threads off (the default): nothing ties "gallons" back to the product, so the route cannot finish it. That is why the
-      // refusal asks for product, amount and unit in one message instead of promising a one-word reply.
+      expect(await resolve('gallons', 'gal', { amount: 2, actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 5 })).toMatchObject({ code: 'unit_required' });
+      // Threads off (the default): nothing ties "gallons" back to the product either.
       IbThreadsMock.threadsEnabled.mockReturnValue(false);
-      expect(await resolve('gallons', 'gal')).toMatchObject({ code: 'target_clarification_required' });
+      expect(await resolve('gallons', 'gal', { amount: 2 })).toMatchObject({ code: 'target_clarification_required' });
     });
   });
 

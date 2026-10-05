@@ -1834,18 +1834,19 @@ function inventoryWriteOptions(input, actionContext, source) {
 // fl_oz (the writer treats a bare oz as ambiguous). A container noun ("two jugs") grounds the unit the model converted
 // to from the catalog container size; that is the one case where the model's unit may differ from the operator's word.
 const UNIT_ALIASES = { floz: 'fl_oz', gallon: 'gal', quart: 'qt', pint: 'pt', liter: 'l', ounce: 'oz', pound: 'lb', gram: 'g' };
+// The spoken words for each canonical unit (alternation sources). Order matters: "fl oz" is tried before a bare "oz".
 const UNIT_WORDS = {
-  fl_oz: /\bfl_oz\b|\bfl\.?\s*oz\b|\bfloz\b|\bfluid\s+(?:ounces?|oz)\b/i,
-  gal: /\b(?:gal|gals|gallons?)\b/i,
-  qt: /\b(?:qt|qts|quarts?)\b/i,
-  pt: /\b(?:pt|pts|pints?)\b/i,
-  ml: /\b(?:ml|mls|millilit(?:er|re)s?)\b/i,
-  l: /\blit(?:er|re)s?\b|\b\d+(?:\.\d+)?\s*l\b/i,
-  oz: /\b(?:oz|ounces?)\b/i,
-  lb: /\b(?:lb|lbs|pounds?)\b/i,
-  g: /\bgrams?\b|\b\d+(?:\.\d+)?\s*g\b/i,
-  kg: /\b(?:kg|kgs|kilograms?)\b/i,
-  each: /\b(?:each|items?|units?|pieces?)\b/i,
+  fl_oz: 'fl_oz|fl\\.?\\s*oz|floz|fluid\\s+(?:ounces?|oz)',
+  gal: 'gal|gals|gallons?',
+  qt: 'qt|qts|quarts?',
+  pt: 'pt|pts|pints?',
+  ml: 'ml|mls|millilit(?:er|re)s?',
+  l: 'l|lit(?:er|re)s?',
+  oz: 'oz|ounces?',
+  lb: 'lb|lbs|pounds?',
+  g: 'g|grams?',
+  kg: 'kg|kgs|kilograms?',
+  each: 'each|items?|units?|pieces?',
 };
 const CONTAINER_WORDS = /\b(?:bottles?|jugs?|bags?|cases?|containers?|pails?|buckets?|boxes|box|cans?|tubes?|packs?|drums?)\b/i;
 
@@ -1886,25 +1887,44 @@ function containerCounts(texts) {
   return out;
 }
 
+// The unit phrases the operator stated: `<plain number> <unit word>` with only whitespace or a hyphen between, using the
+// same number rules as the container count (digits with an optional decimal, or a spelled whole number; the digit match
+// may not follow a digit, ".", "/" or ","). A phrase directly followed by "each", "per", "apiece", "a piece" or "/" describes
+// the container ("78 fl oz each"), not the amount, and so does a phrase immediately followed by a container noun, with an
+// optional hyphen ("96 oz bottles", "2.5-gal jugs", "50 lb bag"): neither is ever a unit phrase.
+function unitPhrases(texts) {
+  const out = [];
+  // "zero" is a whole number here (a shelf count of zero items); it is never a container count.
+  const number = `(?:(?<![\\d./,])(\\d+(?:\\.\\d+)?)|\\b(${PERCENT_NUMBER_WORD_ALT}|zero))`;
+  for (const [key, words] of Object.entries(UNIT_WORDS)) {
+    const re = new RegExp(`${number}[\\s-]*(?:${words})\\b(?!\\s*(?:each\\b|per\\b|apiece\\b|a\\s+piece\\b|/)|[\\s-]*${CONTAINER_WORDS.source.replace(/^\\b/, '')})`, 'gi');
+    for (const raw of texts || []) {
+      for (const m of String(raw || '').matchAll(re)) {
+        const n = m[1] != null ? Number(m[1]) : /^zero$/i.test(m[2]) ? 0 : percentWordsToValue(m[2]);
+        if (n != null && n >= 0) out.push({ n, unit: key });
+      }
+    }
+  }
+  return out;
+}
+
+const withinTolerance = (value, target) => value != null && Math.abs(value - target) <= target * 0.005;
+
 function unitGroundedIn(unit, texts, product, amount) {
   if (!String(unit ?? '').trim()) return false;
   if (!unitDefinition(unit)) return true; // an unsupported unit never writes; the writer refuses it in its own words
-  const normalized = normalizeInventoryUnit(unit);
-  const canonical = UNIT_ALIASES[normalized] || normalized;
   const words = (texts || []).map(t => String(t || ''));
-  const named = (canonical === 'fl_oz' ? [UNIT_WORDS.fl_oz, UNIT_WORDS.oz] : [UNIT_WORDS[canonical]])
-    .some(re => re && words.some(t => re.test(t)));
-  if (named) return true;
-  // Admitted only through a container noun ("two jugs"): the amount must be a whole-container conversion, N x the
-  // catalog container size (in the writer's own conversion) for the count N of ONE container phrase, within 0.5%.
+  const target = Math.abs(Number(amount));
+  if (!Number.isFinite(target)) return false;
+  // Unit branch: the amount must be a stated unit phrase (N, U) converted into the model's unit with the writer's own
+  // helper (a bare "oz" reads as oz or fl_oz there). "2 gallons" admits 2 gal and 256 fl_oz, never 2 fl_oz.
+  if (unitPhrases(words).some(({ n, unit: from }) => withinTolerance(n === 0 ? 0 : convertInventoryQuantity(n, from, unit), target))) return true;
+  // Container branch: admitted only through a container noun ("two jugs"): the amount must be a whole-container conversion,
+  // N x the catalog container size (in the writer's own conversion) for the count N of ONE container phrase, within 0.5%.
   if (!words.some(t => CONTAINER_WORDS.test(t))) return false;
   const size = parseContainerSize(product?.container_size);
-  const target = Math.abs(Number(amount));
   if (!size || !(target > 0)) return false;
-  return containerCounts(words).some((n) => {
-    const converted = convertInventoryQuantity(n * size.amount, size.unit, unit);
-    return converted != null && Math.abs(converted - target) <= target * 0.005;
-  });
+  return containerCounts(words).some(n => withinTolerance(convertInventoryQuantity(n * size.amount, size.unit, unit), target));
 }
 
 // The one refusal for a stock write whose unit the operator did not state. It never hands the model a unit to retry with:
