@@ -199,6 +199,9 @@ export function putFastCompletionAttempt(serviceId, operatorId, attempt, now = D
     body: attempt.body,
     summary: String(attempt.summary || ""),
     storedAt: now,
+    // The server refused this exact body for good, but the device could not
+    // delete it: a reload offers it to discard, never to retry.
+    ...(attempt.refused === true ? { refused: true } : {}),
   };
   const key = fastCompletionAttemptKey(serviceId, operatorId);
   if (!key) return Promise.resolve(false);
