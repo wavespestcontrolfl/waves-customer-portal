@@ -53,9 +53,12 @@ Rules:
   `AT TIME ZONE 'America/New_York'` on that type re-reads the stored UTC
   clock as though it were already Eastern and is just as wrong as none.
   In JS the same bug reads `toISOString().slice(0, 10)` on an instant, or
-  browser-local `getFullYear/getMonth/getDate` in React — compare against
-  `etDateString()` (`client/src/lib/timezone.js`) instead. Formatting a
-  real `date` column this way is correct and not a finding.
+  browser-local `getFullYear/getMonth/getDate` in React. Derive the day
+  from the ET helper on the side you are on — `server/utils/datetime-et.js`
+  (`etParts`, `formatET*`) on the server, `etDateString()`
+  (`client/src/lib/timezone.js`) in React — and never import the server
+  module into the Vite bundle. Formatting a real `date` column this way is
+  correct and not a finding.
 
 ## 3. Local DB access — Codex uses dev/preview only
 
