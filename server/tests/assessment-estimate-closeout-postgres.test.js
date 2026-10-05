@@ -13,6 +13,19 @@ jest.mock('../services/recap-visit-context', () => ({ buildRecapVisitContext: je
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn() }));
 jest.mock('../services/feature-flags', () => ({ isUserFeatureEnabled: jest.fn(async () => false) }));
+// Race injection: a test may run a hook right before the completion claim
+// (after the sweep's own reads, before the record transaction's locks).
+const mockRace = { beforeClaim: null };
+jest.mock('../services/completion-attempts', () => {
+  const actual = jest.requireActual('../services/completion-attempts');
+  return {
+    ...actual,
+    claimCompletionAttempt: async (...args) => {
+      if (mockRace.beforeClaim) { const hook = mockRace.beforeClaim; mockRace.beforeClaim = null; await hook(); }
+      return actual.claimCompletionAttempt(...args);
+    },
+  };
+});
 // The review ask is spied, never mocked away: a regression that reaches it shows up as a call.
 jest.mock('../services/review-request', () => {
   const actual = jest.requireActual('../services/review-request');
@@ -117,6 +130,7 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
   });
   beforeEach(async () => {
     jest.clearAllMocks();
+    mockRace.beforeClaim = null;
     process.env.GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT = 'true';
     mockPg = await database.transaction();
   });
@@ -257,14 +271,80 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(await audits(visitId, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_timer_running' }) })]);
     // Read-only on payroll.
     expect(await mockPg('time_entries').where({ id: timerId }).first()).toEqual(before);
-    // Resting: the next tick does not ask, or audit, again.
+    // Resting: the next tick does not pick it, ask, or audit again.
     await mockPg('time_entries').where({ id: timerId }).update({ status: 'completed', clock_out: new Date(), duration_minutes: 40 });
-    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 0, closed: 0 });
     expect(await audits(visitId, AUDIT_REFUSED)).toHaveLength(1);
     // Six hours on, the timer long stopped: it closes.
     const later = new Date(Date.now() + 7 * 3600000);
     expect(await closeAssessmentsWithSentEstimates({ conn: mockPg, now: later, today: TODAY })).toEqual({ candidates: 1, closed: 1 });
     expect((await row(visitId)).status).toBe('completed');
+  });
+
+  test('a page of refused or not-yet visits never starves an eligible one behind it', async () => {
+    // 26 older assessments the sweep cannot act on: resting after a refusal,
+    // or with an estimate sent before the visit. More than one page (limit 25).
+    for (let i = 0; i < 13; i += 1) {
+      const c = await customer();
+      const resting = await visit(c, { day: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
+      await estimate(c, { sentAt: minutesAgo(60 * 24) });
+      await mockPg('audit_log').insert({ actor_type: 'system', action: AUDIT_REFUSED, resource_type: 'scheduled_services', resource_id: resting, metadata: JSON.stringify({ code: 'grouped_visit' }) });
+      const early = await customer();
+      await visit(early, { day: YESTERDAY, en_route_at: minutesAgo(60 * 26), arrived_at: minutesAgo(60 * 25), check_in_time: minutesAgo(60 * 25) });
+      await estimate(early, { sentAt: minutesAgo(60 * 30) });
+    }
+    const customerId = await customer();
+    const visitId = await visit(customerId);
+    await estimate(customerId);
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 1 });
+    expect((await row(visitId)).status).toBe('completed');
+  });
+
+  test('a job timer that starts after the sweep read the visit is seen under the completion\'s row lock — the visit stays open', async () => {
+    const customerId = await customer();
+    const visitId = await visit(customerId);
+    const visitRow = await row(visitId);
+    await estimate(customerId);
+    mockRace.beforeClaim = async () => {
+      await mockPg('time_entries').insert({ id: randomUUID(), technician_id: visitRow.technician_id, entry_type: 'shift', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: minutesAgo(120) });
+      await mockPg('time_entries').insert({ id: randomUUID(), technician_id: visitRow.technician_id, entry_type: 'job', status: 'active', staff_write_generation: ACTIVE_WRITE_GENERATION, clock_in: new Date(), job_id: visitId });
+    };
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
+    expect((await row(visitId)).status).toBe('on_site');
+    expect(await mockPg('service_records').where({ scheduled_service_id: visitId })).toHaveLength(0);
+    expect(await audits(visitId, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'visit_timer_running', status: 409 }) })]);
+  });
+
+  test('an arrival recorded after the estimate was sent (the technician was still on the way at the read) refuses under the lock', async () => {
+    const customerId = await customer();
+    const visitId = await visit(customerId, { status: 'en_route' });
+    await estimate(customerId);
+    // GPS marks the arrival now — after the estimate's send — between the sweep's read and the lock.
+    mockRace.beforeClaim = async () => {
+      await mockPg('scheduled_services').where({ id: visitId }).update({ status: 'on_site', arrived_at: new Date(), check_in_time: new Date() });
+    };
+    expect(await closeAssessmentsWithSentEstimates({ conn: mockPg })).toEqual({ candidates: 1, closed: 0 });
+    expect((await row(visitId)).status).toBe('on_site');
+    expect(await audits(visitId, AUDIT_REFUSED)).toEqual([expect.objectContaining({ metadata: expect.objectContaining({ code: 'estimate_before_visit' }) })]);
+  });
+
+  test('the completion\'s lockedVisitGuard hook refuses before anything is written, and is ignored unless it is a function', async () => {
+    const { completeScheduledService } = require('../services/complete-scheduled-service');
+    const customerId = await customer();
+    const visitId = await visit(customerId);
+    const request = (lockedVisitGuard) => completeScheduledService({
+      serviceId: visitId, idempotencyKey: randomUUID(),
+      body: { visitOutcome: 'completed', sendCompletionSms: false, requestReview: false },
+      actor: { techRole: 'admin', technicianId: null, technician: null },
+      lockedVisitGuard,
+    });
+    const seen = [];
+    expect(await request(async (trx, locked) => { seen.push(locked.id); return 'not_now'; })).toMatchObject({ status: 409, body: { code: 'locked_visit_guard_refused', reason: 'not_now' } });
+    expect(seen).toEqual([visitId]);
+    expect((await row(visitId)).status).toBe('on_site');
+    expect(await mockPg('service_records').where({ scheduled_service_id: visitId })).toHaveLength(0);
+    // Not a function (a request body can never smuggle one in): ignored.
+    expect(await request('refuse')).toMatchObject({ status: 200, body: { success: true } });
   });
 
   test('gate off: nothing is read and nothing closes', async () => {

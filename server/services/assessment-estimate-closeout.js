@@ -36,7 +36,8 @@ const idempotencyKeyFor = (visitId) => `assessment-estimate:${visitId}`;
 // How far back an estimate's send still closes an assessment, how old an
 // assessment may be, and how long a refused visit rests before it is asked
 // again (the sweep runs every ten minutes; a refusal about what the visit IS
-// would otherwise be re-run and re-audited 144 times a day).
+// would otherwise be re-run and re-audited 144 times a day). The rest is part
+// of the candidate query, so a resting visit takes no slot.
 const ESTIMATE_WINDOW_DAYS = 14;
 const ASSESSMENT_WINDOW_DAYS = 30;
 const REFUSAL_REST_HOURS = 6;
@@ -94,24 +95,43 @@ async function newestSentEstimate(conn, customerId, { now }) {
 // work and parks a crashed run under its idempotency key).
 const OWN_PARKED_ATTEMPT_SQL = "EXISTS (SELECT 1 FROM service_completion_attempts a WHERE a.service_id = s.id AND a.idempotency_key = 'assessment-estimate:' || s.id::text AND a.status NOT IN ('succeeded', 'failed'))";
 
+// The rule and the rest, as SQL, so a row the sweep cannot act on this tick
+// never takes one of its slots (a full page of refused or not-yet rows would
+// otherwise be picked again every tick and starve the eligible visits behind
+// it). The JS rule re-decides each row on a fresh read, and the completion
+// decides once more under its row lock; this only chooses the page.
 function candidateVisits(conn, { today, now }) {
   const oldest = etDateString(new Date(now.getTime() - ASSESSMENT_WINDOW_DAYS * 86400000));
+  const estimateSince = new Date(now.getTime() - ESTIMATE_WINDOW_DAYS * 86400000);
+  const restSince = new Date(now.getTime() - REFUSAL_REST_HOURS * 3600000);
+  const SENT_DAY_SQL = "(e.sent_at AT TIME ZONE 'America/New_York')::date";
   const query = conn('scheduled_services as s')
     .leftJoin('services as svc', 'svc.id', 's.service_id')
-    .where('s.scheduled_date', '<=', today)
-    .where('s.scheduled_date', '>=', oldest)
     .where((q) => q
-      .where((open) => open.whereIn('s.status', [...STARTED_STATUSES, ...UNSTARTED_STATUSES]).orWhereNull('s.status'))
+      .where((open) => open
+        .where('s.scheduled_date', '<=', today)
+        .where('s.scheduled_date', '>=', oldest)
+        .whereExists(function sentAfter() {
+          this.select(conn.raw('1')).from('estimates as e')
+            .whereRaw('e.customer_id = s.customer_id')
+            .whereNotNull('e.sent_at')
+            .whereNot('e.status', 'draft')
+            .where('e.sent_at', '>=', estimateSince)
+            .where((rule) => rule
+              .where((started) => started.whereIn('s.status', STARTED_STATUSES)
+                .whereRaw(`${SENT_DAY_SQL} >= s.scheduled_date`)
+                .whereRaw('(COALESCE(s.arrived_at, s.en_route_at) IS NULL OR e.sent_at > COALESCE(s.arrived_at, s.en_route_at))'))
+              .orWhere((unstarted) => unstarted
+                .where((live) => live.whereIn('s.status', UNSTARTED_STATUSES).orWhereNull('s.status'))
+                .whereRaw(`${SENT_DAY_SQL} > s.scheduled_date`)));
+        })
+        .whereNotExists(function resting() {
+          this.select(conn.raw('1')).from('audit_log as al')
+            .whereRaw("al.resource_type = 'scheduled_services' AND al.resource_id = s.id")
+            .where('al.action', AUDIT_REFUSED)
+            .where('al.created_at', '>=', restSince);
+        }))
       .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
-    // An assessment with a sent estimate for its customer, decided in SQL so
-    // the sweep reads a handful of rows, not every open visit.
-    .whereExists(function sentEstimate() {
-      this.select(conn.raw('1')).from('estimates as e')
-        .whereRaw('e.customer_id = s.customer_id')
-        .whereNotNull('e.sent_at')
-        .whereNot('e.status', 'draft')
-        .where('e.sent_at', '>=', new Date(now.getTime() - ESTIMATE_WINDOW_DAYS * 86400000));
-    })
     .orderBy(['s.scheduled_date', 's.id'])
     .select('s.*', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
   return scopeToAssessmentBookings(query, 's', 'svc');
@@ -129,17 +149,6 @@ async function audit(action, { visitId, estimateId, code = null, status = null, 
   } catch (err) {
     logger.warn(`[assessment-estimate-closeout] audit write failed for visit ${visitId}: ${err.message}`);
   }
-}
-
-// A visit refused recently rests (REFUSAL_REST_HOURS). The rest only spaces
-// out retries; nothing depends on the row for correctness — with no row the
-// visit is simply asked again on the next tick.
-async function restingAfterRefusal(conn, visitId, { now }) {
-  const recent = await conn('audit_log')
-    .where({ resource_type: 'scheduled_services', resource_id: visitId, action: AUDIT_REFUSED })
-    .where('created_at', '>=', new Date(now.getTime() - REFUSAL_REST_HOURS * 3600000))
-    .first('id');
-  return Boolean(recent);
 }
 
 // Reads beyond the visit row that keep it open: its technician's job timer is
@@ -160,7 +169,7 @@ async function liveRefusal(conn, visit) {
 // span from a days-old arrival to now is not labor). `expectedVisit` makes
 // the completion refuse, under its own row lock, a visit that was moved,
 // reassigned to another customer or reclassified after this module read it.
-async function closeAssessment(visit, { today }) {
+async function closeAssessment(visit, { today, now }) {
   const { completeScheduledService } = require('./complete-scheduled-service');
   const key = idempotencyKeyFor(visit.id);
   const pastDay = dateOnlyString(visit.scheduled_date) < today;
@@ -180,10 +189,20 @@ async function closeAssessment(visit, { today }) {
       },
     },
     actor: { techRole: 'admin', technicianId: null, technician: null },
+    // The same decision once more, on the visit row the completion has
+    // LOCKED: a technician who arrived, a job timer that started, or a visit
+    // that moved after the reads above is not completed over. The estimate
+    // is re-read too (a send withdrawn back to draft no longer proves it).
+    lockedVisitGuard: async (trx, lockedVisit) => {
+      const estimate = await newestSentEstimate(trx, lockedVisit.customer_id, { now });
+      if (!estimate) return 'estimate_not_sent';
+      return assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: etDateString() })
+        || await liveRefusal(trx, lockedVisit);
+    },
   });
   const body = (result && result.body) || {};
   const status = (result && result.status) || null;
-  return { closed: status === 200 && body.success === true, status, code: body.code || null };
+  return { closed: status === 200 && body.success === true, status, code: (body.code === 'locked_visit_guard_refused' && body.reason) || body.code || null };
 }
 
 // One candidate visit: decide, close, audit. Never throws.
@@ -200,14 +219,13 @@ async function closeOne(conn, row, { today, now }) {
       // Not this rule's to decide, or not yet: no audit row, nothing to rest.
       const byRule = assessmentEstimateCloseRefusal(visit, estimate.sent_at, { today });
       if (byRule) return { closed: false, reason: byRule };
-      if (await restingAfterRefusal(conn, visitId, { now })) return { closed: false, reason: 'resting' };
       const live = await liveRefusal(conn, visit);
       if (live) {
         await audit(AUDIT_REFUSED, { visitId, estimateId: estimate.id, code: live });
         return { closed: false, reason: live };
       }
     }
-    const outcome = await closeAssessment(visit, { today });
+    const outcome = await closeAssessment(visit, { today, now });
     if (outcome.closed) {
       logger.info(`[assessment-estimate-closeout] visit ${visitId} completed: estimate ${estimate.id} was sent after it`);
       await audit(AUDIT_CLOSED, { visitId, estimateId: estimate.id, status: outcome.status });

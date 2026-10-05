@@ -3463,6 +3463,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // gates, no Tree/Shrub closeout lockout) and stamps its provenance on
     // the record below. Internal input only — the HTTP body cannot set it.
     const issuedInvoiceCloseout = completionInput.issuedInvoiceCloseout || null;
+    // A service caller's own recheck, run under the visit row lock in the
+    // record transaction (assessment-estimate-closeout.js): `async (trx,
+    // lockedVisitRow) => null | reason`. A reason refuses the completion
+    // before anything is written (409 locked_visit_guard_refused). Never
+    // read from a request body — only an in-process caller can pass a function.
+    const lockedVisitGuard = typeof completionInput.lockedVisitGuard === 'function' ? completionInput.lockedVisitGuard : null;
     const typedFindingsType = issuedInvoiceCloseout ? null : (completionProfile?.findingsType || null);
     const typedIndicator = typedFindingsType
       ? ActivityIndicators.getActivityIndicator(typedFindingsType)
@@ -5979,6 +5985,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
               throw Object.assign(new Error('visit became project-backed during the issued-invoice closeout'), { code: 'project_required_completion' });
             }
           }
+          // The caller's recheck on the LOCKED row: whatever it read before
+          // this lock (a start stamp, a running timer, the visit's day) is
+          // decided again here, so nothing that changed in between is
+          // completed over.
+          if (lockedVisitGuard && lockedSvcRow) {
+            const guardReason = await lockedVisitGuard(trx, lockedSvcRow);
+            if (guardReason) {
+              throw Object.assign(new Error(`visit refused by its caller's locked recheck: ${guardReason}`), { code: 'locked_visit_guard_refused', guardReason: String(guardReason) });
+            }
+          }
           if (completionPricingPlan) {
             await require('../services/completion-pricing').commitCompletionPricingReview(trx, completionPricingPlan, {
               role: completionInput.actor.techRole, technicianId: completionInput.actor.technicianId,
@@ -8164,6 +8180,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
           return ({ status: 409, body: {
             error: 'This visit was rescheduled while its invoice was being issued — the visit stays open on its new day.',
             code: 'issued_visit_rescheduled',
+          } });
+        }
+        if (err && err.code === 'locked_visit_guard_refused') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 409, body: {
+            error: 'This visit changed while it was being closed — it stays open.',
+            code: 'locked_visit_guard_refused',
+            reason: err.guardReason || null,
           } });
         }
         if (err && err.code === 'issued_visit_in_progress') {
