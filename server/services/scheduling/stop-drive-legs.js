@@ -59,61 +59,87 @@ function coVisitPair(a, b) {
   return Boolean(a.address) && a.address === b.address;
 }
 
-// On-site minutes for one physical stop, with the simulator's own pieces:
-// a visit group sums its rows (arrival-route.js groupRouteStops); a run of
-// co-visit rows is one chain (startCoVisitChain/advanceCoVisit, so two
-// span-only rows sharing an hour stay one hour); every other piece adds up.
-function stopWork(members) {
-  const groups = new Map();
-  const loose = [];
-  for (const m of members) {
-    if (!m.visitId) { loose.push(m); continue; }
-    if (!groups.has(m.visitId)) groups.set(m.visitId, []);
-    groups.get(m.visitId).push(simRow(m));
-  }
-  let work = 0;
-  for (const g of groups.values()) work += g.reduce((sum, r) => sum + workDuration(r), 0);
+// A stop's work as the simulator's pieces, in day order, each keeping its
+// own promised window (a 13:00 visit at the same pin as a 09:00 one still
+// waits for 13:00): a visit group is one piece that sums its rows
+// (arrival-route.js groupRouteStops); a run of co-visit rows is one piece
+// (startCoVisitChain/advanceCoVisit, so two span-only rows sharing an hour
+// stay one hour); every other row is its own piece.
+function stopPieces(members) {
+  const pieces = [];
+  const byVisit = new Map();
   let chain = null;
-  let prev = null;
-  for (const m of loose) {
-    if (chain && coVisitPair(prev, m)) {
-      chain = advanceCoVisit(chain, simRow(m));
-    } else {
-      if (chain) work += chain.coMerged;
-      chain = { ...startCoVisitChain(simRow(m)), arrivalMin: 0 };
-      chain.clock = chain.coMerged;
+  let prevLoose = null;
+  for (const m of members) {
+    const row = simRow(m);
+    if (m.visitId) {
+      chain = null;
+      prevLoose = null;
+      if (byVisit.has(m.visitId)) {
+        const piece = byVisit.get(m.visitId);
+        piece.work += workDuration(row);
+        piece.start = Math.min(piece.start, minutesOf(m.windowStart));
+        continue;
+      }
+      const piece = { id: m.id, start: minutesOf(m.windowStart), work: workDuration(row) };
+      byVisit.set(m.visitId, piece);
+      pieces.push(piece);
+      continue;
     }
-    prev = m;
+    if (chain && coVisitPair(prevLoose, m)) {
+      chain.state = advanceCoVisit(chain.state, row);
+      chain.work = chain.state.coMerged;
+    } else {
+      const state = { ...startCoVisitChain(row), arrivalMin: 0 };
+      state.clock = state.coMerged;
+      chain = { id: m.id, start: minutesOf(m.windowStart), work: state.coMerged, state };
+      pieces.push(chain);
+    }
+    prevLoose = m;
   }
-  if (chain) work += chain.coMerged;
-  return work;
+  return pieces;
 }
 
 // Minutes past each stop's 2-hour arrival window, from the shared route
 // simulator (simulateArrivalRoute, reportLate): the clock carries every
-// earlier delay forward, waits for a window to open, and uses the same legs
-// the lines show. The day starts at the first stop at its booked time.
-// After a leg that cannot be measured, arrivals are unknown: no lateness.
+// earlier delay forward, waits for each window to open, and uses the same
+// legs the lines show (0 between pieces of one stop). The day starts at
+// the first stop at its booked time. After a leg that cannot be measured,
+// arrivals are unknown: no lateness from there on.
 function lateByStop(stops, legs) {
-  const seq = stops.map((st) => ({
-    id: st.legs[0].id,
-    window_start: st.legs[0].windowStart,
-    estimated_duration_minutes: stopWork(st.members),
-    memberIds: st.members.map((m) => m.id),
-    lat: st.anchor.lat,
-    lng: st.anchor.lng,
-  }));
-  const known = legs.findIndex((l) => l == null);
-  const upTo = known === -1 ? seq.length : known + 1;
+  const unknown = legs.findIndex((l) => l == null);
+  const upTo = unknown === -1 ? stops.length : unknown + 1;
   if (upTo < 2) return new Map();
-  const legById = new Map(seq.slice(1).map((r, i) => [r.id, legs[i]]));
-  const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, seq.slice(0, upTo), {
+  const seq = [];
+  const legIn = new Map();
+  const firstPiece = new Map();
+  stops.slice(0, upTo).forEach((st, i) => {
+    stopPieces(st.members).forEach((p, j) => {
+      const id = `${i}:${j}`;
+      if (j === 0) {
+        firstPiece.set(st.legs[0].id, id);
+        if (i > 0) legIn.set(id, legs[i - 1]);
+      }
+      const hh = String(Math.floor(p.start / 60)).padStart(2, '0');
+      const mm = String(p.start % 60).padStart(2, '0');
+      seq.push({
+        id,
+        window_start: `${hh}:${mm}`,
+        estimated_duration_minutes: p.work,
+        memberIds: [p.id],
+        lat: st.anchor.lat,
+        lng: st.anchor.lng,
+      });
+    });
+  });
+  const sim = simulateArrivalRoute(RouteOptimizer, effectiveWindowRange, seq, {
     startMin: minutesOf(seq[0].window_start),
     origin: { lat: Number(seq[0].lat), lng: Number(seq[0].lng) },
     reportLate: true,
-    legMinutes: (_prev, stop) => legById.get(stop.id) ?? 0,
+    legMinutes: (_prev, stop) => legIn.get(stop.id) ?? 0,
   });
-  return new Map((sim?.arrivals || []).map((a) => [a.id, a.lateMinutes]));
+  const lateById = new Map((sim?.arrivals || []).map((a) => [a.id, a.lateMinutes]));
+  return new Map([...firstPiece].map(([cardId, pieceId]) => [cardId, lateById.get(pieceId)]));
 }
 
 // Visits the tech has not reached yet: only these can still run late.

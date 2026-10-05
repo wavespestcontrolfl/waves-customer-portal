@@ -271,4 +271,16 @@ describe('attachDriveLegs', () => {
     // Two customers in one building: two hours of work, leaving at 11:00.
     expect(services[2].driveLateMin).toBe(11 * 60 + services[2].driveFromPrevMin - (9 * 60 + 120));
   });
+
+  it('keeps a later window at the same pin: the tech waits for it', () => {
+    const services = [
+      stop('m', '09:00', A, { windowEnd: '10:00', customerId: 'cust-1', address: '1 Sample St', displayOrder: 0 }),
+      stop('pm', '13:00', A, { windowEnd: '14:00', customerId: 'cust-1', address: '1 Sample St', displayOrder: 1 }),
+      stop('c', '11:00', C, { displayOrder: 2 }),
+    ];
+    attachDriveLegs(services);
+    const leg = services[2].driveFromPrevMin;
+    // The 13:00 visit cannot start at 10:00: the tech leaves the pin at 14:00.
+    expect(services[2].driveLateMin).toBe(14 * 60 + leg - (11 * 60 + 120));
+  });
 });
