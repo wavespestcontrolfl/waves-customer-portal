@@ -122,15 +122,19 @@ function Pill({ children, style }) {
   );
 }
 
-function tileModel(tier, tiers, pricing) {
+function tileModel(tier, tiers, pricing, estimate = null) {
   const key = tier.key;
+  // The server's guarantee decision (serviceMixMakesNoGuaranteeClaim): on a
+  // no-guarantee estimate no tile may claim a callback or the Waves
+  // Guarantee — the same flag the price cards honor.
+  const noGuarantee = !!(estimate?.noGuaranteeClaims || estimate?.noEstimateWideGuarantee);
   if (key === 'good') {
     return {
       eyebrow: 'GOOD',
       name: 'One-time visit',
       price: fmtMoney(tier.oneTimeTotal),
       unit: 'one visit',
-      caption: 'No plan, no commitment · 30-day callback',
+      caption: noGuarantee ? 'No plan, no commitment' : 'No plan, no commitment · 30-day callback',
       chips: [],
     };
   }
@@ -143,7 +147,7 @@ function tileModel(tier, tiers, pricing) {
       name: 'Pest control plan',
       price: perApp != null ? fmtMoney(perApp) : null,
       unit: perApp != null ? '/ application' : null,
-      caption: `${visits ? `${visits} visits a year` : 'Year-round visits'} · Waves Guarantee`,
+      caption: `${visits ? `${visits} visits a year` : 'Year-round visits'}${noGuarantee ? '' : ' · Waves Guarantee'}`,
       chips: [{ tone: 'navy', text: 'Most popular' }],
     };
   }
@@ -191,7 +195,7 @@ function chipStyle(chip) {
   return waveGuardChipStyle(chip.tier);
 }
 
-export default function OfferTierPicker({ tiers, selectedKey, onSelect, disabled = false, pricing = null }) {
+export default function OfferTierPicker({ tiers, selectedKey, onSelect, disabled = false, pricing = null, estimate = null }) {
   const narrow = useNarrow();
   if (!Array.isArray(tiers) || tiers.length === 0) return null;
 
@@ -228,7 +232,7 @@ export default function OfferTierPicker({ tiers, selectedKey, onSelect, disabled
         }}
       >
         {tiers.map((tier) => {
-          const model = tileModel(tier, tiers, pricing);
+          const model = tileModel(tier, tiers, pricing, estimate);
           const selected = tier.key === selectedKey;
           return (
             <button

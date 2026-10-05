@@ -146,4 +146,12 @@ describe('OfferTierPicker', () => {
       window.matchMedia = original;
     }
   });
+
+  it('a no-guarantee estimate drops the callback and Waves Guarantee wording from the tiles', () => {
+    renderPicker({ estimate: { noGuaranteeClaims: true } });
+    const [good, better] = screen.getAllByRole('radio');
+    expect(good).toHaveTextContent('No plan, no commitment');
+    expect(good).not.toHaveTextContent('30-day callback');
+    expect(better).not.toHaveTextContent('Waves Guarantee');
+  });
 });
