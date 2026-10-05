@@ -58,4 +58,20 @@ describe('LawnAssessmentCompletionBlock', () => {
     // On the lawn sheet it is a row at the end of the photo slot list.
     expect(screen.getByTestId('lawn-shot-list').lastElementChild.getAttribute('data-testid')).toBe('lawn-length-row');
   });
+
+  it('its handle runs a step only when that step\'s own button could be pressed, and onProgress says which can', async () => {
+    const ref = React.createRef();
+    const onProgress = vi.fn();
+    const request = mount({ ref, compact: true, onProgress });
+    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+    // No photo: Analyze and Confirm are off, so the handle does nothing; Add a photo is on.
+    await waitFor(() => expect(onProgress).toHaveBeenLastCalledWith(expect.objectContaining({ photos: 0, assessed: false, canAddPhoto: true, canAnalyze: false, canConfirm: false })));
+    ref.current.analyze();
+    ref.current.confirm();
+    expect(request.mock.calls.map(([path]) => path)).toEqual(['/admin/lawn-assessment/service/svc-1']);
+    // openPhotoPicker clicks the same hidden input as Add turf photos.
+    const open = vi.spyOn(screen.getByLabelText('Add turf photos'), 'click');
+    ref.current.openPhotoPicker();
+    expect(open).toHaveBeenCalledTimes(1);
+  });
 });

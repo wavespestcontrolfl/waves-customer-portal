@@ -391,7 +391,8 @@ describe('the screen', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
     await screen.findByTestId('lawn-shot-list');
     expect(completeButton().textContent).toBe('Add a photo');
-    expect(completeButton().disabled).toBe(true);
+    // Add a photo is a step the bar does itself now (it opens the photo chooser); it is never a completion.
+    expect(completeButton().disabled).toBe(false);
   });
 });
 
@@ -399,19 +400,105 @@ describe('what Complete says while it is off', () => {
   test('Add a photo, Analyze the photos, Confirm the assessment, then it turns on; one thing at a time, in the button', async () => {
     await openSheet();
     expect(completeButton().textContent).toBe('Add a photo');
-    expect(completeButton().disabled).toBe(true);
+    // Each photo step's label is a button that does that step (see the bar tests below).
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
     await addPhoto();
     expect(completeButton().textContent).toBe('Analyze the photos');
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
     fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
     await screen.findByLabelText('Density score');
     await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().disabled).toBe(false);
     await confirm();
     await waitFor(() => expect(completeButton().textContent).toBe('Complete service'));
     expect(completeButton().disabled).toBe(false);
     // The reason is the button, not a line above it.
     expect(footerNote()).toBe('');
+  });
+
+  test('the bar does the step its label names: Analyze the photos runs the same assess request as Analyze lawn, once', async () => {
+    await openSheet();
+    await addPhoto();
+    await waitFor(() => expect(completeButton().textContent).toBe('Analyze the photos'));
+    expect(completeButton().disabled).toBe(false);
+    fireEvent.click(completeButton());
+    await screen.findByLabelText('Density score');
+    const assessCalls = requests.filter((r) => r.path.endsWith('/lawn-assessment/assess'));
+    expect(assessCalls).toHaveLength(1);
+    expect(assessCalls[0].body).toEqual({
+      customerId: 'cust-1',
+      serviceId: 'svc-lawn',
+      photos: [{ data: 'cGhvdG8=', mimeType: 'image/jpeg' }],
+      turfHeightIn: null,
+      technicianNotes: '',
+    });
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
+    expect(completeCalls()).toHaveLength(0);
+  });
+
+  test('while it analyzes the bar shows the in-flow busy text and is off; a second press adds no request', async () => {
+    let finish;
+    assessAnswer = new Promise((resolve) => { finish = resolve; });
+    await openSheet();
+    await addPhoto();
+    await waitFor(() => expect(completeButton().textContent).toBe('Analyze the photos'));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeButton().textContent).toBe('Analyzing...'));
+    expect(completeButton().disabled).toBe(true);
+    fireEvent.click(completeButton());
+    expect(requests.filter((r) => r.path.endsWith('/lawn-assessment/assess'))).toHaveLength(1);
+    await act(async () => { finish({ success: true, assessment: ASSESSED, visitAssessment: REVIEW, adjustedScores: SCORES, observations: 'Synthetic observation' }); });
+    await screen.findByLabelText('Density score');
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
+  });
+
+  test('the bar confirms the assessment with the same request as Confirm assessment, and Complete only comes after', async () => {
+    await openSheet();
+    await analyzeOnly();
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
+    expect(completeButton().disabled).toBe(false);
+    fireEvent.click(completeButton());
+    await screen.findByText('Assessment confirmed');
+    expect(confirmCalls()).toHaveLength(1);
+    expect(confirmCalls()[0].body).toEqual({
+      assessmentId: 'assessment-1',
+      adjustedScores: {},
+      reviewedFindings: [{ finding_id: 'f-1', keep: true, name: null, tech_note: null }],
+      addedDetails: [],
+    });
+    // The confirming press completed nothing.
+    expect(completeCalls()).toHaveLength(0);
+    await waitFor(() => expect(completeButton().textContent).toBe('Complete service'));
+    await submit();
+    expect(completeCalls()[0].body.lawnAssessmentId).toBe('assessment-1');
+  });
+
+  test('while it confirms the bar shows the busy text and is off, and a confirm that leaves it unconfirmed still blocks Complete', async () => {
+    let finish;
+    confirmAnswer = new Promise((resolve) => { finish = resolve; });
+    await openSheet();
+    await analyzeOnly();
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirming...'));
+    expect(completeButton().disabled).toBe(true);
+    await act(async () => { finish({ success: true, confirmed: false, missingScores: ['fungus_control'], assessment: ASSESSED, visitAssessment: REVIEW }); });
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(confirmCalls()).toHaveLength(2));
+    expect(completeCalls()).toHaveLength(0);
+  });
+
+  test('Add a photo in the bar opens the same photo chooser as Add turf photos', async () => {
+    await openSheet();
+    const input = await screen.findByLabelText('Add turf photos');
+    await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
+    const open = vi.spyOn(input, 'click');
+    expect(completeButton().textContent).toBe('Add a photo');
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(completeButton());
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(completeCalls()).toHaveLength(0);
   });
 
   test('with no products on, Add the products applied; adding one turns it on', async () => {
@@ -457,7 +544,8 @@ describe('Confirm assessment, then Complete', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
     await screen.findByText('Could not save the scores');
     expect(completeButton().textContent).toBe('Confirm the assessment');
-    expect(completeButton().disabled).toBe(true);
+    // The bar's Confirm can try again; it is still no completion.
+    expect(completeButton().disabled).toBe(false);
     expect(completeCalls()).toHaveLength(0);
   });
 
@@ -467,7 +555,8 @@ describe('Confirm assessment, then Complete', () => {
     await analyzeOnly();
     fireEvent.click(screen.getByRole('button', { name: 'Confirm assessment' }));
     await screen.findByText('The photos did not give a full read. Fill any blank score, or tap Retake and analyze again.');
-    expect(completeButton().disabled).toBe(true);
+    expect(completeButton().textContent).toBe('Confirm the assessment');
+    expect(completeCalls()).toHaveLength(0);
   });
 
   test('a visit that already has a confirmed assessment completes without confirming', async () => {
@@ -515,11 +604,11 @@ describe('a confirmed assessment when the detail lookup fails', () => {
     const input = screen.getByLabelText('Add turf photos');
     await waitFor(() => expect(screen.queryByTestId('lawn-photo-mode-pending')).toBeNull());
     fireEvent.change(input, { target: { files: [new File(['a'], 'a.jpg', { type: 'image/jpeg' })] } });
-    await waitFor(() => expect(completeButton().disabled).toBe(true));
+    await waitFor(() => expect(completeButton().textContent).toBe('Analyze the photos'));
     await screen.findByLabelText('Slot for photo 1');
     fireEvent.click(screen.getByRole('button', { name: 'Analyze lawn' }));
     await screen.findByLabelText('Density score');
-    expect(completeButton().disabled).toBe(true);
+    await waitFor(() => expect(completeButton().textContent).toBe('Confirm the assessment'));
     await confirm();
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
@@ -535,7 +624,8 @@ describe('a confirmed assessment when the detail lookup fails', () => {
     lookup = new Error('lookup down');
     await openSheet({ request: makeRequest({ ctx: confirmedContext(assessment) }) });
     await waitFor(() => expect(completeButton().textContent).toBe('Add a photo'));
-    expect(completeButton().disabled).toBe(true);
+    // Not a completion: the bar opens the photo chooser here.
+    expect(completeCalls()).toHaveLength(0);
   });
 
   test('a lookup that succeeds with no assessment does not fall back to the context\'s id', async () => {
@@ -597,6 +687,25 @@ describe('products', () => {
     fireEvent.change(box, { target: { value: 'granul' } });
     expect(screen.getByRole('button', { name: /Green Granules/ }).disabled).toBe(true);
     expect(screen.getByRole('button', { name: /Green Granules/ }).textContent).toMatch(/Already on the sheet/);
+  });
+
+  test('matches that appear are scrolled into view (nearest), so they are not left under the bar; no match scrolls nothing', async () => {
+    // jsdom has no scrollIntoView; the picker guards for that and calls it where it exists.
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      await openSheet({ request: makeRequest({ ctx: ONE_TIME() }) });
+      const box = screen.getByLabelText('Search products');
+      fireEvent.change(box, { target: { value: 'zzzz' } });
+      expect(screen.getByText('No products match.')).toBeTruthy();
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      fireEvent.change(box, { target: { value: 'granul' } });
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' });
+      expect(scrollIntoView.mock.instances[0]).toBe(screen.getByRole('group', { name: 'Matching products' }));
+    } finally {
+      delete Element.prototype.scrollIntoView;
+    }
   });
 
   test('a search with no match says so', async () => {

@@ -25,7 +25,8 @@
 //  6. Treatment zone map (optional, a closed row that opens the tracer);
 //  7. one Complete lawn visit button. While it is off, its label says the one
 //     thing missing: Add a photo, Analyze the photos, Confirm the assessment,
-//     Add the products applied.
+//     Add the products applied. The first three it does itself (the photo
+//     step's own handlers, same disabled rules); the rest wait on the tech.
 // No Full form button, watering preview, findings picker or
 // evidence review: the report prints its own watering instructions, and
 // /complete takes a visit with none of them. The submit shares its frame,
@@ -452,6 +453,26 @@ const unusableMessage = (reason) => (reason === 'property_check_failed' ? PROPER
 // Optional: only a typed length outside the server's range holds Complete.
 const heightProblem = (height) => height != null && !(height >= MIN_HEIGHT_IN && height <= MAX_HEIGHT_IN);
 
+// What the bottom button does while its label is a photo-step the block can do:
+// the block's handle runs the step, and the block's own report (`progress`)
+// says whether the step may run now. While it analyzes or confirms the button
+// shows the in-flow button's busy text and is off. Anything else (a dictation
+// still running, the products, a typed value out of range) is no action: the
+// button keeps its label and stays off, as before.
+function barActionFor({ missingReason, dictationPending, progress, block }) {
+  if (dictationPending) return null;
+  if (progress.analyzing) return { label: 'Analyzing...', disabled: true };
+  if (progress.confirming) return { label: 'Confirming...', disabled: true };
+  const step = {
+    [ADD_PHOTO]: ['canAddPhoto', 'openPhotoPicker'],
+    [ANALYZE_PHOTOS]: ['canAnalyze', 'analyze'],
+    [CONFIRM_ASSESSMENT]: ['canConfirm', 'confirm'],
+  }[missingReason];
+  if (!step) return null;
+  const [can, run] = step;
+  return { label: missingReason, disabled: !progress[can], onClick: () => block.current?.[run]() };
+}
+
 function missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   const missingArea = rows.find((row) => requirementOf(row) && !(areaOf(row, lawnSqft) > 0));
@@ -762,6 +783,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // many photos are held / whether an analysis result is on screen.
   const { assessmentId, assessmentReady, settles, onConfirmed, onReady } = useConfirmedAssessment(ctx.assessment);
   const [progress, setProgress] = useState({ photos: 0, assessed: false });
+  const block = useRef(null);
   // The tips are ranked by this visit's assessment, so they are read again each
   // time an analysis or confirm settles.
   const tips = useTipLibrary({ base, request, refreshKey: settles });
@@ -792,6 +814,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   });
 
   const missingReason = missingRequirement({ form, rows, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const submit = () => {
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.map((row) => row.name).join(', ');
@@ -830,6 +853,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               <h3 className="tech-visit-section-title">Lawn assessment</h3>
             </div>
             <LawnAssessmentCompletionBlock
+              ref={block}
               compact
               service={blockService}
               request={request}
@@ -895,6 +919,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
         submission={submission}
         missingReason={missingReason}
         reasonInButton={LABEL_REASONS.has(missingReason)}
+        barAction={barAction}
         warn={!!stockRow}
         label="Complete service"
         onSubmit={submit}
