@@ -148,7 +148,9 @@ const DEFAULTS = Object.freeze({
   FLAGSHIP: 'claude-opus-4-8',
   WORKHORSE: 'claude-sonnet-5',
   // Routine internal lanes that used to ride the flagship (owner 2026-10-04):
-  // staff wiki Q&A, expense categories, vendor invoice PDFs, lead synopsis.
+  // staff wiki Q&A, vendor invoice PDFs, lead synopsis. Expense categories
+  // stay on the flagship (2026-10-04 bake-off: Sonnet 5.5 filed equipment as
+  // Depreciation where the books use Supplies).
   // Hero alt text is published on the site, so it stays on VISION. Sonnet 5.5, not Sonnet 5: same list price, and it is in the
   // thinking floor below, so these lanes' short caps (200 to 2000 tokens)
   // are not spent on thinking. Roll back with MODEL_ROUTINE=claude-opus-4-8.
