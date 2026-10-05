@@ -528,6 +528,9 @@ const CLASS_CLAIMS = [
   [/\bsupplements?\b|\bmicronutrients?\b|\biron\b/i, ['supplement', 'fertilizer']],
 ];
 
+const PRONOUN_OBJECT_RE = /\b(?:them|it|those|these|that\s+problem|the\s+problem|the\s+issue)\b/i;
+const TREAT_VERB_RE = /\b(?:treat\w*|handle\w*|address\w*|knock\w*|go\s+after|went\s+after|clear\w*|fight\w*|combat\w*)\b/i;
+
 // Does this clause name this applied product (its first distinctive token)?
 function productNamedIn(product, sentence) {
   const tok = words(product.name).find((w) => w.length >= 3 && !GENERIC_NAME_TOKENS.has(w) && !COMMON_WORDS.has(w));
@@ -709,6 +712,7 @@ function validateParagraph(answer, rawInputs) {
   const hay = haystacks(inputs);
   // Closed vocabulary, fixed code: the offending word may be a name.
   if (wordsOutsideVocabulary(text, inputs, hay).length) fail('word_not_in_inputs');
+  let prevCauses = []; // cause terms the previous sentence named: what "them" / "it" means
   sentences.forEach((rawSentence, i) => {
     const sentence = rawSentence.replace(/\bWaves\s+Pest\s+Control\b/gi, 'we');
     const from = fromBySentence[i] || [];
@@ -728,6 +732,15 @@ function validateParagraph(answer, rawInputs) {
           && !from.some((k) => ['note', 'finding', 'prior'].includes(k))) fail(`cause_unsourced:${term.key}`);
       }
     }
+    // A product "to treat them / it" points at the previous sentence's causes:
+    // the named product must be for one of them, and there must be one.
+    for (const clause of sentence.split(CLAUSE_BREAK_RE)) {
+      if (!PRONOUN_OBJECT_RE.test(clause) || !(PURPOSE_CUE_RE.test(clause) || TREAT_VERB_RE.test(clause))) continue;
+      const namedHere = inputs.products.filter((p) => productNamedIn(p, clause));
+      if (!namedHere.length) continue;
+      if (!prevCauses.length || !namedHere.some((p) => prevCauses.some((t) => productLicenses(p, t)))) { fail('pronoun_treatment_unresolved'); break; }
+    }
+    prevCauses = named.filter((t) => t.cause);
     // Fail closed on an observation of something the vocabulary does not know:
     // "found nematodes" names no term, so nothing above checked it. Every clause
     // that says found / saw / there is must name a known condition.

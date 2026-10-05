@@ -170,6 +170,7 @@ describe('validator: rejects', () => {
     ['a target of one product claimed for another', 'Our technician found chinch bugs in the trouble spot. LESCO 24-0-11 protects against white grubs.', 'product_not_for_condition:grub'],
     ['a target of one product claimed for another in the same sentence', 'Our technician found chinch bugs in the trouble spot. Arena 50 WDG went on the front yard, and LESCO 24-0-11 protects against white grubs.', 'product_not_for_condition:grub'],
     ['a direct treatment claim for the wrong product', 'Our technician found chinch bugs in the trouble spot. LESCO 24-0-11 went on the lawn to treat chinch bugs.', 'product_not_for_condition:chinch'],
+    ['a treatment claim whose condition hides behind a pronoun', 'Our technician found chinch bugs in the trouble spot. LESCO 24-0-11 went on the lawn to treat them.', 'pronoun_treatment_unresolved'],
     ['a product class nothing applied', 'Our technician found chinch bugs in the trouble spot. We applied fungicide to the entire lawn.', 'class_not_applied'],
     ['a weed control nothing applied', 'Our technician found chinch bugs in the trouble spot. We put down weed control across the lawn.', 'class_not_applied'],
     ['a promise', 'Our technician found chinch bugs in the trouble spot. The lawn will recover on its own.', 'promise:will'],
