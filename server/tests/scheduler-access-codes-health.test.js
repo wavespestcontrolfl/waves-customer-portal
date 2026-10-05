@@ -46,10 +46,10 @@ beforeEach(() => {
   runAccessCodeNet.mockResolvedValue({ scanned: 3, read: 2, found: 1, failed: 0, skipped: 1 });
 });
 
-test('gate off: the tick does nothing', async () => {
+test('gate off: the tick still runs the sweep, which only does ownership cleanup', async () => {
   enabled.mockReturnValue(false);
   await sweepTick()();
-  expect(runAccessCodeNet).not.toHaveBeenCalled();
+  expect(runAccessCodeNet).toHaveBeenCalled();
 });
 
 test('a pass logs its counts only', async () => {

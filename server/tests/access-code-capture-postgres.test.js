@@ -130,7 +130,7 @@ postgres('access codes section', () => {
       const c = await customer();
       await text(c.id, 'The gate code is #4821');
       const read = stub([gateItem()]);
-      expect(await sweep(read)).toEqual({ skipped: 'gate_off' });
+      expect(await sweep(read)).toEqual({ skipped: 'gate_off', movedRetired: 0 });
       expect(read).not.toHaveBeenCalled();
       const probes = [
         ['GET', `/?customerId=${c.id}`], ['GET', '/found'], ['POST', '/', {}],
@@ -146,7 +146,7 @@ postgres('access codes section', () => {
       const read = stub([gateItem()]);
       for (const bad of [undefined, '', '2040-01-01', '2040-01-01T00:00:00', 'soon']) {
         if (bad === undefined) delete process.env.GATE_ACCESS_CODES_SECTION_SINCE; else process.env.GATE_ACCESS_CODES_SECTION_SINCE = bad;
-        expect(await sweep(read)).toEqual({ skipped: 'activation_time_required' });
+        expect(await sweep(read)).toEqual({ skipped: 'activation_time_required', movedRetired: 0 });
       }
       expect(read).not.toHaveBeenCalled();
     });
@@ -851,6 +851,21 @@ postgres('access codes section', () => {
       await sweep(stub([]));
       const ev = await trx('audit_log').where({ action: 'access_code.source_moved', resource_id: row.id }).first('actor_type', 'actor_id');
       expect(ev).toMatchObject({ actor_type: 'system', actor_id: null });
+    });
+
+    test('with the gate off the sweep still retires a code whose text moved', async () => {
+      const winner = await customer();
+      const loser = await customer();
+      const id = await text(winner.id, 'The garage code is 1357');
+      await sweep(stub([gateItem({ kind: 'garage', code: '1357', quote: 'The garage code is 1357' })]));
+      const [row] = await rows(winner.id);
+      await access.accept(trx, row.id, {});
+      await trx('sms_log').where({ id }).update({ customer_id: loser.id });
+      process.env.GATE_ACCESS_CODES_SECTION = 'false';
+      const read = stub([]);
+      expect(await sweep(read)).toEqual({ skipped: 'gate_off', movedRetired: 1 });
+      expect(read).not.toHaveBeenCalled();
+      expect((await trx('property_preferences').where({ customer_id: winner.id }).first()).garage_code).toBeNull();
     });
 
     test('a refused accept leaves the active twin untouched', async () => {

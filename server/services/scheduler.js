@@ -2160,8 +2160,9 @@ function initScheduledJobs() {
   // tick. runAccessCodeNet takes its own cron lock. Logs counts and error
   // codes only: never a code, a quote or a message body.
   cron.schedule('0 3,8,13,18,23,28,33,38,43,48,53,58 * * * *', async () => {
+    // No gate check here: with the section off the sweep still runs its
+    // ownership cleanup (merge undo), and reads nothing else.
     const capture = require('./access-code-capture');
-    if (!capture.enabled()) return;
     const tickStartedAt = Date.now();
     try {
       const result = await capture.runAccessCodeNet();

@@ -415,9 +415,12 @@ async function fileFoundItems(conn, { message }, items, receipt) {
 }
 
 async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccessCodes } = {}) {
-  if (!enabled()) return { skipped: 'gate_off' };
+  // Ownership cleanup runs whatever the gate says: a merge undone while the
+  // section is off (or just before a rollback turns it off) must still take a
+  // moved code and its profile copy off the wrong account.
+  if (!enabled()) return runExclusive('access-code-net', async () => ({ skipped: 'gate_off', movedRetired: await retireMovedSources(conn) }));
   const since = gateEnvTimestamp('GATE_ACCESS_CODES_SECTION_SINCE');
-  if (!since) return { skipped: 'activation_time_required' };
+  if (!since) return runExclusive('access-code-net', async () => ({ skipped: 'activation_time_required', movedRetired: await retireMovedSources(conn) }));
   return runExclusive('access-code-net', async () => {
     const movedRetired = await retireMovedSources(conn);
     const candidates = await conn('sms_log as s')
