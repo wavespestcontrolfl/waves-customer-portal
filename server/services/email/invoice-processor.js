@@ -160,9 +160,6 @@ function scalarInvoiceNumber(n) {
   const s = typeof n === 'string' || (typeof n === 'number' && Number.isFinite(n)) ? String(n).trim() : '';
   return s && s.length <= INVOICE_NUMBER_MAX ? s : null;
 }
-// expenses.amount is decimal(12,2): compare at the scale the row is stored at.
-const toCents = (amount) => Math.round(Number(amount) * 100) / 100;
-
 function duplicateKey(vendorName, invoiceNumber) {
   if (!scalarInvoiceNumber(invoiceNumber) || vendorName === 'Unknown Vendor') return null;
   if (fullExpenseDescription(vendorName, invoiceNumber).length > 300 || String(vendorName).length > 200) return null;
@@ -174,7 +171,10 @@ function duplicateKey(vendorName, invoiceNumber) {
 async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, invoiceDate) {
   if (!duplicateKey(vendorName, invoiceNumber)) return null;
   return conn('expenses')
-    .where({ vendor_name: String(vendorName).slice(0, 200), amount: toCents(amount), expense_date: invoiceDate, description: expenseDescription(vendorName, invoiceNumber) })
+    .where({ vendor_name: String(vendorName).slice(0, 200), expense_date: invoiceDate, description: expenseDescription(vendorName, invoiceNumber) })
+    // expenses.amount is decimal(12,2): let Postgres round the new amount
+    // exactly as the insert will, rather than a float approximation in JS.
+    .whereRaw('amount = round(?::numeric, 2)', [String(amount)])
     .first('id');
 }
 

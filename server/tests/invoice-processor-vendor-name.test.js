@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
       where: (a) => { if (a && typeof a === 'object') Object.assign(filters, a); return q; },
       whereILike: (col, pat) => { filters.ilike = pat; return q; },
       whereIn: (col, vals) => { filters.in = vals; return q; },
+      whereRaw: (sql, binds) => { filters.raw = [sql, binds]; return q; },
       first: async () => {
         if (table === 'expenses') { mockState.lastDuplicateFilter = { ...filters }; return mockState.duplicate; }
         if (table === 'expense_categories') return mockState.categories.find((c) => filters.ilike && c.name.toLowerCase().includes(filters.ilike.replace(/%/g, '').toLowerCase())) || null;
@@ -96,7 +97,7 @@ test('an unknown vendor is never treated as a duplicate (unrelated senders share
 test('the duplicate lookup compares the whole description, so a longer invoice number never matches', async () => {
   extraction({ vendor_name: 'Google', invoice_number: '12', invoice_date: '2026-09-01', total: 16.8 });
   await processVendorInvoice({ id: 'e7', gmail_id: 'g', from_address: 'p@google.com', subject: 'Invoice' }, { extracted: {} });
-  expect(mockState.lastDuplicateFilter).toEqual(expect.objectContaining({ vendor_name: 'Google', amount: 16.8, expense_date: '2026-09-01', description: 'Google Invoice #12 — via email' }));
+  expect(mockState.lastDuplicateFilter).toEqual(expect.objectContaining({ vendor_name: 'Google', expense_date: '2026-09-01', description: 'Google Invoice #12 — via email', raw: ['amount = round(?::numeric, 2)', ['16.8']] }));
 });
 
 test('no duplicate check runs when the description would be clipped', async () => {
@@ -124,7 +125,7 @@ test('a non-scalar classifier invoice number never drives the duplicate check', 
 test('the duplicate lookup compares the amount at the stored cent scale', async () => {
   extraction({ vendor_name: 'Google', invoice_number: '77', invoice_date: '2026-09-01', total: 16.804 });
   await processVendorInvoice({ id: 'e11', gmail_id: 'g', from_address: 'p@google.com', subject: 'Invoice' }, { extracted: {} });
-  expect(mockState.lastDuplicateFilter.amount).toBe(16.8);
+  expect(mockState.lastDuplicateFilter.raw).toEqual(['amount = round(?::numeric, 2)', ['16.804']]);
 });
 
 test('an HTML-only receipt from an unmapped sender takes the sender display name', async () => {
