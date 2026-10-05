@@ -1129,6 +1129,14 @@ const gates = {
   // 'true'); this entry is the status/log listing. Kill switch: unset.
   voiceRelayRecovery: process.env.GATE_VOICE_RELAY_RECOVERY === 'true',
 
+  // Sandy unbooked-call hand-off — a production relay call that closes
+  // ai_handled with caller speech, no booking, no lead and no transfer rings
+  // ONE office bell (relay_unbooked_call) and enters the lead pipeline
+  // (services/voice-agent/relay-unbooked-handoff.js). Off ⇒ the close is
+  // byte-identical to today. Read at CALL time via relayUnbookedHandoffLive();
+  // this entry is the status/log listing. Kill switch: unset.
+  relayUnbookedHandoff: process.env.GATE_RELAY_UNBOOKED_HANDOFF === 'true',
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
@@ -4506,6 +4514,12 @@ function blogSearchSuggestLive() {
   return process.env.GATE_BLOG_SEARCH_SUGGEST === 'true';
 }
 
+// GATE_RELAY_UNBOOKED_HANDOFF read at CALL time — ships DARK, off unless
+// exactly 'true'. The one reader for Sandy's unbooked-call hand-off.
+function relayUnbookedHandoffLive() {
+  return process.env.GATE_RELAY_UNBOOKED_HANDOFF === 'true';
+}
+
 // GATE_VOICE_RELAY_OPENAI read at CALL time — the one reader every entry
 // point into a non-Anthropic voice-relay session model must use: the session
 // allowlist (relay-conversation.js's resolveSessionModel/isAllowedOverride
@@ -5603,3 +5617,5 @@ module.exports.lawnLightingLive = lawnLightingLive;
 module.exports.lawnReportPhotoSetLive = lawnReportPhotoSetLive;
 // GATE_LAWN_REPORT_PHOTO_FINDINGS reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportPhotoFindingsLive = lawnReportPhotoFindingsLive;
+// GATE_RELAY_UNBOOKED_HANDOFF reader, on its own line so gate PRs never conflict.
+module.exports.relayUnbookedHandoffLive = relayUnbookedHandoffLive;
