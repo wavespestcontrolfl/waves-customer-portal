@@ -555,6 +555,12 @@ export function ProtocolMixCard({
                 <Badge tone="neutral">Surfactant Required</Badge>
               )}
             </div>
+            {item.spot && (
+              <div className="text-11 text-ink-secondary leading-normal mt-1">
+                {item.spot.reference ? `${item.spot.reference}. ` : ""}
+                {item.spot.note}
+              </div>
+            )}
           </div>
         </div>
       ),
@@ -625,6 +631,22 @@ export function ProtocolMixCard({
 
   return (
     <div className="flex flex-col gap-3">
+      {plan.blocks?.length > 0 && (
+        <div
+          role="alert"
+          className="rounded-md border border-hairline border-alert-fg/30 bg-alert-bg px-3 py-2"
+        >
+          <div className="text-13 font-medium text-alert-fg">Mix on hold</div>
+          {plan.blocks.map((b) => (
+            <div
+              key={`${b.code}-${b.productId}`}
+              className="text-12 text-alert-fg leading-normal"
+            >
+              {b.message}
+            </div>
+          ))}
+        </div>
+      )}
       {plan.warnings?.length > 0 && (
         <div className="rounded-md border border-hairline border-alert-fg/30 bg-alert-bg px-3 py-2">
           {plan.warnings.map((w) => (
@@ -708,7 +730,7 @@ export function ProtocolMixCard({
           <div className="text-12 text-ink-secondary leading-normal mb-4">
             {plan.visit?.objective || "No objective available for this visit."}
           </div>{" "}
-          {!hasAnyMix && (
+          {!hasAnyMix && !plan.blocks?.length && (
             <div className="mb-3 text-12 text-ink-tertiary">
               Area mix, material cost and tank amounts appear once calibrated
               equipment is selected.
@@ -833,6 +855,10 @@ export function ProtocolMixCard({
                 </div>{" "}
               </div>
             ))
+          ) : plan.blocks?.length ? (
+            <div className="text-13 text-alert-fg">
+              {plan.blocks.map((b) => b.message).join(" ")}
+            </div>
           ) : (
             <div className="text-13 text-ink-secondary">
               Select calibrated equipment and products to build a mixing order.

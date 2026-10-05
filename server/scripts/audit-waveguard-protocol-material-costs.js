@@ -18,6 +18,7 @@ const {
   summarizeMaterialCost,
   loadV13RowsForMonth,
   v13RateOptions,
+  v13RowCalculates,
 } = require('../services/waveguard-plan-engine');
 
 const DEFAULT_LAWN_SQFT = Number(process.env.AUDIT_LAWN_SQFT || 10000);
@@ -119,7 +120,8 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
     });
     return {
       ...item,
-      mix: item.product ? calculateProductAmount({
+      // A spot or label-rate v13 row has no area or rate to price: no amount, as in the plan.
+      mix: item.product && (!row || v13RowCalculates(row)) ? calculateProductAmount({
         product: item.product,
         lawnSqft,
         carrierGalPer1000: DEFAULT_CARRIER_GAL_PER_1000,

@@ -154,6 +154,11 @@ function matchCatalogProduct(line, products) {
     .map((product) => {
       const name = normalizeText(product.name);
       if (!name) return null;
+      // A line that spells whole catalog names (the v13 lawn program,
+      // `exact_catalog_names`) matches ONLY a product whose full name it spells:
+      // a missing product leaves the line unmatched, never a partial-name stand-in
+      // (Acelepryn for Tetrino because both say "Insecticide").
+      if (line.exactName && !normalizedLine.includes(name)) return null;
       const productNpk = parseNpkFromText(product.name);
       const aliases = productAliases(product);
       const direct = aliases.some((alias) => normalizedLine.includes(alias));
@@ -163,16 +168,12 @@ function matchCatalogProduct(line, products) {
       if (!direct && !reverse && !tokenMatch) return null;
       const hasInventoryPrice = Number(product.cost_per_unit || 0) > 0 || Number(product.best_price || 0) > 0;
       const needsPricingPenalty = product.needs_pricing === true ? -75 : 0;
-      // A line that spells a product's whole catalog name (the v13 lawn program,
-      // `exact_catalog_names`) always outranks a product that only shares a
-      // generic word with it ("Insecticide"), whatever either one's price is.
-      const exactNameBonus = line.exactName && normalizedLine.includes(name) ? 300 : 0;
       const npkScore = lineNpk && productNpk
         ? (lineNpk.n === productNpk.n && lineNpk.p === productNpk.p && lineNpk.k === productNpk.k ? 150 : -250)
         : 0;
       return {
         product,
-        score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore + exactNameBonus,
+        score: name.length + (direct ? 100 : 0) + (tokenMatch ? 20 : 0) + (hasInventoryPrice ? 50 : 0) + needsPricingPenalty + npkScore,
       };
     })
     .filter(Boolean)
@@ -576,6 +577,29 @@ function v13RateOptions(row) {
   if (Number(row.ratePer1000) > 0) return { protocolRate: { rate: row.ratePer1000, unit: row.rateUnit } };
   if (/^lb_[nk]/i.test(String(row.rateUnit || ''))) return { deriveNutrientFirst: true };
   return {};
+}
+
+// A v13 row computes an amount only when it is a whole-lawn row that states a rate
+// (or a nutrient target to derive one from). A spot row (backpack work on an area
+// the tech measures) or a label-rate row (Dylox) has no area, carrier or rate the
+// plan knows, so it gets no quantity anywhere: the tech enters the area treated and
+// the amount used. This is the one chokepoint the plan, the tank sheet and the
+// completion defaults all go through.
+function v13RowCalculates(row) {
+  return row.applicationMode !== 'spot'
+    && (Number(row.ratePer1000) > 0 || /^lb_[nk]/i.test(String(row.rateUnit || '')));
+}
+
+// The label rate as reference text for a row that gets no quantity: a stated
+// concentration first (a surfactant is a percent of the tank, never a per-1,000 rate),
+// then the row's rate, the label range, the catalog default.
+function v13SpotReference(row, product) {
+  const gates = row.gates || {};
+  const perThousand = (rate, unit) => (Number(rate) > 0 ? `Label rate ${[rate, unit].filter(Boolean).join(' ')} per 1,000 sq ft` : null);
+  return (gates.concentration ? `Label concentration ${gates.concentration}` : null)
+    || perThousand(row.ratePer1000, row.rateUnit)
+    || (gates.rateRange ? `Label rate ${gates.rateRange}` : null)
+    || perThousand(product?.default_rate_per_1000, product?.rate_unit);
 }
 
 // A whole-lawn product the v13 program limits to sunny turf (Tetrino): the share
@@ -1487,10 +1511,14 @@ function planLineFields(item) {
 
 // The staged v13 row's gates and what they mean in the field (null and empty for
 // every other plan), carried so the panel and job card can show them.
-function v13ItemFields(v13Row, gateContext) {
+function v13ItemFields(v13Row, gateContext, product) {
   return {
     gates: v13Row?.gates && Object.keys(v13Row.gates).length ? v13Row.gates : null,
     gateNotes: v13Row ? v13GateNotes(v13Row.gates, gateContext) : [],
+    // A row with no calculated quantity: selectable, label rate as reference, never an amount.
+    spot: v13Row && !v13RowCalculates(v13Row)
+      ? { note: 'Spot: enter the area treated and the amount used.', reference: v13SpotReference(v13Row, product) }
+      : null,
   };
 }
 
@@ -1681,7 +1709,7 @@ async function buildPlanForService(serviceId, options = {}) {
     const substitution = item.product ? substitutions.get(String(item.product.id)) : null;
     const plannedProduct = substitution ? substitutedProduct(substitution) : item.product;
     const v13Row = !substitution && item.product ? v13Rows.get(String(item.product.id)) : null;
-    const mix = plannedProduct ? calculateProductAmount({
+    const mix = plannedProduct && (!v13Row || v13RowCalculates(v13Row)) ? calculateProductAmount({
       product: plannedProduct,
       lawnSqft,
       carrierGalPer1000: carrier,
@@ -1691,7 +1719,7 @@ async function buildPlanForService(serviceId, options = {}) {
     }) : null;
     return {
       ...planLineFields(item),
-      ...v13ItemFields(v13Row, gateContext),
+      ...v13ItemFields(v13Row, gateContext, plannedProduct),
       matched: !!plannedProduct,
       product: planProductSnapshot(plannedProduct, mix),
       substitution: planSubstitutionSnapshot(substitution),
@@ -1988,6 +2016,8 @@ module.exports = {
   lawnV13PlanBlock,
   v13GateNotes,
   v13ItemFields,
+  v13RowCalculates,
+  planLineFields,
   v13SelectedGateWarnings,
   v13ApplyAloneBlocks,
   calculateNutrientLedgerFromRows,

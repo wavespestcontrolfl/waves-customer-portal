@@ -59,6 +59,17 @@ describeDb('the v13 plan through PostgreSQL', () => {
         default_in_plan: true, rate_per_1000: 0.367, rate_unit: 'fl oz', gates: JSON.stringify(protocol === staged ? { sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true } : {}),
       });
     }
+    // Spot rows on the staged May window: backpack work the plan must never size.
+    const [arena] = await knex('products_catalog').where({ name: 'Arena 50 WDG' });
+    const [celsius] = await knex('products_catalog').insert({ name: 'Celsius WG', category: 'herbicide', default_rate_per_1000: 0.085, rate_unit: 'oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'oz', active: true }).returning('*');
+    const [surfactant] = await knex('products_catalog').insert({ name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant', default_rate_per_1000: 0.25, rate_unit: 'fl oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'fl oz', active: true }).returning('*');
+    const stagedWindow = await knex('lawn_protocol_windows').where({ lawn_protocol_id: staged.id }).first();
+    for (const [product, rate, unit, gates] of [[arena, null, 'label_rate', { trigger: 'chinch' }], [celsius, 0.085, 'oz', {}], [surfactant, null, 'label_rate', { concentration: '0.25% v/v' }]]) {
+      await knex('lawn_protocol_products').insert({
+        lawn_protocol_window_id: stagedWindow.id, product_id: product.id, product_name: product.name, role: 'post_emergent_spot', application_mode: 'spot',
+        default_in_plan: false, rate_per_1000: rate, rate_unit: unit, carrier_gal_per_1000: 4, gates: JSON.stringify(gates),
+      });
+    }
     const [equipment] = await knex('equipment_systems').insert({ name: 'Fixture rig', system_type: 'skid', tank_capacity_gal: 110, active: true }).returning('*');
     await knex('equipment_calibrations').insert({ equipment_system_id: equipment.id, carrier_gal_per_1000: 1, active: true });
   });
@@ -231,5 +242,59 @@ describeDb('the v13 plan through PostgreSQL', () => {
       const source = fs.readFileSync(path.join(__dirname, '../routes/admin-lawn-assessment.js'), 'utf8');
       expect(source).toMatch(/getProtocolWindowContext\(db, visitProtocolQuery\(\{ serviceDate: visitDate, grassTrack: track, scheduledService \}\)\)/);
     });
+  });
+
+  describe('spot rows get no calculated quantity (the one chokepoint)', () => {
+    const SPOTS = ['Arena 50 WDG', 'Celsius WG', 'LESCO 90/10 Nonionic Surfactant'];
+    const select = { selectedConditionalProductNames: SPOTS };
+
+    test('selected spot products stay selectable with a label-rate reference and the note, and carry no mix', async () => {
+      setGates();
+      const visit = await plannedVisit();
+      const result = await buildPlanForService(visit.id, { db: knex, ...select });
+      for (const name of SPOTS) {
+        const item = result.mixCalculator.items.find((i) => i.product?.name === name);
+        expect({ name, selected: item?.selected, mix: item?.mix }).toEqual({ name, selected: true, mix: null });
+        expect(item.spot.note).toBe('Spot: enter the area treated and the amount used.');
+      }
+      expect(result.mixCalculator.items.find((i) => i.product?.name === 'Celsius WG').spot.reference).toBe('Label rate 0.085 oz per 1,000 sq ft');
+      expect(result.mixCalculator.items.find((i) => i.product?.name === 'LESCO 90/10 Nonionic Surfactant').spot.reference).toBe('Label concentration 0.25% v/v');
+      // The whole-lawn Tetrino still computes: 1.835 fl oz on the sunny half of 10,000 sq ft.
+      expect(tetrinoItem(result).mix.amount).toBe(1.835);
+      expect(result.mixCalculator.materialCostSummary.pricedLineCount).toBeLessThanOrEqual(1);
+    });
+
+    test('unselected spot options carry no planned amount either', async () => {
+      setGates();
+      const result = await plan(await plannedVisit());
+      for (const item of result.mixCalculator.conditionalOptions.filter((i) => i.product && SPOTS.includes(i.product.name))) {
+        expect({ name: item.product.name, mix: item.mix }).toEqual({ name: item.product.name, mix: null });
+      }
+    });
+
+    test('completion defaults offer the spot products as options and prefill none of them', async () => {
+      setGates({ completion: 'on', history: 'on' });
+      const result = await buildPlanForService((await plannedVisit()).id, { db: knex, includeCompletionDefaults: true, ...select });
+      expect(result.completionDefaults.items.map((i) => i.product.name)).toEqual(['Tetrino Insecticide']);
+      expect(result.completionDefaults.options.map((o) => o.product.name)).toEqual(expect.arrayContaining(SPOTS));
+      expect(result.completionDefaults.items.every((i) => !SPOTS.includes(i.product.name))).toBe(true);
+    });
+  });
+
+  test('exact names are a hard rule: with Tetrino absent from the catalog the line stays unmatched and no other Insecticide stands in', async () => {
+    setGates();
+    await knex('products_catalog').where({ id: tetrino.id }).update({ active: false });
+    // The stand-in a loose match would pick: it shares the word "Insecticide".
+    const [acelepryn] = await knex('products_catalog').insert({ name: 'Acelepryn Insecticide', category: 'insecticide', default_rate_per_1000: 0.05, rate_unit: 'fl oz', label_verified_at: new Date(), inventory_on_hand: 1000, inventory_unit: 'fl oz', active: true, cost_per_unit: 9 }).returning('*');
+    try {
+      const result = await plan(await plannedVisit());
+      expect(result.mixCalculator.items.some((i) => i.product?.name === 'Tetrino Insecticide')).toBe(false);
+      const line = result.protocol.base.find((i) => /^Tetrino/.test(i.raw));
+      expect(line).toMatchObject({ matched: false, product: null, mix: null });
+      expect(result.mixCalculator.items.every((i) => !i.product || i.product.name !== 'Acelepryn Insecticide')).toBe(true);
+    } finally {
+      await knex('products_catalog').where({ id: acelepryn.id }).del();
+      await knex('products_catalog').where({ id: tetrino.id }).update({ active: true });
+    }
   });
 });

@@ -165,6 +165,17 @@ describe('every v13 line resolves to its intended catalog row', () => {
     }
   });
 
+  test('exact names are a hard rule: a missing product leaves the line unmatched, never a partial-name stand-in', () => {
+    const withoutTetrino = buildCatalog(PRICE_SCENARIOS['all priced']).filter((p) => p.name !== 'Tetrino Insecticide');
+    const raw = rows.find(([label]) => label.includes('Tetrino'))[1];
+    const [line] = engine.parseProtocolLines(raw, 'base', { exactName: true });
+    expect(engine.matchCatalogProduct(line, withoutTetrino)).toBeNull();
+    expect(engine.resolveProtocolItems([line], withoutTetrino, {}, {})[0].product).toBeNull();
+    // Without the flag the old loose match still picks something (the behavior the flag exists to stop).
+    const [loose] = engine.parseProtocolLines(raw, 'base');
+    expect(engine.matchCatalogProduct(loose, withoutTetrino)).not.toBeNull();
+  });
+
   test('Dylox 6.2 G never resolves to Dylox 420 SL, and the reverse', () => {
     const catalog = buildCatalog(PRICE_SCENARIOS['all priced']);
     const [line] = engine.parseProtocolLines(`${migration.NAMES.DYL} — grubs`, 'conditional', { exactName: true });
@@ -380,6 +391,32 @@ describe('plan engine reads the matched v13 protocol row', () => {
     expect(block({ trackKey: 'bermuda', structuredProtocol: null }, 'false')).toBeNull();
   });
 
+  describe('which v13 rows compute a quantity (v13RowCalculates)', () => {
+    test('only a whole-lawn row that states a rate or a nutrient target', () => {
+      const calc = (row) => engine.v13RowCalculates(row);
+      expect(calc({ applicationMode: 'broadcast', ratePer1000: 0.5, rateUnit: 'fl oz' })).toBe(true); // Stonewall 4FL, Nutra-TECH, Tetrino, Stonewall 15-0-15
+      expect(calc({ applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'lb_n' })).toBe(true); // 24-0-11
+      expect(calc({ applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz' })).toBe(false); // Celsius: stated rate, but spot
+      expect(calc({ applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate' })).toBe(false); // Arena, Artavia, the surfactant ...
+      expect(calc({ applicationMode: 'broadcast', ratePer1000: null, rateUnit: 'label_rate' })).toBe(false); // Dylox 6.2 G
+    });
+    test('every spot or label-rate row the staged migration writes is withheld, every whole-lawn default row computes', () => {
+      for (const [, spec] of migration.PRODUCTS) {
+        const [name, , mode, rate, unit, , defaultInPlan] = spec;
+        const row = { applicationMode: mode, ratePer1000: rate, rateUnit: unit };
+        expect({ name, calculates: engine.v13RowCalculates(row) }).toEqual({ name, calculates: Boolean(defaultInPlan) });
+      }
+    });
+    test('the reference text puts a concentration first, then the row rate, the label range, the catalog default', () => {
+      const ref = (row, product) => engine.v13ItemFields({ applicationMode: 'spot', gates: {}, ...row }, {}, product).spot.reference;
+      expect(ref({ ratePer1000: null, gates: { concentration: '0.25% v/v' } }, { default_rate_per_1000: 0.25, rate_unit: 'fl oz' })).toBe('Label concentration 0.25% v/v');
+      expect(ref({ ratePer1000: 0.085, rateUnit: 'oz' }, {})).toBe('Label rate 0.085 oz per 1,000 sq ft');
+      expect(ref({ ratePer1000: null, gates: { rateRange: '0.046-0.092 fl oz/1000' } }, { default_rate_per_1000: 0.05, rate_unit: 'fl oz' })).toBe('Label rate 0.046-0.092 fl oz/1000');
+      expect(ref({ ratePer1000: null }, { default_rate_per_1000: 3, rate_unit: 'lb' })).toBe('Label rate 3 lb per 1,000 sq ft');
+      expect(ref({ ratePer1000: null }, {})).toBeNull();
+    });
+  });
+
   describe('v13GateNotes', () => {
     const keys = (notes) => notes.map((n) => `${n.severity}:${n.key}`);
     test('May Tetrino: water distance is a required warning, apply-alone and sunny turf are notes', () => {
@@ -520,6 +557,14 @@ describe('the material-cost audit reads the gate-aware program', () => {
       const narrowed = itemOf(analyze(5, rows), N.TET).mix;
       const whole = itemOf(analyze(5), N.TET).mix;
       expect(narrowed.amount).toBeCloseTo(whole.amount / 2, 3);
+    });
+
+    test('a spot row is not priced: no amount, as in the plan; the whole-lawn rows around it still are', () => {
+      const withArena = [...catalog, { id: 'are', name: 'Arena 50 WDG', aliases: [], default_rate_per_1000: 0.29, rate_unit: 'oz', cost_per_unit: 1, needs_pricing: false }];
+      const rows = new Map([['bermuda|May', new Map([['are', { applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: {} }], ['tet', { applicationMode: 'broadcast', ratePer1000: 0.367, rateUnit: 'fl oz', gates: {} }]])]]);
+      const result = auditScript.analyzeVisit({ trackKey: 'bermuda', track: v13.bermuda, visit: visitFor(5), products: withArena, options, v13Rows: rows });
+      expect(itemOf(result, 'Arena 50 WDG').mix).toBeNull();
+      expect(itemOf(result, N.TET).mix.amount).toBeGreaterThan(0);
     });
 
     test('with the gate off the loader returns an empty row set for every track and month', async () => {

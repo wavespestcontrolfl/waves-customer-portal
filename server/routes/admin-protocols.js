@@ -15,6 +15,8 @@ const {
   loadV13RowsForMonth,
   v13RateOptions,
   v13ItemFields,
+  v13RowCalculates,
+  planLineFields,
   v13SelectedGateWarnings,
   v13ApplyAloneBlocks,
 } = require('../services/waveguard-plan-engine');
@@ -920,6 +922,37 @@ function stripLawnMixItemPricing(item) {
   };
 }
 
+// Every quantity of a selected item, withheld while the sheet is blocked.
+const WITHHELD_MIXES = { jobMix: null, fullTankMix: null, plannedMix: null, plannedFullTankMix: null };
+
+// The catalog fields a tank-sheet row shows: [out, source, fallback, transform].
+// A fallback replaces a falsy value (null, [] ...); no fallback copies the value;
+// a transform runs instead of both.
+const toNumberOrNull = (value) => (value != null ? Number(value) : null);
+const LAWN_MIX_PRODUCT_FIELDS = [
+  ['id', 'id'], ['name', 'name'], ['category', 'category'], ['activeIngredient', 'active_ingredient'],
+  ['labelVerifiedAt', 'label_verified_at', null],
+  ['bestPrice', 'best_price', null, toNumberOrNull], ['costPerUnit', 'cost_per_unit', null, toNumberOrNull],
+  ['costUnit', 'cost_unit', null], ['containerSize', 'container_size', null],
+  ['unitSizeOz', 'unit_size_oz', null, toNumberOrNull], ['needsPricing', 'needs_pricing', null, (v) => v === true],
+  ['rainfastMinutes', 'rainfast_minutes', null], ['reiHours', 'rei_hours', null, (v) => v ?? null],
+  ['labeledTurfSpecies', 'labeled_turf_species', []], ['excludedTurfSpecies', 'excluded_turf_species', []],
+  ['requiresSurfactant', 'requires_surfactant'], ['allowsSurfactant', 'allows_surfactant'],
+  ['mixingOrderCategory', 'mixing_order_category'], ['mixingInstructions', 'mixing_instructions'],
+  ['labelSourceNote', 'label_source_note'], ['labelUrl', 'label_url', null], ['sdsUrl', 'sds_url', null],
+  ['epaRegNumber', 'epa_reg_number', null], ['manufacturer', 'manufacturer', null],
+  ['ppeRequired', 'ppe_required', null], ['signalWord', 'signal_word', null],
+  ['compatibilityNotes', 'compatibility_notes', null], ['doNotTankMixWith', 'do_not_tank_mix_with', []],
+  ['irrigationNotes', 'irrigation_notes', null], ['pollinatorPrecautions', 'pollinator_precautions', null],
+  ['ppeText', 'ppe_text', null], ['reentryText', 'reentry_text', null],
+];
+const lawnMixProductView = (product) => ({
+  ...Object.fromEntries(LAWN_MIX_PRODUCT_FIELDS.map(([out, source, fallback, transform]) => [
+    out, transform ? transform(product[source]) : (fallback === undefined ? product[source] : (product[source] || fallback)),
+  ])),
+  groups: Object.fromEntries(['moa', 'frac', 'irac', 'hrac'].map((group) => [group, product[`${group}_group`] || null])),
+});
+
 router.get('/lawn-mix', async (req, res, next) => {
   try {
     const trackKey = TRACK_MAP[req.query.track] || req.query.track || 'st_augustine';
@@ -960,115 +993,66 @@ router.get('/lawn-mix', async (req, res, next) => {
       throw err;
     }
     const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1 || null };
+    const areaContext = {
+      plan: req.query.plan,
+      weedPressure: req.query.weedPressure,
+      conditionFlags: req.query.conditionFlags,
+      propertyFlags: req.query.propertyFlags,
+      includePremiumOnly: req.query.includePremiumOnly === 'true',
+      isFirstYear: req.query.isFirstYear == null ? undefined : req.query.isFirstYear !== 'false',
+    };
+    const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
+    const tankCapacity = Number(calibration?.tank_capacity_gal || 0);
+    const tankCoverageSqft = carrier && tankCapacity ? (tankCapacity / carrier) * 1000 : 0;
     const items = resolvedLines.map((line) => {
-      const product = line.product;
-      const selected = line.selected;
+      const { product, selected } = line;
       const v13Row = product ? v13Rows.get(String(product.id)) : null;
-      const rateOptions = v13RateOptions(v13Row);
-      const carrier = Number(calibration?.carrier_gal_per_1000 || 0);
-      const areaContext = {
-        plan: req.query.plan,
-        weedPressure: req.query.weedPressure,
-        conditionFlags: req.query.conditionFlags,
-        propertyFlags: req.query.propertyFlags,
-        includePremiumOnly: req.query.includePremiumOnly === 'true',
-        isFirstYear: req.query.isFirstYear == null ? undefined : req.query.isFirstYear !== 'false',
-      };
+      // A spot or label-rate v13 row (Arena, Celsius, the surfactant, Dylox ...) gets
+      // no quantity at all: the same chokepoint the plan uses (v13RowCalculates).
+      const canMix = Boolean(product && carrier && (!v13Row || v13RowCalculates(v13Row)));
+      const mixAt = (sqft, areaFactor) => calculateProductAmount({
+        product, lawnSqft: sqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Row),
+      });
       // A sunny-turf-only row (Tetrino) narrows the whole-lawn line; the sheet has
       // no turf profile, so it takes the half the plan's own default assumes.
       const sizedLine = v13Row?.gates?.sunnyTurfOnly ? { ...line, sunnyTurfOnly: true } : line;
       const areaFactor = effectiveAreaFactor(sizedLine, areaContext);
-      const jobMix = selected && product && carrier
-        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor, ...nutrientTargets, ...rateOptions })
-        : null;
       // plannedMix mirrors jobMix for unselected conditionals: the mix a tech
       // would put down if the line's trigger fired (rescue threshold met,
       // premium add-on taken). Inspection/scout lines keep a zero factor so a
       // "SKIP" or audit line never shows product math. jobMix stays
-      // selected-only — it alone feeds the material-cost summary.
+      // selected-only: it alone feeds the material-cost summary.
       const plannedAreaFactor = selected
         ? areaFactor
         : effectiveAreaFactor({ ...sizedLine, selected: true }, { ...areaContext, includePremiumOnly: true });
-      const plannedMix = jobMix || (product && carrier && plannedAreaFactor > 0
-        ? calculateProductAmount({ product, lawnSqft: areaSqft, carrierGalPer1000: carrier, areaFactor: plannedAreaFactor, ...nutrientTargets, ...rateOptions })
-        : null);
-      const tankCapacity = Number(calibration?.tank_capacity_gal || 0);
-      const tankCoverageSqft = carrier && tankCapacity ? (tankCapacity / carrier) * 1000 : 0;
-      const fullTankMix = selected && product && carrier && tankCoverageSqft
-        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets, ...rateOptions })
-        : null;
-      const plannedFullTankMix = fullTankMix || (product && carrier && tankCoverageSqft && plannedAreaFactor > 0
-        ? calculateProductAmount({ product, lawnSqft: tankCoverageSqft, carrierGalPer1000: carrier, ...nutrientTargets, ...rateOptions })
-        : null);
-
+      const mixPair = (sqft, jobFactor, plannedFactor) => {
+        const job = canMix && selected ? mixAt(sqft, jobFactor) : null;
+        return [job, job || (canMix && plannedAreaFactor > 0 ? mixAt(sqft, plannedFactor) : null)];
+      };
+      const [jobMix, plannedMix] = mixPair(areaSqft, areaFactor, plannedAreaFactor);
+      const [fullTankMix, plannedFullTankMix] = tankCoverageSqft ? mixPair(tankCoverageSqft) : [null, null];
       return {
-        raw: line.raw,
-        role: line.role,
-        conditional: line.conditional,
-        scope: line.scope,
-        conditionFlag: line.conditionFlag,
-        branchGroupId: line.branchGroupId,
-        branch: line.branch || null,
-        areaFactorDefault: line.areaFactorDefault,
-        areaFactorClean: line.areaFactorClean,
-        areaFactorHeavy: line.areaFactorHeavy,
-        areaFactorBroadcast: line.areaFactorBroadcast,
-        selectionReason: line.selectionReason,
-        selected,
-        // The staged v13 row's gates and their field text (null / empty otherwise):
-        // the same notes the plan item carries.
-        ...v13ItemFields(v13Row, gateContext),
+        ...planLineFields(line),
+        ...v13ItemFields(v13Row, gateContext, product),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render
         // them as tasks instead of alerting on a missing product match.
         taskLine: !product && !isPricedProtocolLine(line.raw),
-        product: product ? {
-          id: product.id,
-          name: product.name,
-          category: product.category,
-          activeIngredient: product.active_ingredient,
-          groups: {
-            moa: product.moa_group || null,
-            frac: product.frac_group || null,
-            irac: product.irac_group || null,
-            hrac: product.hrac_group || null,
-          },
-          labelVerifiedAt: product.label_verified_at || null,
-          bestPrice: product.best_price != null ? Number(product.best_price) : null,
-          costPerUnit: product.cost_per_unit != null ? Number(product.cost_per_unit) : null,
-          costUnit: product.cost_unit || null,
-          containerSize: product.container_size || null,
-          unitSizeOz: product.unit_size_oz != null ? Number(product.unit_size_oz) : null,
-          needsPricing: product.needs_pricing === true,
-          rainfastMinutes: product.rainfast_minutes || null,
-          reiHours: product.rei_hours ?? null,
-          labeledTurfSpecies: product.labeled_turf_species || [],
-          excludedTurfSpecies: product.excluded_turf_species || [],
-          requiresSurfactant: product.requires_surfactant,
-          allowsSurfactant: product.allows_surfactant,
-          mixingOrderCategory: product.mixing_order_category,
-          mixingInstructions: product.mixing_instructions,
-          labelSourceNote: product.label_source_note,
-          labelUrl: product.label_url || null,
-          sdsUrl: product.sds_url || null,
-          epaRegNumber: product.epa_reg_number || null,
-          manufacturer: product.manufacturer || null,
-          ppeRequired: product.ppe_required || null,
-          signalWord: product.signal_word || null,
-          compatibilityNotes: product.compatibility_notes || null,
-          doNotTankMixWith: product.do_not_tank_mix_with || [],
-          irrigationNotes: product.irrigation_notes || null,
-          pollinatorPrecautions: product.pollinator_precautions || null,
-          ppeText: product.ppe_text || null,
-          reentryText: product.reentry_text || null,
-        } : null,
+        product: product ? lawnMixProductView(product) : null,
         jobMix,
         fullTankMix,
         plannedMix,
         plannedFullTankMix,
       };
     });
+    // The plan's own v13 rules, from the shared helpers: an apply-alone product
+    // selected beside another product is a block. The sheet then withholds every
+    // quantity of the selected products and offers no combined mixing order.
+    const blocks = v13ApplyAloneBlocks(items.filter((item) => item.selected));
+    if (blocks.length) {
+      for (const item of items) if (item.selected) Object.assign(item, WITHHELD_MIXES);
+    }
 
     const selectedItems = items.filter((item) => item.selected);
     const materialCostSummary = summarizeMaterialCost(selectedItems.map((item) => ({
@@ -1092,11 +1076,8 @@ router.get('/lawn-mix', async (req, res, next) => {
       });
     }
 
-    // The plan's own v13 rules, from the shared helpers: required gate notes on
-    // selected items are warnings; an apply-alone product selected beside another
-    // product is a block and the tank sheet offers no combined mixing order.
+    // Required v13 gate notes on the selected items are warnings, as in the plan.
     warnings.push(...v13SelectedGateWarnings(selectedItems));
-    const blocks = v13ApplyAloneBlocks(selectedItems);
 
     const seesPricing = viewerSeesPricing(req);
     const payload = {

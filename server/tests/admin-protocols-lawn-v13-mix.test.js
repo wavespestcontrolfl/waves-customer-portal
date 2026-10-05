@@ -28,6 +28,8 @@ const CATALOG = [
   { id: 'stw', name: STONEWALL, aliases: [], default_rate_per_1000: null, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'tet', name: TETRINO, aliases: [], default_rate_per_1000: 0.367, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'are', name: 'Arena 50 WDG', aliases: [], default_rate_per_1000: 0.29, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
+  { id: 'cel', name: 'Celsius WG', aliases: [], default_rate_per_1000: 0.085, rate_unit: 'oz', cost_per_unit: 1, cost_unit: 'oz' },
+  { id: 'nis', name: 'LESCO 90/10 Nonionic Surfactant', aliases: [], default_rate_per_1000: 0.25, rate_unit: 'fl oz', cost_per_unit: 1, cost_unit: 'fl oz' },
   { id: 'f24', name: F24, aliases: [], analysis_n: 24, analysis_k: 11, default_rate_per_1000: 4.2, rate_unit: 'lb', cost_per_unit: 1, cost_unit: 'lb' },
 ];
 const V13_SUMMARY = {
@@ -36,6 +38,9 @@ const V13_SUMMARY = {
     { productId: 'nt', ratePer1000: 6, rateUnit: 'fl oz', gates: {} },
     { productId: 'stw', ratePer1000: 0.5, rateUnit: 'fl oz', gates: {} },
     { productId: 'f24', ratePer1000: null, rateUnit: 'lb_n', gates: {} },
+    { productId: 'are', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { trigger: 'chinch_20_to_25_per_sqft' } },
+    { productId: 'cel', applicationMode: 'spot', ratePer1000: 0.085, rateUnit: 'oz', gates: { annualCounter: 'celsius_oz_per_1000' } },
+    { productId: 'nis', applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: { concentration: '0.25% v/v', tankMixWith: 'Celsius WG' } },
     { productId: 'tet', ratePer1000: 0.367, rateUnit: 'fl oz', gates: { sunnyTurfOnly: true, minDistanceFromWaterFt: 25, applyAlone: true } },
   ],
 };
@@ -142,4 +147,37 @@ test('gate off: no gate notes, no blocks, the mixing order is built as before', 
   const body = await lawnMix({ month: '5', track: 'st_augustine' });
   expect(body.blocks).toEqual([]);
   expect(body.items.every((i) => i.gates === null && i.gateNotes.length === 0)).toBe(true);
+});
+
+test('spot rows get no quantity anywhere on the sheet: no job, planned or full-tank amount, a label-rate reference and the note', async () => {
+  const body = await lawnMix({ month: '5', selectedConditionalProductNames: 'Arena 50 WDG, Celsius WG, LESCO 90/10 Nonionic Surfactant' });
+  for (const name of ['Arena 50 WDG', 'Celsius WG', 'LESCO 90/10 Nonionic Surfactant']) {
+    const item = itemFor(body, name);
+    expect(item.selected).toBe(true);
+    expect({ name, mixes: [item.jobMix, item.plannedMix, item.fullTankMix, item.plannedFullTankMix] }).toEqual({ name, mixes: [null, null, null, null] });
+    expect(item.spot.note).toBe('Spot: enter the area treated and the amount used.');
+  }
+  expect(itemFor(body, 'Arena 50 WDG').spot.reference).toBe('Label rate 0.29 oz per 1,000 sq ft');
+  expect(itemFor(body, 'Celsius WG').spot.reference).toBe('Label rate 0.085 oz per 1,000 sq ft');
+  // The surfactant is a concentration of the tank, never a per-1,000 rate.
+  expect(itemFor(body, 'LESCO 90/10 Nonionic Surfactant').spot.reference).toBe('Label concentration 0.25% v/v');
+});
+
+test('a blocked sheet withholds every quantity of the selected products, spot or not, and keeps the reason', async () => {
+  const body = await lawnMix({ month: '5', selectedConditionalProductNames: 'Arena 50 WDG' });
+  expect(body.blocks).toHaveLength(1);
+  for (const item of body.items.filter((i) => i.selected)) {
+    expect({ name: item.product?.name, mixes: [item.jobMix, item.plannedMix, item.fullTankMix, item.plannedFullTankMix] })
+      .toEqual({ name: item.product?.name, mixes: [null, null, null, null] });
+  }
+  expect(body.materialCostSummary?.pricedLineCount ?? 0).toBe(0);
+  expect(body.mixingOrder).toEqual([]);
+});
+
+test('whole-lawn rows keep their amounts beside the spot rows (a window with no apply-alone product): January Nutra-TECH and Stonewall 4FL', async () => {
+  const body = await lawnMix({ month: '1', selectedConditionalProductNames: 'Celsius WG' });
+  expect(body.blocks).toEqual([]);
+  expect(itemFor(body, NUTRA).jobMix.amount).toBe(60);
+  expect(itemFor(body, STONEWALL).jobMix.amount).toBe(5);
+  expect(itemFor(body, 'Celsius WG').jobMix).toBeNull();
 });
