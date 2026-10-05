@@ -89,6 +89,8 @@ not detectable), screened, with the fixed-rule answer as the reply on
 any model miss
 (`server/services/service-report/report-ask-ai.js`). The AI answers Pest reports only (`data.serviceLine === 'pest'`). Lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks). On pest reports the AI answers only the rule router's `applied`, `results`, `findings`, `summary`, `next_visit` and `unrouted` topics. The `reentry`, `watering` and `next_steps` topics keep the fixed-rule answer, which states recorded instructions word for word.
 
+Symptom and exposure questions (behavior change to the public route, owner review round 5, 2026-10-05): a question that reports a symptom or an exposure ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged.
+
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly

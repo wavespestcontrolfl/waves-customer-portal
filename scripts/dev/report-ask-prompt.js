@@ -21,10 +21,16 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-function nextAppointmentFor(data = {}) {
-  const next = data.nextAppointment;
+// `source.nextAppointment` in the report payload's camelCase (as POST
+// /:token/ask maps it) or already in the route's snake_case.
+function nextAppointmentFor(source = {}) {
+  const next = source.nextAppointment;
   return next
-    ? { service_type: next.serviceType, scheduled_date: next.scheduledDate, window_start: next.windowStart }
+    ? {
+      service_type: next.serviceType ?? next.service_type,
+      scheduled_date: next.scheduledDate ?? next.scheduled_date,
+      window_start: next.windowStart ?? next.window_start,
+    }
     : null;
 }
 
@@ -39,7 +45,8 @@ function main(argv) {
   const wrapped = parsed && typeof parsed === 'object' && parsed.data && typeof parsed.data === 'object'
     && !parsed.reportVersion;
   const data = wrapped ? parsed.data : parsed;
-  const nextAppointment = (wrapped && parsed.nextAppointment) || nextAppointmentFor(data);
+  // Bare or wrapped, the same mapping; the wrapper's own appointment wins.
+  const nextAppointment = nextAppointmentFor(wrapped ? parsed : data) || (wrapped ? nextAppointmentFor(data) : null);
   // Keep stdout pure JSON: the portal logger prints module-load warnings there.
   process.env.LOG_LEVEL = 'error';
   const { buildReportAskPrompt } = require('../../server/services/service-report/report-ask-ai');

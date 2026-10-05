@@ -623,7 +623,15 @@ function withinAllowanceSections(copy, fn) {
   }).join('\n');
 }
 
-function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [], allowedDates = [] } = {}) {
+// `skip` names rejection reasons (the second entry of each screen above, plus
+// 'active_ingredient') the caller leaves out. The Ask Waves answer
+// (report-ask-ai.js) reuses this table and skips the rules that only fit the
+// four-section report: it may name the product the customer asked about, and
+// it states recorded re-entry instructions, timeframes, dates and the gauge
+// from the report's own facts. Every other rule, and every rule added later,
+// applies to it unchanged.
+function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [], allowedDates = [], skip = [] } = {}) {
+  const skipped = new Set(skip);
   // Supplied timeframes (an EXPECTATIONS line's own words) pass exactly as
   // supplied, and a supplied date (the reach-out date) passes only in a
   // sentence that ties it to no visit; anything else still trips the
@@ -657,8 +665,10 @@ function writerRulesRejection(text, { activeIngredients = [], allowedPhrases = [
     const phraseRe = new RegExp(`(?<![\\w-])${pattern}(?![\\w-])`, 'gi');
     copy = withinAllowanceSections(copy, (part) => part.replace(phraseRe, 'X'));
   }
-  const hit = WRITER_RULE_SCREENS.find(([check]) => (typeof check === 'function' ? check(copy) : check.test(copy)));
+  const hit = WRITER_RULE_SCREENS.find(([check, reason]) => !skipped.has(reason)
+    && (typeof check === 'function' ? check(copy) : check.test(copy)));
   if (hit) return hit[1];
+  if (skipped.has('active_ingredient')) return null;
   const patterns = [...new Set([...COMMON_ACTIVE_INGREDIENTS, ...activeIngredientNames(activeIngredients)]
     .map(activeIngredientPattern)
     .filter(Boolean))];
