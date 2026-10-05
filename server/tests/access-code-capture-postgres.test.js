@@ -773,6 +773,16 @@ postgres('access codes section', () => {
       expect(await access.accept(trx, row.id, {})).toMatchObject({ ok: false, status: 409, code: 'source_moved' });
     });
 
+    test('a text moved to another customer after its read is read again for its new owner', async () => {
+      const first = await customer();
+      const second = await customer();
+      const id = await text(first.id, 'The gate code is #4821');
+      expect(await sweep(stub([gateItem()]))).toMatchObject({ found: 1 });
+      await trx('sms_log').where({ id }).update({ customer_id: second.id });
+      expect(await sweep(stub([gateItem()]))).toMatchObject({ read: 1, found: 1 });
+      expect((await rows(second.id)).map((r) => r.status)).toEqual(['found']);
+    });
+
     test('a refused accept leaves the active twin untouched', async () => {
       const winner = await customer();
       const loser = await customer();

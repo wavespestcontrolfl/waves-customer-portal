@@ -32,6 +32,11 @@ const { scrubSegments } = require('../utils/pan-scrub');
 const { etDateString, addETDays, formatETDay } = require('../utils/datetime-et');
 const { recordAuditEvent } = require('./audit-log');
 const { hashExtractionSource, recordExtractionAttempt, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
+
+// A receipt is for one text's words AS ONE CUSTOMER'S evidence: a text moved to
+// another customer (a merge, or a merge undone) is read again for its new owner.
+const sourceHash = (message) => hashExtractionSource(`${message.customer_id || ''}:${message.message_body || ''}`);
+const SOURCE_HASH_SQL = "encode(sha256(convert_to(coalesce(s.customer_id::text, '') || ':' || coalesce(s.message_body, ''), 'UTF8')), 'hex')";
 const { stalePendingExtractionProposals } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { stringifySmsEvidence } = require('./sms-operational-extractor');
@@ -330,7 +335,7 @@ async function sourceStillCurrent(trx, message, receipt) {
   if (!(await lockCustomer(trx, message.customer_id))) return false;
   const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_body');
   return !!live && live.customer_id === message.customer_id && live.direction === 'inbound'
-    && hashExtractionSource(live.message_body) === receipt.source_hash;
+    && sourceHash(live) === receipt.source_hash;
 }
 
 // A text that names no way in any more (emptied, too long, unflagged, or its
@@ -430,9 +435,9 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
       .whereNotExists(function completedAttempt() {
         this.select(1).from('data_hygiene_source_extractions as x').whereRaw('x.source_id = s.id')
           .where({ 'x.source_type': 'message', 'x.extractor_version': VERSION })
-          // A receipt is for the words it read (hashExtractionSource = sha256
+          // A receipt is for the owner and words it read (sourceHash = sha256
           // hex of the body): a corrected text is read again.
-          .whereRaw("x.source_hash = encode(sha256(convert_to(coalesce(s.message_body, ''), 'UTF8')), 'hex')")
+          .whereRaw(`x.source_hash = ${SOURCE_HASH_SQL}`)
           .whereIn('x.status', TERMINAL_STATUSES)
           // and it is the newest receipt for this text: words restored to an
           // earlier version are read again, since a later read changed the rows.
@@ -448,7 +453,7 @@ async function runAccessCodeNet({ now = new Date(), conn = db, read = readAccess
     for (const message of candidates) {
       if (!enabled()) break;
       const receipt = { source_type: 'message', source_id: message.id, extractor_version: VERSION,
-        source_hash: hashExtractionSource(message.message_body) };
+        source_hash: sourceHash(message) };
       try {
         if (!eligibleMessage(message) || String(message.message_body || '').trim() === ''
           || String(message.message_body).length > MAX_BODY) {
