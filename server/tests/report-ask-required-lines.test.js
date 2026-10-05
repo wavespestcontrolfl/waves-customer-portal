@@ -325,7 +325,7 @@ describe('the fact sheet and prompt carry required lines', () => {
     test('insight card text is scrubbed like the concern', () => {
       const text = JSON.stringify(buildReportAskFacts({ data: treeData() }).tree_shrub_report);
       expect(text).not.toMatch(/941-555-0100|4421/);
-      expect(text).toContain('[number]');
+      expect(text).toContain('[address]');
     });
 
     test('another service line, or a tree & shrub report without a read, carries nothing', () => {

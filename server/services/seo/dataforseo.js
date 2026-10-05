@@ -55,7 +55,9 @@ class DataForSEO {
     return 'Basic ' + Buffer.from(`${this.login}:${this.password}`).toString('base64');
   }
 
-  async request(endpoint, body, retries = 3) {
+  // `signal` (optional): a caller's abort, combined with the per-request
+  // timeout; an aborted call returns null at once and is never retried.
+  async request(endpoint, body, retries = 3, { signal = null } = {}) {
     const { isEnabled } = require('../../config/feature-gates');
     if (!isEnabled('seoIntelligence')) {
       logger.info(`[GATE BLOCKED] DataForSEO: ${endpoint}`);
@@ -76,7 +78,8 @@ class DataForSEO {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS), // a stalled call must never hold a caller's lease/connection open
+          // a stalled call must never hold a caller's lease/connection open
+          signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         });
 
         if (res.status === 429) {
@@ -100,6 +103,7 @@ class DataForSEO {
 
         return data;
       } catch (err) {
+        if (signal?.aborted) return null;
         if (attempt === retries) {
           logger.error(`[dataforseo] Failed after ${retries} attempts: ${err.message}`);
           return null;
@@ -114,14 +118,14 @@ class DataForSEO {
   // can cache distinct mobile vs desktop snapshots; defaults to mobile to
   // preserve the prior call shape (serp-analyzer.js etc. pass 2 args).
   // `location` may be a place name OR a "lat,lng" coordinate (see serpLocation).
-  async serpOrganic(keyword, location = 'Bradenton,Florida,United States', device = 'mobile') {
+  async serpOrganic(keyword, location = 'Bradenton,Florida,United States', device = 'mobile', { signal = null } = {}) {
     return this.request('/serp/google/organic/live/advanced', [{
       keyword,
       ...serpLocation(location),
       language_name: 'English',
       device,
       os: device === 'desktop' ? 'macos' : 'iOS',
-    }]);
+    }], 3, { signal });
   }
 
   // SERP — Map Pack. `extra` merges extra task params (e.g. { search_places:false }

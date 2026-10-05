@@ -83,7 +83,9 @@ headers, its limiter and its recorded event (`report_question_asked` with
 `question_length` and `topic` only). `GATE_REPORT_ASK_AI` (dark, off unless
 exactly `true`, read at call time) changes only who writes `answer`: Claude
 Sonnet 5.5 from a fact sheet of the report (no rates, totals, EPA numbers or
-per-product target pests), screened, with the fixed-rule answer as the reply on
+per-product target pests; the question and all free text scrubbed of phones,
+emails, codes and street addresses, but a customer name written in prose is
+not detectable), screened, with the fixed-rule answer as the reply on
 any model miss
 (`server/services/service-report/report-ask-ai.js`). It serves every service
 line and every topic. The recorded instructions the fixed-rule answer states

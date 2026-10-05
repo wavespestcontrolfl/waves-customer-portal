@@ -804,6 +804,26 @@ describe('buildSpiderExpectation', () => {
   // applying it somewhere else entirely. This is the exact required
   // regression test: no recorded action => no spider section, REGARDLESS
   // of any spider-targeted (even pyrethroid-classified) product.
+  // Owner 2026-10-05: the regular pest completion form's "Swept eaves and
+  // webs" box records exactly this protocol action (scope exterior, no
+  // treatment applied). The label it sends must be the protocol's own sweep
+  // step and must earn the spider section.
+  it('the "Swept eaves and webs" box label is the pest protocol sweep and earns the spider section', () => {
+    const protocols = require('../config/protocols.json');
+    const label = 'Swept eaves, window frames, door frames, and lanai';
+    const visitsWithSweep = protocols.pest.visits.filter((visit) => visit.lineMeta?.[label]);
+    expect(visitsWithSweep.length).toBeGreaterThan(0);
+    const entry = visitsWithSweep[0].lineMeta[label];
+    expect(entry).toMatchObject({ scope: 'exterior', treatmentApplied: false });
+    const out = buildSpiderExpectation({
+      actionLabels: [label],
+      actionEntries: [{ label, scope: entry.scope, treatmentApplied: entry.treatmentApplied }],
+      applications: [],
+    });
+    expect(out.headline).toBe('Spiders');
+    expect(out.whatWeDid).toBe('We swept webs and any egg sacs from your eaves and entry points.');
+  });
+
   it('a spider-targeted product WITHOUT a recorded eave/web/soffit action => NO spider section', () => {
     const out = buildSpiderExpectation({
       actionLabels: ['Treated exterior perimeter band'],
