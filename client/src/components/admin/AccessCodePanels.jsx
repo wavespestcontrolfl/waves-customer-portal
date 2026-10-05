@@ -36,6 +36,9 @@ function dayKey(value) {
   if (!value) return "";
   const text = String(value);
   if (/^\d{4}-\d{2}-\d{2}/.test(text) && text.length <= 10) return text.slice(0, 10);
+  // A calendar date serialized as UTC midnight ("2026-10-08T00:00:00.000Z") is
+  // that calendar day, not the evening before in Eastern time.
+  if (/^\d{4}-\d{2}-\d{2}T00:00:00(?:\.000)?Z$/.test(text)) return text.slice(0, 10);
   const d = new Date(text);
   if (Number.isNaN(d.getTime())) return "";
   const parts = new Intl.DateTimeFormat("en-CA", { timeZone: ET, year: "numeric", month: "2-digit", day: "2-digit" }).format(d);

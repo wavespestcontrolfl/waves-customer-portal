@@ -288,6 +288,8 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
   const [rows, setRows] = useState([]);
   const visitKey = visitIds.join(',');
   useEffect(() => {
+    // A new stop never shows the previous stop's codes while its own load.
+    setRows([]);
     if (!request || !customerId) return undefined;
     let cancelled = false;
     const ids = visitKey ? visitKey.split(',') : [];

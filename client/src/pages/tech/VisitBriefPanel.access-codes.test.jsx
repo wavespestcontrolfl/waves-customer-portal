@@ -49,6 +49,19 @@ describe('VisitBriefPanel access codes', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  it('clears the previous stop\'s codes as soon as the stop changes', async () => {
+    let resolveSecond;
+    const request = vi.fn((url) => (url.endsWith('svc-1')
+      ? Promise.resolve({ accessCodes: [code()] })
+      : new Promise((r) => { resolveSecond = r; })));
+    const view = renderPanel(request);
+    expect(await screen.findByText('1234')).toBeInTheDocument();
+    const other = { ...SERVICE, id: 'svc-2', customer_id: 'cust-2' };
+    view.rerender(<VisitBriefPanel stop={{ ...stop, key: 'row:svc-2', services: [other], primary: other }} detail={{ status: 'ready', byService: {} }} request={request} />);
+    await waitFor(() => expect(screen.queryByText('1234')).toBeNull());
+    resolveSecond({ accessCodes: [] });
+  });
+
   it('does not ask without a request function', () => {
     render(<VisitBriefPanel stop={stop} detail={{ status: 'ready', byService: {} }} />);
     expect(screen.queryByText('Access codes')).toBeNull();

@@ -206,3 +206,12 @@ describe('CustomerAccessCodesBlock', () => {
     expect(post.body).toEqual({ customerId: 'customer-a', kind: 'call_box', life: 'standing', code: '77', instructions: 'Press the star key' });
   });
 });
+
+describe('visit picker dates', () => {
+  it('reads a UTC-midnight date as that calendar day', async () => {
+    const { visitChoices } = await import('./AccessCodePanels');
+    const out = visitChoices([{ id: 'v1', scheduled_date: '2040-03-12T00:00:00.000Z', status: 'confirmed' }], '2040-03-12T14:00:00Z', '2040-03-12');
+    expect(out.map((v) => v.id)).toEqual(['v1']);
+    expect(out[0].label).toMatch(/Mar 12/);
+  });
+});
