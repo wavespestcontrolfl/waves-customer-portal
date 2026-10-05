@@ -119,6 +119,9 @@ function LinkBtn({ href, icon, label, onClick, disabled = false }) {
 
 // The exact code rows the day payload never carries (redacted there by
 // design) — only non-null codes render.
+// The access-code kind each profile code field is (for the dedupe below).
+const PROFILE_CODE_KIND = { neighborhoodGate: 'neighborhood_gate', propertyGate: 'property_gate', garage: 'garage', lockbox: 'lockbox' };
+
 const CODE_LABELS = [
   ['neighborhoodGate', 'Neighborhood gate'],
   ['propertyGate', 'Property gate'],
@@ -314,9 +317,11 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
     return () => { cancelled = true; };
   }, [request, customerId, visitKey, attempt]);
   const ids = visitKey ? visitKey.split(',') : [];
-  const shown = new Set(shownCodes.map((c) => String(c).trim().toLowerCase()));
+  // Already shown above for the SAME access point; equal values at different
+  // points (a gate and a door both 1234) are both shown.
+  const shown = new Set(shownCodes.map(([kind, c]) => `${kind}:${String(c).trim().toLowerCase()}`));
   const mine = rows.filter((r) => (r.life === 'standing' || ids.includes(r.scheduledServiceId))
-    && !(r.code && !r.instructions && shown.has(String(r.code).trim().toLowerCase())));
+    && !(r.code && !r.instructions && shown.has(`${r.kind}:${String(r.code).trim().toLowerCase()}`)));
   if (failed) {
     return (
       <>
@@ -1152,7 +1157,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         request={request}
         customerId={service.customer_id || service.customerId || null}
         visitIds={stop.services.map((m) => m.id).filter(Boolean)}
-        shownCodes={CODE_LABELS.map(([key]) => access?.codes?.[key]).filter(Boolean)}
+        shownCodes={CODE_LABELS.map(([key]) => [PROFILE_CODE_KIND[key], access?.codes?.[key]]).filter(([, v]) => Boolean(v))}
       />
 
       <CustomerFlaggedSection

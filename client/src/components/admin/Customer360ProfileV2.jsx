@@ -7531,7 +7531,10 @@ export function CustomerAccessCodesBlock({ customerId, upcomingScheduled = [] })
     return (
       <div className="mt-3">
         <AccessPrefsSubheading>Access codes</AccessPrefsSubheading>
-        <div className="text-ui-label text-ink-secondary">{loadError}</div>
+        <div className="flex flex-wrap items-center gap-2 text-ui-label text-ink-secondary">
+          {loadError}
+          <Button size="sm" variant="ghost" onClick={() => load()}>Try again</Button>
+        </div>
       </div>
     );
   }
@@ -7566,7 +7569,7 @@ export function CustomerAccessCodesBlock({ customerId, upcomingScheduled = [] })
       ) : (
         <div className="grid gap-2">
           {codes.active.map((row) => (
-            <ActiveCodeRow key={row.id} row={row} onRetire={(r) => post(`/${r.id}/retire`)} />
+            <ActiveCodeRow homes={codes?.properties || []} key={row.id} row={row} onRetire={(r) => post(`/${r.id}/retire`)} />
           ))}
         </div>
       )}

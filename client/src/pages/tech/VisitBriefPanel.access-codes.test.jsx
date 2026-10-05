@@ -71,6 +71,12 @@ describe('VisitBriefPanel access codes', () => {
     expect(await screen.findByText('1234')).toBeInTheDocument();
   });
 
+  it('shows a code that equals a profile code of ANOTHER access point', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [code({ id: 'd1', kind: 'door', code: '4321', instructions: null })] }));
+    render(<VisitBriefPanel stop={stop} detail={{ status: 'ready', byService: { 'svc-1': { access: { codes: { neighborhoodGate: '4321' } } } } }} request={request} />);
+    expect(await screen.findByText('Door or lock:')).toBeInTheDocument();
+  });
+
   it('does not ask without a request function', () => {
     render(<VisitBriefPanel stop={stop} detail={{ status: 'ready', byService: {} }} />);
     expect(screen.queryByText('Access codes')).toBeNull();

@@ -71,6 +71,7 @@ const MESSAGES = {
   invalid_visit: 'scheduledServiceId must be a visit of this customer that has not ended',
   visit_required: 'Choose the visit this code is for',
   property_required: 'Choose which home this code is for',
+  visit_home_unknown: 'That visit has no home set; set the visit address first',
   invalid_property: 'propertyId must be an active home of this customer',
   expired: 'This one-visit code is more than 14 days old',
   source_moved: 'The text this code came from now belongs to another customer',

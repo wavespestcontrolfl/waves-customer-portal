@@ -1067,6 +1067,40 @@ postgres('access codes section', () => {
       expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes).toEqual([]);
     });
 
+    test('a code with no home shows nowhere, even after the customer is down to one home', async () => {
+      const c = await customer({ properties: 1 });
+      const [a] = await trx('customer_properties').where({ customer_id: c.id }).select('id');
+      const v = await visit(c.id, day(1));
+      const row = await found(c.id, { kind: 'door', code: '2468' });
+      await access.accept(trx, row.id, {});
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes.map((r) => r.code)).toEqual(['2468']);
+      await trx('customer_access_codes').where({ id: row.id }).update({ property_id: null });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, v)).codes).toEqual([]);
+      expect(a).toBeTruthy();
+    });
+
+    test('a one-visit code takes the visit\'s home; an unstamped visit of a two-home customer is refused', async () => {
+      const c = await customer({ properties: 2 });
+      const [, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      const stamped = await visit(c.id, day(1));
+      const unstamped = await visit(c.id, day(2));
+      await trx('scheduled_services').where({ id: stamped }).update({ property_id: b.id });
+      const one = await found(c.id, { kind: 'door', code: '#9090', life: 'visit' });
+      expect(await access.accept(trx, one.id, { scheduledServiceId: unstamped, now: NOW })).toMatchObject({ ok: false, code: 'visit_home_unknown' });
+      expect((await access.accept(trx, one.id, { scheduledServiceId: stamped, now: NOW })).row.propertyId).toBe(b.id);
+      await trx('scheduled_services').where({ id: stamped }).update({ property_id: null });
+      expect((await access.listForVisit(trx, { techRole: 'admin' }, stamped)).codes).toEqual([]);
+    });
+
+    test('home choices name the unit and the property label', async () => {
+      const c = await customer({ properties: 2 });
+      const [a, b] = await trx('customer_properties').where({ customer_id: c.id }).orderBy('id').select('id');
+      await trx('customer_properties').where({ id: a.id }).update({ address_line1: '10 Example Way', address_line2: 'Unit 1', label: null });
+      await trx('customer_properties').where({ id: b.id }).update({ address_line1: '10 Example Way', address_line2: 'Unit 2', label: 'Rental' });
+      const labels = (await access.listForCustomer(trx, c.id)).properties.map((h) => h.label).sort();
+      expect(labels).toEqual(['10 Example Way · Unit 1', '10 Example Way · Unit 2 · Rental']);
+    });
+
     test('the found list carries each row\'s visit choices', async () => {
       const c = await customer();
       const soon = await visit(c.id, etDateString(addETDays(new Date(), 2)));

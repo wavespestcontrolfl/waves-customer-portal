@@ -217,7 +217,9 @@ function useGuarded() {
 }
 
 // One active code. Retire asks inline (no browser dialog).
-export function ActiveCodeRow({ row, onRetire }) {
+export function ActiveCodeRow({ row, homes = [], onRetire }) {
+  // On a multi-home account each code says which home it opens.
+  const home = homes.length > 1 ? homes.find((h) => h.id === row.propertyId)?.label || "No home set" : null;
   const [confirming, setConfirming] = useState(false);
   const { busy, error, run } = useGuarded();
   return (
@@ -229,6 +231,7 @@ export function ActiveCodeRow({ row, onRetire }) {
         </div>
         {row.code && <div className="mt-1 font-mono u-nums break-all text-ui-body font-medium text-zinc-900">{row.code}</div>}
         {row.instructions && <div className="mt-1 break-words whitespace-pre-line text-ui-label text-zinc-900">{row.instructions}</div>}
+        {home && <div className="mt-1 text-ui-label text-zinc-900">{home}</div>}
         <div className="mt-1 text-ui-label text-ink-secondary">{sourceLabel(row)}</div>
         {error && <ActionFeedback error className="mt-1">{error}</ActionFeedback>}
       </div>

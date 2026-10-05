@@ -601,9 +601,11 @@ async function listForCustomer(conn, customerId) {
 async function homeChoices(conn, customerIds) {
   const ids = [...new Set(customerIds.filter(Boolean))];
   const rows = ids.length ? await conn('customer_properties').whereIn('customer_id', ids).where({ active: true })
-    .select('id', 'customer_id', 'address_line1', 'is_primary').orderBy('is_primary', 'desc').orderBy('address_line1') : [];
+    .select('id', 'customer_id', 'address_line1', 'address_line2', 'label', 'is_primary').orderBy('is_primary', 'desc').orderBy('address_line1') : [];
   const out = new Map();
-  for (const r of rows) out.set(r.customer_id, [...(out.get(r.customer_id) || []), { id: r.id, label: r.address_line1 || 'Home' }]);
+  // Street, unit and the property's own name, so two units at one street differ.
+  const name = (r) => [r.address_line1, r.address_line2, r.label].map((v) => String(v || '').trim()).filter(Boolean).join(' · ') || 'Home';
+  for (const r of rows) out.set(r.customer_id, [...(out.get(r.customer_id) || []), { id: r.id, label: name(r) }]);
   return out;
 }
 
@@ -648,11 +650,13 @@ async function listForVisit(conn, req, visitId) {
   // that one active home.
   const homes = await conn('customer_properties').where({ customer_id: visit.customer_id, active: true }).pluck('id');
   const visitHome = visit.property_id || (homes.length === 1 ? homes[0] : null);
-  // Fail closed: on a multi-home account a code with no home (an old row, or a
-  // home since deleted) is shown at no visit until the office names its home.
-  const sameHome = (r) => (r.propertyId ? !!visitHome && r.propertyId === visitHome : homes.length <= 1);
+  // One rule, fail closed: a code shows at a visit only when it is tied to
+  // exactly that visit's home. A code with no home (an older row, a home since
+  // deleted) or a visit with no known home shows nothing until the office binds it.
+  const sameHome = (r) => !!r.propertyId && !!visitHome && r.propertyId === visitHome;
   // Only what a stop needs: never the customer's message, its source or who decided.
-  return { ok: true, codes: active.filter((r) => (r.life === 'standing' && sameHome(r)) || r.scheduledServiceId === visit.id)
+  return { ok: true, codes: active.filter((r) => r.life === 'standing' || r.scheduledServiceId === visit.id)
+    .filter(sameHome)
     .map((r) => ({ id: r.id, kind: r.kind, code: r.code, instructions: r.instructions, life: r.life, scheduledServiceId: r.scheduledServiceId })) };
 }
 
@@ -746,7 +750,11 @@ async function visitFor(trx, customerId, { from, chosenId }) {
     if (!UUID_RE.test(String(chosenId))) return { error: 'invalid_visit' };
     // Locked, so the visit cannot end or move before this code commits.
     const chosen = await live().where({ id: chosenId }).forUpdate().first('id', 'property_id');
-    return chosen ? { id: chosen.id, propertyId: chosen.property_id || null } : { error: 'invalid_visit' };
+    if (!chosen) return { error: 'invalid_visit' };
+    // The visit names the code's home; a multi-home account's visit with no home cannot.
+    const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
+    const home = chosen.property_id || (homes.length === 1 ? homes[0] : null);
+    return home ? { id: chosen.id, propertyId: home } : { error: 'visit_home_unknown' };
   }
   const candidate = await live().first('id');
   return candidate ? { error: 'visit_required' } : { id: null, propertyId: null };
