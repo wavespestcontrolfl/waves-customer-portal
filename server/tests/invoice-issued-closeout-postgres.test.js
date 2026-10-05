@@ -42,6 +42,7 @@ const {
   closeOutVisitForIssuedInvoice,
   retrySettledStatementCloseouts,
   issuedCloseoutServiceDayEligible,
+  issuedCloseoutTarget,
 } = require('../services/invoice-issued-closeout');
 const { recordAuditEvent } = require('../services/audit-log');
 
@@ -316,6 +317,35 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
     expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'sent', conn: trx, today: TODAY })).toMatchObject({ closed: true, resumed: true, visitId: done.id });
     expect(mockCompleteScheduledService).toHaveBeenCalledTimes(1);
     expect(mockCompleteScheduledService.mock.calls[0][0].idempotencyKey).toBe(`invoice-issued:${inv.id}`);
+  });
+
+  test('issuedCloseoutTarget names the visit the closeout would complete — same verdicts, no audit row, no completion (the IB resend card)', async () => {
+    const open = await visit({ date: '2040-02-20', serviceType: 'Lawn Care Visit' });
+    const inv = await invoice({ scheduled_service_id: open.id, date: '2040-02-20' });
+    expect(await issuedCloseoutTarget(inv, { today: TODAY, conn: trx })).toEqual({ visitId: open.id, serviceType: 'Lawn Care Visit', date: '2040-02-20', resuming: false });
+    // A same-day visit closes on payment (the default trigger here), never on a send.
+    const sameDay = await visit({ date: TODAY });
+    const sameDayInv = await invoice({ scheduled_service_id: sameDay.id, date: TODAY });
+    expect(await issuedCloseoutTarget(sameDayInv, { today: TODAY, conn: trx })).toMatchObject({ visitId: sameDay.id });
+    expect(await issuedCloseoutTarget(sameDayInv, { today: TODAY, conn: trx, trigger: 'sent' })).toBeNull();
+    // Future, completed-with-nothing-parked and unlinked invoices close nothing.
+    const future = await visit({ date: '2040-03-05' });
+    expect(await issuedCloseoutTarget(await invoice({ scheduled_service_id: future.id, date: '2040-03-05' }), { today: TODAY, conn: trx })).toBeNull();
+    const done = await visit({ status: 'completed' });
+    const doneInv = await invoice({ scheduled_service_id: done.id });
+    expect(await issuedCloseoutTarget(doneInv, { today: TODAY, conn: trx })).toBeNull();
+    expect(await issuedCloseoutTarget(await invoice({}), { today: TODAY, conn: trx })).toBeNull();
+    // Our own parked attempt: the closeout would resume it.
+    await trx('service_completion_attempts').insert({ id: randomUUID(), service_id: done.id, idempotency_key: `invoice-issued:${doneInv.id}`, status: 'side_effects_pending', request_hash: 'x' });
+    expect(await issuedCloseoutTarget(doneInv, { today: TODAY, conn: trx })).toMatchObject({ visitId: done.id, resuming: true });
+    // Read-only: nothing completed, nothing audited.
+    expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+    // And the closeout itself then completes exactly the visit the card named.
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: trx, today: TODAY })).toMatchObject({ closed: true, visitId: open.id });
+    // Gate off: the card says nothing.
+    mockGate.on = false;
+    expect(await issuedCloseoutTarget(inv, { today: TODAY, conn: trx })).toBeNull();
   });
 
   test('gate off: nothing runs', async () => {

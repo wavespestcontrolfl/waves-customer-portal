@@ -63,6 +63,7 @@ const { NEEDS_ME_TOOLS, executeNeedsMeTool } = require('../services/intelligence
 const { BILLING_READER_TOOLS, executeBillingReaderTool } = require('../services/intelligence-bar/billing-reader-tools');
 const { CLOSEOUT_TOOLS, executeCloseoutTool } = require('../services/intelligence-bar/closeout-tools');
 const { CLOSEOUT_REPAIR_TOOLS, executeCloseoutRepairTool } = require('../services/intelligence-bar/closeout-repair-tools');
+const { RECEIPT_RESEND_TOOLS, executeReceiptResendTool } = require('../services/intelligence-bar/receipt-resend-tools');
 const { BILLING_WRITE_TOOLS, executeBillingWriteTool } = require('../services/intelligence-bar/billing-write-tools');
 const { CALL_RESEARCH_TOOLS, executeCallResearchTool } = require('../services/intelligence-bar/call-research-tools');
 const { CUSTOMER_LIFECYCLE_TOOLS, executeCustomerLifecycleTool, mergeCustomersEnabled } = require('../services/intelligence-bar/customer-lifecycle-tools');
@@ -151,6 +152,7 @@ const MANAGED_AGENTS_OPS_TOOL_NAMES = new Set(MANAGED_AGENTS_OPS_TOOLS.map(t => 
 const JOB_HEALTH_TOOL_NAMES = new Set(JOB_HEALTH_TOOLS.map(t => t.name));
 const NEEDS_ME_TOOL_NAMES = new Set(NEEDS_ME_TOOLS.map(t => t.name));
 const BILLING_READER_TOOL_NAMES = new Set(BILLING_READER_TOOLS.map(t => t.name));
+const RECEIPT_RESEND_TOOL_NAMES = new Set(RECEIPT_RESEND_TOOLS.map(t => t.name));
 const BILLING_WRITE_TOOL_NAMES = new Set(BILLING_WRITE_TOOLS.map(t => t.name));
 const CALL_RESEARCH_TOOL_NAMES = new Set(CALL_RESEARCH_TOOLS.map(t => t.name));
 const CUSTOMER_LIFECYCLE_TOOL_NAMES = new Set(CUSTOMER_LIFECYCLE_TOOLS.map(t => t.name));
@@ -172,6 +174,9 @@ const INFRA_TOOLS = [
   // customer. Admin-only (technicians get no billing reads), so they ride the
   // admin-only infra set like needs_me and load in every admin context.
   ...BILLING_READER_TOOLS,
+  // Resend a paid receipt: the Invoices page button as a carded write, offered
+  // beside the invoice readers on every admin context (admin-only below).
+  ...RECEIPT_RESEND_TOOLS,
   // Saved-card removal (with the Auto Pay-off step) and invoice address
   // correction: admin-only writes, both always behind the confirm card.
   ...BILLING_WRITE_TOOLS,
@@ -223,6 +228,9 @@ const ADMIN_ONLY_TOOL_NAMES = new Set([
   // Closeout repair queues customer report emails / receipts — admin only,
   // like the closeout reads it builds on.
   ...CLOSEOUT_REPAIR_TOOL_NAMES,
+  // Resending a receipt contacts the customer — admin only, like the
+  // requireAdmin send-receipt route it mirrors.
+  ...RECEIPT_RESEND_TOOL_NAMES,
   ...EMAIL_TOOLS.map(t => t.name),
 ]);
 
@@ -810,6 +818,22 @@ const PINNED_DISPLAY_BUILDERS = {
       message: preview.body_preview,
     }
     : null),
+  // The card names the invoice, what the receipt states, whether this is a
+  // re-send, and who it reaches — never just the raw invoice id the model sent.
+  resend_receipt: (params, preview) => (preview?.preview === true
+    ? {
+      invoice: preview.invoice_number,
+      customer: preview.customer_name || preview.customer_id,
+      amount: `$${preview.amount} paid${preview.paid_date ? ` on ${preview.paid_date}` : ''}`,
+      receipt: preview.receipt_status,
+      send_by: preview.channels,
+      to: preview.recipients,
+      ...(preview.memo ? { memo: preview.memo, memo_note: preview.memo_note } : {}),
+      ...(preview.visit_closeout ? { visit: preview.visit_closeout } : {}),
+      // What a queued automatic receipt will do when this send settles it (the card must say it).
+      ...(preview.automatic_receipt ? { automatic_receipt: preview.automatic_receipt } : {}),
+    }
+    : null),
   // The billing writes: the card names the customer, the method or invoice and
   // the before/after — never raw ids (the steps and notices ride the contract).
   remove_saved_payment_method: (params, preview) => (preview?.preview === true && preview.method
@@ -864,6 +888,9 @@ const VERIFIED_VERSION_PARAMS = {
   create_restock_request: '_verified_inventory_version',
   update_restock_request: '_verified_inventory_version',
   cancel_queued_message: '_verified_message_version',
+  // resend_receipt binds the invoice, channels, recipients, amount, memo and the receipt
+  // state the card showed — a receipt sent in between is refused, never doubled.
+  resend_receipt: '_verified_receipt_version',
 };
 
 function confirmationDisplayParams(toolName, params, preview) {
@@ -2559,6 +2586,9 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
   }
   if (BILLING_READER_TOOL_NAMES.has(toolName)) {
     return executeBillingReaderTool(toolName, input, actionContext);
+  }
+  if (RECEIPT_RESEND_TOOL_NAMES.has(toolName)) {
+    return executeReceiptResendTool(toolName, input, actionContext);
   }
   if (BILLING_WRITE_TOOL_NAMES.has(toolName)) {
     return executeBillingWriteTool(toolName, input, actionContext);

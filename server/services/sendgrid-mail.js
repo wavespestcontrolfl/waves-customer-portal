@@ -521,6 +521,8 @@ function isAnnualOfferWithheld(err) {
 }
 
 module.exports = {
+  // The request timeout every SendGrid call here aborts at (the receipt send lock sizes its handoff window from it).
+  REQUEST_TIMEOUT_MS,
   applyAnnualOfferGuard,
   isConfigured,
   isDefiniteRejection,
