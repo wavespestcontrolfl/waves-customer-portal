@@ -2154,6 +2154,30 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Access codes section (PR 2a): read inbound texts for gate, door, lockbox,
+  // garage, call-box and pass codes and file each as a `found` row for the
+  // office; dark behind GATE_ACCESS_CODES_SECTION (+ _SINCE), read at each
+  // tick. runAccessCodeNet takes its own cron lock. Logs counts and error
+  // codes only: never a code, a quote or a message body.
+  cron.schedule('0 3,8,13,18,23,28,33,38,43,48,53,58 * * * *', async () => {
+    // No gate check here: with the section off the sweep still runs its
+    // ownership cleanup (merge undo), and reads nothing else.
+    const capture = require('./access-code-capture');
+    const tickStartedAt = Date.now();
+    try {
+      const result = await capture.runAccessCodeNet();
+      if (result?.read) logger.info(`[access-codes] sweep: ${JSON.stringify(result)}`);
+      // No connection / lost lock session = nothing was read: a missed tick in
+      // job health. 'lease_held' means a concurrent run is doing the work.
+      if (result?.skipped === true && result.reason !== 'lease_held') {
+        await recordMissedTick('access-code-net', tickStartedAt, `tick skipped: ${result.reason || 'no_connection'}`).catch(() => {});
+        throw Object.assign(new Error(`tick skipped: ${result.reason || 'no_connection'}`), { code: 'TICK_SKIPPED' });
+      }
+    } catch (err) {
+      logger.error(`[access-codes] sweep tick failed (${err.code || err.name || 'error'})${err.tally ? ` ${JSON.stringify(err.tally)}` : ''}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // Keep the existing daily call watchdog independent of timer latency.
   cron.schedule('0 */5 * * * *', async () => {
     if (require('./reschedule-link-promises').mode() === 'off') return;
@@ -4447,6 +4471,25 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Payer statement dunning failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 10 MIN (:04, :14, …) — Estimate sent ⇒ Waves Assessment closed
+  // (GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT; returns before any read when off).
+  // Owner ruling 2026-10-04. A sweep over durable state — an open assessment
+  // visit and a sent estimate for the same customer — instead of a hook on
+  // every estimate send path. Reads a handful of rows; off the :00 / :05
+  // minutes the heavier jobs use.
+  // =========================================================================
+  cron.schedule('4-59/10 * * * *', async () => {
+    try {
+      await runExclusive('assessment-estimate-closeout', async () => {
+        const sweep = await require('./assessment-estimate-closeout').closeAssessmentsWithSentEstimates();
+        if (sweep.closed) logger.info(`Assessment closeout on estimate sent: ${sweep.closed} closed of ${sweep.candidates}`);
+      });
+    } catch (err) {
+      logger.error(`Assessment closeout on estimate sent failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

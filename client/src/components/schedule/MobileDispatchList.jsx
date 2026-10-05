@@ -10,7 +10,7 @@
 // ET-anchored: "today," week anchoring, and section headers all compute
 // against America/New_York — the business is in SW Florida. No UTC.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BookOpen, Leaf, MapPin, ShieldCheck } from 'lucide-react';
 import WavesMark from '../brand/WavesMark';
 import { Badge } from '../ui';
@@ -164,22 +164,41 @@ function headerLabel(dateStr) {
   });
 }
 
-// "~9 min to next" — the straight-line drive estimate the day route computes
-// (GET /admin/schedule). The leg in is the card above's leg out, so it is not
-// repeated (owner 2026-10-05: "from last stop" was filler). Absent fields
-// (week view, older payload) and a missing leg render nothing, never 0.
-function DriveLegs({ service }) {
-  if (service.lastStop || !Number.isFinite(service.driveToNextMin)) return null;
+// The drive into a stop, drawn as a thin line above its card (owner
+// 2026-10-05): "~59 min drive from <previous stop>". The server stamps each
+// leg on one card only (driveInShown) and names the stop it comes from, so
+// the line stays right when techs' stops interleave. Absent fields (week
+// view, older payload) and a leg without coordinates render nothing, never
+// "~0 min".
+function DriveLine({ service }) {
+  if (!service.driveInShown || !Number.isFinite(service.driveFromPrevMin)) return null;
+  const from = service.drivePrevName ? ` from ${service.drivePrevName}` : '';
   return (
-    <div className="flex flex-wrap gap-1.5" style={{ marginTop: 6 }}>
-      <span
-        className="u-nums rounded-full border-hairline border-zinc-200 bg-zinc-50 text-ink-secondary"
-        style={{ fontSize: 14, padding: '2px 8px' }}
-      >
-        ~{service.driveToNextMin} min to next
-      </span>
+    <div
+      className="flex items-center u-nums border-b border-hairline border-zinc-200 bg-zinc-50 text-ink-tertiary"
+      style={{ fontSize: 14, padding: '5px 14px 5px 22px', gap: 8 }}
+    >
+      <span aria-hidden style={{ width: 2, height: 14, borderRadius: 1, background: 'currentColor', opacity: 0.4, flexShrink: 0 }} />
+      <span className="min-w-0">~{service.driveFromPrevMin} min drive{from}</span>
     </div>
   );
+}
+
+// "AT" for Alex Tech: two techs sharing a first initial still read apart.
+function techInitials(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  return parts.map((p) => p[0]).join('').slice(0, 3).toUpperCase() || '?';
+}
+
+// The day's drive, each leg counted once: "~2h 10m". Hidden when any leg
+// could not be measured: a partial sum would read as the whole day.
+function dayDriveLabel(services) {
+  if (services.some((s) => s.driveLegUnknown)) return null;
+  const total = services.reduce((sum, s) => (s.driveInShown && Number.isFinite(s.driveFromPrevMin) ? sum + s.driveFromPrevMin : sum), 0);
+  if (total <= 0) return null;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return h ? `~${h}h ${m}m` : `~${m}m`;
 }
 
 // The word under a card button's icon.
@@ -314,7 +333,6 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
             {formatWindow(service)}
           </span>
         </button>
-        <DriveLegs service={service} />
         <DispatchReadinessStrip readiness={service.readiness} onOpen={onProtocol ? () => onProtocol(service) : null} className="mt-2" />
         {hasActions && (
           <div className="flex items-stretch gap-2 flex-wrap" style={{ marginTop: 10 }}>
@@ -437,7 +455,11 @@ function AppointmentRow({ service, onEdit, onEnRoute, onProtocol, onTreatmentPla
 
 // An empty hour in the day list: tapping it opens New appointment with the
 // day and hour filled in.
-function OpenHourRow({ hour, onBook }) {
+// `free` names who can take the hour when more than one tech works the day
+// (owner 2026-10-05): the list mixes techs, so a booked hour can still read
+// Open for someone else.
+function OpenHourRow({ hour, onBook, free }) {
+  const names = (free || []).map((t) => t.name).filter(Boolean);
   return (
     <div className="bg-zinc-50 border-b border-hairline border-zinc-200" style={{ padding: '6px 10px' }}>
       <button
@@ -446,10 +468,26 @@ function OpenHourRow({ hour, onBook }) {
         className="flex items-center w-full text-left rounded-xs border border-dashed border-zinc-300 bg-zinc-50 hover:border-zinc-900 hover:bg-white active:bg-white u-focus-ring"
         style={{ height: 44, padding: '0 12px', gap: 12 }}
         aria-label={`Book open hour ${formatOpenHour(hour)}`}
+        aria-description={names.length ? `Free: ${names.join(', ')}` : undefined}
+        title={names.length ? `Free: ${names.join(', ')}` : undefined}
       >
         <span className="u-nums font-medium text-zinc-900" style={{ fontSize: 14, minWidth: 92 }}>
           {formatOpenHour(hour)}
         </span>
+        {free && free.length > 0 && (
+          <span className="flex items-center" style={{ gap: 3 }} aria-hidden>
+            {free.slice(0, 3).map((t) => (
+              <span
+                key={t.id}
+                className="inline-flex items-center justify-center rounded-full bg-zinc-900 text-white font-medium u-nums"
+                style={{ minWidth: 28, height: 24, padding: '0 6px', fontSize: 14 }}
+              >
+                {techInitials(t.name)}
+              </span>
+            ))}
+            {free.length > 3 && <span className="text-ink-tertiary" style={{ fontSize: 14 }}>+{free.length - 3}</span>}
+          </span>
+        )}
         <span className="text-ink-tertiary" style={{ fontSize: 14 }}>Open</span>
         <span className="ml-auto font-medium text-ink-secondary" style={{ fontSize: 14 }}>+ Book</span>
       </button>
@@ -509,6 +547,11 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
     const ids = freeTechs.get(hour);
     return ids && ids.length === 1 ? ids[0] : undefined;
   };
+  // Who is free in an hour, shown only when more than one tech works.
+  const freeFor = (hour) => (working.length > 1
+    ? (freeTechs.get(hour) || []).map((id) => working.find((t) => t.id === id)).filter(Boolean)
+    : null);
+  const driveLabel = useMemo(() => dayDriveLabel(services || []), [services]);
   const today = isETToday(dateStr);
   return (
     <section>
@@ -546,6 +589,7 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
           {openHours.length > 0 && (
             <span className="text-zinc-900 font-medium" style={{ fontSize: 14 }}> · {openHours.length} open</span>
           )}
+          {driveLabel && <span style={{ fontSize: 14 }}> · {driveLabel} driving</span>}
         </span>
       </header>
       {rows.length === 0 ? (
@@ -557,8 +601,9 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
         </div>
       ) : (
         rows.map(({ svc, hour }) => (svc ? (
+          <Fragment key={svc.id}>
+          <DriveLine service={svc} />
           <AppointmentRow
-            key={svc.id}
             service={svc}
             onEdit={onEdit}
             onEnRoute={onEnRoute}
@@ -570,10 +615,12 @@ function DaySegment({ dateStr, services, rainChance, onEdit, onEnRoute, onProtoc
             onQuickAction={onQuickAction}
             onRefresh={onRefresh}
           />
+          </Fragment>
         ) : (
           <OpenHourRow
             key={`open-${hour}`}
             hour={hour}
+            free={freeFor(hour)}
             onBook={() => onCreateSlot({
               date: dateStr,
               windowStart: hourToHHMM(hour),

@@ -11,6 +11,7 @@
  *   GATE_SMS_ANY_LANGUAGE_INBOX=true (inbox assist for a customer text in another language: when GATE_SMS_ANY_LANGUAGE_TRIAL has stored a test answer for the customer's latest text and nobody has answered it, the Communications composer shows the English translation of their text and the checked reply in their language beside its English, with a Use button that fills the message box. Staff press Send through the ordinary composer; nothing sends on its own and no reply path changes. Strict opt-in via gateEnvValue, read at call time by server/services/sms-translation.js inboxAssistFor(); dark by default; off = GET /admin/communications/agent-draft returns translation: null.)
  *   GATE_DUPLICATES_SAME_ADDRESS=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers at the same address with different phones, for the office to merge or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; read at request time via duplicatesSameAddressLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
  *   GATE_DUPLICATES_SAME_NAME=true (the admin Duplicates page and /api/admin/customer-duplicates also list customers with the same first and last name but a different phone and address, for the office to merge, merge while keeping the other address as a second property, or mark as separate; review-only, never auto-merged, the auto-merge cron cannot see them; pairs the shared-phone and same-address lists already show are left out; read at request time via duplicatesSameNameLive(), strict === 'true', dark by default; off = the page and API are byte-identical to before; sends nothing to a customer)
+ *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
@@ -34,6 +35,7 @@
  *   GATE_VOICE_AI_AGENT=true    (enable bilingual AI voice backstop on unanswered calls)
  *   GATE_OUTBOUND_VOICEMAIL_SMS=true (admin click-to-call that hits the customer's voicemail hangs up and texts "sorry we missed you" instead)
  *   GATE_MISSED_CALL_TEXT_BACK=true (unknown caller waits 25s+, no answer, no voicemail — texts them back from the line they called)
+ *   GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL=true (text-back lane only: a 25s+ unknown caller whose voicemail recording held no speech — rejected or marker-only transcript — also gets the text; needs GATE_MISSED_CALL_TEXT_BACK; the missed-call bell is unchanged; dark by default)
  *   GATE_AI_ASSISTANT=true      (enable AI auto-replies to customers)
  *   GATE_LEGACY_AI_DRAFTS=true  (enable inbound SMS AI draft approval queue)
  *   GATE_SMS_SHADOW_DRAFTS=true (silent house-voice shadow drafts of inbound SMS)
@@ -123,6 +125,7 @@
  *   GATE_PORTAL_YARD_CALENDAR=true ("Your yard this month" card in the logged-in portal, owner-approved 2026-10-01: the month's lawn, shrub and weed pressure from the species-catalog yard calendar, filtered to the customer's grass and plan lines, plus the same-city weather and household-pest forecast. Off unless exactly 'true', read at call time via portalYardCalendarLive(); off = GET /api/feed/yard answers {available:false} and the existing Local Conditions card renders exactly as before. Sends nothing to a customer.)
  *   GATE_PERMIT_DETAIL_SYNC=true (Manatee permit detail collection, address-match round 2 / R2-A: after the weekly report sync, a slow sequential pass reads each new-home permit's public ACA record page for conditioned and under-roof square footage, stories, bedrooms and bathrooms into construction_permit_records. Off unless exactly 'true', read at call time via permitDetailSyncLive(); independent of GATE_PERMIT_SYNC. Collects only: nothing reads it for a lookup or a price yet, nothing is sent to a customer. Kill switch: unset.)
  *   GATE_LOOKUP_BUSINESS_IDENTITY=true (address-match PR 5: the admin estimate lookup and the estimator engine ask Google Places which operating business sits at the street number and read its type and tenant count, so a storefront with its own street number inside a plaza parcel is no longer priced off the whole building or a satellite guess. Needs GATE_COMMERCIAL_SUITE_SIZING and only runs for the opted-in admin lookup and engine, never a public route. A matched business with part-building evidence is one suite; one with none of that is scope_unresolved, no price until the CSR answers "just your space or the whole building?". Deterministic, no AI reaches a size or price. Off unless exactly 'true', read at call time via lookupBusinessIdentityLive(); off = no Places call and byte-identical output. Kill switch: unset.)
+ *   GATE_LOOKUP_PERMIT_FACTS=true (address-match round 2 / R2-B: the property lookup reads the home's own Manatee building permit facts (conditioned and under-roof square footage, stories; collected by GATE_PERMIT_DETAIL_SYNC into construction_permit_records) when the county roll has no building for the address, and the admin estimate tool and the estimator engine prefill home sq ft from them as a sourced estimate above the plat median, always flagged for confirmation and never as a measurement. Off unless exactly 'true', read at call time via lookupPermitFactsLive(); off = no permit read, byte-identical lookup, profile and draft. Kill switch: unset.)
  *   GATE_LLM_COST_TRACKING=true (estimated AI spend: a weekly pull of OpenRouter's public per-token prices into llm_model_prices (never hand-typed), estimated cost per lane on the Agents hub Control center from the call ledger's tokens (needs GATE_LLM_CALL_LEDGER for rows to exist), and a daily 7:40 AM ET check that raises ONE admin item when a lane's spend yesterday is at least LLM_COST_ALERT_MIN_USD (default 5) and LLM_COST_ALERT_MULTIPLIER (default 3) times its average day over the week before; services/llm-cost.js; internal only, no customer sends; ships DARK, read at call time via llmCostTrackingLive(); unset = off, the hub shows no cost and nothing is fetched)
  *   GATE_TYPED_DECISIONS=true (typed yes/no decisions from TypeSafe Jev, pinned model ROUTES.typedDecision; services/typed-decisions/jev.js askPackage answers a registered decision package or returns {ok:false, reason:'gate_off'}; shadow/evidence only, no customer sends; ships DARK, read at call time via typedDecisionsLive(); unset = off)
  *   GATE_CALL_INCIDENTS=true (correction loop for calls: the nightly 04:10 ET job turns each self-audit field disagreement into an ai_incidents row, confirmed only when a second model on the other provider from the auditor's, reading the call blind, reaches the auditor's answer and both readers' excerpts are in the transcript (unknown auditor provider or a truncated call stays a lead); Sunday 04:50 fix proposals for calls; services/call-incidents.js. Adds about one fast-tier OpenAI call per finding; shadow data only, no customer sends; honoured only while GATE_CALL_SELF_AUDIT is on; ships DARK, read at call time via callIncidentsLive(); unset = off)
@@ -1131,6 +1134,14 @@ const gates = {
   // 'true'); this entry is the status/log listing. Kill switch: unset.
   voiceRelayRecovery: process.env.GATE_VOICE_RELAY_RECOVERY === 'true',
 
+  // Sandy unbooked-call hand-off — a production relay call that closes
+  // ai_handled with caller speech, no booking, no lead and no transfer rings
+  // ONE office bell (relay_unbooked_call) and enters the lead pipeline
+  // (services/voice-agent/relay-unbooked-handoff.js). Off ⇒ the close is
+  // byte-identical to today. Read at CALL time via relayUnbookedHandoffLive();
+  // this entry is the status/log listing. Kill switch: unset.
+  relayUnbookedHandoff: process.env.GATE_RELAY_UNBOOKED_HANDOFF === 'true',
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
@@ -1175,6 +1186,15 @@ const gates = {
   // ("Gate code is 1234"), not only from the strict sentence form. Read at
   // call time in sms-operational-extractor.js. Off = strict form only.
   accessCodeCapture: gateEnvValue('GATE_ACCESS_CODE_CAPTURE'),
+
+  // Access codes section (server half): a text that states a gate, door,
+  // lockbox, garage, call-box or pass code is filed as a `found` row in
+  // customer_access_codes for the office to accept, dismiss or retire, and the
+  // admin API at /api/admin/access-codes serves them. Needs
+  // GATE_ACCESS_CODES_SECTION_SINCE (an offset ISO instant) for the sweep, so
+  // turning it on never reads history. Read at call time in
+  // services/access-code-capture.js; this entry is for logGateStatus only.
+  accessCodesSection: gateEnvValue('GATE_ACCESS_CODES_SECTION'),
 
   // Email asks + staff promises, same shape as the SMS lane above. Also
   // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
@@ -2207,6 +2227,14 @@ const gates = {
   // no claim taken. The sweep still reconciles claims this lane left
   // orphaned while it was on.
   missedCallTextBack: process.env.GATE_MISSED_CALL_TEXT_BACK === 'true',
+  // Widens the text-back lane ONLY (not the bell): a caller who waited 25s+
+  // at the voicemail greeting and hung up without speaking leaves a recording
+  // the processor rejects as no-speech; the voicemail lane does nothing with
+  // it, so the caller got no text. On → that call counts as "no message
+  // left" once the processor has finished with it (a recording still
+  // awaiting transcription never does). Needs GATE_MISSED_CALL_TEXT_BACK.
+  // Off → byte-identical to before.
+  missedCallTextBackEmptyVoicemail: process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true',
 
   // GrowthBook experimentation — master gate for A/B experiment assignment on
   // customer-facing surfaces (experimentation initiative, Phase 0/1). When ON,
@@ -4422,6 +4450,21 @@ function duplicatesSameNameLive() {
   return process.env.GATE_DUPLICATES_SAME_NAME === 'true';
 }
 
+// GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL — ships DARK, off unless exactly
+// 'true'. Same switch the text-back service reads through isEnabled().
+function missedCallTextBackEmptyVoicemailLive() {
+  return process.env.GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL === 'true';
+}
+
+// GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT read at CALL time — strict `=== 'true'`,
+// dark. On, the ten-minute sweep (assessment-estimate-closeout.js) completes
+// an open Waves Assessment visit once an estimate has been sent to its
+// customer after it (owner ruling 2026-10-04). Off = the sweep returns before
+// reading anything. Kill switch: unset it.
+function estimateSentClosesAssessmentLive() {
+  return process.env.GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -4532,6 +4575,12 @@ function standardWordingPreviewLive() {
 // suggestion route answers 404 and the queue claims no queued suggestion.
 function blogSearchSuggestLive() {
   return process.env.GATE_BLOG_SEARCH_SUGGEST === 'true';
+}
+
+// GATE_RELAY_UNBOOKED_HANDOFF read at CALL time — ships DARK, off unless
+// exactly 'true'. The one reader for Sandy's unbooked-call hand-off.
+function relayUnbookedHandoffLive() {
+  return process.env.GATE_RELAY_UNBOOKED_HANDOFF === 'true';
 }
 
 // GATE_VOICE_RELAY_OPENAI read at CALL time — the one reader every entry
@@ -5428,6 +5477,16 @@ function lookupBusinessIdentityLive() {
   return process.env.GATE_LOOKUP_BUSINESS_IDENTITY === 'true';
 }
 
+// GATE_LOOKUP_PERMIT_FACTS read at CALL time — ships DARK, off unless exactly
+// 'true'. The one reader for the permit-facts leg of the property lookup
+// (routes/property-lookup-v2.js: the _permitBuildingFacts stamp and the
+// enriched profile's permitBuildingFacts) and the estimator engine's
+// permit-plan sqft source: off, construction_permit_records is never read
+// for a lookup and the lookup, profile and draft are exactly as before.
+function lookupPermitFactsLive() {
+  return process.env.GATE_LOOKUP_PERMIT_FACTS === 'true';
+}
+
 // GATE_LAWN_REPORT_PHOTO_SET read at CALL time — ships DARK, off unless
 // exactly 'true'. The one reader for the lawn report's photo set (report-data.js
 // buildLawnAssessmentReportData, lawnAssessmentPdfSignature): off, the report
@@ -5638,10 +5697,14 @@ module.exports.reviewLowRatingAlertLive = reviewLowRatingAlertLive;
 module.exports.duplicatesSameAddressLive = duplicatesSameAddressLive;
 // GATE_DUPLICATES_SAME_NAME reader, on its own line.
 module.exports.duplicatesSameNameLive = duplicatesSameNameLive;
+// GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT reader, on its own line.
+module.exports.estimateSentClosesAssessmentLive = estimateSentClosesAssessmentLive;
 // GATE_PERMIT_DETAIL_SYNC reader, on its own line so gate PRs never conflict.
 module.exports.permitDetailSyncLive = permitDetailSyncLive;
 // GATE_LOOKUP_BUSINESS_IDENTITY reader, on its own line so gate PRs never conflict.
 module.exports.lookupBusinessIdentityLive = lookupBusinessIdentityLive;
+// GATE_LOOKUP_PERMIT_FACTS reader, on its own line so gate PRs never conflict.
+module.exports.lookupPermitFactsLive = lookupPermitFactsLive;
 // GATE_LAWN_RAINFAST_WATCH reader, on its own line so gate PRs never conflict.
 module.exports.lawnRainfastWatchLive = lawnRainfastWatchLive;
 // GATE_LAWN_LIGHTING reader, on its own line so gate PRs never conflict.
@@ -5650,6 +5713,10 @@ module.exports.lawnLightingLive = lawnLightingLive;
 module.exports.lawnReportPhotoSetLive = lawnReportPhotoSetLive;
 // GATE_LAWN_REPORT_PHOTO_FINDINGS reader, on its own line so gate PRs never conflict.
 module.exports.lawnReportPhotoFindingsLive = lawnReportPhotoFindingsLive;
+// GATE_MISSED_CALL_TEXT_BACK_EMPTY_VOICEMAIL reader, on its own line so gate PRs never conflict.
+module.exports.missedCallTextBackEmptyVoicemailLive = missedCallTextBackEmptyVoicemailLive;
+// GATE_RELAY_UNBOOKED_HANDOFF reader, on its own line so gate PRs never conflict.
+module.exports.relayUnbookedHandoffLive = relayUnbookedHandoffLive;
 // GATE_LAWN_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.
 module.exports.lawnTechParagraphLive = lawnTechParagraphLive;
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;

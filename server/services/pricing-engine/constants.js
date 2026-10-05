@@ -901,6 +901,8 @@ const PALM_TREATMENTS = {
     ],
     notes: [
       'Preventive program only. Do not sell as a cure for symptomatic or positive palms.',
+      'Each injection leaves a small permanent hole in the trunk.',
+      'Offer only for healthy palms or palms next to an affected palm.',
     ],
   },
 

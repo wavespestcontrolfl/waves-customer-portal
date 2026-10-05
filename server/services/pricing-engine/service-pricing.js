@@ -3955,11 +3955,15 @@ function priceCommercialTreeShrub(property = {}, options = {}) {
 // ============================================================
 // PALM INJECTION
 // ============================================================
+// Customer-facing lethal bronzing disclosure (owner 2026-10-05). Shown on the
+// estimate card through the line's scopeNote and carried in the warning below.
+const LETHAL_BRONZING_CUSTOMER_NOTE = 'Each injection leaves a small permanent hole in the trunk. We offer this only for healthy palms or palms next to an affected palm.';
+
 const PALM_WARNING_TEXT = {
   nutrition: 'Corrective injection; not a replacement for full granular palm fertilization.',
   combo: 'Do not model as tank mix; separate compatible application steps.',
   fungal: 'Diagnosis/product-driven treatment.',
-  lethalBronzing: 'Preventive program only; not a cure for symptomatic or positive palms.',
+  lethalBronzing: `Preventive program only; not a cure for symptomatic or positive palms. ${LETHAL_BRONZING_CUSTOMER_NOTE}`,
   treeAge: 'Annual value is annualized from a 24-month interval; perVisit is the event price.',
 };
 
@@ -4377,6 +4381,8 @@ function pricePalmInjection(property, options) {
 
     warnings,
   };
+
+  if (treatmentType === 'lethalBronzing') result.scopeNote = LETHAL_BRONZING_CUSTOMER_NOTE;
 
   if (intervalMonths) {
     result.displayFrequency = formatInterval(intervalMonths);

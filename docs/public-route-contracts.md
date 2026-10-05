@@ -1508,6 +1508,17 @@ cadence, visit count, cadence wording, catalog key, or an explicit tier field
 grandfathered and untouched by this gate; it only blocks a NEW self-serve
 accept from landing on the retired cadence.
 
+Lethal bronzing injection disclosure (owner ruling 2026-10-05). In GET
+`/api/estimates/:token/data` and the server-rendered estimate page, the
+`palm_injection` supplement row may carry a `scopeNote` string. It is set only
+when the palm treatment is the Lethal Bronzing Preventive OTC program
+(`pricePalmInjection` → `results.injection.scopeNote` → the supplement row);
+no other palm treatment or service row gets one. The text is fixed customer
+copy: "Each injection leaves a small permanent hole in the trunk. We offer this
+only for healthy palms or palms next to an affected palm." The card renders it
+under the treatment row. It carries no pricing, no customer data and no
+internal cost basis.
+
 Missing-contact capture (owner ruling 2026-09-27). GET
 `/api/estimates/:token/data` carries `contactGaps: { firstName, lastName, email, phone }` —
 booleans only — while the estimate is accept-active (never on
@@ -3821,8 +3832,14 @@ only `/api/webhooks/lead` / `/api/leads` persist it.
 The returned and lead-stored `enriched` profile is the admin lookup's profile
 MINUS the staff-only `subdivisionMedian` block (the plat name, county, and
 assessed-neighbor sample/range that back the admin estimator's home-size
-estimate for an unassessed vacant parcel) — `publicEnrichedProfile` strips it
-on both paths; the response otherwise describes only the requested parcel).
+estimate for an unassessed vacant parcel) and MINUS the staff-only
+`permitBuildingFacts` block (the home's own building permit number, issue/CO
+dates and plan figures behind the admin estimator's new-construction home-size
+estimate; `GATE_LOOKUP_PERMIT_FACTS`), with a story count the permit filled
+(`storiesSource: 'permit'`) returned to the default (`stories: 1`,
+`storiesSource: 'default'`) and the `homeSqFt` verify flag's prose replaced by
+the shared source-free vacant-parcel copy — `publicEnrichedProfile` strips all of
+it on both paths; the response otherwise describes only the requested parcel).
 Operational `meta.providerStatus` (credential configuration and attempted-provider
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;
