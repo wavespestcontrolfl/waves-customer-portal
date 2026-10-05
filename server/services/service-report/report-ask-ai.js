@@ -445,10 +445,12 @@ function buildReportAskFacts({
   // The visit summary is only needed when the reviewed sections are absent.
   const summary = clip(data.summary, 700);
 
+  // Same watering screen as the sections: a held aftercare drops an
+  // "increase irrigation" recommendation before the three-row cap.
   const recommendations = asArray(data.recommendations)
-    .slice(0, 3)
     .map((rec) => clip(typeof rec === 'string' ? rec : rec?.text || rec?.title, 240))
-    .filter(Boolean);
+    .filter((rec) => rec && keep(rec))
+    .slice(0, 3);
   const aiSummary = data.summary ? {} : dropEmpty({
     headline: clip(data.dynamicContext?.aiSummary?.headline, 200),
     body: clip(data.dynamicContext?.aiSummary?.body, 700),
@@ -490,7 +492,7 @@ const SYSTEM_PROMPT = `You answer one question from a Waves Pest Control custome
 RULES
 1. Use only the facts in the FACTS block. Do not add knowledge about products, pests or labels from anywhere else. If the facts do not answer the question, say that in one short sentence and offer: "text us or call ${WAVES_SUPPORT_PHONE_DISPLAY}".
 2. Write 1 to 4 short plain sentences of your own. No greeting, no sign-off, no headings, no lists, no markdown, no emoji, no em dashes.
-2a. REQUIRED LINES. When the facts hold required_lines, those are the office's recorded instructions for this customer. Put every one of them into your answer exactly as written, word for word, with the same punctuation, as its own sentence. You may put your own sentence before or after a required line. Never reword, shorten, merge, split, skip or contradict one, and never add a different instruction on the same subject. Required lines do not count toward the 4 sentences. If a required line already answers the question, add at most one short sentence of your own.
+2a. REQUIRED LINES. When the facts hold required_lines, those are the office's recorded instructions for this customer. Put every one of them into your answer exactly as written, word for word, with the same punctuation, as its own sentence. You may put your own sentence before or after a required line. Never reword, shorten, merge, split, skip or contradict one, and never add a different instruction on the same subject. If a required line has no end punctuation, you may end it with a period. Required lines do not count toward the 4 sentences. If a required line already answers the question, add at most one short sentence of your own.
 3. Answer the question that was asked, about the thing that was asked. A question about one product talks about that product only: what it does and where it went. Do not bring in the other products or the rest of the visit.
 4. If the customer's own concern (customer_concern) bears on the question, lead with it and tie the answer to it.
 5. Never give amounts, rates, totals, mix strengths, percentages, counts of product used, or EPA numbers. Lawn scores in lawn_assessment and plant_health_score_out_of_100 are out of 100: say "82 out of 100", never with a percent sign.
@@ -595,7 +597,8 @@ function leaksTargetList(text, {
   return targetLabelsOf(data).some((label) => said.includes(label) && !allowed.includes(label));
 }
 
-const sentenceCount = (text) => text.split(/(?<=[.!?])\s+/).filter(Boolean).length;
+const splitSentences = (text) => text.split(/(?<=[.!?])\s+/).filter(Boolean);
+const sentenceCount = (text) => splitSentences(text).length;
 
 // Whitespace and curly quotes are the only differences a required line may
 // show between the report and the answer.
@@ -627,12 +630,33 @@ const CONTENT_CHECKS = [
   ['target_list', leaksTargetList],
 ];
 
+// A sentence just before a required line that takes it back. The answer must
+// state the line as itself, not as something the customer is told to ignore.
+const DISMISSAL_CUE = /\b(?:ignore|disregard|not true|no longer|outdated|out of date|you can skip)\b/i;
+const DISMISSES_NEXT = [
+  (before) => /:$/.test(before),
+  (before) => DISMISSAL_CUE.test(before),
+];
+
+// Each required line must be one whole sentence of the answer (several whole
+// consecutive sentences when the line is several), and the sentence before it
+// must not dismiss it.
+function statesLineAlone(sentences, line) {
+  const wanted = splitSentences(matchForm(line));
+  // A line with no end mark may take one from the answer.
+  const bare = (value, want) => (/[.!?]$/.test(want) ? value : value.replace(/[.!?]$/, ''));
+  return sentences.some((_, start) => (
+    wanted.every((want, i) => bare(sentences[start + i] || '', want) === want)
+    && !(start > 0 && DISMISSES_NEXT.some((dismisses) => dismisses(sentences[start - 1])))
+  ));
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
   ['missing_required_line', (text, { requiredLines }) => {
-    const haystack = matchForm(text);
-    return requiredLines.some((line) => !haystack.includes(matchForm(line)));
+    const sentences = splitSentences(matchForm(text));
+    return requiredLines.some((line) => !statesLineAlone(sentences, line));
   }],
 ];
 

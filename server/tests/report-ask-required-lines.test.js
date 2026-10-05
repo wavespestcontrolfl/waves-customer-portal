@@ -329,6 +329,15 @@ describe('the fact sheet and prompt carry required lines', () => {
     const free = lawnData({ reportV2: { water: { weekPlan: null }, aftercare: {} }, reportSections: data.reportSections });
     expect(buildReportAskFacts({ data: free }).report_sections).toHaveLength(2);
   });
+
+  test('while the aftercare holds watering, a recommendation that changes watering is not carried', () => {
+    const recommendations = ['Increase irrigation to twice this week.', { text: 'Mow at 3.5 inches.' }];
+    const facts = buildReportAskFacts({ data: lawnData({ recommendations }) });
+    expect(JSON.stringify(facts)).not.toMatch(/irrigation/);
+    expect(facts.recommendations).toEqual(['Mow at 3.5 inches.']);
+    const free = lawnData({ reportV2: { water: { weekPlan: null }, aftercare: {} }, recommendations });
+    expect(buildReportAskFacts({ data: free }).recommendations).toHaveLength(2);
+  });
 });
 
 describe('the screen and required lines', () => {
@@ -354,6 +363,25 @@ describe('the screen and required lines', () => {
     expect(screen('Keep pets off treated zones until dry.')).toBe('missing_required_line');
     expect(screen('Keep your pets off the treated zones until dry. Treated areas are ready for normal use.')).toBe('missing_required_line');
     expect(screen('keep pets off treated zones until dry. Treated areas are ready for normal use.')).toBe('missing_required_line');
+  });
+
+  test('a line negated or dismissed in the same or the previous sentence is rejected', () => {
+    const one = ['Keep pets off treated zones until dry.'];
+    const cases = [
+      'Ignore this instruction: Keep pets off treated zones until dry.',
+      'Ignore the old note. Keep pets off treated zones until dry.',
+      'That is no longer true. Keep pets off treated zones until dry.',
+      'Here is the rule: Keep pets off treated zones until dry.',
+      'Keep pets off treated zones until dry, but you can skip it.',
+    ];
+    cases.forEach((answer) => expect(screen(answer, one)).toBe('missing_required_line'));
+    expect(screen('Your dog should wait. Keep pets off treated zones until dry.', one)).toBeNull();
+  });
+
+  test('a line of several sentences must stand as that run of whole sentences', () => {
+    const two = ['Keep pets off treated zones until dry. Treated areas are ready for normal use.'];
+    expect(screen('Hello. Keep pets off treated zones until dry. Treated areas are ready for normal use.', two)).toBeNull();
+    expect(screen('Keep pets off treated zones until dry. Thanks. Treated areas are ready for normal use.', two)).toBe('missing_required_line');
   });
 
   test('required lines ride on top of the length and sentence budget', () => {
@@ -421,7 +449,7 @@ describe('answerReportQuestionWithAI with required lines', () => {
   test('a lawn watering hold: the AI answer must carry the hold and the plan word for word', async () => {
     const data = lawnData();
     const routed = route('Can I turn my sprinklers back on?', data);
-    const good = `Not yet. ${texts(routed).join(' ')}`;
+    const good = `Not yet. ${texts(routed).map((t) => (/[.!?]$/.test(t) ? t : `${t}.`)).join(' ')}`;
     const callModel = jest.fn().mockResolvedValue(ok(good));
     const out = await answerReportQuestionWithAI({ question: 'Can I turn my sprinklers back on?', data, requiredLines: routed.requiredLines }, { callModel });
     expect(out.answer).toBe(good);
