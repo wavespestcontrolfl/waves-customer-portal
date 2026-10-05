@@ -359,7 +359,7 @@ async function fileFoundItems(conn, { message }, items, receipt) {
       // Only a DECIDED (active) row covers: a waiting row from another text may
       // still be corrected away, and each text must keep its own evidence.
       const covered = (item) => existing.some((r) => r.status === 'active' && r.kind === item.kind
-        && r.value_hash === item.value_hash && r.life === 'standing'
+        && r.value_hash === item.value_hash && r.life === 'standing' && item.life === 'standing'
         && normalizeText(r.instructions) === normalizeText(item.instructions));
       toInsert = items.filter((item) => {
         if (covered(item)) return false;

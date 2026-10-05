@@ -406,6 +406,14 @@ postgres('access codes section', () => {
       expect((await rows(c.id)).map((r) => r.status).sort()).toEqual(['dismissed', 'found']);
     });
 
+    test('a "today only" text with an active standing code still reaches the office', async () => {
+      const c = await customer();
+      const existing = await found(c.id);
+      await access.accept(trx, existing.id, {});
+      await text(c.id, 'The gate code is #4821 today only');
+      expect(await sweep(stub([gateItem({ life: 'visit', quote: 'The gate code is #4821 today only' })]))).toMatchObject({ found: 1 });
+    });
+
     test('each text keeps its own waiting row, so correcting one away leaves the other', async () => {
       const c = await customer();
       const a = await text(c.id, 'The gate code is #4821', { at: '2040-03-10T14:00:00Z' });
