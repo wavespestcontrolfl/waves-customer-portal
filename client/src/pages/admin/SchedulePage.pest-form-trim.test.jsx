@@ -7,7 +7,7 @@
 // A non-pest line keeps both fields. One box stays (owner 2026-10-05):
 // "Swept eaves and webs" records the pest protocol's sweep action.
 // Seeded default rows start on an area (owner 2026-10-05): Perimeter for an
-// exterior method, Kitchen + Bathrooms for an interior one.
+// exterior method; other methods start empty.
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -97,71 +97,28 @@ describe('areasFromProductRows', () => {
 });
 
 describe('pestRowDefaultArea', () => {
-  it('maps an exterior method to Perimeter and an interior method to Kitchen, Bathrooms', () => {
+  it('maps an exterior method to Perimeter', () => {
     for (const method of ['perimeter_spray', 'broadcast_spray', 'granular_broadcast', 'Perimeter band']) {
       expect(pestRowDefaultArea(method)).toBe('Perimeter');
     }
-    for (const method of ['spot_treatment', 'bait_placement', 'Gel bait']) {
-      expect(pestRowDefaultArea(method)).toBe('Kitchen, Bathrooms');
-    }
   });
-  it('leaves an unknown, missing or non-room method empty', () => {
-    for (const method of ['soil_drench', 'station_check', 'fog_ulv', '', undefined]) {
+  // Interior defaults only seed on typed visits (cockroach), which keep their
+  // own area field (Codex P2 #5978).
+  it('leaves interior, unknown and missing methods empty', () => {
+    for (const method of ['spot_treatment', 'bait_placement', 'Gel bait', 'soil_drench', 'station_check', 'fog_ulv', '', undefined]) {
       expect(pestRowDefaultArea(method)).toBe('');
     }
   });
   it('only ever offers areas on the pest list', () => {
-    for (const area of [...pestRowDefaultArea('perimeter_spray').split(', '), ...pestRowDefaultArea('spot_treatment').split(', ')]) {
-      expect(AREAS_BY_SERVICE.pest).toContain(area);
-    }
+    expect(AREAS_BY_SERVICE.pest).toContain(pestRowDefaultArea('perimeter_spray'));
   });
   it('fills an empty area only, and marks it as a default', () => {
-    expect(withPestRowDefaultArea({ applicationMethod: 'spot_treatment', applicationArea: '' }))
-      .toEqual({ applicationMethod: 'spot_treatment', applicationArea: 'Kitchen, Bathrooms', applicationAreaDefault: true });
+    expect(withPestRowDefaultArea({ applicationMethod: 'perimeter_spray', applicationArea: '' }))
+      .toEqual({ applicationMethod: 'perimeter_spray', applicationArea: 'Perimeter', applicationAreaDefault: true });
     const own = { applicationMethod: 'perimeter_spray', applicationArea: 'Garage' };
     expect(withPestRowDefaultArea(own)).toBe(own);
-    const unknown = { applicationMethod: 'soil_drench', applicationArea: '' };
-    expect(withPestRowDefaultArea(unknown)).toBe(unknown);
-  });
-});
-
-describe('a protocol default row on a regular pest visit', () => {
-  const roachCatalog = [
-    { id: 'a1', name: 'Alpine WSG', category: 'Insecticide' },
-    { id: 'a2', name: 'Gentrol IGR', category: 'Insect Growth Regulator' },
-    { id: 'a3', name: 'Advion Cockroach Gel Bait', category: 'Gel Bait' },
-    { id: 'a4', name: 'Synthetic Drench', category: 'Insecticide' },
-  ];
-  const protocolResponse = {
-    source: 'protocol_visit',
-    programKey: 'general_pest',
-    products: [
-      { id: 'a1', completionApplicationMethod: 'spot_treatment' },
-      { id: 'a2', completionApplicationMethod: 'spot_treatment' },
-      { id: 'a3', completionApplicationMethod: 'bait_placement' },
-      { id: 'a4', completionApplicationMethod: 'soil_drench' },
-    ],
-  };
-  it('starts interior rows on Kitchen and Bathrooms and an unknown method on no area', async () => {
-    vi.stubGlobal('fetch', vi.fn(async (url) => ({
-      ok: true,
-      json: async () => (String(url).includes('/default-products')
-        ? protocolResponse
-        : { customer: {}, actions: [], available: false }),
-    })));
-    const onSubmit = vi.fn().mockResolvedValue({});
-    await act(async () => {
-      render(<CompletionPanel service={regularPest()} products={roachCatalog} onClose={() => {}} onSubmit={onSubmit} />);
-    });
-    await screen.findByText('Alpine WSG');
-    await waitFor(() => expect(screen.getAllByText('Treatment areas')).toHaveLength(4));
-    await act(async () => { fireEvent.click(submitButton()); });
-    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-    const body = onSubmit.mock.calls[0][1];
-    expect(body.products.map((p) => p.applicationArea)).toEqual([
-      'Kitchen, Bathrooms', 'Kitchen, Bathrooms', 'Kitchen, Bathrooms', null,
-    ]);
-    expect(body.areasServiced).toEqual(['Kitchen', 'Bathrooms']);
+    const interior = { applicationMethod: 'spot_treatment', applicationArea: '' };
+    expect(withPestRowDefaultArea(interior)).toBe(interior);
   });
 });
 
@@ -301,6 +258,21 @@ describe.each([['desktop', 1024], ['phone', 390]])('the Complete Service form, %
       ['p1', 'Perimeter'], ['p2', 'Perimeter'], ['p3', 'Perimeter'],
     ]);
     expect(body.areasServiced).toEqual(['Perimeter']);
+  });
+
+  // Codex P2 #5978: an untouched default follows the method.
+  it('drops the Perimeter default when the tech switches that row to a non-exterior method', async () => {
+    const onSubmit = await mount(regularPest());
+    await screen.findByText('Taurus SC');
+    const methodSelect = [...document.querySelectorAll('select')].find((el) => el.value === 'perimeter_spray');
+    expect(methodSelect).toBeTruthy();
+    fireEvent.change(methodSelect, { target: { value: 'spot_treatment' } });
+    fillLinearFeet();
+    await act(async () => { fireEvent.click(submitButton()); });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    const body = onSubmit.mock.calls[0][1];
+    const changed = body.products.find((p) => p.applicationMethod === 'spot_treatment');
+    expect(changed.applicationArea ?? null).toBeNull();
   });
 
   it('keeps an area the tech changed, and a row the tech cleared stays clear', async () => {

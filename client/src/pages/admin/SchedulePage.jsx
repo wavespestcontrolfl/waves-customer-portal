@@ -501,23 +501,20 @@ export function areasFromProductRows(selectedProducts, orderedAreas) {
 // A seeded default product row on a regular pest visit starts on an area
 // (owner 2026-10-05, "prefill areas"): with no row area the report's exterior
 // re-entry line drops off, and a tech would tap Perimeter on nearly every
-// visit. An exterior method starts on "Perimeter"; an interior method
-// (crack & crevice spot work, gel bait) starts on the conservative room pair
-// Kitchen + Bathrooms; any other method starts empty. Each value must sit on
-// the pest area list AND on the matching side of treatment-area-scopes.json,
-// or it is not offered. Fills an empty area only, and is marked
-// applicationAreaDefault like the lawn prefill, so a tech's own pick (which
-// clears the mark) is never replaced.
+// visit. An exterior method starts on "Perimeter"; any other method starts
+// empty (the interior defaults only seed on typed visits such as cockroach,
+// which keep their own area field). The value must sit on the pest area list
+// AND on the exterior side of treatment-area-scopes.json, or it is not
+// offered. Fills an empty area only, and is marked applicationAreaDefault
+// like the lawn prefill: it follows a method change until the tech picks an
+// area (which clears the mark), and a tech's own pick is never replaced.
 const PEST_ROW_DEFAULT_AREAS = {
   exterior: ["Perimeter"],
-  interior: ["Kitchen", "Bathrooms"],
 };
 const PEST_ROW_METHOD_SCOPE = {
   perimeter_spray: "exterior",
   broadcast_spray: "exterior",
   granular_broadcast: "exterior",
-  spot_treatment: "interior",
-  bait_placement: "interior",
 };
 export function pestRowDefaultArea(applicationMethod) {
   const scope = PEST_ROW_METHOD_SCOPE[normalizeApplicationMethod(applicationMethod)];
@@ -17330,6 +17327,13 @@ export function CompletionPanel({
           if (!p.totalAmountManual) next.totalAmount = "";
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
+        // An untouched pest default area follows the method (Codex P2 #5978):
+        // spot treatment never keeps "Perimeter" it did not choose.
+        if (field === "applicationMethod" && isRegularPestVisit && p.applicationAreaDefault) {
+          const area = pestRowDefaultArea(value);
+          next.applicationArea = area;
+          next.applicationAreaDefault = Boolean(area);
+        }
         // The row the tech typed into owns its gallons from here on, and the
         // first such row owns the tank.
         if (field === "carrierGallons") Object.assign(next, markTankEntry(next, tankOwner));
