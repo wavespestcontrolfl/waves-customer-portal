@@ -2679,10 +2679,17 @@ async function mirrorSavedMethodForSucceededIntent(paymentIntent) {
 // Auto Pay, a cleared bank debit), so this is the one call for all of them.
 // The closeout decides whether the visit may close (an unstarted visit today
 // is a prepayment and stays open); a visit already completed refuses quietly.
-// Best-effort by the closeout's own contract: it never throws back into the
-// settled payment. Runs BEFORE the review step, like the reconcile route —
-// the review enrollment reads the record this closeout links.
+// A refusal, or a failure the closeout AUDITED, ends here: the visit stays
+// open and the daily paid-invoice sweep retries what is retryable. A failure
+// with NO audit row (the invoice read here, an early read inside the
+// closeout, or the audit write itself) leaves nothing durable behind, and
+// that sweep only acts on an audit row — so it goes back to Stripe for
+// redelivery, like an unrecorded review enrollment below. The settle above is
+// status-guarded and the closeout is idempotent, so the retry re-runs safely.
+// Runs BEFORE the review step, like the reconcile route — the review
+// enrollment reads the record this closeout links.
 async function closeOutVisitAfterPaidInvoice(piId, { invoiceId = null } = {}) {
+  let out;
   try {
     const paid = await db('invoices')
       .where(invoiceId ? { id: invoiceId } : { stripe_payment_intent_id: piId })
@@ -2690,9 +2697,14 @@ async function closeOutVisitAfterPaidInvoice(piId, { invoiceId = null } = {}) {
       .first('id');
     if (!paid) return;
     const { closeOutVisitForIssuedInvoice } = require('../services/invoice-issued-closeout');
-    await closeOutVisitForIssuedInvoice({ invoiceId: paid.id, trigger: 'paid' });
+    out = await closeOutVisitForIssuedInvoice({ invoiceId: paid.id, trigger: 'paid' });
   } catch (err) {
-    logger.error(`[stripe-webhook] Paid-invoice visit closeout failed for PI ${piId}: ${err.message}`);
+    logger.error(`[stripe-webhook] Paid-invoice visit closeout failed for PI ${piId} — rethrowing for Stripe retry: ${err.message}`);
+    throw err;
+  }
+  if (out && out.reason === 'error' && !out.audited) {
+    logger.error(`[stripe-webhook] Paid-invoice visit closeout for PI ${piId} failed with no audit row — rethrowing for Stripe retry: ${out.error}`);
+    throw new Error(`paid-invoice visit closeout was not recorded for retry: ${out.error}`);
   }
 }
 

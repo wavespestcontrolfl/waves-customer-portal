@@ -546,8 +546,15 @@ postgres('invoice issued ⇒ visit completed (migrated PostgreSQL)', () => {
       return trx(table);
     }, { raw: (...a) => trx.raw(...a) });
     const out = await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: flaky, today: TODAY });
-    expect(out).toMatchObject({ closed: false, reason: 'error', visitId: svc.id });
+    expect(out).toMatchObject({ closed: false, reason: 'error', visitId: svc.id, audited: true });
     expect(mockCompleteScheduledService).not.toHaveBeenCalled();
+    // A failure with NO durable audit row says so, and the Stripe webhook
+    // hands it back for redelivery: the audit write itself failing…
+    recordAuditEvent.mockRejectedValueOnce(new Error('audit insert reset'));
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: flaky, today: TODAY })).toMatchObject({ reason: 'error', visitId: svc.id, audited: false });
+    // …or a read that failed before any visit was in hand.
+    const blind = Object.assign(() => { throw new Error('invoice lookup reset'); }, { raw: (...a) => trx.raw(...a) });
+    expect(await closeOutVisitForIssuedInvoice({ invoiceId: inv.id, trigger: 'paid', conn: blind, today: TODAY })).toMatchObject({ reason: 'error', visitId: null, audited: false });
     expect(recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       action: 'visit.completion_on_invoice_issued_refused', resource_id: svc.id,
       metadata: expect.objectContaining({ invoiceId: inv.id, trigger: 'paid', code: 'error' }),

@@ -404,8 +404,10 @@ async function auditCloseoutOutcome(run, { closed, visitId, resumed = false, sta
       resource_id: visitId,
       metadata: { invoiceId: run.invoice?.id || run.invoiceId, trigger: run.trigger, resumed, status, code, ...(error ? { error } : {}) },
     });
+    return true;
   } catch (auditErr) {
     logger.warn(`[invoice-issued-closeout] audit write failed for visit ${visitId}: ${auditErr.message}`);
+    return false;
   }
 }
 
@@ -520,10 +522,15 @@ async function loadCloseoutInvoice(run) {
 async function auditCloseoutFailure(run, err) {
   const visitId = run.linkedVisitId || (err && err.linkedVisit && err.linkedVisit.id) || null;
   logger.error(`[invoice-issued-closeout] failed for invoice ${run.invoiceId}${visitId ? ` (visit ${visitId})` : ''}: ${err.message}`);
-  if (visitId) {
-    await auditCloseoutOutcome(run, { closed: false, visitId, resumed: run.resuming, code: 'error', error: String(err.message || err).slice(0, 500) });
-  }
-  return { closed: false, reason: 'error', error: err.message, visitId };
+  // `audited`: the failure row the retry sweeps look for exists. False when
+  // the failure came before any visit was in hand (the invoice read, the
+  // link read) or the audit write itself failed — then NOTHING durable
+  // records that a closeout is owed, and a caller with a redelivery
+  // mechanism (the Stripe webhook) must use it (pre-push audit P1).
+  const audited = visitId
+    ? await auditCloseoutOutcome(run, { closed: false, visitId, resumed: run.resuming, code: 'error', error: String(err.message || err).slice(0, 500) })
+    : false;
+  return { closed: false, reason: 'error', error: err.message, visitId, audited };
 }
 
 // Entry point for the send and record-payment paths. Best-effort by

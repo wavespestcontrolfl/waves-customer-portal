@@ -164,7 +164,9 @@ describe('source contracts', () => {
   test('the Stripe webhook runs the paid closeout for every settled invoice, BEFORE its review step (owner 2026-10-04: card and bank payments close the visit too)', () => {
     const webhook = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
     // The helper reads only a SETTLED invoice and asks for the 'paid' trigger.
-    expect(webhook).toMatch(/async function closeOutVisitAfterPaidInvoice\(piId, \{ invoiceId = null \} = \{\}\) \{\s*try \{[\s\S]{0,300}?\.whereIn\('status', \['paid', 'prepaid'\]\)[\s\S]{0,300}?closeOutVisitForIssuedInvoice\(\{ invoiceId: paid\.id, trigger: 'paid' \}\);\s*\} catch \(err\) \{\s*logger\.error/);
+    expect(webhook).toMatch(/async function closeOutVisitAfterPaidInvoice\(piId, \{ invoiceId = null \} = \{\}\) \{\s*let out;\s*try \{[\s\S]{0,300}?\.whereIn\('status', \['paid', 'prepaid'\]\)[\s\S]{0,300}?out = await closeOutVisitForIssuedInvoice\(\{ invoiceId: paid\.id, trigger: 'paid' \}\);/);
+    // A failure with no audit row goes back to Stripe; an audited one is the sweep's.
+    expect(webhook).toMatch(/out = await closeOutVisitForIssuedInvoice\([^)]*\);\s*\} catch \(err\) \{[\s\S]{0,200}?throw err;\s*\}\s*if \(out && out\.reason === 'error' && !out\.audited\) \{[\s\S]{0,260}?throw new Error\(/);
     // Both settle paths: the combined PI (one call per settled invoice) and the single-invoice PI.
     expect(webhook).toMatch(/await closeOutVisitAfterPaidInvoice\(piId, \{ invoiceId: settledId \}\);\s*await scheduleReviewAfterPaidInvoice\(piId, \{ invoiceId: settledId \}\);/);
     expect(webhook).toMatch(/await closeOutVisitAfterPaidInvoice\(piId\);\s*await scheduleReviewAfterPaidInvoice\(piId\);/);
