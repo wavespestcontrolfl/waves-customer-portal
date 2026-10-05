@@ -188,6 +188,18 @@ async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, inv
     .first('id');
 }
 
+// The classifier returns the amount as printed ("$10.06", "1,234.50 USD").
+// parseFloat read "$10.06" as NaN, so every such receipt was skipped as
+// "no_amount" (2026-10-05: 96 receipts, about $1,476, mostly Twilio, OpenAI,
+// Google). Accept one money figure with an optional $ and USD and thousands
+// commas; anything else is no amount.
+function classifierAmount(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const m = value.trim().match(/^(?:USD\s*)?\$?\s*(\d{1,3}(?:,\d{3})+|\d+)(\.\d{1,2})?\s*(?:USD)?$/i);
+  return m ? Number(m[1].replace(/,/g, '') + (m[2] || '')) : null;
+}
+
 // Booking phase: the AI category suggestion (outside any transaction), then
 // the duplicate check and the insert under one advisory lock. Logs carry ids
 // only: the vendor name can be a person's display name.
@@ -375,7 +387,7 @@ async function processVendorInvoice(email, classification) {
   // `??`, not `||`: a parsed total of 0 (a zero-total invoice or credit memo)
   // is the extraction's answer, not a missing one — `||` fell through to the
   // classifier's amount and created an expense for it (Codex r18 on #4884).
-  const amount = parsedInvoice?.total ?? (parseFloat(classification.extracted?.invoice_amount) || 0);
+  const amount = parsedInvoice?.total ?? (classifierAmount(classification.extracted?.invoice_amount) || 0);
   const invoiceNumber = parsedInvoice?.invoice_number || classification.extracted?.invoice_number;
   const rawInvoiceDate = parsedInvoice?.invoice_date || classification.extracted?.invoice_date;
   const parsedDate = rawInvoiceDate ? new Date(rawInvoiceDate) : null;
@@ -401,4 +413,4 @@ async function processVendorInvoice(email, classification) {
   }
 }
 
-module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates };
+module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates, classifierAmount };
