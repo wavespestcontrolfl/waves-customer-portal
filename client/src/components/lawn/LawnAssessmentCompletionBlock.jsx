@@ -152,7 +152,7 @@ function resolveAiScores(assessment = {}, visitAssessment, serverAiScores) {
   };
 }
 
-const LawnAssessmentCompletionBlock = forwardRef(function LawnAssessmentCompletionBlock({
+function LawnAssessmentCompletionBlock({
   service,
   // The fetcher the lookup, analyze and confirm calls go through: the host
   // page's own admin fetch (it returns the parsed body and throws an Error
@@ -800,6 +800,7 @@ const LawnAssessmentCompletionBlock = forwardRef(function LawnAssessmentCompleti
       {error && <div className="text-14 leading-normal text-alert-fg">{error}</div>}
     </UiSurface>
   );
-});
+}
 
-export default LawnAssessmentCompletionBlock;
+// A declared function wrapped at export keeps the handler name the IB coverage census records.
+export default forwardRef(LawnAssessmentCompletionBlock);
