@@ -26,6 +26,11 @@ jest.mock('../services/completion-attempts', () => {
     },
   };
 });
+// The canonical completion runs for real; the spy only records what the sweep asked of it.
+jest.mock('../services/complete-scheduled-service', () => {
+  const actual = jest.requireActual('../services/complete-scheduled-service');
+  return { ...actual, completeScheduledService: jest.fn(actual.completeScheduledService) };
+});
 // The review ask is spied, never mocked away: a regression that reaches it shows up as a call.
 jest.mock('../services/review-request', () => {
   const actual = jest.requireActual('../services/review-request');
@@ -38,6 +43,7 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { chargeInvoiceWithSavedCard } = require('../services/stripe');
 const ReviewService = require('../services/review-request');
+const Completion = require('../services/complete-scheduled-service');
 const { ACTIVE_WRITE_GENERATION } = require('../constants/staff-time');
 const {
   assessmentEstimateCloseRefusal,
@@ -373,6 +379,32 @@ postgres('estimate sent ⇒ assessment closed (PostgreSQL, canonical completion)
     expect(closed.service_time_minutes).toBeNull();
     expect((await mockPg('service_completion_attempts').where({ service_id: visitId }).pluck('idempotency_key')).sort())
       .toEqual([`assessment-estimate:${visitId}:backfill`, `assessment-estimate:${visitId}:live`]);
+  });
+
+  test('a completion this closeout committed and left parked is resumed from its own posture — with no fresh estimate needed, no locked guard, and behind the open visits', async () => {
+    // Committed as completed, post-commit work owed; the estimate has since gone back to draft.
+    const parkedCustomer = await customer();
+    const parked = await visit(parkedCustomer, { status: 'completed', day: YESTERDAY });
+    await estimate(parkedCustomer, { status: 'draft', sentAt: null });
+    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: parked, idempotency_key: `assessment-estimate:${parked}:backfill`, status: 'side_effects_pending', request_hash: 'x' });
+    // Someone else's parked completion on a completed assessment is not this sweep's.
+    const foreign = await visit(await customer(), { status: 'completed', day: YESTERDAY });
+    await mockPg('service_completion_attempts').insert({ id: randomUUID(), service_id: foreign, idempotency_key: randomUUID(), status: 'side_effects_pending', request_hash: 'x' });
+    // An open, eligible assessment on a later day: it is asked first.
+    const openCustomer = await customer();
+    const open = await visit(openCustomer);
+    await estimate(openCustomer);
+
+    const out = await closeAssessmentsWithSentEstimates({ conn: mockPg });
+    expect(out.candidates).toBe(2);
+    const calls = Completion.completeScheduledService.mock.calls.map(([input]) => input);
+    expect(calls.map((input) => input.serviceId)).toEqual([open, parked]);
+    const resume = calls[1];
+    expect(resume.idempotencyKey).toBe(`assessment-estimate:${parked}:backfill`);
+    expect(resume.body).toMatchObject({ backfill: true, idempotencyKey: `assessment-estimate:${parked}:backfill` });
+    expect(resume.lockedVisitGuard).toBeNull();
+    expect(typeof calls[0].lockedVisitGuard).toBe('function');
+    expect((await row(open)).status).toBe('completed');
   });
 
   test('gate off: nothing is read and nothing closes', async () => {

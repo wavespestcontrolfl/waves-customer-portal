@@ -126,10 +126,10 @@ function candidateVisits(conn, { today, now }) {
   const SENT_DAY_SQL = "(e.sent_at AT TIME ZONE 'America/New_York')::date";
   const query = conn('scheduled_services as s')
     .leftJoin('services as svc', 'svc.id', 's.service_id')
+    .where('s.scheduled_date', '<=', today)
+    .where('s.scheduled_date', '>=', oldest)
     .where((q) => q
       .where((open) => open
-        .where('s.scheduled_date', '<=', today)
-        .where('s.scheduled_date', '>=', oldest)
         .whereExists(function sentAfter() {
           this.select(conn.raw('1')).from('estimates as e')
             .whereRaw('e.customer_id = s.customer_id')
@@ -151,7 +151,9 @@ function candidateVisits(conn, { today, now }) {
             .where('al.created_at', '>=', restSince);
         }))
       .orWhere((done) => done.where('s.status', 'completed').whereRaw(OWN_PARKED_ATTEMPT_SQL)))
-    .orderBy(['s.scheduled_date', 's.id'])
+    // Open visits first: a resume that keeps failing must not take the
+    // slots of visits that can close (it stays inside the 30-day window too).
+    .orderByRaw(`(${OWN_PARKED_ATTEMPT_SQL}) ASC, s.scheduled_date ASC, s.id ASC`)
     .select('s.*', conn.raw(`${OWN_PARKED_ATTEMPT_SQL} as own_attempt_parked`));
   return scopeToAssessmentBookings(query, 's', 'svc');
 }
@@ -188,7 +190,7 @@ async function liveRefusal(conn, visit) {
 // span from a days-old arrival to now is not labor). `expectedVisit` makes
 // the completion refuse, under its own row lock, a visit that was moved,
 // reassigned to another customer or reclassified after this module read it.
-async function closeAssessment(visit, { today, now, posture = null }) {
+async function closeAssessment(visit, { today, now, posture = null, resuming = false }) {
   const { completeScheduledService } = require('./complete-scheduled-service');
   const pastDay = posture ? posture === 'backfill' : dateOnlyString(visit.scheduled_date) < today;
   const key = idempotencyKeyFor(visit.id, pastDay ? 'backfill' : 'live');
@@ -212,7 +214,10 @@ async function closeAssessment(visit, { today, now, posture = null }) {
     // LOCKED: a technician who arrived, a job timer that started, or a visit
     // that moved after the reads above is not completed over. The estimate
     // is re-read too (a send withdrawn back to draft no longer proves it).
-    lockedVisitGuard: async (trx, lockedVisit) => {
+    // A RESUME carries no guard: that attempt already committed the visit as
+    // completed on evidence that was good then, and only its post-commit
+    // work is owed.
+    lockedVisitGuard: resuming ? null : async (trx, lockedVisit) => {
       const estimate = await newestSentEstimate(trx, lockedVisit.customer_id, { now });
       if (!estimate) return 'estimate_not_sent';
       return assessmentEstimateCloseRefusal(lockedVisit, estimate.sent_at, { today: etDateString() })
@@ -232,9 +237,19 @@ async function closeOne(conn, row, { today, now }) {
     // Fresh reads: the candidate query is a snapshot.
     const visit = await conn('scheduled_services').where({ id: visitId }).first();
     if (!visit || !(await isAssessmentBooking(visit, conn))) return { closed: false, reason: 'not_assessment' };
-    estimate = await newestSentEstimate(conn, visit.customer_id, { now });
-    if (!estimate) return { closed: false, reason: 'estimate_not_sent' };
-    if (!row.own_attempt_parked || visit.status !== 'completed') {
+    // This closeout's own attempt committed the visit as completed and still
+    // owes its post-commit work: finish it from the state it froze. It needs
+    // no fresh evidence — the estimate may have gone back to draft or aged
+    // out of the window since, and requiring it again would strand the
+    // attempt for good (pre-push audit P1).
+    const resuming = Boolean(row.own_attempt_parked) && visit.status === 'completed';
+    let posture = null;
+    if (resuming) {
+      posture = await parkedPosture(conn, visitId);
+      if (!posture) return { closed: false, reason: 'nothing_parked' };
+    } else {
+      estimate = await newestSentEstimate(conn, visit.customer_id, { now });
+      if (!estimate) return { closed: false, reason: 'estimate_not_sent' };
       // Not this rule's to decide, or not yet: no audit row, nothing to rest.
       const byRule = assessmentEstimateCloseRefusal(visit, estimate.sent_at, { today });
       if (byRule) return { closed: false, reason: byRule };
@@ -244,16 +259,16 @@ async function closeOne(conn, row, { today, now }) {
         return { closed: false, reason: live };
       }
     }
-    const resuming = Boolean(row.own_attempt_parked) && visit.status === 'completed';
-    const outcome = await closeAssessment(visit, { today, now, posture: resuming ? await parkedPosture(conn, visitId) : null });
+    const estimateId = estimate ? estimate.id : null;
+    const outcome = await closeAssessment(visit, { today, now, posture, resuming });
     if (outcome.closed) {
-      logger.info(`[assessment-estimate-closeout] visit ${visitId} completed: estimate ${estimate.id} was sent after it`);
-      await audit(AUDIT_CLOSED, { visitId, estimateId: estimate.id, status: outcome.status });
+      logger.info(`[assessment-estimate-closeout] visit ${visitId} ${resuming ? 'completion resumed' : `completed: estimate ${estimateId} was sent after it`}`);
+      await audit(AUDIT_CLOSED, { visitId, estimateId, status: outcome.status, ...(resuming ? { code: 'resumed' } : {}) });
       return { closed: true, reason: null };
     }
     const reason = outcome.code || `status_${outcome.status}`;
     logger.warn(`[assessment-estimate-closeout] visit ${visitId} NOT completed (${outcome.status} ${reason})`);
-    await audit(AUDIT_REFUSED, { visitId, estimateId: estimate.id, code: reason, status: outcome.status });
+    await audit(AUDIT_REFUSED, { visitId, estimateId, code: reason, status: outcome.status });
     return { closed: false, reason };
   } catch (err) {
     logger.error(`[assessment-estimate-closeout] visit ${visitId} failed: ${err.message}`);
