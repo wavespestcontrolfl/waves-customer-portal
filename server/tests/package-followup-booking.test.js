@@ -16,6 +16,7 @@ jest.mock('../services/tech-visit-notifications', () => ({ notifyTechVisitChange
 jest.mock('../services/technician-eligibility', () => ({ assertAssignableTechnician: jest.fn(async () => true) }));
 jest.mock('../services/scheduling/occupancy', () => ({ findConflictingVisits: jest.fn(async () => []) }));
 jest.mock('../services/admin-alert-compose', () => ({ raiseAdminAlert: jest.fn(async () => ({ id: 'alert-1' })) }));
+jest.mock('../services/job-status', () => ({ transitionJobStatus: jest.fn(async () => {}) }));
 jest.mock('../services/booking/create-scheduled-service', () => ({
   createScheduledService: jest.fn(async ({ insertData, source }) => ({ id: 'child-1', ...insertData, source_action: source.sourceAction })),
 }));
@@ -221,6 +222,25 @@ describe('ensurePackageFollowUpVisit', () => {
     const { trx, log } = fakeTrx();
     expect(await ensurePackageFollowUpVisit({ trx, primary: { ...PRIMARY, ...patch }, cols: COLS })).toBeNull();
     expect(log.lookups).toEqual([]);
+    expect(createScheduledService).not.toHaveBeenCalled();
+  });
+
+  test('office confirm promotes a pending call-booked visit 2 to a confirmed package child; other callers leave it', async () => {
+    const { transitionJobStatus } = require('../services/job-status');
+    const pendingCallChild = { id: 'child-call', scheduled_date: '2026-10-19', status: 'pending', technician_id: 'tech-1', source_action: 'ai_call_pipeline_followup', customer_confirmed: false };
+    const left = fakeTrx({ existingChild: pendingCallChild });
+    expect(await ensurePackageFollowUpVisit({ trx: left.trx, primary: PRIMARY, cols: COLS })).toBe(pendingCallChild);
+    expect(transitionJobStatus).not.toHaveBeenCalled();
+
+    const promoted = fakeTrx({ existingChild: pendingCallChild });
+    const updates = [];
+    const base = promoted.trx;
+    const trx = (table) => ({ ...base(table), where: (arg) => ({ ...base(table).where(arg), update: async (patch) => { updates.push({ arg, patch }); return 1; } }) });
+    trx.transaction = async (fn) => fn(trx);
+    const out = await ensurePackageFollowUpVisit({ trx, primary: PRIMARY, cols: COLS, promotePendingCallFollowUp: true });
+    expect(transitionJobStatus).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'child-call', fromStatus: 'pending', toStatus: 'confirmed', trx }));
+    expect(updates).toEqual([{ arg: { id: 'child-call' }, patch: expect.objectContaining({ source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION }) }]);
+    expect(out).toMatchObject({ id: 'child-call', status: 'confirmed', source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION });
     expect(createScheduledService).not.toHaveBeenCalled();
   });
 

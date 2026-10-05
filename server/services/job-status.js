@@ -529,8 +529,9 @@ async function transitionJobStatus({
 
     // Two-treatment package (cockroach / flea / bed bug): an office-review
     // booking (voice agent, outbound callback) becomes a real booking at
-    // office confirm, so visit 2 books HERE, not at the pending request —
-    // gate-dark, savepoint-isolated, idempotent, no-op for every other
+    // office confirm, so visit 2 books HERE, not at the pending request — and
+    // a visit 2 the call pipeline already wrote pending is confirmed with it.
+    // Gate-dark, savepoint-isolated, idempotent, no-op for every other
     // service and source (package-followup-booking.js).
     if (String(toStatus || '') === 'confirmed') {
       try {
@@ -539,7 +540,7 @@ async function transitionJobStatus({
         if (packageFollowupAutobookLive()) {
           const primary = await t('scheduled_services').where({ id: jobId }).first();
           if (primary && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(primary.source_action)) {
-            await require('./package-followup-booking').ensurePackageFollowUpVisit({ trx: t, primary });
+            await require('./package-followup-booking').ensurePackageFollowUpVisit({ trx: t, primary, promotePendingCallFollowUp: true });
           }
         }
       } catch (packageErr) {

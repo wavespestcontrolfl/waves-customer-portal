@@ -158,7 +158,27 @@ async function liveChildOf(trx, primaryId) {
   return trx('scheduled_services')
     .where({ followup_source_service_id: primaryId })
     .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
-    .first('id', 'scheduled_date', 'status', 'technician_id');
+    .first('id', 'scheduled_date', 'status', 'technician_id', 'source_action', 'customer_confirmed');
+}
+
+// An outbound-callback booking's visit 2 was written by the call pipeline
+// while visit 1 was still a pending office-review request: pending,
+// customer-hidden, "confirm the time". Once the office confirms visit 1 the
+// owner ruling applies to it too (nobody confirms visit 2): flip it to
+// confirmed through the canonical status writer and hand it the package
+// marker, so the customer sees it and the move/cancel hooks carry it.
+async function promotePendingCallChild(sp, child) {
+  const { CALL_FOLLOWUP_SOURCE_ACTION } = require('./call-booking-source-actions');
+  if (child.source_action !== CALL_FOLLOWUP_SOURCE_ACTION || child.status !== 'pending' || child.customer_confirmed) return child;
+  await require('./job-status').transitionJobStatus({
+    jobId: child.id, fromStatus: 'pending', toStatus: 'confirmed', transitionedBy: null,
+    notes: 'Package visit 2 confirmed with visit 1', trx: sp,
+  });
+  const now = new Date();
+  await sp('scheduled_services').where({ id: child.id })
+    .update({ source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION, confirmed_at: now, updated_at: now });
+  logger.info(`[package-followup] pending call-booked visit 2 ${child.id} confirmed with its package visit 1`);
+  return { ...child, status: 'confirmed', source_action: PACKAGE_FOLLOWUP_SOURCE_ACTION };
 }
 
 // Advisory, lock-free, tech-scoped: the office hears about a clash on a
@@ -267,22 +287,22 @@ function buildChildInsert(primary, catalogRow, cols, { date, technicianId, now }
  * back only itself — the primary booking commits, the failure is logged,
  * and dispatch's closeout card remains the fallback path for visit 2.
  */
-async function ensurePackageFollowUpVisit({ trx, primary, cols = null } = {}) {
+async function ensurePackageFollowUpVisit({ trx, primary, cols = null, promotePendingCallFollowUp = false } = {}) {
   if (!packageFollowupAutobookLive()) return null;
   if (!trx || !primaryEligible(primary)) return null;
   try {
-    return await trx.transaction((sp) => bookInSavepoint(sp, trx, primary, cols));
+    return await trx.transaction((sp) => bookInSavepoint(sp, trx, primary, cols, { promotePendingCallFollowUp }));
   } catch (err) {
     logger.error(`[package-followup] visit 2 not booked for ${primary.id}; primary booking kept: ${err.message}`);
     return null;
   }
 }
 
-async function bookInSavepoint(sp, outerTrx, primary, cols) {
+async function bookInSavepoint(sp, outerTrx, primary, cols, { promotePendingCallFollowUp = false } = {}) {
   const catalogRow = await resolvePackageCatalogRow(sp, primary);
   if (!catalogRow) return null;
   const existing = await liveChildOf(sp, primary.id);
-  if (existing) return existing;
+  if (existing) return promotePendingCallFollowUp ? promotePendingCallChild(sp, existing) : existing;
   const date = packageFollowUpDate(primary.scheduled_date, catalogRow.follow_up_interval_days);
   if (!date) return null;
   const columns = cols || await sp('scheduled_services').columnInfo();
