@@ -529,6 +529,14 @@ const CLASS_CLAIMS = [
 ];
 
 const AREA_WORD_RE = /\b(?:front|back|rear|side|sides|corner|corners|edge|edges|driveway|walkway|sidewalk|street|curb|fence|fenceline|strip|bed|beds|section|sections|spot|spots|patch|patches|shade|shaded|left|right)\b/gi;
+const AREA_WORD_TEST_RE = new RegExp(AREA_WORD_RE.source, 'i'); // the /g one is stateful under .test()
+const WHOLE_WORD_RE = /\b(?:whole|entire|all|every|throughout|across)\b/i;
+// Does the note put this product on a PART of the lawn (a note sentence naming it
+// with a sub-area word and no whole-lawn word)?
+function noteConfinesProduct(product, note) {
+  return String(note || '').split(/[!?;\n]+|\.(?!\d)/) // a period inside "16.6" is not a stop
+    .some((sentence) => productNamedIn(product, sentence) && AREA_WORD_TEST_RE.test(sentence) && !WHOLE_WORD_RE.test(sentence));
+}
 const PRONOUN_OBJECT_RE = /\b(?:them|it|those|these|that\s+problem|the\s+problem|the\s+issue)\b/i;
 const TREAT_VERB_RE = /\b(?:treat\w*|handle\w*|address\w*|knock\w*|go\s+after|went\s+after|clear\w*|fight\w*|combat\w*)\b/i;
 
@@ -622,6 +630,8 @@ function comparisonSupported(sentence, progressLines) {
   const comparing = clauses.filter(isComparison);
   if (!comparing.length) return false;
   return comparing.every((clause) => {
+    // A negated comparison ("not holding steady") states the opposite: never licensed.
+    if (NEG_BEFORE_RE.test(clause) || /\b(?:no\s+longer|isn't|aren't|hasn't|haven't)\b/i.test(clause)) return false;
     const metrics = Object.keys(SENTENCE_METRICS).filter((k) => SENTENCE_METRICS[k].test(clause));
     const directions = Object.keys(SENTENCE_DIRECTIONS).filter((k) => SENTENCE_DIRECTIONS[k].test(clause));
     if (metrics.length !== 1 || directions.length !== 1) return false;
@@ -749,6 +759,8 @@ function validateParagraph(answer, rawInputs) {
       if (!inputs.products.some((p) => productNamedIn(p, clause))) continue;
       const parts = [...clause.matchAll(AREA_WORD_RE)].map((m) => m[0].toLowerCase());
       if (parts.some((w) => !new RegExp(`\\b${escapeRe(w)}\\b`, 'i').test(inputs.technicianNote || ''))) { fail('area_not_in_note'); break; }
+      // "whole / entire yard" for a product the note confines to a part of the lawn.
+      if (WHOLE_WORD_RE.test(clause) && inputs.products.filter((p) => productNamedIn(p, clause)).some((p) => noteConfinesProduct(p, inputs.technicianNote))) { fail('extent_not_in_note'); break; }
     }
     // Fail closed on an observation of something the vocabulary does not know:
     // "found nematodes" names no term, so nothing above checked it. Every clause

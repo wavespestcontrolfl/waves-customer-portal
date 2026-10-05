@@ -117,6 +117,8 @@ describe('validator: accepts', () => {
   test('naming "progress" as the source is not enough: with no progress line every comparison is rejected', () => {
     for (const progressLines of [[], undefined]) {
       const same = answer('Our technician found chinch bugs in the trouble spot. Weeds are the same as at our last visit.', [['note'], ['progress', 'prior']]);
+      const negated = answer('Our technician found chinch bugs in the trouble spot. Weed pressure is not holding steady.', [['note'], ['progress']]);
+      expect(check(negated, { ...FIXTURE, progressLines: ['Weed pressure is holding steady.'] }).problems).toContain('comparison_without_progress');
       expect(check(same, { ...FIXTURE, technicianNote: `${FIXTURE.technicianNote} A few weeds along the edge.`, progressLines }).problems).toContain('comparison_without_progress');
       const a = answer('Our technician found chinch bugs in the trouble spot. The turf looks thicker than at our last visit.', [['note'], ['progress', 'prior']]);
       expect(check(a, { ...FIXTURE, progressLines }).problems).toContain('comparison_without_progress');
@@ -172,6 +174,7 @@ describe('validator: rejects', () => {
     ['a direct treatment claim for the wrong product', 'Our technician found chinch bugs in the trouble spot. LESCO 24-0-11 went on the lawn to treat chinch bugs.', 'product_not_for_condition:chinch'],
     ['a treatment claim whose condition hides behind a pronoun', 'Our technician found chinch bugs in the trouble spot. LESCO 24-0-11 went on the lawn to treat them.', 'pronoun_treatment_unresolved'],
     ['a product put on a part of the lawn the note never names', 'Our technician found chinch bugs in the trouble spot. We treated the back yard with Arena 50 WDG.', 'area_not_in_note'],
+    ['a whole-yard claim for a product the note confines to the front and side', 'Our technician found chinch bugs in the trouble spot. We applied Arena 50 WDG to the entire yard.', 'extent_not_in_note'],
     ['a product class nothing applied', 'Our technician found chinch bugs in the trouble spot. We applied fungicide to the entire lawn.', 'class_not_applied'],
     ['a weed control nothing applied', 'Our technician found chinch bugs in the trouble spot. We put down weed control across the lawn.', 'class_not_applied'],
     ['a promise', 'Our technician found chinch bugs in the trouble spot. The lawn will recover on its own.', 'promise:will'],
