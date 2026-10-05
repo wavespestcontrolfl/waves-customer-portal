@@ -41,6 +41,15 @@ function phoneKey(phone) {
   return String(phone || '').replace(/\D/g, '').slice(-10);
 }
 
+// The first name the text greets: the slot's OWN name for that phone ("there"
+// when the slot has none). The shared contact list falls back to the account
+// holder's name for a nameless slot, and a contact must not be greeted by it.
+function greetingName(customer, phone) {
+  const { firstNameFrom, getServiceContactSlots } = require('./customer-contact');
+  const slot = getServiceContactSlots(customer).find((s) => phoneKey(s.phone) === phoneKey(phone));
+  return firstNameFrom(slot?.name || '') || 'there';
+}
+
 // The customer row the contact rule reads. A secondary profile with no phone
 // of its own takes the account primary's, so the account holder's number in a
 // contact slot is still recognized as the holder's and never texted twice.
@@ -101,11 +110,6 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
   const profile = await loadCustomer(customerId);
   if (!profile || !slotContacts(profile).length) return 0;
   const { renderSmsTemplate } = require('./sms-template-renderer');
-  const { firstNameFrom, getServiceContactSlots } = require('./customer-contact');
-  // The slot's OWN name: the contact list falls back to the account holder's
-  // name for a nameless slot, and a contact must not be greeted by it.
-  const slotNameIn = (row, phone) => getServiceContactSlots(row).find((slot) => phoneKey(slot.phone) === phoneKey(phone))?.name || '';
-  const slotName = (phone) => slotNameIn(profile, phone);
   const street = await streetAddress(db, scheduledServiceId, profile);
   // One body per slot contact (the greeting names the CONTACT, never the
   // account holder), keyed by phone. A template read that fails throws; a
@@ -114,7 +118,7 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
   const bodyByPhone = new Map();
   for (const contact of slotContacts(profile)) {
     const body = await renderSmsTemplate(TEMPLATE_KEY, {
-      first_name: firstNameFrom(slotName(contact.phone)) || 'there',
+      first_name: greetingName(profile, contact.phone),
       street_address: street,
       report_url: reportUrl,
     }, { workflow: TEMPLATE_KEY, entity_type: 'customer', entity_id: customerId }, { throwOnError: true, requiredVars: ['report_url'] });
@@ -139,7 +143,7 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
       // The greeting was rendered from the unlocked read. A save that kept
       // the phone but changed the person since then would get the previous
       // name: throw, and the retry renders from the saved contact.
-      if (firstNameFrom(slotNameIn(customer, contact.phone)) !== firstNameFrom(slotName(contact.phone))) {
+      if (greetingName(customer, contact.phone) !== greetingName(profile, contact.phone)) {
         throw Object.assign(new Error('contact renamed during the queue'), { code: 'CONTACT_RENAMED' });
       }
       const reportKey = `${sourceKey}:${phoneKey(contact.phone)}`;
@@ -167,6 +171,9 @@ async function queueContactReportTexts({ customerId, sourceKey, reportUrl, sched
           // (dispatchDeferredReplay) instead of sending it unchecked.
           requires_registered_dispatch: true,
           contact_report_key: reportKey,
+          // The name the frozen body greets: the recheck drops the text when
+          // that phone has since been saved under another name.
+          contact_report_first_name: greetingName(customer, contact.phone),
           contact_report_source: String(sourceKey),
           contact_report_queued_at: new Date().toISOString(),
           ...(source.visitId ? { visit_id: source.visitId, summary_token_hash: source.summaryTokenHash || null } : {}),
@@ -232,6 +239,11 @@ async function recheckContactReportText(meta = {}, { conn = db } = {}) {
   if (!customer) return { eligible: false, reason: 'customer-missing' };
   const stillConfirmed = (await confirmedContacts(customer, conn)).some((c) => phoneKey(c.phone) === phoneKey(meta.to_phone));
   if (!stillConfirmed) return { eligible: false, reason: 'contact-removed' };
+  // Same phone, another person: the frozen body greets the previous name.
+  if (typeof meta.contact_report_first_name === 'string'
+    && greetingName(customer, meta.to_phone) !== meta.contact_report_first_name) {
+    return { eligible: false, reason: 'contact-renamed' };
+  }
   return { eligible: true };
 }
 

@@ -128,6 +128,9 @@ describe('queueContactReportTexts', () => {
       { throwOnError: true, requiredVars: ['report_url'] });
     // A worker that predates the registry entry refuses the row.
     expect(meta.requires_registered_dispatch).toBe(true);
+    // The greeted name rides the row for the send-time recheck.
+    expect(meta.contact_report_first_name).toBe('Riley');
+    expect(JSON.parse(rows[1].metadata).contact_report_first_name).toBe('Morgan');
   });
 
   test('each contact is greeted by their own first name; a nameless contact is never greeted by the account holder\'s', async () => {
@@ -281,6 +284,17 @@ describe('recheckContactReportText: is the queued text still right to send', () 
   test('a contact removed or replaced since the queue gets nothing', async () => {
     queue('customers', { ...CUSTOMER, service_contact_phone: '941-555-0999' });
     expect(await ContactReportText.recheckContactReportText(META)).toEqual({ eligible: false, reason: 'contact-removed' });
+  });
+
+  test('the phone saved under another name since the queue: the text that greets the old name is dropped', async () => {
+    const meta = { ...META, contact_report_first_name: 'Riley' };
+    queue('customers', CUSTOMER);
+    expect(await ContactReportText.recheckContactReportText(meta)).toEqual({ eligible: true });
+    queue('customers', { ...CUSTOMER, service_contact_name: 'Jordan Newtenant' });
+    expect(await ContactReportText.recheckContactReportText(meta)).toEqual({ eligible: false, reason: 'contact-renamed' });
+    // A nameless slot was greeted "there"; a name added later is a change too.
+    queue('customers', { ...CUSTOMER, service_contact_name: null });
+    expect(await ContactReportText.recheckContactReportText({ ...meta, contact_report_first_name: 'there' })).toEqual({ eligible: true });
   });
 
   test('a contact who replied STOP to the opt-in ask since the queue gets nothing', async () => {
