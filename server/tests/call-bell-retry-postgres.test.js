@@ -102,6 +102,22 @@ jest.setTimeout(30000);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 
+  test('a redial answered during delivery stops the bell write and the push', async () => {
+    const customer = randomUUID();
+    const missed = call(10, { customer_id: customer });
+    await database('call_log').insert(missed);
+    const verdicts = {};
+    triggerNotification.mockImplementationOnce(async (_key, _payload, opts) => {
+      verdicts.before = await opts.shouldContinue({ database });
+      await database('call_log').insert(call(1, { customer_id: customer, status: 'completed', answered_by: 'human' }));
+      verdicts.bell = await opts.shouldContinue({ database });
+      verdicts.push = await opts.beforePush({ dispatching: true });
+      return { bellWritten: false, suppressed: true };
+    });
+    await ringMissedCallIfUnanswered(missed.twilio_call_sid);
+    expect(verdicts).toEqual({ before: true, bell: false, push: false });
+  });
+
   test('a later recording the voicemail lane did not alert on still lets the missed call ring', async () => {
     const customer = randomUUID();
     const missed = call(10, { customer_id: customer });

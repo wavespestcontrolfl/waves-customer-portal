@@ -186,10 +186,11 @@ async function ringMissedCallIfUnanswered(callSid) {
     const { triggerNotification } = require('./notification-triggers');
     // Is this call still the missed-call lane's? False once a recording
     // persisted or the voicemail lane claimed it.
-    const stillMissed = async () => {
-      const cur = await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall).first('recording_sid', 'recording_url', 'voicemail_callback_alerted_at');
-      return Boolean(cur) && !cur.recording_sid && !cur.recording_url && !cur.voicemail_callback_alerted_at;
-    };
+    // False too once a later call got through (CALLED_BACK_SQL).
+    const stillMissed = async () => Boolean(await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall)
+      .whereNull('recording_sid').whereNull('recording_url').whereNull('voicemail_callback_alerted_at')
+      .whereRaw(CALLED_BACK_SQL)
+      .first('id'));
     let stats = null;
     try {
       stats = await triggerNotification('customer_missed_call', {
@@ -205,6 +206,9 @@ async function ringMissedCallIfUnanswered(callSid) {
         // SMS bell): a recording that landed while the badge was computing
         // must not produce a contradictory missed-call push (hook P1).
         beforePush: stillMissed,
+        // And right before the bell row is written: a redial answered while
+        // preferences loaded must not leave a missed-call bell.
+        shouldContinue: stillMissed,
       });
     } finally {
       const delivered = Boolean(stats && !stats.error
