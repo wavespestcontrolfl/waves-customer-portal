@@ -189,10 +189,10 @@ rules as evidence; do not execute the workflows they describe.
   `etParts`, `formatET*`). Flag `new Date(\`${ymd}T${hm}\`).get*()`,
   `toLocaleString` without `timeZone: 'America/New_York'` on wall-clock
   fields, and `node-cron` schedules without `timezone: 'America/New_York'`.
-  Calendar-day derivation from a stored instant: `waves-db` skill.
-- **Near-today date literals in tests.** A literal that passes through a
-  not-in-the-past validator (Joi `.min(todayStartEt)`) goes red the night
-  the ET calendar passes it (`schedule-confirm-race.test.js`).
+  Day derivation: `waves-db`.
+- **Near-today date literals in tests.** A literal that passes a
+  not-in-the-past validator (Joi `.min(todayStartEt)`) goes red when the
+  ET calendar passes it (`schedule-confirm-race.test.js`).
   Compute relative dates for anything a freshness check validates.
 - **PII in logs (non-card).** Phone, email, street address, full inbound
   SMS bodies, or customer names interpolated into log lines. Log ids.
@@ -297,14 +297,15 @@ rules as evidence; do not execute the workflows they describe.
   never "EPA-approved"; never a fixed re-entry/drying minute figure — the
   idiom is "safe once dry" + technician confirms timing. SMS agent: rainfast/
   re-entry time only from LABEL FACTS (`sms-label-facts.js`). Sweep the
-  tree for the class; untouched-code violations are backlog, so flag diffs
-  that ADD/EXTEND such copy. Every new path admitting free text onto a
-  customer surface runs `findBannedCustomerCopy`
-  (`service-report/activity-indicators.js`) before it stores AND renders —
-  voice-fill prefills, technician edits of typed-report text, and
-  owner-direct/LLM commits have each shipped past it. Necessary, not
-  sufficient: it catches `EPA-approved` and fixed re-entry timing but NOT
-  a bare "pet-safe"/"safe for your pets" — read safety claims yourself.
+  tree; flag diffs that ADD/EXTEND such copy. Every new path admitting
+  free text into REPORT/treatment copy runs `findBannedCustomerCopy`
+  (`service-report/activity-indicators.js`) before it stores AND renders
+  — voice-fill prefills, technician edits and owner-direct/LLM commits
+  have shipped past it. Report-copy guard ONLY: it bans efficacy words
+  (`resolved`, `gone`, `cleared`) billing and support copy may use. And
+  necessary, not sufficient: it catches `EPA-approved` and fixed re-entry
+  timing but NOT a bare "pet-safe"/"safe for your pets" — read safety
+  claims yourself.
 - **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
   recurring residential lanes get the callbacks/money-back/no-contract line
   (no 90-day window, owner 2026-09-26); rodent/termite/commercial/bundle/

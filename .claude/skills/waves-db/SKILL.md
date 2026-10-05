@@ -59,10 +59,14 @@ Rules:
   (`client/src/lib/timezone.js`) in React — and never import the server
   module into the Vite bundle. ET conversion is for real instants ONLY: a
   `date` column deserializes as `'YYYY-MM-DD'` or a UTC-midnight `Date`,
-  and `etDateString` on either shifts it to the PREVIOUS Eastern day (UTC
-  midnight is 7–8 PM ET the night before), so route date-only values
-  through `etCalendarDayOf` — or `dateOnlyString` for a known date column
-  — from `server/utils/datetime-et.js`.
+  and `etDateString` is wrong for both — it returns the PREVIOUS Eastern
+  day for the Date (UTC midnight is 7–8 PM ET the night before) and throws
+  `RangeError: Invalid time value` on the string. Date-only values take a
+  date-only path, and which one depends on the side: on the server,
+  `etCalendarDayOf` (or `dateOnlyString` for a known date column) from
+  `server/utils/datetime-et.js`; in React, where that CJS module is off
+  limits, `formatETDateOnly` (`client/src/lib/timezone.js`) to display one
+  and the literal `'YYYY-MM-DD'` prefix to key or compare one.
 
 ## 3. Local DB access — Codex uses dev/preview only
 
