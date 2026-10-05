@@ -115,6 +115,10 @@ function isQuestionSource(source) {
   return /[?¿؟]/u.test(text) || INTERROGATIVE.test(text) || INDIRECT_INTERROGATIVE.test(text);
 }
 
+// Words that describe a missing, relational, replaced or dead code. The strict
+// form tests the value with them; the natural form tests the whole message, so
+// "Gate code is 5550. That code is disabled." saves nothing.
+const NOT_A_CREDENTIAL = /\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see|broken|disabled|deactivated|reset|removed|inactive|expired|invalid|off|down|gone|lost|stuck|jammed|dead|out|open|locked|unlocked)\b|n['’]t|^n[ /]?a$/i;
 // Owner ruling 2026-10-04: a client's access code saves from the client's own
 // wording, not only from one sentence form ("Gate code is 1234" was dropped).
 // Read at call time so the flip needs no redeploy.
@@ -161,7 +165,7 @@ function matchesNaturalAccessCode({ field, value }, { messageBody = '', properti
   const numbered = words.filter((entry) => /[\d#*]/.test(entry.raw));
   if (numbered.length !== 1 || numbered[0].word !== candidate) return false;
   if (!/[.!?]["'”’)]*$/.test(numbered[0].raw) && !/^[ \t]*(?:\r?\n|$)/.test(body.slice(numbered[0].end))) return false;
-  if (CODE_BLOCKERS.test(body) || CODE_HEDGE.test(body) || CODE_INVALIDATED.test(body) || isQuestionSource(body)) return false;
+  if (NOT_A_CREDENTIAL.test(body) || CODE_BLOCKERS.test(body) || CODE_HEDGE.test(body) || CODE_INVALIDATED.test(body) || isQuestionSource(body)) return false;
   const digits = candidate.replace(/\D/g, '');
   if (properties.some((property) => (String(property.address_line1 || '').match(/^\s*(\d+)/) || [])[1] === digits
     || String(property.zip || '').slice(0, 5) === digits)) return false;
@@ -177,7 +181,7 @@ function matchesExplicitAccessCode({ quote, field, value }) {
   // even if the model proposes them verbatim. Preserve the empty field for
   // the real code: a multi-word value needs at least one digit or key symbol.
   const candidate = String(value || '').trim();
-  if (/\b(?:unknown|none|null|undefined|unsure|uncertain|unavailable|pending|missing|not|no|never|forgot(?:ten)?|forget|maybe|perhaps|same|usual|last|previous|prior|before|earlier|again|old|new|different|changed|later|soon|text|call|ask|check|see|broken|disabled|reset|removed|inactive|expired|invalid|off|down|gone|lost|stuck|jammed|dead|out|open|locked|unlocked)\b|n['’]t|^n[ /]?a$/i.test(candidate)) return false;
+  if (NOT_A_CREDENTIAL.test(candidate)) return false;
   if (/\s/.test(candidate) && !/[#*\d]/.test(candidate)) return false;
   if (!/[A-Za-z\d]/.test(candidate)) return false;
   // A credential is a short token (lettered lockboxes exist) or a digit/symbol
@@ -261,7 +265,7 @@ Facts:
 - Capture explicitly reported operational facts and instructions, not diagnoses or technical recommendations. Keep the customer's equipment/irrigation reports distinguished from verified findings.
 - value must be an exact substring of quote, except contact_preference which must be call, text or email. Capture only the useful operational preference, never its medical explanation.
 - For EVERY fact, quote must retain the whole CURRENT message, including every sentence and qualifier. For controller locations, notes, instructions, pet details and irrigation issues, value MUST equal quote. Never shorten a message to a standalone instruction that omits another clause. If separate topics do not belong together in the field, mark duration uncertain for staff review.
-- Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.${accessCodeCaptureEnabled() ? ' A plain "gate code" with no side, back or yard word is the neighborhood gate (field neighborhood_gate_code). For a code, value is the code alone with its # or * symbol.' : ''}
+- Codes keep their symbols. If the kind of code or its property is ambiguous, do not guess.${accessCodeCaptureEnabled() ? ' A plain "gate code" with no side, back or yard word is the neighborhood gate (field neighborhood_gate_code). For a code, value is the code alone with its # or * symbol. Never report a code the customer calls old, wrong, changed, disabled or unsure.' : ''}
 - An instruction for today/one visit/vacation is visit_only, not durable. Ambiguous duration is uncertain. A change to payment, billing, ownership or communication consent is an obligation to resolve, never a profile fact.
 - property_id may identify the sole provided property. With zero or multiple properties, use null, including requests covering all properties; opaque ids alone cannot prove which address the customer means. Never infer another person's authority or merge accounts.
 

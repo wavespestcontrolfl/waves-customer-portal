@@ -29,7 +29,7 @@ describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)',
   const natural = [
     ['neighborhood_gate_code', 'Gate code is 5550', '5550'],
     ['neighborhood_gate_code', 'Gate code for Example Creek is below.\n\n#55501', '#55501'],
-    ['neighborhood_gate_code', 'Hello our gate code for the example is #5550.  I forgot to mention that.', '#5550'],
+    ['neighborhood_gate_code', 'Hello our gate code for the example is #5550.  Thank you.', '#5550'],
     ['property_gate_code', 'I have a gate code for the left gate to get to the backyard: 5550', '5550'],
     ['lockbox_code', 'The key box on the door opens with 5550', '5550'],
     ['garage_code', 'Garage keypad 5550#', '5550#'],
@@ -86,6 +86,10 @@ describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)',
     ['a modal hedge (may)', 'neighborhood_gate_code', 'Gate code may be 5550', '5550'],
     ['a modal hedge (could)', 'neighborhood_gate_code', 'Gate code could be 5550', '5550'],
     ['a past code', 'neighborhood_gate_code', 'Gate code was 5550', '5550'],
+    ['a code called disabled in a later sentence', 'neighborhood_gate_code', 'Gate code is 5550. That code is disabled.', '5550'],
+    ['a code called inactive', 'neighborhood_gate_code', 'Inactive gate code 5550', '5550'],
+    ['a code called dead', 'neighborhood_gate_code', 'Gate code is 5550. It is dead.', '5550'],
+    ['the old code', 'neighborhood_gate_code', 'Old gate code 5550', '5550'],
   ])('gate on still refuses %s', (_name, field, quote, value) => {
     process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
     const item = codeFact(field, quote, value);
