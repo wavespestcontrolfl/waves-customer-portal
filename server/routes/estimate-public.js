@@ -28089,6 +28089,24 @@ async function suppressOfferTierCarrierIfNeeded(estimate, estData, database = db
   return true;
 }
 
+// Slot reservation: the hold's own estimate read sees the RAW row, where a
+// member-blocked carrier still carries the one-time option and would be
+// sized pest-only while the accept books the full bundle. The reserve route
+// asks this (fresh full read, live member check included) and sizes the hold
+// from every quoted program when the carrier is suppressed.
+async function offerTierCarrierSuppressedForRow(estimateId, database = db) {
+  if (!estimateId) return false;
+  try {
+    const row = await database('estimates').where({ id: estimateId })
+      .first(...OfferTiers.OFFER_TIER_ESTIMATE_COLUMNS, 'price_locked_at');
+    if (!row) return false;
+    const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : row.estimate_data;
+    return await suppressOfferTierCarrierIfNeeded(row, data, database);
+  } catch (_) {
+    return false;
+  }
+}
+
 // Offer tiers (Codex #5921 r1 P1): a bundle frozen while the gate was dark
 // (every send snapshot of an already-sent quote, and any cached payload from
 // before the flip) carries no tier verdict. The gate is read at call time, so
@@ -31366,5 +31384,6 @@ module.exports.shapeFromV1 = shapeFromV1;
 module.exports.stampTreeShrubPalmCount = stampTreeShrubPalmCount;
 module.exports.offerTierMemberBlock = offerTierMemberBlock;
 module.exports.suppressOfferTierCarrierIfNeeded = suppressOfferTierCarrierIfNeeded;
+module.exports.offerTierCarrierSuppressedForRow = offerTierCarrierSuppressedForRow;
 module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBundle;
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;

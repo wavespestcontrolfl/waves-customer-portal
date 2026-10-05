@@ -470,4 +470,16 @@ describe('tier carrier (office asks for tiers with the one-time option on a pest
     expect(served.frequencies.find((f) => f.key === 'quarterly').monthly).toBeCloseTo(84.08, 2);
     expect(served.services.map((s) => s.key)).toEqual(['pest_control', 'lawn_care']);
   });
+
+  test('the reserve route can ask whether a carrier row is suppressed from a fresh read (fail-safe false on a read error)', async () => {
+    const { offerTierCarrierSuppressedForRow } = require('../routes/estimate-public');
+    delete process.env[GATE];
+    const row = carrier({ id: 'carrier-row' });
+    const dbFor = (found) => () => ({ where: () => ({ first: async () => found }) });
+    await expect(offerTierCarrierSuppressedForRow('carrier-row', dbFor({ ...row, estimate_data: JSON.stringify(row.estimate_data) }))).resolves.toBe(true);
+    await expect(offerTierCarrierSuppressedForRow('carrier-row', dbFor(pestLawnOneTimeToggleEstimate()))).resolves.toBe(false);
+    await expect(offerTierCarrierSuppressedForRow('missing', dbFor(null))).resolves.toBe(false);
+    await expect(offerTierCarrierSuppressedForRow('boom', () => { throw new Error('db'); })).resolves.toBe(false);
+    await expect(offerTierCarrierSuppressedForRow(null)).resolves.toBe(false);
+  });
 });

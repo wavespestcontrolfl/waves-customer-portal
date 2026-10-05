@@ -71,6 +71,7 @@ const {
   estimateRendersMonthlyBilling,
   verifyEstimateAskToken,
   offerTierMemberBlock,
+  offerTierCarrierSuppressedForRow,
 } = require('./estimate-public');
 const { resolveBestOfferTierForSlots } = require('../services/estimate-offer-tiers');
 const featureGates = require('../config/feature-gates');
@@ -732,6 +733,15 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
     // from every quoted program — the same profile the accept commits.
     const reserveOfferTier = await bestOfferTierForSlots(estimate, req.body?.offerTier);
     if (reserveOfferTier) slotOpts.offerTier = reserveOfferTier;
+    // Tier carrier that cannot serve tiers (gate off, live member, no longer
+    // eligible): the accept books the full bundle, so the hold is sized from
+    // every quoted program too — the hold's raw row read would size pest-only.
+    let carrierFullBundleHold = false;
+    if (!slotOpts.offerTier && typeof offerTierCarrierSuppressedForRow === 'function'
+      && await offerTierCarrierSuppressedForRow(estimate.id)) {
+      slotOpts.offerTier = 'best';
+      carrierFullBundleHold = true;
+    }
     if (isCommercialAutoEstimate(estimate)) {
       return res.status(409).json({
         error: 'Commercial service is scheduled by our team — no self-booking.',
@@ -765,7 +775,8 @@ router.post('/:token/reserve', reserveLimiter, async (req, res) => {
           // LOCKED row inside the reservation transaction — an edit that
           // removed the tier, or a customer who became a member meanwhile,
           // must not mint a full-bundle hold the accept then refuses.
-          if (slotOpts.offerTier === 'best' && (await bestOfferTierForSlots(row, 'best', trx)) !== 'best') {
+          if (slotOpts.offerTier === 'best' && !carrierFullBundleHold
+            && (await bestOfferTierForSlots(row, 'best', trx)) !== 'best') {
             return {
               status: 409,
               body: { error: 'That plan option is no longer available — reload the page and pick again.', code: 'offer_tier_unavailable' },
