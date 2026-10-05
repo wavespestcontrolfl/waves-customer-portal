@@ -37,6 +37,7 @@ function shippingOfCandidate(c) {
     price: c && c.price,
     quantity: c && c.quantity,
     freeShipping: !!(c && (c.free_shipping === true || c.freeShipping === true)),
+    hazmat: !!(c && (c.hazmat_shipping === true || c.hazmat === true)),
   });
 }
 

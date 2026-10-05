@@ -11,7 +11,9 @@
 // (vendor policy pages read 2026-10-05). SiteOne, Veseris and Amazon are free per the
 // owner (free for this account). No I/O — unit-tested.
 //
-//   shippingFor({ vendorHost?, vendor?, vendorName?, price?, quantity?, freeShipping? })
+//   shippingFor({ vendorHost?, vendor?, vendorName?, price?, quantity?, freeShipping?, hazmat? })
+//     hazmat = the item is flagged hazardous/DOT (vendors whose rule says hazmat costs extra
+//     then return 'estimated', never a firm figure).
 //     vendor = a vendor row or scanned candidate (host/url/website/source_url are read);
 //     vendorName = display name, used ONLY when no host is available.
 //     -> { amount, basis: 'free'|'free_over'|'flat'|'weight_table'|'estimated', note }
@@ -80,7 +82,7 @@ const RULES = [
   { id: 'chemicalwarehouse', type: 'free', hosts: ['chemicalwarehouse.com'], names: [/chemical\s*warehouse/i], note: 'free shipping' },
   { id: 'diypestcontrol', type: 'free', hosts: ['diypestcontrol.com'], names: [/diy\s*pest/i], note: 'free shipping' },
   { id: 'seedbarn', type: 'free', hosts: ['seedbarn.com'], names: [/seed\s*barn/i], note: 'free shipping (time-limited promo, recheck)' },
-  { id: 'gemplers', type: 'free_over', hosts: ['gemplers.com'], names: [/gemplers/i], threshold: GEMPLERS_FREE_OVER_USD },
+  { id: 'gemplers', type: 'free_over', hosts: ['gemplers.com'], names: [/gemplers/i], threshold: GEMPLERS_FREE_OVER_USD, hazmatExtra: true },
   { id: 'solutions', type: 'flagged_free', hosts: ['solutionsstores.com'], names: [/solutions\s*(pest|stores)/i], note: 'free only on flagged items' },
   { id: 'golfcourselawn', type: 'flagged_free', hosts: ['golfcourselawn.store'], names: [/golf\s*course\s*lawn/i], note: 'free only on flagged items' },
   { id: 'gciturfacademy', type: 'estimated', hosts: ['gciturfacademy.com'], names: [/gci\s*turf/i] },
@@ -171,7 +173,23 @@ function applyRule(rule, input) {
     case 'flat':
       return { amount: round2(rule.amount), basis: 'flat', note: rule.note || `flat ${usd(rule.amount)} shipping` };
     case 'free_over': {
-      if (Number.isFinite(price) && price >= rule.threshold) {
+      const over = Number.isFinite(price) && price >= rule.threshold;
+      // Hazardous (DOT) items carry an extra charge the vendor does not publish ("call"), so
+      // neither the free-over threshold nor the weight table is a firm number for them. Keep
+      // the best published figure as the floor, add the default estimate as an allowance for
+      // the unpublished hazmat fee, and label the whole thing 'estimated' so the email never
+      // calls it firm.
+      if (rule.hazmatExtra && input.hazmat === true) {
+        const floor = over ? 0 : (weightLb == null ? 0 : gemplersTableAmount(weightLb).amount);
+        const allowance = defaultShippingUsd();
+        const base = over ? `free over ${usd(rule.threshold)}` : (weightLb == null ? 'weight unknown' : `${usd(floor)} by weight`);
+        return {
+          amount: round2(floor + allowance),
+          basis: 'estimated',
+          note: `${base} + ~${usd(allowance)} est. hazmat fee (hazardous item; fee not published)`,
+        };
+      }
+      if (over) {
         return { amount: 0, basis: 'free_over', note: `free shipping over ${usd(rule.threshold)}` };
       }
       if (weightLb == null) {
@@ -181,7 +199,7 @@ function applyRule(rule, input) {
       return {
         amount,
         basis: interpolated ? 'estimated' : 'weight_table',
-        note: `${usd(amount)} by weight (~${Math.round(weightLb)} lb), under ${usd(rule.threshold)}; hazmat may add`,
+        note: `${usd(amount)} by weight (~${Math.round(weightLb)} lb), under ${usd(rule.threshold)}`,
       };
     }
     case 'flagged_free':

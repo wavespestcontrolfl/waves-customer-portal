@@ -70,16 +70,38 @@ function handlesFromSuggest(json) {
   return [...new Set(list.map((p) => (p && (p.handle || handleOf(p.url))) || null).filter(Boolean))];
 }
 
-// PURE: does the product state "free shipping" for THIS item? A positive tag ("free shipping",
-// never an `_F` false-valued tag like the vendor's `shipping_*_F` flags) or a description
-// that says FREE SHIPPING without a spend threshold ("free shipping over $99" is a
-// threshold rule, not an item flag). shipping-rules only acts on it for flagged-free vendors.
+// Words that turn "free shipping" into a CONDITIONAL offer (a spend threshold or qualifier).
+const FREE_SHIP_CONDITION = /\b(?:over|above|orders?\s+of|minimum|min\.?|qualif\w*|spend\w*|exceed\w*|at\s+least|when|if|only|select(?:ed)?|certain|excluding|except\w*)\b|\$\s*\d/i;
+
+// PURE: does the product state "free shipping" for THIS item, unconditionally? A positive tag
+// (never an `_F` false-valued tag like the vendor's `shipping_*_F` flags) or a description
+// sentence saying FREE SHIPPING. ANY threshold/condition phrase in the same sentence ("free
+// shipping is available on orders over $99", "applies to orders above $149", "when you spend")
+// makes it conditional -> false, and one conditional sentence anywhere vetoes the flag. The
+// flag zeroes freight, so doubt means false. shipping-rules acts on it for flagged-free vendors.
 function freeShippingFromShopify(data) {
   if (!data) return false;
   const tags = Array.isArray(data.tags) ? data.tags : String(data.tags || '').split(',');
-  if (tags.some((t) => /free[\s_-]*shipping/i.test(String(t)) && !/_f(alse)?$/i.test(String(t).trim()))) return true;
-  const text = String(data.description || data.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-  return /free\s+shipping(?!\s*(?:on\s+orders?\s+)?(?:over|above|of\s+\$|\$|with|when))/i.test(text);
+  const tagFree = tags.some((t) => {
+    const tag = String(t).trim();
+    return /free[\s_-]*shipping/i.test(tag) && !/_f(alse)?$/i.test(tag) && !FREE_SHIP_CONDITION.test(tag);
+  });
+  const text = String(data.description || data.body_html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const sentences = text.split(/(?<=[.!?])\s+/).filter((x) => /free\s+shipping/i.test(x));
+  if (sentences.some((x) => FREE_SHIP_CONDITION.test(x))) return false;
+  return tagFree || sentences.length > 0;
+}
+
+// PURE: is the item flagged hazardous / DOT for shipping? Vendors tag it ("shipping_hazardous_T",
+// "shipping_full_haz_T"); a `_F` value means NOT hazardous. Used for vendors whose hazmat
+// shipping is an unpublished extra (Gemplers), so their figure is labelled an estimate.
+function hazmatFromShopify(data) {
+  if (!data) return false;
+  const tags = Array.isArray(data.tags) ? data.tags : String(data.tags || '').split(',');
+  return tags.some((t) => {
+    const tag = String(t).trim();
+    return /haz(?:ard|mat)?|\bdot\b/i.test(tag) && !/_f(alse)?$/i.test(tag);
+  });
 }
 
 async function fetchCandidate(page, vendor, product) {
@@ -158,6 +180,7 @@ async function fetchCandidate(page, vendor, product) {
       name: data.title || null, quantity: offer.quantity, source_url: proofUrl, text: bodyText,
       competing_same_size: !!offer.competingSameSize, price_type: 'public', vendor_id: vid, vendor: vname,
       free_shipping: freeShippingFromShopify(data), // per-item "ships free" flag (flagged-free vendors only)
+      hazmat_shipping: hazmatFromShopify(data), // hazardous/DOT item: hazmat-extra vendors price it as an estimate
     };
     const verdict = verifyMatch({ name: cand.name, text: bodyText, quantity: cand.quantity, competingOffers: cand.competing_same_size }, product);
     if (verdict.matched) {
@@ -188,6 +211,7 @@ module.exports = {
   variantsFromShopify,
   handlesFromSuggest,
   freeShippingFromShopify,
+  hazmatFromShopify,
   handleOf,
   baseOrigin,
   isApprovedShopifyHost,

@@ -160,6 +160,36 @@ describe('Shopify additions: Golf Course Lawn Store + Gemplers', () => {
     expect(shopify.freeShippingFromShopify(null)).toBe(false);
   });
 
+  test.each([
+    'Free shipping is available on orders over $99.',
+    'Free shipping applies to orders above $149.',
+    'Get free shipping when you spend $75 or more.',
+    'Free shipping on orders of 3 or more items.',
+    'Free shipping with a minimum purchase.',
+    'Qualifying orders get free shipping.',
+    'FREE SHIPPING on select items only.',
+    'Free shipping if you join the club.',
+  ])('a conditional free-shipping sentence is NOT a free flag: %s', (sentence) => {
+    expect(shopify.freeShippingFromShopify({ description: `<p>${sentence}</p>` })).toBe(false);
+  });
+
+  test('one conditional sentence vetoes the flag even beside an unconditional one', () => {
+    expect(shopify.freeShippingFromShopify({ description: 'FREE SHIPPING on orders. Free shipping is available on orders over $99.' })).toBe(false);
+    expect(shopify.freeShippingFromShopify({ tags: ['free shipping over 99'] })).toBe(false);
+  });
+
+  test('an unconditional sentence still flags (and a $ price elsewhere does not matter)', () => {
+    expect(shopify.freeShippingFromShopify({ description: 'Costs $155.99 per bag. FREE SHIPPING on orders. Learn more.' })).toBe(true);
+  });
+
+  test('hazmat tag detection: _T true, _F false', () => {
+    expect(shopify.hazmatFromShopify(JSON.parse(read('gemplers-suggest.json')).resources.results.products[0])).toBe(true);
+    expect(shopify.hazmatFromShopify({ tags: ['shipping_hazardous_F', 'shipping_full_haz_F'] })).toBe(false);
+    expect(shopify.hazmatFromShopify({ tags: ['shipping_full_haz_T'] })).toBe(true);
+    expect(shopify.hazmatFromShopify({ tags: ['Insecticide'] })).toBe(false);
+    expect(shopify.hazmatFromShopify(null)).toBe(false);
+  });
+
   test('shipping rules for the two stores', () => {
     const gem = (price, quantity) => shippingFor({ vendor: { source_url: 'https://gemplers.com/products/x' }, price, quantity });
     expect(gem(33.99, '17 oz')).toMatchObject({ amount: 10.99, basis: 'weight_table' }); // aerosol ~1 lb... under 5 lb
@@ -167,6 +197,34 @@ describe('Shopify additions: Golf Course Lawn Store + Gemplers', () => {
     const golf = { vendor: { source_url: 'https://golfcourselawn.store/products/x' }, price: 155.99, quantity: '15 lb' };
     expect(shippingFor(golf).basis).toBe('estimated');
     expect(shippingFor({ ...golf, freeShipping: true }).basis).toBe('free');
+  });
+});
+
+describe('search wait covers every configured link selector', () => {
+  function fakePage({ waitFails = true } = {}) {
+    const calls = { wait: [] };
+    return {
+      calls,
+      goto: async () => {},
+      waitForSelector: async (sel, opts) => { calls.wait.push({ sel, opts }); if (waitFails) throw new Error('timeout'); },
+      evaluate: async () => [],
+    };
+  }
+  test('DIY Pest waits on Klevu tiles OR the server-rendered listing links in one wait', async () => {
+    const page = fakePage();
+    await diypest.fetchCandidate(page, { vendor_id: 'v', name: 'DIY Pest Control' }, { productName: 'Bifenthrin' });
+    expect(page.calls.wait).toHaveLength(1);
+    const { sel, opts } = page.calls.wait[0];
+    expect(opts.timeout).toBe(10000);
+    for (const s of diypest.config.productLinkSelectors) expect(sel.split(', ')).toContain(s);
+    expect(sel).toContain('.product-item-link'); // listing page links satisfy the wait at once
+  });
+  test('an adapter with no link selectors falls back to the default selector', async () => {
+    const { makeAdapter } = require('../services/price-scan/adapters/base');
+    const a = makeAdapter({ key: 't', buildSearchUrl: () => 'https://x.example/s', searchWaitMs: 50 });
+    const page = fakePage();
+    await a.fetchCandidate(page, { vendor_id: 'v' }, { productName: 'x' });
+    expect(page.calls.wait[0].sel).toBe('a.product-link');
   });
 });
 

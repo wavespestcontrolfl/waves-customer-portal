@@ -63,6 +63,39 @@ describe('shippingFor — Gemplers', () => {
   });
 });
 
+describe('shippingFor — Gemplers hazardous items are never firm', () => {
+  test('a hazmat item under the threshold is estimated (table floor + hazmat allowance), not weight_table', () => {
+    const r = shippingFor({ vendorHost: 'gemplers.com', price: 33.99, quantity: '17 oz', hazmat: true });
+    expect(r.basis).toBe('estimated');
+    expect(r.amount).toBe(25.99); // $10.99 table floor + $15 default allowance
+    expect(r.note).toMatch(/hazmat fee/);
+    expect(shippingProofText(r)).toBe('shipping estimated ~$25.99 (not a quote)');
+    expect(shippingProofText(r)).not.toMatch(/firm/);
+  });
+  test('a hazmat item over the free threshold is still estimated (free-over may exclude hazmat)', () => {
+    const r = shippingFor({ vendorHost: 'gemplers.com', price: 274.99, quantity: '1 gal', hazmat: true });
+    expect(r).toMatchObject({ amount: 15, basis: 'estimated' });
+    expect(shippingProofText(r)).not.toMatch(/firm/);
+  });
+  test('the hazmat allowance follows the env default', () => {
+    process.env.PRICE_SCAN_DEFAULT_SHIPPING_USD = '20';
+    expect(shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity: '2 lb', hazmat: true }).amount).toBe(30.99);
+  });
+  test('a non-hazmat Gemplers item keeps its firm table / free-over result', () => {
+    expect(shippingFor({ vendorHost: 'gemplers.com', price: 30, quantity: '2 lb', hazmat: false }).basis).toBe('weight_table');
+    expect(shippingFor({ vendorHost: 'gemplers.com', price: 200, quantity: '2 lb' }).basis).toBe('free_over');
+  });
+  test('the hazmat flag does not change vendors whose rule has no hazmat extra', () => {
+    expect(shippingFor({ vendorHost: 'domyown.com', price: 30, quantity: '1 gal', hazmat: true }).basis).toBe('free');
+  });
+  test('compare carries the flag from a scanned candidate into the delivered price', () => {
+    const { rankCandidates } = require('../services/price-scan/compare');
+    const [c] = rankCandidates([{ price: 33.99, quantity: '17 oz', vendor: 'Gemplers', source_url: 'https://gemplers.com/products/x', hazmat_shipping: true }]);
+    expect(c.shipping.basis).toBe('estimated');
+    expect(c.landedPrice).toBe(59.98);
+  });
+});
+
 describe('shippingFor — flagged-free and estimated vendors', () => {
   test.each(['solutionsstores.com', 'golfcourselawn.store'])('%s is estimated unless the offer is flagged free', (host) => {
     expect(shippingFor({ vendorHost: host, price: 40, quantity: '1 gal' })).toMatchObject({ amount: 15, basis: 'estimated' });

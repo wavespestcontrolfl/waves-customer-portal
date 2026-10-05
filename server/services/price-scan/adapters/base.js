@@ -524,7 +524,12 @@ function makeAdapter(config) {
     // serial multi-product run. waitForSelector returns as soon as a link appears, so a
     // successful dynamic search is still fast; only a genuine no-match waits it out.
     if (config.searchWaitMs) {
-      const waitSel = (config.productLinkSelectors && config.productLinkSelectors[0]) || 'a.product-link';
+      // Wait for ANY configured link selector (comma-joined = CSS "or"): a store whose search
+      // sometimes lands on a server-rendered listing instead of the widget (DIY Pest) must not
+      // burn the full wait when its links are already there.
+      const waitSel = (config.productLinkSelectors && config.productLinkSelectors.length)
+        ? config.productLinkSelectors.join(', ')
+        : 'a.product-link';
       await page.waitForSelector(waitSel, { timeout: config.searchWaitMs }).catch(() => {});
     }
 

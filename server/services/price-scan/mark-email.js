@@ -56,6 +56,7 @@ function shippingOfSide(side, fallbackVendorHost) {
     price: side && side.price,
     quantity: side && side.quantity,
     freeShipping: !!(side && (side.free_shipping === true || side.freeShipping === true)),
+    hazmat: !!(side && (side.hazmat_shipping === true || side.hazmat === true)),
   });
 }
 const landedOf = (side, shipping) => {
