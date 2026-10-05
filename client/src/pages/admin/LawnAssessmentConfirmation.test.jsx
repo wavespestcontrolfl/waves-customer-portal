@@ -185,7 +185,11 @@ it('a hold that is dragged off the button, or cancelled, does not swallow the ne
     await vi.waitFor(() => screen.getByRole('button', { name: 'Confirm assessment' }));
     const density = screen.getByLabelText('Density score');
     const raise = screen.getByRole('button', { name: 'Raise Density score' });
-    fireEvent.pointerDown(raise);
+    // Touch: pointerdown captures the pointer; the handler must release it so a slide away cancels.
+    const release = vi.fn();
+    raise.releasePointerCapture = release;
+    fireEvent.pointerDown(raise, { pointerId: 7 });
+    expect(release).toHaveBeenCalledTimes(1);
     act(() => { vi.advanceTimersByTime(450 + 120 * 2 + 10); });
     expect(Number(density.value)).toBeGreaterThan(80);
     const held = Number(density.value);
