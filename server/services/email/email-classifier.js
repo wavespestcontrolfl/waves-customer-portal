@@ -85,6 +85,7 @@ Respond ONLY in JSON, no markdown:
     "invoice_number": "if this is an invoice",
     "invoice_amount": "dollar amount if this is an invoice",
     "invoice_date": "date if this is an invoice",
+    "payment_status": "if this is an invoice or receipt: paid (this email confirms the business was charged or paid), failed (a payment failed or was declined), due (a bill or renewal not yet paid), or none",
     "urgency_reason": "why this is urgent, if applicable"
   }
 }`,

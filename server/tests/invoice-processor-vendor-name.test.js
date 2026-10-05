@@ -99,7 +99,7 @@ test('a placeholder name on the invoice falls through to "Unknown Vendor"', asyn
 test('an HTML-only receipt from an unmapped sender takes the sender display name', async () => {
   noPdf();
   await processVendorInvoice({ id: 'e6', gmail_id: 'g', from_address: 'no-reply@mailer.example', from_name: 'Example Mailer', subject: 'Payment received' },
-    { extracted: { invoice_amount: '19.99', invoice_date: '2026-01-15' } });
+    { extracted: { payment_status: 'paid', invoice_amount: '19.99', invoice_date: '2026-01-15' } });
   expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Example Mailer', amount: 19.99 }));
 });
 
@@ -112,9 +112,9 @@ test('the same receipt mailed twice links to the first expense instead of insert
 });
 
 test.each([
-  ['the sender display name', { from_name: 'Example Forwarder' }, { invoice_number: 'TEST-0008', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
-  ['the classifier guess', {}, { vendor_name: 'Example Platform', invoice_number: 'TEST-0009', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
-  ['no name at all', {}, { invoice_number: 'TEST-0010', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
+  ['the sender display name', { from_name: 'Example Forwarder' }, { invoice_number: 'TEST-0008', payment_status: 'paid', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
+  ['the classifier guess', {}, { vendor_name: 'Example Platform', invoice_number: 'TEST-0009', payment_status: 'paid', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
+  ['no name at all', {}, { invoice_number: 'TEST-0010', payment_status: 'paid', invoice_amount: '50.00', invoice_date: '2026-01-15' }],
 ])('a vendor name from %s never drives a duplicate match', async (_label, emailExtra, extracted) => {
   mockState.duplicate = { id: 'exp-other-merchant' };
   noPdf();
@@ -152,7 +152,7 @@ test('no duplicate check runs when the vendor name or description would be clipp
 test('the log lines carry ids, never the vendor name', async () => {
   noPdf();
   await processVendorInvoice({ id: 'e13', gmail_id: 'g', from_address: 'a@unmapped.example', from_name: 'Pat Example', subject: 'Receipt' },
-    { extracted: { invoice_amount: '30.00', invoice_date: '2026-01-15' } });
+    { extracted: { payment_status: 'paid', invoice_amount: '30.00', invoice_date: '2026-01-15' } });
   const logged = JSON.stringify([...mockLogger.info.mock.calls, ...mockLogger.warn.mock.calls, ...mockLogger.error.mock.calls]);
   expect(inserted()).toEqual(expect.objectContaining({ vendor_name: 'Pat Example' }));
   expect(logged).not.toContain('Pat Example');
@@ -174,23 +174,12 @@ test('a receipt with no printed date (today fallback) never drives a duplicate m
   expect(mockState.lastDuplicateFilter).toBeUndefined();
 });
 
-test.each([
-  '$12.00 payment to Example Co was unsuccessful',
-  'We could not process your payment of $12.00',
-  'Your payment did not go through',
-  'Your payment couldn\u2019t be processed',
-  'Your card payment didn\u2019t go through',
-  'We were unable to charge your card',
-  'There was a problem with your payment',
-  'URGENT: Your Example account couldn\'t be recharged',
-  'Your $45.00 payout for Example Co is on the way',
-  'Your Example subscription will be renewed in 7 days',
-  'Team Invoice Due for Example Projects',
-])('an email whose subject says no money left (%s) is never booked', async (subject) => {
+test.each([['failed'], ['due'], ['none']])('a classifier-amount receipt with payment_status %p is never booked', async (status) => {
   noPdf();
-  await processVendorInvoice({ id: 'e16', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject }, { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
+  await processVendorInvoice({ id: 'e16', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Your payment' },
+    { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15', ...(status ? { payment_status: status } : {}) } });
   expect(inserted()).toBeUndefined();
-  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:not_a_charge' })]);
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:not_paid' })]);
 });
 
 test('a copy of a notice (same sender, same second, same amount) links to the booked expense', async () => {
@@ -198,12 +187,12 @@ test('a copy of a notice (same sender, same second, same amount) links to the bo
   mockState.me = { from_address: 'noreply@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Notice: your card has been charged' };
   mockState.copy = { id: 'exp-first-notice' };
   await processVendorInvoice({ id: 'e17', gmail_id: 'g', from_address: 'noreply@acme-cloud.example', subject: 'Notice: your card has been charged' },
-    { extracted: { invoice_amount: '$10.00', invoice_date: '2026-01-15' } });
+    { extracted: { payment_status: 'paid', invoice_amount: '$10.00', invoice_date: '2026-01-15' } });
   expect(inserted()).toBeUndefined();
   expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ expense_id: 'exp-first-notice', auto_action: 'expense_duplicate:10' })]);
 });
 
-test('a receipt with a parsed PDF total skips the subject guard', async () => {
+test('a receipt with a parsed PDF total does not need payment_status', async () => {
   extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0018', invoice_date: '2026-01-15', total: 30 });
   await processVendorInvoice({ id: 'e18', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Invoice due: paid in full' }, { extracted: {} });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 30 }));
@@ -222,18 +211,18 @@ test('the notice-copy check requires the same sender, second, subject, body and 
   noPdf();
   mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Receipt' };
   await processVendorInvoice({ id: 'e19', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'Batch Biller', subject: 'Receipt' },
-    { extracted: { invoice_number: 'TEST-0019', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
+    { extracted: { invoice_number: 'TEST-0019', payment_status: 'paid', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
   expect(mockState.copyFilter).toEqual(expect.objectContaining({ 'e.from_address': 'billing@batch.example', 'e.subject': 'Receipt' }));
   expect(mockState.copyRaws.some(([sql]) => /md5/.test(sql))).toBe(true);
   expect(mockState.copyRaws.some(([sql]) => /date_trunc\('second'/.test(sql))).toBe(true);
 });
 
-test('a parsed PDF with no total falls back to the classifier amount and keeps the subject guard', async () => {
+test('a parsed PDF with no total falls back to the classifier amount and keeps the paid check', async () => {
   extraction({ vendor_name: 'Acme Cloud', invoice_number: 'TEST-0021', invoice_date: '2026-01-15' });
   await processVendorInvoice({ id: 'e21', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: '$12.00 payment to Acme Cloud was unsuccessful' },
-    { extracted: { invoice_amount: '$12.00' } });
+    { extracted: { payment_status: 'failed', invoice_amount: '$12.00' } });
   expect(inserted()).toBeUndefined();
-  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:not_a_charge' })]);
+  expect(mockWrites).toContainEqual(['emails', 'update', expect.objectContaining({ auto_action: 'invoice_detected:not_paid' })]);
 });
 
 test('a reprocessed email that already booked an expense keeps it and inserts nothing', async () => {
@@ -241,7 +230,7 @@ test('a reprocessed email that already booked an expense keeps it and inserts no
   mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), expense_id: 'exp-already' };
   mockState.existingExpenseIds = ['exp-already'];
   await processVendorInvoice({ id: 'e22', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' },
-    { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
+    { extracted: { payment_status: 'paid', invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
   expect(inserted()).toBeUndefined();
 });
 
@@ -249,7 +238,7 @@ test('a stale link to a deleted expense does not block booking the email again',
   noPdf();
   mockState.me = { from_address: 'billing@acme-cloud.example', received_at: new Date('2026-01-15T10:00:00Z'), expense_id: 'exp-deleted' };
   await processVendorInvoice({ id: 'e23', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' },
-    { extracted: { invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
+    { extracted: { payment_status: 'paid', invoice_amount: '$12.00', invoice_date: '2026-01-15' } });
   expect(inserted()).toEqual(expect.objectContaining({ amount: 12 }));
 });
 
@@ -261,18 +250,9 @@ test('an email with an attachment never takes the copy shortcut (distinct PDF in
   expect(inserted()).toEqual(expect.objectContaining({ amount: 40 }));
 });
 
-test.each([
-  'Delivery failed \u2014 receipt for your $40 order',
-  'Action required: verify your email \u2014 receipt #12',
-])('a failure word without payment wording (%s) does not block a receipt', async (subject) => {
-  noPdf();
-  await processVendorInvoice({ id: 'e28', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject }, { extracted: { invoice_amount: '$40.00', invoice_date: '2026-01-15' } });
-  expect(inserted()).toEqual(expect.objectContaining({ amount: 40 }));
-});
-
 test('an impossible ISO classifier date is no date (today fallback, no roll-over)', async () => {
   noPdf();
-  await processVendorInvoice({ id: 'e29', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' }, { extracted: { invoice_amount: '$10.06', invoice_date: '2026-02-31' } });
+  await processVendorInvoice({ id: 'e29', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' }, { extracted: { payment_status: 'paid', invoice_amount: '$10.06', invoice_date: '2026-02-31' } });
   expect(inserted().expense_date).not.toBe('2026-03-03');
 });
 
@@ -280,9 +260,22 @@ test('the copy check compares the text and HTML bodies separately', async () => 
   noPdf();
   mockState.me = { from_address: 'billing@batch.example', received_at: new Date('2026-01-15T10:00:00Z'), subject: 'Receipt' };
   await processVendorInvoice({ id: 'e30', gmail_id: 'g', from_address: 'billing@batch.example', from_name: 'Batch Biller', subject: 'Receipt' },
-    { extracted: { invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
+    { extracted: { payment_status: 'paid', invoice_amount: '$25.00', invoice_date: '2026-01-15' } });
   const md5 = mockState.copyRaws.map(([sql]) => sql).filter((sql) => /md5/.test(sql));
-  expect(md5).toHaveLength(2);
+  expect(md5).toHaveLength(3);
+  expect(md5.some((sql) => /snippet/.test(sql))).toBe(true);
   expect(md5.some((sql) => /body_text/.test(sql) && !/body_html/.test(sql))).toBe(true);
   expect(md5.some((sql) => /body_html/.test(sql) && !/body_text/.test(sql))).toBe(true);
+});
+
+test('a non-string classifier date is no date (no 1970 instant)', async () => {
+  noPdf();
+  await processVendorInvoice({ id: 'e31', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' }, { extracted: { payment_status: 'paid', invoice_amount: '$10.06', invoice_date: 20260231 } });
+  expect(inserted().expense_date).not.toMatch(/^1970/);
+});
+
+test('a classification with no payment_status (made before the field existed) books as before', async () => {
+  noPdf();
+  await processVendorInvoice({ id: 'e32', gmail_id: 'g', from_address: 'billing@acme-cloud.example', subject: 'Receipt' }, { extracted: { invoice_amount: '412.50', invoice_date: '2026-01-15' } });
+  expect(inserted()).toEqual(expect.objectContaining({ amount: 412.5 }));
 });

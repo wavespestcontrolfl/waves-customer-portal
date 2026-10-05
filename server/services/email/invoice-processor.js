@@ -188,21 +188,13 @@ async function findDuplicateExpense(conn, vendorName, invoiceNumber, amount, inv
     .first('id');
 }
 
-// With no parsed invoice the subject is the only signal of what the email
-// is. These say money did NOT leave the business (a failed or declined
-// payment, a payout received, a renewal reminder, a bill still due), and the
-// classifier still prints an amount for them, so they are never booked.
-const NOT_A_CHARGE_SUBJECT = new RegExp([
-  // A failure word tied to payment wording, either order, within a few words.
-  String.raw`\b(payment|charge|transaction|card|recharge|auto-?recharge|renewal)\b.{0,40}\b(unsuccessful|not successful|failed|declined|did ?n[o']t go through)\b`,
-  String.raw`\b(unsuccessful|failed|declined)\b.{0,20}\b(payment|charge|transaction)\b`,
-  String.raw`\b(could|can)(not|n't| not) (be )?(process(ed)?|charged?|recharged?|completed?|collect(ed)?)\b`,
-  String.raw`\bunable to (process|charge|collect|complete) (your |the )?(payment|charge|card)\b`,
-  String.raw`\bproblem with your payment\b|\bpayment (issue|problem)\b`,
-  String.raw`\bpayout\b`,
-  String.raw`\bwill (be )?renew(ed|s)?\b|\brenewal notice\b`,
-  String.raw`\b(invoice|payment) (is )?(now )?due\b|\bpast due\b`,
-].join('|'), 'i');
+// A receipt whose amount comes from the classifier (no PDF total) is booked
+// unless the classifier says the email does NOT confirm a payment. Failed
+// or declined payments, payouts, renewal reminders and unpaid bills all
+// print an amount too; a phrase list on the subject could not tell them
+// apart reliably (Codex rounds 2-5 on #5932). A classification made before
+// payment_status existed (no field) books exactly as it did before.
+const PAID = 'paid';
 
 // The same email delivered twice (to two inboxes, or re-sent): an expense
 // already linked to an email from the same sender, received in the same
@@ -229,6 +221,8 @@ async function findSameNoticeExpense(conn, emailId, amount, description) {
     // that split the same characters differently between text and HTML.
     .whereRaw("md5(coalesce(e.body_text, '')) = (select md5(coalesce(body_text, '')) from emails where id = ?)", [emailId])
     .whereRaw("md5(coalesce(e.body_html, '')) = (select md5(coalesce(body_html, '')) from emails where id = ?)", [emailId])
+    // The snippet too: with both bodies empty it is what the classifier read.
+    .whereRaw("md5(coalesce(e.snippet, '')) = (select md5(coalesce(snippet, '')) from emails where id = ?)", [emailId])
     .whereRaw('x.amount = round(?::numeric, 2)', [String(amount)])
     .first('x.id');
 }
@@ -459,17 +453,19 @@ async function processVendorInvoice(email, classification) {
   // is the extraction's answer, not a missing one — `||` fell through to the
   // classifier's amount and created an expense for it (Codex r18 on #4884).
   const amount = parsedInvoice?.total ?? (classifierAmount(classification.extracted?.invoice_amount) || 0);
-  // The subject guard follows where the AMOUNT came from: a parsed PDF with
-  // no total also falls back to the classifier.
+  // The paid check follows where the AMOUNT came from: a parsed PDF with no
+  // total also falls back to the classifier.
   const amountFromClassifier = parsedInvoice?.total == null;
   const invoiceNumber = parsedInvoice?.invoice_number || classification.extracted?.invoice_number;
   // The classifier's date is untyped: an ISO-shaped impossible date
   // (2026-02-31) would roll over to March 3 in new Date(), so it counts as no
   // date. Other written forms are parsed as before.
   const classifierDate = classification.extracted?.invoice_date;
-  const usableClassifierDate = typeof classifierDate === 'string' && /^\s*\d{4}-\d{2}-\d{2}/.test(classifierDate)
-    ? validCalendarDate(classifierDate.trim(), { allowTimeSuffix: true })
-    : classifierDate;
+  // Only a string: new Date(20260231) is a 1970 instant.
+  const usableClassifierDate = typeof classifierDate !== 'string' ? null
+    : /^\s*\d{4}-\d{2}-\d{2}/.test(classifierDate)
+      ? validCalendarDate(classifierDate.trim(), { allowTimeSuffix: true })
+      : classifierDate;
   const rawInvoiceDate = parsedInvoice?.invoice_date || usableClassifierDate;
   const parsedDate = rawInvoiceDate ? new Date(rawInvoiceDate) : null;
   const invoiceDateValid = parsedDate && !Number.isNaN(parsedDate.getTime());
@@ -481,9 +477,10 @@ async function processVendorInvoice(email, classification) {
   const invoiceDate = candidateDate && taxPeriodFor(candidateDate) ? candidateDate : etDateString();
   const { tax_year: taxYear, quarter } = taxPeriodFor(invoiceDate);
 
-  if (amount > 0 && amountFromClassifier && NOT_A_CHARGE_SUBJECT.test(String(email.subject || '').replace(/[\u2018\u2019\u02BC]/g, "'"))) {
+  const paymentStatus = classification.extracted?.payment_status;
+  if (amount > 0 && amountFromClassifier && typeof paymentStatus === 'string' && paymentStatus.trim().toLowerCase() !== PAID) {
     await db('emails').where({ id: email.id }).update({
-      auto_action: 'invoice_detected:not_a_charge',
+      auto_action: 'invoice_detected:not_paid',
       updated_at: new Date(),
     });
   } else if (amount > 0) {
@@ -499,4 +496,4 @@ async function processVendorInvoice(email, classification) {
   }
 }
 
-module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates, classifierAmount, NOT_A_CHARGE_SUBJECT };
+module.exports = { processVendorInvoice, isUsableInvoiceTotal, readParsedInvoice, senderDomainCandidates, classifierAmount };
