@@ -331,6 +331,18 @@ async function ensurePackageFollowUpVisit({ trx, primary, cols = null, promotePe
   try {
     return await trx.transaction((sp) => bookInSavepoint(sp, trx, primary, cols, { promotePendingCallFollowUp }));
   } catch (err) {
+    // Lost the one-live-child race (uq_scheduled_services_followup_source_open)
+    // to a concurrent writer: the obligation is covered either way. Read the
+    // winner HERE, after the savepoint rolled back — inside it the connection
+    // is in an aborted-transaction state and every query fails.
+    if (err && err.code === '23505') {
+      try {
+        const winner = await liveChildOf(trx, primary.id);
+        if (winner) return winner;
+      } catch (readErr) {
+        logger.warn(`[package-followup] winner read failed for ${primary.id}: ${readErr.message}`);
+      }
+    }
     logger.error(`[package-followup] visit 2 not booked for ${primary.id}; primary booking kept: ${err.message}`);
     return null;
   }
@@ -372,23 +384,12 @@ async function bookInSavepoint(sp, outerTrx, primary, cols, { promotePendingCall
     fenceMissed = true;
     logger.warn(`[package-followup] day fence failed for visit 2 of ${primary.id} on ${date} (booking unfenced): ${fenceErr.message}`);
   }
-  let child;
-  try {
-    child = await createScheduledService({
-      trx: sp, insertData, cols: columns,
-      source: { sourceAction: PACKAGE_FOLLOWUP_SOURCE_ACTION },
-    });
-  } catch (insertErr) {
-    // Lost the one-live-child race (uq_scheduled_services_followup_source_open)
-    // to a concurrent writer: the obligation is covered either way. The
-    // failed statement aborted THIS savepoint, so the winner is read on the
-    // outer transaction.
-    if (insertErr && insertErr.code === '23505') {
-      const winner = await liveChildOf(outerTrx, primary.id);
-      if (winner) return winner;
-    }
-    throw insertErr;
-  }
+  // A 23505 (lost the one-live-child race) propagates: the savepoint must
+  // roll back before the winner can be read (ensurePackageFollowUpVisit).
+  const child = await createScheduledService({
+    trx: sp, insertData, cols: columns,
+    source: { sourceAction: PACKAGE_FOLLOWUP_SOURCE_ACTION },
+  });
   if (!child) return null;
   // Visit groups (visit-group-scope.md §2): stamp at scheduling —
   // gate-checked + best-effort + self-refusing inside maybeGroupRow.
