@@ -158,6 +158,29 @@ suite('IB superseded confirmation cards in isolated Postgres', () => {
     expect((await claim(newCard)).action.params.time_window).toBe('10:00 AM');
   });
 
+  test('a resumed older task keeps its original start, so its late card is stored cancelled', async () => {
+    const day = '2030-04-05';
+    // The older task starts first; a newer request then stores a same-intent card.
+    const older = (await Tasks.begin({ actorId, sessionId: crypto.randomUUID(), requestKey: crypto.randomUUID(), request: { prompt: 'Synthetic request' }, pageContext: {} })).task;
+    await new Promise(resolve => setTimeout(resolve, 15));
+    const newer = await propose('create_appointment', booking({ scheduled_date: day, time_window: '10:00 AM' }), { noTask: true, startedAt: new Date() });
+    // Resuming later: the start is the task's created_at (epoch ms), not the resume time.
+    const resumedStart = Tasks.requestStartedAt(older);
+    expect(resumedStart).toBe(new Date(older.created_at).getTime());
+    expect(Tasks.requestStartedAt(undefined)).toBeGreaterThan(resumedStart);
+    const late = await propose('create_appointment', booking({ scheduled_date: day }), { task: older, startedAt: new Date(resumedStart) });
+    expect(late.superseded_by_newer_request).toBe(true);
+    expect(await status(late.id)).toBe('cancelled');
+    expect(await status(newer.id)).toBe('pending');
+    expect((await claim(newer)).action.params.time_window).toBe('10:00 AM');
+    // Contrast: with a fresh start at resume (the old behavior) the stale task would out-rank the newer card.
+    const day2 = '2030-04-06';
+    const task2 = (await Tasks.begin({ actorId, sessionId: crypto.randomUUID(), requestKey: crypto.randomUUID(), request: { prompt: 'Synthetic request' }, pageContext: {} })).task;
+    const newer2 = await propose('create_appointment', booking({ scheduled_date: day2, time_window: '10:00 AM' }), { noTask: true, startedAt: new Date() });
+    await propose('create_appointment', booking({ scheduled_date: day2 }), { task: task2, startedAt: new Date(Date.now() + 1000) });
+    expect(await status(newer2.id)).toBe('cancelled');
+  });
+
   test('a newer card that was cancelled or has expired still shows the older request is stale', async () => {
     const day = '2030-04-10';
     const cancelled = await propose('create_appointment', booking({ scheduled_date: day, time_window: '10:00 AM' }), { noTask: true, startedAt: at(-1000) });

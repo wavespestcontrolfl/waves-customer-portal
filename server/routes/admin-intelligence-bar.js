@@ -2714,7 +2714,8 @@ Use the request-time Eastern date provided on the current turn.`;
 // ─── MAIN QUERY ENDPOINT ────────────────────────────────────────
 
 async function runQuery(req, res, next) {
-  const requestStartedAt = Date.now();
+  // A resumed task keeps its original start, so a late card is not ordered as the newest.
+  const requestStartedAt = IbTasks.requestStartedAt(req.ibResumedTask);
   let activeTask = null;
   try {
     const { prompt, conversationHistory = [], context: requestedContext, pageData } = req.body;
