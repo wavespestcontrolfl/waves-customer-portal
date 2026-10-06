@@ -75,6 +75,8 @@ const BED_AREA_REVIEW_SQFT = 8000;
 // area, no lot to infer from) prices a 1,200 sq ft bed (was 2,000) and stays
 // on the manual-review lane. Replay of an already-quoted fallback line reads
 // its stamped pricingKnobs.fallbackBedSqFt (see estimate-tree-shrub-knob-replay).
+// This is the in-code default; the live value is TREE_SHRUB.fallbackBedSqFt,
+// synced from pricing_config ts_material_rates.fallback_bed_sqft (db-bridge).
 const TREE_SHRUB_FALLBACK_BED_SQFT = 1200;
 
 // ── Turf Complexity Score → Factor ────────────────────────────
@@ -672,6 +674,8 @@ const TREE_SHRUB = {
   // (canopy wider than ~15 ft) counts as that many regular palms in both
   // reserve terms — fertilizer scales with canopy area. NEUTRAL 1 here.
   routinePalmCareReserve: { perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1 },
+  // Bed size a quote with no bed signal prices (see TREE_SHRUB_FALLBACK_BED_SQFT).
+  fallbackBedSqFt: TREE_SHRUB_FALLBACK_BED_SQFT,
   // Per-visit callback/re-treatment reserve, mirroring the commercial
   // pricers' callbackReservePerVisit knob. Residential T&S has ZERO
   // recorded callbacks (Phase-1 audit) so this ships 0 — a knob with no

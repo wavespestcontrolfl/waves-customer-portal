@@ -2546,10 +2546,12 @@ function treeShrubKnobNumber(value, min, max) {
 
 // The fallback bed size a quote with no bed signal prices. A replayed quote
 // carries its own stamped size (options.knobs.fallbackBedSqFt); fresh quotes
-// use the current default.
+// use the live pricing_config value (TREE_SHRUB.fallbackBedSqFt, default 1200).
 function treeShrubFallbackBedSqFt(knobs) {
   const stamped = treeShrubKnobNumber(knobs && knobs.fallbackBedSqFt, 100, 20000);
-  return stamped !== null ? stamped : TREE_SHRUB_FALLBACK_BED_SQFT;
+  if (stamped !== null) return stamped;
+  const live = treeShrubKnobNumber(TREE_SHRUB.fallbackBedSqFt, 100, 20000);
+  return live !== null ? live : TREE_SHRUB_FALLBACK_BED_SQFT;
 }
 
 function treeShrubFallbackWarning(sqft) {
@@ -2844,8 +2846,17 @@ function priceTreeShrub(property, options = {}) {
   const inferredTrees = treeCountSource === 'density_estimate';
   const suppressFor = (legArmed) => inferredTrees
     && (foldablePalmCount > 0 || (legArmed && palmCount > 0));
-  const materialBaseTreeCount = suppressFor(palmMaterialArmed) ? 0 : treeCount;
-  const laborBaseTreeCount = suppressFor(palmLaborArmed) ? 0 : treeCount;
+  // A LOOKUP-sourced palm count (draft-builder, owner ruling 2026-10-05) must
+  // never lower the plant total below the density estimate: one trusted palm
+  // on a property whose density says ~10 trees would otherwise suppress all
+  // 10 and price a single plant. The palms price as palms, so only the
+  // palms' share comes off the inferred tree count, on both legs and
+  // whether or not the reserve is armed. A caller-stated count keeps the
+  // suppression above (replayed sent quotes depend on it).
+  const palmsFromLookup = options.palmCountFromLookup === true && palmCountSource === 'service_line';
+  const lookupNetTrees = inferredTrees && palmsFromLookup ? Math.max(treeCount - palmCount, 0) : null;
+  const materialBaseTreeCount = lookupNetTrees ?? (suppressFor(palmMaterialArmed) ? 0 : treeCount);
+  const laborBaseTreeCount = lookupNetTrees ?? (suppressFor(palmLaborArmed) ? 0 : treeCount);
   // Per-leg counts: palms ride the legacy per-tree term only where their
   // replacement is still unarmed.
   const materialTreeCount = materialBaseTreeCount + (palmMaterialArmed ? 0 : foldablePalmCount);
@@ -2988,6 +2999,7 @@ function priceTreeShrub(property, options = {}) {
     palmCount,
     largePalmCount,
     palmCountSource,
+    ...(palmsFromLookup ? { palmCountFromLookup: true } : {}),
     palmReserveActive,
     palmMaterialArmed,
     palmLaborArmed,

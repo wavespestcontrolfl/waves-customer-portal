@@ -241,7 +241,7 @@ function servicesWithTreeShrubPalms(services, { isCommercial, lookupEnriched }) 
       ? { ...lookupEnriched, estimatedPalmCount: 1 }
       : lookupEnriched);
     if (trusted) {
-      return count === 0 ? services : { ...services, treeShrub: { ...ts, palmCount: count } };
+      return count === 0 ? services : { ...services, treeShrub: { ...ts, palmCount: count, palmCountFromLookup: true } };
     }
   }
   return { ...services, treeShrub: { ...ts, palmCountUnverified: true } };

@@ -1134,6 +1134,11 @@ describe('Tree & Shrub v4.7 density source eligibility + admin validation', () =
     expect(ok({ palm_large_factor: 2.5 })).toBe(true);
     expect(ok({ palm_large_factor: 0.5 })).toBe(false);
     expect(ok({ palm_large_factor: 6 })).toBe(false);
+    // No-bed-signal fallback size (owner ruling 2026-10-05).
+    expect(ok({ fallback_bed_sqft: 1200 })).toBe(true);
+    expect(ok({ fallback_bed_sqft: 99 })).toBe(false);
+    expect(ok({ fallback_bed_sqft: 20001 })).toBe(false);
+    expect(ok({ fallback_bed_sqft: '1200' })).toBe(false);
     expect(ok({ callback_reserve_per_visit: true })).toBe(false); // Number(true)=1 must NOT slip through
     expect(ok({ palm_per_palm_annual: '6' })).toBe(false); // strict numbers, no numeric strings
     expect(ok({ callback_reserve_per_visit: null })).toBe(false);
@@ -1699,5 +1704,56 @@ describe('Tree & Shrub 1,200 sqft fallback bed (owner ruling 2026-10-05) and its
     expect(palms(5).manualReviewReasons).not.toContain('palm_count_unverified');
     // Without the flag, zero palms is silent as before.
     expect(priceTreeShrub({ bedArea: 2000 }, { tier: 'standard' }).manualReviewReasons).not.toContain('palm_count_unverified');
+  });
+});
+
+describe('Tree & Shrub lookup-sourced palms keep the density-estimated trees', () => {
+  const armed = { perPalmAnnual: 16, minutesPerPalmVisit: 1.5, largePalmFactor: 2.5 };
+  const original = { ...constants.TREE_SHRUB.routinePalmCareReserve };
+  afterEach(() => { constants.TREE_SHRUB.routinePalmCareReserve = { ...original }; });
+  const price = (opts, reserve) => {
+    if (reserve) constants.TREE_SHRUB.routinePalmCareReserve = { ...reserve };
+    return priceTreeShrub({ bedArea: 2000, treeDensity: 'heavy' }, { tier: 'standard', ...opts });
+  };
+
+  test.each([['armed reserve', armed], ['unarmed reserve', { perPalmAnnual: 0, minutesPerPalmVisit: 0, largePalmFactor: 1 }]])(
+    'heavy density + 1 lookup palm is never quoted below density alone (%s)',
+    (_label, reserve) => {
+      const densityOnly = price({}, reserve);
+      expect(densityOnly.treeCount).toBe(10);
+      // Stated/caller path keeps its documented suppression.
+      const stated = price({ palmCount: 1 }, reserve);
+      expect(stated.materialTreeCount + stated.laborTreeCount).toBeLessThanOrEqual(2);
+      // Lookup path: 9 non-palm trees stay, the palm prices as a palm.
+      const lookup = price({ palmCount: 1, palmCountFromLookup: true }, reserve);
+      expect(lookup.palmCountFromLookup).toBe(true);
+      expect(lookup.annual).toBeGreaterThanOrEqual(densityOnly.annual);
+      expect(lookup.annual).toBeGreaterThan(stated.annual);
+    },
+  );
+
+  test('palms beyond the density estimate net the trees to zero, not below; a stated treeCount is untouched', () => {
+    const many = price({ palmCount: 14, palmCountFromLookup: true }, armed);
+    expect(many.materialTreeCount).toBe(0);
+    expect(many.laborTreeCount).toBe(0);
+    const explicitTrees = priceTreeShrub({ bedArea: 2000, treeDensity: 'heavy' }, { tier: 'standard', treeCount: 4, palmCount: 3, palmCountFromLookup: true });
+    expect(explicitTrees.materialTreeCount).toBe(4);
+  });
+
+  test('the alternate-tier rows keep the same netting (mapper passes the flag)', () => {
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    constants.TREE_SHRUB.routinePalmCareReserve = { ...armed };
+    const input = { homeSqFt: 2000, bedArea: 2000, treeDensity: 'heavy', services: { treeShrub: { tier: 'standard', palmCount: 1, palmCountFromLookup: true } } };
+    const est = generateEstimate(input);
+    const ts = est.lineItems.find((li) => li.service === 'tree_shrub');
+    expect(ts.palmCountFromLookup).toBe(true);
+    const rows = mapV1ToLegacyShape(est).results.ts;
+    const enhanced = rows.find((r) => r.tier === 'enhanced');
+    // The enhanced row is recomputed by the mapper from the stored line; it
+    // must equal a direct enhanced quote that nets the density trees.
+    const direct = priceTreeShrub({ bedArea: 2000, treeDensity: 'heavy' }, { tier: 'enhanced', palmCount: 1, palmCountFromLookup: true });
+    expect(enhanced.ann).toBe(Math.round(direct.annual));
+    const noFlag = priceTreeShrub({ bedArea: 2000, treeDensity: 'heavy' }, { tier: 'enhanced', palmCount: 1 });
+    expect(enhanced.ann).toBeGreaterThan(Math.round(noFlag.annual));
   });
 });
