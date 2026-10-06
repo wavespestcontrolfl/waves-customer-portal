@@ -368,6 +368,40 @@ export function appendDictatedText(notes, text) {
   const lastLine = notes.slice(notes.lastIndexOf("\n") + 1);
   return parseMarkerLine(lastLine) ? `${notes.trimEnd()}\n${text}` : `${notes} ${text}`;
 }
+// Typing onto a chip line works the same way: words typed (or pasted) after
+// a space at the end of a "[Tag] Label" chip line move to their own line, so
+// the label stays selected and the words stay a note. Only a line that was
+// exactly a picked chip label before this edit splits; a tech-typed
+// "[Found] Ants by the lanai" or an edit inside the label itself is left
+// alone. Returns the caret shifted by the characters the split changed.
+export function splitTypedChipLineTails(prevNotes, nextNotes, labels, caret = null) {
+  const picked = new Set((labels || []).map((label) => String(label || "").trim().toLowerCase()).filter(Boolean));
+  const chipLines = String(prevNotes || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => picked.has(parseMarkerLine(line)?.text.toLowerCase()))
+    .sort((a, b) => b.length - a.length);
+  if (!chipLines.length) return { notes: nextNotes, caret };
+  let offset = 0;
+  let nextCaret = caret;
+  const lines = String(nextNotes || "").split("\n").map((line) => {
+    const start = offset;
+    offset += line.length + 1;
+    const lead = line.length - line.trimStart().length;
+    const body = line.slice(lead);
+    const chip = chipLines.find((candidate) => (
+      body.length > candidate.length
+      && body.slice(0, candidate.length).toLowerCase() === candidate.toLowerCase()
+      && /^\s+\S/.test(body.slice(candidate.length))
+    ));
+    if (!chip) return line;
+    const gapStart = start + lead + chip.length;
+    const gap = body.slice(chip.length).match(/^\s+/)[0].length;
+    if (nextCaret !== null && nextCaret > gapStart) nextCaret += 1 - Math.min(gap, nextCaret - gapStart);
+    return `${line.slice(0, lead)}${chip}\n${body.slice(chip.length + gap)}`;
+  });
+  return { notes: lines.join("\n"), caret: nextCaret };
+}
 function markerLines(notes) {
   return String(notes || "").split("\n").map(parseMarkerLine).filter(Boolean);
 }
@@ -16252,6 +16286,23 @@ export function CompletionPanel({
     }
   }
 
+  // Both notes textareas: keep typed words off a picked chip line
+  // (splitTypedChipLineTails), restoring the caret the split moved.
+  function handleNotesInput(event) {
+    const el = event.target;
+    const { notes: nextNotes, caret } = splitTypedChipLineTails(
+      notes,
+      el.value,
+      [...selectedProtocolActionLabels, ...selectedObservationLabels, ...selectedRecommendationLabels],
+      el.selectionStart,
+    );
+    setNotes(nextNotes);
+    if (nextNotes !== el.value && caret !== null) {
+      requestAnimationFrame(() => {
+        if (document.activeElement === el) el.setSelectionRange(caret, caret);
+      });
+    }
+  }
   function addChipNote(prefix, text) {
     // Once an AI draft has replaced the notes, the label arrays are the
     // selection source of truth and selections render as removable pills —
@@ -20185,7 +20236,7 @@ export function CompletionPanel({
               <div style={{ position: "relative" }}>
                 <textarea
                   value={notes}
-                  onChange={(e) => setNotes(e.target.value)}
+                  onChange={handleNotesInput}
                   rows={quickComplete ? 3 : 5}
                   // Lock edits while the AI draft is in flight so typing or a
                   // dictated chunk landing mid-call isn't clobbered when the
@@ -22695,7 +22746,7 @@ export function CompletionPanel({
           <div style={{ position: "relative" }}>
             <textarea
               value={notes}
-              onChange={(e) => setNotes(e.target.value)}
+              onChange={handleNotesInput}
               rows={quickComplete ? 3 : 5}
               // Lock edits while the AI draft is in flight so typing or a
               // dictated chunk landing mid-call isn't clobbered when the

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendDictatedText,
   buildPhotoRecoveryOutcome,
+  splitTypedChipLineTails,
   buildPhotoRetryFormBody,
   completionAutoCloseDelay,
   reportShapedNotes,
@@ -162,5 +163,48 @@ describe("appendDictatedText", () => {
   it("keeps later chunks on the spoken line", () => {
     const first = appendDictatedText("[Protocol] Web sweep", "Treated the perimeter.");
     expect(appendDictatedText(first, "Ants by the lanai.")).toBe("[Protocol] Web sweep\nTreated the perimeter. Ants by the lanai.");
+  });
+});
+
+describe("splitTypedChipLineTails", () => {
+  const labels = ["Web sweep", "Ants"];
+
+  it("moves words typed after a picked chip line to their own line", () => {
+    const prev = "Note.\n[Protocol] Web sweep ";
+    const next = "Note.\n[Protocol] Web sweep T";
+    expect(splitTypedChipLineTails(prev, next, labels, next.length)).toEqual({ notes: "Note.\n[Protocol] Web sweep\nT", caret: next.length });
+  });
+
+  it("splits pasted text and shifts the caret by the whitespace removed", () => {
+    const prev = "[Found] Ants\nLast line";
+    const next = "[Found] Ants   by the lanai\nLast line";
+    const caret = "[Found] Ants   by the lanai".length;
+    expect(splitTypedChipLineTails(prev, next, labels, caret)).toEqual({ notes: "[Found] Ants\nby the lanai\nLast line", caret: caret - 2 });
+  });
+
+  it("leaves a caret before the split where it was", () => {
+    const prev = "Hi\n[Protocol] Web sweep";
+    const next = "Hi\n[Protocol] Web sweep treated";
+    expect(splitTypedChipLineTails(prev, next, labels, 1).caret).toBe(1);
+  });
+
+  it("keeps a trailing space until words follow it", () => {
+    const next = "[Protocol] Web sweep ";
+    expect(splitTypedChipLineTails("[Protocol] Web sweep", next, labels, next.length).notes).toBe(next);
+  });
+
+  it("leaves a tech-typed marker line alone while it is being typed", () => {
+    const prev = "[Found] Ants by ";
+    const next = "[Found] Ants by t";
+    expect(splitTypedChipLineTails(prev, next, labels, next.length).notes).toBe(next);
+    expect(splitTypedChipLineTails("[Found] Roaches", "[Found] Roaches in garage", labels).notes).toBe("[Found] Roaches in garage");
+  });
+
+  it("leaves an edit inside the label itself alone", () => {
+    expect(splitTypedChipLineTails("[Protocol] Web sweep", "[Protocol] Web sweeps", labels).notes).toBe("[Protocol] Web sweeps");
+  });
+
+  it("does nothing when no chip label is picked", () => {
+    expect(splitTypedChipLineTails("[Protocol] Web sweep", "[Protocol] Web sweep done", []).notes).toBe("[Protocol] Web sweep done");
   });
 });
