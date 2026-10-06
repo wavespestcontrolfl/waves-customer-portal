@@ -165,6 +165,14 @@ async function accountWantsBermudaRemoval(knex, { customerId, profile, trackKey,
     : none;
 }
 
+// A step visit is a LAWN visit on the v13 program: the service line is the repo's own lawn
+// classifier (the one lawn-completion-defaults uses), and a visit pinned to another protocol
+// version (the recorded version the plan honors, scheduled_services.lawn_protocol_version)
+// is not on v13. Unpinned = the current serving version. A pest or tree and shrub visit on a
+// flagged account, or a lawn visit pinned to 2026.05, is never a step visit.
+const isLawnV13Visit = (visit) => detectServiceLine(visit?.service_type) === 'lawn'
+  && (!visit.lawn_protocol_version || visit.lawn_protocol_version === LAWN_V13_VERSION);
+
 // The step for a booked visit, for readers that have the visit but not the plan (the
 // tank sheet, the completion actions). `visit` is the row the caller already loaded
 // (admin-protocols' loadVisitForPlan, technician-scoped): the same account reader
@@ -174,6 +182,9 @@ async function accountWantsBermudaRemoval(knex, { customerId, profile, trackKey,
 async function stepForVisit(knex, visit, { trackKey, month, strict = false, profile: loadedProfile }) {
   const off = { active: false, excluded: false, source: null, cultivar: null, addOn: null };
   if (!bermudaRemovalVisit({ trackKey, month }) || !visit?.customer_id) return off;
+  // A step visit is a LAWN visit on the v13 program (isLawnV13Visit), whoever asks: the
+  // completion checks, the tank sheet and the completion actions.
+  if (!isLawnV13Visit(visit)) return off;
   // The month is the VISIT's, never the request's: a request month that is not the
   // visit's own month opens nothing.
   if (visitMonthOf(visit) !== month) return off;
@@ -206,14 +217,6 @@ async function stepVisitOf(knex, serviceId, { strict = false } = {}) {
   // explicit-property visit of the same lawn are one lock and one history.
   const visit = await resolvedVisitOf(knex, serviceId, { strict });
   if (!visit) return null;
-  // A step visit is a LAWN visit on the v13 program: the service line is the repo's own lawn
-  // classifier (the one lawn-completion-defaults uses), and a visit pinned to another
-  // protocol version (the recorded version the plan honors) is not on v13. Unpinned = the
-  // current serving version. Anything else (a pest or tree and shrub visit on a flagged
-  // account, a lawn visit pinned to 2026.05) is never judged by the pair check or the
-  // Fusilade II cap.
-  if (detectServiceLine(visit.service_type) !== 'lawn') return null;
-  if (visit.lawn_protocol_version && visit.lawn_protocol_version !== LAWN_V13_VERSION) return null;
   // The ACTIVE profile, whole (the staff switch and the cultivar ride on it), read once and
   // handed to stepForVisit.
   const profile = (await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first()) || null;

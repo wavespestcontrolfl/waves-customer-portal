@@ -50,6 +50,8 @@ const freshAccount = () => ({
   properties: [{ id: 'prop-1', is_primary: true }],
   visitProperty: 'prop-1',
   visitDate: '2026-04-14',
+  serviceType: 'Lawn Care',
+  pin: null,
   // The program's tagged product_limits rows: Recognition holds the label-rate row, Fusilade II the others.
   tagged: [{ product_id: 'rec', limit_type: 'annual_max_apps' }, { product_id: 'rec', limit_type: 'annual_max_rate' }, { product_id: 'fus', limit_type: 'annual_max_apps' }],
 });
@@ -93,7 +95,7 @@ beforeEach(() => {
     }
     if (table === 'products_catalog') return readQuery(CATALOG);
     if (table === 'product_aliases') return readQuery([]);
-    if (table === 'scheduled_services') return readQuery(account.customerId ? [{ id: SERVICE_ID, customer_id: account.customerId, property_id: account.visitProperty, scheduled_date: account.visitDate }] : []);
+    if (table === 'scheduled_services') return readQuery(account.customerId ? [{ id: SERVICE_ID, customer_id: account.customerId, property_id: account.visitProperty, scheduled_date: account.visitDate, service_type: account.serviceType, lawn_protocol_version: account.pin }] : []);
     if (table === 'customer_turf_profiles') return readQuery(account.profile ? [account.profile] : []);
     if (table === 'estimates') return readQuery(account.estimates);
     if (table === 'customer_properties') return readQuery(account.properties);
@@ -330,6 +332,27 @@ describe('the account decides, on the server', () => {
     expect(stepNames(body)).toEqual([]);
     expect(body.warnings.map((w) => w.code)).toContain('lawn_bermuda_step_unavailable');
     expect(body.blocks).toEqual([]);
+  });
+
+  test.each([['Pest Control Quarterly', null], ['Tree & Shrub Care', null], ['Lawn Care', '2026.05']])('the visit must be a lawn visit on the v13 program: %s pinned to %s shows no step on the sheet or the actions', async (serviceType, pin) => {
+    const completionActions = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
+    const actionGroups = async () => {
+      const res = { json: jest.fn(), status: jest.fn() };
+      res.status.mockReturnValue(res);
+      await completionActions({ query: { serviceType: 'Lawn Care', track: 'st_augustine', month: '4', scheduledServiceId: SERVICE_ID } }, res, jest.fn());
+      return JSON.parse(JSON.stringify(res.json.mock.calls[0][0])).actions.filter((a) => a.group);
+    };
+    account.serviceType = serviceType;
+    account.pin = pin;
+    expect(stepNames(await lawnMix({ scheduledServiceId: SERVICE_ID }))).toEqual([]);
+    expect(await actionGroups()).toEqual([]);
+    // The same account and month on a v13-pinned or unpinned lawn visit shows the step.
+    account.serviceType = 'Lawn Care';
+    for (const ok of ['2026.10-v13', null]) {
+      account.pin = ok;
+      expect(stepNames(await lawnMix({ scheduledServiceId: SERVICE_ID }))).toEqual(all);
+      expect(await actionGroups()).toHaveLength(3);
+    }
   });
 
   test('a malformed visit id reads nothing and shows no step', async () => {
