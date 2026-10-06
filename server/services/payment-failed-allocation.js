@@ -28,9 +28,14 @@ function ledgerInvoiceId(row) {
 }
 
 // Valid invoice ids of the failed attempt's allocation (deduplicated).
-async function failedAllocationInvoiceIds(conn, { paymentIntentId = null, invoiceId = null } = {}) {
+async function failedAllocationInvoiceIds(conn, { paymentIntentId = null, invoiceId = null, allocationInvoiceIds = null } = {}) {
   const ids = new Set();
   if (invoiceId != null && isUuid(String(invoiceId))) ids.add(String(invoiceId));
+  // The combined allocation queued from the PaymentIntent's own metadata: the
+  // full set, even when a synchronous failure left no ledger row per invoice.
+  for (const id of Array.isArray(allocationInvoiceIds) ? allocationInvoiceIds : []) {
+    if (isUuid(String(id))) ids.add(String(id));
+  }
   if (paymentIntentId) {
     const rows = await conn('payments').where({ stripe_payment_intent_id: String(paymentIntentId) }).select('metadata');
     for (const row of rows || []) {
@@ -49,6 +54,8 @@ async function invoicesAllSettled(conn, ids) {
 }
 
 async function isFailedAllocationSettled(conn, attempt) {
+  // A combined allocation that could not be read never auto-retires.
+  if (attempt?.allocationUnreadable) return false;
   return invoicesAllSettled(conn, await failedAllocationInvoiceIds(conn, attempt));
 }
 

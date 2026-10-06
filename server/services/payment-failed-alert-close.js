@@ -46,7 +46,7 @@ async function closeRows(invoiceId, conn) {
   const closable = [];
   for (const row of candidates || []) {
     const payload = parseJson(row.metadata).payload || {};
-    if (await isFailedAllocationSettled(conn, { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId })) {
+    if (await isFailedAllocationSettled(conn, { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable })) {
       closable.push(row.id);
     }
   }
@@ -102,7 +102,7 @@ async function sweepSettledPaymentFailedAlerts({ conn = db, page = SWEEP_PAGE } 
     const closable = [];
     for (const row of candidates || []) {
       const payload = parseJson(row.metadata).payload || {};
-      if (await isFailedAllocationSettled(conn, { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId })) {
+      if (await isFailedAllocationSettled(conn, { paymentIntentId: payload.paymentIntentId, invoiceId: payload.invoiceId, allocationInvoiceIds: payload.allocationInvoiceIds, allocationUnreadable: payload.allocationUnreadable })) {
         closable.push(row.id);
       }
     }

@@ -31,10 +31,10 @@ postgres('payment_failed bells close when their invoice is paid', () => {
     });
     return id;
   }
-  async function insertAlert({ paymentIntentId, invoiceId = null, triggerKey = 'payment_failed', category = 'payment' }) {
+  async function insertAlert({ paymentIntentId, invoiceId = null, triggerKey = 'payment_failed', category = 'payment', allocationInvoiceIds }) {
     const [row] = await db('notifications').insert({
       recipient_type: 'admin', category, title: 'Billing', body: 'payment failed',
-      metadata: JSON.stringify({ triggerKey, dedupeKey: `payment-failed:${paymentIntentId}:ch_x`, payload: { invoiceId, paymentIntentId } }),
+      metadata: JSON.stringify({ triggerKey, dedupeKey: `payment-failed:${paymentIntentId}:ch_x`, payload: { invoiceId, paymentIntentId, ...(allocationInvoiceIds ? { allocationInvoiceIds } : {}) } }),
     }).returning('id');
     const id = row.id ?? row;
     notificationIds.push(id);
@@ -175,6 +175,42 @@ postgres('payment_failed bells close when their invoice is paid', () => {
       metadata: { waves_customer_id: customerId, waves_invoice_id: invoiceA } }, 'Your card was declined.', 'evt_x');
     const job = await db('stripe_payment_notification_log').where({ payment_intent_id: piId }).first('pending_payload');
     expect(job.pending_payload.invoiceId).toBe(invoiceA);
+  });
+
+  test('a combined failure with no ledger rows keeps its alert until every queued invoice is paid', async () => {
+    const { sweepSettledPaymentFailedAlerts } = require('../services/payment-failed-alert-close');
+    const { isFailedAllocationSettled } = require('../services/payment-failed-allocation');
+    const piId = `pi_${randomUUID()}`;
+    logPis.push(piId);
+    await Dispatch.enqueuePaymentFailureNotification({ id: piId, amount: 24078, latest_charge: `ch_${randomUUID()}`,
+      metadata: { waves_customer_id: customerId, waves_invoice_id: invoiceA, combined_allocation: `${invoiceA}:12039,${invoiceB}:12039` } },
+    'Your card was declined.', 'evt_y');
+    const job = await db('stripe_payment_notification_log').where({ payment_intent_id: piId }).first('pending_payload');
+    expect(job.pending_payload.allocationInvoiceIds.sort()).toEqual([invoiceA, invoiceB].sort());
+    // Only the anchor is paid: the allocation is not settled, and an alert carrying it stays open.
+    await db('invoices').where({ id: invoiceA }).update({ status: 'paid', paid_at: new Date() });
+    const attempt = { paymentIntentId: piId, invoiceId: invoiceA, allocationInvoiceIds: job.pending_payload.allocationInvoiceIds };
+    expect(await isFailedAllocationSettled(db, attempt)).toBe(false);
+    const alert = await insertAlert(attempt);
+    await db('system_settings').where({ key: 'payment_failed_alert_sweep_cursor' }).del();
+    await sweepSettledPaymentFailedAlerts({ conn: db });
+    expect((await state(alert)).done_at).toBeNull();
+    await db('invoices').where({ id: invoiceB }).update({ status: 'paid', paid_at: new Date() });
+    await db('system_settings').where({ key: 'payment_failed_alert_sweep_cursor' }).del();
+    await sweepSettledPaymentFailedAlerts({ conn: db });
+    expect(await state(alert)).toMatchObject({ done_by: 'payments' });
+  });
+
+  test('an unreadable combined allocation is queued as such and never auto-retires', async () => {
+    const { isFailedAllocationSettled } = require('../services/payment-failed-allocation');
+    const piId = `pi_${randomUUID()}`;
+    logPis.push(piId);
+    await Dispatch.enqueuePaymentFailureNotification({ id: piId, amount: 100, latest_charge: `ch_${randomUUID()}`,
+      metadata: { waves_customer_id: customerId, waves_invoice_id: invoiceA, combined_allocation: 'garbage' } }, 'Declined', 'evt_z');
+    const job = await db('stripe_payment_notification_log').where({ payment_intent_id: piId }).first('pending_payload');
+    expect(job.pending_payload.allocationUnreadable).toBe(true);
+    await db('invoices').where({ id: invoiceA }).update({ status: 'paid', paid_at: new Date() });
+    expect(await isFailedAllocationSettled(db, { paymentIntentId: piId, invoiceId: invoiceA, allocationUnreadable: true })).toBe(false);
   });
 
   test('a combined attempt stays open after one invoice is paid and closes after both', async () => {

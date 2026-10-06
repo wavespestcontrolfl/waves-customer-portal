@@ -6,6 +6,22 @@ const { isUuid, ledgerInvoiceId, isFailedAllocationSettled } = require('./paymen
 const TABLE = 'stripe_payment_notification_log';
 const SETTLED_STATUSES = ['paid', 'refunded', 'disputed'];
 
+// The combined allocation the PaymentIntent was minted with, as payload
+// fields: allocationInvoiceIds (UUID-checked), or allocationUnreadable when the
+// metadata is present but malformed (the alert then never auto-retires; a
+// person closes it). {} for a single-invoice PaymentIntent.
+function queuedAllocation(metadata) {
+  if (!metadata?.combined_allocation) return {};
+  try {
+    const entries = require('./pay-combined').parseCombinedAllocation(metadata) || [];
+    const ids = entries.map((e) => String(e.invoiceId));
+    if (!ids.length || !ids.every((id) => isUuid(id))) return { allocationUnreadable: true };
+    return { allocationInvoiceIds: ids };
+  } catch {
+    return { allocationUnreadable: true };
+  }
+}
+
 async function enqueuePaymentFailureNotification(paymentIntent, friendlyFailure, eventId) {
   const charge = paymentIntent.latest_charge;
   const attemptId = (typeof charge === 'object' ? charge?.id : charge) || eventId || 'no_charge';
@@ -22,6 +38,10 @@ async function enqueuePaymentFailureNotification(paymentIntent, friendlyFailure,
       // to a NEW PaymentIntent before this job runs: then neither the invoice
       // binding nor a ledger row names it, and only this metadata still does.
       invoiceId: isUuid(String(paymentIntent.metadata?.waves_invoice_id || '')) ? String(paymentIntent.metadata.waves_invoice_id) : null,
+      // A combined attempt covered several invoices, and a synchronous failure
+      // may leave no ledger row per invoice: keep the attempt's own allocation
+      // so the alert only retires when every invoice in it is paid.
+      ...queuedAllocation(paymentIntent.metadata),
       reason: friendlyFailure,
     },
   }).onConflict(['payment_intent_id', 'outcome', 'attempt_id']).ignore();
@@ -44,6 +64,13 @@ async function resolveAlertInvoiceId(trx, invoice, ledgerRow, queuedInvoiceId = 
   return null;
 }
 
+// The queued allocation fields, carried onto the alert's payload so the paid
+// hook and the repair sweep judge the same allocation the dispatch did.
+function allocationOf(payload) {
+  if (payload?.allocationUnreadable) return { allocationUnreadable: true };
+  return Array.isArray(payload?.allocationInvoiceIds) ? { allocationInvoiceIds: payload.allocationInvoiceIds } : {};
+}
+
 async function dispatchPendingNotification(trx, key) {
   const job = await trx(TABLE).where(key).whereNotNull('pending_payload')
     .forUpdate().skipLocked().first();
@@ -60,7 +87,7 @@ async function dispatchPendingNotification(trx, key) {
     // The customer may have paid the whole allocation through a NEW
     // PaymentIntent before this job ran (the closer found no bell then): the
     // alert would be stale on arrival, so it is suppressed like a settled PI.
-    settled = await isFailedAllocationSettled(trx, { paymentIntentId: piId, invoiceId: alertInvoiceId });
+    settled = await isFailedAllocationSettled(trx, { paymentIntentId: piId, invoiceId: alertInvoiceId, ...allocationOf(job.pending_payload) });
   }
   if (!settled) {
     const payload = job.pending_payload;
@@ -76,7 +103,7 @@ async function dispatchPendingNotification(trx, key) {
         const settledRow = await trx('payments').where({ stripe_payment_intent_id: piId })
           .whereIn('status', SETTLED_STATUSES).first('id');
         settled = settled || Boolean(settledRow)
-          || await isFailedAllocationSettled(trx, { paymentIntentId: piId, invoiceId: alertInvoiceId });
+          || await isFailedAllocationSettled(trx, { paymentIntentId: piId, invoiceId: alertInvoiceId, ...allocationOf(payload) });
         return !settled && !recheckError;
       } catch (error) {
         // The trigger's beforePush error fallback is fail-open; return false
@@ -91,6 +118,7 @@ async function dispatchPendingNotification(trx, key) {
       customerId,
       reason: payload.reason,
       invoiceId: alertInvoiceId,
+      ...allocationOf(payload),
       paymentIntentId: piId,
       attemptId: job.attempt_id,
     }, {
