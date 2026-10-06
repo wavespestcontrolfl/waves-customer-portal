@@ -24,9 +24,8 @@ describe('every booking path stamps or deliberately skips', () => {
     expect((src.match(/maybeGroupRow\(/g) || []).length).toBe(count);
   });
 
-  test('admin-schedule.js + services/schedule-booking.js stamp all eight insert sites', () => {
-    // The Schedule-screen create (POST /) lives in services/schedule-booking.js.
-    const src = read('routes/admin-schedule.js') + read('services/schedule-booking.js');
+  test('admin-schedule.js stamps all eight insert sites', () => {
+    const src = read('routes/admin-schedule.js');
     // Insert seams pass the inserted row's id. The address-edit regroup
     // loop passes an existing id and is covered by update-details tests.
     expect((src.match(/maybeGroupRow\(\w+\.id,/g) || []).length).toBe(8);

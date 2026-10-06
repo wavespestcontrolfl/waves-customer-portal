@@ -274,8 +274,7 @@ describe('every spawned-row writer anchors the sole property', () => {
   });
 
   test('every admin-schedule spawned-row writer copies the parent stamp AND anchors', () => {
-    // The direct admin create (POST /) lives in services/schedule-booking.js.
-    const src = read('routes/admin-schedule.js') + read('services/schedule-booking.js');
+    const src = read('routes/admin-schedule.js');
     const anchored = src.match(/copyStampedServiceAddressFields\((\w+), (\w+), cols\);\n\s*(?:if \(!propertyOwnedByEstimateLinkage\) )?await anchorSoleProperty\(\1, cols, (trx|conn)\);/g) || [];
     const allCopies = src.match(/copyStampedServiceAddressFields\(\w+, \w+, cols\);/g) || [];
     // Five extension/spawn writers + the direct admin-create child and

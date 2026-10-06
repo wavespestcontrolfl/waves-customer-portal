@@ -225,9 +225,8 @@ describe('recurringWithoutBillableAmount — typed one-time profile (Codex P1)',
   test('every gate call site passes NULL when the profile read fails, never false', () => {
     const fs = require('fs');
     const path = require('path');
-    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8')
-      + fs.readFileSync(path.join(__dirname, '../services/schedule-booking.js'), 'utf8');
-    // POST create (services/schedule-booking.js), make-recurring spawn, visit-count extend: each resolves
+    const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    // POST create, make-recurring spawn, visit-count extend: each resolves
     // the profile with .catch(() => null) and maps null → null.
     const sites = src.match(/typedOneTimeBilling: (gateProfile|spawnProfile|extendProfile)\n/g) || [];
     expect(sites).toHaveLength(3);

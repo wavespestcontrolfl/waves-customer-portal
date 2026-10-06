@@ -555,8 +555,7 @@ describe('findDirectRodentSetupObligationForCoverage — the Customer 360 dialog
     });
 
     test('the direct booking branch anchors the claim instead of stamping (source contract)', () => {
-      // The direct booking (POST /admin/schedule) lives in services/schedule-booking.js.
-      const adminSchedule = fs.readFileSync(path.join(__dirname, '..', 'services', 'schedule-booking.js'), 'utf8');
+      const adminSchedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
       expect(adminSchedule).toMatch(/const coverageClaim = await plans\.liveAnchorlessCoverageSetupClaim\(trx, \{ customerId, rootId: svc\.id \}\);\s+if \(coverageClaim\) \{\s+await plans\.anchorSetupFeeClaim\(trx, \{ claimId: coverageClaim\.id, anchorId: svc\.id \}\);[\s\S]*?\} else \{\s+await trx\('scheduled_services'\)\s+\.where\(\{ id: svc\.id \}\)\s+\.whereNull\('pending_setup_fee'\)\s+\.update\(\{ pending_setup_fee: owedSetup, updated_at: new Date\(\) \}\);/);
     });
   });
@@ -612,9 +611,7 @@ describe('source contracts — where the lifecycle is wired', () => {
   const booking = fs.readFileSync(path.join(__dirname, '..', 'routes', 'booking.js'), 'utf8');
 
   test('the admin booking stamp covers accept-on-book failure paths and is RETIRED when acceptance lands (codex #3591 r61+r62 P1)', () => {
-    // The admin booking (POST /admin/schedule) lives in services/schedule-booking.js.
-    const adminSchedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8')
-      + fs.readFileSync(path.join(__dirname, '..', 'services', 'schedule-booking.js'), 'utf8');
+    const adminSchedule = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     // r61 exempted every linkedEstimateId from the transaction-time stamp; r62
     // showed the acceptance runs post-commit and deliberately leaves the
     // appointment standing when the attach loses a race or accept throws — so
@@ -738,9 +735,7 @@ describe('source contracts — where the lifecycle is wired', () => {
   });
 
   test('the stamp retires only after a durable estimate link; activating a row as recurring stamps the setup (codex #3591 r88 P1)', () => {
-    // The two accept sites live in POST /admin/schedule (services/schedule-booking.js).
-    const scheduleSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8')
-      + fs.readFileSync(path.join(__dirname, '..', 'services', 'schedule-booking.js'), 'utf8');
+    const scheduleSrc = fs.readFileSync(path.join(__dirname, '..', 'routes', 'admin-schedule.js'), 'utf8');
     // Both accept sites key the retire on the link result — an unlinked
     // series keeps the stamp as provenance and pages the operator.
     expect((scheduleSrc.match(/if \(await linkCreatedRowsToEstimate\(\)\) \{\s+await retireRodentSetupStampAfterAcceptance\(/g) || []).length).toBe(2);

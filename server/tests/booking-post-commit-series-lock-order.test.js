@@ -204,11 +204,9 @@ describe('other checkActiveSeriesLocked / acquireSeriesCreateLocks callers audit
   });
 
   test('admin-schedule.js: the POST creator already locked the customer row before its guard (pre-existing, unchanged)', () => {
-    // The POST creator's body lives in services/schedule-booking.js.
-    const scheduleBooking = fs.readFileSync(path.join(__dirname, '..', 'services', 'schedule-booking.js'), 'utf8');
-    const rowLockAt = scheduleBooking.indexOf("await trx('customers').where({ id: customerId }).forUpdate().first('id');");
+    const rowLockAt = adminSchedule.indexOf("await trx('customers').where({ id: customerId }).forUpdate().first('id');");
     expect(rowLockAt).toBeGreaterThan(-1);
-    const seriesLockAt = scheduleBooking.indexOf('RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {', rowLockAt);
+    const seriesLockAt = adminSchedule.indexOf('RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {', rowLockAt);
     expect(seriesLockAt).toBeGreaterThan(rowLockAt);
   });
 

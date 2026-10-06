@@ -254,16 +254,14 @@ describe('POST /admin/schedule/:id/card-request', () => {
 
 describe('source guards — booking hook and client defaults', () => {
   const scheduleSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
-  // POST /admin/schedule's body lives in services/schedule-booking.js.
-  const bookingSrc = fs.readFileSync(path.join(__dirname, '../services/schedule-booking.js'), 'utf8');
   const createModalSrc = fs.readFileSync(
     path.join(__dirname, '../../client/src/components/schedule/CreateAppointmentModal.jsx'),
     'utf8',
   );
 
   test('POST /admin/schedule fires the funnel only on explicit opt-in, parent visit only', () => {
-    expect(bookingSrc).toContain('sendCardOnFileLink === true');
-    expect(bookingSrc).toContain("requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'admin' })");
+    expect(scheduleSrc).toContain('sendCardOnFileLink === true');
+    expect(scheduleSrc).toContain("requestCardForAppointment({ scheduledServiceId: svc.id, trigger: 'admin' })");
   });
 
   test('the card-request GET is tech-scoped like its per-visit neighbors (Codex #2921 P1)', () => {
