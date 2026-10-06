@@ -227,6 +227,7 @@
  *   GATE_ADMIN_MFA=true (staff two-step sign-in: a staff member who has set up an authenticator app must enter its 6-digit code (or a single-use recovery code) after the password before a session is issued, and a session minted without that step is refused; the enrollment page /admin/two-step and its /api/admin/auth/mfa routes answer only while on. Read at call time via adminMfaLive() in server/services/staff-mfa.js; off = login, /me and every staff session are exactly as before, whatever was enrolled, so unset is the kill switch.)
  *   GATE_ADMIN_MFA_ENFORCE=true (needs GATE_ADMIN_MFA: an ADMIN with no authenticator set up is held on the two-step enrollment page — every other staff route answers 403 MFA_ENROLLMENT_REQUIRED — until they finish it. Read at call time via adminMfaEnforceLive(); unset = enrollment stays optional.)
  *   GATE_STAFF_DEFAULT_DENY=true (owner 2026-10-02: a technician-role staff login reaches ONLY the routes on server/middleware/technician-scope.js — own schedule/visits, own timesheet, texts with own-visit customers, promises, protocols, documents, pay-growth, knowledge READ, equipment/inventory READ; every other staff route is a 403 before it runs. Off = today's behavior plus a once-per-route "[staff-scope] would-deny" log line so the production log shows real technician use before the flip. Admins are never affected. docs/technician-reachable-routes.md is the rendered list.)
+ *   GATE_SERVER_DICTATION=true (every staff voice-to-text mic goes through our own transcriber: the mic records a clip and POSTs it to /api/tech/dictation, which hears it with `gpt-transcribe` primed with a server-built word list (the named customer, active technicians, catalog products, service names, pest and lawn terms) instead of the browser's speech recognition, which on iPhone is Apple dictation and mishears names, products and pests. Words appear after the mic stops, not live. Strict opt-in: exactly 'true' in every environment, read at call time via serverDictationLive(). Ships DARK; off = the endpoint answers 404 / {available:false} and every mic keeps today's browser behavior.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -4466,6 +4467,13 @@ function fastCompleteVoiceFillLive() {
   return process.env.GATE_FAST_COMPLETE_VOICE_FILL === 'true';
 }
 
+// GATE_SERVER_DICTATION read at CALL time — strict `=== 'true'`, dark in every
+// environment. Every staff mic (useSpeechDictation) records a clip and the
+// server transcribes it (routes/tech-dictation.js); off = browser speech.
+function serverDictationLive() {
+  return process.env.GATE_SERVER_DICTATION === 'true';
+}
+
 // GATE_LLM_COST_TRACKING read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for estimated AI spend (services/llm-cost.js: the
 // price pull and the daily spend check; agent-control/hub-read.js: the
@@ -5912,3 +5920,5 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
 module.exports.lawnV13Live = lawnV13Live;
+// GATE_SERVER_DICTATION reader, on its own line so gate PRs never conflict.
+module.exports.serverDictationLive = serverDictationLive;

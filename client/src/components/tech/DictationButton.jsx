@@ -1,21 +1,30 @@
-import { useEffect } from "react";
+import { useEffect, useId } from "react";
 import { Button } from "../ui";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
+import { setDictationPending } from "../../hooks/dictationPending";
 
 /**
- * DictationButton — small Web Speech API mic that transcribes speech to text.
+ * DictationButton — small mic that transcribes speech to text.
  *
- * Tap to start, tap to stop. Each final transcript chunk is passed to
+ * Tap to start, tap to stop. Each transcript chunk is passed to
  * `onAppend(text)`; the caller decides how to merge it into the field value.
  * Mirrors the dictation pattern used on CommunicationsPageV2. Renders nothing
  * on browsers without SpeechRecognition support (e.g. Firefox) so field layout
  * stays clean — on those, techs can fall back to the phone keyboard mic.
+ * With GATE_SERVER_DICTATION on, the mic records a clip and our server hears it
+ * (words arrive after the tap that stops it, with "Transcribing" showing); off,
+ * it is the browser's speech recognition. While a clip is recorded or
+ * transcribed the button reports it to `useDictationPending()` so Send / Ask
+ * buttons can wait for the words.
  *
  * Props:
  *   onAppend(text)  required — called with each final transcript chunk
  *   palette         optional — { accent, muted, red, card } for theming
  *   title           optional — accessible label / tooltip (default "Dictate")
  *   size            optional — button diameter in px (default 30)
+ *   dictationContext optional — { customerId, serviceId } of the record the field
+ *                   belongs to; server dictation spells that customer's name
+ *                   right (ids only, never words)
  *   uploadServiceId optional — the visit's id; where SpeechRecognition is
  *                   missing, the hook records a clip and sends it for server
  *                   transcription instead (GATE_TECH_DICTATION_UPLOAD)
@@ -65,12 +74,13 @@ export default function DictationButton({
   presentation = "legacy",
   disabled = false,
   uploadServiceId,
+  dictationContext,
   clipHandler,
   onPendingChange,
 }) {
   const migrated = presentation === "admin";
   const Control = migrated ? Button : "button";
-  const { listening, supported, toggle, cancel, mode, starting, uploading } = useSpeechDictation(onAppend, { uploadServiceId, clipHandler });
+  const { listening, supported, toggle, cancel, mode, starting, uploading } = useSpeechDictation(onAppend, { uploadServiceId, clipHandler, dictationContext });
 
   // A recorded clip has no transcript until it is stopped and transcribed;
   // a save in that window would go out without it. The window opens at the
@@ -85,6 +95,12 @@ export default function DictationButton({
     onPendingChange?.(pending);
     return () => onPendingChange?.(false);
   }, [pending, onPendingChange]);
+  // The same window, for any Send / Ask button on the page (dictationPending.js).
+  const pendingId = useId();
+  useEffect(() => {
+    setDictationPending(pendingId, pending);
+    return () => setDictationPending(pendingId, false);
+  }, [pending, pendingId]);
 
   // A consumer disables the mic while it is busy (e.g. an AI rewrite of the
   // same field). Dictation keeps listening through pauses, and a disabled
