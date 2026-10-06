@@ -1493,10 +1493,10 @@ function estimateDataCarriesBermudaSuppression(estimateDataRaw) {
 // Does the estimate's CURRENT stored result still carry the bermuda suppression add-on on
 // its lawn line? Narrower than estimateDataCarriesBermudaSuppression (which also reads the
 // request options, and an opt-out leaves the request option behind): only the priced result
-// counts (the authoritative container: result when it exists, else engineResult): the mapped
+// counts (the authoritative container, estimate-result-container.js): the mapped
 // lawnMeta, a lawn tier's provenance, or the raw engine lawn line. An
 // estimate with no lawn line in its result (pest only) never carries it.
-function estimateResultCarriesBermudaSuppression(estimateDataRaw) {
+function estimateResultCarriesBermudaSuppression(estimateDataRaw, { pricingAuthority = null } = {}) {
   let d = estimateDataRaw;
   if (typeof d === 'string') {
     try { d = JSON.parse(d); } catch (_) { return false; }
@@ -1505,7 +1505,12 @@ function estimateResultCarriesBermudaSuppression(estimateDataRaw) {
   const positive = (value) => Number(value) > 0;
   // The current result only: when `result` exists it is authoritative and a stale engineResult
   // left behind by a revision is never read (see estimate-result-container.js).
-  const current = authoritativeEstimateResult(d);
+  // The pick is the audit's own, with the audit's own "prices something" detector (required
+  // here, at call time: the audit module is not a load-time dependency of the mapper).
+  const current = authoritativeEstimateResult(d, {
+    pricingAuthority,
+    hasPricedLines: require('../estimate-pricing-audit').hasPricedLines,
+  });
   if (current.results?.lawnMeta?.bermudaSuppression || current.lawnMeta?.bermudaSuppression) return true;
   const tiers = Array.isArray(current.results?.lawn) ? current.results.lawn : [];
   if (tiers.some((tier) => positive(tier?.prov?.bermudaSuppressionPerApp))) return true;

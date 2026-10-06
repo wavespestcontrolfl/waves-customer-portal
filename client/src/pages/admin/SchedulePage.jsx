@@ -14970,7 +14970,7 @@ export function CompletionPanel({
       }
       if (lawnDefaultsEnabled) {
         setProtocolActions(lawnPlanActionOptions(lawnCompletionDefaults.options));
-        setProtocolActionMeta({ source: "appointment_plan" });
+        setProtocolActionMeta({ source: "appointment_plan", ...(lawnCompletionDefaults.planWarnings ? { warnings: lawnCompletionDefaults.planWarnings } : {}) });
         setProtocolActionsLoaded(true);
         setProtocolActionsLoading(false);
         return () => { cancelled = true; };
@@ -15084,7 +15084,11 @@ export function CompletionPanel({
       .then((data) => {
         if (cancelled) return;
         lawnPlanVerifiedRef.current = service.id;
-        setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id });
+        // The plan's own bermuda removal warnings (why the mix is not offered) ride with the completion
+        // defaults, so the drawer shows them beside the Additional work selector like the actions list's.
+        const planWarnings = (Array.isArray(data?.plan?.propertyGate?.warnings) ? data.plan.propertyGate.warnings : [])
+          .filter((warning) => String(warning?.code || "").startsWith("lawn_bermuda_"));
+        setLawnCompletionDefaults({ ...(data?.plan?.completionDefaults || { enabled: false }), serviceId: service.id, ...(planWarnings.length ? { planWarnings } : {}) });
         const blocks =
           data?.plan?.propertyGate?.blocks ||
           data?.plan?.protocol?.blocked ||

@@ -211,6 +211,22 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(lawnCogs(await audit({ result: { recurring: { services: [lawnService] }, lineItems: [{ service: 'lawn_care', costs: { annualBermudaRemoval: 10 } }] }, engineResult: staleEngine })).bermudaRemovalCost).toBe(10);
   });
 
+  test('the audit and the bermuda evidence pick the same container: an unpriced ancillary result yields to a priced engineResult; a SERVER reprice keeps its result', async () => {
+    const pricedEngine = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, costs: { annualBermudaRemoval: 71.25 } }] };
+    const pest = { service: 'pest_control', name: 'Pest Control', mo: 40, monthly: 40 };
+    const audit = (extra) => buildEstimatePricingAudit({ id: 'est-pick', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: null, ...extra });
+    const lawnLine = (built) => built.lines.find((l) => l.serviceKey === 'lawn_care');
+    // An ancillary result with no priced lines + a priced engine lawn line: the engine one is THE result, cost counted.
+    const ancillary = await audit({ source: 'quote_wizard', estimate_data: { result: { results: {} }, engineResult: pricedEngine } });
+    expect(lawnLine(ancillary).cogs.bermudaRemovalCost).toBe(71.25);
+    // A SERVER reprice (current result priced pest only, a stale engine lawn line left behind): no lawn line, no cost.
+    const repriced = await audit({ source: 'manual', pricing_authority: 'SERVER', estimate_data: { result: { recurring: { services: [pest] } }, engineResult: pricedEngine } });
+    expect(lawnLine(repriced)).toBeUndefined();
+    // A SERVER reprice whose current result prices nothing stays empty: the stale engine line is not costed.
+    const emptied = await audit({ source: 'manual', pricing_authority: 'SERVER', estimate_data: { result: { results: {} }, engineResult: pricedEngine } });
+    expect(lawnLine(emptied)).toBeUndefined();
+  });
+
   test('wizard rows with ONLY engineResult.lineItems still produce audit lines', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-li', status: 'sent', source: 'quote_wizard',

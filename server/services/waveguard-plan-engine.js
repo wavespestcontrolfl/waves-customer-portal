@@ -1832,8 +1832,12 @@ async function buildPlanForService(serviceId, options = {}) {
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
   // The April and June bermuda removal step: its three spot lines join the visit's
   // secondary list (opt-in lines, like every other spot product).
+  // The step month is the APPOINTMENT's own (ET calendar month of its date), as stepVisitOf and
+  // the tank sheet read it, never the assigned protocol window's: an April-window visit
+  // rescheduled into May has no step.
   const bermudaVisit = bermudaWanted.requested && structuredProtocol?.version === LAWN_V13_VERSION
-    && bermudaRemoval.bermudaRemovalVisit({ trackKey, month });
+    && bermudaRemoval.bermudaRemovalVisit({ trackKey, month })
+    && bermudaRemoval.visitMonthOf({ scheduled_date: service.scheduled_date }) === month;
   // St. Augustine cultivar policy: an excluded cultivar never gets the step.
   const bermudaCultivar = bermudaRemoval.cultivarState(trackKey, profile?.cultivar);
   const bermudaAddOn = bermudaVisit ? bermudaRemoval.stepAddOn(trackKey, month) : null;

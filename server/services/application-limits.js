@@ -48,14 +48,18 @@ function unitFamily(unit) {
 }
 
 // A bermuda removal history row's rate per 1,000 sq ft in the cap's own unit: its recorded
-// rate converted from the unit it was recorded in (0.01 lb counts as 0.16 oz), else its
-// quantity over the treated area. A rate or quantity that does not convert (another basis,
-// another dimension, no unit, no area) is not counted as it stands: it counts for nothing.
+// rate converted from the unit it was recorded in (0.01 lb counts as 0.16 oz); when that
+// cannot convert, its quantity over the treated area. A rate or quantity that does not
+// convert (another basis, another dimension, no unit, no area) is not counted as it stands:
+// it counts for nothing.
 // Other rows keep counting only a recorded rate, as recorded.
 function bermudaRowRate(row, limit) {
   const capUnit = capUnitOf(limit.limit_unit);
   const recorded = parseFloat(row.application_rate);
-  if (recorded > 0) return familyConvert(recorded, row.rate_unit, capUnit);
+  // An explicit rate that converts is used; one that cannot (oz/acre, an unknown unit) falls
+  // back to the quantity over the treated area, with the same unit-family checks.
+  const converted = recorded > 0 ? familyConvert(recorded, row.rate_unit, capUnit) : 0;
+  if (converted > 0) return converted;
   const area = Number(row.area_treated_sqft);
   if (!(area > 0)) return 0;
   return familyConvert(Number(row.quantity_applied) / (area / 1000), row.quantity_unit, capUnit);

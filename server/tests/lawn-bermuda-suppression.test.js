@@ -237,13 +237,24 @@ describe('send-boundary gate for persisted suppression estimates', () => {
     expect(carries({ result: { results: { lawn: [{ prov: { bermudaSuppressionPerApp: 25 } }] } } })).toBe(true);
     expect(carries({ engineResult: { lineItems: [{ service: 'lawn_care', costs: { annualBermudaRemoval: 13.08 } }] } })).toBe(true);
     expect(carries({ engineResult: { lineItems: [{ service: 'pest_control', bermudaSuppression: { perApp: 25 } }] } })).toBe(false);
-    // A current `result` is authoritative: a stale engineResult left behind by a revision is never read.
+    // A current `result` that prices something is authoritative: a stale engineResult left by a
+    // revision is never read.
     const staleEngine = { lineItems: [{ service: 'lawn_care', bermudaSuppression: { perApp: 25 }, costs: { annualBermudaRemoval: 71.25 } }] };
-    expect(carries({ result: { results: { pest: { apps: 4 } } }, engineResult: staleEngine })).toBe(false);
-    expect(carries({ result: { lineItems: [{ service: 'pest_control' }] }, engineResult: staleEngine })).toBe(false);
-    expect(carries({ result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }, engineResult: { lineItems: [{ service: 'pest_control' }] } })).toBe(true);
+    const pestResult = { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 40, monthly: 40 }] } };
+    expect(carries({ result: pestResult, engineResult: staleEngine })).toBe(false);
+    expect(carries({ result: { lineItems: [{ service: 'pest_control', name: 'Pest Control', monthly: 40, annual: 480 }] }, engineResult: staleEngine })).toBe(false);
+    expect(carries({ result: { ...pestResult, results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }, engineResult: { lineItems: [{ service: 'pest_control' }] } })).toBe(true);
     // No `result` at all (a wizard or agent-draft row): the engineResult is the current one.
     expect(carries({ engineResult: staleEngine })).toBe(true);
+    // An ancillary `result` that prices nothing yields to a priced engineResult (the audit's own pick):
+    // the priced engine lawn line with the suppression counts.
+    const pricedEngine = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, bermudaSuppression: { perApp: 25 } }] };
+    expect(carries({ result: { results: {} }, engineResult: pricedEngine })).toBe(true);
+    // A SERVER-authoritative reprice rewrote `result` wholesale: it stays authoritative even when it prices
+    // nothing, and the stale engine suppression is never read.
+    expect(carries({ result: { results: {} }, engineResult: pricedEngine }, { pricingAuthority: 'SERVER' })).toBe(false);
+    expect(carries({ result: pestResult, engineResult: pricedEngine }, { pricingAuthority: 'SERVER' })).toBe(false);
+    expect(carries({ result: { ...pestResult, results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }, engineResult: {} }, { pricingAuthority: 'SERVER' })).toBe(true);
     expect(carries('not json')).toBe(false);
     expect(carries(null)).toBe(false);
   });

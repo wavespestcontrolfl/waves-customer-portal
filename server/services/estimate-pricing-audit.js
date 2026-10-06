@@ -1065,10 +1065,16 @@ function normalizeProposalLines(estimate) {
   return lines;
 }
 
+// Does a persisted result container price anything (a mapped recurring or one-time line, or a
+// raw engine line item)? The detector the shared container pick uses for an ancillary result.
+function hasPricedLines(container, setupOpts = {}) {
+  return normalizeRecurringLines(container).length > 0
+    || normalizeOneTimeLines(container, setupOpts).length > 0
+    || normalizeEngineLineItems(container, setupOpts).length > 0;
+}
+
 async function buildEstimatePricingAudit(estimate, context = {}) {
   const data = parseJson(estimate.estimate_data) || {};
-  // The container that holds the CURRENT priced result (shared with the bermuda removal reader).
-  let result = authoritativeEstimateResult(data);
   // Branch on the OUTCOME, not the raw flag: a stored {enabled:true}
   // whose canonical normalization yields no itemization (synthesized/
   // disabled fallback) must fall through to the engine lines instead of
@@ -1104,6 +1110,15 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     : null;
   const initialFeeGross = Number.isFinite(frozenSetupGross) && frozenSetupGross > 0 ? frozenSetupGross : null;
   const setupOpts = { emitInitialFee, initialFeeOverride, initialFeeGross };
+  // The container that holds the CURRENT priced result, picked by the rule shared with the
+  // bermuda removal reader (estimate-result-container.js): a SERVER reprice keeps `result`; an
+  // ancillary `result` with no priced lines yields to a priced engineResult (it then becomes THE
+  // result for the whole audit: dimensions, visit counts, provenance, not just the lines). The
+  // proposal path keeps `result` whenever it exists.
+  const result = authoritativeEstimateResult(data, proposalAuthoritative ? {} : {
+    pricingAuthority: estimate.pricing_authority,
+    hasPricedLines: (container) => hasPricedLines(container, setupOpts),
+  });
   let rawLines = proposalAuthoritative
     ? proposalLines
     : [
@@ -1209,34 +1224,16 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
       // join the covered set only for LATER containers.
       survivors.forEach(remember);
     };
-    const hadMappedLines = rawLines.length > 0;
-    const fromResult = normalizeEngineLineItems(result, setupOpts);
-    if (!hadMappedLines && !fromResult.length && data.engineResult && data.engineResult !== result) {
-      // The alternate container gets EVERY canonical collector, not just
-      // the lineItems scan — a structured engineResult.oneTime/recurring
-      // block is a supported shape there too (GH codex P1: a $500
-      // one-time charge in engineResult.oneTime.items was dropped).
-      // Structured first, then lineItems, so cross-shape duplicates
-      // (membership fee in both) dedupe exactly as they do on `result`.
-      const altMapped = [
+    merge(normalizeEngineLineItems(result, setupOpts));
+    // An earlier engineResult that is not THE result is consume-only: it enriches a priced line
+    // it matches, and a service it alone carries is a stale revision (or, after a SERVER reprice,
+    // a removed service), never a mixed-shape extra.
+    if (data.engineResult && data.engineResult !== result) {
+      merge([
         ...normalizeRecurringLines(data.engineResult),
         ...normalizeOneTimeLines(data.engineResult, setupOpts),
-      ];
-      const altRaw = normalizeEngineLineItems(data.engineResult, setupOpts);
-      if (altMapped.length || altRaw.length) {
-        result = data.engineResult;
-        merge(altMapped);
-        merge(altRaw);
-      }
-    } else {
-      merge(fromResult);
-      if (data.engineResult && data.engineResult !== result) {
-        merge([
-          ...normalizeRecurringLines(data.engineResult),
-          ...normalizeOneTimeLines(data.engineResult, setupOpts),
-        ], { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
-        merge(normalizeEngineLineItems(data.engineResult, setupOpts), { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
-      }
+      ], { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
+      merge(normalizeEngineLineItems(data.engineResult, setupOpts), { consumeOnlyMappedServices: true, consumeOnly: serverRepriced });
     }
   }
   const dimensions = dimensionsFrom(data, result);
@@ -1404,6 +1401,7 @@ module.exports = {
   quoteProvenanceFrom,
   quotedFieldsFrom,
   buildEstimatePricingAudit,
+  hasPricedLines,
   buildEstimatePricingRisk,
   buildEstimatePricingRiskBatch,
   getLatestEstimatePricingAuditSnapshot,

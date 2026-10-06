@@ -154,13 +154,13 @@ async function accountWantsBermudaRemoval(knex, { customerId, profile, trackKey,
     rows = await savepointRead(knex, (k) => k('estimates')
       .where({ customer_id: customerId, status: 'accepted' })
       .whereNull('archived_at')
-      .select('estimate_data', 'property_id'));
+      .select('estimate_data', 'property_id', 'pricing_authority'));
   } catch (err) {
     if (strict) throw err;
     return none;
   }
   const forThisProperty = (row) => (row.property_id ? String(row.property_id) === scope.effective : scope.sole === scope.effective);
-  return rows.some((row) => forThisProperty(row) && estimateResultCarriesBermudaSuppression(row.estimate_data))
+  return rows.some((row) => forThisProperty(row) && estimateResultCarriesBermudaSuppression(row.estimate_data, { pricingAuthority: row.pricing_authority }))
     ? { requested: true, source: 'estimate' }
     : none;
 }
@@ -587,6 +587,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
 }
 
 module.exports = {
+  visitMonthOf,
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,

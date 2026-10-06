@@ -193,8 +193,17 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       // A revised estimate: the current result is pest only and a STALE engineResult still carries the
       // suppression. The current result is authoritative: no step.
       const staleEngine = { lineItems: [{ service: 'lawn_care', bermudaSuppression: { perApp: 25 }, costs: { annualBermudaRemoval: 71.25 } }] };
-      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify({ result: { results: { pest: { apps: 4 } } }, engineResult: staleEngine }) });
+      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify({ result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control', mo: 40, monthly: 40 }] } }, engineResult: staleEngine }) });
       expect((await plan(plain.visit)).bermudaRemoval).toBeUndefined();
+      // A SERVER reprice that left a stale engine lawn line behind keeps its own (empty) result.
+      await knex('estimates').where({ customer_id: plain.customerId }).del();
+      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', pricing_authority: 'SERVER', estimate_data: JSON.stringify({ result: { results: {} }, engineResult: staleEngine }) });
+      expect((await plan(plain.visit)).bermudaRemoval).toBeUndefined();
+      // An ancillary result that prices nothing beside a priced engine lawn line with the suppression: step on.
+      await knex('estimates').where({ customer_id: plain.customerId }).del();
+      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify({ result: { results: {} }, engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, bermudaSuppression: { perApp: 25 } }] } }) });
+      expect((await plan(plain.visit)).bermudaRemoval).toMatchObject({ active: true, source: 'estimate' });
+      await knex('estimates').where({ customer_id: plain.customerId }).del();
       // The raw engine lawn line alone (no mapped result) counts as the current result.
       await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify({ engineResult: { lineItems: [{ service: 'lawn_care', bermudaSuppression: { perApp: 25 } }] } }) });
       expect((await plan(plain.visit)).bermudaRemoval).toMatchObject({ active: true, source: 'estimate' });
@@ -294,6 +303,20 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(codes(result)).not.toContain('lawn_v13_annual_limit');
       expect(result.propertyGate.warnings.map((w) => w.code)).not.toContain('lawn_bermuda_step_unavailable');
       expect(names(result.mixCalculator.items)).toEqual(expect.arrayContaining([REC, FUS]));
+    });
+
+    test('the plan uses the appointment\'s own ET month: an April-window visit rescheduled into May has no step', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-04-14', bermuda: true });
+      const withDefaults = { completionDefaultsEnabled: true };
+      // The visit keeps its April protocol window assignment (the assigned window picks the recipe month).
+      await knex('scheduled_services').where({ id: f.visit.id }).update({ lawn_protocol_key: TRACKS[0][0], lawn_protocol_version: LAWN_V13_VERSION, lawn_protocol_window_key: 'apr_v13_spreader_feeding' });
+      expect((await plan(f.visit, withDefaults)).bermudaRemoval).toMatchObject({ active: true });
+      // Now it sits in May: the window still says April, the appointment says May: no step.
+      await knex('scheduled_services').where({ id: f.visit.id }).update({ scheduled_date: '2026-05-12' });
+      const moved = await plan(f.visit, withDefaults);
+      expect(moved.bermudaRemoval).toBeUndefined();
+      expect(optionNames(moved)).not.toContain(REC);
     });
 
     test('the April base visit stays computable beside an unavailable optional step', async () => {
@@ -1067,6 +1090,25 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         await knex('property_application_history').where({ customer_id: f.customerId }).update({ rate_unit: unit });
         expect(rateWarnings(await check(f, f.property.id, planned))).toHaveLength(0);
       }
+    });
+
+    test('an explicit rate that cannot convert falls back to the quantity over the treated area, with the same unit checks', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      const rateWarnings = (result) => result.warnings.filter((w) => w.type === 'annual_max_rate');
+      const planned = { proposed: { ratePer1000: 0.03, unit: 'oz' } };
+      // 0.6 oz over 10,000 sq ft = 0.06 oz per 1,000, twice = 0.12; each row states an oz/acre rate that does not convert.
+      await knex('property_application_history').insert(['2026-03-01', '2026-04-20'].map((application_date) => ({
+        customer_id: f.customerId, product_id: rec.id, application_date, application_rate: 2.6, rate_unit: 'oz/acre', quantity_applied: 0.6, quantity_unit: 'oz', area_treated_sqft: 10000,
+      })));
+      const sized = rateWarnings(await check(f, f.property.id, planned));
+      expect(sized).toHaveLength(1);
+      expect(sized[0].message).toMatch(/cumulative 0\.150/);
+      // The fallback is unit-checked too: a gallon quantity, or no treated area, still counts for nothing.
+      await knex('property_application_history').where({ customer_id: f.customerId }).update({ quantity_unit: 'gal' });
+      expect(rateWarnings(await check(f, f.property.id, planned))).toHaveLength(0);
+      await knex('property_application_history').where({ customer_id: f.customerId }).update({ quantity_unit: 'oz', area_treated_sqft: null });
+      expect(rateWarnings(await check(f, f.property.id, planned))).toHaveLength(0);
     });
 
     test('a history row with no recorded rate counts by its quantity over the treated area, unit-checked', async () => {

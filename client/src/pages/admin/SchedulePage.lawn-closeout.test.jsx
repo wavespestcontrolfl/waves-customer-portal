@@ -19,6 +19,7 @@ let failPlan;
 let withdrawDefaults;
 let catalog;
 let optionalOptions;
+let planWarnings;
 let delayFlags;
 let flagResolvers;
 let reentryDefaultsFromEvidence;
@@ -41,6 +42,7 @@ beforeEach(async () => {
   withdrawDefaults = false;
   catalog = products;
   optionalOptions = [];
+  planWarnings = [];
   localStorage.clear();
   localStorage.setItem('waves_admin_token', 'test-token');
   localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'technician' }));
@@ -67,6 +69,7 @@ beforeEach(async () => {
       if (delayPlan) await new Promise((resolve) => { planResolvers.push(resolve); });
       if (failPlan) throw new Error('Synthetic plan outage');
       data = { plan: { protocol: {}, mixCalculator: { items: [{ product: products[0], mix: { ratePer1000: 3, rateUnit: 'fl_oz', amount: mixAmount, amountUnit: 'fl_oz', treatedSqft: 5000 } }] } } };
+      if (planWarnings.length) data.plan.propertyGate = { warnings: planWarnings };
       if (defaultsEnabled) {
         const items = (withdrawDefaults ? [] : catalog).map((product, index) => ({ product, selected: true, applicationMethod: 'broadcast_spray',
           mix: { ratePer1000: index === 0 ? 3 : 2, rateUnit: 'fl_oz', amount: sqft ? sqft * (index === 0 ? 3 : 2) / 1000 : null, amountUnit: 'fl_oz', treatedSqft: sqft } }));
@@ -1556,6 +1559,21 @@ it('the /completion-actions warnings show in the drawer, so the reason the bermu
   await screen.findByRole('option', { name: 'Warn product' });
   expect(screen.getAllByText(reason)).toHaveLength(1);
   expect(screen.getAllByText(excluded)).toHaveLength(1);
+});
+
+it('with the appointment plan in use, the plan\'s bermuda warnings show beside the Additional work selector (other plan warnings do not)', async () => {
+  enableDefaults();
+  const reason = 'Bermuda removal is not offered on this visit: Recognition, Fusilade II and the surfactant go together, and one of them is blocked or has no planned row.';
+  planWarnings = [
+    { code: 'lawn_bermuda_step_unavailable', severity: 'warning', message: reason },
+    { code: 'lawn_v13_limit_warning', severity: 'warning', message: 'An unrelated plan warning that stays out of this line.' },
+  ];
+  mount();
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  expect(await screen.findByText(reason)).toBeTruthy();
+  expect(screen.queryByText(/unrelated plan warning/)).toBeNull();
+  // The actions list is not fetched on this path: the line came from the plan.
+  expect(fetch.mock.calls.some(([url]) => /completion-actions/.test(url))).toBe(false);
 });
 
 it('no warnings, no warning lines beside the Additional work selector', async () => {
