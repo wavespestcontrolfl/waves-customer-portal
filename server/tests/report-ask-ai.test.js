@@ -407,7 +407,7 @@ describe('screenAskAnswer', () => {
   });
 
   test('more than four sentences is rejected', () => {
-    expect(screen('We treated the outside. We treated the kitchen. We checked the garage. We looked at the entry points.')).toBeNull();
+    expect(screen('We treated the outside. We treated the kitchen. The cockroach you saw was the reason. That is what the report shows.')).toBeNull();
     expect(screen('We treated the outside. We treated the kitchen. We checked the garage. We looked at the entry points. We wrote it up.')).toBe('too_many_sentences');
   });
 

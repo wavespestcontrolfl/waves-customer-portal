@@ -1136,7 +1136,11 @@ function numberIsKnown(value, after, sentence, known) {
   // "density score" names density: the generic score words apply only when
   // no category is named (Codex P1 #5964 r14).
   const specific = matched.filter((entry) => entry !== GENERIC_SCORE);
-  const named = (specific.length ? specific : matched).map(([, keyRe]) => keyRe);
+  // "Total" qualifies another measurement ("total rain" is the rain fact);
+  // alone it names the total-water fact.
+  const TOTAL = MEASUREMENTS.find(([wordRe]) => wordRe.source === '\\btotal\\b');
+  const qualified = specific.length > 1 ? specific.filter((entry) => entry !== TOTAL) : specific;
+  const named = (qualified.length ? qualified : matched).map(([, keyRe]) => keyRe);
   // A number with no score or inch unit must match the measurement its clause
   // names ("the score went from 70 to 100"); with none named ("82 days") it
   // may only repeat a number the report's own text states (Codex P1 r12).
@@ -1145,12 +1149,14 @@ function numberIsKnown(value, after, sentence, known) {
     // "4 inches" in a section is no "4 nests" (Codex P1 #5964 r26).
     const noun = nounAfter(after);
     return known.some((fact) => fact.value === value
-      && (named.length ? named.some((keyRe) => keyRe.test(fact.key)) : (fact.key === '' && fact.noun === noun)));
+      && (named.length ? named.every((keyRe) => keyRe.test(fact.key)) : (fact.key === '' && fact.noun === noun)));
   }
   const noun = nounAfter(unitText);
   return known.some((fact) => fact.value === value
     && ((fact.key === '' && fact.noun && fact.noun === noun)
-      || (kind[2].test(fact.key) && (!named.length || named.some((keyRe) => keyRe.test(fact.key))))));
+      // Every named measurement must fit the fact: "total rain" is not the
+      // total-water fact (Codex P1 #5964 r43).
+      || (kind[2].test(fact.key) && (!named.length || named.every((keyRe) => keyRe.test(fact.key))))));
 }
 
 // Fact-sheet lines that hold digits but no measurement: the office phone,
@@ -1238,8 +1244,11 @@ const UNCONDITIONAL_PERMISSION_RE = /\b(?:right\s+away|immediately|right\s+now|a
 const CONDITION_RE = /\b(?:once|after|until|when|as\s+soon\s+as)\s+(?:\w+\s+){0,4}?(?:dry|dried|dries|drying|hours?|minutes?|settle[sd]?|settling|absorb\w*|it(?:['’]s|\s+is)\s+dry)\b/i;
 // The answer's sentences that are not part of a required line.
 function ownSentences(text, requiredLines) {
-  const lines = requiredLines.map(matchForm);
-  return splitSentences(matchForm(text)).filter((sentence) => !lines.some((line) => line.includes(sentence.replace(/[.!?]$/, ''))));
+  // Only a sentence equal to a required sentence is exempt: "Run it." is not
+  // "Run it on your permitted watering day." (Codex P1 #5964 r43).
+  const bare = (value) => value.replace(/[.!?]+$/, '').trim().toLowerCase();
+  const lineSentences = new Set(requiredLines.flatMap((line) => splitSentences(matchForm(line)).map(bare)));
+  return splitSentences(matchForm(text)).filter((sentence) => !lineSentences.has(bare(sentence)));
 }
 
 // Rooms are inside; yard features are outside (Codex P1 #5964 r22).
@@ -1485,10 +1494,15 @@ const HEALTH_BAD = ['poor', 'unhealthy', 'bad', 'struggling', 'stressed', 'decli
 const HEALTH_GOOD = ['healthy', 'good', 'great', 'excellent', 'thriving', 'lush', 'strong', 'thick', 'dense', 'vibrant', 'perfect'];
 function contradictsHealth(text, facts) {
   const sheet = JSON.stringify([facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report, facts?.findings, facts?.report_sections, facts?.waves_summary, facts?.visit_summary]).toLowerCase();
-  const has = (word) => new RegExp(`\\b${word}`).test(sheet);
+  // A sheet word grounds only the same dimension: "Color is poor" does not
+  // ground "Overall lawn health is poor" (Codex P1 #5964 r43).
+  const sheetClauses = sheet.split(/[.;!?"]+|\\n/).filter(Boolean);
   return clausesOf(text).some((clause) => {
     const lower = clause.toLowerCase();
     if (!HEALTH_SUBJECT.test(lower) || NOT_CONFIRMED_RE.test(lower)) return false;
+    const claimed = HEALTH_DIMENSIONS.filter(([re]) => re.test(lower));
+    const sameDimension = (part) => (claimed.length ? claimed.some(([re]) => re.test(part)) : !HEALTH_DIMENSIONS.some(([re]) => re.test(part)));
+    const has = (word) => sheetClauses.some((part) => new RegExp(`\\b${word}`).test(part) && sameDimension(part));
     // Each dimension is judged on its own score: "Density is excellent" on a
     // density of 20 fails even when the overall is 72 (Codex P1 #5964 r42).
     const scores = HEALTH_DIMENSIONS.filter(([re]) => re.test(lower)).map(([, key]) => facts?.lawn_assessment?.[key]);
@@ -1520,9 +1534,10 @@ const WORK_CLAIMS = [
   ['repair', /\b(?:repair\w*|fix(?:ed)?|replac\w*|install\w*|set\s+(?:up\s+)?traps?|trapp?(?:ed|ing)|cut\s+back|trimm?(?:ed|ing)|prun(?:ed|ing))\b/],
 ];
 const WORK_FACT_WORDS = {
-  inspect: /inspect|check|look|exam|survey|found|noted|observ|saw|finding/, seal: /seal|caulk|plug|patch|exclu|screen|block/,
+  inspect: /inspect|check|look|exam|survey/, seal: /seal|caulk|plug|patch|exclu|screen|block/,
   remov: /remov|took|knock|clear|clean|vacuum|haul/, repair: /repair|fix|replac|install|trap|cut back|trim|prun/,
 };
+const WORK_PLACE_RE = /\b(?:attic|roof|crawl\s*space|garage|kitchen|bathrooms?|bedrooms?|closets?|pantry|laundry|cabinets?|sinks?|baseboards?|walls?|ceilings?|eaves|soffits?|vents?|windows?|doors?|entry\s+points?|gaps?|cracks?|foundation|perimeter|lanai|patio|pool|deck|porch|shed|fence|yard|beds?|trees?|shrubs?|palms?|nests?|hives?|mounds?|droppings|burrows?|traps?|stations?)\b/g;
 const WORK_ACTOR = /\b(?:we|i|our|tech\w*|technician|crew|team|[A-Z][a-z]+)\b|\b(?:was|were|has\s+been|have\s+been|got)\s+\w+ed\b|^\s*(?:yes|yep|correct)\b/;
 function claimsUnrecordedWork(text, facts) {
   const sheet = JSON.stringify([facts?.findings, facts?.report_sections, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report, facts?.products, facts?.areas_serviced]).toLowerCase();
@@ -1530,7 +1545,11 @@ function claimsUnrecordedWork(text, facts) {
     if (NOT_CONFIRMED_RE.test(clause) || !WORK_ACTOR.test(clause)) return false;
     const lower = clause.toLowerCase();
     if (/\b(?:will|would|can|could|should|may|might|next\s+visit|if)\b/.test(lower)) return false;
-    return WORK_CLAIMS.some(([kind, re]) => re.test(lower) && !WORK_FACT_WORDS[kind].test(sheet));
+    // The place or thing worked on must be on the sheet too: an ant trail on
+    // the lanai grounds no attic inspection (Codex P1 #5964 r43).
+    const places = (lower.match(WORK_PLACE_RE) || []).map((place) => place.replace(/\\s+/g, ' '));
+    return WORK_CLAIMS.some(([kind, re]) => re.test(lower)
+      && (!WORK_FACT_WORDS[kind].test(sheet) || places.some((place) => !sheet.includes(place.replace(/e?s$/, '')))));
   });
 }
 
@@ -1715,7 +1734,7 @@ const EXPOSURE_WORD = /\b(?:bait\w*|spray\w*|pesticides?|chemicals?|granules?|gr
 // names the product ("ant bait") (Codex P1 #6016 r33-r34).
 const PEST_WORDS = '(?:ants?|roach(?:es)?|cockroach(?:es)?|rats?|mice|mouse|rodents?|pests?|bugs?|insects?|termites?|squirrels?|raccoons?|fleas?|ticks?|spiders?|snails?|slugs?|wildlife|colony|colonies)';
 const PRODUCT_AFTER_PEST = '(?!\\s+(?:bait\\w*|poison\\w*|gel|killer|spray\\w*|traps?|stations?|granules?|control|treatment|products?|pellets?|blocks?|dust|powder))';
-const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\\w+\\s+)?(?:ate|eats|eating|swallow\\w*|consum\\w*|lick\\w*|chew\\w*|nibbl\\w*|took|takes|taking|feed\\w*|carr\\w*)\\b|\\b(?:eaten|consumed|taken)\\s+by\\s+(?:the\\s+)?${PEST_WORDS}\\b`, 'i');
+const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\\w+\\s+)?(?:ate|eats|eating|swallow\\w*|consum\\w*|lick\\w*|chew\\w*|nibbl\\w*|took|takes|taking|feed\\w*|carr\\w*|gnaw\\w*|gulp\\w*|gobbl\\w*|devour\\w*|wolf(?:ed|ing|s)?|chomp\\w*|slurp\\w*|guzzl\\w*|scarf\\w*|munch\\w*|snack\\w*|crunch\\w*|feast\\w*|bit|bites?|biting)\\b|\\b(?:eaten|consumed|taken|devoured|gobbled|gnawed|nibbled|chewed)\\s+by\\s+(?:the\\s+)?${PEST_WORDS}\\b`, 'i');
 // Someone must be the eater: a name, a pronoun, a possessive person or a
 // listed person or pet, before the verb or after "by". "Was the bait
 // eaten?" names no one (Codex P1 #6016 r34).
@@ -1734,7 +1753,9 @@ const EAT_VERBS = '(?:swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eati
 const EXPOSURE_PRODUCT = '(?:bait\\w*|poison\\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)';
 const OBJECT_WORDS = '(?:(?:down|up|on|into|at|through|some|the|a|an|of|any|more|my|our|that|this|from|out)\\s+)*';
 const NOT_IN_PRODUCT_NAME = '(?!(?:near|by|at|in|on|next|beside|behind|under|over|while|and|but|or|with|without|from|of|to|for|after|before|when|i|we|it|was|were|is|are|outside|inside)\\b)';
-const OBJECT_BOUND_INGESTION = new RegExp(`\\b${EAT_VERBS}(?!\\s+of\\b)\\s+${OBJECT_WORDS}(?:${NOT_IN_PRODUCT_NAME}\\w+\\s+){0,3}${EXPOSURE_PRODUCT}\\b|\\b${EXPOSURE_PRODUCT}\\s+(?:\\w+\\s+){0,2}?(?:was|were|got|gets|been|has\\s+been|have\\s+been|is|are)\\s+(?:\\w+\\s+)?${EAT_VERBS}`, 'i');
+// A pronoun object counts when the sentence names the product: "John
+// swallowed it after touching the pesticide" (Codex P1 #5964 r43).
+const OBJECT_BOUND_INGESTION = new RegExp(`\\b${EAT_VERBS}\\s+(?:it|them|some|any|that|this|those|these)\\b|\\b${EAT_VERBS}(?!\\s+of\\b)\\s+${OBJECT_WORDS}(?:${NOT_IN_PRODUCT_NAME}\\w+\\s+){0,3}${EXPOSURE_PRODUCT}\\b|\\b${EXPOSURE_PRODUCT}\\s+(?:\\w+\\s+){0,2}?(?:was|were|got|gets|been|has\\s+been|have\\s+been|is|are)\\s+(?:\\w+\\s+)?${EAT_VERBS}`, 'i');
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => (OBJECT_BOUND_INGESTION.test(sentence) || INGESTION_VERB.test(sentence))
     && EXPOSURE_WORD.test(sentence) && boundToProduct(sentence)

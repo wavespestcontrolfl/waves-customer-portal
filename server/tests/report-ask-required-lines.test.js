@@ -1698,3 +1698,47 @@ describe('answer screen, Codex round 42', () => {
     expect(screenAskAnswer('The report does not say the attic was inspected.', { question: 'Did you inspect the attic?', data, facts: buildReportAskFacts({ data }) })).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 43', () => {
+  test('a pronoun object is an ingestion when the sentence names the product', () => {
+    expect(medicalExposureAnswer('John swallowed it after touching the pesticide.')).toBeTruthy();
+  });
+
+  test('pests eating bait with an adverb is not an ingestion', () => {
+    expect(medicalExposureAnswer('Did the roaches quickly devour the bait?')).toBeNull();
+  });
+
+  test('a finding about one dimension does not ground another', () => {
+    const data = lawnData({ lawnAssessment: { scores: { overallScore: 92, colorHealth: 20 }, snapshot: { summary: 'Color is poor.', findings: [] } }, reportV2: { aftercare: {} } });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'How is my lawn?', data, facts });
+    expect(ask('Your lawn health is poor.')).toBe('health_claim');
+    expect(ask('Overall lawn health is poor.')).toBe('health_claim');
+    expect(ask('The color is poor.')).toBeNull();
+  });
+
+  test('an inspection needs recorded inspection work at that place', () => {
+    const data = pestData({ applications: [], findings: [{ customerCopy: 'Ant trail found along the lanai' }] });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'Did you inspect the attic?', data, facts });
+    expect(ask('We inspected the attic.')).toBe('unrecorded_work');
+    expect(ask('The technician checked under the roof.')).toBe('unrecorded_work');
+  });
+});
+
+describe('answer screen, Codex round 43 (lines and measurements)', () => {
+  test('a fragment of a required line is not exempt', () => {
+    const line = 'Run it on your permitted watering day.';
+    const data = lawnData({ reportV2: { water: { weekPlan: { ...RAW_PLAN } }, aftercare: { ...HOLD_AFTERCARE } } });
+    const facts = buildReportAskFacts({ data });
+    expect(screenAskAnswer(`${line} Run it.`, { question: 'Should I water?', data, facts, requiredLines: [line] })).not.toBeNull();
+  });
+
+  test('every named measurement must fit the number', () => {
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    const facts = { lawn_report: { water_this_week: { rain_last_7_days_inches: 1.23, irrigation_inches_per_week: 0.5, total_inches_7_days: 1.73 } } };
+    const ask = (answer) => screenAskAnswer(answer, { question: 'How much rain did we get?', data, facts });
+    expect(ask('Total rain was 1.73 inches.')).toBe('unstated_number');
+    expect(ask('Total rain was 1.23 inches.')).toBeNull();
+  });
+});
