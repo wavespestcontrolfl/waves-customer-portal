@@ -396,6 +396,16 @@ describe('Waves Assessment pick is the offered visit, not a placeholder (2026-10
     expect(row?.service_key).toBe('lawn_inspection');
   });
 
+  test('a stored extraction still saying Waves Assessment finds the renamed row by its key', () => {
+    const renamed = { ...ASSESSMENT_ROW, name: 'Free Home Assessment' };
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Waves Assessment', requested_service: 'rodent and termite plan' },
+      transcription: 'we have rodent boxes outside, can you come take a look',
+      services: [...CATALOG, renamed],
+    });
+    expect(row?.service_key).toBe('lawn_inspection');
+  });
+
   test('a renamed assessment (same key) is still replaceable by the re-service override', () => {
     const renamed = { ...ASSESSMENT_ROW, name: 'Free Home Assessment' };
     const row = resolveCallBookingCatalogService({

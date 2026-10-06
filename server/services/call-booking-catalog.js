@@ -345,7 +345,10 @@ function findServiceByName(services, value) {
     const hit = match(normalizeServiceText(candidate));
     if (hit) return hit;
   }
-  return null;
+  // A stored extraction that still says "Waves Assessment" after the row was
+  // renamed resolves to the row with the stable assessment key.
+  const { isAssessmentServiceType } = require('./assessment-booking');
+  return isAssessmentServiceType(value) ? (services.find(isAssessmentCatalogRow) || null) : null;
 }
 
 /**
@@ -550,7 +553,17 @@ function isValidWindowTime(value) {
  * future date was stated, else parent date + the service's catalog interval
  * (default 14 days). Returns { scheduledDate, windowStart } or null.
  */
-function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate, parentWindowStart } = {}) {
+// Parent date + the service's catalog interval (default 14 days). parentDate
+// is an ET wall-clock calendar date; the server runs UTC, so day math goes
+// through the ET helpers (noon anchor clears DST seams). Null if unparseable.
+function catalogIntervalFollowUpDate(parentDate, catalogRow) {
+  const configured = Number(catalogRow?.follow_up_interval_days);
+  const days = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_FOLLOW_UP_INTERVAL_DAYS;
+  const base = parseETDateTime(`${parentDate}T12:00`);
+  return Number.isNaN(base.getTime()) ? null : etDateString(addETDays(base, days));
+}
+
+function resolveCallFollowUpPlan({ extracted = {}, catalogRow, parentDate, parentWindowStart } = {}) {
   // A follow-up treatment talked about on an assessment call follows the
   // quote, not the assessment (the forced-assessment path clears the same
   // signals).
@@ -574,27 +587,14 @@ function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate
   const discussed = extracted.follow_up_visit_mentioned === true || statedFutureDate;
   if (!discussed && !packageRow) return null;
 
-  let scheduledDate = null;
-  let windowStart = null;
-  if (statedFutureDate) {
-    scheduledDate = m[1];
-    windowStart = m[2] && isValidWindowTime(m[2]) ? m[2] : null;
-  }
-
-  if (!scheduledDate) {
-    const configured = Number(catalogRow?.follow_up_interval_days);
-    const days = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_FOLLOW_UP_INTERVAL_DAYS;
-    // parentDate is an ET wall-clock calendar date; the server runs UTC, so
-    // day math goes through the ET helpers (noon anchor clears DST seams).
-    const base = parseETDateTime(`${parentDate}T12:00`);
-    if (Number.isNaN(base.getTime())) return null;
-    scheduledDate = etDateString(addETDays(base, days));
-  }
-
-  const finalWindowStart = windowStart || parentWindowStart || '09:00';
+  // Date from the transcript when a valid future date was stated, else the
+  // catalog interval. Window: the stated time, else the parent's, else 09:00.
+  const scheduledDate = statedFutureDate ? m[1] : catalogIntervalFollowUpDate(parentDate, catalogRow);
+  if (!scheduledDate) return null;
+  const statedWindow = statedFutureDate ? m[2] : null;
   return {
     scheduledDate,
-    windowStart: isValidWindowTime(finalWindowStart) ? finalWindowStart : '09:00',
+    windowStart: [statedWindow, parentWindowStart].find(isValidWindowTime) || '09:00',
     // The plan exists only because the service is a package — nobody on the
     // call discussed a second visit. The writer skips it while the primary
     // is still a pending office-review request (office confirm books it).
