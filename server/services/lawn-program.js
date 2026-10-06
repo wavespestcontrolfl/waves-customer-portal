@@ -30,7 +30,8 @@ const LAWN_V13_VERSION = '2026.10-v13';
 // tools included, sees an add-on. Built once.
 const v13WithoutAddOns = Object.fromEntries(Object.entries(v13).map(([track, program]) => [
   track,
-  { ...program, visits: program.visits.map(({ addOns, ...visit }) => visit) },
+  // A visit with no add-on keeps its own object (identity), so a reader that holds one sees the recipe's.
+  { ...program, visits: program.visits.map((visit) => (visit.addOns ? (({ addOns, ...rest }) => rest)(visit) : visit)) },
 ]));
 
 function lawnProtocols() {
