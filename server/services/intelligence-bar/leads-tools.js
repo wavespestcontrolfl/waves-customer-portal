@@ -938,7 +938,7 @@ async function convertLead(input) {
   });
   if (result.error) {
     return result.status === 409
-      ? { error: 'Lead changed while the conversion was being applied. Re-check the lead and rebuild the confirmation card.', preview_changed: true }
+      ? { error: 'The lead changed since the card was shown — nothing was converted.', preview_changed: true }
       : { error: result.error };
   }
 

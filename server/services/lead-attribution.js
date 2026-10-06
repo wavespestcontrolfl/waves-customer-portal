@@ -267,7 +267,10 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 // customer's booking closed after staff loaded it is not won from that view —
 // judged here and re-asserted in the win's own UPDATE.
 // `expectedStatus` (optional, the bar's card): the win's UPDATE also requires
-// the lead to still hold the status the card showed. The route passes none.
+// the lead to still hold the status, the version (`seenUpdatedAt`, to the
+// millisecond) and the customer link (none, or this customer) the card showed,
+// so another admin's edit or a re-link after the card matches no row (codex
+// #6099 r1). The route passes none and keeps its handled-only rule.
 async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthlyValue, initialServiceValue, waveguardTier, seenStatus, seenUpdatedAt, expectedStatus } = {}) {
   const customerId = typeof rawCustomerId === 'string' ? rawCustomerId.trim() : rawCustomerId;
   if (!customerId) return { status: 400, error: 'customer_id is required to convert a lead' };
@@ -280,6 +283,14 @@ async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthl
 
   const refusal = handledStatusRefusal('won', seenStatus, lead.status, seenUpdatedAt, lead.updated_at);
   if (refusal) return { status: refusal.code, error: refusal.error };
+  // The card path fails closed without the version it showed.
+  if (expectedStatus && !seenUpdatedAt) return { status: 409, error: 'The lead changed since the card was shown — nothing was converted.' };
+  const handledGuard = unlessHandledSince(seenStatus, seenUpdatedAt);
+  const cardGuard = expectedStatus ? (q) => {
+    handledGuard(q);
+    q.whereRaw("date_trunc('milliseconds', updated_at) = ?::timestamptz", [new Date(seenUpdatedAt).toISOString()]);
+    q.where((w) => w.whereNull('customer_id').orWhere('customer_id', customerId));
+  } : null;
   const won = await markConverted(leadId, {
     customerId,
     monthlyValue,
@@ -288,9 +299,10 @@ async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthl
     // Only 'handled' is excluded, unless it is the very close the page showed (any
     // other status converts exactly as before): the claim's where() takes a callback,
     // re-asserting it in the win's own UPDATE.
-    onlyIfIdentity: unlessHandledSince(seenStatus, seenUpdatedAt),
+    onlyIfIdentity: cardGuard || handledGuard,
     ...(expectedStatus ? { onlyIfStatusIn: [expectedStatus] } : {}),
   });
+  if (won === false && expectedStatus) return { status: 409, error: 'The lead changed since the card was shown — nothing was converted.' };
   if (won === false) return { status: 409, error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' };
   const updatedLead = await db('leads').where('id', leadId).first();
   return { lead: updatedLead };

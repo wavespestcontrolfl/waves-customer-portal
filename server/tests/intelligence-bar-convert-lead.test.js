@@ -162,7 +162,7 @@ describe('confirmed', () => {
     install();
     leadAttribution.convertLeadToCustomer.mockResolvedValue({ status: 409, error: 'This lead changed since the page loaded' });
     const res = await executeLeadsTool('convert_lead', { lead_id: LEAD_ID, customer_id: CUSTOMER_ID, confirmed: true, ...pins });
-    expect(res).toMatchObject({ preview_changed: true, error: expect.stringMatching(/rebuild the confirmation card/) });
+    expect(res).toMatchObject({ preview_changed: true, error: 'The lead changed since the card was shown — nothing was converted.' });
     expect(res.success).toBeUndefined();
   });
 
@@ -221,10 +221,82 @@ describe('convertLeadToCustomer (POST /api/admin/leads/:id/convert body)', () =>
 
   test('the card\'s expected status rides into the win\'s UPDATE; a claim that matches nothing is 409', async () => {
     const { leads } = installConvert({ claimed: 0 });
-    const res = await convertLeadToCustomer(LEAD_ID, { customerId: CUSTOMER_ID, seenStatus: 'estimate_sent', expectedStatus: 'estimate_sent' });
+    const res = await convertLeadToCustomer(LEAD_ID, { customerId: CUSTOMER_ID, seenStatus: 'estimate_sent', seenUpdatedAt: LEAD_UPDATED.toISOString(), expectedStatus: 'estimate_sent' });
     expect(leads.whereIn).toHaveBeenCalledWith('status', ['estimate_sent']);
     expect(res.status).toBe(409);
     expect(require('../services/lead-funnel-bridge').bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+});
+
+// Codex #6099 r1: the card path's UPDATE binds the lead's version and its
+// customer link, not just its status. The claim's predicates are evaluated
+// against the row as it is at the UPDATE, after the pre-read saw the card's lead.
+describe('card path: a lead changed between the card and the UPDATE', () => {
+  const { convertLeadToCustomer } = jest.requireActual('../services/lead-attribution');
+  const msIso = (v) => new Date(v).toISOString();
+
+  // A tiny knex where-evaluator: AND by default, orWhere* joins with OR.
+  function group(row) {
+    const terms = [];
+    const add = (op, fn) => { terms.push({ op, fn }); return g; };
+    const g = {
+      where: (a, b) => add('and', typeof a === 'function' ? (() => { const sub = group(row); a.call(sub, sub); return sub.test(); }) : () => (b === undefined ? true : row[a] === b)),
+      orWhere: (a, b) => add('or', () => row[a] === b),
+      whereNull: (c) => add('and', () => row[c] == null),
+      whereNot: (c, v) => add('and', () => row[c] !== v),
+      whereIn: (c, arr) => add('and', () => arr.includes(row[c])),
+      whereRaw: (_sql, [iso]) => add('and', () => msIso(row.updated_at) === iso),
+      orWhereRaw: (_sql, [iso]) => add('or', () => msIso(row.updated_at) === iso),
+      whereNotExists: () => g,
+      test: () => terms.reduce((acc, t, i) => (i === 0 ? t.fn() : t.op === 'or' ? acc || t.fn() : acc && t.fn()), true),
+    };
+    return g;
+  }
+
+  function installRace(current) {
+    let reads = 0;
+    const leads = {};
+    let claim = null;
+    for (const m of ['where', 'whereNull', 'whereIn', 'whereNot', 'whereRaw', 'orWhereRaw', 'whereNotExists', 'orWhere']) {
+      leads[m] = jest.fn((...args) => { (claim ||= group(current))[m](...args); return leads; });
+    }
+    leads.first = jest.fn(async () => { claim = null; return reads++ === 0 ? LEAD : { ...current, status: 'won' }; });
+    leads.update = jest.fn(async () => { const hit = claim.test(); claim = null; return hit ? 1 : 0; });
+    db.mockImplementation((table) => ({ leads, customers: chain({ first: CUSTOMER }), lead_activities: chain({ insert: undefined }) }[table] || chain()));
+    return leads;
+  }
+  const card = { customerId: CUSTOMER_ID, seenStatus: 'estimate_sent', seenUpdatedAt: LEAD_UPDATED.toISOString(), expectedStatus: 'estimate_sent' };
+  const refused = { status: 409, error: 'The lead changed since the card was shown — nothing was converted.' };
+
+  test('unchanged since the card: converts', async () => {
+    const leads = installRace({ ...LEAD });
+    const res = await convertLeadToCustomer(LEAD_ID, card);
+    expect(res.lead).toMatchObject({ status: 'won' });
+    expect(leads.update).toHaveBeenCalledTimes(1);
+  });
+
+  test('already linked to this same customer: converts', async () => {
+    installRace({ ...LEAD, customer_id: CUSTOMER_ID });
+    expect((await convertLeadToCustomer(LEAD_ID, card)).lead).toMatchObject({ status: 'won' });
+  });
+
+  test('edited by another admin after the card (same status, newer version): refused, nothing converted', async () => {
+    installRace({ ...LEAD, phone: '+19415550199', updated_at: new Date(LEAD_UPDATED.getTime() + 1) });
+    expect(await convertLeadToCustomer(LEAD_ID, card)).toEqual(refused);
+    expect(require('../services/lead-funnel-bridge').bridgeLeadFunnelStage).not.toHaveBeenCalled();
+  });
+
+  test('re-linked to another customer after the card (version unchanged): refused', async () => {
+    installRace({ ...LEAD, customer_id: OTHER_CUSTOMER_ID });
+    expect(await convertLeadToCustomer(LEAD_ID, card)).toEqual(refused);
+  });
+
+  test('the card path without its version fails closed; the plain route path keeps its rule', async () => {
+    installRace({ ...LEAD, updated_at: new Date(LEAD_UPDATED.getTime() + 1) });
+    expect(await convertLeadToCustomer(LEAD_ID, { ...card, seenUpdatedAt: undefined })).toEqual(refused);
+    // Route: no expected status, so a newer version of a non-handled lead still converts, as before.
+    installRace({ ...LEAD, updated_at: new Date(LEAD_UPDATED.getTime() + 1) });
+    expect((await convertLeadToCustomer(LEAD_ID, { customerId: CUSTOMER_ID, seenStatus: 'estimate_sent' })).lead).toMatchObject({ status: 'won' });
   });
 });
 
