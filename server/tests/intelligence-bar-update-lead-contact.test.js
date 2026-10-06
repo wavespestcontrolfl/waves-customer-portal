@@ -343,246 +343,84 @@ test('authorization contract: the card shows the old and new address and says no
   expect(c.effects.map(e => e.label)).not.toEqual(expect.arrayContaining([expect.stringMatching(/email-confirmed/)]));
 });
 
-// ─── a one-line address is replaced whole, never half-edited ────
+// ─── columns only (owner 2026-10-06): the bar never composes an address ────
 
-const ONE_LINE_REFUSAL = "This lead's address is stored as one line (street, city, ZIP). Give the whole corrected address in one message.";
-const COMPOSED = '21 Synthetic Oak Ave, Testville, FL 34200';
-const COMPOSED_LEAD = { ...LEAD, address: COMPOSED, city: 'Testville', zip: '34200' };
-const TWO_SEG = '21 Oak Ave, Sarasota FL 34200';
-const TWO_SEG_LEAD = { ...LEAD, address: TWO_SEG, city: 'Sarasota', zip: '34200' };
-const NO_COMMA = '100 Main St Sarasota FL 34236';
-const NO_COMMA_LEAD = { ...LEAD, address: NO_COMMA, city: 'Sarasota', zip: '34236' };
+const ONE_LINE_REFUSAL = "This lead's address is stored as one line; edit it on the Leads screen.";
+const LOCALITY_REFUSAL = 'Give the street alone; put the city and ZIP in their own fields, or edit the lead on the Leads screen.';
+const COMPOSED_LEAD = { ...LEAD, address: '21 Synthetic Oak Ave, Testville, FL 34200', city: 'Testville', zip: '34200' };
+const TWO_SEG_LEAD = { ...LEAD, address: '21 Oak Ave, Sarasota FL 34200', city: 'Sarasota', zip: '34200' };
+const NO_COMMA_LEAD = { ...LEAD, address: '100 Main St Sarasota FL 34236', city: 'Sarasota', zip: '34236' };
 const OPAQUE_LEAD = { ...ADDR_LEAD, address: '21 Oak Ave, Testville' };
+const INCONSISTENT_LEAD = { ...ADDR_LEAD, address: '21 Oak Ave, Sarasota', city: 'Bradenton' };
 
-test('a whole address on a one-line row replaces the line and syncs city and zip (comma, comma-free, two-segment, unit)', async () => {
-  const whole = '12 Pine Rd, Bradenton, FL 34201';
-  for (const lead of [COMPOSED_LEAD, TWO_SEG_LEAD, NO_COMMA_LEAD, OPAQUE_LEAD]) {
-    db.mockReturnValue(chain({ first: lead }));
-    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: whole });
-    expect(res.changes).toEqual({
-      address: { from: lead.address, to: whole },
-      city: { from: lead.city, to: 'Bradenton' },
-      zip: { from: lead.zip, to: '34201' },
-    });
-    expect(res.asserted_fields).toEqual(['address', 'city', 'zip']);
-  }
-  db.mockReturnValue(chain({ first: TWO_SEG_LEAD }));
-  for (const [given, line] of [
-    ['100 Main St Bradenton FL 34201', '100 Main St, Bradenton, FL 34201'],
-    ['21 Oak Ave Unit 4, Bradenton FL 34201', '21 Oak Ave Unit 4, Bradenton, FL 34201'],
-    ['21 Oak Ave, Unit 4, Bradenton, FL 34201', '21 Oak Ave Unit 4, Bradenton, FL 34201'],
-  ]) {
-    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: given });
-    expect(res.changes.address).toEqual({ from: TWO_SEG, to: line });
-    expect(res.changes.city).toEqual({ from: 'Sarasota', to: 'Bradenton' });
-    const segs = line.split(',').map(x => x.trim().toLowerCase());
-    expect(new Set(segs).size).toBe(segs.length);
-  }
-});
-
-test('a whole address equal to the stored one is nothing to change; a state-only correction to FL is a change', async () => {
-  db.mockReturnValue(chain({ first: COMPOSED_LEAD }));
-  const same = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '21 Synthetic Oak Avenue, testville, FL 34200' });
-  expect(same.error).toMatch(/already has those contact details/);
-  // A stored line with another state is corrected to FL: a real change on the line only.
-  db.mockReturnValue(chain({ first: { ...COMPOSED_LEAD, address: '21 Synthetic Oak Ave, Testville, GA 34200' } }));
-  const state = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: COMPOSED });
-  expect(state.changes).toEqual({ address: { from: '21 Synthetic Oak Ave, Testville, GA 34200', to: COMPOSED } });
-});
-
-test('every partial edit on a one-line row refuses with no write', async () => {
-  for (const lead of [COMPOSED_LEAD, TWO_SEG_LEAD, NO_COMMA_LEAD, OPAQUE_LEAD]) {
+test('a lead whose address is stored as one line refuses every address, city or zip edit, with no write', async () => {
+  for (const lead of [COMPOSED_LEAD, TWO_SEG_LEAD, NO_COMMA_LEAD, OPAQUE_LEAD, INCONSISTENT_LEAD]) {
     const leads = chain({ first: lead });
     db.mockReturnValue(leads);
     for (const input of [
-      { address: '12 Pine Rd' }, { address: '123 Main St, Fl B' }, { address: '123 Main St, Fl 2' },
-      { address: '12 Oak Ave, FL' }, { address: '12 Oak Ave, Sarasota' }, { address: '12 Oak Ave, FL 34236' },
-      { address: '12 Oak Ave, Bradenton, FL' }, { zip: '34201' }, { city: 'Bradenton' }, { city: 'Bradenton', zip: '34201' },
+      { address: '12 Pine Rd' }, { address: '12 Pine Rd, Bradenton, FL 34201' }, { address: '' },
+      { city: 'Bradenton' }, { zip: '34201' }, { city: '', zip: '' }, { address: '', city: '', zip: '' },
     ]) {
       const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', ...input, confirmed: true });
       expect(res.error).toBe(ONE_LINE_REFUSAL);
       expect(res.preview).toBeUndefined();
     }
     expect(leads.update).not.toHaveBeenCalled();
+    // Name, phone and email edits on the same lead still work.
+    const name = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Teste' });
+    expect(name.changes).toEqual({ first_name: { from: lead.first_name, to: 'Teste' } });
   }
 });
 
-test('explicit city or zip fields beside a whole address must agree with it', async () => {
-  db.mockReturnValue(chain({ first: TWO_SEG_LEAD }));
-  const agree = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Rd, Bradenton, FL 34201', city: 'Bradenton', zip: '34201' });
-  expect(agree.changes.city).toEqual({ from: 'Sarasota', to: 'Bradenton' });
-  const clash = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Rd, Bradenton, FL 34201', city: 'Venice' });
-  expect(clash.error).toMatch(/city "Venice" does not match/);
-  // Case and whitespace do not matter; the canonical parsed value is stored.
-  const loose = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Rd, Bradenton, FL 34201', city: ' bradenton ', zip: '34201 ' });
-  expect(loose.changes.city).toEqual({ from: 'Sarasota', to: 'Bradenton' });
-  expect(loose.changes.zip).toEqual({ from: '34200', to: '34201' });
-});
-
-test('a whole address outside Florida is refused on either representation; FL is accepted', async () => {
-  for (const lead of [TWO_SEG_LEAD, ADDR_LEAD]) {
-    const leads = chain({ first: lead });
-    db.mockReturnValue(leads);
-    const ga = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Rd, Valdosta, GA 31601', confirmed: true });
-    expect(ga.error).toBe('Leads are Florida addresses; this one says GA. Fix the state or convert the lead on the Customers screen.');
-    expect(leads.update).not.toHaveBeenCalled();
-    const fl = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Rd, Bradenton, FL 34201' });
-    expect(fl.changes.city).toEqual({ from: lead.city, to: 'Bradenton' });
-  }
-});
-
-test('a blank for address, city and zip together clears the location on a one-line row; partial blanks refuse', async () => {
-  const leads = chain({ first: TWO_SEG_LEAD });
-  db.mockReturnValue(leads);
-  const cleared = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '', city: '', zip: '' });
-  expect(cleared.changes).toEqual({
-    address: { from: TWO_SEG, to: null },
-    city: { from: 'Sarasota', to: null },
-    zip: { from: '34200', to: null },
-  });
-  expect(cleared.asserted_fields).toEqual(['address', 'city', 'zip']);
-  for (const input of [{ address: '' }, { city: '', zip: '' }, { address: '', city: '' }]) {
-    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', ...input, confirmed: true });
-    expect(res.error).toBe(ONE_LINE_REFUSAL);
-  }
-  expect(leads.update).not.toHaveBeenCalled();
-});
-
-test('a whole address whose parsed city is over 120 characters, or whose line is over 255, refuses at preview', async () => {
-  db.mockReturnValue(chain({ first: TWO_SEG_LEAD }));
-  const city = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: `12 Oak Ave, ${'Longtown'.repeat(16)}, FL 34236` });
-  expect(city.error).toMatch(/city is too long \(120 characters max\)/);
-  const line = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: `${'1'.repeat(230)} Oak Ave, Bradenton, FL 34236` });
-  expect(line.error).toMatch(/address is too long/);
-});
-
-test('bare row: a plain street is written as typed; a locality-shaped but incomplete text refuses; a whole address replaces all three', async () => {
+test('bare row: a plain street is written as typed, never parsed', async () => {
   const leads = chain({ first: ADDR_LEAD });
   db.mockReturnValue(leads);
-  // Plain streets (a unit segment, a unit value) are stored as typed.
-  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B']) {
+  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B', '123 Main St N', '12 Oak Avenue']) {
     const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address });
     expect(res.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: address } });
   }
-  // The lead's own city beside the street is stripped: the street alone is stored, columns untouched.
-  for (const address of ['12 Oak Ave, Testville', '12 Oak Ave Testville', '12 Oak Ave, testville']) {
-    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address });
-    expect(res.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: '12 Oak Ave' } });
-    const line = [res.changes.address.to, ADDR_LEAD.city, ADDR_LEAD.zip].join(', ');
-    const segs = line.split(',').map(x => x.trim().toLowerCase());
-    expect(new Set(segs).size).toBe(segs.length);
-  }
-  // Nothing left once the city is stripped: refused.
-  const cityOnly = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: 'Testville', confirmed: true });
-  expect(cityOnly.error).toBe(ONE_LINE_REFUSAL);
-  // A state, or a different real city, without the rest: refused, nothing written.
-  for (const address of ['12 Oak Ave, Bradenton, FL', '12 Oak Ave, FL', '123 Main St, Fl 2', '12 Oak Ave, Bradenton', '12 Oak Ave Bradenton FL']) {
-    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address, confirmed: true });
-    expect(res.error).toBe(ONE_LINE_REFUSAL);
-  }
   expect(leads.update).not.toHaveBeenCalled();
-  // The row stays bare: the parsed STREET goes to address, city and zip to their columns.
-  const whole = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Road, Bradenton, FL 34201' });
-  expect(whole.changes).toEqual({
-    address: { from: '21 Synthetic Oak Ave', to: '12 Pine Rd' },
-    city: { from: 'Testville', to: 'Bradenton' },
-    zip: { from: '34200', to: '34201' },
-  });
-  expect(whole.asserted_fields).toEqual(['address', 'city', 'zip']);
-  // A bare street ending in a unit, or in a unit number that looks like a ZIP but
-  // is not the lead's zip, is still bare: a zip edit touches only the column.
-  for (const address of ['21 Oak Ave Unit 4', '1200 Main St 2B', '21 Oak Ave Apt 34236']) {
+});
+
+test('bare row: city and zip edit their own columns; a blank clears', async () => {
+  db.mockReturnValue(chain({ first: ADDR_LEAD }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Bradenton', zip: '34201' })).changes)
+    .toEqual({ city: { from: 'Testville', to: 'Bradenton' }, zip: { from: '34200', to: '34201' } });
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '' })).changes).toEqual({ zip: { from: '34200', to: null } });
+  // A bare street ending in a unit number that looks like a ZIP but is not the lead's zip is still bare.
+  for (const address of ['21 Oak Ave Unit 4', '21 Oak Ave Apt 34236']) {
     db.mockReturnValue(chain({ first: { ...ADDR_LEAD, address } }));
-    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' });
-    expect(res.changes).toEqual({ zip: { from: '34200', to: '34201' } });
+    expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' })).changes).toEqual({ zip: { from: '34200', to: '34201' } });
   }
 });
 
-test('confirmed whole address: one guarded UPDATE writes line, city and zip and re-asserts every old value', async () => {
-  const leads = chain({ first: TWO_SEG_LEAD, update: [{ id: 'lead-1' }] });
-  const activities = chain({ insert: undefined });
-  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
-  const approved = {
-    address: { from: TWO_SEG, to: '12 Pine Rd, Bradenton, FL 34201' },
-    city: { from: 'Sarasota', to: 'Bradenton' },
-    zip: { from: '34200', to: '34201' },
-  };
-  const res = await executeLeadsTool('update_lead_contact', {
-    lead_id: 'lead-1', address: '12 Pine Rd, Bradenton, FL 34201', confirmed: true, _approved_changes: approved,
-  });
-  expect(res.success).toBe(true);
-  expect(res.updated_fields).toEqual(['address', 'city', 'zip']);
-  expect(leads.where).toHaveBeenCalledWith('address', TWO_SEG);
-  expect(leads.where).toHaveBeenCalledWith('city', 'Sarasota');
-  expect(leads.where).toHaveBeenCalledWith('zip', '34200');
-  expect(leads.update).toHaveBeenCalledWith(
-    expect.objectContaining({ address: '12 Pine Rd, Bradenton, FL 34201', city: 'Bradenton', zip: '34201' }), ['id'],
-  );
-  // The row moved after the card: the pinned diff no longer matches, nothing is written.
-  jest.clearAllMocks();
-  const moved = chain({ first: { ...TWO_SEG_LEAD, address: '99 Other St, Elsewhere, FL 34111', city: 'Elsewhere', zip: '34111' }, update: [{ id: 'lead-1' }] });
-  db.mockImplementation((table) => (table === 'leads' ? moved : activities));
-  const stale = await executeLeadsTool('update_lead_contact', {
-    lead_id: 'lead-1', address: '12 Pine Rd, Bradenton, FL 34201', confirmed: true, _approved_changes: approved,
-  });
-  expect(stale.success).toBe(true); // the pinned "from" values ride into the WHERE; the mock returns a row
-  expect(moved.where).toHaveBeenCalledWith('address', TWO_SEG);
-  expect(moved.where).not.toHaveBeenCalledWith('address', '99 Other St, Elsewhere, FL 34111');
-});
-
-test('a ZIP+4 whole address replaces the line and the zip column as parsed', async () => {
-  db.mockReturnValue(chain({ first: TWO_SEG_LEAD }));
-  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Rd, Bradenton, FL 34201-1234' });
-  expect(res.changes).toEqual({
-    address: { from: TWO_SEG, to: '12 Pine Rd, Bradenton, FL 34201-1234' },
-    city: { from: 'Sarasota', to: 'Bradenton' },
-    zip: { from: '34200', to: '34201-1234' },
-  });
-});
-
-test('confirmed whole address: an asserted but unchanged column is guarded and written; a column moved meanwhile refuses', async () => {
-  // City stays Sarasota: not in the approved diff, but asserted by the whole address.
-  const leads = chain({ first: TWO_SEG_LEAD, update: [{ id: 'lead-1' }] });
-  const activities = chain({ insert: undefined });
-  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
-  const approved = { address: { from: TWO_SEG, to: '12 Pine Rd, Sarasota, FL 34201' }, zip: { from: '34200', to: '34201' } };
-  const res = await executeLeadsTool('update_lead_contact', {
-    lead_id: 'lead-1', address: '12 Pine Rd, Sarasota, FL 34201', confirmed: true, _approved_changes: approved, _asserted_fields: ['address', 'city', 'zip'],
-  });
-  expect(res.success).toBe(true);
-  expect(res.updated_fields).toEqual(['address', 'zip']);
-  expect(leads.where).toHaveBeenCalledWith('city', 'Sarasota');
-  expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ city: 'Sarasota', zip: '34201' }), ['id']);
-  // Another editor moved the city between card and confirm: the guard matches zero rows.
-  jest.clearAllMocks();
-  const moved = chain({ first: { ...TWO_SEG_LEAD, city: 'Venice' }, update: [] });
-  db.mockImplementation((table) => (table === 'leads' ? moved : activities));
-  const stale = await executeLeadsTool('update_lead_contact', {
-    lead_id: 'lead-1', address: '12 Pine Rd, Sarasota, FL 34201', confirmed: true, _approved_changes: approved, _asserted_fields: ['address', 'city', 'zip'],
-  });
-  expect(stale.preview_changed).toBe(true);
-  expect(stale.success).toBeUndefined();
-  expect(activities.insert).not.toHaveBeenCalled();
-});
-
-test('a legacy line whose embedded city differs from the city column is one-line: partial edits refuse, a whole address replaces it', async () => {
-  const legacy = { ...ADDR_LEAD, address: '21 Oak Ave, Sarasota', city: 'Bradenton' };
-  const leads = chain({ first: legacy });
+test('bare row: address text that carries a locality is refused, with no write', async () => {
+  const leads = chain({ first: ADDR_LEAD });
   db.mockReturnValue(leads);
-  for (const input of [{ city: 'Venice' }, { zip: '34201' }, { address: '12 Oak Ave' }]) {
-    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', ...input, confirmed: true });
-    expect(res.error).toBe(ONE_LINE_REFUSAL);
+  for (const address of [
+    '12 Oak Ave, Sarasota', '12 Oak Ave, Testville', '12 Oak Ave Testville', '12 Oak Ave, FL', '12 Oak Ave, Bradenton, FL',
+    '12 Oak Ave, Bradenton, FL 34201', '12 Oak Ave Sarasota 34201', '12 Oak Ave, FL 34236', '12 Pine Rd, Bradenton, FL 34201-1234',
+    '123 Main St, Sarasota, FL 34201, Apt 4', '12 Pine Rd, Valdosta, GA 31601',
+  ]) {
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address, confirmed: true });
+    expect(res.error).toBe(LOCALITY_REFUSAL);
+    expect(res.preview).toBeUndefined();
+  }
+  // Floor notation is not a locality: "Fl 2" and "Fl B" stay street text.
+  for (const address of ['123 Main St, Fl 2', '123 Main St, Fl B']) {
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address });
+    expect(res.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: address } });
   }
   expect(leads.update).not.toHaveBeenCalled();
-  const whole = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Rd, Venice, FL 34285' });
-  expect(whole.changes).toEqual({
-    address: { from: '21 Oak Ave, Sarasota', to: '12 Pine Rd, Venice, FL 34285' },
-    city: { from: 'Bradenton', to: 'Venice' },
-    zip: { from: '34200', to: '34285' },
-  });
-  // Comma-free legacy form too; a unit segment is still bare.
-  db.mockReturnValue(chain({ first: { ...legacy, address: '21 Oak Ave Sarasota' } }));
-  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Venice' })).error).toBe(ONE_LINE_REFUSAL);
-  db.mockReturnValue(chain({ first: { ...ADDR_LEAD, address: '21 Oak Ave, Unit 4' } }));
-  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Venice' })).changes).toEqual({ city: { from: 'Testville', to: 'Venice' } });
+});
+
+test('the preview carries no asserted_fields; confirmed writes and guards only the changed columns', async () => {
+  const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
+  db.mockReturnValue(leads);
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Bradenton', confirmed: true, _approved_changes: { city: { from: 'Testville', to: 'Bradenton' } } });
+  expect(res.success).toBe(true);
+  expect(res.asserted_fields).toBeUndefined();
+  expect(res.updated_fields).toEqual(['city']);
+  expect(leads.update.mock.calls[0][0]).toMatchObject({ city: 'Bradenton' });
+  expect(leads.update.mock.calls[0][0].address).toBeUndefined();
 });
