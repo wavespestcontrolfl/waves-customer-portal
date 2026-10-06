@@ -415,11 +415,11 @@ describe('the account decides, on the server', () => {
     });
 
     // Every spray condition of the staged rows rides each of the three actions (and only those
-    // conditions: not the recipe note, the pairing note or the Celsius note), no test-patch note
+    // conditions: not the recipe note or the pairing note), no test-patch note
     // for an eligible cultivar. April has no morning limit; June adds it.
     test.each([
-      ['4', ['activelyGrowingOnly', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter']],
-      ['6', ['activelyGrowingOnly', 'morningUnderF', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter']],
+      ['4', ['activelyGrowingOnly', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter', 'skipCelsiusInBermudaArea']],
+      ['6', ['activelyGrowingOnly', 'morningUnderF', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter', 'skipCelsiusInBermudaArea']],
     ])('month %s: each of the three actions carries the spray conditions %j', async (month, keys) => {
       account.visitDate = month === '6' ? '2026-06-16' : '2026-04-14';
       const withMorning = (gates) => (month === '6' ? { ...gates, morningUnderF: 85 } : gates);
@@ -428,6 +428,9 @@ describe('the account decides, on the server', () => {
       expect(grouped).toHaveLength(3);
       for (const action of grouped) expect(action.gateNotes.map((n) => n.key)).toEqual(keys);
       expect(grouped[0].gateNotes.find((n) => n.key === 'noMowDaysBeforeAfter').text).toMatch(/2 days/);
+      expect(grouped[0].gateNotes.find((n) => n.key === 'skipCelsiusInBermudaArea').text).toBe('Skip the Celsius weed spot in the bermuda area today.');
+      // Each action is a spot line with no catalog-derived amount.
+      for (const action of grouped) expect(action).toMatchObject({ applicationMode: 'spot', prefillAmount: false });
     });
 
     test('an eligible cultivar carries no test-patch note; an excluded cultivar offers none of the three and says why', async () => {

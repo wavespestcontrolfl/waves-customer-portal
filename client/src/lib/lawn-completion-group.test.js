@@ -30,3 +30,17 @@ describe("lawnPlanActionOptions test-patch note", () => {
     expect(options[1]).not.toHaveProperty("gateNotes");
   });
 });
+
+describe("lawnPlanActionOptions no-prefill marker", () => {
+  const options = lawnPlanActionOptions([
+    { product: { id: "rec", name: "Recognition" }, group: "bermuda_removal", applicationMethod: "spot_treatment", prefillAmount: false },
+    { product: { id: "p1", name: "Plain" } },
+  ]);
+
+  it("carries the no-prefill marker on the option and its product, and only on a marked option", () => {
+    expect(options[0].prefillAmount).toBe(false);
+    expect(options[0].product.prefillAmount).toBe(false);
+    expect(options[1]).not.toHaveProperty("prefillAmount");
+    expect(options[1].product).not.toHaveProperty("prefillAmount");
+  });
+});

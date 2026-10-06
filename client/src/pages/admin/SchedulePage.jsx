@@ -8333,6 +8333,51 @@ export function ProtocolPanel({ service, onClose }) {
                             ))}
                           </div>
                         )}
+                        {lawnMix.bermudaMixingOrder?.length > 0 && (
+                          <div
+                            style={{
+                              marginTop: 10,
+                              paddingTop: 10,
+                              borderTop: `1px solid ${D.border}`,
+                            }}
+                          >
+                            {" "}
+                            <div
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 500,
+                                color: D.muted,
+                                textTransform: "uppercase",
+                                letterSpacing: 0.6,
+                                marginBottom: 6,
+                              }}
+                            >
+                              Bermuda backpack mix
+                            </div>
+                            {lawnMix.bermudaMixingOrder.map((step) => (
+                              <div
+                                key={`${step.step}-${step.productId}`}
+                                style={{
+                                  fontSize: 11,
+                                  color: D.text,
+                                  marginBottom: 3,
+                                }}
+                              >
+                                {" "}
+                                <strong>
+                                  {step.step}. {step.productName}
+                                </strong>
+                                {step.instruction && (
+                                  <div
+                                    style={{ color: D.muted, marginLeft: 14 }}
+                                  >
+                                    {step.instruction}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
                     {lawnProtocol && (
@@ -12126,7 +12171,7 @@ function PestRecapCard({ serviceId }) {
 // Shown beside the Additional work selector while the bermuda removal mix carries the
 // server's spray conditions; the test-patch line is the short wording for a CitraBlue or
 // unconfirmed St. Augustine cultivar.
-const BERMUDA_CONDITION_KEYS = ["activelyGrowingOnly", "morningUnderF", "noRainOrIrrigationHours", "noMowDaysBeforeAfter", "testPatchFirst"];
+const BERMUDA_CONDITION_KEYS = ["activelyGrowingOnly", "morningUnderF", "noRainOrIrrigationHours", "noMowDaysBeforeAfter", "skipCelsiusInBermudaArea", "testPatchFirst"];
 const BERMUDA_TEST_PATCH_LINE = "Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot";
 
 export function CompletionPanel({
@@ -17006,7 +17051,7 @@ export function CompletionPanel({
       action.product?.id &&
       !selectedProducts.find((p) => p.productId === action.product.id)
     ) {
-      addProduct(action.product);
+      addProduct(action.prefillAmount === false ? { ...action.product, prefillAmount: false } : action.product);
     }
   }
   function handleOneTimeRecapOnlyChange(checked) {
@@ -17058,6 +17103,11 @@ export function CompletionPanel({
         lawnAmountReason: row.totalAmount !== ""
           ? "Suggested from the label rate for the visit area. Confirm the actual amount."
           : "Enter the actual amount for this application." };
+    }
+    // A spot line (the bermuda removal mix) has no catalog-derived amount: no rate, area or
+    // total is suggested; the tech enters the area treated and the amount used.
+    if (product.prefillAmount === false) {
+      row = { ...row, rate: "", totalAmount: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false, lawnAmountReason: "Spot work: enter the area treated and the amount used." };
     }
     // A re-added product is no longer a removed default whatever the plan
     // state — a draft restored under an outage carries removed ids too, and

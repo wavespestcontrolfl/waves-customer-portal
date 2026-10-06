@@ -482,17 +482,23 @@ function withRowGateNotes(items, rows) {
 
 // The spray conditions the tech must see before choosing the step, in the order they are
 // read out. Every projection that offers the step carries these from the staged rows.
-const OPTION_NOTE_KEYS = ['activelyGrowingOnly', 'morningUnderF', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter', 'testPatchFirst'];
+const OPTION_NOTE_KEYS = ['activelyGrowingOnly', 'morningUnderF', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter', 'skipCelsiusInBermudaArea', 'testPatchFirst'];
 
 // The spray conditions an option or action carries through a completion projection (the
 // plan's completion options, /completion-actions): the step line's own gate notes for
-// active growth, the June morning limit, rain and irrigation, mowing and the test patch,
+// active growth, the June morning limit, rain and irrigation, mowing, the Celsius skip and the test patch,
 // as the same { key, severity, text } shape, nothing when there is none.
 const optionNotes = (item) => {
   const notes = (item?.gateNotes || []).filter((note) => OPTION_NOTE_KEYS.includes(note.key))
     .sort((a, b) => OPTION_NOTE_KEYS.indexOf(a.key) - OPTION_NOTE_KEYS.indexOf(b.key));
   return notes.length ? { gateNotes: notes } : {};
 };
+
+// What every completion option or action of the step carries: its group (added and removed
+// together), the spot mode, and a no-prefill marker (a spot line has no catalog-derived
+// amount; the tech enters the area and the amount). Options add the spray conditions.
+const STEP_FIELDS = { group: BERMUDA_GROUP, applicationMode: 'spot', prefillAmount: false };
+const stepOptionFields = (item) => ({ ...STEP_FIELDS, ...optionNotes(item) });
 
 // The step as one reader sees it (the tank sheet, the completion actions): opened once
 // from the booked visit, then asked for its lines, its staged-row options, its one
@@ -535,7 +541,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
       return noted.map((item) => (isStepLine(item) ? { ...item, spot: null, unavailable: { reason } } : item));
     },
     // The three actions carry the group id and the mark the settlement reads.
-    tagActions: (actions, lines) => (active ? actions.map((action, index) => (lines[index].bermudaStep ? { ...action, bermudaStep: true, group: BERMUDA_GROUP } : action)) : actions),
+    tagActions: (actions, lines) => (active ? actions.map((action, index) => (lines[index].bermudaStep ? { ...action, bermudaStep: true, ...STEP_FIELDS } : action)) : actions),
     mixable: inMixingOrder,
     mixOrderField,
     info: { active, source: step.source },
@@ -547,6 +553,6 @@ module.exports = {
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
   markStepLines, isStepLine,
-  selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, effectivePropertyId, stepProductIds, inMixingOrder, mixOrderField, optionNotes, EXCLUDED_CULTIVAR_WARNING,
+  selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, effectivePropertyId, stepProductIds, inMixingOrder, mixOrderField, optionNotes, stepOptionFields, EXCLUDED_CULTIVAR_WARNING,
   excludedCultivarSql, stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction,
 };

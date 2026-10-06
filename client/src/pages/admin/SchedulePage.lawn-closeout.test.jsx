@@ -75,7 +75,7 @@ beforeEach(async () => {
         data.plan.mixCalculator.items = items;
         data.plan.completionDefaults = { enabled: true, serviceId: visitId, propertyId: 'property-a', lawnSqft: sqft,
           // Optional protocol rows reach the client as id/name only (server options), never as defaults.
-          items, options: [...items, ...optionalOptions.map(({ applicationMethod, group, gateNotes, ...product }) => ({ product: { id: product.id, name: product.name }, applicationMethod, ...(group ? { group } : {}), ...(gateNotes ? { gateNotes } : {}) }))], propertyMatchesProfile: true,
+          items, options: [...items, ...optionalOptions.map(({ applicationMethod, group, gateNotes, prefillAmount, ...product }) => ({ product: { id: product.id, name: product.name }, applicationMethod, ...(group ? { group } : {}), ...(gateNotes ? { gateNotes } : {}), ...(prefillAmount === false ? { prefillAmount } : {}) }))], propertyMatchesProfile: true,
           history: { available: true, rows: [baseline, previous], current: null, baseline, previous, progress: { baselineDelta: 21 } } };
       }
     }
@@ -1496,6 +1496,7 @@ it('the spray conditions of the bermuda removal mix show once each beside the se
     { key: 'morningUnderF', severity: 'required', text: 'Spray in the morning, with the temperature under 85°F.' },
     { key: 'noRainOrIrrigationHours', severity: 'note', text: 'No rain or irrigation for 3 hours after the spray.' },
     { key: 'noMowDaysBeforeAfter', severity: 'note', text: 'Do not mow for 2 days before or after the spray.' },
+    { key: 'skipCelsiusInBermudaArea', severity: 'note', text: 'Skip the Celsius weed spot in the bermuda area today.' },
   ];
   const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal', gateNotes: notes }));
   optionalOptions = mix;
@@ -1503,6 +1504,19 @@ it('the spray conditions of the bermuda removal mix show once each beside the se
   await waitFor(() => expect(totals()).toHaveLength(2));
   await screen.findByRole('option', { name: 'Mix rec' });
   for (const { text } of notes) expect(screen.getAllByText(text)).toHaveLength(1);
+});
+
+it('selecting the bermuda removal group gives three spot rows with no suggested rate, area or amount', async () => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', applicationMode: 'spot', prefillAmount: false, group: 'bermuda_removal' }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, applicationMode, prefillAmount, group, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-rec' } });
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  for (const total of totals().slice(2)) expect(total.value).toBe('');
+  // The catalog rate (1 per 1,000) is not suggested either: the Rate box is empty, as is the area.
+  for (const rate of screen.getAllByPlaceholderText('Rate').slice(2)) expect(rate.value).toBe('');
 });
 
 it('the bermuda removal mix options go on together and come off together', async () => {
