@@ -532,15 +532,15 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
   if (address) {
     try {
       const { performPropertyLookup } = require('../../routes/property-lookup-v2');
-      const lookup = await performPropertyLookup(address, {
+      // Scope decision: lookup-callers.js (estimator_engine opts in: the
+      // lookup sizes a commercial suite itself and the pipeline adopts that
+      // result below instead of resolving the same suite a second time).
+      const { lookupOptionsFor } = require('../property-lookup/lookup-callers');
+      const lookup = await performPropertyLookup(address, lookupOptionsFor('estimator_engine', {
         ...(refreshLookup ? { refresh: true } : {}),
         // dryRun replays are documented read-only — no cache rows behind.
         ...(persistLookup ? {} : { persist: false }),
-        // The lookup sizes a commercial suite itself (dark behind
-        // GATE_COMMERCIAL_SUITE_SIZING); the pipeline adopts that result
-        // below instead of resolving the same suite a second time.
-        commercialSuiteSizing: true,
-      });
+      }));
       propertyRecord = lookup?.propertyRecord || null;
       // The normalized profile carries the pricing feature modifiers the raw
       // record doesn't (pool/cage, shrub density, landscape complexity,

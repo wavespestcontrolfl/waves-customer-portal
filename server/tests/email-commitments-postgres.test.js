@@ -978,7 +978,7 @@ postgres('Email commitments on PostgreSQL', () => {
     // would read 0 and no bell would ever ring.
     expect(result).toMatchObject({ scanned: 1, fulfilled: 0 });
     expect(NotificationService.notifyAdmin).toHaveBeenCalledWith('alert', 'Comms — follow up with Synthetic Fixture',
-      expect.stringContaining('We said “I\'ll send the estimate today”'), expect.objectContaining({ bell: true, detail: expect.stringContaining('promised this by email') }));
+      expect.stringContaining('We said “send the estimate today”'), expect.objectContaining({ bell: true, detail: expect.stringContaining('promised this by email') }));
     expect((await mockPg('call_commitments').first()).status).toBe('open');
   });
 

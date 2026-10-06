@@ -602,9 +602,12 @@ function simulateArrivalRoute(RouteOptimizer, rangeForStop, seq, {
   let state = { clock: startMin, prev: origin, travelMin: 0, waitingMin: 0 };
   const arrivals = [];
   for (const stop of seq) {
+    const travelBefore = state.travelMin;
     state = advanceSim(RouteOptimizer, rangeForStop, state, stop, { legMinutes, bufferMinutes, blockedIntervals, reportLate });
     if (!state || state.clock > dayEndMin) return null;
-    arrivals.push({ id: stop.id, arrivalMin: state.arrivalMin, departureMin: state.clock,
+    // driveMin: this stop's inbound drive alone (no waiting), for pickers
+    // that show "N min here" (Codex #6045 r5).
+    arrivals.push({ id: stop.id, arrivalMin: state.arrivalMin, departureMin: state.clock, driveMin: state.travelMin - travelBefore,
       ...(reportLate ? { lateMinutes: Math.max(0, state.arrivalMin - (rangeForStop(stop)?.endMin ?? Infinity)) } : {}),
     });
   }

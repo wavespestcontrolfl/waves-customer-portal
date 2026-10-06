@@ -222,7 +222,7 @@ describe('planned products carry the treated area from the completion-defaults p
 
   test('a non-recurring visit still starts blank (no area either)', async () => {
     planWith([{ product: { id: P_HERB, name: 'Test Weed Spray' }, mix: { treatedSqft: 5400 } }]);
-    const knex = world({ extra: { customers: { billing_mode: 'per_application' } } });
+    const knex = world({ extra: { customers: { billing_mode: 'one_time' } } });
     const result = await buildLawnFastContext(VISIT, { knex });
     expect(result.plannedProducts).toEqual({ source: null, items: [], addOns: [] });
     expect(buildPlanForService).not.toHaveBeenCalled();
