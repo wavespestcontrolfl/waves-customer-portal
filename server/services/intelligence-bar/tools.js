@@ -1657,6 +1657,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
+  // A bulk write stamps one number onto every selected row, so an impossible
+  // US phone is refused here, before either execution path (codex #6028 P2).
+  if (clean.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
+  }
 
   // A bulk phone change re-points every row's primary number → drop their
   // line_type caches (no per-row before-state here, so clear unconditionally

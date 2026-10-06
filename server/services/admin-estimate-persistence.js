@@ -20,6 +20,7 @@ const {
   normalizeContactEmail,
 } = require('./lead-estimate-link');
 const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
+const { nanpPhoneProblem } = require('../utils/phone');
 const { resolveStoredPestPricingVersion } = require('./estimate-pricing-bundle-utils');
 const { recordPreSendRevision } = require('./estimate-learning');
 const { inferEstimateServiceInterest } = require('./estimate-service-lines');
@@ -1904,7 +1905,24 @@ async function resolveEstimateWritePayload({
   pricingOut = null, // optional side-channel: { fallbackReason } for post-commit alerts
   storedProposal = null, // revise only: the ROW's estimate_data.proposal (server-owned, see stripClientProposal)
   requireLivePricing = false,
+  priorPhone = null, // revise only: the ROW's customer_phone, so an unchanged echo is not re-judged
 }) {
+  // A US-shaped phone that can never be texted (area code or exchange starting
+  // 0/1, Twilio 21211) is refused at save, not first at Send (codex #6028 P2).
+  // Same rule as the lead/customer writers: only a number being entered or
+  // changed now is judged; a revise echoing the stored number still saves.
+  {
+    const nextPhone = typeof body.customerPhone === 'string' ? body.customerPhone.trim() : '';
+    const prior = typeof priorPhone === 'string' ? priorPhone.trim() : '';
+    if (nextPhone && nextPhone !== prior) {
+      const phoneProblem = nanpPhoneProblem(nextPhone);
+      if (phoneProblem) {
+        const err = errorWithStatus(`${phoneProblem} Correct the phone before saving.`, 400);
+        err.code = 'INVALID_PHONE';
+        throw err;
+      }
+    }
+  }
   const {
     showOneTimeOption,
     billByInvoice,
@@ -3047,6 +3065,7 @@ async function reviseAdminEstimate({
   const writeFields = await resolveEstimateWritePayload({
     database,
     storedProposal,
+    priorPhone: estimate.customer_phone,
     body: {
       ...body,
       customerId: body.customerId || estimate.customer_id || null,
