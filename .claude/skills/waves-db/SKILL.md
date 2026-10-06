@@ -57,19 +57,17 @@ Rules:
   from the ET helper on the side you are on — `server/utils/datetime-et.js`
   (`etParts`, `formatET*`) on the server, `etDateString()`
   (`client/src/lib/timezone.js`) in React — and never import the server
-  module into the Vite bundle. ET conversion is for real instants ONLY: a
-  `date` column deserializes as `'YYYY-MM-DD'` or a UTC-midnight `Date`,
-  and `etDateString` is wrong for both — it returns the PREVIOUS Eastern
-  day for the Date (UTC midnight is 7–8 PM ET the night before) and throws
-  `RangeError: Invalid time value` on the string. Date-only values take a
-  date-only path, and which one depends on the side: on the server,
-  `dateOnlyString` from `server/utils/date-only.js` for a known date
-  column, `etCalendarDayOf` (`server/utils/datetime-et.js`) when the input
-  may be either a date or an instant — don't reach for that module's own
-  `dateOnlyString`, which is the `technician_absences` normalizer and
-  differs on null; in React, where the CJS module is off limits,
-  `formatETDateOnly` (`client/src/lib/timezone.js`) to display one and the
-  literal `'YYYY-MM-DD'` prefix to key or compare one.
+  module into the Vite bundle. ET conversion is for real instants ONLY. A
+  `date` column is a calendar day, not an instant: it deserializes as
+  `'YYYY-MM-DD'` or a UTC-midnight `Date`, and an ET conversion of that
+  Date lands on the PREVIOUS Eastern day (UTC midnight is 7–8 PM ET the
+  night before). So the caller must know which one it holds — from the
+  column type or the API contract — before it picks a path. Never infer it
+  from the value: a real instant can sit exactly on UTC midnight too. The
+  date-only helpers and their exact semantics live in
+  `server/utils/date-only.js` and `server/utils/datetime-et.js` (server)
+  and `client/src/lib/timezone.js` (React); read the helper's own docblock
+  before you call it, because this rule does not pick one for you.
 
 ## 3. Local DB access — Codex uses dev/preview only
 

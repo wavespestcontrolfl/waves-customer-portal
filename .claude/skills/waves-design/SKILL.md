@@ -125,15 +125,11 @@ Anton / Luckiest Guy / Baloo there. Full decisions:
   `client/src/theme-doc.js`. New portal and billing cards are where this
   keeps slipping. And no raw emoji in JSX source (including comments —
   use icon components). The mechanical gate (`npm run check:portal-brand`,
-  runs in Railway prebuild — one violation kills EVERY build) scans all of
-  `client/src` and catches every size UNDER the 14 floor: 1–13px literals
-  (decimals and ternaries included), `FS.micro`/`FS.caption`,
-  `text-xs`/`text-[13px]`, CSS `font-size`, and SVG `fontSize` attributes
-  — minus a short `EXCLUDED_FILES` list (the `?mode=pdf` print documents,
-  demos) and a shrink-only `LEGACY_BASELINE` of per-file counts, which are
-  debt to pay down, not exemptions. Its blind spot is precisely the policy
-  above: `text-sm`/14 is legal by design and 15 is unmatched, so a 14px or
-  15px prose paragraph passes the gate — a pass is NOT proof of compliance.
+  runs in Railway prebuild — one violation kills EVERY build) looks for
+  font sizes under the 14 floor and does not catch every form of them; its
+  exact coverage lives in `scripts/check-portal-brand.js`, not here. It is
+  necessary but not sufficient: 14px is legal by design, so it cannot judge
+  the primary-prose rule above, and a pass is NOT proof of compliance.
 - Never apply customer-facing brand styling (Luckiest Guy / Baloo 2 / gold
   pill / mascot) inside `/admin/*` — admin stays monochrome.
 - **iOS PWA safe areas:** `viewport-fit=cover` is global in the standalone
