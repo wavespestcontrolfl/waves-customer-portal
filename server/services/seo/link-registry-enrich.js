@@ -41,10 +41,16 @@ const items = (resp) => {
   return Array.isArray(r) ? r : null;
 };
 
+// The seo_link_domains metric columns are 32-bit integers. A very large site
+// reports an organic traffic value past that limit, and one such row failed
+// the whole Sunday run ("out of range for type integer", 2026-10-04). Cap at
+// the column's limit: no code scores on the exact traffic number, it is only
+// shown.
+const INT4_MAX = 2147483647;
 const intOrNull = (v) => {
   if (v == null || v === '') return null;
   const n = Number(v);
-  return Number.isFinite(n) ? Math.round(n) : null;
+  return Number.isFinite(n) ? Math.max(-INT4_MAX, Math.min(INT4_MAX, Math.round(n))) : null;
 };
 
 const chunk = (arr, size) => {
@@ -220,4 +226,4 @@ async function enrichDomains(db, { domainIds = null, limit = 500, force = false,
   return out;
 }
 
-module.exports = { enrichDomains, competitorsLinked, BULK_MAX, BULK_CALLS, ENRICH_LOCK_KEY, _test: { items, selectDomains } };
+module.exports = { enrichDomains, competitorsLinked, BULK_MAX, BULK_CALLS, ENRICH_LOCK_KEY, _test: { items, selectDomains, intOrNull } };
