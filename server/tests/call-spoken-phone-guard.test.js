@@ -5,7 +5,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { rejectImpossibleSpokenPhones } = require('../services/call-spoken-phone-guard');
+const { rejectImpossibleSpokenPhones, dropImpossibleSecondaryPhones } = require('../services/call-spoken-phone-guard');
 const { isImpossibleNanpPhone } = require('../utils/phone');
 const {
   computeDeterministicTriageFlags,
@@ -87,28 +87,6 @@ describe('impossible phones never reach a contact number', () => {
     )).toBe(false);
   });
 
-  test('the guard nulls an impossible secondary phone in the V1 view and in V2, keeps a real one', () => {
-    const extracted = {
-      first_name: 'Joyce',
-      last_name: null,
-      secondary_contact: { first_name: 'Quentrell', last_name: 'Varnum', phone: '+11733038616', email: null },
-    };
-    const v2Extraction = v2({}, {
-      secondary_contact: { first_name: 'Quentrell', last_name: 'Varnum', phone_e164: '+11733038616' },
-      secondary_contacts: [
-        { first_name: 'Quentrell', last_name: 'Varnum', phone_e164: '+11733038616' },
-        { first_name: 'Lorna', last_name: 'Varnum', phone_e164: '+19415550123' },
-      ],
-    });
-    const result = rejectImpossibleSpokenPhones({ extracted, v2Extraction });
-    expect(extracted.secondary_contact.phone).toBeNull();
-    expect(v2Extraction.secondary_contact.phone_e164).toBeNull();
-    expect(v2Extraction.secondary_contacts[0].phone_e164).toBeNull();
-    expect(v2Extraction.secondary_contacts[1].phone_e164).toBe('+19415550123');
-    expect(result.rejectedSecondary).toBe(3);
-    expect(extracted.secondary_contact.first_name).toBe('Quentrell');
-  });
-
   test('an impossible CALLER phone is nulled and the V2 source stops claiming "spoken"', () => {
     const extracted = { first_name: 'Joyce', phone: '+11733038616' };
     const v2Extraction = v2({ phone_e164: '+11733038616', phone_source: 'spoken' });
@@ -120,26 +98,55 @@ describe('impossible phones never reach a contact number', () => {
   });
 });
 
-describe('the guard runs on each record independently', () => {
-  test('V1 only (V2 off or failed): the V1 secondary phone is nulled and counted', () => {
-    const extracted = { first_name: 'Joyce', secondary_contact: { first_name: 'Quentrell', phone: '+11733038616' } };
-    const result = rejectImpossibleSpokenPhones({ extracted });
-    expect(extracted.secondary_contact.phone).toBeNull();
-    expect(result.rejectedSecondary).toBe(1);
+describe('caller guard runs on each record independently', () => {
+  test('V1 only (V2 off or failed): the V1 caller phone is nulled', () => {
+    const extracted = { first_name: 'Joyce', phone: '+11733038616' };
+    expect(rejectImpossibleSpokenPhones({ extracted })).toEqual({ rejectedCaller: true });
+    expect(extracted.phone).toBeNull();
   });
 
-  test('V2 only (no V1 record): the V2 caller and secondary phones are nulled', () => {
-    const v2Extraction = v2({ phone_e164: '+11733038616', phone_source: 'spoken' }, {
-      secondary_contact: { first_name: 'Quentrell', phone_e164: '+11733038616' },
-    });
-    const result = rejectImpossibleSpokenPhones({ v2Extraction });
-    expect(v2Extraction.caller.phone_e164).toBeNull();
-    expect(v2Extraction.secondary_contact.phone_e164).toBeNull();
-    expect(result).toEqual({ rejectedSecondary: 1, rejectedCaller: true });
+  test('secondary contacts are not touched before identity reconciliation', () => {
+    const extracted = { first_name: 'Joyce', secondary_contact: { first_name: 'Quentrell', phone: '+11733038616' } };
+    rejectImpossibleSpokenPhones({ extracted });
+    expect(extracted.secondary_contact.phone).toBe('+11733038616');
   });
 
   test('nothing to reject is a clean no-op', () => {
-    expect(rejectImpossibleSpokenPhones({})).toEqual({ rejectedSecondary: 0, rejectedCaller: false });
+    expect(rejectImpossibleSpokenPhones({})).toEqual({ rejectedCaller: false });
+  });
+});
+
+describe('dropImpossibleSecondaryPhones (resolved contacts)', () => {
+  const { resolveCallSecondaryContacts } = require('../services/call-recording-processor')._test || {};
+
+  test('nulls an impossible number on a resolved contact and keeps the person', () => {
+    const contacts = [{ first_name: 'Quentrell', last_name: 'Varnum', phone: '+11733038616' }, { first_name: 'Lorna', phone: '+19415550123' }];
+    expect(dropImpossibleSecondaryPhones(contacts)).toBe(true);
+    expect(contacts).toHaveLength(2);
+    expect(contacts[0].phone).toBeNull();
+    expect(contacts[1].phone).toBe('+19415550123');
+  });
+
+  test('drops a contact whose only detail was the impossible number', () => {
+    const contacts = [{ phone: '+11733038616' }];
+    expect(dropImpossibleSecondaryPhones(contacts)).toBe(true);
+    expect(contacts).toHaveLength(0);
+  });
+
+  test('a valid resolved number reports nothing dropped', () => {
+    const contacts = [{ first_name: 'Lorna', phone: '+19415550123' }];
+    expect(dropImpossibleSecondaryPhones(contacts)).toBe(false);
+  });
+
+  test('the marker follows the RESOLVED contact: V1 kept on a phone conflict, its impossible number is dropped and reported', () => {
+    const v1 = { secondary_contact: { first_name: 'Quentrell', last_name: 'Varnum', phone: '+11733038616' } };
+    const v2Ext = { secondary_contact: { first_name: 'Quentrell', last_name: 'Varnum', phone_e164: '+19415550123' }, secondary_contacts: [] };
+    const contacts = resolveCallSecondaryContacts(v1, v2Ext);
+    const dropped = dropImpossibleSecondaryPhones(contacts);
+    const phones = contacts.map((c) => c.phone).filter(Boolean);
+    expect(phones).not.toContain('+11733038616');
+    expect(dropped).toBe(true);
+    expect(contacts[0].first_name).toBe('Quentrell');
   });
 });
 
@@ -151,6 +158,13 @@ describe('processor wiring order', () => {
     const v2Branch = src.indexOf('if (CALL_EXTRACTION_V2_ENABLED) {', v1Guard);
     expect(v1Guard).toBeGreaterThan(-1);
     expect(v2Branch).toBeGreaterThan(v1Guard);
+  });
+
+  test('the secondary guard runs on the resolved contacts', () => {
+    const resolved = src.indexOf('const callSecondaryContacts = resolveCallSecondaryContacts(');
+    const guard = src.indexOf('dropImpossibleSecondaryPhones(callSecondaryContacts)', resolved);
+    expect(resolved).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(resolved);
   });
 
   test('the V2 guard runs before the ai_extraction_enriched write', () => {
