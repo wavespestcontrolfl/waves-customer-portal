@@ -13,7 +13,7 @@
  * so we do NOT synthesize legacy A/B/C1/C2/D codes here.
  */
 const db = require('./../models/db');
-const { lawnProtocols } = require('./lawn-program');
+const { lawnProtocols, lawnV13AnyGrassTrack } = require('./lawn-program');
 
 const GRASS_TYPE_LABELS = {
   st_augustine: 'St. Augustine',
@@ -107,7 +107,10 @@ async function loadCustomerGrassContext(customerId, knex = db, { strict = false 
   return {
     grassType,
     grassTypeLabel: grassTypeLabel(grassType),
-    trackKey: resolveTrackKey(profile?.track_key, grassType),
+    // A recorded grass with no track of its own (mixed, unknown) runs the one
+    // v13 program while GATE_LAWN_V13 is live.
+    trackKey: resolveTrackKey(profile?.track_key, grassType)
+      || ((profile?.track_key || grassType) ? lawnV13AnyGrassTrack() : null),
     sunExposure: profile?.sun_exposure || null,
     irrigationSystem: profile?.irrigation_type || null,
     propertySqft: profile?.lawn_sqft || customer?.property_sqft || null,

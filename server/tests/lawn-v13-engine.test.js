@@ -126,6 +126,54 @@ describe('gate off is byte-identical for the readers', () => {
   });
 });
 
+// ── A grass with no track of its own runs the one program ──────────────────
+describe('mixed or unknown grass under GATE_LAWN_V13', () => {
+  const { loadCustomerGrassContext } = require('../services/lawn-grass-context');
+  const { LAWN_V13_ANY_GRASS_TRACK } = require('../services/lawn-program');
+  const date = new Date(Date.UTC(2026, 9, 6, 16));
+  const knexFor = (rows) => (table) => ({ where() { return this; }, first: async () => rows[table] ?? null });
+
+  test('the four v13 copies are one program, so any key serves any grass', () => {
+    const body = ({ name, ...rest }) => JSON.stringify(rest);
+    for (const grass of GRASSES) expect(body(v13[grass])).toBe(body(v13[LAWN_V13_ANY_GRASS_TRACK]));
+  });
+
+  test.each(['mixed', 'unknown', 'centipede'])('gate on: recorded %s plans the October v13 visit', (grass) => {
+    withGate('true', () => {
+      for (const requireKnownGrass of [false, true]) {
+        const got = engine.selectProtocolVisit({ grass_type: grass }, date, null, { requireKnownGrass });
+        expect(got.trackKey).toBe(LAWN_V13_ANY_GRASS_TRACK);
+        expect(got.visit).toBe(v13[LAWN_V13_ANY_GRASS_TRACK].visits.find((v) => v.month === 'Oct'));
+      }
+    });
+  });
+
+  test.each(['mixed', 'unknown', 'centipede'])('gate off: recorded %s still has no track', (grass) => {
+    withGate(undefined, () => {
+      expect(engine.selectProtocolVisit({ grass_type: grass }, date).trackKey).toBeNull();
+    });
+  });
+
+  test('gate on: blank grass under completion defaults stays unresolved', () => {
+    withGate('true', () => {
+      expect(engine.selectProtocolVisit({ grass_type: '', track_key: null }, date, null, { requireKnownGrass: true }).trackKey).toBeNull();
+    });
+  });
+
+  test('grass context gives a mixed profile the v13 track only while the gate is on', async () => {
+    const knex = knexFor({ customer_turf_profiles: { grass_type: 'mixed' }, customers: {} });
+    await withGateAsync('true', async () => {
+      expect((await loadCustomerGrassContext('c1', knex)).trackKey).toBe(LAWN_V13_ANY_GRASS_TRACK);
+    });
+    await withGateAsync(undefined, async () => {
+      expect((await loadCustomerGrassContext('c1', knex)).trackKey).toBeNull();
+    });
+    await withGateAsync('true', async () => {
+      expect((await loadCustomerGrassContext('c1', knexFor({ customers: {} }))).trackKey).toBeNull();
+    });
+  });
+});
+
 // ── Every line resolves to the intended catalog row ──────────────────────────
 // Blindside is added by migration 20261005140000 (the staged rows of 120000 have none).
 const BLINDSIDE = 'Blindside Herbicide';
