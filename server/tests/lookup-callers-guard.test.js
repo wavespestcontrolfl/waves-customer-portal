@@ -42,12 +42,14 @@ const lookupAliases = (src) => aliasesOf(src, 'performPropertyLookup');
 const SANCTIONED_OVERRIDE = { file: 'routes/property-lookup-v2.js', line: /^\s*if \(wholeProperty === true\) callerOptions\.commercialSuiteSizing = false;\s*$/ };
 
 // Lines that CALL the lookup (not the definition, not a comment, not a jest mock).
+// One record per line that calls `name`, with `count` = how many calls that
+// line makes (two lookups inside one Promise.all([...]) count as two).
 function callLines(src, name) {
-  const re = new RegExp('(?<![\\w.])' + name + '\\(');
+  const re = new RegExp('(?<![\\w.])' + name + '\\(', 'g');
   const def = new RegExp('function\\s+' + name + '\\(');
   const mock = new RegExp(name + ':\\s*jest');
-  return src.split('\n').map((line, i) => ({ line, n: i + 1 }))
-    .filter(({ line }) => re.test(line) && !/^\s*(\/\/|\*)/.test(line) && !def.test(line) && !mock.test(line));
+  return src.split('\n').map((line, i) => ({ line, n: i + 1, count: (line.match(re) || []).length }))
+    .filter(({ line, count }) => count > 0 && !/^\s*(\/\/|\*)/.test(line) && !def.test(line) && !mock.test(line));
 }
 
 // The modules that define or read `commercialSuiteSizing`. A new file under
@@ -99,10 +101,10 @@ describe('property-lookup callers declare their scope decision', () => {
     for (const file of files) {
       const r = rel(file);
       const src = fs.readFileSync(file, 'utf8');
-      for (const name of lookupAliases(src)) for (const { line, n } of callLines(src, name)) {
+      for (const name of lookupAliases(src)) for (const { line, n, count } of callLines(src, name)) {
         // The alias binding itself ("= lookup || require(...).performPropertyLookup") is not a call.
         if (new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line)) continue;
-        invocations[r] = (invocations[r] || 0) + 1;
+        invocations[r] = (invocations[r] || 0) + count;
         // The options argument is lookupOptionsFor(...) on the line, or a
         // `callerOptions` variable built from it just above.
         const above = src.split('\n').slice(Math.max(0, n - 8), n).join('\n');
@@ -155,7 +157,8 @@ describe('property-lookup callers declare their scope decision', () => {
       const src = fs.readFileSync(file, 'utf8');
       const calls = aliasesOf(src, 'lookupPropertyFromAITrio').flatMap((name) => callLines(src, name)
         .filter(({ line }) => !new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line)));
-      if (calls.length) found[r] = calls.length;
+      const n = calls.reduce((sum, c) => sum + c.count, 0);
+      if (n) found[r] = n;
     }
     // Both directions, with the call count: a direct caller the registry
     // does not name is a new, unreviewed bypass; a registry entry with no
