@@ -96,6 +96,9 @@ export default function useSpeechDictation(onTranscript, options = {}) {
   // that tap synchronously; `starting` shows the same window to the caller.
   const startingRef = useRef(false);
   const [starting, setStarting] = useState(false);
+  // The recorder slot of the latest tap; `cancel()` cancels it while the mic is
+  // still opening, so the recording never starts.
+  const openingSlotRef = useRef(null);
 
   const speechSupported =
     typeof window !== "undefined" &&
@@ -232,6 +235,7 @@ export default function useSpeechDictation(onTranscript, options = {}) {
     // holds it (and hands over its clip). A mic still opening when it loses the
     // slot never starts.
     const slot = openRecorderSlot(() => stopQuietly(recorderRef.current));
+    openingSlotRef.current = slot;
     const { release } = slot;
     const doneStarting = () => {
       startingRef.current = false;
@@ -247,8 +251,8 @@ export default function useSpeechDictation(onTranscript, options = {}) {
       return;
     }
     if (!mountedRef.current || slot.cancelled()) {
-      // Unmounted (or another mic took the microphone) while the permission
-      // prompt was open — release the mic.
+      // Unmounted, cancelled (`cancel()`), or another mic took the microphone
+      // while the permission prompt was open — release the mic.
       stream.getTracks().forEach((t) => t.stop());
       release();
       doneStarting();
@@ -568,9 +572,11 @@ export default function useSpeechDictation(onTranscript, options = {}) {
 
   // Ends a live SPEECH session for a consumer that has gone busy (e.g. a
   // disabled mic while its field is being rewritten) and drops any result
-  // still in flight. The MediaRecorder upload path records until
-  // tap-to-stop and has no in-flight speech results to drop.
+  // still in flight. On the recording path it stops a mic still waiting for
+  // the permission prompt from ever starting (a hidden tab must not record);
+  // a recording already running stops on its own tap as before.
   const cancel = useCallback(() => {
+    if (startingRef.current) openingSlotRef.current?.cancel();
     const rec = recognitionRef.current;
     if (!rec) return;
     stopRequestedRef.current = true;

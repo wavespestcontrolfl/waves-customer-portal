@@ -1234,13 +1234,17 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   const dictation = useSpeechDictation((text) => {
     setMsgBody((b) => (b ? `${b} ${text}` : text));
   }, { dictationContext: { customerId: selectedCustomerId } });
-  const { listening, supported: dictationSupported, toggle: toggleDictation } =
+  const { listening, supported: dictationSupported, toggle: toggleDictation, cancel: cancelDictation, starting: dictationStarting } =
     dictation;
   // The mic is open, opening or its clip is being transcribed: words are on the way, so Send waits.
-  const hearing = listening || dictation.starting || dictation.uploading;
+  const hearing = listening || dictationStarting || dictation.uploading;
+  // Leaving the tab ends the mic: a recording stops (its words still land), and
+  // a mic still waiting for the permission prompt never starts in the hidden tab.
   useEffect(() => {
-    if (!active && listening) toggleDictation();
-  }, [active, listening, toggleDictation]);
+    if (active) return;
+    if (listening) toggleDictation();
+    else if (dictationStarting) cancelDictation();
+  }, [active, listening, dictationStarting, toggleDictation, cancelDictation]);
   const fileInputRef = useRef(null);
   const cameraInputRef = useRef(null);
   const [showAttachSheet, setShowAttachSheet] = useState(false);

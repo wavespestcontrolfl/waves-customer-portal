@@ -133,7 +133,8 @@ function releaseRecorder(owner) {
 /**
  * Takes the microphone slot for one recording attempt. `stopRecorder` ends this
  * mic's recording (if it has started one) when another mic claims the slot;
- * `cancelled()` tells a mic still opening that it lost the slot and must not start.
+ * `cancelled()` tells a mic still opening that it lost the slot (or was cancelled
+ * with `cancel()`) and must not start.
  */
 export function openRecorderSlot(stopRecorder) {
   let cancelled = false;
@@ -144,7 +145,7 @@ export function openRecorderSlot(stopRecorder) {
     },
   };
   claimRecorder(owner);
-  return { cancelled: () => cancelled, release: () => releaseRecorder(owner) };
+  return { cancelled: () => cancelled, cancel: owner.stop, release: () => releaseRecorder(owner) };
 }
 
 /** The first container this browser's recorder supports, in the order the server's transcriber likes them. */

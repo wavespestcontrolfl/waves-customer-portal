@@ -219,6 +219,23 @@ describe("useSpeechDictation with server dictation on", () => {
     expect(FakeRecorder.instances).toHaveLength(1);
   });
 
+  it("cancel() while the permission prompt is open: the mic never starts recording (a hidden tab stays silent)", async () => {
+    stubServer();
+    let resolveStream;
+    const stop = vi.fn();
+    navigator.mediaDevices.getUserMedia.mockImplementationOnce(() => new Promise((r) => { resolveStream = r; }));
+    const { result } = renderHook(() => useSpeechDictation(vi.fn()));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    act(() => { result.current.toggle(); });
+    await waitFor(() => expect(result.current.starting).toBe(true));
+    act(() => { result.current.cancel(); });
+    await act(async () => { resolveStream({ getTracks: () => [{ stop }] }); });
+    await waitFor(() => expect(result.current.starting).toBe(false));
+    expect(result.current.listening).toBe(false);
+    expect(FakeRecorder.instances).toHaveLength(0);
+    expect(stop).toHaveBeenCalled();
+  });
+
   it("a recording ends when the page is hidden and the clip is still transcribed", async () => {
     const onTranscript = vi.fn();
     stubServer();
