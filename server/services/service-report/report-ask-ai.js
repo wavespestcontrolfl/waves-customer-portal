@@ -554,6 +554,7 @@ const MEDICAL_EXPOSURE_ANSWER = `Please call Poison Control at ${POISON_CONTROL_
 
 // A person or pet as the subject: "I", "my dog", "the baby", "our son".
 const PATIENT_NOUNS = '(?:dogs?|cats?|pets?|puppy|puppies|kittens?|birds?|horses?|rabbits?|child(?:ren)?|kids?|bab(?:y|ies)|toddlers?|sons?|daughters?|wife|husband|mom|mother|dad|father|grand(?:ma|pa|mother|father|son|daughter|kids?|children)|sisters?|brothers?|nephews?|nieces?|friends?|neighbou?rs?|guests?)';
+const BODY_PARTS = '(?:eyes?|skin|mouth|face|hands?|arms?|legs?|feet|foot|nose|lips?|head|hair|body)';
 const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS})`;
 const MEDICAL_CUES = [
   // Symptoms, said with or without a subject.
@@ -569,7 +570,10 @@ const MEDICAL_CUES = [
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
-  /\bsprayed\s+(?:on\s+)?(?:me|him|her|us|them|my\s+\w+)\b/i,
+  // Sprayed on a person, a pet or a body part only: "what was sprayed on my
+  // lawn" is a report question (Codex P1 #5964).
+  new RegExp(`\\bsprayed\\s+(?:on\\s+)?(?:me|myself|him|her|us|them|(?:my|our|his|her|their|the)\\s+(?:${PATIENT_NOUNS}|${BODY_PARTS}))\\b`, 'i'),
+  new RegExp(`\\b${PATIENT}\\s+(?:got|gets|was|were|is|are)\\s+sprayed\\b`, 'i'),
 ];
 
 /**
