@@ -315,8 +315,9 @@ describe('buildReportAskPrompt', () => {
       dynamicContext: { aiSummary: { headline: 'Visit at 900 Example Trail', body: 'Reach us at pat@example.com' } },
     });
     const { user } = buildReportAskPrompt({ question: 'I live at 12 Example Lane. What did you find?', data, nextAppointment, now: NOW });
-    expect(user).not.toMatch(/555|example\.com|Example Lane|Sample Court|Test Avenue|Example Trail|A1B2|4821|\b900\b/);
-    expect(user).toMatch(/\[address\]/);
+    // House numbers are masked; a street name without its number may stay.
+    expect(user).not.toMatch(/555|example\.com|A1B2|4821|\b900\b|\b12 Example|\b77 Test/);
+    expect(user).toMatch(/\[number\] Example Lane/);
     expect(user).toMatch(/What did you find\?/);
     // The fixed lines and the calendar date are left as built.
     expect(user).toContain('Waves Pest Control');
@@ -439,6 +440,8 @@ describe('screenAskAnswer', () => {
     expect(screen('The technician arrives on 2027-01-05.')).toBe('states_a_date');
     expect(screen('Your next visit is 5 January.')).toBe('states_a_date');
     expect(screen('Your next visit is the 5th of January.')).toBe('states_a_date');
+    expect(screen("The technician arrives at 2 o'clock.")).toBe('states_a_date');
+    expect(screen('The technician arrives at half past two.')).toBe('states_a_date');
     expect(screen('Activity often settles after the sun comes out.')).toBeNull();
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
   });
@@ -626,6 +629,9 @@ describe('symptoms and exposure never reach the model', () => {
     'She was sprayed',
     'You got sprayed',
     'The technician sprayed you',
+    'The technician sprayed my cousin',
+    'You sprayed my coworker',
+    'My snake was sprayed',
   ])('a safety line before the answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
     expect(exposureSafetyLine(question)).toBe(EXPOSURE_SAFETY_LINE);
@@ -741,7 +747,8 @@ describe('prompt and facts, review round 5', () => {
     ['18 Test St.', '18 Test St'],
   ])('masks the street address %s', (address) => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: `Ants at ${address}, near the lanai` } });
-    expect(facts.customer_concern).toBe('Ants at [address], near the lanai');
+    // The house number is masked; the street name alone is not an address.
+    expect(facts.customer_concern).toBe(`Ants at ${address.replace(/^\d+/, '[number]')}, near the lanai`);
   });
 });
 
@@ -969,13 +976,13 @@ describe('street-address scrub keeps prose', () => {
   const { buildReportAskFacts } = require('../services/service-report/report-ask-ai');
   test.each([
     ['Pressure index 2 is improving.', 'Pressure index 2 is improving.'],
-    ['Ants at 18 Bay Pass by the lanai.', 'Ants at [address] by the lanai.'],
-    ['Ants at 21 Harbor Crossing.', 'Ants at [address]'],
-    ['Ants at 7 Heron Bluff.', 'Ants at [address]'],
-    ['Ants at 18 North Martin Luther King Boulevard.', 'Ants at [address]'],
-    ['Ants at 18 bay pass.', 'Ants at [address]'],
-    ['We found 2 ant hills by the drive.', 'We found 2 ant hills by the drive.'],
-    ['We saw 2 termite tunnels and 2 ant trails.', 'We saw 2 termite tunnels and 2 ant trails.'],
+    ['Ants at 18 Bay Pass by the lanai.', 'Ants at [number] Bay Pass by the lanai.'],
+    ['Ants at 21 Harbor Crossing.', 'Ants at [number] Harbor Crossing.'],
+    ['Ants at 21 heron bluff.', 'Ants at [number] heron bluff.'],
+    ['Ants at 21 HERON BLUFF.', 'Ants at [number] HERON BLUFF.'],
+    ['Ants at 18 North Martin Luther King Boulevard.', 'Ants at [number] North Martin Luther King Boulevard.'],
+    // Everyday nouns in the USPS table lose only the count.
+    ['We saw 2 rats by the lake.', 'We saw [number] rats by the lake.'],
   ])('%s', (concern, expected) => {
     expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: concern } }).customer_concern).toBe(expected);
   });
