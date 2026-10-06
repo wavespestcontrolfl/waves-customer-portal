@@ -803,14 +803,13 @@ describe("default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29)
     })).toBe(false);
   });
 
-  it("resolves Taurus SC, Atticus Talak 7.9 F, and the LESCO 90/10 surfactant with the house totals", () => {
+  it("resolves Taurus SC and Atticus Talak 7.9 F with the house totals, and never seeds LESCO (owner ruling 2026-10-03)", () => {
     const selections = pestDefaultMixSelections(CATALOG);
+    // Exact identity only — the LESCO and bare "Non-ionic Surfactant" rows
+    // and the retired "Talstar P" row are never eligible.
     expect(selections.map((s) => [s.product.name, s.totalAmount])).toEqual([
       ["Taurus SC", 4],
       ["Atticus Talak 7.9 F", 4],
-      // Exact identity only — the bare "Non-ionic Surfactant" and the
-      // retired "Talstar P" rows are never eligible.
-      ["LESCO 90/10 Nonionic Surfactant", 0.25],
     ]);
   });
 
@@ -818,10 +817,9 @@ describe("default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29)
     expect(
       pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Taurus SC"))
         .map((s) => s.product.name),
-    ).toEqual(["Atticus Talak 7.9 F", "LESCO 90/10 Nonionic Surfactant"]);
-    // With the intended surfactant retired, the bare lawn/legacy surfactant
-    // must NOT be auto-recorded in its place (codex P1 on #3611) — the
-    // entry is skipped.
+    ).toEqual(["Atticus Talak 7.9 F"]);
+    // With LESCO retired, the bare lawn/legacy surfactant must NOT be
+    // auto-recorded in its place (codex P1 on #3611).
     expect(
       pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "LESCO 90/10 Nonionic Surfactant"))
         .map((s) => s.product.name),
@@ -831,7 +829,7 @@ describe("default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29)
     expect(
       pestDefaultMixSelections(CATALOG.filter((p) => p.name !== "Atticus Talak 7.9 F"))
         .map((s) => s.product.name),
-    ).toEqual(["Taurus SC", "LESCO 90/10 Nonionic Surfactant"]);
+    ).toEqual(["Taurus SC"]);
   });
 });
 

@@ -26,7 +26,8 @@
  * exactly like a manual "add product" tap. PEST is NOT curated here (owner ruling
  * 2026-09-27): the general recurring/one-time pest visit keeps its
  * existing house mix on the client — lib/pest-default-mix.js (Taurus SC +
- * Atticus Talak 7.9 F + LESCO 90/10 Nonionic Surfactant, fixed totals). A
+ * Atticus Talak 7.9 F, fixed totals; LESCO surfactant dropped, owner
+ * ruling 2026-10-03). A
  * seasonal pest rotation is a possible LATER PR, built when a visit
  * actually needs it, not ahead of time.
  *

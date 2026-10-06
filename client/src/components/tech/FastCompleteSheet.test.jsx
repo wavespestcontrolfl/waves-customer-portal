@@ -16,7 +16,8 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const CATALOG = [
   { id: 'taurus', name: 'Taurus SC', category: 'Insecticide', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal' },
   // House mix names per the 2026-09-27 ruling (#5049): Talstar P → Atticus
-  // Talak 7.9 F, bare surfactant → LESCO 90/10. Ids kept so assertions hold.
+  // Talak 7.9 F. LESCO 90/10 stays in the catalog but is no longer seeded
+  // (owner ruling 2026-10-03). Ids kept so assertions hold.
   { id: 'talstar', name: 'Atticus Talak 7.9 F', category: 'Insecticide' },
   { id: 'surfactant', name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' },
   { id: 'extra', name: 'Advion Ant Bait Gel', category: 'Bait' },
@@ -61,10 +62,10 @@ describe('FastCompleteSheet', () => {
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} />);
 
     expect(await screen.findByRole('button', { name: /Taurus SC — 4 fl oz/ })).toBeTruthy();
-    // A liquid's bare "oz" is a fluid ounce, and a dose under 1 fl oz reads in
-    // measuring spoons (0.25 fl oz = 1½ tsp) — never in mL.
+    // A liquid's bare "oz" is a fluid ounce.
     expect(screen.getByRole('button', { name: /Atticus Talak 7\.9 F — 4 fl oz/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant — 1½ tsp/ })).toBeTruthy();
+    // Owner ruling 2026-10-03: the mix is Taurus + Talak only; LESCO is not seeded.
+    expect(screen.queryByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant/ })).toBeNull();
   });
 
   test('tapping a prefilled tile strikes it through (off) instead of removing it; tapping again restores it', async () => {
@@ -95,7 +96,6 @@ describe('FastCompleteSheet', () => {
     // Deselect every default product — now nothing is selected at all.
     fireEvent.click(screen.getByRole('button', { name: /Taurus SC/ }));
     fireEvent.click(screen.getByRole('button', { name: /Atticus Talak 7\.9 F/ }));
-    fireEvent.click(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant/ }));
     expect(screen.getByText('Select at least one product.')).toBeTruthy();
     expect(submit.disabled).toBe(true);
 
@@ -139,7 +139,7 @@ describe('FastCompleteSheet', () => {
     // showed: a liquid is never recorded in a bare oz.
     expect(taurus).toMatchObject({ rate: 4, rateUnit: 'oz', amountUnit: 'fl_oz' });
     expect(taurus.targets).toEqual(['Ants', 'Palmetto bugs']);
-    expect(body.products.map((p) => p.productId).sort()).toEqual(['surfactant', 'talstar', 'taurus']);
+    expect(body.products.map((p) => p.productId).sort()).toEqual(['talstar', 'taurus']);
   }, 15000);
 
   test('submits the full-completion body shape and shows the done view', async () => {
@@ -176,7 +176,7 @@ describe('FastCompleteSheet', () => {
     expect(body.areasServiced).toEqual(['Inside']);
     expect(body.clientPestRating).toBe(3); // moderate -> 3
 
-    expect(body.products).toHaveLength(3);
+    expect(body.products).toHaveLength(2);
     const taurus = body.products.find((p) => p.productId === 'taurus');
     // The unit follows the method, as the full form's resolver seeds it: at
     // spot treatment Taurus's per-basis label (fl oz/gal) records fl oz.
@@ -191,8 +191,7 @@ describe('FastCompleteSheet', () => {
     expect(taurus.targets).toEqual(['Ants', 'Roaches']);
     // Where rides each product row for the application record.
     expect(taurus.applicationArea).toBe('Inside');
-    const surfactant = body.products.find((p) => p.productId === 'surfactant');
-    expect(surfactant.totalAmount).toBe(0.25);
+    expect(body.products.find((p) => p.productId === 'surfactant')).toBeUndefined();
 
     // Done view.
     expect(await screen.findByText('Re-service complete')).toBeTruthy();

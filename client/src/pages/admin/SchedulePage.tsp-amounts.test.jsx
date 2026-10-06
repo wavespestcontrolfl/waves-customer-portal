@@ -20,8 +20,9 @@ const TANK = {
   id: 'tank-concentrate', name: 'Fixture tank concentrate', category: 'insecticide',
   application_method: 'spot_treatment', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal',
 };
-// The pest house mix (lib/pest-default-mix): 4 oz, 4 oz and 0.25 fl oz of the
-// surfactant, whose catalog label is per gallon (20260712100000).
+// The pest house mix (lib/pest-default-mix) seeds 4 oz of Taurus and of Talak.
+// The surfactant (label per gallon, 20260712100000) is in the catalog but not
+// seeded (owner ruling 2026-10-03); a tech adds it by hand.
 const HOUSE_MIX = [
   { id: 'taurus', name: 'Taurus SC', category: 'insecticide' },
   { id: 'talak', name: 'Atticus Talak 7.9 F', category: 'insecticide' },
@@ -153,19 +154,17 @@ describe('tsp on a tank (per-gallon) row', () => {
 });
 
 describe('tsp on the pest house seed', () => {
-  it('reads the 0.25 fl oz surfactant seed as 1.5 tsp, and withdraws an oz seed rather than relabel it', async () => {
+  it('reads a hand-added 0.25 fl oz surfactant as 1.5 tsp, and withdraws an oz seed rather than relabel it', async () => {
     const onSubmit = await mount(PEST_VISIT, HOUSE_MIX);
-    await waitFor(() => expect(document.querySelectorAll('input[placeholder="Total"]')).toHaveLength(3));
+    await waitFor(() => expect(document.querySelectorAll('input[placeholder="Total"]')).toHaveLength(2));
     const surfactant = HOUSE_MIX[2].name;
-    expect(row(surfactant).total.value).toBe('0.25');
+    expect(screen.queryByText(surfactant)).toBeNull();
+    await pick(HOUSE_MIX[2]);
+    await waitFor(() => expect(document.querySelectorAll('input[placeholder="Total"]')).toHaveLength(3));
     expect(row(surfactant).amountUnit.value).toBe('fl_oz');
-
     set(row(surfactant).amountUnit, 'tsp');
-    expect(row(surfactant).total.value).toBe('1.5');
+    set(row(surfactant).total, '1.5');
     expect(row(surfactant).amountUnit.value).toBe('tsp');
-    set(row(surfactant).amountUnit, 'fl_oz');
-    expect(row(surfactant).total.value).toBe('0.25');
-    set(row(surfactant).amountUnit, 'tsp');
 
     // A bare oz may be a dry weight, so 4 oz does not become 24 tsp: the
     // seed is withdrawn for the tech to enter, never kept as "4 tsp".

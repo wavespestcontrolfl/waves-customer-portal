@@ -176,6 +176,33 @@ async function flagIsFromAIAudit(entry, conn = db) {
 // into a linear total).
 const CONTAINER_USAGE_UNITS = new Set(['bottle', 'bottles', 'jug', 'jugs', 'container', 'containers', 'can', 'cans', 'bag', 'bags', 'pail', 'pails', 'box', 'boxes', 'case', 'cases', 'each', 'ea', 'unit', 'units']);
 
+// Field rules (protocols.json `<program>.field_rules`): one fact per rule,
+// each synced as its own protocols row so the tech Intelligence Bar answers
+// with the rule itself instead of a slice of the whole program page.
+const FIELD_RULE_SLUG_PREFIX = 'field-rule-';
+
+function fieldRuleEntries(protocols) {
+  const entries = [];
+  for (const [programKey, program] of Object.entries(protocols || {})) {
+    const rules = program && Array.isArray(program.field_rules) ? program.field_rules : [];
+    for (const r of rules) {
+      const id = cleanText(r && r.id);
+      const ask = cleanText(r && r.ask);
+      const rule = cleanText(r && r.rule);
+      if (!id || !ask || !rule) continue;
+      const lines = [ask, rule];
+      if (cleanText(r.source)) lines.push(`Source: ${cleanText(r.source)}`);
+      entries.push({
+        slug: `${FIELD_RULE_SLUG_PREFIX}${slugify(programKey)}-${slugify(id)}`,
+        title: `${program.name || programKey}: ${ask}`,
+        content: lines.join('\n'),
+        tags: [programKey, 'field-rule'],
+      });
+    }
+  }
+  return entries;
+}
+
 // How many usage units one catalog package holds when both are counts:
 // "1 trap" for traps, "4 x 30g tubes" for tubes. Null when the pack is
 // measured by weight/volume ("500 g" of packets, an "18 lb pail" of blocks).
@@ -863,6 +890,24 @@ const KnowledgeBaseService = {
         if (programKey === 'lawn') continue;
         await syncProgram(programKey, program, [programKey]);
       }
+
+      // Field rules: one row per rule. A rule removed from the file is
+      // archived so the bar stops quoting it; one put back is restored
+      // (before the upsert, which re-stamps verified_by on a text change).
+      const ruleEntries = fieldRuleEntries(protocols);
+      const ruleSlugs = ruleEntries.map((e) => e.slug);
+      if (ruleSlugs.length) {
+        await db('knowledge_base')
+          .whereIn('slug', ruleSlugs)
+          .where({ status: 'archived', verified_by: 'field-rule-sync' })
+          .update({ status: 'active', verified_by: 'auto-sync', updated_at: new Date() });
+      }
+      for (const e of ruleEntries) await upsert(e.slug, e.title, e.content, 'protocols', e.tags);
+      await db('knowledge_base')
+        .where('slug', 'like', `${FIELD_RULE_SLUG_PREFIX}%`)
+        .where({ source: 'auto-sync', status: 'active' })
+        .whereNotIn('slug', ruleSlugs)
+        .update({ status: 'archived', verified_by: 'field-rule-sync', updated_at: new Date() });
       logger.info(`[kb-sync] Protocols synced (all categories)`);
     } catch (e) { logger.error(`[kb-sync] Protocols sync failed: ${e.message}`); }
 
@@ -959,4 +1004,4 @@ const KnowledgeBaseService = {
 };
 
 module.exports = KnowledgeBaseService;
-module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit, cogsLineForUsage, cogsTotalLine };
+module.exports._internals = { auditSourceFor, buildAuditPrompt, planAuditOutcome, flagIsFromAIAudit, cogsLineForUsage, cogsTotalLine, fieldRuleEntries };
