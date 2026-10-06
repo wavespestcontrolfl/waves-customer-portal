@@ -414,6 +414,15 @@ describe('GATE_LAWN_REPORT_COPY_V6 on the report payload', () => {
         expect(multi.data.reportV2.snapshot.nextVisit).toBeUndefined();
       });
 
+      // These fixtures use fixed 2026/2027 dates on purpose. They are valid
+      // only because the enclosing describe's beforeEach pins Date to
+      // 2026-10-02 (buildReportV1Data filters against the ET date), so this
+      // guard fails loudly if that pin is ever removed or moved.
+      test('the clock is pinned, so the fixed next-visit fixtures below cannot go stale', () => {
+        expect(new Date().toISOString().slice(0, 10)).toBe('2026-10-02');
+        expect(Date.now()).toBe(new Date('2026-10-02T16:00:00Z').getTime());
+      });
+
       // Prod shape (2026-10-06): the customer's recurring lawn rows (Nov 2 and
       // on) carry NO property_id and no stamp; the one row with a property_id
       // is a year out. The report's own visit is linked to the primary property.

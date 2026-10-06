@@ -37,8 +37,18 @@ const canonicalizeAddress = (s) => String(s || '').toLowerCase().replace(/[.,#]/
 const DIRECTIONAL_CANON = {
   n: 'north', s: 'south', e: 'east', w: 'west', ne: 'northeast', nw: 'northwest', se: 'southeast', sw: 'southwest',
 };
-const canonicalizeScopeAddress = (s) => canonicalizeAddress(s)
-  .split(' ').map((w) => DIRECTIONAL_CANON[w] || w).join(' ');
+// Directionals expand in the STREET words only. A unit identifier is data, not
+// a direction: "100 Main St Apt E" and "Apt East" are different units, so the
+// token right after a unit designator (apt/unit/ste/suite/#) is left exact.
+// A line2 is a unit by definition and goes through canonicalizeAddress alone.
+const UNIT_DESIGNATOR_WORDS = new Set(['apt', 'apartment', 'unit', 'ste', 'suite', '#']);
+const canonicalizeScopeAddress = (s) => {
+  const words = String(s || '').toLowerCase().replace(/[.,]/g, ' ').replace(/#/g, ' # ').split(/\s+/).filter(Boolean);
+  return words.map((w, i) => {
+    const canon = STREET_SUFFIX_CANON[w] || w;
+    return UNIT_DESIGNATOR_WORDS.has(words[i - 1]) ? canon : (DIRECTIONAL_CANON[canon] || canon);
+  }).join(' ');
+};
 
 /** First 5 ZIP digits, so "34205" and "34205-1234" (ZIP+4) key identically. */
 const normalizeZip = (z) => (String(z || '').match(/\d{5}/) || [''])[0];

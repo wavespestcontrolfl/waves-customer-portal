@@ -34,3 +34,25 @@ describe('scope keys canonicalize street directionals', () => {
     expect(sameResolvedProperty(estimate('4610 61st Dr, Bradenton, FL 34203, USA'), prop)).toBe(false);
   });
 });
+
+describe('directionals expand in the street only, never in a unit identifier', () => {
+  test('"Apt E" and "Apt East" are distinct units; the same unit still matches itself', () => {
+    expect(property('100 Main St', 'Bradenton', '34203', 'Apt E')).not.toBe(property('100 Main St', 'Bradenton', '34203', 'Apt East'));
+    expect(property('100 Main St, Apt E')).not.toBe(property('100 Main St, Apt East'));
+    expect(property('100 Main St #E')).not.toBe(property('100 Main St #East'));
+    expect(property('100 Main St, Unit W')).not.toBe(property('100 Main St, Unit West'));
+    // A bare line2 is a unit too.
+    expect(property('100 Main St', 'Bradenton', '34203', 'E')).not.toBe(property('100 Main St', 'Bradenton', '34203', 'East'));
+    // Same unit spelled in line 1 or line 2 still keys alike.
+    expect(property('100 Main St Apt E')).toBe(property('100 Main St', 'Bradenton', '34203', 'Apt E'));
+    expect(property('100 Main St, Apt E.')).toBe(property('100 Main St Apt E'));
+  });
+
+  test('a unit does not stop the street directional from matching', () => {
+    expect(property('4610 61st Dr E, Apt 4')).toBe(property('4610 61st Drive East', 'Bradenton', '34203', 'Apt 4'));
+    expect(property('4610 61st Dr E Apt E')).toBe(property('4610 61st Drive East', 'Bradenton', '34203', 'Apt E'));
+    expect(property('4610 61st Dr E Apt E')).not.toBe(property('4610 61st Drive East', 'Bradenton', '34203', 'Apt East'));
+    expect(estimate('4610 61st Dr E, Bradenton, FL 34203, USA')).toBe(property('4610 61st Drive East'));
+  });
+});
+

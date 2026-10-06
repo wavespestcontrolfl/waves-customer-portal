@@ -56,3 +56,41 @@ describe('buildTreatmentSummary: combination pre-emergent + fertilizer', () => {
       .toBe('Today we applied No active.');
   });
 });
+
+describe('buildTreatmentSummary: combination product from the v13 catalog migration', () => {
+  // The migration creates these rows with the active alone; the analysis lives
+  // in the product name (and analysis_n/p/k, which this builder is not given).
+  it('names the fertilizer half of Stonewall from the product name', () => {
+    expect(summary([{
+      name: 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer',
+      activeIngredient: 'Prodiamine',
+      kind: 'pre_emergent',
+      method: 'granular_broadcast',
+    }])).toBe('Today we applied prodiamine with 15-0-15 fertilizer (granular application).');
+  });
+
+  it('names the fertilizer half of Dimension from the product name', () => {
+    expect(summary([{
+      name: 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer',
+      activeIngredient: 'Dithiopyr',
+      kind: 'pre_emergent',
+      method: 'granular_broadcast',
+    }])).toBe('Today we applied dithiopyr with 18-0-10 fertilizer (granular application).');
+  });
+
+  it('leaves straight pre-emergents and non-pre-emergents unchanged', () => {
+    expect(summary([{ name: 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', activeIngredient: 'Prodiamine', kind: 'pre_emergent', method: 'broadcast_spray' }]))
+      .toBe('Today we applied prodiamine (broadcast application).');
+    expect(summary([{ name: 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', activeIngredient: 'Dithiopyr', kind: 'pre_emergent', method: 'broadcast_spray' }]))
+      .toBe('Today we applied dithiopyr (broadcast application).');
+    // An analysis in the name of a non-pre-emergent never adds a fertilizer half.
+    expect(summary([{ name: 'Iron 6-0-0 Micro', activeIngredient: 'Iron', kind: 'supplement', method: 'foliar_spray' }]))
+      .toBe('Today we applied iron (foliar spray).');
+  });
+
+  it('does not double the analysis when the active already carries it', () => {
+    expect(summary([{ name: 'LESCO Stonewall 0.43% 15-0-15', activeIngredient: 'prodiamine 0.43% + 15-0-15', kind: 'pre_emergent', method: 'granular_broadcast' }]))
+      .toBe('Today we applied prodiamine with 15-0-15 fertilizer (granular application).');
+  });
+});
+
