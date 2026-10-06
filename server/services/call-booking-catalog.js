@@ -20,6 +20,7 @@ const { recurringDispatchDuePatch } = require('./scheduling/recurring-dispatch-d
  */
 
 const logger = require('./logger');
+const { isEnabled: isGateEnabled } = require('../config/feature-gates');
 const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
 
 const BOOKABLE_SERVICE_COLUMNS = [
@@ -87,6 +88,48 @@ function hasAffirmativeRoachMention(text) {
 // label). Most-specific first — inspection wins over trapping wins over a
 // general rodent call. A rodent mention with no specific action defaults to
 // the general "Rodent Pest Control Service".
+// Vehicle German roach job (owner ruling 2026-10-06, GATE_CALL_VEHICLE_ROACH_BOOKING):
+// roaches inside a car, truck or van book the vehicle_german_roach row, not the
+// home roach package. Judged on the extraction's own request fields only (never
+// the raw transcript, where "I'll be in my car" is small talk): ONE field must
+// name an affirmative roach problem AND roaches inside a vehicle ("in a car",
+// "inside her 2024 Jeep Grand Cherokee"). When ANY request field (summary
+// included) also names a room or roaches in the home, it is a home job (the
+// car is the office-priced add-on), so it keeps today's resolution.
+const VEHICLE_SERVICE_KEY = 'vehicle_german_roach';
+const VEHICLE_NOUN = '(?:cars?|vehicles?|trucks?|pickups?|suvs?|vans?|minivans?|jeeps?|sedans?|campers?|rvs?|motorhomes?)';
+const VEHICLE_FILLER = "(?:(?!(?:by|near|next|beside|behind|under|from|and|or|to|garage|carport|driveway|house|home|kitchen|yard)\\b)[a-z0-9'’-]+\\s+){0,3}?";
+const VEHICLE_PHRASE = `(?:in|inside|infesting|infested|throughout)\\s+(?:of\\s+)?(?:(?:my|her|his|their|our|the|a|an|your)\\s+)?(?:(?:19|20)\\d{2}\\s+)?${VEHICLE_FILLER}${VEHICLE_NOUN}\\b`;
+const VEHICLE_PHRASE_RE = new RegExp(`\\b${VEHICLE_PHRASE}`, 'i');
+const NEGATED_VEHICLE_PHRASE_RE = new RegExp(`\\b(?:not|no|never|isn['’]?t|aren['’]?t|without)\\s+(?:[\\w'’]+\\s+){0,2}?${VEHICLE_PHRASE}`, 'gi');
+// A room, or roaches "in the house/home/apartment/condo". "At her home
+// address" names where the car is parked, not an infestation, so a bare
+// home/house/apartment/condo word does not veto.
+const HOME_INFESTATION_RE = /\b(?:kitchen|bathrooms?|bedrooms?|cabinets?|pantry|garage|laundry|living\s+room|attic|(?:in|inside|throughout|around)\s+(?:(?:my|her|his|their|our|the|a|an|your)\s+)?(?:house|home|apartment|condo|unit))\b/i;
+
+function hasVehicleRoachRequest(extracted = {}) {
+  const fields = [extracted.requested_service, extracted.pain_points, extracted.call_summary]
+    .filter((v) => typeof v === 'string' && v.trim());
+  const vehicleField = fields.some((text) => hasAffirmativeRoachMention(text)
+    && VEHICLE_PHRASE_RE.test(text.replace(NEGATED_VEHICLE_PHRASE_RE, ' ')));
+  if (!vehicleField) return false;
+  return !fields.some((text) => HOME_INFESTATION_RE.test(text));
+}
+
+// A model pick the vehicle request may replace: nothing, a generic row, or a
+// one-time pest row (the home roach package, a one-time pest visit). A
+// recurring plan pick is a different sale and is never replaced.
+function vehicleRoachOverridesPick(pick) {
+  if (!pick) return true;
+  if (pick.service_key === VEHICLE_SERVICE_KEY) return false;
+  if (isGenericCallCatalogRow(pick)) return true;
+  return pick.category === 'pest_control' && pick.billing_type === 'one_time';
+}
+
+function vehicleRoachBookingLive() {
+  return isGateEnabled('callVehicleRoachBooking');
+}
+
 const RODENT_RE = /\b(rodents?|rats?|mouse|mice)\b/i;
 // Rodent mentions get the same affirmative-only treatment as roaches: "not
 // rats, it's ants" and "we had mice last time but now need spiders treated"
@@ -286,7 +329,11 @@ const KEYWORD_SERVICE_RULES = [
   { serviceKey: 'rodent_general_one_time', matches: (h) => hasAffirmativeRodentMention(h) },
 ];
 
-async function loadBookableCallServices(conn) {
+// `includeVehicleRoach` (the call-recording pipeline only, and only with
+// GATE_CALL_VEHICLE_ROACH_BOOKING on) adds the live vehicle_german_roach row,
+// which is booking_enabled=false on purpose: the voice agent, the SMS drafter
+// and every other caller of this loader never see it.
+async function loadBookableCallServices(conn, { includeVehicleRoach = false } = {}) {
   try {
     // Stable order matters beyond display: these rows render the prompt's
     // catalog block AND feed extractionPromptVersion's order-sensitive hash,
@@ -297,8 +344,12 @@ async function loadBookableCallServices(conn) {
     // re-selected later (codex r22 on #4786) — the same authority the public
     // menu reads.
     const { RETIRED_SALE_SERVICE_KEYS } = require('./pricing-engine/retired-sale-catalog');
+    const bookable = includeVehicleRoach && vehicleRoachBookingLive()
+      ? (q) => q.where({ is_active: true, booking_enabled: true })
+        .orWhere((v) => v.where({ is_active: true, service_key: VEHICLE_SERVICE_KEY }).whereRaw('is_archived IS NOT TRUE'))
+      : { is_active: true, booking_enabled: true };
     const rows = await conn('services')
-      .where({ is_active: true, booking_enabled: true })
+      .where(bookable)
       .whereNotIn('service_key', [...RETIRED_SALE_SERVICE_KEYS])
       .orderBy('name', 'asc')
       .orderBy('id', 'asc')
@@ -360,6 +411,10 @@ function resolveCallBookingCatalogService({
   // but a revisit is the plan's free between-visits callback, not an extra
   // plan visit.
   const pickPlanLane = reServiceLaneForPlanRow(byModelPick);
+  if (vehicleRoachOverridesPick(byModelPick) && vehicleRoachBookingLive() && hasVehicleRoachRequest(extracted)) {
+    const vehicleRow = services.find((s) => s.service_key === VEHICLE_SERVICE_KEY);
+    if (vehicleRow) return vehicleRow;
+  }
   if (byModelPick && !isGenericCallCatalogRow(byModelPick) && !pickPlanLane) return byModelPick;
 
   const haystack = callBookingResolutionHaystack(extracted, transcription);
@@ -919,6 +974,8 @@ module.exports = {
   reServiceLaneForRow,
   reServiceLaneForPlanRow,
   resolveCallBookingCatalogService,
+  hasVehicleRoachRequest,
+  VEHICLE_SERVICE_KEY,
   resolveCallBookingPrice,
   resolveCallFollowUpPlan,
   callBookingInvoiceOnComplete,
