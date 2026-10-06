@@ -630,7 +630,7 @@ describe('schedule questions keep the rule answer', () => {
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
-  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'What time of year are ants most active?', 'I booked this service for ants. What was applied?', 'Could ants be here because of the rain?', 'Why would roaches be here?', 'Could the pests be back next week?', 'Why are you treating the lawn?', 'The service was completed as scheduled. What was applied?', 'What was applied during the scheduled service?', 'What was applied at my last appointment?', "Which product did you use at today's appointment?", 'Where are the ants coming from?', 'How do roaches arrive in the house?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'Did you come into the house?', 'What time of year are ants most active?', 'I booked this service for ants. What was applied?', 'Could ants be here because of the rain?', 'Why would roaches be here?', 'Could the pests be back next week?', 'Why are you treating the lawn?', 'The service was completed as scheduled. What was applied?', 'What was applied during the scheduled service?', 'What was applied at my last appointment?', "Which product did you use at today's appointment?", 'Where are the ants coming from?', 'How do roaches arrive in the house?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(false);
   });
 });
@@ -1086,6 +1086,7 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at 12-14 US 41.', 'Ants at [number] US 41.'],
     ['Ants at 12 N US 41.', 'Ants at [number] N US 41.'],
     ['Ants at 12 U.S. 41.', 'Ants at [number] U.S. 41.'],
+    ['Ants at 12 U S 41.', 'Ants at [number] U S 41.'],
     ['Ants at 12 S.R. 70.', 'Ants at [number] S.R. 70.'],
     ['Ants at 12/14 SR 70.', 'Ants at [number] SR 70.'],
     ['Ants at 12 1/2 FL-70.', 'Ants at [number] FL-70.'],
