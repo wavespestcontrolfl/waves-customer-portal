@@ -61,6 +61,7 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import { PEST_SWEEP_ACTION } from "../../lib/pest-sweep-action";
 import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
@@ -218,16 +219,6 @@ const CHIP_ACTIONS = [
 const CHIP_ACTION_BY_LABEL = Object.fromEntries(
   CHIP_ACTIONS.map((chip) => [chip.label, chip]),
 );
-// The one protocol action a regular pest visit still records (owner
-// 2026-10-05): the "Swept eaves and webs" box. It is the pest protocol's own
-// sweep step (server/config/protocols.json), so the customer report's spider
-// section (buildSpiderExpectation) reads it as a recorded sweep: exterior,
-// no treatment applied.
-export const PEST_SWEEP_ACTION = {
-  label: "Swept eaves, window frames, door frames, and lanai",
-  scope: "exterior",
-  treatmentApplied: false,
-};
 // Completion-panel quick-entry chips are service-aware: pest-line services
 // (pest control, mosquito, termite, rodent) get a pest-focused list, while
 // plant-health services (lawn, tree/shrub) keep the original broad list that
