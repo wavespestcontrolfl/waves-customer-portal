@@ -27,6 +27,17 @@ describe('after-stop extension window', () => {
     expect(_test.followOnWindow(stop, { estimated_duration_minutes: 60 }).window_start).toBe('13:00');
   });
 
+  test('members with no estimate share their promised hour (co-visit floor), not one hour each', () => {
+    const rows = [row('a', '18:00', '19:00', null), row('b', '18:00', '19:00', null)];
+    const stop = _test.connectedStop(rows, [{ id: 'a' }]);
+    expect(_test.followOnWindow(stop, { estimated_duration_minutes: 60 }).window_start).toBe('19:00');
+  });
+
+  test('a windowless row that day is ignored, not a reason to leave the path', () => {
+    const rows = [row('lawn', '09:00', '10:00', 60), row('placeholder', null, null, 60)];
+    expect(_test.connectedStop(rows, [{ id: 'lawn' }]).map((r) => r.id)).toEqual(['lawn']);
+  });
+
   test('a clash row outside the other-group rows is not this case', () => {
     expect(_test.connectedStop([row('lawn', '09:00', '10:00', 60)], [{ id: 'lawn' }, { id: 'pest' }])).toBeNull();
   });

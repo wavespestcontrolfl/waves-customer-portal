@@ -19955,7 +19955,11 @@ async function placeAfterOtherGroupStop(ctx, candidate, clashRows) {
   try {
     const placed = await conn.transaction(async (sp) => {
       const tech = await assignablePlacementTechnicianId(sp, parent, stop[0].technician_id, candidate);
-      const template = { ...parent, ...window, recurring_technician_override: true, recurring_technician_id: tech };
+      // The parent's legacy time label (e.g. "Morning") would contradict the
+      // moved window: the window is the appointment time.
+      const template = {
+        ...parent, ...window, time_window: null, recurring_technician_override: true, recurring_technician_id: tech,
+      };
       const visit = await extendSeriesOnceLocked(sp, template, parentId, cols, svcLike, {
         ...opts, onSkip: undefined, forceDate: candidate, commitScope: scope,
       });
@@ -20001,16 +20005,16 @@ async function otherGroupStopRows(conn, parent, parentId, candidate, clashRows) 
   return ok ? stop : null;
 }
 
-const rowWorkMinutes = (r) => Number(r.estimated_duration_minutes)
-  || ((parseHHMM(r.window_end) ?? parseHHMM(r.window_start) + 60) - parseHHMM(r.window_start));
+const { workDuration: rowWorkMinutes, startCoVisitChain } = require('../services/route-reorder-window-fit');
 
 // The stop the clash belongs to: the clashing rows plus every row that touches
 // their span, grown until nothing more touches it. Members work one after
 // another, so the span runs from the first arrival for the summed work (or to
 // the latest window end, when later). A separate appointment later that day
-// is not part of it. null when a clash row is not among the rows or has no window.
-function connectedStop(rows, clashRows) {
-  if (rows.some((r) => parseHHMM(r.window_start) == null)) return null;
+// is not part of it, nor is a windowless row (no occupancy). null when a clash
+// row is not among the timed rows.
+function connectedStop(allRows, clashRows) {
+  const rows = allRows.filter((r) => parseHHMM(r.window_start) != null);
   let stop = rows.filter((r) => clashRows.some((c) => String(c.id) === String(r.id)));
   if (stop.length !== clashRows.length) return null;
   for (;;) {
@@ -20022,9 +20026,12 @@ function connectedStop(rows, clashRows) {
   }
 }
 
+// The canonical co-visit workload (route-reorder-window-fit coVisitWork):
+// real estimates add up, floored by the longest member's window-derived work.
 function stopSpan(stop) {
   const lo = Math.min(...stop.map((r) => parseHHMM(r.window_start)));
-  const work = stop.reduce((sum, r) => sum + rowWorkMinutes(r), 0);
+  const parts = stop.map(startCoVisitChain);
+  const work = Math.max(...parts.map((p) => p.coFloor), parts.reduce((sum, p) => sum + p.coEstimates, 0));
   return [lo, Math.max(lo + work, ...stop.map((r) => parseHHMM(r.window_end) ?? 0))];
 }
 
