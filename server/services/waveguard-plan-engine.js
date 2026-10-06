@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
 const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -1159,20 +1159,34 @@ async function lawnVisitsPerYear(knex, service) {
     ?? stated(service.service_type);
 }
 
+// An explicit bahia lawn: bahia as the grass type, as the track key, or in the legacy free text
+// (read only when no profile is recorded).
+function explicitBahia(profile, legacyGrass, profileRecorded) {
+  const bahia = [normalizeGrassType(profile?.grass_type), String(profile?.track_key || '').trim().toLowerCase(), profileRecorded ? null : normalizeGrassType(legacyGrass)].includes('bahia');
+  return bahia ? 'bahia' : null;
+}
+
+// Only a v13 plan of a bahia lawn carries the flag; every other result keeps its old shape.
+function noProgramFlag(track, grass) {
+  return !track && lawnV13NoProgramGrass(grass) ? { v13NoProgram: true } : {};
+}
+
 function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: assignedMonth, requireKnownGrass } = {}) {
   const profileRecorded = [profile?.track_key, profile?.grass_type]
     .some((value) => String(value || '').trim());
   const recorded = profileRecorded || String(legacyGrass || '').trim();
+  const grass = explicitBahia(profile, legacyGrass, profileRecorded);
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
     // GATE_LAWN_V13: a recorded grass with no track of its own (mixed, unknown,
-    // free text) runs the one v13 program instead of blocking the visit.
-    || (recorded ? lawnV13AnyGrassTrack() : null)
+    // free text) runs the one v13 program instead of blocking the visit. Bahiagrass
+    // is the exception: it has no v13 program and never borrows another grass's.
+    || (recorded ? lawnV13AnyGrassTrack(grass) : null)
     || (recorded || requireKnownGrass ? null : 'st_augustine');
   const track = trackKey ? lawnProtocols()?.[trackKey] : null;
   const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
-  return { trackKey, track, month, visit };
+  return { trackKey, track, month, visit, ...noProgramFlag(track, grass) };
 }
 
 // The ordinance jurisdictions (county + city) one visit is judged under —
@@ -1971,6 +1985,13 @@ async function buildPlanForService(serviceId, options = {}) {
       code: 'missing_lawn_area',
       severity: 'block',
       message: 'Turf profile is missing lawn square footage, so mix amounts cannot be calculated.',
+    });
+  }
+  if (selection.v13NoProgram) {
+    blocks.push({
+      code: 'lawn_v13_bahia_no_program',
+      severity: 'block',
+      message: 'Bahiagrass has no v13 lawn program: Celsius and Blindside are not labeled for bahiagrass, so no suggested amounts are planned. Enter the actual work.',
     });
   }
   if (!track || !visit) {

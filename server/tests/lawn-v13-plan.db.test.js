@@ -78,10 +78,10 @@ describeDb('the v13 plan through PostgreSQL', () => {
     for (const name of GATES) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
   });
 
-  async function plannedVisit(changes = {}) {
+  async function plannedVisit(changes = {}, turf = { grass_type: 'bermuda', track_key: 'bermuda' }) {
     const f = await fixture(knex);
     await knex('customers').where({ id: f.customerId }).update({ address_line1: f.property.address_line1, city: f.property.city, zip: f.property.zip, state: f.property.state, waveguard_tier: 'Silver' });
-    await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, grass_type: 'bermuda', track_key: 'bermuda', lawn_sqft: 10000 });
+    await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, ...turf, lawn_sqft: 10000 });
     return f.visit(0, { scheduled_date: '2026-05-12', ...changes });
   }
   const plan = (visit) => buildPlanForService(visit.id, { db: knex, includeCompletionDefaults: true });
@@ -135,6 +135,33 @@ describeDb('the v13 plan through PostgreSQL', () => {
     } finally {
       await knex('lawn_protocols').where({ id: staged.id }).update({ status: 'staged' });
     }
+  });
+
+  // Celsius and Blindside are not labeled for bahiagrass, so v13 has no bahia track (owner 2026-10-06):
+  // an explicit bahia lawn plans nothing and never borrows the St. Augustine program.
+  describe.each(PREREQ)('an explicit bahia lawn: completion defaults %s, property history %s', (completion, history) => {
+    test.each([['grass_type', { grass_type: 'bahia', track_key: null }], ['track_key', { grass_type: null, track_key: 'bahia' }]])('recorded by %s: the bahia block, no products, no amounts', async (_name, turf) => {
+      setGates({ v13: 'on', completion, history });
+      const result = await plan(await plannedVisit({}, turf));
+      expect(codes(result)).toContain('lawn_v13_bahia_no_program');
+      expect(result.status).toBe('blocked');
+      expect(result.mixCalculator.items).toEqual([]);
+      expect(result.protocol.base).toEqual([]);
+      expect(result.protocol.conditional).toEqual([]);
+      expect(JSON.stringify(result.mixCalculator.items) + JSON.stringify(result.protocol)).not.toMatch(/"amount":\s*[1-9]/);
+    });
+
+    test('a mixed lawn still plans from the one program (the any-grass fallback), with no bahia block', async () => {
+      setGates({ v13: 'on', completion, history });
+      const result = await plan(await plannedVisit({}, { grass_type: 'mixed', track_key: null }));
+      expect(codes(result)).not.toContain('lawn_v13_bahia_no_program');
+    });
+  });
+
+  test('gate off: an explicit bahia lawn carries no bahia block', async () => {
+    setGates({ v13: 'off' });
+    const result = await plan(await plannedVisit({}, { grass_type: 'bahia', track_key: null }));
+    expect(codes(result)).not.toContain('lawn_v13_bahia_no_program');
   });
 
   test('gate off: a visit pinned to the older version plans exactly as before, with no v13 block', async () => {

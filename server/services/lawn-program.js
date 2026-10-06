@@ -4,9 +4,10 @@
  *
  * GATE_LAWN_V13 off (the default) returns protocols.json `lawn`, the object
  * every reader used before. On, it returns server/config/lawn-protocol-v13.json:
- * the same four track keys (st_augustine, bermuda, zoysia, bahia) in the same
- * visit shape, each holding the one universal v13 program (owner 2026-10-05,
- * no per-grass tracks).
+ * the track keys st_augustine, bermuda and zoysia in the same visit shape, each
+ * holding the one universal v13 program (owner 2026-10-05, no per-grass tracks).
+ * There is no bahia track: Celsius and Blindside are not labeled for bahiagrass
+ * (owner 2026-10-06, the track is deleted and a bahia lawn plans nothing).
  *
  * Read at call time so unsetting the gate is the kill switch with no redeploy.
  * The structured (database) side of the same switch is
@@ -28,15 +29,23 @@ function lawnProtocols() {
   return featureGates.lawnV13Live?.() ? v13 : protocols.lawn;
 }
 
-// v13 is one program for every grass, still filed under the four track keys.
+// v13 is one program for every grass, still filed under the three track keys.
 // A lawn whose recorded grass names none of them (mixed, unknown, free text)
-// plans from this key while GATE_LAWN_V13 is live: the four copies are the same
+// plans from this key while GATE_LAWN_V13 is live: the copies are the same
 // steps and the same safety rules, so the key changes nothing but the lookup.
 // Gate off: null, and such a lawn has no track, as before. Planning only (the
 // plan engine): historical readers never synthesize a track for a past visit.
+// Bahiagrass is the one grass that never takes this key: v13 weed spots use
+// Celsius and Blindside, and both labels exclude bahiagrass, so a bahia lawn has
+// no v13 track and no fallback (lawnV13NoProgramGrass).
 const LAWN_V13_ANY_GRASS_TRACK = 'st_augustine';
-function lawnV13AnyGrassTrack() {
-  return featureGates.lawnV13Live?.() === true ? LAWN_V13_ANY_GRASS_TRACK : null;
+const LAWN_V13_NO_PROGRAM_GRASS = 'bahia';
+function lawnV13NoProgramGrass(grass) {
+  return featureGates.lawnV13Live?.() === true && grass === LAWN_V13_NO_PROGRAM_GRASS;
+}
+function lawnV13AnyGrassTrack(grass = null) {
+  if (featureGates.lawnV13Live?.() !== true || grass === LAWN_V13_NO_PROGRAM_GRASS) return null;
+  return LAWN_V13_ANY_GRASS_TRACK;
 }
 
 // A protocol version that can serve a visit: the published one, or the staged
@@ -95,4 +104,4 @@ function unknownCadenceWarning(unknownCadence) {
   };
 }
 
-module.exports = { lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning };
+module.exports = { lawnProtocols, LAWN_V13_VERSION, LAWN_V13_ANY_GRASS_TRACK, lawnV13AnyGrassTrack, lawnV13NoProgramGrass, isServingProtocol, visitProtocolQuery, visitForCadence, unknownCadenceWarning };

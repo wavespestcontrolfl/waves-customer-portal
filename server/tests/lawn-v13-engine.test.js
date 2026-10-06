@@ -24,6 +24,8 @@ const migration = require('../models/migrations/20261005120000_lawn_protocol_v13
 const octoberMigration = require('../models/migrations/20261007120500_lawn_v13_october_dimension');
 
 const GRASSES = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
+// The v13 recipe has no bahia track (owner 2026-10-06); protocols.json (gate off) still does.
+const V13_GRASSES = ['st_augustine', 'bermuda', 'zoysia'];
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const MONTHS = Array.from({ length: 12 }, (_, i) => i + 1);
 
@@ -115,14 +117,48 @@ describe('gate off is byte-identical for the readers', () => {
     expect(Object.keys(protocolsJson.lawn)).toEqual(GRASSES);
   });
 
-  test('gate on reads the v13 visit for every grass', () => {
+  test('gate on reads the v13 visit for every v13 grass', () => {
     withGate('true', () => {
-      for (const grass of GRASSES) {
+      for (const grass of V13_GRASSES) {
         const got = engine.selectProtocolVisit({ track_key: grass }, new Date(Date.UTC(2026, 1, 15, 16)));
         expect(got.visit.primary).toContain('LESCO 24-0-11 with PolyPlus OPTI');
         expect(got.track.name).toContain('v13');
       }
       expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toBe(v13.zoysia);
+    });
+  });
+
+  // Bahiagrass: Celsius and Blindside (the v13 weed spots) are not labeled for it, so v13 has no bahia
+  // track and a bahia lawn must never borrow another grass's program (owner 2026-10-06).
+  test('gate on: a bahia lawn has no v13 track and no fallback, however the grass is recorded', () => {
+    const date = new Date(Date.UTC(2026, 1, 15, 16));
+    expect(v13.bahia).toBeUndefined();
+    withGate('true', () => {
+      for (const [profile, legacy] of [[{ grass_type: 'bahia' }, null], [{ track_key: 'bahia' }, null], [{ grass_type: 'bahia', track_key: 'bahia' }, null], [{ grass_type: 'mixed', track_key: 'bahia' }, null], [null, 'Argentine Bahia']]) {
+        for (const requireKnownGrass of [false, true]) {
+          const got = engine.selectProtocolVisit(profile, date, legacy, { requireKnownGrass });
+          expect({ profile, legacy, trackKey: got.trackKey, track: got.track, visit: got.visit, noProgram: got.v13NoProgram }).toEqual({ profile, legacy, trackKey: null, track: null, visit: null, noProgram: true });
+        }
+      }
+      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'bahia' }).protocol).toBeUndefined();
+    });
+  });
+
+  test('gate on: mixed and unknown lawns keep the any-grass fallback and carry no no-program flag', () => {
+    withGate('true', () => {
+      for (const grass of ['mixed', 'unknown']) {
+        const got = engine.selectProtocolVisit({ grass_type: grass }, new Date(Date.UTC(2026, 1, 15, 16)));
+        expect(got.trackKey).toBe('st_augustine');
+        expect('v13NoProgram' in got).toBe(false);
+      }
+    });
+  });
+
+  test('gate off: a bahia lawn keeps its old track and no flag appears on any result', () => {
+    withGate(undefined, () => {
+      const got = engine.selectProtocolVisit({ grass_type: 'bahia' }, new Date(Date.UTC(2026, 1, 15, 16)));
+      expect(got.trackKey).toBe('bahia');
+      expect('v13NoProgram' in got).toBe(false);
     });
   });
 });
@@ -134,9 +170,9 @@ describe('mixed or unknown grass under GATE_LAWN_V13', () => {
   const date = new Date(Date.UTC(2026, 9, 6, 16));
   const knexFor = (rows) => (table) => ({ where() { return this; }, first: async () => rows[table] ?? null });
 
-  test('the four v13 copies are one program, so any key serves any grass', () => {
+  test('the three v13 copies are one program, so any key serves any grass', () => {
     const body = ({ name, ...rest }) => JSON.stringify(rest);
-    for (const grass of GRASSES) expect(body(v13[grass])).toBe(body(v13[LAWN_V13_ANY_GRASS_TRACK]));
+    for (const grass of V13_GRASSES) expect(body(v13[grass])).toBe(body(v13[LAWN_V13_ANY_GRASS_TRACK]));
   });
 
   test.each(['mixed', 'unknown', 'centipede'])('gate on: recorded %s plans the October v13 visit', (grass) => {
@@ -377,7 +413,7 @@ describe('completion defaults with the v13 protocol resolved', () => {
     };
   }
 
-  test.each(GRASSES)('%s: each month prefills exactly the whole-lawn products (July none)', async (grass) => {
+  test.each(V13_GRASSES)('%s: each month prefills exactly the whole-lawn products (July none)', async (grass) => {
     await withGateAsync('true', async () => {
       for (const month of MONTHS) {
         const result = buildLawnCompletionDefaults(planFor(grass, month), { isLawn: true, propertyId: 'p', propertyMatchesProfile: true, history: { rows: [] } });
@@ -399,10 +435,8 @@ describe('completion defaults with the v13 protocol resolved', () => {
 
 describe('v13 safety rules reach the reference tab through the catalog payload', () => {
   test('every track carries the same non-empty list; the old tracks carry none (the tab keeps its static list)', () => {
-    for (const grass of GRASSES) {
-      expect(v13[grass].safety_rules).toEqual(v13.st_augustine.safety_rules);
-      expect(protocolsJson.lawn[grass].safety_rules).toBeUndefined();
-    }
+    for (const grass of V13_GRASSES) expect(v13[grass].safety_rules).toEqual(v13.st_augustine.safety_rules);
+    for (const grass of GRASSES) expect(protocolsJson.lawn[grass].safety_rules).toBeUndefined();
   });
 });
 

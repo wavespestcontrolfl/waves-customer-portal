@@ -1,0 +1,72 @@
+// GET /api/admin/protocols/completion-actions with GATE_LAWN_V13 on: Celsius and Blindside are not
+// labeled for bahiagrass, so v13 has no bahia track (owner 2026-10-06). An explicit bahia lawn gets the
+// same no-program answer here as in the plan, never the St. Augustine chips; mixed and unknown lawns
+// keep the one-program fallback; with the gate off the old bahia track still answers.
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: jest.fn(), requireAdmin: jest.fn(), requireTechOrAdmin: jest.fn(),
+}));
+
+const db = require('../models/db');
+const adminProtocolsRouter = require('../routes/admin-protocols');
+
+const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
+
+function readQuery(rows) {
+  const query = {};
+  for (const method of ['where', 'orWhere', 'orWhereNull', 'whereIn', 'join', 'select', 'orderByRaw', 'orderBy']) query[method] = jest.fn(() => query);
+  query.first = jest.fn(async () => rows[0] || null);
+  query.catch = (onRejected) => Promise.resolve(rows).catch(onRejected);
+  query.then = (resolve, reject) => Promise.resolve(rows).then(resolve, reject);
+  return query;
+}
+
+async function completionActions(query) {
+  const res = { json: jest.fn(), status: jest.fn() };
+  res.status.mockReturnValue(res);
+  const next = jest.fn();
+  await handler({ query: { serviceType: 'Lawn Care', month: '2', ...query } }, res, next);
+  expect(next).not.toHaveBeenCalled();
+  return res;
+}
+
+beforeEach(() => {
+  db.mockImplementation((table) => {
+    if (table === 'products_catalog') return readQuery([]);
+    if (table === 'product_aliases') return readQuery([]);
+    throw new Error(`Unexpected table: ${table}`);
+  });
+});
+afterEach(() => { delete process.env.GATE_LAWN_V13; });
+
+test('gate on: an explicit bahia lawn gets a 404 no-program answer, never St. Augustine chips', async () => {
+  process.env.GATE_LAWN_V13 = 'true';
+  for (const key of ['lawnType', 'grassType', 'track']) {
+    const res = await completionActions({ [key]: 'Argentine Bahia' });
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'lawn_v13_bahia_no_program' }));
+  }
+});
+
+test('gate on: mixed, unknown and unnamed lawns keep the one v13 program', async () => {
+  process.env.GATE_LAWN_V13 = 'true';
+  for (const query of [{ grassType: 'mixed' }, { grassType: 'unknown' }, {}]) {
+    const res = await completionActions(query);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(JSON.stringify(res.json.mock.calls[0][0])).toContain('Waves Lawn Program v13');
+  }
+});
+
+test('gate on: the three v13 tracks answer', async () => {
+  process.env.GATE_LAWN_V13 = 'true';
+  for (const grassType of ['St. Augustine', 'bermuda', 'zoysia']) {
+    const res = await completionActions({ grassType });
+    expect(res.status).not.toHaveBeenCalled();
+  }
+});
+
+test('gate off: the old bahia track still answers', async () => {
+  const res = await completionActions({ grassType: 'bahia' });
+  expect(res.status).not.toHaveBeenCalled();
+  expect(res.json.mock.calls[0][0]).toMatchObject({ track: 'bahia' });
+});

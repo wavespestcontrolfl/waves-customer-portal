@@ -1180,7 +1180,12 @@ router.get('/completion-actions', async (req, res, next) => {
     if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
       programKey = 'lawn';
       track = lawnTrackFromInput(req.query.lawnType || req.query.grassType || req.query.track);
-      program = lawnProtocols()?.[track] || lawnProtocols()?.st_augustine;
+      // Every track lawnTrackFromInput names exists in the program except bahia once v13 is live
+      // (Celsius and Blindside are not labeled for bahiagrass): that lawn gets no chips, never another grass's.
+      program = lawnProtocols()?.[track];
+      if (!program && track === 'bahia') {
+        return res.status(404).json({ error: 'Bahiagrass has no lawn program under v13', code: 'lawn_v13_bahia_no_program' });
+      }
       month = monthAbbr(req.query.month);
       visit = program?.visits?.find((v) => v.month === month) || program?.visits?.[0] || null;
     } else {

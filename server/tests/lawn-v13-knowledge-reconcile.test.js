@@ -12,6 +12,8 @@ const { syncCorpus } = require('../services/knowledge-index/ingest');
 const { CONNECTORS } = require('../services/knowledge-index/connectors');
 
 const TRACKS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'];
+// The v13 program has no bahia track (owner 2026-10-06): its KB set is these three.
+const V13_TRACKS = Object.keys(v13);
 const slugOf = (track) => `protocol-${track.replace(/_/g, '-')}`;
 
 function withGate(value, fn) {
@@ -63,14 +65,21 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
     makeDb(tables);
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
     tables.knowledge_base.push({ slug: slugOf('bermuda'), tags: JSON.stringify(['lawn', 'bermuda', 'lawn-v13']) });
-    // A partial set (one of the four) is stale either way: the next sync completes it.
+    // A partial set (one of the program's tracks) is stale either way: the next sync completes it.
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
-    for (const track of TRACKS.filter((t) => t !== 'bermuda')) tables.knowledge_base.push({ slug: slugOf(track), tags: JSON.stringify(['lawn', track, 'lawn-v13']) });
+    for (const track of V13_TRACKS.filter((t) => t !== 'bermuda')) tables.knowledge_base.push({ slug: slugOf(track), tags: JSON.stringify(['lawn', track, 'lawn-v13']) });
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
+    // The old program has a bahia entry too, so three v13 entries are a partial set to it.
     expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(true);
     for (const row of tables.knowledge_base) row.tags = JSON.stringify(['lawn']);
+    tables.knowledge_base.push({ slug: slugOf('bahia'), tags: JSON.stringify(['lawn', 'bahia']) });
     expect(await withGate(undefined, () => KB.lawnKnowledgeStale())).toBe(false);
+    // With v13 live the old bahia entry is the other program's: stale until a sync removes it.
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
+    for (const row of tables.knowledge_base) row.tags = JSON.stringify(['lawn', 'lawn-v13']);
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
+    tables.knowledge_base = tables.knowledge_base.filter((row) => row.slug !== slugOf('bahia'));
+    expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
   });
 
   test('gate on then off: entries and index chunks go v13, then back to the old program with no v13 text left', async () => {
@@ -81,14 +90,14 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
     // Gate on with the index in use and no corpus marker yet: stale, so the first reconcile
     // creates the v13 entries and syncs both corpora.
     expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(true);
-    for (const track of TRACKS) {
+    for (const track of V13_TRACKS) {
       const row = kbRow(tables, slugOf(track));
       expect(tagsOf(row)).toContain('lawn-v13');
       expect(row.content).toContain(v13[track].visits[0].primary.split('\n')[0]);
       expect(row.title).toBe(v13[track].name);
     }
-    // The reconcile writes nothing to the KB but the four lawn entries.
-    expect(tables.knowledge_base).toHaveLength(4);
+    // The reconcile writes nothing to the KB but the lawn entries: three, no bahia.
+    expect(tables.knowledge_base).toHaveLength(3);
 
     // Gate unset: stale now; the reconcile replaces every entry with the old program.
     const result = await withGate(undefined, () => KB.reconcileLawnProtocolKnowledge());
@@ -104,7 +113,9 @@ describe('the lawn protocol knowledge follows GATE_LAWN_V13 both ways', () => {
     }
     // Back on, and a second reconcile with nothing to change is a no-op.
     expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(true);
-    for (const track of TRACKS) expect(tagsOf(kbRow(tables, slugOf(track)))).toContain('lawn-v13');
+    for (const track of V13_TRACKS) expect(tagsOf(kbRow(tables, slugOf(track)))).toContain('lawn-v13');
+    // The old bahia entry the gate-off sync filed is gone again.
+    expect(kbRow(tables, slugOf('bahia'))).toBeUndefined();
     expect((await withGate('true', () => KB.reconcileLawnProtocolKnowledge())).stale).toBe(false);
   });
 
@@ -139,7 +150,7 @@ describe('a corpus failure after the entries were rewritten is retried, not forg
     const spy = jest.spyOn(ingest, 'syncCorpus').mockRejectedValueOnce(new Error('index down')).mockImplementation(real);
     await expect(withGate('true', () => KB.reconcileLawnProtocolKnowledge())).rejects.toThrow('index down');
     // The entries already match the gate, but no corpus marker was written.
-    expect(TRACKS.every((t) => tagsOf(kbRow(tables, slugOf(t))).includes('lawn-v13'))).toBe(true);
+    expect(V13_TRACKS.every((t) => tagsOf(kbRow(tables, slugOf(t))).includes('lawn-v13'))).toBe(true);
     expect(marker(tables, 'lawn_knowledge.protocol_corpus')).toBeUndefined();
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
     // Next tick: retried and completed, both markers written.
@@ -282,7 +293,7 @@ describe('a corpus failure after the entries were rewritten is retried, not forg
     expect((tables.system_settings || []).length).toBe(0);
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(true);
     await withGate('true', () => KB.reconcileLawnProtocolKnowledge());
-    expect(TRACKS.every((track) => kbRow(tables, slugOf(track)))).toBe(true);
+    expect(V13_TRACKS.every((track) => kbRow(tables, slugOf(track)))).toBe(true);
     expect(await withGate('true', () => KB.lawnKnowledgeStale())).toBe(false);
   });
 
