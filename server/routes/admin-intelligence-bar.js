@@ -2523,8 +2523,23 @@ A handful of write actions exist now (owner ruling 2026-09-28) — resolve/ignor
 // on EVERY admin context regardless of role (INFRA_TOOLS below), so this
 // filter is the ONLY place that keeps these out of a non-full-access list —
 // there is no per-module QUERY-only export to fall back to.
+// Core tools on EVERY admin page (EVERY_PAGE_TOOL_NAMES in
+// action-registry.js; owner IB history 10-06: asks failed with "no tool" on
+// the Customers page or dashboard). This legacy list carries the ones its
+// modules execute by name. The property writes are registry-only
+// (executePropertyTool refuses unless GATE_IB_PLATFORM), so they ride the
+// platform list only. Admin-only; never the tech or agent-estimate rails.
+// Only the offer widens: every write keeps its UI-confirm card.
+const EVERY_PAGE_TOOL_NAME_SET = new Set(ActionRegistry.EVERY_PAGE_TOOL_NAMES);
+function withEveryPageTools(tools, context, isAdmin) {
+  if (!isAdmin || context === 'tech' || context === 'agent_estimate') return tools;
+  const present = new Set(tools.map(t => t.name));
+  return [...tools, ...[...LEADS_TOOLS, ...PROCUREMENT_TOOLS, ...ESTIMATE_TOOLS, ...SCHEDULE_TOOLS]
+    .filter(t => EVERY_PAGE_TOOL_NAME_SET.has(t.name) && !present.has(t.name))];
+}
+
 function getToolsForContext(context, isAdmin = false, fullAccess = false) {
-  const tools = toolsForContextUngated(context, isAdmin, fullAccess)
+  const tools = withEveryPageTools(toolsForContextUngated(context, isAdmin, fullAccess), context, isAdmin)
     // Defense in depth: catches a future red tool reaching a context list
     // through a module that forgot its own write-free "query" export
     // (banking-tools.js / seo-tools.js already build one for the branches
