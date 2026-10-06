@@ -28,6 +28,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Camera, ClipboardCheck, FileText, Flag, Map, MessageSquare, Phone } from 'lucide-react';
 import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
+import { withPassLinks } from './passLinks';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
 import { formatETDateTime } from '../../lib/timezone';
@@ -117,6 +118,11 @@ const gateBtnStyle = {
   minHeight: 36, padding: '4px 12px', borderRadius: 6, fontSize: 14, cursor: 'pointer',
   border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.text,
 };
+
+// A visitor or QR pass the server marks as kind pass is a button that opens
+// the pass in a new tab; free-form notes and alerts keep their raw text.
+const passButtonStyle = { ...gateBtnStyle, display: 'inline-flex', alignItems: 'center', textDecoration: 'none', margin: '0 2px' };
+const passLinks = (text) => withPassLinks(text, { style: passButtonStyle });
 
 // Neighborhood gate codes from the visit (GATE_NEIGHBORHOOD_TECH_ACTIONS).
 // `gate` ({ visitId, request, onChanged }) is set when this stop's
@@ -332,10 +338,10 @@ function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
       <SectionLabel>Access codes</SectionLabel>
       {mine.map((r) => (
         <p key={r.id} style={factRowStyle}>
-          <span style={{ color: DARK.muted }}>{ACCESS_KIND_LABELS[r.kind] || 'Access code'}{r.life === 'visit' ? ' (this visit)' : ''}: </span>
+          <span style={{ color: DARK.muted }}>{ACCESS_KIND_LABELS[r.kind] || 'Access code'}{r.shared ? ' (neighborhood)' : ''}{r.life === 'visit' ? ' (this visit)' : ''}: </span>
           {r.code && <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>{r.code}</span>}
           {r.code && r.instructions ? ' · ' : ''}
-          {r.instructions}
+          {r.kind === 'pass' ? passLinks(r.instructions) : r.instructions}
         </p>
       ))}
     </>

@@ -1264,9 +1264,11 @@ router.get('/:id/edit-source', async (req, res, next) => {
         try {
           const OfferTiers = require('../services/estimate-offer-tiers');
           const { isCommercialEstimateData } = require('../services/estimate-delivery-options');
+          // A marked row already on the pest plan (lawn parked at send or
+          // removed by the customer) keeps its choice on reopen.
           return OfferTiers.offerTiersSaveEligibility({
             estData, commercial: isCommercialEstimateData(estData),
-          }).eligible === true;
+          }).eligible === true || OfferTiers.offerTiersMarkedPestOnlyState(estData);
         } catch (_) { return false; }
       })(),
       billByInvoice: !!estimate.bill_by_invoice,
@@ -1798,7 +1800,10 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null, preserve
     // lawn is the parked line and the customer lands on the pest plan with
     // Best one tap away. Parking pest instead would leave a lawn-only quote
     // and no picker.
-    const leadKey = require('../services/estimate-offer-tiers').offerTiersRequested(estData)
+    const OfferTiersForSend = require('../services/estimate-offer-tiers');
+    const leadKey = OfferTiersForSend.offerTiersGateLive()
+      && OfferTiersForSend.optOutRailGateLive()
+      && OfferTiersForSend.offerTiersRequested(estData)
       && recurringKeys.includes('pest_control')
       ? 'pest_control'
       : selectedOrder.find((k) => recurringKeys.includes(k));

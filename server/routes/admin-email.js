@@ -40,10 +40,11 @@ router.use(adminAuthenticateExceptOauthCallback);
 // OAuth flow
 // ============================================
 
-async function createOauthState(technician) {
+async function createOauthState(technician, staffToken) {
   return createStaffOAuthState({
     prefix: GMAIL_OAUTH_STATE_PREFIX,
     technician,
+    staffToken,
     ttlMs: GMAIL_OAUTH_STATE_TTL_MS,
     description: 'Gmail OAuth one-time state',
   });
@@ -52,7 +53,7 @@ async function createOauthState(technician) {
 // GET /oauth/auth-url — create signed OAuth URL for an authenticated admin
 router.get('/oauth/auth-url', async (req, res) => {
   try {
-    const state = await createOauthState(req.technician);
+    const state = await createOauthState(req.technician, req.staffToken);
     res.json({ url: gmailClient.getAuthUrl(state) });
   } catch (err) {
     logger.error(`[email] OAuth start error: ${err.message}`);
@@ -63,7 +64,7 @@ router.get('/oauth/auth-url', async (req, res) => {
 // GET /oauth/start — authenticated redirect fallback for non-SPA callers
 router.get('/oauth/start', async (req, res) => {
   try {
-    const state = await createOauthState(req.technician);
+    const state = await createOauthState(req.technician, req.staffToken);
     res.redirect(gmailClient.getAuthUrl(state));
   } catch (err) {
     logger.error(`[email] OAuth start error: ${err.message}`);

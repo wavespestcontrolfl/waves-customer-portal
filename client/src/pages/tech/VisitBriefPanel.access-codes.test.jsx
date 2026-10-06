@@ -40,6 +40,45 @@ describe('VisitBriefPanel access codes', () => {
     expect(request).toHaveBeenCalledWith('/admin/access-codes/visits/svc-1');
   });
 
+  it('shows a pass link as an Open visitor pass button, never as raw text', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [
+      code({ id: 'p1', kind: 'pass', code: null, instructions: 'View your pass: https://pass.example.com/v/abc123.' }),
+      code({ id: 'p2', kind: 'pass', code: null, instructions: 'Scan the QR at the guard house' }),
+      code({ id: 'p3', kind: 'pass', code: null, instructions: 'Not secure http://pass.example.com/v/x and javascript:alert(1)' }),
+    ] }));
+    renderPanel(request);
+    const button = await screen.findByRole('link', { name: 'Open visitor pass' });
+    expect(button).toHaveAttribute('href', 'https://pass.example.com/v/abc123');
+    expect(button).toHaveAttribute('target', '_blank');
+    expect(button).toHaveAttribute('rel', 'noopener noreferrer');
+    expect(screen.queryByText(/pass\.example\.com\/v\/abc123/)).toBeNull();
+    expect(screen.getByText(/View your pass:/)).toBeInTheDocument();
+    expect(screen.getByText(/Scan the QR at the guard house/)).toBeInTheDocument();
+    // Only an https link becomes a button; an http link stays text.
+    expect(screen.getAllByRole('link', { name: 'Open visitor pass' })).toHaveLength(1);
+    expect(screen.getByText(/http:\/\/pass\.example\.com\/v\/x/)).toBeInTheDocument();
+  });
+
+  it('keeps raw text for a note that is not a pass, and for alerts, even when they hold a link', async () => {
+    const service = { ...SERVICE, propertyAlerts: [{ type: 'gate', text: 'Gate: https://pass.example.com/v/hood1 (neighborhood)' }] };
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [
+      code({ id: 'o1', kind: 'other', code: null, instructions: 'Directions: https://maps.example.com/gate' }),
+    ] }));
+    render(<VisitBriefPanel stop={{ ...stop, services: [service], primary: service }} detail={{ status: 'ready', byService: {} }} request={request} />);
+    expect(await screen.findByText(/https:\/\/maps\.example\.com\/gate/)).toBeInTheDocument();
+    expect(screen.getByText(/https:\/\/pass\.example\.com\/v\/hood1/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open visitor pass' })).toBeNull();
+  });
+
+  it('labels a pass shared by a neighbor and shows its link as the button', async () => {
+    const request = vi.fn(() => Promise.resolve({ accessCodes: [
+      code({ id: 'p9', kind: 'pass', code: null, instructions: 'View your pass: https://pass.example.com/v/n1', shared: true }),
+    ] }));
+    renderPanel(request);
+    expect(await screen.findByText('Visitor pass (neighborhood):')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open visitor pass' })).toHaveAttribute('href', 'https://pass.example.com/v/n1');
+  });
+
   it('shows nothing, with no error, when the list is refused', async () => {
     const request = vi.fn(() => Promise.reject(Object.assign(new Error('nope'), { status: 404 })));
     renderPanel(request);

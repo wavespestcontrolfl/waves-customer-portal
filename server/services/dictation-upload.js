@@ -49,4 +49,18 @@ function dictationClipType(file) {
   return { baseType, filename: DICTATION_AUDIO_TYPES.get(baseType) };
 }
 
-module.exports = { DICTATION_AUDIO_TYPES, DICTATION_MAX_BYTES, DICTATION_TOO_LARGE, dictationBaseType, dictationAudioUpload, dictationClipType };
+// Paid transcription: ONE clip budget per staff bucket (the same key as every
+// other paid-LLM limiter — rate-limit-key.js) shared by every dictation route
+// (the visit upload in tech-track.js and server dictation in tech-dictation.js),
+// so a stuck retry loop cannot bill unbounded by spreading clips across routes.
+// 40 clips in 15 minutes is far above one person's honest cadence.
+const dictationLimiter = require('express-rate-limit')({
+  windowMs: 15 * 60 * 1000,
+  max: 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many dictation clips. Type for now.' },
+});
+
+module.exports = { DICTATION_AUDIO_TYPES, DICTATION_MAX_BYTES, DICTATION_TOO_LARGE, dictationBaseType, dictationAudioUpload, dictationClipType, dictationLimiter };

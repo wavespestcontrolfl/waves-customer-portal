@@ -124,7 +124,14 @@ async function main() {
       // service and property type: keep it only when this extraction names the
       // same; otherwise judge on the persisted, unwaived verdict.
       const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
-      const rawAv = (rawAvWaived !== rawAvUnwaived && waiverInputs(priorEnriched) !== waiverInputs(e)) ? rawAvUnwaived : rawAvWaived;
+      // A business whole-building waiver is recomputed against this extraction's pin and
+      // the transcript instead (waiverCarriesToCandidate).
+      const carries = require('../services/call-triage-flags').waiverCarriesToCandidate(rawAvUnwaived, e, {
+        transcript: r.transcription,
+        outbound: String(r.direction || '').toLowerCase().startsWith('outbound'),
+        scalarInputsMatch: !(waiverInputs(priorEnriched) !== waiverInputs(e)),
+      });
+      const rawAv = (rawAvWaived !== rawAvUnwaived && !carries) ? rawAvUnwaived : rawAvWaived;
       const addrKey = (sa) => [streetCompareKey(sa?.street_line_1 || ''), String(sa?.street_line_2 || '').toLowerCase().trim(), String(sa?.city || '').toLowerCase().trim(), String(sa?.postal_code || '').trim()].join('|');
       // Recovery reconstruction (codex round-12 P2): a recovered call routed
       // on the recovery's accepting verdict, not the persisted unresolvable

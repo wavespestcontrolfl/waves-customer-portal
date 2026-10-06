@@ -4959,7 +4959,24 @@ Staff authentication (`server/routes/admin-auth.js`, mounted at
 `/forgot-password` (5 per 15 min) and `/reset-password` (10 per 15 min) key
 on `unauthenticatedAuthLimitKey` with production-only limiters;
 `/change-password`, `/register` (requireAdmin), and `/me` require the staff
-bearer. OAuth callbacks validate a one-time `state` nonce, never bearer (see
+bearer. Two-step sign-in (`GATE_ADMIN_MFA`, dark): for an enrolled account
+`/login` returns `{ mfaRequired, challengeToken }` (a 5-minute signed JWT of
+type `staff_mfa_challenge`, never an access token) instead of a session, and
+the public `POST /login/mfa` (a generic 404 while the gate is dark, answered in
+`server/index.js` before the login limiter; live, the same `authLimiter` by
+prefix, a 5-wrong-code per-account lockout and no-store/noindex headers; a malformed body and an
+unknown, expired, revoked or ineligible challenge all answer the same generic
+404, only a wrong code for a live challenge answers 401 `MFA_INVALID`) takes that challenge plus an authenticator or recovery
+code and is the only path that mints an access token carrying `mfa: true`;
+`/reset-password` on an enrolled account returns `{ passwordReset,
+signInRequired }` with no session. The native WavesPay app (`ios/WavesPay`,
+`API.login` / `API.loginMfa`) decodes the challenge and asks for the code; an
+older WavesPay build cannot sign an enrolled account in. A session that signed
+in with a recovery code carries `mfaRecoveryUntil` (30 minutes out; a password
+change keeps it, never extends it) and until then may replace the
+authenticator without a second code. The `/mfa*` self-service
+routes require the staff bearer, are fenced on the session's credential
+version, and 404 while the gate is off. OAuth callbacks validate a one-time `state` nonce, never bearer (see
 the AGENTS.md admin OAuth rule).
 `/.well-known/apple-app-site-association` + `/.well-known/assetlinks.json`
 (static universal-link association JSON for the native app shell — no auth,
@@ -5039,7 +5056,8 @@ start + 2h only, and the range is derived server-side with
 dispatch-owned unreviewed booking, or an inactive/cancelled account.
 `canMoveOnline` (dead-link guard, C3/C6, 2026-09-28) is an additional
 boolean, false when the visit itself already starts inside the self-serve
-MOVE notice window (`SELF_SERVE_MOVE_NOTICE_HOURS`, `visitInsideMoveNoticeWindow`)
+MOVE notice window (`SELF_SERVE_MOVE_NOTICE_HOURS`, `visitInsideMoveNoticeWindow`,
+which honors the office move approval above)
 — the CTA's own destination would refuse the move — and the client hides
 the card when either is falsy. The separate missed-visit "pick a new time"
 recovery link (a different, `state: 'past'` branch of this same GET) is
@@ -5220,7 +5238,10 @@ into a book window and a move window 2026-09-28, `SELF_SERVE_MOVE_NOTICE_HOURS`,
 default 24, independent of `SELF_SERVE_NOTICE_HOURS` — no fallback to it):
 GET answers `not_reschedulable` with reason `self_serve_notice` for a visit
 that itself currently starts within the MOVE window (a MISSED visit is being
-rebooked and is exempt); no offered target/destination starts within the
+rebooked and is exempt, and so is a visit whose
+`scheduled_services.office_move_approved_for` equals its current start — the
+admin composer stamps that when the office inserts the reschedule link inside
+the window, owner 2026-10-06, and any move ends it); no offered target/destination starts within the
 BOOK window (`SELF_SERVE_NOTICE_HOURS`, default 24); and POST refuses such a
 visit with 409 code
 `SELF_SERVE_NOTICE`. POST is a WRITE with two owner-authorized
@@ -6564,8 +6585,26 @@ best: { rows, oneTimeTotal, waveGuardTier } }`, `rows` being
 row is NOT in are this rail's own dry run (a removal in `best`, an add-back
 in `pest_only`), so a tile never shows a price the rail would not persist;
 any refusal or error omits the block. The dry-run response carries
-`perApplication` (the per-line terms the `previewBasis` digest binds) as
-data. The commit sets `show_one_time_option` on a marked row from the lawn
+`perApplication` (the per-line terms the `previewBasis` digest binds) and
+`oneTimeChoiceAmount` (ONLY while `GATE_ESTIMATE_OFFER_TIERS` is live — off,
+the response is byte-identical to before: the one-time choice the
+POST-change row would offer and accept, resolved by the same
+`oneTimeChoiceAmountForEstimate` acceptance uses on the post-change result,
+so a removal that reallocates a discount is already netted; the Good tile
+shows it in the as-quoted state, and the `previewBasis` digest binds it so a
+one-time floor or multiplier change between preview and commit refuses the
+commit) as data. The
+picker's member judgement follows the accept's own order for an unlinked
+estimate: the shared `resolveGroupedEstimateOwnerId` (an accepted sibling's
+live customer) first, then the phone match; strict and fail-closed. The same
+judgement applies to the plain service opt-out rail for an UNLINKED
+estimate: `/data` stamps no `removable` and no `addable` / staff add-back
+offer, and the write answers 409 `reprice_unavailable` when the prospective
+owner is an active member; the write fences that expected owner (the
+customer-comms lock) before the estimate lock, re-resolves the owner under
+the group-accept lock, aborts 409 on any identity drift, and locks the
+customer row FOR UPDATE, like a linked one. The
+staff compensation restore of an undelivered send is exempt, as before. The commit sets `show_one_time_option` on a marked row from the lawn
 line: on when lawn is removed (customer, or the staff send-time park) and
 the delivery validator allows the option on the repriced row; always off
 when lawn is added back, with the gate on or off — the one-time option never

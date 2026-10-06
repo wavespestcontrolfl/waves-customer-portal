@@ -66,19 +66,22 @@ const LEGACY_PHOTO_FLOOR = Object.freeze({ minPhotos: 3 });
  * or tier (a WaveGuard member's one-time job is not a program visit), by the
  * report's own rule (lawn-program-line.resolveProgramVisit): not a callback, a
  * real (not synthesized) completion profile whose billing type is recurring and
- * whose key is a recurring lawn plan key. A customer billed per application is
- * 'per_application' whatever the visit's key, since those visits start blank.
+ * whose key is a recurring lawn plan key. Billing per application is how most
+ * program customers pay (prod 10-06: 28 of 34 recurring lawn customers), and the
+ * plan engine treats it as a membership lane, so a per-application customer's
+ * recurring lawn plan visit is 'recurring' like any other; their other visits
+ * (callbacks, non-plan keys) stay 'per_application'.
  */
 function lawnFastVisitType(profile, billingMode, isCallback = false) {
   // A failed billing read cannot assert any type (a per-application customer would
   // read as recurring), so it is 'unknown' and gets no program defaults.
   if (billingMode === BILLING_MODE_UNKNOWN) return 'unknown';
-  if (billingMode === 'per_application') return 'per_application';
+  const notProgram = billingMode === 'per_application' ? 'per_application' : 'other';
   const billingType = String(profile?.billingType || '').toLowerCase();
   if (billingType === 'one_time' || billingMode === 'one_time') return 'one_time';
-  if (isCallback === true || !profile || profile.synthesized) return 'other';
+  if (isCallback === true || !profile || profile.synthesized) return notProgram;
   if (billingType === 'recurring' && require('./service-report/lawn-program-line').isRecurringLawnPlanKey(profile.serviceKey)) return 'recurring';
-  return 'other';
+  return notProgram;
 }
 
 /**
@@ -490,7 +493,7 @@ async function loadAssessmentPhotos(assessmentId, knex, readFailures) {
  * opening the sheet.
  */
 async function loadPlannedProducts(svc, knex, visitType, readFailures) {
-  const empty = (unavailable = null) => ({ source: null, items: [], unavailable });
+  const empty = (unavailable = null) => ({ source: null, items: [], addOns: [], unavailable });
   if (visitType === 'unknown') return empty('billing_mode_lookup_failed');
   // buildPlanForService keys the program off the CUSTOMER (tier / billing mode),
   // so it can return the seasonal recipe for a member's one-time or
@@ -499,34 +502,47 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures) {
   try {
     if (!require('./lawn-completion-defaults').lawnCompletionDefaultsEnabled()) return empty();
     const plan = await require('./waveguard-plan-engine').buildPlanForService(svc.id, { db: knex, includeCompletionDefaults: true });
-    const items = Array.isArray(plan?.completionDefaults?.items) ? plan.completionDefaults.items : [];
-    const withProduct = items.filter((item) => item?.product?.id);
-    const rows = await loadCatalogRows(withProduct.map((item) => String(item.product.id)), knex);
+    const withProduct = (list) => (Array.isArray(list) ? list : []).filter((item) => item?.product?.id);
+    const items = withProduct(plan?.completionDefaults?.items);
+    const addOns = withProduct(plan?.completionDefaults?.addOns);
+    const rows = await loadCatalogRows([...items, ...addOns].map((item) => String(item.product.id)), knex);
+    const plannedItem = (item) => {
+      const entry = productRuleEntry(String(item.product.id), rows.get(String(item.product.id)) || null);
+      return {
+        productId: item.product.id,
+        name: item.product.name || entry.name,
+        applicationMethod: item.applicationMethod || null,
+        amount: item.mix?.amount ?? null,
+        amountUnit: item.mix?.amountUnit ?? null,
+        // The treated area and planned rate exactly as the full form's completion defaults
+        // prefill them (lawnPlanSelections reads mix.treatedSqft in square feet and
+        // mix.ratePer1000 / mix.rateUnit): the same plan item, nothing computed here. null
+        // when the plan carries none (never invented); /complete then asks for the area.
+        treatedSqft: item.mix?.treatedSqft ?? null,
+        areaUnit: item.mix?.treatedSqft != null ? 'sqft' : null,
+        ratePer1000: item.mix?.ratePer1000 ?? null,
+        rateUnit: item.mix?.rateUnit ?? null,
+        approvedForReport: entry.approvedForReport,
+        wateringRule: entry.rule,
+        wateringSummary: entry.ruleSummary,
+        mowHoldDays: entry.mowHoldDays,
+      };
+    };
     return {
       source: 'plan',
       unavailable: null,
-      items: withProduct.map((item) => {
-        const entry = productRuleEntry(String(item.product.id), rows.get(String(item.product.id)) || null);
-        return {
-          productId: item.product.id,
-          name: item.product.name || entry.name,
-          applicationMethod: item.applicationMethod || null,
-          amount: item.mix?.amount ?? null,
-          amountUnit: item.mix?.amountUnit ?? null,
-          // The treated area and planned rate exactly as the full form's completion defaults
-          // prefill them (lawnPlanSelections reads mix.treatedSqft in square feet and
-          // mix.ratePer1000 / mix.rateUnit): the same plan item, nothing computed here. null
-          // when the plan carries none (never invented); /complete then asks for the area.
-          treatedSqft: item.mix?.treatedSqft ?? null,
-          areaUnit: item.mix?.treatedSqft != null ? 'sqft' : null,
-          ratePer1000: item.mix?.ratePer1000 ?? null,
-          rateUnit: item.mix?.rateUnit ?? null,
-          approvedForReport: entry.approvedForReport,
-          wateringRule: entry.rule,
-          wateringSummary: entry.ruleSummary,
-          mowHoldDays: entry.mowHoldDays,
-        };
-      }),
+      items: items.map(plannedItem),
+      // The visit's month (1-12, ET), for the add-on row's title.
+      month: Number(String(etCalendarDayOf(svc.scheduled_date) || '').slice(5, 7)) || null,
+      // The window's opt-in products as the same plan built them (the visit's
+      // substitute, the plan's mix and method), offered as one-tap add-ons, with
+      // the protocol's own words for when they go down and the plan's gate notes.
+      addOns: addOns.map((item) => ({
+        ...plannedItem(item),
+        line: typeof item.raw === 'string' && item.raw.trim() ? item.raw.trim() : null,
+        substituteFor: item.substitution?.originalProductName || null,
+        gateNotes: (Array.isArray(item.gateNotes) ? item.gateNotes : []).map((note) => note?.text).filter((text) => typeof text === 'string' && text),
+      })),
     };
   } catch (err) {
     logger.warn(`[lawn-fast] planned products unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);

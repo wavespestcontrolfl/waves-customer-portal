@@ -59,7 +59,9 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
   // One customer, one call that ended about three days ago, one open promise.
   async function world({ kind = 'other', party = 'waves', customer = true, human_state = null, source = 'ai', status = 'open', callExtra = {}, commitmentExtra = {} } = {}) {
     seq += 1;
-    const n = `${Date.now().toString().slice(-5)}${String(seq).padStart(3, '0')}`;
+    // Never let the clock digits spell 4111: the card-number witness test
+    // asserts /4111/ never reaches the provider (CI flake on #6057, 41115217).
+    const n = `${Date.now().toString().slice(-5)}${String(seq).padStart(3, '0')}`.replace(/4111/g, '4101');
     const phone = `+1555${n.padStart(7, '0').slice(-7)}`;
     let customerId = null;
     if (customer) {

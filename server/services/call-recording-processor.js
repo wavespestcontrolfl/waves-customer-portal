@@ -27,7 +27,8 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers');
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { isLikelyE164 } = require('../utils/phone');
+const { isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
+const { rejectImpossibleSpokenPhones } = require('./call-spoken-phone-guard');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
@@ -115,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -158,12 +159,62 @@ function commercialDictatedBookingActive(call = {}, gates = {}) {
   const live = gates.commercialLive || (() => require('../config/feature-gates').callCommercialDictatedBookingLive?.());
   return enabled('callAgentCommitBooking') === true && !isOutboundCall(call) && live() === true;
 }
+// GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING (owner ruling 2026-10-06): a Waves Assessment
+// staff book on the call with no price discussed, OUTBOUND callback calls included.
+// Needs GATE_CALL_AGENT_COMMIT_BOOKING too (the kill switch of the commercial
+// exception) and is read at call time. Independent of the priced lane's gate; outbound
+// calls qualify only as lead callback bridges; the staff-identity proof outbound needs lives in
+// call-commercial-dictated-booking.js, reached through canAutoRoute from every lane.
+// ONE predicate for both processor lanes AND buildFailOpenRoutingContext (the offline
+// audits), like commercialDictatedBookingActive (codex #5377 r6).
+function commercialAssessmentBookingActive(call = {}, gates = {}) {
+  // A pass that already read the predicate hands that one value back (gates.captured).
+  if (typeof gates.captured === 'boolean') return gates.captured;
+  const enabled = gates.isEnabled || isEnabled;
+  const live = gates.assessmentLive || (() => require('../config/feature-gates').callCommercialAssessmentBookingLive?.());
+  // Inbound is always eligible; outbound only for the lead callback bridge (the
+  // server-written metadata.type 'lead_auto_bridge') AND only when outbound booking
+  // creation itself is enabled (outboundAutoBookingEnabled), never another outbound call.
+  return enabled('callAgentCommitBooking') === true && live() === true
+    && (!isOutboundCall(call) || (isLeadCallbackBridge(call) && outboundAutoBookingEnabled(gates)));
+}
+// What an OUTBOUND call needs before the processor may create its appointment at all
+// (GATE_CALL_OUTBOUND_BOOKING and V2 routing in enforce mode: outside it the confidence,
+// address and HOA-commercial gates never run). The creation path below and the assessment
+// lane read THIS one predicate, so routing never clears a hold for a call whose booking
+// creation would skip, and the audits agree with production (codex #6046 r3 P1). The new
+// gate never authorizes outbound creation by itself.
+function outboundAutoBookingEnabled(gates = {}) {
+  const enabled = gates.isEnabled || isEnabled;
+  const v2Enforced = typeof gates.v2Routing === 'boolean' ? gates.v2Routing : (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED);
+  return !!enabled('callOutboundBooking') && v2Enforced === true;
+}
+// The outbound call is the form-lead callback bridge: its server-written metadata
+// (the same record resolveCallContactPhone reads) says type 'lead_auto_bridge'.
+function isLeadCallbackBridge(call = {}) {
+  let metadata = call.metadata || {};
+  try { if (typeof metadata === 'string') metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  return metadata?.type === 'lead_auto_bridge';
+}
+// The canAutoRoute options of that lane: {} when it is off (so the options shape every
+// lane and audit compares is unchanged gate-off), else the switch, the call direction
+// (outbound adds the staff-identity proof) and the catalog check, built only when on.
+// `v1Views` are the V1 records the no-price decision also reads for any price signal (the
+// merged record and the one before V2 adoption): the same views commercialAssessmentBookableFor gets.
+function commercialAssessmentRoutingOptions(call, makeBookable, gates = {}, v1Views = []) {
+  if (!commercialAssessmentBookingActive(call, gates)) return {};
+  return {
+    commercialAssessmentBooking: true, commercialOutbound: isOutboundCall(call), commercialAssessmentBookable: makeBookable(),
+    commercialAssessmentV1Views: v1Views.filter(Boolean),
+  };
+}
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
+const { isAssessmentServiceRow } = require('./assessment-booking');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -1107,6 +1158,10 @@ function isUsableContactPhone(value) {
   const v = String(value || '').trim();
   if (!v || PHONE_SENTINEL_WORDS.test(v)) return false;
   if (!isLikelyE164(v)) return false;
+  // A spoken number with an impossible NANP area code (173-...)
+  // is a mishearing, never a line: saving it as the contact number sent texts to
+  // a stranger (audited call 2026-10-01). The ANI fallback takes over instead.
+  if (isImpossibleNanpPhone(v)) return false;
   const digits = v.replace(/\D/g, '');
   return !PHONE_SENTINELS.has(digits) && !PHONE_SENTINELS.has(digits.replace(/^1/, ''));
 }
@@ -1247,6 +1302,23 @@ function slotElapsedAtBookingTime(scheduledDate, windowStart = null) {
   // is "00:00" for the elapsed comparison (codex #4890 r8 P2).
   const start = windowStart ? String(windowStart).replace(/^24:/, '00:') : windowStart;
   return sameDayWindowElapsed(scheduledDate, start);
+}
+
+// Spelled-email trust (owner ruling 2026-10-05) applies only to an address no
+// customer record already holds — the ownership gate the decoder adopt and
+// the domain-typo adopt use, with no customer exempted. An address the primary extractor captured
+// itself never went through those adopt paths, so it is checked here before
+// the read-back card (and with it the first-touch hold) is dropped. Fails
+// closed: a failed lookup keeps the card.
+async function spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail }) {
+  if (!spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)) return false;
+  // No customer is exempt: the canonical customer is not known yet (Step 3
+  // can still reassign a shared-phone call), so ANY record already holding
+  // the address keeps the read-back card.
+  const ownedByAnyone = await require('./email-bounce-recovery')
+    .correctedAddressOwnedByOther(String(extracted.email).trim().toLowerCase(), null)
+    .catch(() => true);
+  return !ownedByAnyone;
 }
 
 // codex #4919 round-9 P2: start_before_call and slot_elapsed_at_booking_time
@@ -2150,6 +2222,33 @@ function auditCommercialDictatedOptions({ call, gates, transcript, extracted, bo
   };
 }
 
+// The same for the no-price assessment lane: the trusted-label gate, the routed
+// transcript and the call's own start (what the grounding reads), plus the lane's options.
+function auditCommercialAssessmentOptions({ call, gates, transcript, extracted, bookableServices }) {
+  // The shared part is the priced lane's own builder (one source for the label gate, the
+  // routed transcript and the call start); the priced switch and quote check are dropped.
+  const { commercialDictatedBooking: _priced, commercialQuoteBookable: _quote, ...shared } = auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices });
+  const routedTranscript = shared.transcript;
+  const persisted = extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction);
+  // The persisted record is the merged V1 view; the pre-adoption view is rebuilt from the
+  // recorded V1 fields the same way auditCommercialAssessmentBookableFor does (the record keeps
+  // the V1 SERVICE fields only, so a price V2 adoption replaced is visible through the merged
+  // view and the V2 extraction, never from the pre-adoption record).
+  const recorded = persisted?.pre_adoption_service_fields;
+  const hasRecord = !!recorded && typeof recorded === 'object' && !Array.isArray(recorded) && Object.keys(recorded).length > 0;
+  return {
+    ...shared,
+    ...commercialAssessmentRoutingOptions(call, () => auditCommercialAssessmentBookableFor({
+      extracted: persisted,
+      transcription: routedTranscript,
+      services: bookableServices,
+    }), gates, [persisted, hasRecord ? { ...persisted, ...recorded } : null, hasPreAdoptionPriceRecord(persisted) ? { ...persisted, ...persisted.pre_adoption_price_fields } : null]),
+    // A row with no pre-adoption PRICE record (processed before it was written, or with the lane
+    // off) has an unknown V1 price view: the no-price decision holds it rather than over-admit.
+    ...(commercialAssessmentBookingActive(call, gates) ? { commercialAssessmentPriceRecordMissing: !hasPreAdoptionPriceRecord(persisted) } : {}),
+  };
+}
+
 function buildFailOpenRoutingContext({
   call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
   unclearServiceAssessmentEnabled = false,
@@ -2194,6 +2293,7 @@ function buildFailOpenRoutingContext({
       // off the call row every audit already has. Absent when the gate is off,
       // so the options shape the audits compare is unchanged gate-off.
       ...(commercialDictatedBookingActive(call, gates) ? auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices }) : {}),
+      ...(commercialAssessmentBookingActive(call, gates) ? auditCommercialAssessmentOptions({ call, gates, transcript, extracted, bookableServices }) : {}),
     },
   };
 }
@@ -3321,6 +3421,10 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // An on-site contact the opt-in ask will actually go to (the caller's
   // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
   // unstamped: the slot is where the ask's phone and the later YES stamp live.
+  // A second person's number no NANP line can have is never saved (audited
+  // call 2026-10-01: a misheard +1 173-... sent the household's texts to a
+  // stranger). Refused here, at the one slot writer, like #6028's intake rule.
+  if (contact && contact.phone && isImpossibleNanpPhone(contact.phone)) contact = { ...contact, phone: null };
   const onSiteOnly = !!contact && contact.wants_notifications !== true && onSiteAskEligible && onSiteOptinAskTrigger(contact);
   if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOnly)) return 'skipped_no_intent';
   // Nobody asked for this person to get notifications: their opt-in covers
@@ -3744,6 +3848,7 @@ const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'home_sell
 // caller and the opt-in service.
 function onSiteOptinAskTrigger(contact) {
   if (!contact || !String(contact.phone || '').trim()) return false;
+  if (isImpossibleNanpPhone(contact.phone)) return false;
   if (!ON_SITE_NOTIFY_ROLES.has(String(contact.on_site_role || contact.role || '').trim().toLowerCase())) return false;
   return contact.wants_appointment_texts === true || contact.on_site === true;
 }
@@ -6677,6 +6782,20 @@ function preAdoptionServiceFields(preAdoptionExtracted = {}, adoptedFields = [])
     .map((key) => [key, preAdoptionExtracted?.[key] ?? null]));
 }
 
+// The V1 PRICE signals the no-price assessment decision reads (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING).
+// V2-primary adoption can clear or replace them, so the pre-adoption values ride on the canonical
+// extraction as their OWN record, `pre_adoption_price_fields`, never inside CALL_SERVICE_VIEW_FIELDS /
+// pre_adoption_service_fields (other code reads those). Every key is recorded (null when absent) so
+// an empty record still proves the V1 leg said nothing about price (codex #6046 r5 P1).
+const PRE_ADOPTION_PRICE_FIELDS = Object.freeze(['quoted_price', 'quoted_price_usd', 'price', 'prices', 'price_amount_usd', 'price_amount_max_usd', 'quote_requested', 'quote_promised']);
+function preAdoptionPriceFields(preAdoptionExtracted = {}) {
+  return Object.fromEntries(PRE_ADOPTION_PRICE_FIELDS.map((key) => [key, preAdoptionExtracted?.[key] ?? null]));
+}
+const hasPreAdoptionPriceRecord = (extracted) => {
+  const rec = extracted?.pre_adoption_price_fields;
+  return !!rec && typeof rec === 'object' && !Array.isArray(rec);
+};
+
 // The offline audits' commercial quote check (buildFailOpenRoutingContext): the live
 // check's views rebuilt from the persisted extraction. The pre-adoption view is the
 // canonical record with the recorded V1 service values restored. A row with a V2
@@ -6690,6 +6809,52 @@ function auditCommercialQuoteBookableFor({ extracted = {}, transcription = '', s
   return (quoted, v2Extraction = null) => {
     if (!hasRecord && isV2Extraction(v2Extraction)) return false;
     return check(quoted, v2Extraction);
+  };
+}
+
+// The no-price assessment lane's catalog check (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING):
+// `(v2Extraction) => boolean`, true only when EVERY view of the call's service (the V1
+// record before V2 adoption, the merged fields, the V2-overridden view the booking
+// books — the views commercialQuoteBookableFor judges) resolves to the Waves
+// Assessment catalog row. FAILS CLOSED: no catalog, a view that resolves elsewhere or
+// to nothing, a re-service revisit, any error.
+function commercialAssessmentBookableFor({ extracted = {}, preAdoptionExtracted = null, transcription = '', services = null } = {}) {
+  return (v2Extraction = null) => {
+    try {
+      if (!Array.isArray(services) || !services.length) return false;
+      const views = [];
+      if (preAdoptionExtracted) views.push(preAdoptionExtracted);
+      views.push(extracted || {});
+      const finalView = v2BookingServiceView(extracted || {}, v2Extraction);
+      if (finalView) views.push(finalView);
+      if (views.some((view) => hasCallReServiceIntent(view))) return false;
+      const serviceNames = services.map((sv) => sv.name).filter(Boolean);
+      return views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every((view) => {
+        const coarse = resolveSchedulableCallService(view, { transcription });
+        const row = resolveCallBookingCatalogService({
+          extracted: view,
+          transcription,
+          services,
+          coarseServiceLabel: coarse.ok ? coarse.service : null,
+        });
+        return isAssessmentServiceRow(row);
+      });
+    } catch (_e) {
+      return false;
+    }
+  };
+}
+
+// The audits' version (buildFailOpenRoutingContext): the live views rebuilt from the
+// persisted extraction; a V2 row with no pre-adoption record holds (codex #5377 r17 P1).
+function auditCommercialAssessmentBookableFor({ extracted = {}, transcription = '', services = null } = {}) {
+  const recorded = extracted?.pre_adoption_service_fields;
+  const hasRecord = !!recorded && typeof recorded === 'object' && !Array.isArray(recorded);
+  const preAdoptionExtracted = hasRecord && Object.keys(recorded).length ? { ...extracted, ...recorded } : null;
+  const check = commercialAssessmentBookableFor({ extracted, preAdoptionExtracted, transcription, services });
+  return (v2Extraction = null) => {
+    if (!hasRecord && isV2Extraction(v2Extraction)) return false;
+    return check(v2Extraction);
   };
 }
 
@@ -6764,6 +6929,27 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
   const out = results[results.length - 1].waived;
   out.wholeStructureUnitWaived.service = results[results.length - 1].service;
   return out;
+}
+
+// Business whole-building unit waiver for one call
+// (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT; caller checks the gate). No
+// service allowlist: the owner's ruling (2026-10-06) is about the ADDRESS, a
+// business building the caller owns or occupies whole. The V2 extraction judges
+// the language (property.whole_building_occupancy plus a pinned caller quote);
+// the pure rule in call-triage-flags.js verifies it against the labeled
+// transcript and Google's business verdict. Returns the SAME verdict object
+// unless the waiver applies.
+function businessWholeBuildingUnitWaiverForCall({ addressValidation, v2Extraction = null, transcription = '', outbound = false } = {}) {
+  const property = v2Extraction?.property || {};
+  return applyBusinessWholeBuildingUnitWaiver(addressValidation, {
+    enabled: true,
+    propertyType: property.property_type,
+    wholeBuildingOccupancy: property.whole_building_occupancy,
+    wholeBuildingFinal: property.whole_building_occupancy_final,
+    evidence: v2Extraction?.evidence,
+    transcript: transcription,
+    outbound,
+  });
 }
 
 async function resolveDefaultCallBookingTechnician(conn = db) {
@@ -8426,6 +8612,10 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // Cross-call threading: prior call from this number, so a continuation
     // completes the earlier record instead of restarting from nothing.
     priorCall: opts.priorCall,
+    // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: also read the shape where staff propose the
+    // slot, the caller says yes and staff commit. Absent (false) off, so the prompt is
+    // byte-identical off.
+    ...(opts.agentProposedSlotCommitment === true ? { agentProposedSlotCommitment: true } : {}),
   });
 
   // Cross-provider dispatch with the model-output schema validated INSIDE
@@ -8472,7 +8662,7 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     extractionModel: res.model || CALL_EXTRACTION_ROUTE.primary.model,
     // The catalog block is part of the rendered prompt, so the stamped
     // version must carry its hash or cohorts mix under one version.
-    promptVersion: extractionPromptVersion(opts.bookableServiceNames),
+    promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true }),
   });
 }
 
@@ -10084,7 +10274,12 @@ const CallRecordingProcessor = {
     const bookableServiceNames = bookableCallServices.map((s) => s.name).filter(Boolean);
     // Catalog-aware provenance: the catalog block is part of the rendered
     // V2 prompt, so every stamp for this call must carry its hash.
-    const v2PromptVersion = extractionPromptVersion(bookableServiceNames);
+    // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING, read ONCE for this pass (codex #6046 r2 P1): the
+    // V2 prompt block, the prompt-version stamps, the persisted metadata and both routing
+    // lanes all use this one value, so a flip mid-pass can never stamp a cohort the prompt
+    // did not render (or route on a block the prompt never carried).
+    const assessmentLaneActive = commercialAssessmentBookingActive(call);
+    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive });
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the
@@ -10172,7 +10367,21 @@ const CallRecordingProcessor = {
           // Who is staff and who is the customer follows from who dialed —
           // the prompt's greeting rule needs it (codex #4618 r1 P1).
           callDirection: isOutboundCall(call) ? 'outbound' : 'inbound',
+          // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING (owner ruling 2026-10-06): read the
+          // agent-proposed slot shape for the booking this lane can now clear.
+          ...(assessmentLaneActive ? { agentProposedSlotCommitment: true } : {}),
         });
+        // An impossible spoken caller number (no NANP line has an area
+        // code starting 0 or 1) is dropped from the V2 extraction
+        // before ai_extraction_enriched is serialized below; the V1 record is
+        // already cleaned by its intake normalizer. Fail-open.
+        try {
+          if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
+            rejectImpossibleSpokenPhones({ v2Extraction: v2Result.extraction });
+          }
+        } catch (guardErr) {
+          logger.warn(`[call-proc] spoken-phone guard (V2) skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
+        }
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
         // recorded for the promotion-readiness gate and reused by the routing
@@ -10322,6 +10531,8 @@ const CallRecordingProcessor = {
     // quote check reads (codex #5377 r17 P1).
     if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       extracted = { ...extracted, pre_adoption_service_fields: preAdoptionServiceFields(preAdoptionExtracted, serviceFieldsAdopted) };
+      // Only while the no-price assessment lane is live (gate off: the persisted record is unchanged).
+      if (assessmentLaneActive) extracted = { ...extracted, pre_adoption_price_fields: preAdoptionPriceFields(preAdoptionExtracted) };
     }
 
     // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
@@ -10984,7 +11195,12 @@ const CallRecordingProcessor = {
     // service is resolved the way the booking below resolves it (catalog row
     // first, coarse label only when no catalog row matched). Gate off, or any
     // non-qualifying call, returns the verdict object untouched.
-    if (v2AddressValidation && isEnabled('callWholeStructureNoUnit') && isMissingUnitNumber(v2AddressValidation)) {
+    // Business whole building (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT, owner
+    // ruling 2026-10-06): the same rewrite for a business address when the
+    // caller says they own or occupy the WHOLE building. It rides the same
+    // open-card guard and persisted marker (reason 'business_whole_building'),
+    // and runs only when the whole-structure rule did not already waive the call.
+    if (v2AddressValidation && (isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit')) && isMissingUnitNumber(v2AddressValidation)) {
       try {
         // A reprocess of a call an earlier pass parked on the unit ask: the
         // open missing_unit_number card (and its clarify draft and merged
@@ -10999,16 +11215,26 @@ const CallRecordingProcessor = {
         if (openUnitCard) {
           logger.info(`[call-proc] Whole-structure unit waiver skipped for ${maskSid(callSid)}: an open missing_unit_number card still owes a human verdict`);
         } else {
-          const wsAv = wholeStructureUnitWaiverForCall({
-            addressValidation: v2AddressValidation,
-            extracted,
-            preAdoptionExtracted,
-            transcription,
-            services: bookableCallServices,
-            property: v2Result?.extraction?.property,
-            v2Extraction: v2Result?.extraction,
-            unclearServiceAssessment: unclearServiceAssessmentActive(),
-          });
+          let wsAv = isEnabled('callWholeStructureNoUnit')
+            ? wholeStructureUnitWaiverForCall({
+              addressValidation: v2AddressValidation,
+              extracted,
+              preAdoptionExtracted,
+              transcription,
+              services: bookableCallServices,
+              property: v2Result?.extraction?.property,
+              v2Extraction: v2Result?.extraction,
+              unclearServiceAssessment: unclearServiceAssessmentActive(),
+            })
+            : v2AddressValidation;
+          if (wsAv === v2AddressValidation && isEnabled('callBusinessWholeBuildingNoUnit')) {
+            wsAv = businessWholeBuildingUnitWaiverForCall({
+              addressValidation: v2AddressValidation,
+              v2Extraction: v2Result?.extraction,
+              transcription,
+              outbound: isOutboundCall(call),
+            });
+          }
           if (wsAv !== v2AddressValidation) {
             // Stamp the pass's waiver on the PERSISTED verdict (status stays
             // the original) so the offline audits can rebuild the verdict the
@@ -11018,7 +11244,7 @@ const CallRecordingProcessor = {
               ai_address_validation: JSON.stringify({ ...v2AddressValidation, wholeStructureUnitWaived: wsAv.wholeStructureUnitWaived }),
               updated_at: new Date(),
             });
-            logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (service ${wsAv.wholeStructureUnitWaived.service})`);
+            logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (${wsAv.wholeStructureUnitWaived.reason || `service ${wsAv.wholeStructureUnitWaived.service}`})`);
             v2AddressValidation = wsAv;
           }
         }
@@ -11263,6 +11489,11 @@ const CallRecordingProcessor = {
                 extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
               }),
             } : {}),
+            // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING (owner ruling 2026-10-06): a Waves
+            // Assessment staff booked with no price discussed, outbound included. {} when off.
+            ...commercialAssessmentRoutingOptions(call, () => commercialAssessmentBookableFor({
+              extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
+            }), { captured: assessmentLaneActive }, [extracted, preAdoptionExtracted]),
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
             callStartedAt: callStartedAt(call) || call.created_at,
@@ -11316,6 +11547,17 @@ const CallRecordingProcessor = {
           const finalFlags = mergeTriageFlags(modelFlags, deterministicFlags).filter((f) => !onFileSatisfied.includes(f));
           if (onFileSatisfied.length) {
             logger.info(`[call-proc] Address flags satisfied by the on-file address for ${maskSid(callSid)}: ${onFileSatisfied.join(', ')} (no card)`);
+          }
+          // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
+          // cards only; finalFlags, the route decision and the routing
+          // verdict keep every flag.
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1 }).dropped);
+          if (unneededCards.size) {
+            logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
+            // Only cards this pass would file are skipped. Cards an earlier
+            // pass filed keep their filing-time snapshot of the ask and are
+            // left to the evidence sweep — the rolling extraction can change
+            // under them.
           }
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
@@ -11392,7 +11634,7 @@ const CallRecordingProcessor = {
           // don't block. Without this, promoting DRIVES_ROUTING would silence the
           // identity signals the shadow bridge used to surface. onConflict dedups
           // against the blocked-branch inserts below.
-          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
+          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f) && !unneededCards.has(f)).slice(0, 10)) {
             if (flag === 'missing_unit_number') clarifyUnitOwed = true;
             await db('triage_items')
               .insert(buildTriageItem({
@@ -11503,13 +11745,13 @@ const CallRecordingProcessor = {
             const blockingReasons = (routingResult.appointmentBlockingFlags && routingResult.appointmentBlockingFlags.length)
               ? routingResult.appointmentBlockingFlags
               : (noSchedulingAsk ? [] : [routingResult.reason || 'routing_rejected']);
-            const triageReasons = blockingReasons;
+            const triageReasons = blockingReasons.filter((f) => !unneededCards.has(f));
             // A held scheduling CHANGE (cancel / reschedule / coordination on
             // an existing visit) is owed work. The card files below, but
             // review_status is driven by bridgeNeedsConfirmation alone, so the
             // call itself looked fully processed (2026-09-02..08 audit: a
             // cancellation, two reschedules and a re-treat with no owner).
-            if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
+            if (triageReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({
                 callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress,
@@ -11524,7 +11766,7 @@ const CallRecordingProcessor = {
             // set, so without this loop it would appear on no card at all.
             // Mirrors the allowed branch's fail-open advisory loop; onConflict
             // dedups against any same-reason row.
-            for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
+            for (const f of (routingResult.failedOpenFlags || []).filter((x) => !unneededCards.has(x)).slice(0, 10)) {
               try {
                 await db('triage_items')
                   .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
@@ -11552,7 +11794,7 @@ const CallRecordingProcessor = {
             // (phone via ANI, garbled email, on-file address, low confidence) —
             // book-and-flag, never book-and-hide (owner directive).
             if (routingResult.failedOpenFlags?.length) {
-              for (const f of routingResult.failedOpenFlags) {
+              for (const f of routingResult.failedOpenFlags.filter((x) => !unneededCards.has(x))) {
                 try {
                   await db('triage_items')
                     .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
@@ -11746,6 +11988,12 @@ const CallRecordingProcessor = {
             && !needsConfirmation.includes('email_unverified')
             && !needsConfirmation.includes('email_invalid')) {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
+        // Spelled-email trust (owner ruling 2026-10-05): one spelling heard,
+        // and it is the address being saved — no read-back card, no hold.
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {
+          const at = needsConfirmation.indexOf('email_unverified');
+          if (at !== -1) needsConfirmation.splice(at, 1);
         }
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
@@ -11955,6 +12203,12 @@ const CallRecordingProcessor = {
             && !emailReasons.includes('email_unverified')
             && !emailReasons.includes('email_invalid')) {
           emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
+        // Spelled-email trust (owner ruling 2026-10-05) — same rule as the
+        // shadow branch.
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail })) {
+          const at = emailReasons.indexOf('email_unverified');
+          if (at !== -1) emailReasons.splice(at, 1);
         }
         if (correctedEmail) {
           // Same ownership gate as the shadow-bridge site above (fails closed),
@@ -13949,7 +14203,13 @@ const CallRecordingProcessor = {
       // dedup, cross-customer, empty slot). A full set of slots does not end
       // the scan: a later party already on record still gets its on-site ask.
       const lastTen = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-      for (const secondaryEntry of callSecondaryContacts) {
+      for (const resolvedEntry of callSecondaryContacts) {
+      // One cleaned entry drives the slot write AND every ask/send below: an
+      // impossible number (a misheard +1 173-...) is never saved or texted,
+      // even when the contact is still saved by its email.
+      const secondaryEntry = resolvedEntry && resolvedEntry.phone && isImpossibleNanpPhone(resolvedEntry.phone)
+        ? { ...resolvedEntry, phone: null }
+        : resolvedEntry;
       let onSitePath = false;
       try {
         // Pre-persist: only entries that could be asked need the slot-phone read.
@@ -16893,8 +17153,7 @@ const CallRecordingProcessor = {
     // so a call those gates would have vetoed books live — containment the
     // removed review hold used to provide (Codex #3361 r4 P1). Shadow/legacy
     // routing keeps the pre-gate behavior: outbound bookings stay manual.
-    const outboundAutoBooking = isOutboundCall(call) && isEnabled('callOutboundBooking')
-      && CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED;
+    const outboundAutoBooking = isOutboundCall(call) && outboundAutoBookingEnabled();
     // The v2 TCPA verdict is only computed in ENFORCE routing mode — but
     // outbound consent is never implied UNLESS this outbound call cleared
     // the return-message eligibility gate above (owner ruling 2026-09-26,
@@ -21667,6 +21926,10 @@ const CallRecordingProcessor = {
               extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
             }),
           } : {}),
+          // Mirrors the enforce lane (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING).
+          ...commercialAssessmentRoutingOptions(call, () => commercialAssessmentBookableFor({
+            extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
+          }), { captured: assessmentLaneActive }, [extracted, preAdoptionExtracted]),
           callStartedAt: callStartedAt(call) || call.created_at,
           // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
           unclearServiceAssessment: unclearServiceAssessmentActive(),
@@ -23132,6 +23395,7 @@ CallRecordingProcessor._test = {
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   wholeStructureUnitWaiverForCall,
+  businessWholeBuildingUnitWaiverForCall,
   forcedAssessmentBooking,
   demoteOpenTriageCards,
   applyUnclearServiceTranscriptVeto,
@@ -23222,9 +23486,15 @@ CallRecordingProcessor._test = {
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
   commercialDictatedBookingActive,
+  commercialAssessmentBookingActive,
+  outboundAutoBookingEnabled,
+  commercialAssessmentRoutingOptions,
+  commercialAssessmentBookableFor,
   commercialQuoteBookableFor,
   auditCommercialQuoteBookableFor,
+  auditCommercialAssessmentBookableFor,
   preAdoptionServiceFields,
+  preAdoptionPriceFields,
   resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,
