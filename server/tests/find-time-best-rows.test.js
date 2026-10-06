@@ -262,3 +262,27 @@ describe('the day list matches the chips (Codex #6045 r7)', () => {
     jest.dontMock('../services/weather-forecast');
   });
 });
+
+describe('Codex #6045 r8', () => {
+  const { hintTravelOption, summarizeHintDays } = require('../services/scheduling/find-time-hints');
+
+  test('capacity road pricing only for a summary plan that answers the rows', () => {
+    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
+    try {
+      expect(hintTravelOption({ hint: true, bestRows: true, plan: { summary: true } })).toEqual({ providerTravel: 'hint' });
+      expect(hintTravelOption({ hint: true, bestRows: true, plan: { summary: false } })).toEqual({ providerTravel: false });
+      expect(hintTravelOption({ hint: true, bestRows: false, plan: { summary: true } })).toEqual({ providerTravel: false });
+      expect(hintTravelOption({ hint: false, bestRows: true, plan: { summary: true } })).toEqual({});
+    } finally {
+      delete process.env.GATE_BEST_TIMES_ROAD_TIMES;
+    }
+    expect(hintTravelOption({ hint: true, bestRows: true, plan: { summary: true } })).toEqual({ providerTravel: false });
+  });
+
+  test("a capacity slot's own source survives into the day rows", () => {
+    const [day] = summarizeHintDays([
+      { date: '2026-10-08', start_time: '12:00', end_time: '13:00', detour_minutes: 30, drive_in_minutes: 18, drive_source: 'google' },
+    ], { from: '2026-10-08', to: '2026-10-08' });
+    expect(day.hours[0]).toMatchObject({ drive_in_minutes: 18, drive_source: 'google' });
+  });
+});

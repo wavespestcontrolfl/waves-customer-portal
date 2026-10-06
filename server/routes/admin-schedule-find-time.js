@@ -35,6 +35,7 @@ const logger = require('../services/logger');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech, hintSearchPlan, buildHintSummary, loadSummaryDayFacts,
+  hintTravelOption,
 } = require('../services/scheduling/find-time-hints');
 const { gateEnvValue } = require('../config/feature-gates');
 const { geocodeAddress, ensureCustomerGeocoded, buildAddress } = require('../services/geocoder');
@@ -352,10 +353,9 @@ router.post('/', async (req, res) => {
       // only changes the engine's final slice, never its work.
       topN: hint ? Number.POSITIVE_INFINITY : requestedTopN,
       // A hint fires on every pick in every staff form; it must not spend
-      // the Google drive-time allowance customer booking depends on.
-      // New Appointment's rows with GATE_BEST_TIMES_ROAD_TIMES: a capacity
-      // search prices its simulated legs on the picker's own allowance.
-      ...(hint ? { providerTravel: bestRows === true && gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES') ? 'hint' : false } : {}),
+      // the Google drive-time allowance customer booking depends on (the
+      // picker's own allowance only, find-time-hints.js hintTravelOption).
+      ...hintTravelOption({ hint, bestRows, plan }),
       // undefined = the engine's own defaults ([] / exact-minute starts).
       excludeServiceIds,
       // Existing-visit staff hints share their route check with the edit
