@@ -115,7 +115,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, applyBusinessWholeBuildingUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -6921,6 +6921,27 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
   return out;
 }
 
+// Business whole-building unit waiver for one call
+// (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT; caller checks the gate). No
+// service allowlist: the owner's ruling (2026-10-06) is about the ADDRESS, a
+// business building the caller owns or occupies whole. The V2 extraction judges
+// the language (property.whole_building_occupancy plus a pinned caller quote);
+// the pure rule in call-triage-flags.js verifies it against the labeled
+// transcript and Google's business verdict. Returns the SAME verdict object
+// unless the waiver applies.
+function businessWholeBuildingUnitWaiverForCall({ addressValidation, v2Extraction = null, transcription = '', outbound = false } = {}) {
+  const property = v2Extraction?.property || {};
+  return applyBusinessWholeBuildingUnitWaiver(addressValidation, {
+    enabled: true,
+    propertyType: property.property_type,
+    wholeBuildingOccupancy: property.whole_building_occupancy,
+    wholeBuildingFinal: property.whole_building_occupancy_final,
+    evidence: v2Extraction?.evidence,
+    transcript: transcription,
+    outbound,
+  });
+}
+
 async function resolveDefaultCallBookingTechnician(conn = db) {
   const configuredId = String(process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_ID || '').trim();
   if (configuredId) {
@@ -11153,7 +11174,12 @@ const CallRecordingProcessor = {
     // service is resolved the way the booking below resolves it (catalog row
     // first, coarse label only when no catalog row matched). Gate off, or any
     // non-qualifying call, returns the verdict object untouched.
-    if (v2AddressValidation && isEnabled('callWholeStructureNoUnit') && isMissingUnitNumber(v2AddressValidation)) {
+    // Business whole building (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT, owner
+    // ruling 2026-10-06): the same rewrite for a business address when the
+    // caller says they own or occupy the WHOLE building. It rides the same
+    // open-card guard and persisted marker (reason 'business_whole_building'),
+    // and runs only when the whole-structure rule did not already waive the call.
+    if (v2AddressValidation && (isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit')) && isMissingUnitNumber(v2AddressValidation)) {
       try {
         // A reprocess of a call an earlier pass parked on the unit ask: the
         // open missing_unit_number card (and its clarify draft and merged
@@ -11168,16 +11194,26 @@ const CallRecordingProcessor = {
         if (openUnitCard) {
           logger.info(`[call-proc] Whole-structure unit waiver skipped for ${maskSid(callSid)}: an open missing_unit_number card still owes a human verdict`);
         } else {
-          const wsAv = wholeStructureUnitWaiverForCall({
-            addressValidation: v2AddressValidation,
-            extracted,
-            preAdoptionExtracted,
-            transcription,
-            services: bookableCallServices,
-            property: v2Result?.extraction?.property,
-            v2Extraction: v2Result?.extraction,
-            unclearServiceAssessment: unclearServiceAssessmentActive(),
-          });
+          let wsAv = isEnabled('callWholeStructureNoUnit')
+            ? wholeStructureUnitWaiverForCall({
+              addressValidation: v2AddressValidation,
+              extracted,
+              preAdoptionExtracted,
+              transcription,
+              services: bookableCallServices,
+              property: v2Result?.extraction?.property,
+              v2Extraction: v2Result?.extraction,
+              unclearServiceAssessment: unclearServiceAssessmentActive(),
+            })
+            : v2AddressValidation;
+          if (wsAv === v2AddressValidation && isEnabled('callBusinessWholeBuildingNoUnit')) {
+            wsAv = businessWholeBuildingUnitWaiverForCall({
+              addressValidation: v2AddressValidation,
+              v2Extraction: v2Result?.extraction,
+              transcription,
+              outbound: isOutboundCall(call),
+            });
+          }
           if (wsAv !== v2AddressValidation) {
             // Stamp the pass's waiver on the PERSISTED verdict (status stays
             // the original) so the offline audits can rebuild the verdict the
@@ -11187,7 +11223,7 @@ const CallRecordingProcessor = {
               ai_address_validation: JSON.stringify({ ...v2AddressValidation, wholeStructureUnitWaived: wsAv.wholeStructureUnitWaived }),
               updated_at: new Date(),
             });
-            logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (service ${wsAv.wholeStructureUnitWaived.service})`);
+            logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (${wsAv.wholeStructureUnitWaived.reason || `service ${wsAv.wholeStructureUnitWaived.service}`})`);
             v2AddressValidation = wsAv;
           }
         }
@@ -23332,6 +23368,7 @@ CallRecordingProcessor._test = {
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
   wholeStructureUnitWaiverForCall,
+  businessWholeBuildingUnitWaiverForCall,
   forcedAssessmentBooking,
   demoteOpenTriageCards,
   applyUnclearServiceTranscriptVeto,

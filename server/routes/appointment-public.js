@@ -243,7 +243,7 @@ async function loadByToken(token, conn = db) {
       's.id', 's.customer_id', 's.technician_id', 's.status', 's.scheduled_date',
       's.window_start', 's.window_end', 's.service_type', 's.is_recurring',
       's.recurring_parent_id', 's.recurring_pattern', 's.reschedule_token', 's.visit_id',
-      's.source_action', 's.customer_confirmed', 's.property_id',
+      's.source_action', 's.customer_confirmed', 's.property_id', 's.office_move_approved_for',
       // c.first_name is deliberately NOT selected — see the payload comment:
       // this token is shared with whoever the notification reached, so the
       // account holder's name must not travel with it.

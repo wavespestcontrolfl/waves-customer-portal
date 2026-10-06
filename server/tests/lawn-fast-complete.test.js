@@ -197,7 +197,7 @@ describe('buildLawnFastContext', () => {
     });
     expect(ctx).toMatchObject({
       ok: true, eligible: true, reason: null, visitType,
-      plannedProducts: { source: null, items: [] },
+      plannedProducts: { source: null, items: [], addOns: [] },
       assessment: { exists: false, id: null, confirmed: false },
       photoStatus: null,
       previousFrontPhoto: null,
@@ -256,6 +256,32 @@ describe('buildLawnFastContext', () => {
     expect(JSON.stringify(ctx)).not.toMatch(/epa_reg|post_application_watering/);
   });
 
+  test('a recurring program visit carries the plan\'s opt-in products as add-ons, in the planned items\' shape plus the plan\'s words', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    buildPlanForService.mockResolvedValue({
+      completionDefaults: {
+        items: [{ product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast', mix: { amount: 20, amountUnit: 'lb' } }],
+        addOns: [
+          {
+            product: { id: P_HERB, name: 'Test Weed Spray' }, applicationMethod: 'spot_treatment', raw: '  If sedge: Test Weed Spray ',
+            substitution: { originalProductName: 'Celsius WG' },
+            gateNotes: [{ key: 'tankMixWith', severity: 'note', text: 'Tank mix with NIS.' }, { key: 'x', text: '' }],
+            mix: { amount: 0.4, amountUnit: 'oz', ratePer1000: 0.085, rateUnit: 'oz', treatedSqft: 4000 },
+          },
+          { product: { name: 'No id' }, mix: {} },
+        ],
+      },
+    });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    expect(ctx.plannedProducts.items.map((item) => item.productId)).toEqual([P_GRAN]);
+    expect(ctx.plannedProducts.addOns).toEqual([expect.objectContaining({
+      productId: P_HERB, applicationMethod: 'spot_treatment', amount: 0.4, amountUnit: 'oz', ratePer1000: 0.085, rateUnit: 'oz', treatedSqft: 4000, areaUnit: 'sqft',
+      line: 'If sedge: Test Weed Spray', substituteFor: 'Celsius WG', gateNotes: ['Tank mix with NIS.'], approvedForReport: true,
+    })]);
+    expect(ctx.plannedProducts.month).toBe(10);
+  });
+
   describe('program defaults only on a recurring program appointment', () => {
     const PLAN = {
       completionDefaults: {
@@ -278,14 +304,14 @@ describe('buildLawnFastContext', () => {
     test('a member\'s one-time appointment starts blank', async () => {
       const ctx = await ctxFor(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }), 'monthly_membership');
       expect(ctx.visitType).toBe('one_time');
-      expect(ctx.plannedProducts).toEqual({ source: null, items: [] });
+      expect(ctx.plannedProducts).toEqual({ source: null, items: [], addOns: [] });
       expect(buildPlanForService).not.toHaveBeenCalled();
     });
 
     test('a per-application visit starts blank', async () => {
       const ctx = await ctxFor(PROFILE(), 'per_application');
       expect(ctx.visitType).toBe('per_application');
-      expect(ctx.plannedProducts).toEqual({ source: null, items: [] });
+      expect(ctx.plannedProducts).toEqual({ source: null, items: [], addOns: [] });
       expect(buildPlanForService).not.toHaveBeenCalled();
     });
 
@@ -307,7 +333,7 @@ describe('buildLawnFastContext', () => {
       const ctx = await ctxFor(PROFILE(), null);
       expect(ctx.visitType).toBe('recurring');
       expect(buildPlanForService).toHaveBeenCalledTimes(1);
-      expect(ctx.plannedProducts).toEqual({ source: 'plan', items: [] });
+      expect(ctx.plannedProducts).toEqual({ source: 'plan', items: [], addOns: [], month: 10 });
     });
   });
 
@@ -316,7 +342,7 @@ describe('buildLawnFastContext', () => {
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
     buildPlanForService.mockRejectedValue(new Error('plan down'));
     const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()) });
-    expect(ctx).toMatchObject({ eligible: true, plannedProducts: { source: null, items: [] } });
+    expect(ctx).toMatchObject({ eligible: true, plannedProducts: { source: null, items: [], addOns: [] } });
   });
 
   test('an existing confirmed assessment, with the advisory photo status', async () => {

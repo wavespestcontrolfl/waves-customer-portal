@@ -122,6 +122,19 @@ function flatView(extraction) {
     service_address_is_primary_residence: typeof property.service_address_is_primary_residence === 'boolean'
       ? property.service_address_is_primary_residence
       : null,
+    // Whole-building occupancy (schema 1.23.0): the extraction's judgement that
+    // the caller owns/leases/occupies the ENTIRE building at the service
+    // address. null when absent (every older row). It decides one thing: a
+    // business address with no unit is not held for a unit ask
+    // (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT), so replay variance watches it.
+    whole_building_occupancy: typeof property.whole_building_occupancy === 'boolean'
+      ? property.whole_building_occupancy
+      : null,
+    // The extraction's final judgement of the above over the whole call (schema
+    // 1.23.0): unhedged, uncorrected, unshared, not a question or a condition.
+    whole_building_occupancy_final: typeof property.whole_building_occupancy_final === 'boolean'
+      ? property.whole_building_occupancy_final
+      : null,
     // Caller-stated unit bedroom count (schema 1.10.0) — the bedroom-band
     // pricing basis; replay variance watches it (FIELD_GROUPS medium).
     bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
