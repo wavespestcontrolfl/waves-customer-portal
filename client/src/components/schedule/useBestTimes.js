@@ -205,6 +205,61 @@ async function searchSummary(search, { date, today, pickedArgs, bestRows }) {
   return { ...data, summary: { ...data.summary, best: { ...data.summary.best, week: weekRow.week || [], week_covered: true } } };
 }
 
+// The request fields every find-time hint search shares; `undefined` drops
+// a field from the JSON.
+function hintRequestBody({
+  arrivalWindows, moveScope, serviceId, propertyId, customerId, address, lat, lng,
+  durationMinutes, durationEdit, technicianId, excludeKey, sameDayFloorMin,
+}) {
+  return {
+    hint: true,
+    arrivalWindows,
+    moveScope: moveScope || undefined,
+    // Existing-visit surfaces pass serviceId so the server ranks at
+    // the VISIT's stamped address (secondary/rental properties),
+    // not the customer's primary home.
+    serviceId: serviceId || undefined,
+    // The edit form's pending Service address selection — the
+    // server scores at THAT property (what the save will stamp),
+    // not the visit's stored address.
+    propertyId: propertyId || undefined,
+    customerId,
+    address: address || undefined,
+    lat: lat ?? undefined,
+    lng: lng ?? undefined,
+    durationMinutes,
+    // Only the edit form saves `durationMinutes` as the visit's
+    // estimate; a move keeps the stored one, so the arrival
+    // simulation must not adopt the requested span there.
+    durationEdit: durationEdit ? true : undefined,
+    technicianId: technicianId || undefined,
+    excludeServiceIds: excludeKey ? excludeKey.split(',') : undefined,
+    // Appointment windows always start on the hour (owner directive),
+    // so hint chips snap to it too.
+    slotStepMinutes: 60,
+    // A picker's own same-day floor (minutes from midnight) — the
+    // server applies it while choosing, so a single-answer range
+    // search is the best hour that clears it.
+    sameDayFloorMin: Number.isInteger(sameDayFloorMin) ? sameDayFloorMin : undefined,
+  };
+}
+
+// The plain three-line hint (no summary): the picked day's best hours and
+// verdict, and the single best date + hour from `rangeKey` when asked.
+async function searchPlainHint(search, { date, rangeKey, pickedArgs, scopedToTech }) {
+  const [day, range] = await Promise.all([
+    search({ dateFrom: date, dateTo: date, topN: 3, ...pickedArgs }),
+    rangeKey ? search({ dateFrom: rangeKey, dateTo: addDays(rangeKey, RANGE_DAYS), topN: 1 }) : Promise.resolve(null),
+  ]);
+  const normalized = normalizeDay(day, scopedToTech);
+  return {
+    bestTimes: normalized.bestTimes,
+    picked: normalized.picked,
+    pickedByTech: normalizePickedByTech(day?.pickedByTech),
+    bestInRange: range?.slots?.length ? mapSlot(range.slots[0], scopedToTech) : null,
+  };
+}
+
 // `address` / `lat` / `lng` pin the search to a specific service address (the
 // create modal's property picker); the server prefers coords, then geocodes
 // the address, and only falls back to the customer's primary when both are
@@ -288,35 +343,10 @@ export function useBestTimes({
           headers: authHeaders(),
           signal: controller.signal,
           body: JSON.stringify({
-            hint: true,
-            arrivalWindows,
-            moveScope: moveScope || undefined,
-            // Existing-visit surfaces pass serviceId so the server ranks at
-            // the VISIT's stamped address (secondary/rental properties),
-            // not the customer's primary home.
-            serviceId: serviceId || undefined,
-            // The edit form's pending Service address selection — the
-            // server scores at THAT property (what the save will stamp),
-            // not the visit's stored address.
-            propertyId: propertyId || undefined,
-            customerId,
-            address: address || undefined,
-            lat: lat ?? undefined,
-            lng: lng ?? undefined,
-            durationMinutes,
-            // Only the edit form saves `durationMinutes` as the visit's
-            // estimate; a move keeps the stored one, so the arrival
-            // simulation must not adopt the requested span there.
-            durationEdit: durationEdit ? true : undefined,
-            technicianId: technicianId || undefined,
-            excludeServiceIds: excludeKey ? excludeKey.split(',') : undefined,
-            // Appointment windows always start on the hour (owner directive),
-            // so hint chips snap to it too.
-            slotStepMinutes: 60,
-            // A picker's own same-day floor (minutes from midnight) — the
-            // server applies it while choosing, so a single-answer range
-            // search is the best hour that clears it.
-            sameDayFloorMin: Number.isInteger(sameDayFloorMin) ? sameDayFloorMin : undefined,
+            ...hintRequestBody({
+              arrivalWindows, moveScope, serviceId, propertyId, customerId, address, lat, lng,
+              durationMinutes, durationEdit, technicianId, excludeKey, sameDayFloorMin,
+            }),
             ...extra,
           }),
         });
@@ -348,17 +378,12 @@ export function useBestTimes({
           // Hints gated altogether: the fallbacks would be gated too.
           if (Date.now() < hintsGatedUntil) { setChecking(false); return; }
         }
-        const [day, range] = await Promise.all([
-          search({ dateFrom: date, dateTo: date, topN: 3, ...pickedArgs }),
-          rangeKey ? search({ dateFrom: rangeKey, dateTo: addDays(rangeKey, RANGE_DAYS), topN: 1 }) : Promise.resolve(null),
-        ]);
+        const plain = await searchPlainHint(search, { date, rangeKey, pickedArgs, scopedToTech });
         if (controller.signal.aborted) return;
-        const scoped = !!technicianId;
-        const normalized = normalizeDay(day, scoped);
-        setBestTimes(normalized.bestTimes);
-        setPicked(normalized.picked);
-        setPickedByTech(normalizePickedByTech(day?.pickedByTech));
-        setBestInRange(range?.slots?.length ? mapSlot(range.slots[0], scoped) : null);
+        setBestTimes(plain.bestTimes);
+        setPicked(plain.picked);
+        setPickedByTech(plain.pickedByTech);
+        setBestInRange(plain.bestInRange);
       } catch {
         // Advisory only — a failed search just shows no hint (and drops a
         // held summary, unless a newer pick already owns the state).
