@@ -2216,6 +2216,15 @@ postgres('access codes section', () => {
         expect(await access.suggestCustomer(trx, 'Pass for 100 Main St N, Apt 5')).toBeNull();
         expect(await access.suggestCustomer(trx, 'Pass for 100 Main St N, Apt 5, Lakewood Ranch')).toBe(id);
       });
+      test('a text naming two addresses suggests nobody, even when only one is a home', async () => {
+        await home('100 Main St N', 'Apt 5');
+        expect(await access.suggestCustomer(trx, `${BODY} Also 300 Pine Ave, FL 34202: code 4821`)).toBeNull();
+      });
+      test('a ZIP in the text needs the same ZIP on the home; a home with none on file is not suggested', async () => {
+        const id = await home('100 Main St N', 'Apt 5');
+        await trx('customer_properties').where({ customer_id: id }).update({ zip: null });
+        expect(await access.suggestCustomer(trx, BODY)).toBeNull();
+      });
       test('a ZIP qualifies only the address it follows', async () => {
         await home('100 Main St N', 'Apt 5');
         const two = 'Pass for 100 Main St N, Apt 5, FL 34231 and 200 Oak St, FL 34202';

@@ -2552,8 +2552,7 @@ router.get('/', async (req, res, next) => {
     const offset = (page - 1) * limit;
     // A customer found through a second home shows that home (the access-code
     // link picker names the address the text gave).
-    const matchedHome = filters.search ? matchedHomeAddressSql(db, filters.search) : null;
-    if (matchedHome) query = query.select(matchedHome);
+    query = query.select(matchedHomeAddressSql(db, filters.search));
     const customers = await query.limit(limit).offset(offset);
 
     // Pipeline counts

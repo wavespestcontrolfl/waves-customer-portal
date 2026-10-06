@@ -438,7 +438,9 @@ const cityNamed = (span, city) => {
 async function suggestedHome(conn, body) {
   const none = { customerId: null, propertyId: null };
   const { addresses } = addressesIn(body);
-  if (!addresses.length) return none;
+  // A text that names more than one address may carry a code for each, and
+  // every row would get the one suggestion: the office picks instead.
+  if (new Set(addresses.map((a) => `${a.number} ${a.street.join(' ')} ${a.unit || ''}`)).size !== 1) return none;
   const numbers = [...new Set(addresses.map((a) => a.number))].slice(0, 5);
   const homes = await conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
     .where('p.active', true).whereNull('c.deleted_at')
@@ -448,12 +450,13 @@ async function suggestedHome(conn, body) {
     const [number, ...street] = addressWords(stripTrailingUnit(home.address_line1));
     const unit = unitKey(streetEmbeddedUnitKey(home.address_line1) || home.address_line2);
     const zip = normalizeZip(home.zip);
-    // Street, unit and ZIP of the SAME address in the text. With no ZIP to
-    // compare, the home's city must be written after the street: the same
-    // street number and name exist in more than one town.
+    // Street, unit and ZIP of the SAME address in the text. A ZIP in the text
+    // must equal the home's (a home with no ZIP on file cannot be checked, so
+    // it is not suggested). With no ZIP in the text, the home's city must be
+    // written after the street: the same street exists in more than one town.
     return addresses.some((a) => a.number === number && a.street.join(' ') === street.join(' ')
       && (!a.unit || a.unit === unit)
-      && (a.zip && zip ? a.zip === zip : cityNamed(a.span, home.city)));
+      && (a.zip ? a.zip === zip : cityNamed(a.span, home.city)));
   });
   return matches.length === 1 ? { customerId: matches[0].customer_id, propertyId: matches[0].id } : none;
 }

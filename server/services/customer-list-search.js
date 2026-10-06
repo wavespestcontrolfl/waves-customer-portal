@@ -133,10 +133,10 @@ function homeMatch(value) {
 
 // The address of the home the search matched, so a customer found through a
 // second home shows that home, not the address on the customer row. The
-// primary home first; null when no home matched.
+// primary home first; NULL when no home matched or there is no search.
 function matchedHomeAddressSql(knex, value) {
-  const home = homeMatch(value);
-  if (!home) return null;
+  const home = value ? homeMatch(value) : null;
+  if (!home) return knex.raw('NULL::text as matched_home_address');
   return knex.raw(`(SELECT CONCAT_WS(', ', cp.address_line1, NULLIF(cp.address_line2, ''), cp.city)
     FROM customer_properties cp WHERE ${home.sql}
     ORDER BY cp.is_primary DESC NULLS LAST, cp.id LIMIT 1) as matched_home_address`, home.bindings);
