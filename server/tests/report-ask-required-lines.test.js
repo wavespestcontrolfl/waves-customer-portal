@@ -1448,3 +1448,30 @@ describe('answer screen, Codex round 32', () => {
     expect(exposureSafetyLine('My dog took a mouthful of spray.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 33 (+ #6038 round 9)', () => {
+  const data = pestData({ applications: [{ product: { name: 'Alpine WSG', active_ingredient: 'Dinotefuran 40%' }, applicationArea: 'Outside', method: 'spray' }] });
+  const facts = buildReportAskFacts({ question: 'q', data });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'q', data, facts });
+
+  test('every active product mention is checked', () => {
+    expect(ruleAnswerReason(data, [], 'applied', 'Did you use Alpine WSG? Did you spray Roundup?')).toBe('unrecorded_product');
+  });
+
+  test.each(['The treatment took place inside.', 'We performed an interior treatment.', 'The treatment was done in the kitchen.'])('a noun-led place claim must fit the record: %s', (answer) => {
+    expect(ask(answer)).toBe('scope_claim');
+  });
+
+  test('"uses X as its active ingredient" is checked', () => {
+    expect(ask('It uses arsenic as its active ingredient.')).toBe('ingredient_claim');
+    expect(ask('It uses dinotefuran as its active ingredient.')).toBeNull();
+  });
+
+  test.each(["We've scheduled a follow-up.", 'A follow-up has been scheduled.', 'Your follow-up has been booked.'])('a completed-scheduling promise is rejected: %s', (answer) => {
+    expect(ask(answer)).toBe('states_a_date');
+  });
+
+  test.each(['My dog took a nibble of bait', 'My dog took a gulp of pesticide'])('ingestion nouns: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+});
