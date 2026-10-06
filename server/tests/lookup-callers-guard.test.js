@@ -92,12 +92,17 @@ describe('property-lookup callers declare their scope decision', () => {
 
   test('every performPropertyLookup call site passes lookupOptionsFor(...)', () => {
     const offenders = [];
+    // Actual lookup INVOCATIONS per file, counted independently of the
+    // lookupOptionsFor(...) occurrences the id test counts: one callerOptions
+    // reused for a second lookup in the same file is a second purpose too.
+    const invocations = {};
     for (const file of files) {
       const r = rel(file);
       const src = fs.readFileSync(file, 'utf8');
       for (const name of lookupAliases(src)) for (const { line, n } of callLines(src, name)) {
         // The alias binding itself ("= lookup || require(...).performPropertyLookup") is not a call.
         if (new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line)) continue;
+        invocations[r] = (invocations[r] || 0) + 1;
         // The options argument is lookupOptionsFor(...) on the line, or a
         // `callerOptions` variable built from it just above.
         const above = src.split('\n').slice(Math.max(0, n - 8), n).join('\n');
@@ -129,6 +134,12 @@ describe('property-lookup callers declare their scope decision', () => {
       }
     }
     expect(offenders).toEqual([]);
+    // Each file's lookup invocations equal the `calls` its registry entries
+    // declare for it, so a second performPropertyLookup in a declared file
+    // fails here even when it reuses the first call's callerOptions.
+    const declaredByFile = {};
+    for (const c of Object.values(CALLERS)) declaredByFile[c.file] = (declaredByFile[c.file] || 0) + c.calls;
+    expect(invocations).toEqual(declaredByFile);
   });
 
   test('every direct lookupPropertyFromAITrio caller (by any alias) is a declared bypass', () => {
