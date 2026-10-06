@@ -242,7 +242,7 @@ describe('a customer who opts out between the card and the confirm', () => {
 describe('the reservation row for an unknown outcome', () => {
   const real = jest.requireActual('../services/intelligence-bar/sms-outcome-guard');
   const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000);
-  const row = (status, metadata, ageHours = 1) => ({ id: `${status}-${ageHours}`, status, metadata, created_at: hoursAgo(ageHours), updated_at: hoursAgo(ageHours) });
+  const row = (status, metadata, ageHours = 1, body = SEND.message) => ({ id: `${status}-${ageHours}`, status, metadata, message_body: body, created_at: hoursAgo(ageHours), updated_at: hoursAgo(ageHours) });
 
   test('carriesUnknownOutcome is the repo\'s unresolved-reservation predicate plus the prior-attempt marker family', () => {
     // isUnresolvedSendReservation: a reply reservation still sending inside its 24-hour hold.
@@ -257,37 +257,42 @@ describe('the reservation row for an unknown outcome', () => {
     expect(real.carriesUnknownOutcome(row('scheduled', { review_ask_reservation: true }, 73))).toBe(false);
     expect(real.carriesUnknownOutcome(row('sent', { review_ask_reservation: true }, 1))).toBe(false);
     expect(real.carriesUnknownOutcome(row('failed', { review_ask_reservation: true, finalize_only: true }, 1))).toBe(false);
-    // A queued row a worker picked up or requeued after an attempt (PRIOR_ATTEMPT_KEY_RE), while still queued.
-    expect(real.carriesUnknownOutcome(row('scheduled', { scheduled_sms_claimed_at: '2026-10-05T12:00:00Z' }))).toBe(true);
-    expect(real.carriesUnknownOutcome(row('scheduled', { provider_retry_at: '2026-10-05T12:05:00Z' }))).toBe(true);
-    expect(real.carriesUnknownOutcome(row('failed', { provider_retry_at: '2026-10-05T12:05:00Z' }))).toBe(false);
+    // A queued row a worker picked up or requeued after an attempt (PRIOR_ATTEMPT_KEY_RE), while still queued,
+    // aged from the ATTEMPT (the marker time), not from the queue row's creation.
+    expect(real.carriesUnknownOutcome(row('scheduled', { scheduled_sms_claimed_at: hoursAgo(10).toISOString() }, 5 * 24))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('scheduled', { provider_retry_at: hoursAgo(1).toISOString(), provider_retry_code: 'PROVIDER_FAILURE' }, 5 * 24))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('scheduled', { scheduled_sms_claimed_at: hoursAgo(30).toISOString() }, 5 * 24))).toBe(false);
+    // A boolean marker (twilio-webhook's provider_retry: true) carries no time: the row's own timestamps age it.
+    expect(real.carriesUnknownOutcome(row('scheduled', { provider_retry: true }, 2))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('scheduled', { provider_retry: true }, 30))).toBe(false);
+    expect(real.carriesUnknownOutcome(row('failed', { provider_retry_at: hoursAgo(1).toISOString() }))).toBe(false);
     // A queued text no worker has picked up, and a plain sent text, are not unknown.
     expect(real.carriesUnknownOutcome(row('scheduled', {}))).toBe(false);
     expect(real.carriesUnknownOutcome(row('sent', null))).toBe(false);
   });
 
-  test('findUnreconciledSend matches on number and the provider-bound body, within the widest hold, and classifies the rows', async () => {
+  test('findUnreconciledSend narrows the SQL to the number and a coarse window, then compares canonical bodies and classifies each row in JS', async () => {
     const rows = [
       row('sent', { manual_send_reservation: true, provider_outcome: 'accepted' }),
-      row('sending', { manual_send_reservation: true, provider_outcome_uncertain: true }),
+      // A queued row stores the TYPED body (curly apostrophe); the retry is typed straight. Same text to the provider.
+      row('scheduled', { provider_retry_at: hoursAgo(1).toISOString() }, 1, 'We’ll be there Tuesday — see https://waves.example/portal'),
+      row('sending', { manual_send_reservation: true, provider_outcome_uncertain: true }, 1, 'A different text entirely.'),
     ];
     const q = {};
     for (const m of ['where', 'whereIn', 'whereRaw', 'whereNot']) q[m] = jest.fn(() => q);
     q.select = jest.fn(async () => rows);
     db.mockImplementation(() => q);
 
-    // A curly apostrophe, an em dash and an https:// prefix are typed differences only: the
-    // same text reaches the provider, so the lookup compares the canonical body.
-    const typed = 'We’ll be there Tuesday — see waves.example/portal';
-    const found = await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: typed });
+    const found = await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: "We'll be there Tuesday - see waves.example/portal" });
 
     expect(found).toEqual(rows[1]);
     expect(db).toHaveBeenCalledWith('sms_log');
-    expect(q.where).toHaveBeenCalledWith({ direction: 'outbound', message_body: "We'll be there Tuesday - see waves.example/portal" });
-    // No status whitelist: the SQL window is the widest hold (72 h); each row is classified above.
+    // No body equality and no status whitelist in SQL.
+    expect(q.where).toHaveBeenCalledWith({ direction: 'outbound' });
+    expect(q.where.mock.calls.some((c) => c[0] && c[0].message_body)).toBe(false);
     expect(q.whereIn).not.toHaveBeenCalled();
-    const sqlCutoff = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
-    expect(Math.abs(sqlCutoff.getTime() - hoursAgo(72).getTime())).toBeLessThan(5000);
+    const windowCall = q.whereRaw.mock.calls.find((c) => /GREATEST\(updated_at, created_at\) >= \?/.test(c[0]));
+    expect(Math.abs(windowCall[1][0].getTime() - hoursAgo(72).getTime())).toBeLessThan(5000);
     expect(await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: '' })).toBeNull();
     expect(await real.findUnreconciledSend({ phone: '', body: SEND.message })).toBeNull();
   });

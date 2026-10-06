@@ -62,27 +62,47 @@ function parseMeta(value) {
   try { return JSON.parse(value); } catch { return {}; }
 }
 
+// When the row's send was last attempted. A queued text can be created days
+// before the scheduler tries it, so its hold ages from the attempt: the latest
+// time-valued prior-attempt marker (scheduled_sms_claimed_at,
+// scheduled_sms_recovered_at, provider_retry_at; a code or a boolean under the
+// same key family is skipped), else updated_at, else created_at.
+function attemptAt(row, meta) {
+  const times = Object.keys(meta)
+    .filter((k) => PRIOR_ATTEMPT_KEY_RE.test(k))
+    .map((k) => meta[k])
+    .filter((v) => typeof v === 'string' || v instanceof Date)
+    .map((v) => new Date(v).getTime())
+    .filter(Number.isFinite);
+  if (times.length) return Math.max(...times);
+  const fallback = new Date(row.updated_at || row.created_at || NaN).getTime();
+  return Number.isFinite(fallback) ? fallback : NaN;
+}
+
 /**
  * Is this row a text that may already have reached the customer, with no
- * confirmed outcome? Two existing notions, not a third:
+ * confirmed outcome, inside its hold? Two existing notions, not a third:
  *  - isUnresolvedSendReservation (review-ask-reservation.js): a review-ask
  *    reservation in any non-delivered status (here bounded to the ask-spacing
  *    window), a reply reservation still 'sending' inside its 24-hour hold, a
- *    billing text-leg claim.
+ *    billing text-leg claim. It is handed the attempt time as created_at so
+ *    its own hold ages from the attempt.
  *  - a queued row a worker already picked up or requeued after a provider
  *    attempt: any PRIOR_ATTEMPT_KEY_RE marker (the key family the cancel
  *    writer's CAS and smsIneligibilityReason refuse on), while the row is still
- *    'scheduled' or 'sending' (the deliveryLabel reading in comms-tools).
+ *    'scheduled' or 'sending' (the deliveryLabel reading in comms-tools),
+ *    inside the 24-hour hold from the attempt.
  */
 function carriesUnknownOutcome(row, now = Date.now()) {
   const meta = parseMeta(row.metadata);
-  const createdAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
-  if (isUnresolvedSendReservation({ ...row, metadata: meta }, now)) {
-    if (meta[REVIEW_ASK_MARKER] !== true) return true;
-    return !Number.isFinite(createdAt) || createdAt >= now - REVIEW_ASK_HOLD_MS;
+  const attempted = attemptAt(row, meta);
+  const within = (ms) => !Number.isFinite(attempted) || attempted >= now - ms;
+  if (isUnresolvedSendReservation({ ...row, metadata: meta, created_at: Number.isFinite(attempted) ? new Date(attempted) : row.created_at }, now)) {
+    return meta[REVIEW_ASK_MARKER] === true ? within(REVIEW_ASK_HOLD_MS) : true;
   }
   return ['scheduled', 'sending'].includes(String(row.status || ''))
-    && Object.keys(meta).some((k) => PRIOR_ATTEMPT_KEY_RE.test(k));
+    && Object.keys(meta).some((k) => PRIOR_ATTEMPT_KEY_RE.test(k))
+    && within(UNRECONCILED_HOLD_HOURS * 60 * 60 * 1000);
 }
 
 const REFUSAL = {
@@ -101,9 +121,12 @@ function unreconciledRefusal(extra = {}) {
 }
 
 /**
- * An outbound row to this number with this text (the provider-bound form) that
- * may already have reached the customer with no confirmed outcome
- * (carriesUnknownOutcome). Null when there is none. `excludeId` skips the
+ * An outbound row to this number whose text, in the provider-bound form, is this
+ * text, and that may already have reached the customer with no confirmed outcome
+ * (carriesUnknownOutcome). Null when there is none. The SQL narrows to the number
+ * and a coarse time window only; the body is compared in JS on both sides through
+ * canonicalSmsBody, because queued rows store the typed body (the composer saves
+ * it raw; dispatch normalizes only the outgoing copy). `excludeId` skips the
  * caller's own reservation.
  */
 async function findUnreconciledSend({ phone, body }, dbh = db, { excludeId = null } = {}) {
@@ -112,12 +135,12 @@ async function findUnreconciledSend({ phone, body }, dbh = db, { excludeId = nul
   if (!identity || !canonical) return null;
   const now = Date.now();
   const query = dbh('sms_log')
-    .where({ direction: 'outbound', message_body: canonical })
-    .where('created_at', '>=', new Date(now - WIDEST_HOLD_MS))
+    .where({ direction: 'outbound' })
+    .whereRaw('GREATEST(updated_at, created_at) >= ?', [new Date(now - WIDEST_HOLD_MS)])
     .whereRaw(`${phoneIdentitySql("BTRIM(COALESCE(to_phone, ''))")} = ?`, [identity]);
   if (excludeId) query.whereNot('id', excludeId);
-  const rows = await query.select('id', 'status', 'metadata', 'created_at');
-  return (rows || []).find((row) => carriesUnknownOutcome(row, now)) || null;
+  const rows = await query.select('id', 'status', 'metadata', 'message_body', 'created_at', 'updated_at');
+  return (rows || []).find((row) => canonicalSmsBody(row.message_body || '') === canonical && carriesUnknownOutcome(row, now)) || null;
 }
 
 /**
