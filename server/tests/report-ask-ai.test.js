@@ -447,6 +447,11 @@ describe('screenAskAnswer', () => {
     expect(screen('The technician arrives 1-5-2027.')).toBe('states_a_date');
     expect(screen('The technician arrives at two PM.')).toBe('states_a_date');
     expect(screen('The technician arrives tomorrow.')).toBe('states_a_date');
+    expect(screen('Your next visit is in May.')).toBe('states_a_date');
+    expect(screen('Your appointment is on the 5th.')).toBe('states_a_date');
+    expect(screen('Your visit is next weekend.')).toBe('states_a_date');
+    expect(screen('We treated the outside today.')).toBeNull();
+    expect(screen('The ants may move after the treatment.')).toBeNull();
     expect(screen('The technician arrives on the fifth.')).toBe('states_a_date');
     expect(screen('The technician arrives the fifth of January.')).toBe('states_a_date');
     expect(screen('The first application went around the exterior.')).toBeNull();
@@ -593,10 +598,11 @@ describe('schedule questions keep the rule answer', () => {
   test.each([
     'When are you returning?', 'When will the technician return?', 'When are you coming again?',
     'Can I reschedule?', 'When is my next appointment?',
+    'What time will you be here?', 'What day are you coming?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
-  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(false);
   });
 });
@@ -618,6 +624,9 @@ describe('symptoms and exposure never reach the model', () => {
     'I feel lightheaded since this morning',
     'He passed out in the kitchen',
     'It sprayed on my face',
+    'I was sprayed in the eyes',
+    'He was sprayed on the skin',
+    'The technician sprayed me in the face',
   ])('a fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
   });
@@ -1007,6 +1016,8 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at 21 heron bluff.', 'Ants at [number] heron bluff.'],
     ['Ants at 21 HERON BLUFF.', 'Ants at [number] HERON BLUFF.'],
     ['Ants at 21 Palm Is.', 'Ants at [number] Palm Is.'],
+    ['Ants at 12 1/2 Example Street.', 'Ants at [number] Example Street.'],
+    ['Ants at 88B Example Street.', 'Ants at [number] Example Street.'],
     ['Ants at 18 North Martin Luther King Boulevard.', 'Ants at [number] North Martin Luther King Boulevard.'],
     // Everyday nouns in the USPS table lose only the count.
     ['We saw 2 rats by the lake.', 'We saw [number] rats by the lake.'],

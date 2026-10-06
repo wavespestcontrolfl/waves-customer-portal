@@ -214,8 +214,9 @@ function petPrecautionFact(data = {}) {
 const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'unrouted']);
 
 // A schedule question the rule router left unrouted ("when are you coming
-// again?") keeps the rule answer too (Codex P1 #6016 r9).
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|my)\b)/i;
+// again?", "what time will you be here?") keeps the rule answer too (Codex
+// P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
+const SCHEDULE_QUESTION = /\b(?:what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|arriv\w*|show\s+up|coming(?!\s+back)|come\s+(?:by|over|out|again)|eta|tomorrow|next\s+(?:week|month)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }
@@ -301,7 +302,8 @@ const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'tr
 const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
   .sort((x, y) => y.length - x.length)
   .join('|');
-const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}(?=\\s+(?:[a-z0-9'.-]+\\s+){1,6}(?:${STREET_SUFFIX})\\b)`, 'gi');
+// "12 1/2 Example Street" and "88B Example Street" mask whole.
+const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[a-z0-9'.-]+\\s+){1,6}(?:${STREET_SUFFIX})\\b)`, 'gi');
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
@@ -521,12 +523,14 @@ const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th
 // Abbreviated weekdays only capitalized: a lowercase "sun" or "sat" is a word.
 // A month name alone ("January the 5th", "January fifth", "in February"), a
 // spelled ordinal ("on the fifth") or a relative day ("tomorrow", "next
-// week") also states a schedule (Codex P1 #6016 r9, #5964 r8). "This week"
-// stays: rain and watering facts speak of it. "May" is left out (a verb).
+// week", "next weekend") also states a schedule (Codex P1 #6016 r9-r11, #5964
+// r8). "This week" and "today" stay: rain and watering facts speak of this
+// week, and "today" is the visit itself. "May" counts only with a date
+// word ("in May", "May 5"): alone it is a verb.
 const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]first)';
 // A spelled ordinal is a date only with time context ("on the fifth", "the
 // fifth of January"); "the first application" is report content.
-const RELATIVE_DATE = new RegExp(`\\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|next\\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:on|by|until|before|after)\\s+the\\s+${ORDINAL_WORDS}|the\\s+${ORDINAL_WORDS}\\s+of\\s+(?:the\\s+)?(?:month|${MONTHS}))\\b`, 'i');
+const RELATIVE_DATE = new RegExp(`\\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|(?:this|next|the)\\s+weekend|(?:in|on|by|until|since|this|next|early|late|mid)[\\s-]+may|may\\s+\\d|the\\s+\\d{1,2}(?:st|nd|rd|th)|next\\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:on|by|until|before|after)\\s+the\\s+${ORDINAL_WORDS}|the\\s+${ORDINAL_WORDS}\\s+of\\s+(?:the\\s+)?(?:month|${MONTHS}))\\b`, 'i');
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 // The output screen, in order: the first check that fails names the rejection.
@@ -590,6 +594,8 @@ const MEDICAL_CUES = [
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
+  // Sprayed in the eyes, on the skin, in the face, with or without a possessive.
+  /\bspray\w*\s+(?:\w+\s+){0,3}?(?:in|into|on|onto|at)\s+(?:the\s+|my\s+|his\s+|her\s+|their\s+|our\s+|your\s+)?(?:eyes?|skin|face|mouth|nose)\b/i,
 ];
 
 // ── A question that sounds like a spray exposure: a safety line first ──
