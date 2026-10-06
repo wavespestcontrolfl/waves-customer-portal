@@ -56,5 +56,7 @@ describe('save body', () => {
     const candidates = ['src/pages/admin/EstimateToolViewV2.jsx', 'client/src/pages/admin/EstimateToolViewV2.jsx'].map((rel) => path.resolve(process.cwd(), rel));
     const src = fs.readFileSync(candidates.find((f) => fs.existsSync(f)), 'utf8');
     expect(src).toMatch(/offerTiersDeclined: !!form\._offerTiersDeclined,/);
+    // Both estimate loads (edit open and post-send refresh) carry the availability flag.
+    expect(src.match(/offerTiersAvailable === true \? \{ offerTiersAvailable: true \} : \{\}/g)).toHaveLength(2);
   });
 });

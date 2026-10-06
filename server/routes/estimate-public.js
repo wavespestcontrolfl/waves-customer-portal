@@ -17778,9 +17778,19 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // returns the estimate to the shape it was sent in and is exempt, as in
     // the write below: a member who appeared since the park must not leave
     // the row stuck in its reduced shape.
+    // The owner resolved here (an unlocked read) is also the one whose
+    // comms fence the transaction takes BEFORE the estimate lock; under the
+    // lock it is re-resolved and any drift aborts (never chase a newly
+    // observed owner's fence after locking the estimate).
+    let expectedProspectiveOwnerId = null;
     if (!estimate.customer_id && !(actor === 'staff' && mode === 'restore')) {
       let prospectiveMember = true;
-      try { prospectiveMember = !!(await offerTierMemberBlock(estimate, db)); } catch (_) { prospectiveMember = true; }
+      try {
+        expectedProspectiveOwnerId = await resolveProspectiveOwnerId(estimate, db);
+        prospectiveMember = expectedProspectiveOwnerId
+          ? !!(await isActivePlanCustomer(db, expectedProspectiveOwnerId, { strict: true }))
+          : false;
+      } catch (_) { prospectiveMember = true; }
       if (prospectiveMember) return { status: 409, body: ({ error: 'reprice_unavailable' }) };
     }
     const memberEvidence = OptOut.memberEvidenceInEstimateData(parsedData) || priors.length > 0;
@@ -18049,6 +18059,14 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
       // Lock ORDER matches the accept path (estimate row first, customer row
       // later inside the converter) so an add racing an acceptance can never
       // deadlock (GH codex r10 P2); the CAS below still decides the write.
+      // An UNLINKED estimate's expected prospective owner is fenced here,
+      // before the estimate lock, exactly as a linked owner is inside
+      // lockEstimateOwnerForUpdate — customer-first writers (merges, contact
+      // edits) take the same fence, so the row order never crosses theirs.
+      const guardsProspectiveOwner = !memberEvidence && !(actor === 'staff' && mode === 'restore') && !estimate.customer_id;
+      if (guardsProspectiveOwner && expectedProspectiveOwnerId) {
+        await lockCustomerComms(trx, expectedProspectiveOwnerId);
+      }
       await lockEstimateOwnerForUpdate(trx, estimate);
       if (!memberEvidence && !(actor === 'staff' && mode === 'restore')) {
         // Linked: the row itself. Unlinked: the PROSPECTIVE owner, re-resolved
@@ -18071,6 +18089,14 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
             }
             ownerIdToLock = await resolveProspectiveOwnerId(estimate, trx);
           } catch (_) { memberActivatedMidWrite = true; return; }
+          // Identity drift since the pre-read (an owner appeared, vanished or
+          // changed) aborts: the fence above is the expected owner's, and a
+          // newly observed owner's fence is never acquired after the estimate
+          // lock. The customer retries against the settled state.
+          if (String(ownerIdToLock || '') !== String(expectedProspectiveOwnerId || '')) {
+            memberActivatedMidWrite = true;
+            return;
+          }
         }
         if (ownerIdToLock) {
           const customerRow = await trx('customers').where({ id: ownerIdToLock }).forUpdate().first();

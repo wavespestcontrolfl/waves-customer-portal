@@ -336,9 +336,14 @@ describe('the plain opt-out rail for an unlinked prospective member', () => {
     expect(src).toMatch(/let addStampBlockedByMembership = unlinkedMemberHidesMixChange;/);
     // The grouped-owner re-resolution takes the accept path's group lock first, after the estimate lock and before the customer lock.
     const txStart = src.indexOf('let memberActivatedMidWrite = false;');
-    const block = src.slice(txStart, txStart + 4000);
+    const block = src.slice(txStart, txStart + 6000);
+    const fence = block.indexOf('await lockCustomerComms(trx, expectedProspectiveOwnerId);');
     const estimateLock = block.indexOf('await lockEstimateOwnerForUpdate(trx, estimate)');
     const groupLock = block.indexOf("['estimate-group-accept', String(estimate.estimate_group_id)]");
+    expect(fence).toBeGreaterThan(0);
+    expect(estimateLock).toBeGreaterThan(fence);
+    // Drift between the pre-read owner and the one under the lock aborts.
+    expect(block).toMatch(/if \(String\(ownerIdToLock \|\| ''\) !== String\(expectedProspectiveOwnerId \|\| ''\)\) \{\s*\n\s*memberActivatedMidWrite = true;/);
     const resolve = block.indexOf('ownerIdToLock = await resolveProspectiveOwnerId(estimate, trx)');
     const customerLock = block.indexOf("trx('customers').where({ id: ownerIdToLock }).forUpdate().first()");
     expect(estimateLock).toBeGreaterThan(0);

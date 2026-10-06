@@ -4839,7 +4839,11 @@ export default function EstimateToolViewV2({
       setReopenNotice(notice);
       setEditMode((current) => ({ ...current, status: source.status, editVersion: source.editVersion }));
       if (!source.editable) setEditLoadError(source.blockReason);
-      setEstimate(source.result && !stale ? { ...source.result, engineRequest: source.engineRequest } : null);
+      // Same as the edit loader: the stored result carries no tier-availability
+      // flag, so the Good / Better / Best checkbox survives the post-send refresh.
+      setEstimate(source.result && !stale
+        ? { ...source.result, engineRequest: source.engineRequest, ...(source.offerTiersAvailable === true ? { offerTiersAvailable: true } : {}) }
+        : null);
 
     } catch (err) {
       setSaveError(err.message);
