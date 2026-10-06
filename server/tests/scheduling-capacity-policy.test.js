@@ -20,8 +20,14 @@ test('versioned combined allowances preserve old holds and whole-hour new member
   expect(windowForCapacityService(current, 1, 'lawn_care_recurring')).toEqual({ window_start: '10:00', window_end: '10:40', estimated_duration_minutes: 40 });
   // 30 pest minutes, then lawn on the next whole hour: 60 + 40 held.
   expect(capacityFromReservation(current).durationMinutes).toBe(100);
-  // A hold stamped before the stop groups (plain sum) still reads.
-  expect(capacityFromReservation({ reservation_service_mix: { ...current.reservation_service_mix, durationMinutes: 70 } }).durationMinutes).toBe(70);
+  // A hold stamped before the stop groups (no marker, plain sum) keeps its
+  // original promise: every version-2 member at the shared arrival.
+  const { stopGroups: _marker, ...legacyMix } = current.reservation_service_mix;
+  const legacy = { window_start: '09:00', reservation_service_mix: { ...legacyMix, durationMinutes: 70 } };
+  expect(capacityFromReservation(legacy).durationMinutes).toBe(70);
+  expect(windowForCapacityService(legacy, 1, 'lawn_care_recurring')).toEqual({ window_start: '09:00', window_end: '09:40', estimated_duration_minutes: 40 });
+  // A marked hold must carry the padded span.
+  expect(() => capacityFromReservation({ reservation_service_mix: { ...current.reservation_service_mix, durationMinutes: 70 } })).toThrow();
   expect(() => capacityFromReservation({ reservation_service_mix: { version: 2, services: ['pest_control'], durationMinutes: 60 } })).toThrow();
 });
 
@@ -103,5 +109,7 @@ test('allocated members are ordered anchor group first, each group contiguous', 
   const row = (id, key) => ({ id, service_key_snapshot: key });
   const anchor = row('a', 'lawn_care_recurring');
   const members = [anchor, row('m', 'mosquito_monthly'), row('t', 'tree_shrub_6week')];
-  expect(orderMembersByStopGroup(anchor, members).map((r) => r.id)).toEqual(['a', 't', 'm']);
+  expect(orderMembersByStopGroup(anchor, members, { stopGroups: true }).map((r) => r.id)).toEqual(['a', 't', 'm']);
+  // A hold stamped before the stop groups keeps its member order.
+  expect(orderMembersByStopGroup(anchor, members, {}).map((r) => r.id)).toEqual(['a', 'm', 't']);
 });

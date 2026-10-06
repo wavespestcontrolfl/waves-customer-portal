@@ -46,7 +46,8 @@ function stopGroupSpanMinutes(services, durations) {
 
 // Allocated members in route order: the anchor's group first, then the other
 // group, each contiguous (the route evaluator refuses an A-B-A stop order).
-function orderMembersByStopGroup(anchor, members) {
+function orderMembersByStopGroup(anchor, members, capacity) {
+  if (capacity?.stopGroups !== true) return members;
   const groupOfRow = (row) => stopGroupOf(serviceKeyFor({ service_key: row.service_key_snapshot }));
   const first = groupOfRow(anchor);
   return [...members.filter((row) => groupOfRow(row) === first), ...members.filter((row) => groupOfRow(row) !== first)];
@@ -72,9 +73,17 @@ function capacityForServices(services, durations) {
     || new Set(keys).size !== keys.length) throw capacityUnavailable();
   if (durations) {
     if (durations.length !== keys.length || durations.some(value => !Number.isInteger(value) || value < 15 || value > 480)) throw capacityUnavailable();
-    return { version: 2, services: keys, durations, durationMinutes: stopGroupSpanMinutes(keys, durations) };
+    return { version: 2, services: keys, durations, durationMinutes: stopGroupSpanMinutes(keys, durations), stopGroups: true };
   }
-  return { version: 1, services: keys, durationMinutes: keys.length * SERVICE_MINUTES };
+  return { version: 1, services: keys, durationMinutes: keys.length * SERVICE_MINUTES, stopGroups: true };
+}
+
+// A hold stamped before the stop groups (no `stopGroups` marker) keeps its
+// original promise: version 1 one hour per member in member order, version 2
+// every member at the shared arrival, and the plain sum of minutes held.
+function legacyDurationMinutes(capacity) {
+  return capacity.version === 2 ? capacity.durations.reduce((sum, value) => sum + value, 0)
+    : capacity.services.length * SERVICE_MINUTES;
 }
 
 function capacityFromReservation(row) {
@@ -83,9 +92,8 @@ function capacityFromReservation(row) {
   if (![1, 2].includes(capacity.version) || !Array.isArray(capacity.services)
     || (capacity.version === 2 && !Array.isArray(capacity.durations))) throw capacityUnavailable();
   const expected = capacityForServices(capacity.services.map((service) => ({ service })), capacity.version === 2 ? capacity.durations : undefined);
-  // A hold stamped before the stop groups summed the durations with no gap.
-  const legacySum = capacity.version === 2 ? capacity.durations.reduce((sum, value) => sum + value, 0) : null;
-  if (capacity.durationMinutes !== expected.durationMinutes && capacity.durationMinutes !== legacySum) throw capacityUnavailable();
+  const held = capacity.stopGroups === true ? expected.durationMinutes : legacyDurationMinutes(capacity);
+  if (capacity.durationMinutes !== held) throw capacityUnavailable();
   return capacity;
 }
 
@@ -100,7 +108,9 @@ function windowForCapacityService(anchor, index, catalogServiceKey) {
     ? capacity.services.indexOf(serviceKeyFor({ service_key: catalogServiceKey })) : index;
   if (allowanceIndex < 0) throw capacityUnavailable();
   const minutes = capacity.version === 2 ? capacity.durations[allowanceIndex] : SERVICE_MINUTES;
-  const arrival = start + stopGroupOffsetMinutes(capacity, anchor, allowanceIndex, catalogServiceKey);
+  let offset = stopGroupOffsetMinutes(capacity, anchor, allowanceIndex, catalogServiceKey);
+  if (capacity.stopGroups !== true) offset = capacity.version === 2 ? 0 : index * SERVICE_MINUTES;
+  const arrival = start + offset;
   if (arrival + minutes > 24 * 60 - 1) throw capacityUnavailable();
   return {
     window_start: minutesToHHMM(arrival),

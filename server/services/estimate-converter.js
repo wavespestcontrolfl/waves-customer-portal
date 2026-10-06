@@ -6826,12 +6826,14 @@ const EstimateConverter = {
           reservation_service_mix: {
             ...combinedCapacity,
             scheduledDate: scheduledDateOnly(reservedStart.scheduled_date),
-            // No arrivalWindowStart (owner ruling 2026-10-05, two stop groups):
-            // each stop group has its own arrival hour, so each member's own
-            // window_start is its arrival (reservation_arrival_start and
-            // flex-tier destinationArrival fall back to it). Older stamps
-            // keep their shared arrival.
-            allocatedServiceIds: VisitCapacity.orderMembersByStopGroup(reservedStart, capacityMembers).map((row) => row.id),
+            // Two stop groups (owner ruling 2026-10-05): each group has its own
+            // arrival hour, so a stopGroups hold stamps no arrivalWindowStart and
+            // each member's own window_start is its arrival. A hold stamped
+            // before the change keeps its shared arrival and member order.
+            ...(combinedCapacity.stopGroups === true ? {}
+              : { arrivalWindowStart: String(reservedStart.window_start).slice(0, 5) }),
+            allocatedServiceIds: VisitCapacity.orderMembersByStopGroup(reservedStart, capacityMembers, combinedCapacity)
+              .map((row) => row.id),
           },
         };
         await database('scheduled_services').whereIn('id', allocation.reservation_service_mix.allocatedServiceIds)
