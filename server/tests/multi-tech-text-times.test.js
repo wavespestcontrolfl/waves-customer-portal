@@ -223,7 +223,7 @@ describe('lead reply agent: check_next_availability', () => {
 });
 
 describe('estimate converter: first service day', () => {
-  const { pickFirstServiceDate, funnelKeyForEstimate } = require('../services/estimate-converter');
+  const { pickFirstServiceDate, funnelKeyForEstimate, funnelKeyForEstimateId } = require('../services/estimate-converter');
   const customer = { id: CUSTOMER_ID, city: 'Sarasota' };
 
   test('gate off: the old by-city engine picks the day', async () => {
@@ -282,6 +282,19 @@ describe('estimate converter: first service day', () => {
       expect(funnelKeyForEstimate([{ service: 'Rodent Bait Stations' }], {})).toBe('');
       expect(funnelKeyForEstimate([{ service: 'Palm Injection' }], {})).toBe('');
       expect(funnelKeyForEstimate([{ service: 'Something Unmapped' }], {})).toBe('');
+    });
+
+    // Codex r2 P1-1 on #6073: the text drafter reads a STORED estimate through the same function.
+    test('funnelKeyForEstimateId reads a stored estimate (jsonb object or JSON string) through the same funnelKeyForEstimate', async () => {
+      mockRows.estimates = { service_interest: 'Pest Control', estimate_data: { recurring: { services: [{ service: 'Lawn Care' }] } } };
+      await expect(funnelKeyForEstimateId(ESTIMATE_ID)).resolves.toBe('lawn_care');
+      mockRows.estimates = { service_interest: 'Pest Control', estimate_data: JSON.stringify({ recurring: { services: [{ service: 'Pest Control' }, { service: 'Lawn Care' }] } }) };
+      await expect(funnelKeyForEstimateId(ESTIMATE_ID)).resolves.toBe('');
+      mockRows.estimates = { service_interest: 'Mosquito Control', estimate_data: 'not json' };
+      await expect(funnelKeyForEstimateId(ESTIMATE_ID)).resolves.toBe('mosquito');
+      mockRows.estimates = null;
+      await expect(funnelKeyForEstimateId(ESTIMATE_ID)).resolves.toBe('');
+      await expect(funnelKeyForEstimateId(null)).resolves.toBe('');
     });
 
     test('no recurring line: the estimate\'s own service name through the same table, else not representable', () => {

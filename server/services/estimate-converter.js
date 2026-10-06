@@ -157,6 +157,21 @@ function funnelKeyForEstimate(recurringServices, estimate) {
   return keys.every(Boolean) && new Set(keys).size === 1 ? keys[0] : '';
 }
 
+// funnelKeyForEstimate for a stored estimate: its sold recurring lines and
+// service_interest, read the way convertEstimate reads them. The text drafter's
+// estimate-linked OPEN TIMES (GATE_MULTI_TECH_TEXT_TIMES) asks the website engine
+// for THIS estimate's service through it. '' = not representable.
+async function funnelKeyForEstimateId(estimateId, database = db) {
+  if (!estimateId) return '';
+  const estimate = await database('estimates').where({ id: estimateId }).first();
+  if (!estimate) return '';
+  let estimateData = estimate.estimate_data;
+  if (typeof estimateData === 'string') {
+    try { estimateData = JSON.parse(estimateData); } catch { estimateData = {}; }
+  }
+  return funnelKeyForEstimate(recurringServicesFromEstimateData(estimateData || {}), estimate);
+}
+
 /**
  * Pick the first service date for a freshly-converted customer.
  *
@@ -8945,3 +8960,4 @@ module.exports.isTermiteAnnualSignBeforePayAccept = isTermiteAnnualSignBeforePay
 module.exports.frozenTermiteAnnualFinancialsFor = frozenTermiteAnnualFinancialsFor;
 module.exports.pickFirstServiceDate = pickFirstServiceDate;
 module.exports.funnelKeyForEstimate = funnelKeyForEstimate;
+module.exports.funnelKeyForEstimateId = funnelKeyForEstimateId;

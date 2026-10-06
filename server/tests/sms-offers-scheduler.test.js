@@ -862,6 +862,119 @@ describe('gate on — an estimate is offered through its public page picker', ()
   });
 });
 
+// GATE_MULTI_TECH_TEXT_TIMES (multi-tech booking PR 4, Codex r2 on #6073): with no
+// scheduler picker for the text, the city-based fallback asks the website engine
+// and STAMPS it on the snapshot; the recheck follows the stamp, not the gate.
+describe('GATE_MULTI_TECH_TEXT_TIMES — the city fallback asks the website engine, stamped on the snapshot', () => {
+  const WEB = 'GATE_MULTI_TECH_TEXT_TIMES';
+  let textOfferDays;
+  let funnelKeyForEstimateId;
+  beforeEach(() => {
+    process.env[WEB] = 'true';
+    textOfferDays = jest.fn(async () => ({ days: BOOK_DAYS, pinSource: 'city_table' }));
+    funnelKeyForEstimateId = jest.fn(async () => 'lawn_care');
+    jest.doMock('../services/scheduling/text-offer-times', () => ({ textOfferDays }));
+    jest.doMock('../services/estimate-converter', () => ({ funnelKeyForEstimateId }));
+  });
+  afterEach(() => {
+    if (prior[WEB] === undefined) delete process.env[WEB]; else process.env[WEB] = prior[WEB];
+    jest.dontMock('../services/scheduling/text-offer-times');
+    jest.dontMock('../services/estimate-converter');
+  });
+
+  test('a new visit: the website engine answers for the text\'s funnel service; the snapshot stamps source + serviceKey; the old finder is never called', async () => {
+    const drafter = freshDrafter();
+    const client = makeClient(OFFER_REPLY());
+    const r = await drafter.generateGroundedDraft(argsFor(client, baseContext([], COMPLETED)));
+    expect(textOfferDays).toHaveBeenCalledWith({ city: 'Venice', customerId: 'cust-9', estimateId: null, serviceKey: 'pest_control' });
+    expect(oldFinder).not.toHaveBeenCalled();
+    expect(factsOf(client)).toContain('- Wednesday, September 30: 8:00 AM - 10:00 AM, 10:00 AM - 12:00 PM');
+    expect(r.openTimesSnapshot).toEqual({
+      lookup: { city: 'Venice', customerId: 'cust-9', estimateId: null, serviceType: 'General Pest Control (Quarterly)', source: 'website_engine', serviceKey: 'pest_control' },
+      quotedWindows: [{ date: 'Wednesday, September 30', window: '8:00 AM - 10:00 AM' }],
+    });
+  });
+
+  // Codex r2 P1-1: the customer's visit history (pest) must not size an estimate's offer.
+  test('an estimate-linked draft: the funnel service comes from the LINKED ESTIMATE (funnelKeyForEstimate), not the customer\'s visit history or a pest default', async () => {
+    const drafter = freshDrafter();
+    const r = await drafter.generateGroundedDraft(argsFor(makeClient(OFFER_REPLY()), baseContext([], COMPLETED), { estimateId: 'est-linked-1' }));
+    expect(funnelKeyForEstimateId).toHaveBeenCalledWith('est-linked-1');
+    expect(textOfferDays).toHaveBeenCalledWith({ city: 'Venice', customerId: 'cust-9', estimateId: 'est-linked-1', serviceKey: 'lawn_care' });
+    expect(oldFinder).not.toHaveBeenCalled();
+    expect(r.openTimesSnapshot.lookup).toEqual({ city: 'Venice', customerId: 'cust-9', estimateId: 'est-linked-1', serviceType: 'General Pest Control (Quarterly)', source: 'website_engine', serviceKey: 'lawn_care' });
+  });
+
+  test('an estimate the website engine cannot represent (empty key): the OLD finder keeps it, exactly as the converter does — no website-engine times, no stamp, never the pest default', async () => {
+    funnelKeyForEstimateId.mockResolvedValue('');
+    const drafter = freshDrafter();
+    const r = await drafter.generateGroundedDraft(argsFor(makeClient(replyWith('10:00 AM - 12:00 PM', 'Friday, October 9')), baseContext([], COMPLETED), { estimateId: 'est-linked-1' }));
+    expect(textOfferDays).not.toHaveBeenCalled();
+    expect(oldFinder).toHaveBeenCalledWith('Venice', 'est-linked-1', expect.objectContaining({ customerId: 'cust-9' }));
+    expect(r.openTimesSnapshot.lookup).not.toHaveProperty('source');
+    expect(r.openTimesSnapshot.lookup).not.toHaveProperty('serviceKey');
+  });
+
+  test('a failure reading the estimate withholds OPEN TIMES (no guessed service, no old finder)', async () => {
+    funnelKeyForEstimateId.mockRejectedValue(new Error('db down'));
+    const drafter = freshDrafter();
+    const client = makeClient(plainReply());
+    const r = await drafter.generateGroundedDraft(argsFor(client, baseContext([], COMPLETED), { estimateId: 'est-linked-1' }));
+    expect(textOfferDays).not.toHaveBeenCalled();
+    expect(oldFinder).not.toHaveBeenCalled();
+    expect(r.openTimesSnapshot).toBeNull();
+  });
+
+  test('with GATE_SMS_OFFERS_SCHEDULER on, its picker keeps the text: the website engine is never asked (unchanged)', async () => {
+    process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
+    const drafter = freshDrafter();
+    const r = await drafter.generateGroundedDraft(argsFor(makeClient(OFFER_REPLY()), baseContext([], COMPLETED)));
+    expect(textOfferDays).not.toHaveBeenCalled();
+    expect(book.availabilityForExistingCustomer).toHaveBeenCalled();
+    expect(r.openTimesSnapshot.lookup.source).toBe('book');
+  });
+
+  // Codex r2 P1-2: the recheck asks the engine that BUILT the snapshot.
+  describe('send-time recheck follows the stamped engine, not the current gate', () => {
+    const quoted = [{ date: 'Wednesday, September 30', window: '8:00 AM - 10:00 AM' }];
+    const stamped = { city: 'Venice', customerId: 'cust-9', estimateId: 'est-linked-1', source: 'website_engine', serviceKey: 'lawn_care' };
+
+    test('a website-engine snapshot is rechecked on the website engine with the recorded estimate + service, even with the gate now OFF', async () => {
+      delete process.env[WEB];
+      const drafter = freshDrafter();
+      await expect(drafter.openTimesStillOffered({ ...stamped, quotedWindows: quoted })).resolves.toEqual({ ok: true });
+      expect(textOfferDays).toHaveBeenCalledWith({ city: 'Venice', customerId: 'cust-9', estimateId: 'est-linked-1', serviceKey: 'lawn_care' });
+      expect(oldFinder).not.toHaveBeenCalled();
+    });
+
+    test('a legacy snapshot (no source) is rechecked on the OLD finder, even with the gate now ON', async () => {
+      const drafter = freshDrafter();
+      await expect(drafter.openTimesStillOffered({ city: 'Venice', customerId: 'cust-9', quotedWindows: [{ date: 'Friday, October 9', window: '10:00 AM - 12:00 PM' }] })).resolves.toEqual({ ok: true });
+      expect(oldFinder).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-9' });
+      expect(textOfferDays).not.toHaveBeenCalled();
+    });
+
+    test('a window the website engine dropped is refused; an engine error, an empty service key or nothing offered fails CLOSED; the deadline is the longer one', async () => {
+      const drafter = freshDrafter();
+      await expect(drafter.openTimesStillOffered({ ...stamped, quotedWindows: [{ date: 'Wednesday, September 30', window: '4:00 PM - 6:00 PM' }] }))
+        .resolves.toMatchObject({ ok: false, reason: 'open_times_no_longer_offered' });
+      textOfferDays.mockResolvedValue(null);
+      await expect(drafter.openTimesStillOffered({ ...stamped, quotedWindows: quoted })).resolves.toMatchObject({ ok: false, reason: 'open_times_no_longer_offered' });
+      await expect(drafter.openTimesStillOffered({ ...stamped, serviceKey: undefined, quotedWindows: quoted })).resolves.toMatchObject({ ok: false });
+      textOfferDays.mockRejectedValue(new Error('engine down'));
+      await expect(drafter.openTimesStillOffered({ ...stamped, quotedWindows: quoted })).resolves.toEqual({ ok: false, reason: 'open_times_recheck_failed' });
+    });
+  });
+
+  test('snapshot lookup: website_engine carries serviceKey; absent offer keeps the legacy shape', () => {
+    const { computeOpenTimesSnapshot } = freshDrafter();
+    const offered = [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }];
+    const snap = (schedulerOffer) => computeOpenTimesSnapshot({ openTimesBlock: 'x', offeredTimes: offered, city: 'Venice', customerId: 'c1', estimateId: null, schedulerOffer }).lookup;
+    expect(snap({ source: 'website_engine', serviceKey: 'mosquito', city: 'Venice' })).toEqual({ city: 'Venice', customerId: 'c1', estimateId: null, source: 'website_engine', serviceKey: 'mosquito' });
+    expect(snap(null)).toEqual({ city: 'Venice', customerId: 'c1', estimateId: null });
+  });
+});
+
 describe('snapshot lookup — source + the keys to re-run the SAME picker (slice 1b)', () => {
   const offered = [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }];
   test('book carries serviceKey; estimate carries only its source (estimateId is already on the lookup); scheduler unchanged; none = legacy', () => {
