@@ -231,8 +231,26 @@ describe('getCachedLookup', () => {
     expect(await getCachedLookup('100 Main St')).toBeTruthy();
   });
 
+  it('roll-miss rows from an older county matcher (or before the marker) are a miss at once; county-backed rows are untouched', async () => {
+    const { ROLL_MATCHER_VERSION } = require('../services/property-lookup/ai-property-lookup');
+    const fresh = new Date(Date.now() - 3600000).toISOString();
+    // No marker (cached before PR 3): miss, however fresh.
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, property_record: { squareFootage: 1200, _source: 'ai' }, data_saved_at: fresh } });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+    // An older matcher: miss.
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, property_record: { squareFootage: 1200, _source: 'ai', _rollMatcherVersion: '2026-09-01' }, data_saved_at: fresh } });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+    // The current matcher: a hit inside the roll-miss TTL.
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, property_record: { squareFootage: 1200, _source: 'ai', _rollMatcherVersion: ROLL_MATCHER_VERSION }, data_saved_at: fresh } });
+    expect(await getCachedLookup('100 Main St')).toBeTruthy();
+    // A county-backed row carries no marker and is served as before.
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, data_saved_at: fresh } });
+    expect(await getCachedLookup('100 Main St')).toBeTruthy();
+  });
+
   it('roll-miss rows (no county evidence) age out on the short TTL', async () => {
-    const aiOnly = { squareFootage: 1200, _source: 'ai' };
+    const { ROLL_MATCHER_VERSION } = require('../services/property-lookup/ai-property-lookup');
+    const aiOnly = { squareFootage: 1200, _source: 'ai', _rollMatcherVersion: ROLL_MATCHER_VERSION };
     const days = (n) => new Date(Date.now() - n * 86400000).toISOString();
 
     // Inside the short window → still a hit.
@@ -402,7 +420,8 @@ describe('saveLookup', () => {
     expect(writes[0][1].data_saved_at.toISOString()).toBe(lookupStart);
   });
 
-  it('writes the short roll-miss TTL for records without county evidence', async () => {
+  it('writes the short roll-miss TTL for records without county evidence, and stamps the matcher version on them only', async () => {
+    const { ROLL_MATCHER_VERSION } = require('../services/property-lookup/ai-property-lookup');
     const writes = [];
     mockDbHandler = () => fakeTable({ writes });
     await saveLookup('100 Main St', {
@@ -412,6 +431,12 @@ describe('saveLookup', () => {
     const expiresMs = writes[0][1].expires_at.getTime() - Date.now();
     expect(expiresMs).toBeLessThanOrEqual(21 * 86400000);
     expect(expiresMs).toBeGreaterThan(20 * 86400000);
+    expect(JSON.parse(writes[0][1].property_record)._rollMatcherVersion).toBe(ROLL_MATCHER_VERSION);
+    // The caller's record object is not mutated, and a county-backed save carries no marker.
+    const county = { squareFootage: 1348, _source: 'county', _parcel: { parcelId: '1' } };
+    await saveLookup('100 Main St', { ...result, propertyRecord: county });
+    expect(JSON.parse(writes[1][1].property_record)._rollMatcherVersion).toBeUndefined();
+    expect(county._rollMatcherVersion).toBeUndefined();
   });
 
   it('never caches a failed lookup and respects the kill switch', async () => {

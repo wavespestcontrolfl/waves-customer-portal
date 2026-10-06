@@ -22,6 +22,14 @@
  *   PROPERTY_LOOKUP_CACHE_DISABLED=1 — kill switch (reads AND writes skip;
  *     verified overrides still apply — they are corrections, not cache)
  *
+ * Stale failures (address-match PR 3): a roll-miss row also records the
+ * county-roll matcher's version (property_record._rollMatcherVersion,
+ * ai-property-lookup ROLL_MATCHER_VERSION). On read, a roll-miss row with no
+ * marker or an older one is a miss at once, whatever its TTL: the matcher
+ * that failed it has changed, so the live lookup gets another try. Keyed on
+ * the record, not the cache key, so verified overrides on the same row are
+ * untouched.
+ *
  * All logs are prefixed `[lookup-cache]` so they're greppable in Railway.
  */
 
@@ -29,7 +37,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { normalizeLeadAddress } = require('../../utils/address-normalizer');
-const { buildPropertyDataQuality, detectUnassessedVacantParcel, detectStaleImageryTurfConflict, detectVacantRollBareLandImagery, hasCountyEvidence, hasCountyPricingCore, hasUnconfirmedCountyEvidence, isPreMarkerParkRecord } = require('./ai-property-lookup');
+const { buildPropertyDataQuality, detectUnassessedVacantParcel, detectStaleImageryTurfConflict, detectVacantRollBareLandImagery, hasCountyEvidence, hasCountyPricingCore, hasUnconfirmedCountyEvidence, isPreMarkerParkRecord, ROLL_MATCHER_VERSION } = require('./ai-property-lookup');
 
 const DEFAULT_TTL_DAYS = 180;
 // Unassessed vacant parcel (vacant roll parcel, no building record — often
@@ -297,6 +305,12 @@ async function getCachedLookup(address) {
     // the ones a re-run can now resolve against the roll (codex P2 #3095),
     // and their stored expires_at still says 180 days.
     if (!hasCountyEvidence(row.property_record)) {
+      // A roll-miss row failed under an OLDER matcher (or one from before
+      // the marker existed): a stale failure, re-run now (PR 3).
+      if (row.property_record._rollMatcherVersion !== ROLL_MATCHER_VERSION) {
+        logger.info('[lookup-cache] roll-miss row from an older county matcher — treating as miss');
+        return null;
+      }
       const savedAt = row.data_saved_at ? new Date(row.data_saved_at).getTime() : 0;
       const maxAgeMs = rollMissTtlDays() * 24 * 60 * 60 * 1000;
       if (!savedAt || Date.now() - savedAt > maxAgeMs) {
@@ -577,6 +591,8 @@ async function saveLookup(address, result, attemptId) {
     const staleImagery = Boolean(detectStaleImageryTurfConflict(record, result.aiAnalysis));
     const vacantBareLand = Boolean(detectVacantRollBareLandImagery(record, result.aiAnalysis));
     const rollMiss = !hasCountyEvidence(record);
+    // A roll-miss row remembers which matcher failed it (read-side rule above).
+    const stored = rollMiss ? { ...record, _rollMatcherVersion: ROLL_MATCHER_VERSION } : record;
     const ttlDays = (vacantParcel || staleImagery || vacantBareLand || !hasCountyPricingCore(record)) ? vacantParcelTtlDays()
       : rollMiss ? rollMissTtlDays()
       : cacheTtlDays();
@@ -588,7 +604,7 @@ async function saveLookup(address, result, attemptId) {
       county: record.county || record._parcel?.county || null,
       lat: Number.isFinite(result.satellite?.lat) ? result.satellite.lat : null,
       lng: Number.isFinite(result.satellite?.lng) ? result.satellite.lng : null,
-      property_record: JSON.stringify(record),
+      property_record: JSON.stringify(stored),
       ai_analysis: JSON.stringify(result.aiAnalysis),
       parcel: record._parcel ? JSON.stringify(record._parcel) : null,
       providers: JSON.stringify(record._aiProviders || []),
