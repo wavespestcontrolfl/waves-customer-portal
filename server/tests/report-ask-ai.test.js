@@ -401,7 +401,9 @@ describe('screenAskAnswer', () => {
   test('a target is matched by its singular or plural form', () => {
     expect(screen('It also covers the ghost ant.')).toBe('target_list');
     expect(screen('It also covers German roach.')).toBe('target_list');
-    expect(screen('We did treat for the ghost ant as you asked.', 'Did you treat for ghost ants?')).toBeNull();
+    // A pest only the question names may be repeated, never affirmed (Codex P1 #5964 r39).
+    expect(screen('We did treat for the ghost ant as you asked.', 'Did you treat for ghost ants?')).toBe('target_list');
+    expect(screen('The report does not list the ghost ant.', 'Did you treat for ghost ants?')).toBeNull();
   });
 
   test('more than four sentences is rejected', () => {
@@ -409,8 +411,9 @@ describe('screenAskAnswer', () => {
     expect(screen('We treated the outside. We treated the kitchen. We checked the garage. We looked at the entry points. We wrote it up.')).toBe('too_many_sentences');
   });
 
-  test('a target pest the customer named is not a leak', () => {
-    expect(screen('We did treat for ghost ants as you asked.', 'Did you treat for ghost ants?')).toBeNull();
+  test('a target pest the customer named may be repeated, not affirmed', () => {
+    expect(screen('The report does not show a treatment for ghost ants.', 'Did you treat for ghost ants?')).toBeNull();
+    expect(screen('We did treat for ghost ants as you asked.', 'Did you treat for ghost ants?')).toBe('target_list');
   });
 
   test('the company phone number is allowed', () => {

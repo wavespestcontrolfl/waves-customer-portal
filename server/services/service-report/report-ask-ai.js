@@ -366,6 +366,11 @@ const NUMBER_WORD = `(?:${Object.keys(NUMBER_WORD_DIGITS).join('|')})`;
 // Digit groups count too ("nine four one 55 five...") (Codex P1 #6038 r7).
 const NUMBER_TOKEN = `(?:${NUMBER_WORD}|\\d{1,4})`;
 const NUMBER_WORD_RUN = new RegExp(`\\b(?:(?:double|triple)\\s+)?${NUMBER_TOKEN}(?:[\\s,.-]+(?:and\\s+)?(?:double\\s+|triple\\s+)?${NUMBER_TOKEN})+\\b`, 'gi');
+// A hyphen-joined run of spoken digits or single characters is a credential
+// or a number: "one-two-three-four", "1-2-3-4", "A-7-B-2" (Codex P1 #5964 r39).
+const CHAIN_WORD = '(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|[a-z0-9])';
+const HYPHEN_CHAIN = new RegExp(`\\b${CHAIN_WORD}(?:\\s*-\\s*${CHAIN_WORD}){2,}\\b`, 'gi');
+
 function maskSpokenPhones(text) {
   return text.replace(NUMBER_WORD_RUN, (run) => {
     const words = run.toLowerCase().split(/[\s,.-]+/).filter((word) => word && word !== 'and');
@@ -400,7 +405,7 @@ function scrubFreeText(value, max = Infinity) {
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
+  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text.replace(HYPHEN_CHAIN, '[redacted]')).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
     .replace(/\d{3,}/g, '[number]');
   return clipText(masked, max);
 }
@@ -830,7 +835,7 @@ const INLINE_LIST_RE = /(?:^|[:.;]\s)1[.)]\s+\S.*\s2[.)]\s/;
 const ASK_EXTRA_BANNED = [
   // No-harm assurances in other words (Codex P1 #5964 r29): "poses no risk to
   // pets", "will not harm your children", "gentle around pets".
-  [/\b(?:no|zero|little|minimal|low)\s+(?:risk|danger|harm|threat|hazard)\b|\b(?:won['’]?t|will\s+not|does\s+not|doesn['’]?t|cannot|can['’]?t|wouldn['’]?t|would\s+not|isn['’]?t\s+going\s+to|shouldn['’]?t|should\s+not|mustn['’]?t|must\s+not|couldn['’]?t|could\s+not|never)\s+(?:\w+\s+){0,2}?(?:harm|hurt|affect|bother|endanger|injure|poison|irritate|pose\s+(?:a|an|any)\s+(?:\w+\s+)?(?:risk|danger|threat|hazard))\b|\b(?:not|never|unlikely\s+to|won['’]?t|will\s+not|does\s+not|doesn['’]?t|shouldn['’]?t|should\s+not|mustn['’]?t|couldn['’]?t|could\s+not|wouldn['’]?t|would\s+not)\s+(?:\w+\s+){0,2}?(?:harm|hurt|endanger|injure|poison|pose\s+(?:a|an|any)\s+(?:\w+\s+)?(?:risk|danger|threat|hazard))\b|\bgentle\b|\b(?:not|isn['’]?t|aren['’]?t)\s+(?:harmful|dangerous|toxic|a\s+(?:risk|danger|concern))\b|\bnothing\s+to\s+worry\b/i, 'safety claim'],
+  [/\b(?:no|zero|little|minimal|low)\s+(?:risk|danger|harm|threat|hazard)\b|\b(?:won['’]?t|will\s+not|does\s+not|doesn['’]?t|cannot|can['’]?t|wouldn['’]?t|would\s+not|isn['’]?t\s+going\s+to|shouldn['’]?t|should\s+not|mustn['’]?t|must\s+not|couldn['’]?t|could\s+not|never)\s+(?:\w+\s+){0,2}?(?:harm|hurt|affect|bother|endanger|injure|poison|irritate|pose\s+(?:a|an|any)\s+(?:\w+\s+)?(?:risk|danger|threat|hazard))\b|\b(?:not|never|unlikely\s+to|won['’]?t|will\s+not|does\s+not|doesn['’]?t|shouldn['’]?t|should\s+not|mustn['’]?t|couldn['’]?t|could\s+not|wouldn['’]?t|would\s+not)\s+(?:\w+\s+){0,2}?(?:harm|hurt|endanger|injure|poison|pose\s+(?:a|an|any)\s+(?:\w+\s+)?(?:risk|danger|threat|hazard))\b|\bgentle\b|\b(?:not|isn['’]?t|aren['’]?t)\s+(?:harmful|dangerous|toxic|a\s+(?:risk|danger|concern))\b|\bnothing\s+to\s+worry\b|\b(?:zero|no|little|minimal|low|slim)\s+(?:chance|probability|possibility|likelihood|odds)\s+of\s+(?:\w+\s+){0,2}?(?:harm|injury|illness|poisoning|irritation|reaction|problems?|issues?|side\s+effects?)\b|\bbenign\b|\bno\s+(?:adverse|ill|harmful|negative|side)\s+effects?\b|\b(?:completely|totally|perfectly|entirely|100%?)\s+(?:harmless|non-?toxic|fine|okay|ok)\b|\bharmless\b|\bnon-?toxic\b/i, 'safety claim'],
   // "You should see improvement", "the lawn should show improvement" (Codex P1 #5964 r20).
   [/\b(?:will|should|ought\s+to|(?:is|are)\s+going\s+to|expect\s+to)\s+(?:start\s+to\s+|begin\s+to\s+)?(?:see|notice|show|find)\s+(?:\w+\s+){0,3}?(?:improvement|results?|difference|progress|reduction|fewer|less|greener|better|healthier|thicker)\b/i, 'result promise'],
   // Modal, future and expected results (Codex P1 #5964 r13, r17): "should
@@ -944,13 +949,12 @@ function leaksTargetList(text, {
     data?.customerConcern, facts?.customer_concern, facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment,
     facts?.lawn_report, facts?.tree_shrub_report, approvedWording, requiredLines,
   ].map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '));
-  return splitSentences(text).some((sentence) => DIAGNOSIS_RE.test(sentence) && !NOT_CONFIRMED_RE.test(sentence)
+  // Any sentence that is not a "no" or a "not sure" affirms it: "The symptoms
+  // indicate root rot", "It treats termites" (Codex P1s #5964 r39).
+  return splitSentences(text).some((sentence) => !NOT_CONFIRMED_RE.test(sentence)
     && terms.some((label) => stemmedTerms(sentence).includes(label) && !inFacts.includes(label)));
 }
-// A sentence that says the condition is present, not one that says what we
-// checked or treated for.
-const DIAGNOSIS_RE = /^\s*(?:yes|yep|correct|right)\b|\b(?:has|have|had|got|is|are|it['’]s|that['’]s|this['’]s|looks?\s+like|appears?\s+to\s+be|caused\s+by|signs?\s+of|suffering\s+from|infested|infestation|confirmed|diagnos\w*)\b/i;
-const NOT_CONFIRMED_RE = /\b(?:no|not|never|none|without|doesn['’]?t|does\s+not|isn['’]?t|aren['’]?t|can['’]?t|cannot|unable|unclear|unknown|don['’]?t\s+know|whether|if)\b/i;
+const NOT_CONFIRMED_RE = /\b(?:no|not|never|none|without|doesn['’]?t|does\s+not|didn['’]?t|did\s+not|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t|can['’]?t|cannot|unable|unclear|unknown|don['’]?t\s+know|whether|if)\b/i;
 
 const splitSentences = (text) => text.split(/(?<=[.!?])\s+/).filter(Boolean);
 const sentenceCount = (text) => splitSentences(text).length;
@@ -1213,6 +1217,9 @@ const CARE_ADVICE_RE = new RegExp(`\\b(?:you|we)\\s+(?:should|must|need\\s+to|ha
 // fertilizer could help the lawn" (Codex P1 #5964 r36).
 const GERUND_CARE_RE = /^(?:\w+\s+)?(?:watering|mowing|applying|fertilizing|spraying|aerating|seeding|overseeding|trimming|pruning|raking|irrigating|cutting|adding|using|keeping|stopping|skipping|reducing|increasing|raising|lowering|dethatching|treating)\b[^.?!]*\b(?:can|could|will|would|may|might|should|helps?|improves?|is\s+(?:key|best|important|good|a\s+good\s+idea)|works?)\b/i;
 const CARE_RECOMMENDATION_RE = /\b(?:is|are)\s+(?:highly\s+|strongly\s+)?(?:recommended|advised|suggested|encouraged|needed|required)\b|\b(?:needs?|requires?|could\s+use|would\s+benefit\s+from)\s+(?:more|less|extra|some|additional|a\s+(?:lot|bit|little)\s+(?:more|less)|regular|daily|weekly)\s+(?:\w+\s+)?(?:water\w*|fertiliz\w*|mow\w*|sun|shade|nitrogen|irrigation|attention|care|treatment|feeding|aeration|seed\w*)\b|\bshould\s+be\s+(?:\w+\s+)?(?:watered|mowed|mown|fertilized|cut|treated|trimmed|pruned|raised|lowered|aerated|seeded)\b/i;
+// Care framed as a benefit: "A daily watering schedule may be beneficial",
+// "Keeping the lawn shorter is beneficial" (Codex P1 #5964 r39).
+const CARE_BENEFIT_RE = new RegExp(`\\b${CARE_VERBS}\\b[^.?!]*\\b(?:beneficial|benefit\\w*|helpful|advisable|worthwhile|worth\\s+(?:it|doing|trying)|good\\s+for|best\\s+for|the\\s+way\\s+to\\s+go)\\b|\\b(?:beneficial|helpful|advisable|ideal|best)\\s+(?:to|for\\s+(?:you|the\\s+lawn|your\\s+lawn)\\s+to)\\s+(?:\\w+\\s+)?${CARE_VERBS}\\b`, 'i');
 const DRY_TIME_GUIDANCE = /\b(?:pets?|kids?|children|family|treated\s+(?:areas?|zones?))\b[^.?!]*\b(?:until|once|after)\b[^.?!]*\bdr(?:y|ied|ies)\b/i;
 const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;
 // A grant of permission with no condition: "can go out", "right away", "no
@@ -1229,6 +1236,10 @@ function ownSentences(text, requiredLines) {
 }
 
 // Rooms are inside; yard features are outside (Codex P1 #5964 r22).
+// Coverage and receipt claims: "The application covered the kitchen",
+// "Coverage included the interior", "The kitchen received the application"
+// (Codex P1 #5964 r39).
+const COVERAGE_CLAIM = /\b(?:cover(?:ed|s|ing|age)?|includ(?:ed|es|ing)|received|got|reached|went\s+(?:to|into|inside|around)|focused\s+on|targeted|concentrated\s+on)\b/i;
 const SAYS_INSIDE = /\b(?:inside|indoors?|interior|in\s+the\s+(?:home|house)|kitchen|bathrooms?|bedrooms?|living\s+room|dining\s+room|family\s+room|attic|basement|closets?|pantry|laundry|hallways?|cabinets?|baseboards?|under\s+the\s+sink|garage)\b/i;
 const SAYS_OUTSIDE = /\b(?:outside|outdoors?|exterior|perimeter|around\s+the\s+(?:home|house|outside)|yard|lawn|garden|flower\s+beds?|landscape\s+beds?|lanai|patio|pool\s+(?:cage|deck|area)|fence(?:\s+line)?|driveway|eaves|soffits?|mulch|shrubs?|hedges?|trees?|palms?|turf)\b/i;
 const NEGATION_RE = /\b(?:no|not|never|none|nothing|without|wasn['’]?t|weren['’]?t|didn['’]?t|isn['’]?t|aren['’]?t)\b/i;
@@ -1264,7 +1275,7 @@ function statesWrongScope(text, { facts }) {
     if (named.length) return named.some((product) => wrongPlace(sentence, String(product.applied_where || '')));
     // Noun-led treatment claims too ("The treatment took place inside") (Codex
     // P1 #5964 r33).
-    if (!APPLICATION_VERB.test(sentence) && !TREATMENT_EVENT.test(sentence)) return false;
+    if (!APPLICATION_VERB.test(sentence) && !TREATMENT_EVENT.test(sentence) && !COVERAGE_CLAIM.test(sentence)) return false;
     // With no name, each place claim must fit some recorded product.
     const wheres = products.map((product) => String(product.applied_where || ''));
     return (SAYS_INSIDE.test(sentence) && !wheres.some((where) => /inside|garage|entry/.test(where)))
@@ -1381,9 +1392,35 @@ function keepsLineCondition(sentence, requiredLines) {
   return lines.length > 0 && lines.every((line) => !STRONG_QUALIFIER.test(line) || STRONG_QUALIFIER.test(sentence));
 }
 
+// Visit weather in the answer must fit weather_during_visit: no sky word the
+// sheet lacks, and rain only as the sheet records it (Codex P1 #5964 r39).
+const SKY_WORDS = ['sunny', 'cloudy', 'clouds', 'overcast', 'foggy', 'stormy', 'windy', 'breezy', 'drizzle', 'showers', 'muggy'];
+// Only a sentence about the visit's own weather: rain over the week comes from
+// lawn_report and is grounded by the number checks.
+const VISIT_WEATHER = /\b(?:during|at|for|on)\s+(?:the|your|our|this)\s+(?:visit|service|treatment|application|spray)|\bthat\s+(?:day|morning|afternoon)|\btoday\b|\byesterday\b|\bwhile\s+(?:we|the\s+tech\w*|our\s+tech\w*|your\s+tech\w*)|\b(?:before|after|when)\s+(?:the|we|our)\s+(?:visit|service|treatment|tech\w*|sprayed|treated|came)|\b24\s+hours\b|\b(?:weather|conditions|skies|sky)\b|\bit\s+(?:was|wasn['’]?t|had|hadn['’]?t)\s+(?:\w+\s+)?(?:rain\w*|sunny|cloudy|overcast|windy|stormy|foggy|drizzl\w*)/i;
+const SAYS_RAIN = /\b(?:rain(?:ed|ing|y|s)?|raining|rainfall|showers?|drizzl\w*|downpour|wet\s+weather|stormy?)\b/i;
+const OTHER_PERIOD = /\b(?:week|7\s+days|seven\s+days|past\s+few\s+days|this\s+month|lately|recently)\b/i;
+function contradictsWeather(text, facts) {
+  const sheet = String(facts?.weather_during_visit || '').toLowerCase();
+  const sheetRain = /(?:^|,\s*)rain in the last 24 hours/.test(sheet) || /trace of rain/.test(sheet);
+  const sheetDry = /no rain in the last 24 hours/.test(sheet);
+  return splitSentences(matchForm(text)).some((sentence) => {
+    const lower = sentence.toLowerCase();
+    if (OTHER_PERIOD.test(lower) || !VISIT_WEATHER.test(lower)) return false;
+    const negated = NOT_CONFIRMED_RE.test(lower);
+    if (!negated && SKY_WORDS.some((word) => new RegExp(`\\b${word}\\b`).test(lower) && !new RegExp(`\\b${word}`).test(sheet))) return true;
+    if (SAYS_RAIN.test(lower)) {
+      if (!negated && !sheetRain) return true;
+      if (negated && !sheetDry) return true;
+    }
+    return false;
+  });
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['weather_claim', (text, { facts }) => contradictsWeather(text, facts)],
   ['missing_required_line', (text, { requiredLines }) => {
     const sentences = splitSentences(matchForm(text));
     return requiredLines.some((line) => !statesLineAlone(sentences, line));
@@ -1418,7 +1455,7 @@ const ASK_CHECKS = [
   // A care instruction the model writes itself ("Water every day", "Mow the
   // lawn shorter") is not on the report; only required lines instruct
   // (Codex P1 #5964 r31). The prompt's own dry-time guidance (rule 6) stays.
-  ['own_instruction', (text, { requiredLines }) => ownSentences(text, requiredLines).some((sentence) => (CARE_INSTRUCTION_RE.test(sentence) || CARE_ADVICE_RE.test(sentence) || CARE_RECOMMENDATION_RE.test(sentence) || GERUND_CARE_RE.test(sentence)) && !DRY_TIME_GUIDANCE.test(sentence))],
+  ['own_instruction', (text, { requiredLines }) => ownSentences(text, requiredLines).some((sentence) => (CARE_INSTRUCTION_RE.test(sentence) || CARE_ADVICE_RE.test(sentence) || CARE_RECOMMENDATION_RE.test(sentence) || GERUND_CARE_RE.test(sentence) || CARE_BENEFIT_RE.test(sentence)) && !DRY_TIME_GUIDANCE.test(sentence))],
 ];
 
 function firstFailure(checks, text, context) {

@@ -769,7 +769,8 @@ describe('answer screen, Codex round 7', () => {
     const facts = buildReportAskFacts({ question: 'What is Taurus SC for?', data });
     const ask = (answer, question = 'What is Taurus SC for?') => screenAskAnswer(answer, { question, data, facts });
     expect(ask('Taurus SC also treats termites.')).toBe('target_list');
-    expect(ask('We checked for termites around the garage.', 'Did you look for termites?')).toBeNull();
+    expect(ask('The report does not mention termites.', 'Did you look for termites?')).toBeNull();
+    expect(ask('We checked for termites around the garage.', 'Did you look for termites?')).toBe('target_list');
   });
 
   test.each(['lockbox 42', 'lock box A2', 'keypad #7', 'Key-box 1234'])('the shorthand %s is masked', (credential) => {
@@ -1556,5 +1557,61 @@ describe('answer screen, Codex round 38', () => {
   test('prose with "at" and a spaced period is not masked', () => {
     const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'We were at home. Then ants came' } });
     expect(facts.customer_concern).toBe('We were at home. Then ants came');
+  });
+});
+
+describe('answer screen, Codex round 39', () => {
+  test.each(['Gate code one-two-three-four', 'Gate code 1-2-3-4'])('a hyphen-joined code is masked whole: %s', (concern) => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: `${concern}, ants in kitchen` } });
+    expect(facts.customer_concern).toBe('Gate code [redacted], ants in kitchen');
+  });
+
+  test('a hyphenated word is not a code', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'Ants in a two-car garage' } });
+    expect(facts.customer_concern).toBe('Ants in a two-car garage');
+  });
+
+  test.each(['A daily watering schedule may be beneficial.', 'More frequent watering may benefit the lawn.', 'Keeping the lawn shorter is beneficial.'])('care framed as a benefit is rejected: %s', (answer) => {
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    expect(screenAskAnswer(answer, { question: 'How can I help my lawn?', data, facts: buildReportAskFacts({ data }) })).toBe('own_instruction');
+  });
+
+  test('a question-only condition is not affirmed by "indicate"', () => {
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    const question = 'Is this root rot?';
+    const facts = buildReportAskFacts({ question, data });
+    expect(screenAskAnswer('The symptoms indicate root rot.', { question, data, facts })).toBe('target_list');
+  });
+
+  test.each(['Alpine WSG controls termites.', 'It treats termites.'])('a question-only pest is not made a label claim: %s', (answer) => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, targets: ['ants'] }] });
+    const question = 'Does Alpine WSG control termites?';
+    expect(screenAskAnswer(answer, { question, data, facts: buildReportAskFacts({ question, data }) })).toBe('target_list');
+  });
+
+  test.each(['There is zero chance of harm to your dog.', 'The product is benign around pets.'])('a zero-chance assurance is rejected: %s', (answer) => {
+    const data = pestData({ applications: [] });
+    expect(screenAskAnswer(answer, { question: 'Is it safe?', data, facts: buildReportAskFacts({ data }) })).toBe('safety claim');
+  });
+
+  test.each(['The application covered the kitchen.', 'Coverage included the interior.', 'The kitchen received the application.'])('a coverage claim must fit an outside-only record: %s', (answer) => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside' }] });
+    const question = 'Where did you treat?';
+    expect(screenAskAnswer(answer, { question, data, facts: buildReportAskFacts({ question, data }) })).toBe('scope_claim');
+  });
+
+  test('an outside coverage claim fits an outside record', () => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside' }] });
+    const question = 'Where did you treat?';
+    expect(screenAskAnswer('The application covered the outside of the home.', { question, data, facts: buildReportAskFacts({ question, data }) })).toBeNull();
+  });
+
+  test('visit weather must fit the sheet', () => {
+    const data = pestData({ applications: [], conditions: { conditions: 'Cloudy', rain_24h_in: 0 } });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'What was the weather?', data, facts });
+    expect(ask('It was raining during the visit.')).toBe('weather_claim');
+    expect(ask('Conditions were sunny.')).toBe('weather_claim');
+    expect(ask('It was cloudy with no rain during the visit.')).toBeNull();
   });
 });
