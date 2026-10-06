@@ -139,11 +139,12 @@ describe('customer_visit_photos cards follow the visit-prep gates at request tim
   });
 });
 
-// Owner 2026-10-06, "keep notices": arrival, timer and storm notices are not
+// Owner 2026-10-06, "keep notices": arrival and timer notices are not
 // aged out by the clock. The client marks one read only after the tech has
 // seen it, so the feed keeps serving the unread row until the end of its ET
-// day (the hard cap), not for a fixed 6 hours or 5 minutes.
-describe('arrival, timer and storm notices stay until the end of their ET day', () => {
+// day (the hard cap), not for a fixed 6 hours or 5 minutes. Storm nudges keep
+// their 6-hour cap (a stale storm warning misleads).
+describe('arrival and timer notices stay until the end of their ET day', () => {
   async function run() {
     const chain = {};
     const calls = { whereNotIn: [], orWhere: [] };
@@ -162,13 +163,21 @@ describe('arrival, timer and storm notices stay until the end of their ET day', 
 
   afterEach(() => { jest.useRealTimers(); });
 
-  test('the cap covers the four geofence notice types and storm alerts, and nothing else', async () => {
+  test('the cap covers the four geofence notice types and nothing else', async () => {
     const { whereNotIn } = await run();
     expect(whereNotIn).toHaveLength(1);
     expect(whereNotIn[0][0]).toBe('type');
     expect(whereNotIn[0][1].slice().sort()).toEqual([
-      'geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped', 'storm_watch_alert',
+      'geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped',
     ]);
+  });
+
+  test('storm nudges keep their 6-hour cap', async () => {
+    await run();
+    expect(db.mock.results.length).toBeGreaterThan(0);
+    const chain = db.mock.results[db.mock.results.length - 1].value;
+    expect(chain.whereNot).toHaveBeenCalledWith({ type: 'storm_watch_alert' });
+    expect(chain.orWhereRaw).toHaveBeenCalledWith("created_at >= now() - interval '6 hours'");
   });
 
   test('a capped notice is served while it was raised since 00:00 ET today (EDT)', async () => {

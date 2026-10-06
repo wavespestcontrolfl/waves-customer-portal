@@ -13,10 +13,11 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 // Notices that wait for the tech to see them but not past the end of the ET
-// day they were raised (the storm nudge used to expire at 6 hours instead).
+// day they were raised. Storm nudges keep their own 6-hour cap below: an
+// unseen morning storm warning must not show up stale in the afternoon.
 const DAY_CAPPED_TYPES = [
   'geofence_arrival_reminder', 'geofence_arrival_select',
-  'geofence_timer_started', 'geofence_timer_stopped', 'storm_watch_alert',
+  'geofence_timer_started', 'geofence_timer_stopped',
 ];
 
 // 00:00 ET of today as an instant (the server runs UTC).
@@ -32,7 +33,15 @@ router.get('/', async (req, res, next) => {
     let q = db('tech_notifications')
       .where({ technician_id: req.technicianId })
       .whereNull('dismissed_at')
-      // Arrival, timer and storm notices stay until the tech has SEEN them
+      // Storm-watch nudges are only actionable for a couple of hours
+      // (sweep lookahead + service window). Without an age cutoff, unread
+      // alerts from earlier days pile up into a wall of cards that buries
+      // the tech home screen on the next load.
+      .where(function stormFreshness() {
+        this.whereNot({ type: 'storm_watch_alert' })
+          .orWhereRaw("created_at >= now() - interval '6 hours'");
+      })
+      // Arrival and timer notices stay until the tech has SEEN them
       // (owner 2026-10-06, "keep notices"): the client starts its 5-minute
       // clock only after the card has been on screen, and marks it read then.
       // Until that, the row stays unread and this feed keeps serving it. The
