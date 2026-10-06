@@ -61,6 +61,44 @@ postgres('update_property_access keeps history and keeps community codes off the
     expect((await prefs()).property_gate_code).toBe('7777');
   });
 
+  test('a shorter code is not hidden inside a longer one already on file', async () => {
+    await run({ access_notes: 'punch in 555' });
+    expect((await prefs()).access_notes.split('\n')).toHaveLength(2);
+  });
+
+  test('the note stamp is the Eastern date', async () => {
+    jest.useFakeTimers({ now: new Date('2026-10-06T02:30:00Z'), doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'clearTimeout'] });
+    try {
+      await run({ access_notes: 'Side door sticks' });
+    } finally { jest.useRealTimers(); }
+    expect((await prefs()).access_notes).toContain('[bar 2026-10-05] Side door sticks');
+  });
+
+  test('a side gate note that would pass its 200 characters is not saved, and the result says so', async () => {
+    await mockDb('property_preferences').where({ customer_id: customerId }).update({ side_gate_access: 'x'.repeat(150) });
+    const out = await run({ side_gate_access: 'Latch on the left side of the gate, lift and push hard' });
+    expect(out.updated_fields).toEqual([]);
+    expect(out.kept.join(' ')).toMatch(/200 characters/);
+    expect((await prefs()).side_gate_access).toBe('x'.repeat(150));
+  });
+
+  test('a community code set in the same call, or one that needs confirming in the directory, stays off the property gate', async () => {
+    let out = await run({ neighborhood_gate_code: '8080', property_gate_code: '8080' });
+    expect(out.updated_fields).toEqual(['neighborhood_gate_code']);
+    expect(out.kept.join(' ')).toMatch(/community gate code/);
+    expect((await prefs()).property_gate_code).toBeNull();
+    const hoodId = randomUUID();
+    await mockDb('neighborhoods').insert({ id: hoodId, name: 'Example Glen', match_key: `example-glen-${hoodId}`, source: 'office' });
+    await mockDb('neighborhood_access').insert({ neighborhood_id: hoodId, access_type: 'keypad', code: '#4321', status: 'needs_confirm', source: 'office' });
+    await mockDb('customer_properties').insert({
+      id: randomUUID(), customer_id: customerId, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: true,
+      address_line1: '4455 Example Lane', city: 'Lakewood Ranch', zip: '34202', active: true, neighborhood_id: hoodId,
+    });
+    out = await run({ property_gate_code: '#4321' });
+    expect(out.updated_fields).toEqual([]);
+    expect((await prefs()).property_gate_code).toBeNull();
+  });
+
   test('an empty field is simply filled', async () => {
     await run({ parking_notes: 'Park on the street' });
     expect((await prefs()).parking_notes).toBe('Park on the street');
