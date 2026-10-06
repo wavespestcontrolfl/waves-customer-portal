@@ -36,10 +36,12 @@
  *   polls; verify the error path swallows quietly and resumes.
  * - Notification dedupe: if the same notification id arrives twice
  *   (server retry, late ack), do we render two cards?
- * - Auto-dismiss timers (REMINDER_AUTODISMISS_MS, STOP_TOAST_MS): if
- *   the user confirms / dismisses manually before the timer fires,
- *   confirm we clear the pending timeout to avoid a late-firing
- *   dismiss racing with a fresh notification.
+ * - Auto-dismiss timers (REMINDER_AUTODISMISS_MS, STOP_TOAST_MS): they start
+ *   only once the card has been seen (SeenOnScreen: visible on screen for
+ *   SEEN_DWELL_MS, or tapped). An unseen card never expires on the clock and
+ *   stays unread on the server. If the user confirms / dismisses manually
+ *   before the timer fires, confirm we clear the pending timeout to avoid a
+ *   late-firing dismiss racing with a fresh notification.
  * - Backgrounded tab behavior: when the tech's phone backgrounds the
  *   tab, polls pause. On resume, do we catch up correctly? Skipped
  *   notifications during the gap should still render once.
@@ -57,8 +59,16 @@ import { formatETDateOnly } from '../../lib/timezone';
 
 const API = import.meta.env.VITE_API_URL || '';
 const POLL_MS = 10_000;
+// Timed cards (arrival, timer, storm) keep their clock, but it starts when the
+// tech has SEEN the card, not when it arrived (owner 2026-10-06, "keep
+// notices"): a card scrolled past or opened on a locked phone used to be
+// marked read after 5 minutes unseen.
 const REMINDER_AUTODISMISS_MS = 5 * 60 * 1000;
 const STOP_TOAST_MS = 15_000;
+// Seen = at least half the card (or half the screen, for a tall card) in view
+// for this long while the page is visible, or a tap on the card.
+const SEEN_VISIBLE_RATIO = 0.5;
+const SEEN_DWELL_MS = 1500;
 const MAX_STORM_CARDS = 2;
 // Visit cards never auto-dismiss, so a bulk assign or day swap could stack
 // dozens over the actionable geofence prompts: same cap + summary line as
@@ -146,6 +156,15 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
   const isMobile = useIsMobile();
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
+  // When the tech first saw each card (id → ms). A card with no entry has not
+  // been seen and its auto-dismiss clock has not started.
+  const seenAt = useRef(new Map());
+  const [seenTick, setSeenTick] = useState(0);
+  const markSeen = useCallback((id) => {
+    if (seenAt.current.has(id)) return;
+    seenAt.current.set(id, Date.now());
+    setSeenTick((t) => t + 1);
+  }, []);
 
   const poll = useCallback(async () => {
     try {
@@ -267,18 +286,23 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     }
   }, [active]);
 
-  // Auto-dismiss timers — RENDERED cards only. Storm alerts for other stops
-  // held back by the cap must stay unread so they actually surface later;
-  // marking them read here would hide them from every future unreadOnly poll
-  // without the tech ever seeing them.
+  // Auto-dismiss timers — RENDERED and SEEN cards only. Storm alerts for other
+  // stops held back by the cap must stay unread so they actually surface
+  // later, and a card the tech has not yet seen must stay unread too: marking
+  // either read here would hide it from every future unreadOnly poll without
+  // the tech ever seeing it. The clock runs from the moment of first sight, so
+  // a re-run of this effect (a new card arriving) never restarts it.
   useEffect(() => {
-    const timers = cards.filter((n) => !KEPT_TYPES.has(n.type)).map((n) => {
-      const ms = n.type === 'geofence_timer_stopped' ? STOP_TOAST_MS : REMINDER_AUTODISMISS_MS;
-      return setTimeout(() => removeCard(n.id, { silent: true }), ms);
-    });
+    const timers = cards
+      .filter((n) => !KEPT_TYPES.has(n.type) && seenAt.current.has(n.id))
+      .map((n) => {
+        const ms = n.type === 'geofence_timer_stopped' ? STOP_TOAST_MS : REMINDER_AUTODISMISS_MS;
+        const left = Math.max(0, ms - (Date.now() - seenAt.current.get(n.id)));
+        return setTimeout(() => removeCard(n.id, { silent: true }), left);
+      });
     return () => timers.forEach(clearTimeout);
 
-  }, [cards]);
+  }, [cards, seenTick]);
 
   function removeCard(id, { silent } = {}) {
     setActive((prev) => prev.filter((n) => n.id !== id));
@@ -336,7 +360,7 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
       maxHeight: '50dvh', overflowY: 'auto',
     } : { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 12 }}>
       {cards.map((n) => (
-        <div key={n.id} style={elsewhere ? { pointerEvents: 'auto', filter: 'drop-shadow(0 6px 14px rgba(28,25,23,0.18))' } : undefined}>
+        <SeenOnScreen key={n.id} id={n.id} onSeen={markSeen} style={elsewhere ? { pointerEvents: 'auto', filter: 'drop-shadow(0 6px 14px rgba(28,25,23,0.18))' } : undefined}>
           {n.type === 'geofence_arrival_reminder' && (
             <ReminderCard n={n} onStart={() => handleStart(n)} onDismiss={() => removeCard(n.id)} />
           )}
@@ -374,7 +398,7 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
               onDismiss={() => removeCard(n.id)}
             />
           )}
-        </div>
+        </SeenOnScreen>
       ))}
       {hiddenVisitCount > 0 && (
         <div style={{ ...cardStyle(COLORS.muted), padding: 10 }} data-testid="visit-notice-more">
@@ -393,6 +417,53 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     </div>}
     </>
   );
+}
+
+// Wraps one card and reports it SEEN once it has been on screen: at least
+// SEEN_VISIBLE_RATIO of it (or of the viewport, for a card taller than the
+// screen) for SEEN_DWELL_MS while the page is visible. A tap on the card
+// counts too. The dwell timer drops when the card scrolls out or the tab is
+// hidden. A browser without IntersectionObserver counts a mounted card on a
+// visible page as in view.
+function SeenOnScreen({ id, onSeen, style, children }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    let inView = typeof IntersectionObserver === 'undefined';
+    let timer = null;
+    const pageVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
+    const stop = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    const evaluate = () => {
+      if (inView && pageVisible()) {
+        if (!timer) timer = setTimeout(() => { timer = null; onSeen(id); }, SEEN_DWELL_MS);
+      } else {
+        stop();
+      }
+    };
+    let observer = null;
+    if (!inView) {
+      observer = new IntersectionObserver((entries) => {
+        const entry = entries[entries.length - 1];
+        if (!entry) return;
+        const viewportHeight = entry.rootBounds?.height || window.innerHeight || 0;
+        inView = entry.isIntersecting && (
+          entry.intersectionRatio >= SEEN_VISIBLE_RATIO
+          || (viewportHeight > 0 && entry.intersectionRect.height >= viewportHeight * SEEN_VISIBLE_RATIO)
+        );
+        evaluate();
+      }, { threshold: [0, 0.25, SEEN_VISIBLE_RATIO, 0.75, 1] });
+      observer.observe(el);
+    }
+    document.addEventListener('visibilitychange', evaluate);
+    evaluate();
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', evaluate);
+      if (observer) observer.disconnect();
+    };
+  }, [id, onSeen]);
+  return <div ref={ref} style={style} onClickCapture={() => onSeen(id)}>{children}</div>;
 }
 
 // "N notices on Today": the one in-page line shown away from Today for the

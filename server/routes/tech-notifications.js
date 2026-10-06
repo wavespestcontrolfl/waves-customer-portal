@@ -12,6 +12,19 @@ const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-a
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
+// Notices that wait for the tech to see them but not past the end of the ET
+// day they were raised (the storm nudge used to expire at 6 hours instead).
+const DAY_CAPPED_TYPES = [
+  'geofence_arrival_reminder', 'geofence_arrival_select',
+  'geofence_timer_started', 'geofence_timer_stopped', 'storm_watch_alert',
+];
+
+// 00:00 ET of today as an instant (the server runs UTC).
+function startOfTodayET(now = new Date()) {
+  const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+  return parseETDateTime(`${etDateString(now)}T00:00`);
+}
+
 // GET /api/tech/notifications?unreadOnly=true
 router.get('/', async (req, res, next) => {
   try {
@@ -19,13 +32,15 @@ router.get('/', async (req, res, next) => {
     let q = db('tech_notifications')
       .where({ technician_id: req.technicianId })
       .whereNull('dismissed_at')
-      // Storm-watch nudges are only actionable for a couple of hours
-      // (sweep lookahead + service window). Without an age cutoff, unread
-      // alerts from earlier days pile up into a wall of cards that buries
-      // the tech home screen on the next load.
-      .where(function stormFreshness() {
-        this.whereNot({ type: 'storm_watch_alert' })
-          .orWhereRaw("created_at >= now() - interval '6 hours'");
+      // Arrival, timer and storm notices stay until the tech has SEEN them
+      // (owner 2026-10-06, "keep notices"): the client starts its 5-minute
+      // clock only after the card has been on screen, and marks it read then.
+      // Until that, the row stays unread and this feed keeps serving it. The
+      // hard cap is the end of the tech's ET day, so an unseen notice from
+      // earlier days cannot pile up into a wall of cards on the next load.
+      .where(function noticeDayCap() {
+        this.whereNotIn('type', DAY_CAPPED_TYPES)
+          .orWhere('created_at', '>=', startOfTodayET());
       });
     // GATE_NOSHOW_DETECTOR is the feature's kill switch, and turning it off
     // stops the sweep — which is the only thing that dismisses a tracking
@@ -82,9 +97,12 @@ router.get('/', async (req, res, next) => {
     // bucket 0 with them meant an offline tech who collected 20 newer
     // geofence/timer prompts — two events across ten stops — still lost the
     // stage-2 card from the window (codex P2 round 17). The other buckets
-    // keep their relative order, one step down.
+    // keep their relative order, one step down. An unseen arrival or timer
+    // notice stays in bucket 1 for the rest of its ET day (owner 2026-10-06,
+    // "keep notices"), not only its first six hours, so a backlog of visit
+    // cards cannot push it out of the window before the tech has seen it.
     const rows = await q
-      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 3 WHEN type = 'storm_watch_alert' THEN 2 WHEN created_at >= now() - interval '6 hours' THEN 1 ELSE 3 END")
+      .orderByRaw("CASE WHEN type = 'follow_through_tracking' THEN 0 WHEN type LIKE 'visit\\_%' OR type IN ('tech_line_sms', 'customer_visit_photos') THEN 3 WHEN type = 'storm_watch_alert' THEN 2 WHEN type IN ('geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped') OR created_at >= now() - interval '6 hours' THEN 1 ELSE 3 END")
       // Stage 2 before stage 1 INSIDE the tracking bucket, before the limit
       // truncates: a tech with more than 20 undismissed tracking cards would
       // otherwise lose an older critical arrival check behind 20 newer
