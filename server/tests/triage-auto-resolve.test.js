@@ -1992,7 +1992,7 @@ describe('email_dictation_unambiguous (GATE_FIRST_TOUCH_AUTO_RELEASE)', () => {
 });
 
 describe('staff-work rules (quote_sent_to_customer / staff_booked_after_card / staff_booked_at_account_address)', () => {
-  const { staffBookingsAfterCard, visitAtSoleProperty, soleClaimant, estimateReachedCustomer, STAFF_WORK_MAX_AGE_DAYS } = require('../services/triage-auto-resolve');
+  const { staffBookingsAfterCard, visitAtSoleProperty, soleClaimant, filedAgainstProperty, STAFF_WORK_MAX_AGE_DAYS } = require('../services/triage-auto-resolve');
   const ctxOf = (flags, id = 't1') => ({ evidence: new Map([[id, flags]]) });
   const CARD_AT = '2026-09-10T15:00:00Z';
   const after = (hours) => new Date(new Date(CARD_AT).getTime() + hours * 3600 * 1000).toISOString();
@@ -2088,14 +2088,21 @@ describe('staff-work rules (quote_sent_to_customer / staff_booked_after_card / s
     expect(soleClaimant(me, null, [me])).toBe(false);
   });
 
-  test('estimateReachedCustomer: a real handoff, or the customer acted; never a suppressed send or a manual accept', () => {
-    const boundary = new Date(CARD_AT);
-    expect(estimateReachedCustomer({ handed_off_at: after(1), status: 'sent' }, boundary)).toBe(true);
-    expect(estimateReachedCustomer({ status: 'viewed' }, boundary)).toBe(true);
-    expect(estimateReachedCustomer({ status: 'declined' }, boundary)).toBe(true);
-    expect(estimateReachedCustomer({ status: 'accepted', price_locked_by: null }, boundary)).toBe(true);
-    expect(estimateReachedCustomer({ status: 'accepted', price_locked_by: 'manual_accept' }, boundary)).toBe(false);
-    expect(estimateReachedCustomer({ status: 'sent' }, boundary)).toBe(false);
-    expect(estimateReachedCustomer({ handed_off_at: after(-1), status: 'sent' }, boundary)).toBe(false);
+  test('filedAgainstProperty: the card\'s own on-file snapshot must key, unit and locality-match the sole property', () => {
+    const prop = { id: 'p1', address_line1: '10 Oak St', address_line2: null, city: 'Bradenton', zip: '34205' };
+    const filed = (a) => card({ payload: { flag: 'missing_service_address', on_file_address: a } });
+    const snap = { address_line1: '10 Oak Street', address_line2: null, city: 'Bradenton', zip: '34205' };
+    expect(filedAgainstProperty(filed(snap), prop)).toBe(true);
+    expect(filedAgainstProperty(filed({ ...snap, address_line2: 'Apt 2' }), prop)).toBe(false);
+    expect(filedAgainstProperty(filed({ ...snap, zip: '34211' }), prop)).toBe(false);
+    expect(filedAgainstProperty(filed({ ...snap, zip: null }), prop)).toBe(false);
+    expect(filedAgainstProperty(filed({ ...snap, address_line1: '12 Oak St' }), prop)).toBe(false);
+    expect(filedAgainstProperty(filed({ ...snap, address_line1: 'Oak St' }), prop)).toBe(false);
+    expect(filedAgainstProperty(filed(null), prop)).toBe(false);
+    // No ZIP anywhere: only a matching city can show the locality.
+    const noZip = { ...prop, zip: null };
+    expect(filedAgainstProperty(filed({ ...snap, zip: null }), noZip)).toBe(true);
+    expect(filedAgainstProperty(filed({ ...snap, zip: null, city: 'Sarasota' }), noZip)).toBe(false);
+    expect(filedAgainstProperty(filed({ ...snap, zip: null, city: null }), { ...noZip, city: null })).toBe(false);
   });
 });
