@@ -200,27 +200,33 @@ describe('GATE_AUTO_DISPATCH_FLEX_TIER ctx', () => {
 describe('isPersonPlacedVisit', () => {
   // An in-memory reschedule_log. Rows are filtered by the predicates the
   // query sends, so a wrong column or value makes a test miss the row.
+  // An in-memory reschedule_log. Rows are filtered by the predicates the
+  // query sends, so a wrong column or value makes a test miss the row; the
+  // newest-placement subquery is evaluated like PostgreSQL would.
   function fakeDb({ log = [], fail = false } = {}) {
+    const slotChanged = (r) => r.original_date !== r.new_date || r.original_window !== r.new_window;
     return (table) => {
       if (table !== 'reschedule_log') throw new Error(`unexpected table ${table}`);
       const preds = [];
-      let ordered = false;
-      const rows = () => {
-        if (fail) throw new Error('connection reset');
-        const out = log.filter((r) => preds.every((p) => p(r)));
-        return ordered ? [...out].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)) : out;
-      };
       const chain = {
         where(key, value) { preds.push((r) => String(r[key]) === String(value)); return chain; },
         whereNotNull(key) { preds.push((r) => r[key] != null); return chain; },
         whereRaw(sql) {
-          expect(sql).toBe('(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)');
-          preds.push((r) => r.original_date !== r.new_date || r.original_window !== r.new_window);
+          if (sql === '(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)') {
+            preds.push(slotChanged);
+          } else if (/created_at = \(SELECT max\(r2\.created_at\)/.test(sql)) {
+            preds.push((r) => {
+              const peers = log.filter((x) => x.scheduled_service_id === r.scheduled_service_id && x.new_date != null && slotChanged(x));
+              const max = Math.max(...peers.map((x) => new Date(x.created_at).getTime()));
+              return new Date(r.created_at).getTime() === max;
+            });
+          } else throw new Error(`unexpected raw sql ${sql}`);
           return chain;
         },
-        orderBy() { ordered = true; return chain; },
-        first: async () => rows()[0] || null,
-        select: async () => rows(),
+        select: async () => {
+          if (fail) throw new Error('connection reset');
+          return log.filter((r) => preds.every((p) => p(r)));
+        },
       };
       return chain;
     };

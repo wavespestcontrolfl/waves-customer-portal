@@ -395,6 +395,14 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     expect(routeTiers.loadReminderFreeze).not.toHaveBeenCalled();
   });
 
+  test('the primary is rechecked on the move transaction (a person placed it after pass 1) (Codex #6055 r5)', async () => {
+    const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    isPersonPlacedVisit.mockResolvedValueOnce({ placed: true, reason_code: 'PERSON_PLACED', reason_description: 'Date chosen by staff (move by admin)' });
+    await expect(makeMoveGuard({ service: SERVICE, best: BEST, config: {} })({ trx: {}, technicianId: 't1', service: SERVICE }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('placed by a person') });
+  });
+
   test('a sibling a person placed refuses the whole grouped move (Codex #6055 r1 P1)', async () => {
     const { isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
     isPersonPlacedVisit.mockResolvedValueOnce({ placed: true, reason_code: 'PERSON_PLACED', reason_description: 'Date chosen by the customer (series move m1)' });

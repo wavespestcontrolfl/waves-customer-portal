@@ -195,25 +195,25 @@ async function isPersonPlacedVisit(service, db) {
   if (!service.id || !dateStr) return { placed: false };
   if (service.recurring_dispatch_due_date && !service.window_start) return { placed: false };
   try {
-    const newest = await db('reschedule_log')
+    // The newest placement's rows, chosen entirely in SQL: created_at has
+    // microsecond precision and a JS Date keeps only milliseconds, so the
+    // timestamp must never round-trip through JS as a key (Codex #6055 r5).
+    const newestRows = await db('reschedule_log')
       .where('scheduled_service_id', service.id)
       .whereNotNull('new_date')
       .whereRaw(SLOT_CHANGED_SQL)
-      .orderBy('created_at', 'desc')
-      .first('created_at');
+      .whereRaw(`created_at = (SELECT max(r2.created_at) FROM reschedule_log r2
+        WHERE r2.scheduled_service_id = reschedule_log.scheduled_service_id
+          AND r2.new_date IS NOT NULL
+          AND (r2.original_date IS DISTINCT FROM r2.new_date OR r2.original_window IS DISTINCT FROM r2.new_window))`)
+      .select('created_at', 'new_date', 'initiated_by', 'series_move_id');
+    const newestAt = newestRows.length ? new Date(newestRows[0].created_at) : null;
     const exceptionAt = personExceptionAt(service);
-    if (exceptionAt && (!newest || exceptionAt > new Date(newest.created_at))) {
+    if (exceptionAt && (!newestAt || exceptionAt > newestAt)) {
       return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${whoPlaced(service.date_exception_source)} (date edit)` };
     }
-    if (!newest) return { placed: false };
     // Rows one move writes share its transaction's created_at.
-    const rows = await db('reschedule_log')
-      .where('scheduled_service_id', service.id)
-      .where('created_at', newest.created_at)
-      .where('new_date', dateStr)
-      .whereRaw(SLOT_CHANGED_SQL)
-      .select('initiated_by', 'series_move_id');
-    const placement = rows.find((r) => !AUTOMATIC_INITIATORS.has(r.initiated_by));
+    const placement = newestRows.find((r) => toDateStr(r.new_date) === dateStr && !AUTOMATIC_INITIATORS.has(r.initiated_by));
     if (!placement) return { placed: false };
     const how = placement.series_move_id ? `series move ${placement.series_move_id}` : `move by ${placement.initiated_by || 'unknown'}`;
     return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${whoPlaced(placement.initiated_by)} (${how})` };
