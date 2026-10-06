@@ -166,10 +166,14 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const assessmentLinked = await estimate(c, { createdAt: minutesAgo(60), data: { scheduled_service_id: randomUUID() } });
     await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
     await mockPg('booking_intents').insert({ id: randomUUID(), phone: '+12025550123', pricing_estimate_id: handoff, suppressed: false });
-    await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', flags: JSON.stringify({ estimate_id: clarify }) });
+    await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'pending', flags: JSON.stringify({ estimate_id: clarify }) });
+    // A rejected (terminal) clarification is history, not a live dependent.
+    const oldClarify = await estimate(c, { createdAt: minutesAgo(60) });
+    await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', status: 'rejected', flags: JSON.stringify({ estimate_id: oldClarify }) });
     const bellId = randomUUID();
     await mockPg('notifications').insert({ id: bellId, recipient_type: 'admin', category: 'lead', title: 'Draft ready', metadata: JSON.stringify({ estimateId: staffDraft }) });
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(2);
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(3);
+    expect((await row(oldClarify)).archived_at).not.toBeNull();
     expect((await row(staffDraft)).archived_at).not.toBeNull();
     expect((await row(autoDraft)).archived_at).not.toBeNull();
     expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBeNull();

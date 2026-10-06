@@ -49,7 +49,13 @@ const DRAFT_HOLD_MARKERS_ABSENT_SQL = `(
 // the link is cleared, as the Delete action does (see retireOneDraft).
 const NO_LIVE_DEPENDENTS_SQL = `(
   NOT EXISTS (SELECT 1 FROM booking_intents b WHERE b.pricing_estimate_id = estimates.id)
-  AND NOT EXISTS (SELECT 1 FROM message_drafts m WHERE m.flags->>'estimate_id' = estimates.id::text)
+  AND NOT EXISTS (
+    SELECT 1 FROM message_drafts m
+     WHERE m.intent = 'estimate_clarify'
+       AND m.flags->>'estimate_id' = estimates.id::text
+       AND m.status IN ('pending', 'approved', 'revised')
+       AND m.sent_at IS NULL
+  )
 )`;
 
 const DRAFT_ELIGIBLE_SQL = `
@@ -145,16 +151,20 @@ async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BA
   // no LIMIT for other-door pairs to starve later drafts behind; the WRITES
   // are capped at `batch`.
   const pairs = (await conn.raw(`
-    SELECT DISTINCT ON (d.id) d.id AS draft_id, d.property_id AS draft_property_id, d.address AS draft_address,
+    SELECT d.id AS draft_id, d.property_id AS draft_property_id, d.address AS draft_address,
            s.id AS sent_id, s.sent_at, s.property_id AS sent_property_id, s.address AS sent_address
       FROM (SELECT * FROM estimates WHERE ${DRAFT_ELIGIBLE_SQL}) d
-      JOIN estimates s
-        ON s.customer_id = d.customer_id
-       AND s.id <> d.id
-       AND ${SENT_EVIDENCE_SQL('s')}
-       AND s.created_at > d.created_at
-       AND d.updated_at <= s.sent_at
-     ORDER BY d.id, s.sent_at DESC
+      CROSS JOIN LATERAL (
+        SELECT s.id, s.sent_at, s.property_id, s.address
+          FROM estimates s
+         WHERE s.customer_id = d.customer_id
+           AND s.id <> d.id
+           AND ${SENT_EVIDENCE_SQL('s')}
+           AND s.created_at > d.created_at
+           AND d.updated_at <= s.sent_at
+         ORDER BY s.sent_at DESC
+         LIMIT 1
+      ) s
   `))?.rows || [];
 
   const chosen = pairs.filter(sameProperty).slice(0, batch);
