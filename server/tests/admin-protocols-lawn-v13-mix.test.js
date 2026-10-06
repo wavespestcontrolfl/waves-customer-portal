@@ -75,9 +75,13 @@ async function lawnMix(query, reqExtra = {}) {
 const itemFor = (body, name) => body.items.find((item) => item.product?.name === name);
 
 let visitRows = [];
+let profileRows = [];
+let customerRows = [];
 beforeEach(() => {
   jest.clearAllMocks();
   visitRows = [];
+  profileRows = [];
+  customerRows = [];
   mockCheckLimits.mockReset().mockResolvedValue({ allowed: true, blocks: [], warnings: [] });
   process.env.GATE_LAWN_V13 = 'true';
   operatingLayer.getProtocolWindowContext.mockResolvedValue({ protocol: { version: LAWN_V13_VERSION } });
@@ -89,6 +93,8 @@ beforeEach(() => {
     if (table === 'products_catalog') return readQuery(CATALOG);
     if (table === 'product_aliases') return readQuery([]);
     if (table === 'scheduled_services') return readQuery(visitRows);
+    if (table === 'customer_turf_profiles') return readQuery(profileRows);
+    if (table === 'customers') return readQuery(customerRows);
     throw new Error(`Unexpected table: ${table}`);
   });
 });
@@ -352,4 +358,62 @@ test('whole-lawn rows keep their amounts beside the spot rows (a window with no 
   expect(itemFor(body, NUTRA).jobMix.amount).toBe(60);
   expect(itemFor(body, STONEWALL).jobMix.amount).toBe(5);
   expect(itemFor(body, 'Celsius WG').jobMix).toBeNull();
+});
+
+// The city hold (North Port Nutra-TECH, June, August and September) on the tank sheet, as in the plan.
+describe('the city hold on the tank sheet', () => {
+  const VISIT = '4a3b2c1d-6e5f-4d8c-9b0a-1f2e3d4c5b6a';
+  const WINDOW_KEY = 'northPortProductWindow';
+  const gatedSummary = () => ({
+    ...V13_SUMMARY,
+    products: V13_SUMMARY.products.map((row) => (row.productId === 'nt' ? { ...row, ratePer1000: 12, gates: { [WINDOW_KEY]: true } } : row)),
+  });
+  const june = (changes = {}) => ({ id: VISIT, customer_id: 'c1', property_id: 'p1', scheduled_date: '2026-06-10', service_id: null, service_type: 'Lawn Care', recurring_pattern: 'monthly', recurring_interval_days: null, service_address_city: null, ...changes });
+  const codes = (body) => body.warnings.map((w) => w.code);
+  beforeEach(() => { operatingLayer.summarizeProtocolContext.mockReturnValue(gatedSummary()); });
+
+  test('a North Port visit: Nutra-TECH is not selected, gets no amount and says why; the plan warning shows', async () => {
+    visitRows = [june({ service_address_city: 'North Port' })];
+    const body = await lawnMix({ month: '6', scheduledServiceId: VISIT });
+    const nutra = itemFor(body, NUTRA);
+    expect(nutra).toMatchObject({ selected: false, jobMix: null, plannedMix: null, fullTankMix: null });
+    expect(nutra.unavailable.reason).toMatch(/North Port bans this product/);
+    expect(nutra.gateNotes.map((n) => n.key)).toContain(WINDOW_KEY);
+    expect(body.selectedItems.map((item) => item.product?.name)).not.toContain(NUTRA);
+    expect(codes(body)).toContain('lawn_v13_north_port_product_window');
+    expect(body.warnings.find((w) => w.code === 'lawn_v13_north_port_product_window').message).toMatch(/plan holds it back/);
+  });
+
+  test('the city resolves the way the plan resolves it: stamped address, then turf profile municipality, then customer city', async () => {
+    visitRows = [june()];
+    customerRows = [{ city: 'North Port' }];
+    expect(itemFor(await lawnMix({ month: '6', scheduledServiceId: VISIT }), NUTRA)).toMatchObject({ selected: false, jobMix: null });
+    profileRows = [{ municipality: 'Sarasota' }];
+    expect(itemFor(await lawnMix({ month: '6', scheduledServiceId: VISIT }), NUTRA)).toMatchObject({ selected: true, jobMix: { amount: 120 } });
+    visitRows = [june({ service_address_city: 'North Port' })];
+    expect(itemFor(await lawnMix({ month: '6', scheduledServiceId: VISIT }), NUTRA)).toMatchObject({ selected: false, jobMix: null });
+  });
+
+  test('another city keeps the amount and shows no North Port warning', async () => {
+    visitRows = [june({ service_address_city: 'Sarasota' })];
+    const body = await lawnMix({ month: '6', scheduledServiceId: VISIT });
+    expect(itemFor(body, NUTRA)).toMatchObject({ selected: true, jobMix: { amount: 120 } });
+    expect(codes(body)).not.toContain('lawn_v13_north_port_product_window');
+  });
+
+  test('the reference sheet (no visit) keeps the amount and says North Port does not apply it April to September', async () => {
+    const body = await lawnMix({ month: '6' });
+    expect(itemFor(body, NUTRA)).toMatchObject({ selected: true, jobMix: { amount: 120 } });
+    const warning = body.warnings.find((w) => w.code === 'lawn_v13_north_port_product_window');
+    expect(warning).toMatchObject({ productName: NUTRA });
+    expect(warning.message).toContain('North Port: not applied April to September');
+    expect(body.warnings.filter((w) => w.code === 'lawn_v13_north_port_product_window')).toHaveLength(1);
+  });
+
+  test('a row without the product window gate gets no reference warning, and the gate off changes nothing', async () => {
+    operatingLayer.summarizeProtocolContext.mockReturnValue(V13_SUMMARY);
+    expect(codes(await lawnMix({ month: '6' }))).not.toContain('lawn_v13_north_port_product_window');
+    delete process.env.GATE_LAWN_V13;
+    expect(codes(await lawnMix({ month: '6', track: 'st_augustine' }))).not.toContain('lawn_v13_north_port_product_window');
+  });
 });

@@ -3,7 +3,7 @@
 // plan engine. Synthetic data only.
 const { randomUUID } = require('crypto');
 const { createLawnHistoryDb, fixture } = require('./helpers/lawn-history-db');
-const { buildPlanForService } = require('../services/waveguard-plan-engine');
+const { buildPlanForService, loadVisitCity } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const { heldProductBlocks } = require('../services/complete-scheduled-service');
 const migration = require('../models/migrations/20261007150000_lawn_v13_field_rules');
@@ -157,6 +157,18 @@ describeDb('v13 field rules through PostgreSQL', () => {
       // A visit that records it anyway is flagged like the nitrogen ban.
       expect(heldProductBlocks(plan, [{ productId: nutra.product.id }]).map((b) => b.code)).toEqual(['actual_north_port_product_window']);
       expect(heldProductBlocks(plan, [{ productId: item(plan, DIMENSION).product.id }])).toEqual([]);
+    });
+
+    test('the tank sheet reads the visit city the way the plan does: stamped address, then profile municipality, then customer city', async () => {
+      const f = await fixture(knex);
+      await knex('customers').where({ id: f.customerId }).update({ city: 'Customer City' });
+      const visit = await f.visit(0, { scheduled_date: '2026-06-10' });
+      expect(await loadVisitCity(knex, visit)).toBe('Customer City');
+      await knex('customer_turf_profiles').insert({ customer_id: f.customerId, active: true, grass_type: 'bermuda', track_key: 'bermuda', lawn_sqft: 10000, municipality: 'Profile City' });
+      expect(await loadVisitCity(knex, visit)).toBe('Profile City');
+      await knex('scheduled_services').where({ id: visit.id }).update({ service_address_city: 'North Port' });
+      expect(await loadVisitCity(knex, visit)).toBe('North Port');
+      expect(await loadVisitCity(knex, null)).toBeNull();
     });
 
     test('another city: Nutra-TECH plans as before and nothing is held', async () => {

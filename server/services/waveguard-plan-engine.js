@@ -1689,6 +1689,26 @@ async function loadVisitForPlan(knex, id, scope = (q) => q) {
     .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days')) || null;
 }
 
+// The city a booked visit is judged under, resolved the way the plan resolves it (the stamped visit
+// address, then the turf profile's municipality, then the customer's city); null for no visit or no
+// city on file. The tank sheet reads it for the city holds.
+async function loadVisitCity(knex, visit) {
+  if (!visit?.id) return null;
+  const stamped = await knex('scheduled_services').where({ id: visit.id }).first('service_address_city');
+  const profile = visit.customer_id ? await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('municipality') : null;
+  const customer = visit.customer_id ? await knex('customers').where({ id: visit.customer_id }).first('city') : null;
+  return String(stamped?.service_address_city || profile?.municipality || customer?.city || '').trim() || null;
+}
+
+// A reader with no resolved city (the reference tab, or a visit with no city on file) cannot tell
+// North Port from anywhere else: every row carrying the product window says so and keeps its amount.
+function v13NorthPortReferenceWarnings(items) {
+  return items.filter((item) => item.product && item.gates?.northPortProductWindow === true).map((item) => ({
+    code: 'lawn_v13_north_port_product_window', severity: 'warning', productId: item.product.id, productName: item.product.name,
+    message: `${item.product.name}: North Port: not applied April to September (city fact sheet; the city has not confirmed yet). Skip this product there.`,
+  }));
+}
+
 // v13Limits for a reader that has a booked visit (the tank sheet), plus the plan's own
 // block notices for what it capped. Gate off or no visit (no customer): nothing is checked.
 async function v13VisitLimits(knex, service, items, rows, targets = {}) {
@@ -2262,6 +2282,8 @@ module.exports = {
   v13SelectionBlocks,
   v13LineState,
   holdNorthPortProducts,
+  loadVisitCity,
+  v13NorthPortReferenceWarnings,
   v13HoldWarnings,
   lawnVisitsPerYear,
   visitForPlan,
