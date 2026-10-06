@@ -27,7 +27,8 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers');
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { isLikelyE164 } = require('../utils/phone');
+const { isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
+const { rejectImpossibleSpokenPhones } = require('./call-spoken-phone-guard');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
@@ -1107,6 +1108,10 @@ function isUsableContactPhone(value) {
   const v = String(value || '').trim();
   if (!v || PHONE_SENTINEL_WORDS.test(v)) return false;
   if (!isLikelyE164(v)) return false;
+  // A spoken number with an impossible NANP area code (173-...)
+  // is a mishearing, never a line: saving it as the contact number sent texts to
+  // a stranger (audited call 2026-10-01). The ANI fallback takes over instead.
+  if (isImpossibleNanpPhone(v)) return false;
   const digits = v.replace(/\D/g, '');
   return !PHONE_SENTINELS.has(digits) && !PHONE_SENTINELS.has(digits.replace(/^1/, ''));
 }
@@ -3338,6 +3343,10 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // An on-site contact the opt-in ask will actually go to (the caller's
   // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
   // unstamped: the slot is where the ask's phone and the later YES stamp live.
+  // A second person's number no NANP line can have is never saved (audited
+  // call 2026-10-01: a misheard +1 173-... sent the household's texts to a
+  // stranger). Refused here, at the one slot writer, like #6028's intake rule.
+  if (contact && contact.phone && isImpossibleNanpPhone(contact.phone)) contact = { ...contact, phone: null };
   const onSiteOnly = !!contact && contact.wants_notifications !== true && onSiteAskEligible && onSiteOptinAskTrigger(contact);
   if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOnly)) return 'skipped_no_intent';
   // Nobody asked for this person to get notifications: their opt-in covers
@@ -3761,6 +3770,7 @@ const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'home_sell
 // caller and the opt-in service.
 function onSiteOptinAskTrigger(contact) {
   if (!contact || !String(contact.phone || '').trim()) return false;
+  if (isImpossibleNanpPhone(contact.phone)) return false;
   if (!ON_SITE_NOTIFY_ROLES.has(String(contact.on_site_role || contact.role || '').trim().toLowerCase())) return false;
   return contact.wants_appointment_texts === true || contact.on_site === true;
 }
@@ -10211,6 +10221,17 @@ const CallRecordingProcessor = {
           // the prompt's greeting rule needs it (codex #4618 r1 P1).
           callDirection: isOutboundCall(call) ? 'outbound' : 'inbound',
         });
+        // An impossible spoken caller number (no NANP line has an area
+        // code starting 0 or 1) is dropped from the V2 extraction
+        // before ai_extraction_enriched is serialized below; the V1 record is
+        // already cleaned by its intake normalizer. Fail-open.
+        try {
+          if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
+            rejectImpossibleSpokenPhones({ v2Extraction: v2Result.extraction });
+          }
+        } catch (guardErr) {
+          logger.warn(`[call-proc] spoken-phone guard (V2) skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
+        }
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
         // recorded for the promotion-readiness gate and reused by the routing
@@ -14025,7 +14046,13 @@ const CallRecordingProcessor = {
       // dedup, cross-customer, empty slot). A full set of slots does not end
       // the scan: a later party already on record still gets its on-site ask.
       const lastTen = (v) => String(v || '').replace(/\D/g, '').slice(-10);
-      for (const secondaryEntry of callSecondaryContacts) {
+      for (const resolvedEntry of callSecondaryContacts) {
+      // One cleaned entry drives the slot write AND every ask/send below: an
+      // impossible number (a misheard +1 173-...) is never saved or texted,
+      // even when the contact is still saved by its email.
+      const secondaryEntry = resolvedEntry && resolvedEntry.phone && isImpossibleNanpPhone(resolvedEntry.phone)
+        ? { ...resolvedEntry, phone: null }
+        : resolvedEntry;
       let onSitePath = false;
       try {
         // Pre-persist: only entries that could be asked need the slot-phone read.
