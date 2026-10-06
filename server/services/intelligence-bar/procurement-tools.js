@@ -1499,10 +1499,38 @@ function operationMatches(toolName, texts, preview) {
 
 const TARGET_UNAVAILABLE = Object.freeze({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
 
-async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null, toolName = null } = {}) {
+// `lookedUp` is the bar's own lookup target (see lookupTarget below), or
+// null. It stands in only when the operator's words named NO product at all
+// (`silent`): never over a name that conflicts, names two products, names a
+// different product, or asks for a different operation.
+async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null, toolName = null, lookedUp = null } = {}) {
   const grounded = await groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName });
   if (grounded?.productId) return { productId: grounded.productId };
+  if (grounded?.silent && lookedUp) return lookedUp;
   return grounded?.mismatch ? { ...TARGET_UNAVAILABLE, code: 'target_relationship_mismatch' } : TARGET_UNAVAILABLE;
+}
+
+// The bar's own catalog readers. A result that lists exactly ONE product
+// shows the model that product's id; a result listing two or more leaves the
+// choice open, and that choice stays the operator's (one question, never a
+// guess).
+const PRODUCT_LOOKUP_TOOLS = new Set(['query_stock', 'query_products', 'get_stock_movements']);
+
+// Product ids a lookup in an EARLIER round of this same request showed the
+// model alone (owner IB history 2026-10-06: the bar found the product with
+// query_stock, proposed adjust_stock with that id, and the proposal was
+// refused because the operator had used a short name). `results` are the
+// route's own server-side tool results, in the order the model received
+// them; the route passes only rounds before the proposing one, so a read in
+// the same round (whose result the model had not seen yet) never counts.
+function productsShownAlone(results = []) {
+  const ids = new Set();
+  for (const { name, result } of results) {
+    if (!PRODUCT_LOOKUP_TOOLS.has(name) || !result || typeof result !== 'object' || result.error) continue;
+    const shown = Array.isArray(result.products) ? result.products : result.product ? [result.product] : [];
+    if (shown.length === 1 && shown[0]?.id) ids.add(String(shown[0].id));
+  }
+  return ids;
 }
 
 async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName }) {
@@ -1530,10 +1558,14 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
   const current = await productsNamedIn(prompt);
   // A prompt that names anything (or carries a conflict) stands on its own.
   if (current.conflict || current.named.size) return decide(current, [prompt]);
+  // The operator's words named no product anywhere this look-back reads, and
+  // they ask for this tool's operation: the caller may let the bar's own
+  // lookup stand in (resolveByOperatorGrounding's `lookedUp`).
+  const silent = texts => (operationMatches(toolName, texts, preview) ? { silent: true } : null);
   // A stale tab never grounds off turns it never saw (two tabs on one
   // thread): observedSeq is the requesting tab's own tail seq, from the
   // route's thread_seq. Without one there is no prior-turn grounding at all.
-  if (!isBareFollowUp(prompt) || !Number.isInteger(observedSeq)) return null;
+  if (!isBareFollowUp(prompt) || !Number.isInteger(observedSeq)) return silent([prompt]);
   const IbThreads = require('./threads');
   // Newest first and resolved ONE AT A TIME, never concatenated: a turn
   // ending "...Demand" and the next-older turn beginning "CS..." must never
@@ -1553,14 +1585,27 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
     if (!isBareFollowUp(turn)) return null;
     skipped.push(turn);
   }
-  return null;
+  return silent([prompt, ...skipped]);
 }
 
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
-async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq }) {
+//
+// One narrow exception, for adjust_stock only (always carded, owner
+// 2026-10-05): when the operator's words name no product the catalog can
+// read (a short name the grammar's lookup misses, or free phrasing naming
+// nothing), the preview's product stands when the bar's own lookup showed
+// the model exactly that product, alone, earlier in this request
+// (`lookedUpProductIds`, from productsShownAlone). The id is server-verified:
+// it must be in a tool result this route produced, so a model-invented id is
+// still refused. It never overrides a name that matched several products, a
+// different product, a page reference, a question, or a different operation.
+async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq, lookedUpProductIds = null }) {
   const { targetClause, UUID_RE } = require('./task-context');
+  const lookedUp = toolName === 'adjust_stock' && preview?.product?.id && !isNotAnInstruction(prompt)
+    && lookedUpProductIds instanceof Set && lookedUpProductIds.has(String(preview.product.id))
+    ? { productId: preview.product.id } : null;
   // A colon/quote can be part of a catalog identity. Never turn a qualified
   // product into the shorter base product by applying the contact-body split.
   // The anchored inventory grammar below excludes communication/note intents.
@@ -1618,7 +1663,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // No pattern matched at all, so the operator named no target the grammar
   // can read: this is the one place the free-phrasing fallback runs (and,
   // for a bare follow-up like "1 bottle", recent operator turns).
-  if (!selected) return resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName });
+  if (!selected) return resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName, lookedUp });
   // A trailing destination ("… to inventory", "… into our stock") names
   // where the stock goes, not the product: "add two bottles of Taurus SC to
   // inventory" must look up "Taurus SC" (the grammar captured the whole
@@ -1649,7 +1694,11 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // ("Restock Unlisted Chemical instead of Taurus SC").
   if (deictic && !selector.product_id) return unavailable;
   const resolved = literal || await resolveProduct(selector);
-  if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
+  // A named product the catalog does not find ("the Guard" for "Synthetic
+  // Guard CS") may stand on the bar's own lookup; a name that matched
+  // several products (candidates) stays a question for the operator.
+  if (resolved.error) return !resolved.candidates && !selector.product_id && lookedUp ? lookedUp
+    : { ...resolved, code: 'target_clarification_required' };
   if (resolved.product.id !== preview.product?.id) return { ...unavailable, code: 'target_relationship_mismatch' };
   return { productId: resolved.product.id };
 }
@@ -1792,8 +1841,19 @@ async function adjustStock(input, actionContext) {
   const fields = { movementType: input.movement_type, quantity: input.quantity, setTotal: input.set_total,
     unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };
   if (!actionContext.confirmed) return inventory.previewStockAdjustment(resolved.product.id, fields);
-  const result = await inventory.adjustStock(resolved.product.id, fields,
-    inventoryWriteOptions(input, actionContext, 'intelligence_bar_adjust_stock'));
+  let result;
+  try {
+    result = await inventory.adjustStock(resolved.product.id, fields,
+      inventoryWriteOptions(input, actionContext, 'intelligence_bar_adjust_stock'));
+  } catch (err) {
+    // A refusal the writer raised itself (stale preview, missing approval,
+    // bad unit, saved count mismatch) rolled its transaction back, so the
+    // receipt says the stock was not written: a confirmed card that changed
+    // nothing must never read as done. Any other error keeps the generic path.
+    if (!err.isOperational && err.code !== 'approval_required') throw err;
+    return { success: false, written: false, code: err.code, preview_changed: err.code === 'preview_changed',
+      error: `${err.message} Stock was not written.` };
+  }
   return { success: true, state: 'completed', product: inventory.productIdentity(result.product),
     movement_type: result.movement.movement_type, stock_before: toNumber(result.movement.stock_before),
     stock_after: toNumber(result.movement.stock_after), change: toNumber(result.movement.metadata.delta),
@@ -1854,4 +1914,4 @@ async function updateRestockRequest(input, actionContext) {
     receipt: { label: labels[input.action], summary, href: result.href } };
 }
 
-module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget };
+module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget, productsShownAlone };

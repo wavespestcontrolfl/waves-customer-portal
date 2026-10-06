@@ -1135,7 +1135,7 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null, priorToolResults = [] }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
@@ -1830,15 +1830,21 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
     // OPERATOR turn on the OPERATOR's OWN server-persisted thread naming the
     // preview's product) — resolveInventoryWriteTarget re-verifies thread
     // ownership and the threads gate itself before reading anything.
-    const target = await require('../services/intelligence-bar/procurement-tools').resolveInventoryWriteTarget({
+    const Procurement = require('../services/intelligence-bar/procurement-tools');
+    const target = await Procurement.resolveInventoryWriteTarget({
       toolName: toolUse.name, prompt: req.body.prompt, pageData: req.body.pageData, preview,
       actorId: getAdminActorId(req), threadId: req.body.thread_id,
       // The requesting tab's OWN observed thread tail (Codex round-2 P2) —
       // same parse as the optimistic-append check below — so a stale tab
       // never grounds off turns appended by another tab it never saw.
       threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
+      // Products this route's own lookups showed the model alone in earlier
+      // rounds of this request (server-held results, never model input).
+      lookedUpProductIds: Procurement.productsShownAlone(priorToolResults),
     });
-    if (target.error) return { failed: true, modelResult: target };
+    // A refused target leaves no card and writes nothing; the model is told so
+    // in plain words, so its reply can never read as a recorded change.
+    if (target.error) return { failed: true, modelResult: { ...target, error: `${target.error} Nothing was written and no confirmation card was created.` } };
     if (toolUse.name !== 'update_restock_request') {
       params.product_id = target.productId;
       delete params.product_name;
@@ -3273,6 +3279,8 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               task: activeTask,
               taskContext,
               requestStartedAt,
+              // Results the model had already received: earlier rounds only.
+              priorToolResults: toolResults.filter(entry => entry.round < round),
               // Three or more same-tool edits that would run direct: refused
               // as a set, pointing at the bulk tool (one card). Judged on the
               // finished preview, so an edit the preview cards still reaches
@@ -3390,7 +3398,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
-        toolResults.push({ name: toolUse.name, result });
+        toolResults.push({ name: toolUse.name, result, round });
         if (toolUse.name === 'search_field_intelligence' && !failed && isEmptyKnowledgeSearch(result)) knowledgeMisses.add(result.query);
         // A clarification stays open until the same operation succeeds in a
         // later round; an unrelated or sibling call succeeding does not answer it.

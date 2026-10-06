@@ -153,6 +153,16 @@ describe('adjust_stock', () => {
     });
   });
 
+  test('a confirmed card the writer refuses (stale preview) says the stock was not written', async () => {
+    const mutations = useDb({ products_catalog: [TRACKED_PRODUCT] });
+    const result = await executeRaw('adjust_stock', {
+      product_id: 'prod-1', movement_type: 'restock', quantity: 2, unit: 'gal', _verified_inventory_version: 'stale-version',
+    }, { confirmed: true, isAdmin: true, technicianId: 'actor-1' });
+    expect(result).toMatchObject({ success: false, written: false, code: 'preview_changed', preview_changed: true });
+    expect(result.error).toMatch(/Stock was not written\.$/);
+    expect(mutations.filter(m => m.op !== 'select')).toEqual([]);
+  });
+
   test('set_total 0 on an UNTRACKED product seeds tracking at zero (Codex P2)', async () => {
     const mutations = useDb({ products_catalog: [UNTRACKED_PRODUCT] });
     const result = await executeProcurementTool('adjust_stock', {
@@ -1776,6 +1786,92 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
         });
         expect(result).toMatchObject({ code: 'target_clarification_required' });
       });
+    });
+  });
+
+  // Owner IB history 2026-10-06: the operator used a short name, the bar's own
+  // query_stock found exactly one product, adjust_stock was proposed with that
+  // id, and the proposal was refused ("Choose the exact product"), so the
+  // stock was never written. The route now passes the products its own
+  // lookups showed the model alone in earlier rounds (lookedUpProductIds).
+  describe('the bar\'s own lookup grounds an adjust_stock target the operator named by a short name', () => {
+    const GUARD = { id: 'p-guard', name: 'Synthetic Guard CS', active: true };
+    const OTHER = { id: 'p-other', name: 'Synthetic Other WSG', active: true };
+    const SHORT_NAME = 'Add 2 gallons of the Guard to inventory';
+    const restock = product => ({ product: { id: product.id, name: product.name }, movement_type: 'restock' });
+
+    test('reproduction: the short name alone (no lookup) is refused, exactly as the owner hit it', async () => {
+      setGroundingDb({ products: [GUARD, OTHER] });
+      const result = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: SHORT_NAME, preview: restock(GUARD) });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('the same short name stands when an earlier lookup showed the model that product alone', async () => {
+      setGroundingDb({ products: [GUARD, OTHER] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock', prompt: SHORT_NAME, preview: restock(GUARD), lookedUpProductIds: new Set([GUARD.id]),
+      });
+      expect(result).toEqual({ productId: GUARD.id });
+    });
+
+    test('free phrasing that names no product also stands on the lookup', async () => {
+      setGroundingDb({ products: [GUARD, OTHER] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock', prompt: 'We got the new jug in today, add it to stock', preview: restock(GUARD), lookedUpProductIds: new Set([GUARD.id]),
+      });
+      expect(result).toEqual({ productId: GUARD.id });
+    });
+
+    test('an id no lookup in this request returned is refused (a model-invented id never stands)', async () => {
+      setGroundingDb({ products: [GUARD, OTHER] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock', prompt: SHORT_NAME, preview: restock(GUARD), lookedUpProductIds: new Set([OTHER.id]),
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('a name that matches several products stays a question, whatever the lookup showed', async () => {
+      const GUARD_TWO = { id: 'p-guard-2', name: 'Synthetic Guard CS 2', active: true };
+      setGroundingDb({ products: [GUARD, GUARD_TWO] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'adjust_stock', prompt: 'Add 2 gallons of Synthetic Guard to inventory', preview: restock(GUARD), lookedUpProductIds: new Set([GUARD.id]),
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+      expect(result.candidates).toHaveLength(2);
+    });
+
+    test('words naming a different product, a question, or an order never fall back to the lookup', async () => {
+      setGroundingDb({ products: [GUARD, OTHER] });
+      const lookedUpProductIds = new Set([GUARD.id]);
+      const named = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'We got the Synthetic Other WSG in today', preview: restock(GUARD), lookedUpProductIds });
+      expect(named).toMatchObject({ code: 'target_relationship_mismatch' });
+      const question = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'Did we add the new jug to stock?', preview: restock(GUARD), lookedUpProductIds });
+      expect(question).toMatchObject({ code: 'target_clarification_required' });
+      const order = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt: 'Order another jug of the stuff', preview: restock(GUARD), lookedUpProductIds });
+      expect(order).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('only adjust_stock (always carded) takes the lookup; create_restock_request does not', async () => {
+      setGroundingDb({ products: [GUARD, OTHER] });
+      const result = await resolveInventoryWriteTarget({
+        toolName: 'create_restock_request', prompt: 'request 2 gallons of the Guard', preview: { product: { id: GUARD.id, name: GUARD.name } }, lookedUpProductIds: new Set([GUARD.id]),
+      });
+      expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
+  });
+
+  describe('productsShownAlone', () => {
+    const { productsShownAlone } = require('../services/intelligence-bar/procurement-tools');
+    test('counts a lookup result that lists exactly one product, and nothing else', () => {
+      const ids = productsShownAlone([
+        { name: 'query_stock', result: { products: [{ id: 'p-one' }] } },
+        { name: 'query_products', result: { products: [{ id: 'p-two' }, { id: 'p-three' }] } },
+        { name: 'get_stock_movements', result: { product: { id: 'p-four' }, movements: [] } },
+        { name: 'query_stock', result: { error: 'failed', products: [{ id: 'p-five' }] } },
+        { name: 'get_restock_queue', result: { requests: [{ id: 'r-1', product_id: 'p-six' }] } },
+        { name: 'adjust_stock', result: { product: { id: 'p-seven' } } },
+      ]);
+      expect([...ids].sort()).toEqual(['p-four', 'p-one']);
     });
   });
 });
