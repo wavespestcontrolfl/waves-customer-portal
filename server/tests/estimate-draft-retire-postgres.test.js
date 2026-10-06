@@ -143,14 +143,45 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const c = await customer();
     const draft = await estimate(c, { createdAt: minutesAgo(60) });
     const sent = await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
-    // The move lands between the pair read and the write.
-    const realRaw = mockPg.raw.bind(mockPg);
-    const conn = { raw: async (sql, bindings) => {
-      if (/^\s*UPDATE/.test(sql)) await mockPg('estimates').where({ id: sent }).update({ address: '500 Elsewhere Blvd, Testville, FL 34000' });
-      return realRaw(sql, bindings);
-    } };
-    expect((await retireDraftsReplacedBySentEstimate({ conn })).retired).toBe(0);
+    // The move lands right after the pair read, before the write.
+    const realRaw = mockPg.raw;
+    mockPg.raw = async (...args) => {
+      const out = await realRaw.apply(mockPg, args);
+      mockPg.raw = realRaw;
+      await mockPg('estimates').where({ id: sent }).update({ address: '500 Elsewhere Blvd, Testville, FL 34000' });
+      return out;
+    };
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(0);
     expect((await row(draft)).archived_at).toBeNull();
+  });
+
+  test('the lead moves to the sent estimate, booking reminders stop, draft-ready bells close', async () => {
+    const { autoDraft, staffDraft, sent } = await sentAfterTwoDrafts();
+    const leadId = randomUUID();
+    await mockPg('leads').insert({ id: leadId, estimate_id: autoDraft, first_name: 'Fixture', last_name: 'Retire' });
+    const intentId = randomUUID();
+    await mockPg('booking_intents').insert({ id: intentId, phone: '+12025550123', pricing_estimate_id: staffDraft, suppressed: false });
+    const bellId = randomUUID();
+    await mockPg('notifications').insert({ id: bellId, recipient_type: 'admin', category: 'lead', title: 'Draft ready', metadata: JSON.stringify({ estimateId: autoDraft }) });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(2);
+    expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBe(sent);
+    expect((await mockPg('booking_intents').where({ id: intentId }).first()).suppressed).toBe(true);
+    const bell = await mockPg('notifications').where({ id: bellId }).first();
+    expect(bell.done_at).not.toBeNull();
+    expect(bell.resolution).toBe('estimate_draft_replaced');
+  });
+
+  test('a lead is unlinked, not moved, when another lead already holds the sent estimate', async () => {
+    const { autoDraft, sent } = await sentAfterTwoDrafts();
+    const draftLead = randomUUID();
+    const sentLead = randomUUID();
+    await mockPg('leads').insert([
+      { id: draftLead, estimate_id: autoDraft, first_name: 'Fixture', last_name: 'Retire' },
+      { id: sentLead, estimate_id: sent, first_name: 'Fixture', last_name: 'Retire' },
+    ]);
+    await retireDraftsReplacedBySentEstimate();
+    expect((await mockPg('leads').where({ id: draftLead }).first()).estimate_id).toBeNull();
+    expect((await mockPg('leads').where({ id: sentLead }).first()).estimate_id).toBe(sent);
   });
 
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {

@@ -72,16 +72,73 @@ const SENT_EVIDENCE_SQL = (alias) => `${alias}.sent_at IS NOT NULL
   AND ${alias}.status <> 'draft'
   AND ${LINKAGE_MARKERS_ABSENT_SQL(alias)}`;
 
+// Archive one draft and close what still points at it, in one transaction:
+// the lead link moves to the sent estimate (or is cleared, as the Delete
+// action does, when another lead already holds it or several leads share
+// the draft); open booking-recovery intents on the draft are suppressed, so
+// the old funnel's reminder texts and emails never go out; open "draft
+// ready" bells for it are marked done.
+async function retireOneDraft(trx, pair) {
+  // Every predicate re-checked on the row itself: a draft edited, sent or
+  // claimed since the read — or a send since invalidated, re-pointed or
+  // moved to another address — is left alone. Both rows' property_id and
+  // address must still be what the JS match judged.
+  const result = await trx.raw(`
+    UPDATE estimates
+       SET archived_at = NOW(),
+           updated_at = NOW(),
+           estimate_data = jsonb_set(
+             COALESCE(estimate_data, '{}'::jsonb),
+             '{retiredBySentEstimate}',
+             jsonb_build_object('estimate_id', ?::text, 'retired_at', NOW())
+           )
+     WHERE id = ?
+       AND updated_at <= ?
+       AND property_id IS NOT DISTINCT FROM ?
+       AND address IS NOT DISTINCT FROM ?
+       AND ${DRAFT_ELIGIBLE_SQL}
+       AND EXISTS (
+         SELECT 1 FROM estimates s
+          WHERE s.id = ?
+            AND s.customer_id = estimates.customer_id
+            AND s.created_at > estimates.created_at
+            AND s.property_id IS NOT DISTINCT FROM ?
+            AND s.address IS NOT DISTINCT FROM ?
+            AND ${SENT_EVIDENCE_SQL('s')}
+       )
+    RETURNING id, customer_id
+  `, [pair.sent_id, pair.draft_id, pair.sent_at, pair.draft_property_id, pair.draft_address,
+    pair.sent_id, pair.sent_property_id, pair.sent_address]);
+  const row = result?.rows?.[0];
+  if (!row) return null;
+
+  const leads = await trx('leads').where({ estimate_id: row.id }).forUpdate().select('id');
+  if (leads.length) {
+    const sentTaken = await trx('leads').where({ estimate_id: pair.sent_id }).first('id');
+    const target = leads.length === 1 && !sentTaken ? pair.sent_id : null;
+    await trx('leads').whereIn('id', leads.map((l) => l.id)).update({ estimate_id: target, updated_at: trx.fn.now() });
+  }
+  await trx('booking_intents')
+    .where({ pricing_estimate_id: row.id, suppressed: false })
+    .whereNull('converted_at')
+    .update({ suppressed: true, updated_at: trx.fn.now() });
+  await trx('notifications')
+    .whereRaw("metadata->>'estimateId' = ?", [String(row.id)])
+    .whereNull('done_at')
+    .update({ done_at: trx.fn.now(), resolution: 'estimate_draft_replaced' });
+  return row;
+}
+
 async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BATCH_LIMIT } = {}) {
   const batch = Math.max(1, Math.min(Number(limit) || RETIRE_BATCH_LIMIT, 1000));
-  // Unqualified columns in DRAFT_ELIGIBLE_SQL resolve to the draft: the
-  // subquery reads one table.
-  // No LIMIT on the pairs: the property match runs in JS, and a fixed prefix
-  // of other-door pairs would otherwise starve every later draft. The set is
-  // bounded by drafts that already have a newer sent sibling; the WRITES are
-  // capped at `batch`.
+  // Unqualified columns in DRAFT_ELIGIBLE_SQL resolve to the draft (the
+  // subquery reads one table). One pair per draft: its customer's NEWEST real send created after it
+  // (fails closed — a newest send for another door keeps the draft). So the
+  // read is bounded by the open drafts that have a newer sent sibling, with
+  // no LIMIT for other-door pairs to starve later drafts behind; the WRITES
+  // are capped at `batch`.
   const pairs = (await conn.raw(`
-    SELECT d.id AS draft_id, d.property_id AS draft_property_id, d.address AS draft_address,
+    SELECT DISTINCT ON (d.id) d.id AS draft_id, d.property_id AS draft_property_id, d.address AS draft_address,
            s.id AS sent_id, s.sent_at, s.property_id AS sent_property_id, s.address AS sent_address
       FROM (SELECT * FROM estimates WHERE ${DRAFT_ELIGIBLE_SQL}) d
       JOIN estimates s
@@ -90,48 +147,14 @@ async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BA
        AND ${SENT_EVIDENCE_SQL('s')}
        AND s.created_at > d.created_at
        AND d.updated_at <= s.sent_at
-     ORDER BY d.created_at, d.id, s.sent_at DESC
+     ORDER BY d.id, s.sent_at DESC
   `))?.rows || [];
 
-  const chosen = new Map();
-  for (const pair of pairs) {
-    if (chosen.size >= batch) break;
-    if (!chosen.has(pair.draft_id) && sameProperty(pair)) chosen.set(pair.draft_id, pair);
-  }
+  const chosen = pairs.filter(sameProperty).slice(0, batch);
 
-  // One row per write, every predicate re-checked on the row itself: a draft
-  // edited, sent or claimed since the read — or a send since invalidated,
-  // re-pointed or moved to another address — is left alone. Both rows'
-  // property_id and address must still be what the JS match judged.
   const rows = [];
-  for (const pair of chosen.values()) {
-    const result = await conn.raw(`
-      UPDATE estimates
-         SET archived_at = NOW(),
-             updated_at = NOW(),
-             estimate_data = jsonb_set(
-               COALESCE(estimate_data, '{}'::jsonb),
-               '{retiredBySentEstimate}',
-               jsonb_build_object('estimate_id', ?::text, 'retired_at', NOW())
-             )
-       WHERE id = ?
-         AND updated_at <= ?
-         AND property_id IS NOT DISTINCT FROM ?
-         AND address IS NOT DISTINCT FROM ?
-         AND ${DRAFT_ELIGIBLE_SQL}
-         AND EXISTS (
-           SELECT 1 FROM estimates s
-            WHERE s.id = ?
-              AND s.customer_id = estimates.customer_id
-              AND s.created_at > estimates.created_at
-              AND s.property_id IS NOT DISTINCT FROM ?
-              AND s.address IS NOT DISTINCT FROM ?
-              AND ${SENT_EVIDENCE_SQL('s')}
-         )
-      RETURNING id, customer_id
-    `, [pair.sent_id, pair.draft_id, pair.sent_at, pair.draft_property_id, pair.draft_address,
-      pair.sent_id, pair.sent_property_id, pair.sent_address]);
-    const row = result?.rows?.[0];
+  for (const pair of chosen) {
+    const row = await conn.transaction((trx) => retireOneDraft(trx, pair));
     if (!row) continue;
     rows.push({ ...row, sent_id: pair.sent_id });
     logger.info(`[estimate-draft-retire] archived draft ${row.id} (customer ${row.customer_id}): replaced by sent estimate ${pair.sent_id}`);
