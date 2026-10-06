@@ -75,6 +75,15 @@ jest.setTimeout(30000);
     expect(await sweepMissedCalls()).toBe(0);
   });
 
+  test('the sweep rings an unknown voicemail-path caller at 15 s and above, never below (owner ruling 2026-10-05)', async () => {
+    const short = call(10, { answered_by: 'voicemail', status: 'completed', duration_seconds: 14, from_phone: '+19415550111' });
+    const floor = call(10, { answered_by: 'voicemail', status: 'completed', duration_seconds: 15, from_phone: '+19415550112' });
+    const mid = call(10, { answered_by: 'voicemail', status: 'completed', duration_seconds: 22, from_phone: '+19415550113' });
+    await mockConn('call_log').insert([short, floor, mid]);
+    expect(await sweepMissedCalls()).toBe(2);
+    expect(triggerNotification.mock.calls.map(c => c[1].callLogId).sort()).toEqual([floor.id, mid.id].sort());
+  });
+
   test('a redial that someone answered keeps the missed call out of the bell', async () => {
     const customer = randomUUID();
     const missed = call(10, { customer_id: customer, status: 'completed', answered_by: 'voicemail', duration_seconds: 10 });
