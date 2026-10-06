@@ -72,13 +72,19 @@ test.each([
 });
 
 test('captures list leaves out raw_item unless raw=1, filters by query_id and clamps days', async () => {
-  const res = await call('GET', '/llm-mentions/captures?query_id=abc&days=500');
+  const res = await call('GET', '/llm-mentions/captures?query_id=11111111-2222-4333-8444-555555555555&days=500');
   expect(res).toMatchObject({ status: 200, body: { captures: [{ id: 'c1' }] } });
   expect(mockSelect.mock.calls[0][0]).not.toContain('raw_item');
-  expect(mockWhere).toHaveBeenCalledWith('query_id', 'abc');
+  expect(mockWhere).toHaveBeenCalledWith('query_id', '11111111-2222-4333-8444-555555555555');
   expect(mockWhere.mock.calls[0][2].raw[1]).toEqual([90]);
 
   mockSelect.mockClear();
   await call('GET', '/llm-mentions/captures?raw=1');
   expect(mockSelect.mock.calls[0][0]).toContain('raw_item');
+});
+
+test('captures list refuses a query_id that is not a uuid', async () => {
+  mockSelect.mockClear();
+  const res = await call('GET', '/llm-mentions/captures?query_id=abc');
+  expect(res.status).toBe(400);
 });

@@ -774,7 +774,7 @@ router.patch('/llm-mentions/queries/:id', requireAdmin, async (req, res, next) =
 // GET /api/admin/seo/llm-mentions/captures?query_id=&days=&raw=1 — pinned AI
 // Overview captures, newest first. raw_item (the full overview) only with raw=1.
 const AIO_CAPTURE_COLUMNS = ['id', 'query_id', 'query', 'captured_at', 'pass', 'device', 'location', 'status',
-  'answer_markdown', 'elements', 'references', 'organic_top', 'paa', 'local_pack', 'check_url', 'se_datetime',
+  'answer_markdown', 'elements', 'aio_references', 'organic_top', 'paa', 'local_pack', 'check_url', 'se_datetime',
   'cost_usd', 'waves_cited'];
 router.get('/llm-mentions/captures', async (req, res, next) => {
   try {
@@ -782,7 +782,11 @@ router.get('/llm-mentions/captures', async (req, res, next) => {
     let q = db('seo_aio_captures')
       .select(req.query.raw === '1' ? [...AIO_CAPTURE_COLUMNS, 'raw_item'] : AIO_CAPTURE_COLUMNS)
       .where('captured_at', '>=', db.raw("now() - (? * interval '1 day')", [days]));
-    if (req.query.query_id) q = q.where('query_id', String(req.query.query_id));
+    if (req.query.query_id) {
+      const queryId = String(req.query.query_id);
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(queryId)) return res.status(400).json({ error: 'query_id must be a uuid' });
+      q = q.where('query_id', queryId);
+    }
     res.json({ captures: await q.orderBy('captured_at', 'desc').limit(500) });
   } catch (err) { next(err); }
 });

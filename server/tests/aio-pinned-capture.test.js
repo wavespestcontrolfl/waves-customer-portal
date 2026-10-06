@@ -127,7 +127,7 @@ test('a shown overview maps elements to urls, keeps reference titles and flags a
     { title: 'Claim A', text: 'Claim A text', urls: ['https://www.wavespestcontrol.com/pest-control-bradenton/', 'https://rival0.example/a'] },
     { title: null, text: 'Claim B text', urls: ['https://rival1.example/b'] },
   ]);
-  expect(JSON.parse(row.references)).toEqual([{ url: 'https://rival2.example/c', title: 'Source C', domain: 'rival2.example', text: 'snippet' }]);
+  expect(JSON.parse(row.aio_references)).toEqual([{ url: 'https://rival2.example/c', title: 'Source C', domain: 'rival2.example', text: 'snippet' }]);
   expect(JSON.parse(row.raw_item).type).toBe('ai_overview');
   expect(summary).toMatchObject({ shown: 2, costUsd: 0.008 });
 });

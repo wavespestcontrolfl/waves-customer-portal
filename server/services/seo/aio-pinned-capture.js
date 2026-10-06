@@ -103,7 +103,7 @@ async function captureOne(queryRow, device, pass) {
     status: 'shown',
     answer_markdown: parsed.markdown,
     elements: json(parsed.elements),
-    references: json(parsed.references),
+    aio_references: json(parsed.references),
     raw_item: json(parsed.aio),
     waves_cited: parsed.wavesCited,
   };

@@ -31,7 +31,7 @@ exports.up = async function up(knex) {
       t.text('status').notNullable(); // shown | none | task_error | request_error
       t.text('answer_markdown');
       t.jsonb('elements'); // [{title, text, urls: []}] one per ai_overview_element
-      t.jsonb('references'); // [{url, title, domain, text}] top-level aio.references
+      t.jsonb('aio_references'); // [{url, title, domain, text}] top-level aio.references (not 'references': reserved word)
       t.jsonb('organic_top'); // top 10 organic: rank_absolute, rank_group, url, domain, title
       t.jsonb('paa'); // People Also Ask questions
       t.jsonb('local_pack'); // [{title, domain, rating, rank_group}]
