@@ -312,6 +312,33 @@ test('confirmed address change: guarded UPDATE re-asserts the old address and th
   expect(activities.insert).toHaveBeenCalledWith(expect.objectContaining({ description: 'Contact updated: address' }));
 });
 
+test('confirmed zip change re-asserts the unchanged street and city too (a one-line write in between matches zero rows)', async () => {
+  const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', zip: '34201', confirmed: true,
+    _approved_changes: { zip: { from: '34200', to: '34201' } },
+  });
+  expect(res.success).toBe(true);
+  expect(leads.where).toHaveBeenCalledWith('zip', '34200');
+  expect(leads.where).toHaveBeenCalledWith('address', '21 Synthetic Oak Ave');
+  expect(leads.where).toHaveBeenCalledWith('city', 'Testville');
+  expect(Object.keys(leads.update.mock.calls[0][0]).sort()).toEqual(['updated_at', 'zip']);
+});
+
+test('confirmed phone change does not touch the address columns in the guard', async () => {
+  const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', phone: '9415550123', confirmed: true,
+    _approved_changes: { phone: { from: ADDR_LEAD.phone, to: '9415550123' } },
+  });
+  expect(leads.where).not.toHaveBeenCalledWith('address', expect.anything());
+  expect(leads.where).not.toHaveBeenCalledWith('city', expect.anything());
+});
+
 test('confirmed: a changed city between card and commit refuses with preview_changed', async () => {
   const leads = chain({ first: ADDR_LEAD, update: [] });
   const activities = chain({ insert: undefined });

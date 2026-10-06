@@ -902,6 +902,18 @@ async function updateLeadContact(input) {
       else if (field === 'email') q = q.whereRaw('LOWER(TRIM(email)) = ?', [from]);
       else q = q.where(field, from);
     }
+    // An address edit also re-asserts the address columns it did NOT change
+    // (Codex r14 P2): the one-line check above read them, and a Leads-screen
+    // write that stores a one-line address between that read and this UPDATE
+    // must match zero rows, not leave the row's street and columns disagreeing.
+    if (ADDRESS_FIELDS.some(f => f in changes)) {
+      for (const field of ADDRESS_FIELDS) {
+        if (field in changes) continue;
+        const seen = (lead[field] ?? '').toString().trim();
+        if (seen === '') q = q.where(function () { this.whereNull(field).orWhere(field, ''); });
+        else q = q.where(field, lead[field]);
+      }
+    }
     const rows = await q.update(updates, ['id']);
     if (!rows || rows.length === 0) return rows;
     await trx('lead_activities').insert({
