@@ -45,7 +45,7 @@ const {
 } = require('../services/call-recording-processor');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
-const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
+const { PROMPT_HASH, APS_PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
 const MODELS = require('../config/models');
 
 const MIN_CALLS = 100;
@@ -524,8 +524,8 @@ async function main() {
 }
 
 // The "-aps" cohort (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING, codex #6046 r4): calls whose
-// extraction prompt carried the agent-proposed-slot block are stamped with an '-aps' version
-// suffix (extractionPromptVersion). They are a DIFFERENT prompt, so they are never merged into
+// extraction prompt carried the agent-proposed-slot block are stamped with the 'a' cohort
+// version token (`v22a-<hash>...`, APS_PROMPT_HASH; extractionPromptVersion). They are a DIFFERENT prompt, so they are never merged into
 // main()'s readiness cohort above (which stays on the unsuffixed versions exactly as before)
 // and are scored here on their own counts with the same MIN_CALLS and SCHEMA_PASS_THRESHOLD.
 // Routing agreement and the consent / phantom checks are main()'s and are not rescored here.
@@ -543,7 +543,7 @@ async function apsCohortReport(env = process.env) {
     const rows = await db('call_log')
       .whereNotNull('v2_extraction_status').whereNot('v2_extraction_status', 'not_run')
       .whereIn('ai_extraction_model', [CURRENT_PRIMARY])
-      .where('ai_extraction_prompt_version', 'like', `${CURRENT_PROMPT_VERSION}%-aps`)
+      .where('ai_extraction_prompt_version', 'like', `${APS_PROMPT_HASH}%`)
       .select('v2_extraction_status');
     const r = evaluateApsCohort(rows);
     console.log(`\n-aps cohort (agent-proposed-slot prompt; scored separately, never merged above): ${r.attempts} attempt(s), schema pass ${(r.schemaPassRate * 100).toFixed(1)}% (${r.valid}/${r.attempts}) — ≥ ${MIN_CALLS} attempts: ${r.enough ? 'yes' : 'no'}, ≥ ${SCHEMA_PASS_THRESHOLD * 100}% valid: ${r.schemaOk ? 'yes' : 'no'}.`);

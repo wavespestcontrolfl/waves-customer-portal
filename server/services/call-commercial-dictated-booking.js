@@ -270,6 +270,8 @@ const SCHEDULE_CHECKS = [
 // What the no-price assessment mode needs before it grounds the agreement, in order;
 // the first that fails is the reason. `t` carries { v2, transcript, assessmentBooking }.
 const ASSESSMENT_CHECKS = [
+  // The offline audit has no record of the V1 price before V2 adoption: the V1 view is unknown, so hold.
+  ['pre_adoption_price_unknown', (t) => t.assessmentBooking.priceRecordMissing === true],
   // A NEW visit only: an extraction that names an existing appointment being moved is a
   // reschedule (call-reschedule-apply.js), never a commercial assessment booking.
   ['moves_existing_visit', (t) => !!t.v2.scheduling.moved_appointment_date || !!t.v2.scheduling.moved_appointment_words

@@ -2237,7 +2237,10 @@ function auditCommercialAssessmentOptions({ call, gates, transcript, extracted, 
       extracted: persisted,
       transcription: routedTranscript,
       services: bookableServices,
-    }), gates, [persisted, hasRecord ? { ...persisted, ...recorded } : null]),
+    }), gates, [persisted, hasRecord ? { ...persisted, ...recorded } : null, hasPreAdoptionPriceRecord(persisted) ? { ...persisted, ...persisted.pre_adoption_price_fields } : null]),
+    // A row with no pre-adoption PRICE record (processed before it was written, or with the lane
+    // off) has an unknown V1 price view: the no-price decision holds it rather than over-admit.
+    ...(commercialAssessmentBookingActive(call, gates) ? { commercialAssessmentPriceRecordMissing: !hasPreAdoptionPriceRecord(persisted) } : {}),
   };
 }
 
@@ -6769,6 +6772,20 @@ function preAdoptionServiceFields(preAdoptionExtracted = {}, adoptedFields = [])
     .map((key) => [key, preAdoptionExtracted?.[key] ?? null]));
 }
 
+// The V1 PRICE signals the no-price assessment decision reads (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING).
+// V2-primary adoption can clear or replace them, so the pre-adoption values ride on the canonical
+// extraction as their OWN record, `pre_adoption_price_fields`, never inside CALL_SERVICE_VIEW_FIELDS /
+// pre_adoption_service_fields (other code reads those). Every key is recorded (null when absent) so
+// an empty record still proves the V1 leg said nothing about price (codex #6046 r5 P1).
+const PRE_ADOPTION_PRICE_FIELDS = Object.freeze(['quoted_price', 'quoted_price_usd', 'price', 'prices', 'price_amount_usd', 'price_amount_max_usd', 'quote_requested', 'quote_promised']);
+function preAdoptionPriceFields(preAdoptionExtracted = {}) {
+  return Object.fromEntries(PRE_ADOPTION_PRICE_FIELDS.map((key) => [key, preAdoptionExtracted?.[key] ?? null]));
+}
+const hasPreAdoptionPriceRecord = (extracted) => {
+  const rec = extracted?.pre_adoption_price_fields;
+  return !!rec && typeof rec === 'object' && !Array.isArray(rec);
+};
+
 // The offline audits' commercial quote check (buildFailOpenRoutingContext): the live
 // check's views rebuilt from the persisted extraction. The pre-adoption view is the
 // canonical record with the recorded V1 service values restored. A row with a V2
@@ -10472,6 +10489,8 @@ const CallRecordingProcessor = {
     // quote check reads (codex #5377 r17 P1).
     if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
       extracted = { ...extracted, pre_adoption_service_fields: preAdoptionServiceFields(preAdoptionExtracted, serviceFieldsAdopted) };
+      // Only while the no-price assessment lane is live (gate off: the persisted record is unchanged).
+      if (assessmentLaneActive) extracted = { ...extracted, pre_adoption_price_fields: preAdoptionPriceFields(preAdoptionExtracted) };
     }
 
     // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
@@ -23411,6 +23430,7 @@ CallRecordingProcessor._test = {
   auditCommercialQuoteBookableFor,
   auditCommercialAssessmentBookableFor,
   preAdoptionServiceFields,
+  preAdoptionPriceFields,
   resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,

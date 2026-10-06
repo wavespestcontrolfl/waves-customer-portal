@@ -204,8 +204,8 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
       : '');
   // The agent-proposed slot shape (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING, owner
   // ruling 2026-10-06). Per-call variable, off by default and deliberately outside
-  // the BASE version hash like the blocks above, but extractionPromptVersion adds an
-  // '-aps' suffix when it renders (its own cohort). Empty unless the processor turns it
+  // the BASE version hash like the blocks above, but extractionPromptVersion marks the
+  // 'a' cohort token when it renders (its own cohort). Empty unless the processor turns it
   // on, so the prompt and its version are byte-identical with the gate off.
   const apsOn = opts.agentProposedSlotCommitment === true;
   const agentProposedSlotBlock = apsOn ? AGENT_PROPOSED_SLOT_BLOCK : '';
@@ -482,21 +482,27 @@ const PROMPT_HASH = `${PROMPT_VERSION}-${_contractHash}`;
 // Order-sensitive by design: a reordered catalog renders a different
 // prompt and must version as a different cohort. No catalog → bare
 // PROMPT_HASH, so pre-catalog rows keep their existing version.
+// The persisted version columns (call_log.ai_extraction_prompt_version and
+// ai_validation_prompt_version, route_decisions.ai_validation_prompt_version) are varchar(30),
+// and a catalog-suffixed version is already 29 characters (`v22-` + 12 + `-cat.` + 8), so
+// the agent-proposed-slot cohort cannot be a suffix. It is marked INSIDE the leading version
+// token instead: `v22a-<hash>[-cat.<hash>]`, one character longer at most (30). No migration.
+const APS_PROMPT_HASH = `${PROMPT_VERSION}a-${_contractHash}`;
 function extractionPromptVersion(bookableServiceNames, opts = {}) {
   const names = Array.isArray(bookableServiceNames)
     ? bookableServiceNames.filter(Boolean)
     : [];
   // The agent-proposed-slot block (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING) changes the
-  // rendered prompt too, so its calls are their own cohort: a '-aps' suffix, only when
+  // rendered prompt too, so its calls are their own cohort: the 'a' version token, only when
   // the block renders (buildExtractionPrompt's same strict === true), so gate-off
   // versions are byte-identical.
-  const aps = opts.agentProposedSlotCommitment === true ? '-aps' : '';
-  if (!names.length) return `${PROMPT_HASH}${aps}`;
+  const base = opts.agentProposedSlotCommitment === true ? APS_PROMPT_HASH : PROMPT_HASH;
+  if (!names.length) return base;
   const catalogHash = crypto.createHash('sha256')
     .update(names.join('\n'))
     .digest('hex')
     .slice(0, 8);
-  return `${PROMPT_HASH}-cat.${catalogHash}${aps}`;
+  return `${base}-cat.${catalogHash}`;
 }
 
 module.exports = {
@@ -505,4 +511,5 @@ module.exports = {
   extractionPromptVersion,
   PROMPT_VERSION,
   PROMPT_HASH,
+  APS_PROMPT_HASH,
 };

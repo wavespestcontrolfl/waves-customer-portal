@@ -451,7 +451,7 @@ describe('GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: the processor predicate, the 
   const build = (call = outbound, gates = gatesOf(), extra = {}) => buildFailOpenRoutingContext({
     call, customer: null, contactPhone: '+19415550100', failOpenEnabled: false, gates, ...extra,
   }).options;
-  const EXTRACTED = { requested_service: 'Waves Assessment', matched_service: 'Waves Assessment', specific_service_name: 'Waves Assessment' };
+  const EXTRACTED = { requested_service: 'Waves Assessment', matched_service: 'Waves Assessment', specific_service_name: 'Waves Assessment', pre_adoption_price_fields: { quoted_price: null, quoted_price_usd: null, price: null, prices: null, price_amount_usd: null, price_amount_max_usd: null, quote_requested: null, quote_promised: null } };
 
   test('the predicate: both directions, needs GATE_CALL_AGENT_COMMIT_BOOKING, off when its own gate is off', () => {
     expect(commercialAssessmentBookingActive(outbound, gatesOf())).toBe(true);
@@ -581,14 +581,16 @@ describe('the extraction prompt reads the agent-proposed shape only under the ga
   });
 
   test('the persisted prompt version carries the block: its own cohort, gate-off byte-identical (codex #6046 r1 P1)', () => {
-    const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
+    const { extractionPromptVersion, PROMPT_VERSION } = require('../services/prompts/call-extraction-v1');
     const names = ['Waves Assessment', 'Cockroach Control Service'];
     for (const n of [undefined, [], names]) {
       const base = extractionPromptVersion(n);
       for (const o of [undefined, {}, { agentProposedSlotCommitment: false }, { agentProposedSlotCommitment: 'true' }]) expect(extractionPromptVersion(n, o)).toBe(base);
       const on = extractionPromptVersion(n, { agentProposedSlotCommitment: true });
-      expect(on).toBe(`${base}-aps`);
       expect(on).not.toBe(base);
+      expect(on.startsWith(`${PROMPT_VERSION}a-`)).toBe(true); // the cohort mark sits INSIDE the leading version token
+      expect(on.endsWith('-aps')).toBe(false);
+      expect(on.replace(`${PROMPT_VERSION}a-`, `${PROMPT_VERSION}-`)).toBe(base);
     }
     expect(extractionPromptVersion([], {})).toBe(PROMPT_HASH);
     // both stamps (the extractor's and the processor's per-call one) pass the block's own switch
@@ -617,7 +619,7 @@ describe('codex #6046 round 2', () => {
     expect(evaluateApsCohort(rows(95, 5))).toMatchObject({ attempts: 100, valid: 95, enough: true, schemaOk: true });
     expect(evaluateApsCohort(rows(94, 6))).toMatchObject({ enough: true, schemaOk: false });
     expect(evaluateApsCohort(rows(10, 0))).toMatchObject({ enough: false, schemaOk: true });
-    expect(src).toContain('${CURRENT_PROMPT_VERSION}%-aps');
+    expect(src).toContain('${APS_PROMPT_HASH}%');
     expect(src).toContain('.then(() => apsCohortReport())');
     // gate off: no section, no database read, no output (output identical to main)
     const log = jest.spyOn(console, 'log').mockImplementation(() => {});
@@ -766,7 +768,7 @@ describe('codex #6046 round 3', () => {
 
     test('the -aps cohort suffix covers the rule edits (one switch renders the block and the rules)', () => {
       const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
-      expect(extractionPromptVersion([], { agentProposedSlotCommitment: true })).toMatch(/-aps$/);
+      expect(extractionPromptVersion([], { agentProposedSlotCommitment: true })).toMatch(/^v\d+a-[0-9a-f]{12}$/);
       expect(on).not.toBe(off);
     });
   });
@@ -827,9 +829,9 @@ describe('codex #6046 round 4: the no-price decision fails closed on every view'
     const call = { direction: 'inbound', transcription: OUTBOUND, created_at: CALL_STARTED_AT };
     const gates = { isEnabled: (g) => ({ callAgentCommitBooking: true, callAgentCommitTrustedLabels: true }[g] === true), assessmentLive: () => true };
     const build = (extracted) => buildFailOpenRoutingContext({ call, customer: null, contactPhone: '+19415550100', failOpenEnabled: false, gates, bookableServices: [ASSESSMENT_ROW], extracted }).options;
-    const ASSESS = { requested_service: 'Waves Assessment', matched_service: 'Waves Assessment', specific_service_name: 'Waves Assessment', pre_adoption_service_fields: {} };
+    const ASSESS = { requested_service: 'Waves Assessment', matched_service: 'Waves Assessment', specific_service_name: 'Waves Assessment', pre_adoption_service_fields: {}, pre_adoption_price_fields: { quoted_price: null, quoted_price_usd: null, price: null, prices: null, price_amount_usd: null, price_amount_max_usd: null, quote_requested: null, quote_promised: null } };
     const priced = { ...ASSESS, quoted_price: 149 };
-    expect(build(ASSESS).commercialAssessmentV1Views).toEqual([ASSESS]);
+    expect(build(ASSESS).commercialAssessmentV1Views).toEqual([ASSESS, { ...ASSESS, ...ASSESS.pre_adoption_price_fields }]);
     const opts2 = (ex) => ({ addressValidation: AV_CLEAN, contactPhone: '+19415550100', ...build(ex) });
     expect(canAutoRoute(extraction(), { ...opts2(ASSESS), commercialOutbound: false }).allowed).toBe(true);
     expect(canAutoRoute(extraction(), { ...opts2(priced), commercialOutbound: false }).allowed).toBe(false);
@@ -854,5 +856,98 @@ describe('the real shape still grounds after round 4 (outbound lead_auto_bridge)
     const views = [{ requested_service: 'Waves Assessment', quoted_price: null, quote_requested: false, quote_promised: false }];
     expect(grounded(ex, real, { assessmentBooking: assess({ outbound: true, v1Views: views }) })).toEqual({ ok: true, reason: 'assessment_booking_grounded', mode: 'agent_proposed', assessment: true });
     expect(route(ex, { transcript: real, commercialAssessmentV1Views: views }).allowed).toBe(true);
+  });
+});
+
+describe('codex #6046 round 5', () => {
+  const PV = require('../services/prompts/call-extraction-v1');
+  const { extractionPromptVersion, PROMPT_VERSION, PROMPT_HASH, APS_PROMPT_HASH } = PV;
+  const HASH = '0123456789ab';
+  const NAMES = ['Waves Assessment', 'Cockroach Control Service'];
+
+  test('every possible stamped version fits varchar(30), for today\'s vNN and a later two-digit one', () => {
+    const catalog = require('crypto').createHash('sha256').update(NAMES.join('\n')).digest('hex').slice(0, 8);
+    for (const v of ['v22', 'v23', 'v99']) {
+      for (const stamp of [`${v}-${HASH}`, `${v}-${HASH}-cat.${catalog}`, `${v}a-${HASH}`, `${v}a-${HASH}-cat.${catalog}`]) {
+        expect([stamp, stamp.length <= 30]).toEqual([stamp, true]);
+      }
+    }
+    // the real exports, every combination
+    for (const names of [undefined, [], NAMES]) {
+      for (const aps of [false, true]) {
+        const stamp = extractionPromptVersion(names, { agentProposedSlotCommitment: aps });
+        expect([stamp, stamp.length <= 30]).toEqual([stamp, true]);
+      }
+    }
+    expect(PROMPT_VERSION).toMatch(/^v\d{2}$/);
+    expect(APS_PROMPT_HASH).toBe(`${PROMPT_VERSION}a-${PROMPT_HASH.slice(PROMPT_VERSION.length + 1)}`);
+  });
+
+  test('every column that stores this value is varchar(30) or wider (migrations scanned)', () => {
+    const dir = path.join(__dirname, '../models/migrations');
+    const widths = [];
+    for (const f of fs.readdirSync(dir)) {
+      const text = fs.readFileSync(path.join(dir, f), 'utf8');
+      for (const m of text.matchAll(/\bt\.string\('(ai_extraction_prompt_version|ai_validation_prompt_version)',\s*(\d+)\)/g)) widths.push([f, m[1], Number(m[2])]);
+    }
+    expect(widths.map(([, c]) => c).sort()).toEqual(['ai_extraction_prompt_version', 'ai_validation_prompt_version', 'ai_validation_prompt_version']);
+    const longest = Math.max(...[undefined, NAMES].flatMap((n) => [false, true].map((aps) => extractionPromptVersion(n, { agentProposedSlotCommitment: aps }).length)));
+    for (const [file, col, width] of widths) expect([file, col, width >= longest]).toEqual([file, col, true]);
+    // no migration shrinks them, and none of them is jsonb/text-checked by this PR: the widest stamp is 30
+    expect(longest).toBeLessThanOrEqual(30);
+  });
+
+  describe('V1 pre-adoption price record', () => {
+    const Processor = require('../services/call-recording-processor');
+    const { preAdoptionPriceFields } = Processor._test;
+    const { buildFailOpenRoutingContext } = Processor;
+    const call = { direction: 'inbound', transcription: OUTBOUND, created_at: CALL_STARTED_AT };
+    const gatesOn = { isEnabled: (g) => ({ callAgentCommitBooking: true, callAgentCommitTrustedLabels: true }[g] === true), assessmentLive: () => true };
+    const ASSESS = { requested_service: 'Waves Assessment', matched_service: 'Waves Assessment', specific_service_name: 'Waves Assessment', pre_adoption_service_fields: {} };
+    const build = (extracted, gates = gatesOn) => buildFailOpenRoutingContext({ call, customer: null, contactPhone: '+19415550100', failOpenEnabled: false, gates, bookableServices: [ASSESSMENT_ROW], extracted }).options;
+    const decide = (extracted, v2 = extraction(), gates = gatesOn) => canAutoRoute(v2, { addressValidation: AV_CLEAN, contactPhone: '+19415550100', ...build(extracted, gates) });
+
+    test('the record holds the V1 price fields, separate from the service view fields', () => {
+      expect(Object.keys(preAdoptionPriceFields({}))).toEqual(['quoted_price', 'quoted_price_usd', 'price', 'prices', 'price_amount_usd', 'price_amount_max_usd', 'quote_requested', 'quote_promised']);
+      expect(preAdoptionPriceFields({ quoted_price: 149, quote_promised: true, requested_service: 'x' })).toMatchObject({ quoted_price: 149, quote_promised: true, price: null });
+      expect(preAdoptionPriceFields({ requested_service: 'x' })).not.toHaveProperty('requested_service');
+      const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+      // the service view list and its record are untouched
+      expect(src).toContain("const CALL_SERVICE_VIEW_FIELDS = Object.freeze(['matched_service', 'requested_service', 'specific_service_name', 'call_summary', 'pain_points']);");
+      expect(src).toContain('extracted = { ...extracted, pre_adoption_service_fields: preAdoptionServiceFields(preAdoptionExtracted, serviceFieldsAdopted) };');
+      // persisted only while the lane is live, from the pre-adoption copy
+      expect(src).toContain('if (assessmentLaneActive) extracted = { ...extracted, pre_adoption_price_fields: preAdoptionPriceFields(preAdoptionExtracted) };');
+    });
+
+    test('audit: a V2 row with no price record holds (pre_adoption_price_unknown); the live lane is unaffected', () => {
+      expect(decide(ASSESS).allowed).toBe(false);
+      expect(canAutoRoute(extraction(), { addressValidation: AV_CLEAN, contactPhone: '+19415550100', ...build(ASSESS) }).reason).toBe('triage_flags');
+      const g = (extracted) => commercialDictatedBookingGrounded({ v2: extraction(), transcript: OUTBOUND, callStartedAt: CALL_STARTED_AT, pricedPath: false, assessmentBooking: { bookable: () => true, outbound: false, ...extracted } });
+      expect(g({ priceRecordMissing: true })).toEqual({ ok: false, reason: 'pre_adoption_price_unknown' });
+      expect(g({ priceRecordMissing: false }).ok).toBe(true);
+      // live lane: no such key is ever set, and the same call books
+      expect(g({}).ok).toBe(true);
+      expect(route(extraction(), { commercialOutbound: false }).allowed).toBe(true);
+      const live = Processor._test.commercialAssessmentRoutingOptions(call, () => () => true, { captured: true }, [ASSESS]);
+      expect(live).not.toHaveProperty('commercialAssessmentPriceRecordMissing');
+    });
+
+    test('audit: with the record, a V1 price that V2 adoption cleared still holds the call', () => {
+      const NOPRICE = { ...ASSESS, pre_adoption_price_fields: preAdoptionPriceFields({}) };
+      expect(build(NOPRICE).commercialAssessmentPriceRecordMissing).toBe(false);
+      expect(decide(NOPRICE).allowed).toBe(true);
+      // adoption cleared the merged quoted_price; the pre-adoption record still has it
+      const cleared = { ...ASSESS, quoted_price: null, pre_adoption_price_fields: preAdoptionPriceFields({ quoted_price: 149 }) };
+      expect(decide(cleared).allowed).toBe(false);
+      const promised = { ...ASSESS, pre_adoption_price_fields: preAdoptionPriceFields({ quote_promised: true }) };
+      expect(decide(promised).allowed).toBe(false);
+      const entry = { ...ASSESS, pre_adoption_price_fields: preAdoptionPriceFields({ prices: [{ amount_usd: 99 }] }) };
+      expect(decide(entry).allowed).toBe(false);
+    });
+
+    test('lane off: the audit options carry no price-record key (byte-identical)', () => {
+      const off = { ...gatesOn, assessmentLive: () => false };
+      expect(Object.keys(build(ASSESS, off)).some((k) => /^commercial/.test(k))).toBe(false);
+    });
   });
 });
