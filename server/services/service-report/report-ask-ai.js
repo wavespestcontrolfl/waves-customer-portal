@@ -219,7 +219,9 @@ function petPrecautionFact(data = {}) {
 
 // Rule-router topics the AI may answer. Re-entry, watering and next steps
 // stay on the fixed rules: they carry recorded instructions word for word.
-const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'next_visit', 'unrouted']);
+// next_visit stays on the rule answer: it states the scheduled date and
+// window exactly, and an AI answer states no date (Codex P1s on #6020).
+const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'unrouted']);
 
 // A pressure reading, or null for a missing one: Number(null) is 0, and a
 // made-up zero would contradict the report (pre-push audit P1).
@@ -289,15 +291,17 @@ function productsNamedIn(question, products) {
 // house number past two digits) is masked (Codex P1 r1 #5957). It cannot see a
 // customer's NAME in prose, or a street name without a number and a suffix: no
 // pattern tells those from ordinary words, so those pass through.
-// Full words and the common postal abbreviations.
-const STREET_SUFFIX = `(?:${[
-  'street', 'st', 'avenue', 'ave', 'av', 'road', 'rd', 'drive', 'dr', 'lane', 'ln', 'court', 'ct', 'circle', 'cir',
-  'boulevard', 'blvd', 'way', 'place', 'pl', 'terrace', 'ter', 'trail', 'trl', 'parkway', 'pkwy', 'highway', 'hwy',
-  'loop', 'run', 'cove', 'cv', 'point', 'pointe', 'pt', 'crossing', 'xing', 'square', 'sq', 'row', 'path', 'alley',
-  'bend', 'glen', 'ridge', 'trace', 'plaza', 'plz', 'turnpike', 'tpke', 'pike', 'expressway', 'expy', 'causeway',
-  'cswy', 'creek', 'grove', 'heights', 'hts', 'hollow', 'landing', 'manor', 'mews', 'oaks', 'shores', 'vista', 'villas',
-].join('|')})`;
-const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){0,3}?${STREET_SUFFIX}\\b\\.?`, 'gi');
+// Every USPS street suffix and variant (Publication 28 C1, the table the
+// address matcher uses) plus local spellings the table lacks, longest first.
+// A hand-picked list missed real types ("18 Bay Pass", Codex P1 #5964 r6).
+const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
+
+const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'trace', 'mews', 'landing', 'hollow', 'vista'];
+const STREET_SUFFIX = `(?:${[...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
+  .sort((x, y) => y.length - x.length)
+  .join('|')})`;
+// Greedy: "21 Harbor Crossing" takes both words, not the first suffix only.
+const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){0,3}${STREET_SUFFIX}\\b\\.?`, 'gi');
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
@@ -509,6 +513,13 @@ function leaksTargetList(text, { question, data, facts }) {
   return targetLabelsOf(data).some((label) => said.includes(label) && !allowed.includes(label));
 }
 
+// The shared screen skips its date and time rules, so an AI answer may not
+// state a calendar date, a weekday or a clock time at all: a recombined or
+// mistyped appointment can never reach the customer (Codex P1s on #6020).
+// Next-visit questions keep the rule answer, which states the schedule.
+const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec';
+const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|noon|midnight|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\\b`, 'i');
+
 // The output screen, in order: the first check that fails names the rejection.
 // Each entry is [reason, (text, context) => failed]. A rejection is never an
 // edit; the route then answers with the fixed rules.
@@ -524,6 +535,7 @@ const ASK_CHECKS = [
   ['banned_copy', (text) => require('./activity-indicators').findBannedCustomerCopy(text).length > 0],
   ['compliance', (text) => require('../social-media').complianceLanguageIssues(text, { impliedTreatmentContext: true }).length > 0],
   ['target_list', leaksTargetList],
+  ['states_a_date', (text) => DATE_TOKEN.test(text)],
 ];
 
 /**
@@ -569,87 +581,38 @@ const MEDICAL_CUES = [
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
-  // "My left side", never "the left side of the house" (Codex P1 #6016 r4).
-  /\bsprayed\s+(?:on\s+)?(?:my|his|her|their|your|our)\s+(?:left|right)\s+side\b(?!\s+of\b)/i,
-  // A pronoun object, "them" included ("my kids ran out and he sprayed them").
-  /\bsprayed\s+(?:on\s+)?(?:me|myself|him|himself|her|herself|us|ourselves|them|themselves)\b/i,
-  // First person, "sprayed" right after the verb: "I got sprayed", never the
-  // causative "I got it sprayed" (Codex P1 #6016 r2).
-  /\b(?:i|we|he|she)\s+(?:just\s+|also\s+|accidentally\s+)?(?:got|get|gets|was|were|have\s+been|had\s+been|been)\s+(?:accidentally\s+|directly\s+|also\s+)?sprayed\b/i,
 ];
+
+// ── A question that sounds like a spray exposure: a safety line first ──
+// "Sprayed" plus a person, a pet or a body part anywhere in the question
+// ("the tech sprayed my side", "can my dog go out after the spray?") puts
+// one fixed Poison Control line before the normal answer (owner 2026-10-05,
+// option A, #6016). A word match cannot tell "the arm chair" from "my arm"
+// (Codex rounds 1-5 on #6016), so the match is broad and a false match costs
+// one sentence. Clear symptoms and ingestion (MEDICAL_CUES) still replace
+// the answer. The model never writes this line.
+const EXPOSURE_SAFETY_LINE = `If anyone or a pet was exposed or feels unwell, call Poison Control at ${POISON_CONTROL_PHONE_DISPLAY} (free, confidential, 24/7). In an emergency, call 911.`;
+const SPRAY_WORD = /\bspray(?:ed|ing|s)?\b/i;
+const BODY_PARTS = '(?:eyes?|skin|mouth|face|hands?|fingers?|arms?|legs?|feet|foot|toes?|back|side|neck|head|hair|ears?|nose|lips?|throat|chest|stomach|belly|body|shoulders?|knees?|ankles?|wrists?|clothes|clothing|paws?|fur)';
+// "Me" and "us" after a request verb ("tell me", "text us") name no one exposed.
+const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|animals?|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|(?:\\bi|\\bwe)\\s+(?:\\w+\\s+)?(?:got|get|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b`, 'i');
 
 /**
  * The fixed answer when the question reports a symptom or an exposure, else
  * null. Pure and deterministic; the question is never logged.
  */
-// "Sprayed (on) my/the X" and "my/the X was sprayed". Who or what X is cannot
-// be listed in full ("my partner", "my neck", "my hamster"), so X's head noun
-// (its last word, before a place or time word) counts as a person or pet
-// unless it names a place, a plant, a pest or a thing ("my front lawn", "the
-// dog bed", "my dog's bowl"). A missed exposure is worse than an extra Poison
-// Control answer (Codex P1 #5964, #6016 r1-r2).
-const DETERMINER = '(?:my|our|his|her|their|the|your)';
-const SPRAYED_ON = new RegExp(`\\bsprayed\\s+(?:on\\s+|onto\\s+|at\\s+)?${DETERMINER}\\s+([^.?!,;:]+)`, 'gi');
-const SPRAYED_PASSIVE = new RegExp(`\\b${DETERMINER}\\s+((?:[\\w'’-]+\\s+){0,2}[\\w'’-]+)\\s+(?:got|gets|was|were|is|are|has\\s+been|have\\s+been|been)\\s+(?:accidentally\\s+|directly\\s+|also\\s+)?sprayed\\b`, 'gi');
-// Words that end the noun phrase: prepositions, place and time words, links.
-const PHRASE_STOP_WORDS = new Set(('in on at by with near around under over to from for of into onto behind through while when '
-  + 'after before and but or so because then too also again inside outside indoors outdoors upstairs downstairs here there '
-  + 'today yesterday tonight earlier last this that accidentally directly just was were is are got gets has have had '
-  + 'and while who which right now').split(' '));
-const BODY_PART_WORDS = new Set(('eye eyes skin mouth face hand hands arm arms leg legs foot feet nose lip lips head hair body neck '
-  + 'ear ears back chest throat stomach belly paw paws fur tongue finger fingers toe toes knee knees shoulder shoulders wrist ankle').split(' '));
-const NOT_A_PATIENT_WORDS = new Set(('lawn yard yards grass turf fence fences patio deck porch lanai pool garage driveway sidewalk walkway '
-  + 'house home roof wall walls window windows door doors floor floors baseboard baseboards cabinet cabinets kitchen bathroom '
-  + 'attic shed barn screen screens perimeter foundation siding gutters gutter mulch soil dirt beds bed garden gardens '
-  + 'flower flowers plant plants shrub shrubs bush bushes hedge hedges tree trees palm palms weed weeds leaves roses '
-  + 'ant ants roach roaches spider spiders webs nest nests hive mosquito mosquitoes bug bugs insects wasps termites fleas ticks '
-  + 'mound mounds area areas spot spots side corner corners exterior interior property entry entries station stations '
-  + 'cage crate bowl bowls toy toys playset swing swingset trampoline furniture couch chair chairs table car truck boat trash can cans '
-  + 'bin bins grill hose sprinkler sprinklers everything stuff part parts room rooms closet laundry '
-  // A phrase that opens on a place word ("the outside of the house").
-  + 'outside inside indoors outdoors upstairs downstairs front rear '
-  // The treatment itself ("the product was sprayed outside").
-  + 'product products chemical chemicals treatment treatments spray sprays pesticide pesticides insecticide insecticides '
-  + 'herbicide herbicides fungicide fungicides repellent bait baits granule granules liquid liquids material materials '
-  + 'solution mix mixture barrier application applications').split(' '));
-
-// The words of the noun phrase, up to a stop word, possessives trimmed.
-function phraseWords(phrase) {
-  const words = phrase.toLowerCase().split(/\s+/).map((word) => word.replace(/[^a-z'’-]/g, ''));
-  const stop = words.findIndex((word, i) => i > 0 && PHRASE_STOP_WORDS.has(word));
-  return (stop === -1 ? words : words.slice(0, stop)).slice(0, 4).filter(Boolean)
-    .map((word) => word.replace(/['’]s?$/, ''));
-}
-
-// Body parts that also name a side of a place ("back yard", "front door")
-// count only as the head noun.
-const PLACE_SIDE_WORDS = new Set(['back', 'front']);
-
-function namesPatient(phrase) {
-  const words = phraseWords(phrase);
-  const head = words[words.length - 1];
-  if (!head) return false;
-  // A body part anywhere counts: "my neck area", "my left side" (Codex P1 #6016 r4).
-  if (words.some((word, i) => BODY_PART_WORDS.has(word) && (i === words.length - 1 || !PLACE_SIDE_WORDS.has(word)))) return true;
-  return !NOT_A_PATIENT_WORDS.has(head);
-}
-
-// A passive subject is the 1 to 3 words right before the verb; a stop word
-// inside them means the words are not one noun phrase ("the ants disappeared
-// after they were sprayed").
-function passiveSubjectIsPatient(phrase) {
-  const words = phrase.toLowerCase().split(/\s+/);
-  return !words.some((word) => PHRASE_STOP_WORDS.has(word)) && namesPatient(phrase);
-}
-
-function sprayedOnSomeone(text) {
-  return [...text.matchAll(SPRAYED_ON)].some((m) => namesPatient(m[1]))
-    || [...text.matchAll(SPRAYED_PASSIVE)].some((m) => passiveSubjectIsPatient(m[1]));
-}
-
 function medicalExposureAnswer(question) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
-  return MEDICAL_CUES.some((cue) => cue.test(text)) || sprayedOnSomeone(text) ? MEDICAL_EXPOSURE_ANSWER : null;
+  return MEDICAL_CUES.some((cue) => cue.test(text)) ? MEDICAL_EXPOSURE_ANSWER : null;
+}
+
+/**
+ * The safety line to put before the answer when the question mentions spray
+ * and a person, a pet or a body part, else null.
+ */
+function exposureSafetyLine(question) {
+  const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
+  return SPRAY_WORD.test(text) && EXPOSED_SOMEONE.test(text) ? EXPOSURE_SAFETY_LINE : null;
 }
 
 // ── The call ────────────────────────────────────────────────────────────
@@ -719,6 +682,8 @@ module.exports = {
   screenAskAnswer,
   medicalExposureAnswer,
   MEDICAL_EXPOSURE_ANSWER,
+  exposureSafetyLine,
+  EXPOSURE_SAFETY_LINE,
   placeOfApplication,
   answerReportQuestionWithAI,
   AI_ASK_TOPICS,

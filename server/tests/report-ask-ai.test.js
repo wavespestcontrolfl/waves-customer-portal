@@ -60,6 +60,8 @@ const {
   screenAskAnswer,
   medicalExposureAnswer,
   MEDICAL_EXPOSURE_ANSWER,
+  exposureSafetyLine,
+  EXPOSURE_SAFETY_LINE,
   placeOfApplication,
   answerReportQuestionWithAI,
 } = require('../services/service-report/report-ask-ai');
@@ -428,7 +430,11 @@ describe('screenAskAnswer', () => {
   test('shared screen: a local absence, recorded re-entry words, a timeframe, a date and a product name pass', () => {
     expect(screen('None were seen at the dishwasher today.')).toBeNull();
     expect(screen('Keep pets off the treated areas until they are dry.', 'Can my dog go out?')).toBeNull();
-    expect(screen('Activity can stay up for a few days, and your next visit is Tuesday, January 5, 2027.')).toBeNull();
+    expect(screen('Activity can stay up for a few days, and we check again at your next visit.')).toBeNull();
+    // A date, a weekday or a clock time is never stated by the AI (#6020).
+    expect(screen('Your next visit is Tuesday, January 5, 2027.')).toBe('states_a_date');
+    expect(screen('The technician arrives at 2 PM.')).toBe('states_a_date');
+    expect(screen('We come back on 1/8.')).toBe('states_a_date');
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
   });
 
@@ -581,9 +587,16 @@ describe('symptoms and exposure never reach the model', () => {
     'I am having trouble breathing',
     'I feel lightheaded since this morning',
     'He passed out in the kitchen',
+    'It sprayed on my face',
+  ])('a fixed answer for: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
+  });
+
+  // Spray plus a person, pet or body part: the safety line goes before the
+  // normal answer (owner 2026-10-05, option A); the answer is not replaced.
+  test.each([
     'You sprayed my dog by accident',
     'The tech sprayed me',
-    'It sprayed on my face',
     'My cat got sprayed',
     'The tech sprayed my neck',
     'Some got sprayed on my ear',
@@ -602,8 +615,30 @@ describe('symptoms and exposure never reach the model', () => {
     'The tech sprayed my neck area',
     'The tech sprayed my left side',
     'You sprayed my arm and hand',
-  ])('a fixed answer for: %s', (question) => {
-    expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
+    'What was sprayed on the arm chair?',
+    'Can my dog go out after the spray?',
+  ])('a safety line before the answer for: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+    expect(exposureSafetyLine(question)).toBe(EXPOSURE_SAFETY_LINE);
+  });
+
+  test.each([
+    'What was sprayed on my lawn?',
+    'What was sprayed on the fence?',
+    'Which product was sprayed on my garage?',
+    'What was sprayed on the outside of the house?',
+    'Can you tell me what was sprayed?',
+    'Text us what you sprayed',
+    'When can my dog go back outside?',
+    'Why was Alpine WSG used?',
+    '',
+  ])('no safety line for: %s', (question) => {
+    expect(exposureSafetyLine(question)).toBeNull();
+  });
+
+  test('the safety line: Poison Control and 911, nothing about safety', () => {
+    expect(EXPOSURE_SAFETY_LINE).toBe('If anyone or a pet was exposed or feels unwell, call Poison Control at 1-800-222-1222 (free, confidential, 24/7). In an emergency, call 911.');
+    expect(EXPOSURE_SAFETY_LINE).not.toMatch(/\bsaf/i);
   });
 
   test.each([
@@ -884,6 +919,18 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
     });
     expect(dispatchWithFallback).not.toHaveBeenCalled();
     expect(JSON.parse(eventInsert.insert.mock.calls[0][0].metadata)).toEqual({ question_length: q.length, topic: 'applied' });
+  });
+
+  test.each(['on', 'off'])('gate %s, a spray question naming a person: the safety line, then the normal answer', async (gate) => {
+    if (gate === 'on') process.env.GATE_REPORT_ASK_AI = 'true'; else delete process.env.GATE_REPORT_ASK_AI;
+    dispatchWithFallback.mockResolvedValueOnce({ ok: false, reason: 'all_providers_failed' });
+    mockDb();
+    await withServer(async (baseUrl) => {
+      const { status, body } = await ask(baseUrl, 'The tech sprayed my arm, what was it?');
+      expect(status).toBe(200);
+      expect(body.answer.startsWith(`${EXPOSURE_SAFETY_LINE} `)).toBe(true);
+      expect(body.answer.length).toBeGreaterThan(EXPOSURE_SAFETY_LINE.length + 1);
+    });
   });
 
   test('a symptom question on a lawn report gets the fixed answer too', async () => {

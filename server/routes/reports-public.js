@@ -1906,7 +1906,7 @@ router.post('/:token/ask', async (req, res, next) => {
     // precautions with fixed waits, technician recommendations, aftercare)
     // that must reach the customer word for word, so they keep the rule
     // answer (pre-push audit, several rounds).
-    const { AI_ASK_TOPICS, medicalExposureAnswer } = require('../services/service-report/report-ask-ai');
+    const { AI_ASK_TOPICS, medicalExposureAnswer, exposureSafetyLine } = require('../services/service-report/report-ask-ai');
     // A question that reports a symptom or an exposure gets the fixed Poison
     // Control / 911 answer on every report and with the gate off too: the
     // fixed-rule answers have no medical handling. No model call.
@@ -1919,6 +1919,10 @@ router.post('/:token/ask', async (req, res, next) => {
       const ai = await answerReportQuestionWithAI({ question, data, nextAppointment });
       if (ai) answer = ai.answer;
     }
+    // A question that mentions spray and a person, pet or body part gets the
+    // fixed Poison Control line before the answer (owner 2026-10-05, #6016).
+    const safetyLine = urgent ? null : exposureSafetyLine(question);
+    if (safetyLine) answer = `${safetyLine} ${answer}`;
     // The question's text is never stored — only its length and the topic
     // the answer came from (report-assistant.js REPORT_QUESTION_TOPICS), so
     // the engagement stats can say what customers ask about per report type.
