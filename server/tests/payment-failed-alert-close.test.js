@@ -9,7 +9,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const knex = require('knex')({ client: 'pg' });
 const logger = require('../services/logger');
-const { closePaymentFailedAlertsForPaidInvoice, RESOLUTION } = require('../services/payment-failed-alert-close');
+const { closePaymentFailedAlertsForPaidInvoice, sweepSettledPaymentFailedAlerts, RESOLUTION } = require('../services/payment-failed-alert-close');
 const PaymentPlans = require('../services/payment-plans');
 
 const INV_A = '11111111-1111-4111-8111-111111111111';
@@ -158,5 +158,30 @@ describe('payment path (completeActivePlansForInvoice)', () => {
     conn.transaction = undefined;
     await expect(PaymentPlans.completeActivePlansForInvoice('inv-9', conn)).resolves.toBe(1);
     expect(writes).toHaveLength(2);
+  });
+});
+
+describe('repair sweep', () => {
+  test('re-judges open payment_failed bells from committed state and closes the settled ones', async () => {
+    const { conn, captured } = compilingConn({ responses: {
+      notifications: [[bell(7, { paymentIntentId: 'pi_x', invoiceId: INV_A }), bell(8, { paymentIntentId: 'pi_y', invoiceId: INV_B })], 1],
+      payments: [[], []],
+      invoices: [[{ id: INV_A }], []],
+    } });
+    expect(await sweepSettledPaymentFailedAlerts({ conn })).toBe(1);
+    const select = captured.find((q) => q.table === 'notifications' && q.sql.startsWith('select'));
+    expect(select.sql).toContain("metadata->>'triggerKey' = 'payment_failed'");
+    expect(select.sql).toContain('"done_at" is null');
+    expect(select.sql).toContain('limit $');
+    const update = captured.find((q) => q.table === 'notifications' && q.sql.startsWith('update'));
+    expect(update.bindings).toContain(7);
+    expect(update.bindings).not.toContain(8);
+    expect(update.bindings).toContain(RESOLUTION);
+  });
+
+  test('a failure is logged and closes nothing', async () => {
+    const { conn } = compilingConn({ failWith: new Error('db down') });
+    expect(await sweepSettledPaymentFailedAlerts({ conn })).toBe(0);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('repair sweep failed'));
   });
 });

@@ -119,6 +119,29 @@ postgres('payment_failed bells close when their invoice is paid', () => {
     expect(await state(system)).toMatchObject({ done_by: 'relevance', resolution: 'Moved on' });
   });
 
+  test('the repair sweep closes a bell whose invoice was paid without the hook, and leaves an unpaid one open', async () => {
+    const { sweepSettledPaymentFailedAlerts } = require('../services/payment-failed-alert-close');
+    // Paid by a path that never ran the hook (or raced it): only the status changed.
+    const paidQuietly = await insertAlert({ paymentIntentId: `pi_${randomUUID()}`, invoiceId: invoiceA });
+    await db('invoices').where({ id: invoiceA }).update({ status: 'paid', paid_at: new Date() });
+    const stillOwed = await insertAlert({ paymentIntentId: `pi_${randomUUID()}`, invoiceId: invoiceB });
+    expect((await state(paidQuietly)).done_at).toBeNull();
+    await sweepSettledPaymentFailedAlerts({ conn: db });
+    expect(await state(paidQuietly)).toMatchObject({ done_by: 'payments', resolution: 'The invoice was paid' });
+    expect((await state(stillOwed)).done_at).toBeNull();
+  });
+
+  test('the repair sweep closes a combined bell once both invoices are paid, even when neither hook saw the other', async () => {
+    const { sweepSettledPaymentFailedAlerts } = require('../services/payment-failed-alert-close');
+    const piId = `pi_${randomUUID()}`;
+    await failedLedgerRow(invoiceA, piId);
+    await failedLedgerRow(invoiceB, piId);
+    const alert = await insertAlert({ paymentIntentId: piId });
+    await db('invoices').whereIn('id', [invoiceA, invoiceB]).update({ status: 'paid', paid_at: new Date() });
+    await sweepSettledPaymentFailedAlerts({ conn: db });
+    expect(await state(alert)).toMatchObject({ done_by: 'payments' });
+  });
+
   test('a combined attempt stays open after one invoice is paid and closes after both', async () => {
     const piId = `pi_${randomUUID()}`;
     await failedLedgerRow(invoiceA, piId);

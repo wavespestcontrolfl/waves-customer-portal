@@ -4008,6 +4008,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 15 MIN — Close payment-failed admin bells whose invoices are now
+  // paid. The paid-invoice hook (payment-failed-alert-close.js) runs inside the
+  // payment transaction; this repair pass re-judges from committed state, so a
+  // bell that raced the payment still closes within one tick. Read + admin
+  // bell state only: no charge, receipt or customer message.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await runExclusive('payment-failed-alert-sweep', async () => {
+        const closed = await require('./payment-failed-alert-close').sweepSettledPaymentFailedAlerts();
+        if (closed) logger.info(`[payment-failed-alert-close] repair sweep closed ${closed} bell(s)`);
+      });
+    } catch (err) {
+      logger.error(`Payment-failed alert sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY 15 MIN — Appointment reminders (72h, 24h) from appointment_reminders table
   // =========================================================================
   cron.schedule('*/15 * * * *', async () => {
