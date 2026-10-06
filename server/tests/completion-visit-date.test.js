@@ -139,7 +139,7 @@ describe('earlyCloseoutInvoiceDate (the project invoice is dated before delivery
   test('gate on, work day before the booked day: the booked and work days', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
     expect(await earlyCloseoutInvoiceDate(runnerFor(visit), { project, scheduledServiceId: 'v', today }))
-      .toEqual({ from: '2026-10-08', to: '2026-10-05' });
+      .toMatchObject({ from: '2026-10-08', to: '2026-10-05' });
   });
   test('gate on: late, same-day, future, rescheduled and grouped visits keep the default date', async () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
@@ -162,5 +162,31 @@ describe('date reading', () => {
   test('a date that is not on the calendar is no date', () => {
     expect(planCompletionDateMove({ bookedDate: '2026-02-31', workDate: '2026-02-01', today: '2026-10-06' })).toMatchObject({ move: false, reason: 'no_date' });
     expect(planCompletionDateMove({ bookedDate: '2026-10-08T00:00:00.000Z', workDate: '2026-10-05', today: '2026-10-06' })).toMatchObject({ move: true, from: '2026-10-08' });
+  });
+});
+
+describe('redateUndeliveredDraft scope', () => {
+  const { redateUndeliveredDraft } = require('../services/completion-visit-date');
+  test('only this visit\'s own invoice: same customer, and no other visit linked', async () => {
+    const wheres = [];
+    const nested = [];
+    const chain = {
+      where(arg) {
+        if (typeof arg === 'function') {
+          const b = { whereNull: (c) => { nested.push(['null', c]); return b; }, orWhere: (o) => { nested.push(['or', o]); return b; } };
+          arg(b);
+        } else wheres.push(arg);
+        return chain;
+      },
+      whereNull() { return chain; },
+      whereRaw() { return chain; },
+      update: async () => 1,
+    };
+    const runner = () => chain;
+    runner.fn = { now: () => 'now()' };
+    const out = await redateUndeliveredDraft(runner, { id: 'inv-1', service_date: '2026-10-08' }, { from: '2026-10-08', to: '2026-10-05', scheduledServiceId: 'v-1', customerId: 'c-1' });
+    expect(out.service_date).toBe('2026-10-05');
+    expect(wheres).toEqual(expect.arrayContaining([{ id: 'inv-1' }, { customer_id: 'c-1' }, { status: 'draft' }]));
+    expect(nested).toEqual([['null', 'scheduled_service_id'], ['or', { scheduled_service_id: 'v-1' }]]);
   });
 });

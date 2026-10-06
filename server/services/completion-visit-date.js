@@ -147,7 +147,7 @@ async function planEarlyMove(runner, {
 async function earlyCloseoutInvoiceDate(runner, { project, scheduledServiceId, today = etDateString() } = {}) {
   if (!completionMovesDateLive() || !scheduledServiceId) return null;
   const plan = await planEarlyMove(runner, { scheduledServiceId, workDate: project?.project_date, today });
-  return plan.move ? { from: plan.from, to: plan.to } : null;
+  return plan.move ? { from: plan.from, to: plan.to, scheduledServiceId, customerId: project?.customer_id || null } : null;
 }
 
 /**
@@ -158,7 +158,14 @@ async function earlyCloseoutInvoiceDate(runner, { project, scheduledServiceId, t
  */
 async function redateUndeliveredDraft(runner, invoice, dates) {
   if (!dates || !invoice?.id) return invoice;
-  const changed = await undeliveredDraftsDatedOn(runner('invoices').where({ id: invoice.id }), dates.from)
+  // Only this visit's own invoice: same customer, and not linked to another
+  // visit (a caller-picked invoice for a different stop is never re-dated).
+  const query = runner('invoices').where({ id: invoice.id });
+  if (dates.customerId) query.where({ customer_id: dates.customerId });
+  if (dates.scheduledServiceId) {
+    query.where((b) => b.whereNull('scheduled_service_id').orWhere({ scheduled_service_id: dates.scheduledServiceId }));
+  }
+  const changed = await undeliveredDraftsDatedOn(query, dates.from)
     .update({ service_date: dates.to, updated_at: runner.fn.now() });
   return changed ? { ...invoice, service_date: dates.to } : invoice;
 }
