@@ -26,7 +26,7 @@
  *     before it is delivered. At closeout the visit moves only when every
  *     non-void invoice of the visit already carries the work day; an invoice
  *     on any other date (delivered on the booked day, project date edited after
- *     delivery, set by hand) keeps the visit where it is (invoice_date_mismatch),
+ *     delivery, set by hand) keeps the visit where it is (invoice_date_mismatch / record_date_mismatch),
  *     so the closeout never creates a date disagreement.
  *
  * Never moved: a late completion (work day after the booked day: the visit
@@ -99,7 +99,8 @@ async function hasLiveGroupPartner(runner, row) {
   const partner = await runner('scheduled_services')
     .where({ visit_id: row.visit_id })
     .whereNot({ id: row.id })
-    .whereNotIn('status', JOIN_INELIGIBLE_STATUSES)
+    // A NULL status is live: SQL's NOT IN drops NULL rows (as visit-groups.js does).
+    .where((builder) => builder.whereNotIn('status', JOIN_INELIGIBLE_STATUSES).orWhereNull('status'))
     .first('id');
   return !!partner;
 }
@@ -137,7 +138,7 @@ async function planEarlyMove(runner, {
  * will then move the visit early: the project's work day, or null (gate off,
  * column missing, visit not movable, no early move). Same eligibility as the
  * closeout. An invoice is never re-dated after creation: the closeout moves
- * the visit only when every invoice already agrees (invoiceDatesAgree).
+ * the visit only when every invoice and the record already agree (dateDisagreement).
  */
 async function earlyCloseoutInvoiceDate(runner, { project, scheduledServiceId, today = etDateString() } = {}) {
   if (!scheduledServiceId) return null;
@@ -146,21 +147,30 @@ async function earlyCloseoutInvoiceDate(runner, { project, scheduledServiceId, t
 }
 
 // Closeout guard: the visit's non-void invoices (by visit or by this record)
-// must all carry the work day already. One that carries anything else (the
+// and the visit's service record must all carry the booked day or the work day
+// (an invoice: the work day only) already. One that carries anything else (the
 // booked day on a delivered or reused invoice, a project date edited after
-// delivery, a date set by hand) keeps the visit where it is, so the closeout
-// never creates a visit / invoice date disagreement. No date = no disagreement.
-async function invoiceDatesAgree(trx, { visitId, recordId, workDay }) {
-  const stray = await trx('invoices')
+// delivery, a date set or corrected by hand) keeps the visit where it is, so
+// the closeout never creates a visit / invoice / record date disagreement. No
+// date = no disagreement; a NULL invoice status counts as non-void.
+// Resolves to the refusal reason, or null when everything agrees.
+async function dateDisagreement(trx, { visitId, recordId, from, to }) {
+  const strayInvoice = await trx('invoices')
     .where((builder) => {
       builder.where({ scheduled_service_id: visitId });
       if (recordId) builder.orWhere({ service_record_id: recordId });
     })
-    .whereNot({ status: 'void' })
+    .whereRaw("status IS DISTINCT FROM 'void'")
     .whereNotNull('service_date')
-    .whereRaw('service_date <> ?::date', [workDay])
+    .whereRaw('service_date <> ?::date', [to])
     .first('id');
-  return !stray;
+  if (strayInvoice) return 'invoice_date_mismatch';
+  const strayRecord = recordId && await trx('service_records')
+    .where({ id: recordId })
+    .whereNotNull('service_date')
+    .whereRaw('service_date NOT IN (?::date, ?::date)', [from, to])
+    .first('id');
+  return strayRecord ? 'record_date_mismatch' : null;
 }
 
 /**
@@ -199,9 +209,10 @@ async function moveCompletedVisitToWorkDay(trx, {
   });
   if (!plan.move) return { moved: false, reason: plan.reason };
   const { visit: locked, cols } = plan;
-  if (!await invoiceDatesAgree(trx, { visitId: locked.id, recordId: serviceRecord.id, workDay: plan.to })) {
-    logger.warn(`[completion-visit-date] visit ${locked.id} stays on ${plan.from}: an invoice carries a date other than the work day ${plan.to}`);
-    return { moved: false, reason: 'invoice_date_mismatch' };
+  const disagreement = await dateDisagreement(trx, { visitId: locked.id, recordId: serviceRecord.id, from: plan.from, to: plan.to });
+  if (disagreement) {
+    logger.warn(`[completion-visit-date] visit ${locked.id} stays on ${plan.from}: ${disagreement} (an invoice or the service record carries a date other than the work day ${plan.to})`);
+    return { moved: false, reason: disagreement };
   }
 
   const update = {

@@ -57,12 +57,12 @@ describe('moveCompletedVisitToWorkDay guards', () => {
   });
 
   // A trx whose scheduled_services row is `row` and whose update/partner calls are recorded.
-  function trxFor(row, { partner = null, stray = null } = {}) {
+  function trxFor(row, { partner = null, stray = null, strayRecord = null } = {}) {
     const updates = [];
     const trx = (table) => {
       const chain = {
         where() { return chain; }, whereNot() { return chain; }, whereNotIn() { return chain; }, whereNull() { return chain; }, whereNotNull() { return chain; }, whereRaw() { return chain; }, forUpdate() { return chain; },
-        first: async () => (table === 'invoices' ? stray : (table === 'scheduled_services' && !chain._partnerQuery ? row : partner)),
+        first: async () => (table === 'invoices' ? stray : table === 'service_records' ? strayRecord : (table === 'scheduled_services' && !chain._partnerQuery ? row : partner)),
         update: async (patch) => { updates.push({ table, patch }); return 1; },
       };
       const origWhereNot = chain.whereNot;
@@ -88,6 +88,13 @@ describe('moveCompletedVisitToWorkDay guards', () => {
     process.env.GATE_COMPLETION_MOVES_DATE = 'true';
     const trx = trxFor({ ...base }, { stray: { id: 'inv' } });
     expect(await moveCompletedVisitToWorkDay(trx, args())).toEqual({ moved: false, reason: 'invoice_date_mismatch' });
+    expect(trx.updates).toEqual([]);
+  });
+
+  test('a service record on neither the booked day nor the work day keeps the visit where it is', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const trx = trxFor({ ...base }, { strayRecord: { id: 'r' } });
+    expect(await moveCompletedVisitToWorkDay(trx, args())).toEqual({ moved: false, reason: 'record_date_mismatch' });
     expect(trx.updates).toEqual([]);
   });
 

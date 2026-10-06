@@ -3090,7 +3090,8 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       // on the project (inside the lock) so the racing/resend POST reuses it.
       // GATE_COMPLETION_MOVES_DATE: an early closeout moves the visit to the
       // work day, so the invoice is dated that day NOW, before it is delivered.
-      const earlyWorkDay = await earlyCloseoutInvoiceDateFor(trx, project, null);
+      // From the freshly LOCKED project row, not the route's earlier read.
+      const earlyWorkDay = await earlyCloseoutInvoiceDateFor(trx, locked || project, null);
       const created = await InvoiceService.create({
         customerId: project.customer_id,
         serviceRecordId: project.service_record_id || undefined,
@@ -3232,7 +3233,7 @@ async function resolveOrCreateProjectInvoice({ project, customer, invoiceId, dry
       throw err;
     }
     // GATE_COMPLETION_MOVES_DATE: same early-closeout date as the WDO draft above.
-    const earlyWorkDay = await earlyCloseoutInvoiceDateFor(trx, project, scheduledServiceId);
+    const earlyWorkDay = await earlyCloseoutInvoiceDateFor(trx, locked || project, scheduledServiceId);
     if (dryRun) {
       // Preview only (ADMIN-BUG-R49): build the draft through the SAME
       // create() call the real send uses below — replaying the discount/tax

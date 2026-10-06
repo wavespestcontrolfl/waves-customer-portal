@@ -188,6 +188,67 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
     }
   });
 
+  test('gate on: a grouped partner whose status is NULL counts as LIVE (NOT IN drops NULL), so the visit keeps its date', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const f = await seed({ bookedOffset: 3, projectOffset: -1 });
+    const stopId = randomUUID();
+    const partnerId = randomUUID();
+    f.extraServiceIds = [partnerId];
+    try {
+      await mockPg('service_visits').insert({ id: stopId, customer_id: f.customerId, scheduled_date: f.booked, stop_base_key: `fx-${stopId}`, created_by: 'fixture' });
+      await mockPg('scheduled_services').insert({
+        id: partnerId, customer_id: f.customerId, technician_id: f.techId, service_id: f.catalogId, service_type: 'Fixture partner',
+        scheduled_date: f.booked, window_start: '09:00', window_end: '10:00', status: 'confirmed', estimated_price: 50,
+      });
+      await mockPg('scheduled_services').whereIn('id', [f.serviceId, partnerId]).update({ visit_id: stopId });
+      await mockPg('scheduled_services').where({ id: partnerId }).update({ status: null });
+      const out = await close(f);
+      expect(out.visitDateMove).toEqual({ moved: false, reason: 'grouped_visit' });
+      expect(day((await visitRow(f)).scheduled_date)).toBe(f.booked);
+    } finally {
+      await mockPg('scheduled_services').whereIn('id', [f.serviceId, partnerId]).update({ visit_id: null }).catch(() => {});
+      await cleanup(f);
+      await mockPg('service_visits').where({ id: stopId }).del().catch(() => {});
+    }
+  });
+
+  test('gate on: a service record corrected by hand to another day keeps the visit where it is (record_date_mismatch)', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const f = await seed({ bookedOffset: 3, projectOffset: -1 });
+    try {
+      const { moveCompletedVisitToWorkDay } = require('../services/completion-visit-date');
+      const other = dayOffset(-5);
+      const recordId = randomUUID();
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'completed' });
+      await mockPg('service_records').insert({
+        id: recordId, customer_id: f.customerId, scheduled_service_id: f.serviceId, service_date: other, service_type: 'Fixture', status: 'completed',
+      });
+      const out = await mockPg.transaction((trx) => moveCompletedVisitToWorkDay(trx, {
+        scheduledServiceId: f.serviceId, serviceRecord: { id: recordId, service_date: other }, workDate: f.work, previousStatus: 'confirmed',
+      }));
+      expect(out).toEqual({ moved: false, reason: 'record_date_mismatch' });
+      expect(day((await visitRow(f)).scheduled_date)).toBe(f.booked);
+      expect(day((await mockPg('service_records').where({ id: recordId }).first()).service_date)).toBe(other);
+    } finally { await cleanup(f); }
+  });
+
+  test('gate on: an invoice whose status is NULL counts as non-void and blocks a date mismatch; a void one does not', async () => {
+    process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+    const { moveCompletedVisitToWorkDay } = require('../services/completion-visit-date');
+    const f = await seed({ bookedOffset: 3, projectOffset: -1, invoiceDate: 'booked' });
+    const move = () => mockPg.transaction((trx) => moveCompletedVisitToWorkDay(trx, {
+      scheduledServiceId: f.serviceId, serviceRecord: { service_date: f.work }, workDate: f.work, previousStatus: 'confirmed',
+    }));
+    try {
+      await mockPg('scheduled_services').where({ id: f.serviceId }).update({ status: 'completed' });
+      await mockPg('invoices').where({ id: f.invoiceId }).update({ status: null });
+      expect(await move()).toEqual({ moved: false, reason: 'invoice_date_mismatch' });
+      expect(day((await visitRow(f)).scheduled_date)).toBe(f.booked);
+      await mockPg('invoices').where({ id: f.invoiceId }).update({ status: 'void' });
+      expect(await move()).toMatchObject({ moved: true });
+    } finally { await cleanup(f); }
+  });
+
   test('gate OFF: today\'s behavior exactly: visit and invoice keep the booked day, nothing written', async () => {
     const f = await seed({ bookedOffset: 3, projectOffset: -1, invoiceDate: 'booked' });
     try {
@@ -283,6 +344,21 @@ postgres('certificate closeout moves the visit to the work day (GATE_COMPLETION_
           else await expect(mint(f)).rejects.toThrow(/refusing to mint/);
         } finally { await cleanup(f); }
       }
+    });
+
+    test('the creation date comes from the LOCKED project row, not the caller\'s earlier read', async () => {
+      process.env.GATE_COMPLETION_MOVES_DATE = 'true';
+      const f = await seed({ bookedOffset: 3, projectOffset: -1, noInvoice: true });
+      try {
+        const { resolveOrCreateProjectInvoice } = require('../routes/admin-projects')._private;
+        const stale = await mockPg('projects').where({ id: f.projectId }).first();
+        const customer = await mockPg('customers').where({ id: f.customerId }).first();
+        // Edited after the route read the project (stale row still says f.work).
+        const edited = dayOffset(-2);
+        await mockPg('projects').where({ id: f.projectId }).update({ project_date: edited });
+        const { invoice } = await resolveOrCreateProjectInvoice({ project: stale, customer });
+        expect(day((await mockPg('invoices').where({ id: invoice.id }).first()).service_date)).toBe(edited);
+      } finally { await cleanup(f); }
     });
 
     test('gate OFF: the minted draft keeps the booked day (today\'s behavior)', async () => {
