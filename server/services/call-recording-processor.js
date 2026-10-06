@@ -6791,7 +6791,7 @@ function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, pr
 // the pure rule in call-triage-flags.js verifies it against the labeled
 // transcript and Google's business verdict. Returns the SAME verdict object
 // unless the waiver applies.
-function businessWholeBuildingUnitWaiverForCall({ addressValidation, v2Extraction = null, transcription = '' } = {}) {
+function businessWholeBuildingUnitWaiverForCall({ addressValidation, v2Extraction = null, transcription = '', outbound = false } = {}) {
   const property = v2Extraction?.property || {};
   return applyBusinessWholeBuildingUnitWaiver(addressValidation, {
     enabled: true,
@@ -6799,6 +6799,7 @@ function businessWholeBuildingUnitWaiverForCall({ addressValidation, v2Extractio
     wholeBuildingOccupancy: property.whole_building_occupancy,
     evidence: v2Extraction?.evidence,
     transcript: transcription,
+    outbound,
   });
 }
 
@@ -11057,6 +11058,7 @@ const CallRecordingProcessor = {
               addressValidation: v2AddressValidation,
               v2Extraction: v2Result?.extraction,
               transcription,
+              outbound: isOutboundCall(call),
             });
           }
           if (wsAv !== v2AddressValidation) {

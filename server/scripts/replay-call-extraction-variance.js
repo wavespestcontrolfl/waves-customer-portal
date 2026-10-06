@@ -1450,6 +1450,7 @@ async function replayCall(call, context) {
   const storedAvForCurrent = (!recoveredCard && storedAvRaw !== storedAvUnwaived && currentExtraction
     && !require('../services/call-triage-flags').waiverCarriesToCandidate(storedAvUnwaived, currentExtraction, {
       transcript: transcriptForExtraction,
+      outbound: String(call.direction || '').toLowerCase().startsWith('outbound'),
       scalarInputsMatch: !(priorV2Valid && waiverInputs(priorV2) !== waiverInputs(currentExtraction)),
     }))
     ? storedAvUnwaived : storedAv;

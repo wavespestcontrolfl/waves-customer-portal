@@ -964,6 +964,45 @@ function turnAssertsQuote(turn, quote) {
     && !QUESTION_OPENER_RE.test(normalizeForGrounding(quote).replace(QUESTION_FILLER_RE, ''));
 }
 
+// Uncertainty on the turn that holds the quote: the caller is guessing, not
+// stating. A LOCAL superset on purpose: the shared hedge screen
+// (turnHasNegationOrHedge) is calibrated for agent commitments and other
+// callers depend on it as it is. Tested on the normalized turn ("I'm" reads
+// "i m", "I'd" reads "i d").
+const UNCERTAINTY_RE = new RegExp('(?:^| )(?:'
+  + 'i (?:think|thought|believe|guess|suppose|assume|reckon|hope|figure|d (?:assume|guess|say|think)|'
+  + '(?:m|am) (?:pretty|fairly|almost|not|kinda|kind of) (?:sure|certain|positive))'
+  + '|pretty sure|fairly sure|probably|prob|maybe|might|may|perhaps|possibly|supposedly|presumably|allegedly|apparently'
+  + '|as far as i know|to my knowledge|should be|kind of|kinda|sort of|sorta|not sure|unsure|not certain|not positive'
+  + '|no idea|think so|believe so|hopefully|more or less'
+  + ')(?: |$)');
+// Wording that says the caller has only PART of the building: a floor, level,
+// wing, annex, a back/front room, or any "only lease/rent/use/have/own" turn.
+const PARTIAL_BUILDING_RE = new RegExp(
+  '\\b(?:floors?|levels?|stor(?:y|ies|eys?)|upstairs|downstairs|wings?|annex(?:es)?|mezzanine|basement|loft)\\b'
+  + '|\\b(?:back|front|rear|left|right|side) (?:unit|room|office|half|portion|section|part|building)\\b'
+  + '|\\bonly (?:\\w+ ){0,2}(?:leas(?:e|es|ed|ing)|rent(?:s|ed|ing)?|use|uses|used|using|have|has|had|own|owns|owned|occupy|occupies|occupied|operate|operates|operated|got|tenants?|renters?|lessees?)\\b'
+  + '|\\b(?:leas(?:e|es|ed|ing)|rent(?:s|ed|ing)?|use|uses|used|using|own|owns|owned|occupy|occupies|occupied|operate|operates|operated) only\\b', 'i');
+
+// Outbound speaker labels have been swapped before (diarization): the lead is
+// labeled Agent and Waves staff Caller. A plain staff self-introduction at the
+// start of a turn ("Hi, this is Sam with Waves ...") is a deterministic tell.
+// On an OUTBOUND call, when a Caller-labeled turn introduces itself that way
+// and no Agent-labeled turn does, swap the roles. Both or neither introducing
+// is ambiguous and keeps the raw labels (fail closed). Inbound never swaps.
+const STAFF_INTRO_RE = /^\s*(?:(?:hi|hello|hey|good (?:morning|afternoon|evening|day)|thanks? for (?:calling|taking))\b[\s,.!:-]*)*this is [a-z'.-]+(?: [a-z'.-]+){0,3}? (?:calling )?(?:with|from|at) waves\b/i;
+function orientTranscriptForOutbound(transcript, outbound) {
+  if (outbound !== true) return transcript;
+  const { parseTurns } = require('./call-reschedule-agreement').groundingTools;
+  const turns = parseTurns(transcript);
+  if (!turns) return transcript;
+  const callerIntro = turns.some((t) => !t.agent && STAFF_INTRO_RE.test(t.raw));
+  const agentIntro = turns.some((t) => t.agent && STAFF_INTRO_RE.test(t.raw));
+  if (!callerIntro || agentIntro) return transcript;
+  return String(transcript).replace(/^(\s*)(agent|caller)(\s*:)/gim,
+    (_m, lead, who, colon) => `${lead}${who.toLowerCase() === 'agent' ? 'Caller' : 'Agent'}${colon}`);
+}
+
 // Wording that says the building sits in a multi-tenant center.
 const MULTI_TENANT_WORDING_RE = /\b(?:strip\s+(?:mall|center|centre|plaza)|plaza|shopping\s+(?:center|centre|mall|plaza)|mall|(?:office|business|industrial)\s+park|complex)\b/i;
 const BUSINESS_WHOLE_BUILDING_WAIVER_REASON = 'business_whole_building';
@@ -990,6 +1029,10 @@ const BUSINESS_WHOLE_BUILDING_WAIVER_REASON = 'business_whole_building';
  *     hedge or condition;
  *   - (the quote's WHOLE caller turn carries no negation, hedge or condition, and
  *     the sentence holding it is an assertion, not a question)
+ *   - (the holding turn also carries no uncertainty: I think, probably, maybe,
+ *     should be, kind of, not sure ...; and no caller turn names a floor, wing,
+ *     annex, or an "only lease/rent/use/have/own" construction)
+ *   - (on an OUTBOUND call whose labels look swapped, roles are swapped first)
  *   - no CALLER turn says suite / ste / unit / bay / condo / apartment (an
  *     agent asking "is there a suite number?" does not count against the
  *     caller), and no turn at all names a strip mall, plaza, shopping center,
@@ -1008,7 +1051,7 @@ function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
   if (opts.wholeBuildingOccupancy !== true) return av;
   // Lazy: call-reschedule-agreement requires this module at load time.
   const { parseTurns, turnsHolding } = require('./call-reschedule-agreement').groundingTools;
-  const turns = parseTurns(opts.transcript);
+  const turns = parseTurns(orientTranscriptForOutbound(opts.transcript, opts.outbound));
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return av;
   const quotes = (Array.isArray(opts.evidence) ? opts.evidence : [])
     .filter((e) => e?.field_path === '/property/whole_building_occupancy' && e.speaker === 'caller' && typeof e.quote === 'string');
@@ -1019,10 +1062,11 @@ function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
   const grounded = quotes.some((e) => {
     const holding = turnsHolding(turns, e.quote, 'caller');
     return holding.length > 0 && holding.every((t) => !turnHasNegationOrHedge(t.ns)
-      && !turnHasUnresolvedConditional(t.ns) && turnAssertsQuote(t, e.quote));
+      && !turnHasUnresolvedConditional(t.ns) && !UNCERTAINTY_RE.test(t.ns)
+      && turnAssertsQuote(t, e.quote));
   });
   if (!grounded) return av;
-  if (turns.some((t) => !t.agent && SUBUNIT_WORDING_RE.test(t.raw))) return av;
+  if (turns.some((t) => !t.agent && (SUBUNIT_WORDING_RE.test(t.raw) || PARTIAL_BUILDING_RE.test(t.raw)))) return av;
   if (turns.some((t) => MULTI_TENANT_WORDING_RE.test(t.raw))) return av;
   return {
     ...av,
@@ -1045,7 +1089,7 @@ function applyBusinessWholeBuildingUnitWaiver(av, opts = {}) {
 //   - any other waiver (whole-structure) carries when the caller-supplied
 //     scalar inputs (service and property type) match: `scalarInputsMatch`.
 // `stored` is the persisted (unwaived, marker-stamped) verdict.
-function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarInputsMatch = true } = {}) {
+function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarInputsMatch = true, outbound = false } = {}) {
   if (stored?.wholeStructureUnitWaived?.reason !== BUSINESS_WHOLE_BUILDING_WAIVER_REASON) return scalarInputsMatch;
   const property = candidate?.property || {};
   return applyBusinessWholeBuildingUnitWaiver(stored, {
@@ -1054,6 +1098,7 @@ function waiverCarriesToCandidate(stored, candidate, { transcript = '', scalarIn
     wholeBuildingOccupancy: property.whole_building_occupancy,
     evidence: candidate?.evidence,
     transcript,
+    outbound,
   }) !== stored;
 }
 
@@ -3199,6 +3244,7 @@ module.exports = {
   isMissingUnitNumber,
   applyWholeStructureUnitWaiver,
   applyBusinessWholeBuildingUnitWaiver,
+  orientTranscriptForOutbound,
   BUSINESS_WHOLE_BUILDING_WAIVER_REASON,
   waiverCarriesToCandidate,
   reconstructWaivedAddressValidation,

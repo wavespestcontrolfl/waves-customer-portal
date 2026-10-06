@@ -128,6 +128,7 @@ async function main() {
       // the transcript instead (waiverCarriesToCandidate).
       const carries = require('../services/call-triage-flags').waiverCarriesToCandidate(rawAvUnwaived, e, {
         transcript: r.transcription,
+        outbound: String(r.direction || '').toLowerCase().startsWith('outbound'),
         scalarInputsMatch: !(waiverInputs(priorEnriched) !== waiverInputs(e)),
       });
       const rawAv = (rawAvWaived !== rawAvUnwaived && !carries) ? rawAvUnwaived : rawAvWaived;

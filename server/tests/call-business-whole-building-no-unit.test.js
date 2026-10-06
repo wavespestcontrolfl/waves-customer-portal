@@ -9,6 +9,7 @@ const {
   applyBusinessWholeBuildingUnitWaiver,
   reconstructWaivedAddressValidation,
   waiverCarriesToCandidate,
+  orientTranscriptForOutbound,
   canAutoRoute,
   computeDeterministicTriageFlags,
   suppressAddressFlagsForAV,
@@ -194,6 +195,115 @@ describe('applyBusinessWholeBuildingUnitWaiver (pure)', () => {
     // A plain assertion next to an unrelated question still waives.
     const t2 = withTranscript(['Agent: Hello.', 'Caller: Is the technician licensed? We own the whole building.']);
     expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t2, evidence: [{ ...EVIDENCE[0], quote: q }] })).not.toBe(AV_BUSINESS);
+  });
+
+  describe('uncertainty on the holding turn (whole class)', () => {
+    test.each([
+      'I think we own the whole building',
+      'We probably own the whole building',
+      'I believe we own the whole building',
+      'I guess we own the whole building',
+      "I'm pretty sure we own the whole building",
+      'Pretty sure we own the whole building',
+      'Maybe we own the whole building',
+      'We might own the whole building',
+      'We may own the whole building',
+      'I suppose we own the whole building',
+      'We supposedly own the whole building',
+      'As far as I know we own the whole building',
+      'We should be the owners of the whole building',
+      "It's kind of the whole building that we own",
+      'We sort of own the whole building',
+      "I'm not sure but we own the whole building",
+      "I'd assume we own the whole building",
+      'We own the whole building I guess',
+      'We own the whole building, more or less',
+    ])('keeps the hold: %s', (turn) => {
+      const q = turn.replace(/^(?:I think|I believe|I guess|Maybe|I suppose|Pretty sure) /, '');
+      const t = withTranscript(['Agent: Hello.', `Caller: ${turn}.`]);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: [{ ...EVIDENCE[0], quote: q }] })).toBe(AV_BUSINESS);
+    });
+    test('a confident turn ("I am sure") still waives', () => {
+      const t = withTranscript(['Agent: Hello.', 'Caller: Yes, I am sure we own the whole building.']);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...t, evidence: [{ ...EVIDENCE[0], quote: 'we own the whole building' }] })).not.toBe(AV_BUSINESS);
+    });
+  });
+
+  describe('partial-building wording in a caller turn (whole class)', () => {
+    test.each([
+      'Actually, we only lease the second floor.',
+      'We are on the ground floor.',
+      'We have the upstairs.',
+      'We are downstairs.',
+      'It is on level two.',
+      'It is a two story building and we are in one half.',
+      'We only rent the back office.',
+      'We have the east wing.',
+      'We lease the annex.',
+      'It is the front room.',
+      'We only use the back.',
+      'We only have the north half.',
+      'We only own our part.',
+      'We lease only that room.',
+      'We are only the tenants.',
+      'We only really lease it.',
+    ])('keeps the hold: %s', (line) => {
+      const t = withTranscript(['Agent: Hello.', `Caller: ${QUOTE}.`, 'Agent: Got it.', `Caller: ${line}`]);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).toBe(AV_BUSINESS);
+    });
+    test('an agent turn naming a floor does not matter, and "only" without a holding verb does not veto', () => {
+      const t = withTranscript(['Agent: Is it on the second floor or the whole building?', `Caller: ${QUOTE}. We only need a quick visit.`]);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, t)).not.toBe(AV_BUSINESS);
+    });
+  });
+
+  describe('outbound swapped speaker labels', () => {
+    const SWAPPED = [
+      'Caller: Hi, this is Sam with Waves Pest Control returning your request.',
+      `Agent: ${QUOTE}. We need pest service before we open.`,
+      'Caller: Great, what is the address?',
+      'Agent: 200 Example Avenue in Bradenton.',
+    ].join('\n');
+
+    test('outbound + a Caller-labeled staff intro and no Agent intro: roles swap and the quote grounds', () => {
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...OK, transcript: SWAPPED, outbound: true })).not.toBe(AV_BUSINESS);
+    });
+    test('inbound (or direction unknown) never swaps: the raw labels hold', () => {
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...OK, transcript: SWAPPED, outbound: false })).toBe(AV_BUSINESS);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...OK, transcript: SWAPPED })).toBe(AV_BUSINESS);
+    });
+    test('ambiguous (both or neither sides introduce) keeps the raw labels', () => {
+      const both = `Agent: Hello, this is Pat from Waves.\n${SWAPPED}`;
+      expect(orientTranscriptForOutbound(both, true)).toBe(both);
+      const neither = SWAPPED.replace('Hi, this is Sam with Waves Pest Control returning your request.', 'Hi, returning your request.');
+      expect(orientTranscriptForOutbound(neither, true)).toBe(neither);
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...OK, transcript: neither, outbound: true })).toBe(AV_BUSINESS);
+    });
+    test('correctly labeled outbound calls are untouched, and unlabeled text passes through', () => {
+      expect(orientTranscriptForOutbound(TRANSCRIPT, true)).toBe(TRANSCRIPT);
+      expect(orientTranscriptForOutbound('no labels at all', true)).toBe('no labels at all');
+      expect(applyBusinessWholeBuildingUnitWaiver(AV_BUSINESS, { ...OK, outbound: true })).not.toBe(AV_BUSINESS);
+    });
+    test.each([
+      'Caller: Hello, this is Sam from Waves Pest Control.',
+      'Caller: Good morning, this is Sam Lee at Waves.',
+      'Caller: This is Sam calling from Waves Pest Control.',
+    ])('intro phrasings are recognised: %s', (intro) => {
+      const t = `${intro}\nAgent: ${QUOTE}.\nCaller: ok`;
+      expect(orientTranscriptForOutbound(t, true)).not.toBe(t);
+    });
+    test('the audit recompute and the processor thread direction through', () => {
+      const stored = JSON.parse(JSON.stringify({ ...AV_BUSINESS, wholeStructureUnitWaived: { missingComponents: ['subpremise'], originalStatus: 'ambiguous', reason: 'business_whole_building' } }));
+      const cand = { property: { property_type: 'commercial', whole_building_occupancy: true }, evidence: EVIDENCE };
+      expect(waiverCarriesToCandidate(stored, cand, { transcript: SWAPPED, outbound: true })).toBe(true);
+      expect(waiverCarriesToCandidate(stored, cand, { transcript: SWAPPED, outbound: false })).toBe(false);
+      const fs = require('fs');
+      expect(fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8')).toContain('outbound: isOutboundCall(call),');
+      for (const f of ['replay-call-extraction-variance', 'verify-v2-shadow-path']) {
+        expect(fs.readFileSync(require.resolve(`../scripts/${f}`), 'utf8')).toContain("outbound: String(");
+      }
+      expect(businessWholeBuildingUnitWaiverForCall({ addressValidation: AV_BUSINESS, v2Extraction: { property: { property_type: 'commercial', whole_building_occupancy: true }, evidence: EVIDENCE }, transcription: SWAPPED, outbound: true }).status).toBe('validated_accept');
+    });
   });
 
   test.each([
