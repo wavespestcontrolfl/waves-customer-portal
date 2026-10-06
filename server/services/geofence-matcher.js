@@ -8,6 +8,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
+const { STAFF_WORK_DATE_SQL, staffWorkDate } = require('../utils/staff-time-work-date');
 
 const EARTH_METERS = 6371000;
 
@@ -330,7 +331,7 @@ async function isDuplicateEnter(techId, customerId, cooldownMinutes = 15) {
     const cutoff = new Date(Date.now() - cooldownMinutes * 60_000);
     const row = await db('geofence_events')
       .where({ technician_id: techId, matched_customer_id: customerId, event_type: 'ENTER' })
-      .whereIn('action_taken', ['timer_started', 'reminder_sent', 'timer_already_running'])
+      .whereIn('action_taken', ['timer_started', 'clocked_in_timer_started', 'reminder_sent', 'clocked_in_reminder_sent', 'timer_already_running'])
       .where('event_timestamp', '>', cutoff)
       .first();
     return !!row;
@@ -350,6 +351,29 @@ async function getActiveJobTimer(techId) {
       .first();
   } catch (err) {
     logger.error(`[geofence-matcher] getActiveJobTimer failed: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * The tech's shift state for the current ET work day, for the geofence auto
+ * clock-in decision: { active, anyToday } (voided shifts do not count), or
+ * null when it cannot be read (the caller then does NOT clock anyone in).
+ * `active` counts any open shift, whatever day it started.
+ */
+async function getShiftStateToday(techId, date = new Date()) {
+  try {
+    const rows = await db('time_entries')
+      .where({ technician_id: techId, entry_type: 'shift' })
+      .where('status', '!=', 'voided')
+      .where(function () {
+        this.where('status', 'active')
+          .orWhereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [staffWorkDate(date)]);
+      })
+      .select('status');
+    return { active: rows.some((r) => r.status === 'active'), anyToday: rows.length > 0 };
+  } catch (err) {
+    logger.error(`[geofence-matcher] getShiftStateToday failed: ${err.message}`);
     return null;
   }
 }
@@ -400,6 +424,7 @@ module.exports = {
   isAutoFlipDisabledForCustomer,
   isRecentAutoFlipForCustomer,
   getActiveJobTimer,
+  getShiftStateToday,
   getActiveTimerDwellMinutes,
   logEvent,
   distanceMeters,

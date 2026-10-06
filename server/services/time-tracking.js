@@ -100,7 +100,9 @@ async function clockIn(technicianId, { lat, lng, notes, source } = {}) {
       .where({ technician_id: technicianId, entry_type: 'shift', status: 'active' })
       .first();
     if (existing) {
-      throw new Error('Already clocked in. Clock out before starting a new shift.');
+      const alreadyClockedIn = new Error('Already clocked in. Clock out before starting a new shift.');
+      alreadyClockedIn.code = 'ALREADY_CLOCKED_IN';
+      throw alreadyClockedIn;
     }
 
     const now = new Date();

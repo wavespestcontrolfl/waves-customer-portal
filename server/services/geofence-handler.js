@@ -13,7 +13,8 @@ const matcher = require('./geofence-matcher');
 const timeTracking = require('./time-tracking');
 const trackTransitions = require('./track-transitions');
 const auditLog = require('./audit-log');
-const { parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime, etDateString, etCalendarDayOf } = require('../utils/datetime-et');
+const featureGates = require('../config/feature-gates');
 const { isStaffMaintenanceEnabled } = require('../middleware/staff-maintenance');
 
 /**
@@ -157,6 +158,62 @@ async function handleGeozoneEvent(payload) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Auto clock-in at the first stop (GATE_GEOFENCE_AUTO_CLOCK_IN, owner 2026-10-06)
+// ---------------------------------------------------------------------------
+// A Bouncie ENTER older than this no longer says where the tech is NOW:
+// clockIn() stamps the shift with the current time, so a delayed webhook would
+// start paid time late (or on a stale position). Older events fall back to the
+// reminder.
+const AUTO_CLOCK_IN_MAX_EVENT_AGE_MS = 10 * 60 * 1000;
+// A visit in one of these statuses is not startable (startJob refuses
+// 'completed'; the rest are not work the tech is arriving to do).
+const AUTO_CLOCK_IN_BLOCKED_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
+
+/**
+ * Clock the tech in on arrival at their first scheduled stop of the day.
+ * Returns the new shift row when THIS call clocked them in, else null (never
+ * throws: every "no" and every failure leaves today's behavior to run).
+ *
+ * Clocks in only when ALL hold: gate on; the arrival matched a scheduled visit
+ * ASSIGNED to this tech (the matcher's any-tech crew-switch fallback does not
+ * count) for today (ET), not completed/cancelled/skipped/no-show/rescheduled;
+ * the event is fresh; and the tech has NO shift today (an open shift of any
+ * day, or a shift already worked/closed today, means they run their own clock).
+ * A tech who stopped at the shop first clocks in by hand, so the shift is
+ * active here and this does nothing.
+ */
+async function maybeAutoClockIn({ tech, job, lat, lng, eventTime }) {
+  if (!featureGates.geofenceAutoClockInLive()) return null;
+  if (!job || !tech || !tech.id) return null;
+  if (job.technician_id == null || String(job.technician_id) !== String(tech.id)) return null;
+  if (AUTO_CLOCK_IN_BLOCKED_STATUSES.includes(String(job.status))) return null;
+  if (job.track_state === 'complete') return null;
+  const jobDay = job.scheduled_date ? etCalendarDayOf(job.scheduled_date) : null;
+  if (!jobDay || jobDay !== etDateString(new Date())) return null;
+  const eventAgeMs = Date.now() - new Date(eventTime).getTime();
+  if (!Number.isFinite(eventAgeMs) || eventAgeMs > AUTO_CLOCK_IN_MAX_EVENT_AGE_MS) return null;
+
+  // null = unreadable: never clock anyone in on a guess.
+  const shiftState = await matcher.getShiftStateToday(tech.id, new Date());
+  if (!shiftState || shiftState.active || shiftState.anyToday) return null;
+
+  try {
+    return await timeTracking.clockIn(tech.id, {
+      lat,
+      lng,
+      source: 'geofence_auto',
+      notes: 'Auto clock-in on arrival at first stop',
+    });
+  } catch (err) {
+    // A concurrent ENTER (or a manual clock-in) won the technician-row lock:
+    // that shift is the one in force. Fall through to the normal startJob.
+    if (err && err.code === 'ALREADY_CLOCKED_IN') return null;
+    logger.warn(`[geofence-handler] auto clock-in failed, falling back to the normal path: ${err && err.message}`);
+    return null;
+  }
+}
+
 async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, payload }) {
   const mode = await matcher.getMode();
   const cooldown = await matcher.getCooldownMinutes();
@@ -235,10 +292,48 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
   const unscheduled = !job;
 
   if (mode === 'automatic') {
+    // Gate-off (or any "no") returns null and everything below is today's path.
+    const autoShift = await maybeAutoClockIn({ tech, job, lat, lng, eventTime });
     let entry = null;
     try {
       entry = await timeTracking.startJob(tech.id, job ? job.id : null, { lat, lng });
     } catch (err) {
+      if (autoShift) {
+        // This arrival opened the shift and the timer could not start. KEEP the
+        // shift (payroll-safe: the tech really is at their first stop, and
+        // rolling back would drop paid time they cannot get back without an
+        // office edit; a stray shift is visible, source geofence_auto, and the
+        // 14-hour auto clock-out bounds it) and tell the tech, never silently.
+        const completed = err && err.code === 'job_already_completed';
+        logger.warn(`[geofence-handler] auto clock-in kept, startJob failed: ${err && err.message}`);
+        await sendTechNotification(tech.id, {
+          type: 'geofence_arrival_reminder',
+          message: completed
+            ? `Clocked in at ${customerLabel}. This visit is already completed.`
+            : `Clocked in at ${customerLabel}. Start timer?`,
+          payload: {
+            customer_id: customer.id,
+            customer_name: customerLabel,
+            job_id: completed ? null : (job ? job.id : null),
+            clocked_in_time_entry_id: autoShift.id,
+            reason: err && err.message,
+          },
+        });
+        await matcher.logEvent({
+          bouncie_imei: imei,
+          technician_id: tech.id,
+          event_type: 'ENTER',
+          latitude: lat,
+          longitude: lng,
+          matched_customer_id: customer.id,
+          matched_job_id: job ? job.id : null,
+          action_taken: 'clocked_in_reminder_sent',
+          time_entry_id: autoShift.id,
+          raw_payload: payload,
+          event_timestamp: eventTime,
+        });
+        return;
+      }
       // The visit was completed between the job lookup above and the timer
       // start (the office closed it out on its paid invoice): there is
       // nothing to start and nothing to remind about — tapping a reminder
@@ -293,15 +388,18 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
 
     await sendTechNotification(tech.id, {
       type: 'geofence_timer_started',
-      message: unscheduled
-        ? `Timer started — unscheduled visit at ${customerLabel}`
-        : `Timer started at ${customerLabel}`,
+      message: autoShift
+        ? `Clocked in and timer started at ${customerLabel}`
+        : unscheduled
+          ? `Timer started — unscheduled visit at ${customerLabel}`
+          : `Timer started at ${customerLabel}`,
       payload: {
         customer_id: customer.id,
         customer_name: customerLabel,
         job_id: job ? job.id : null,
         time_entry_id: entry.id,
         unscheduled,
+        ...(autoShift ? { clocked_in: true, shift_entry_id: autoShift.id } : {}),
       },
     });
 
@@ -313,7 +411,7 @@ async function handleArrival({ tech, customer, job, lat, lng, eventTime, imei, p
       longitude: lng,
       matched_customer_id: customer.id,
       matched_job_id: job ? job.id : null,
-      action_taken: 'timer_started',
+      action_taken: autoShift ? 'clocked_in_timer_started' : 'timer_started',
       time_entry_id: entry.id,
       raw_payload: payload,
       event_timestamp: eventTime,
@@ -826,6 +924,7 @@ function customerName(c) {
 module.exports = {
   handleGeozoneEvent,
   handleArrival,
+  maybeAutoClockIn,
   sendTechNotification,
   markOnPropertyFromGeofence,
   markCompleteFromGeofence,

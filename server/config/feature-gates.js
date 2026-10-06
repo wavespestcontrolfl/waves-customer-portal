@@ -14,6 +14,7 @@
  *   GATE_ESTIMATE_SENT_CLOSES_ASSESSMENT=true (an estimate sent to a customer after their Waves Assessment closes that assessment visit quietly — no report, text, review ask or invoice; a sweep every ten minutes, owner ruling 2026-10-04; off = nothing runs)
  *   GATE_NEIGHBORHOOD_ACCESS=true (a neighborhood gate code saved by the office, the customer's portal, a call or a customer text is also filed under that property's neighborhood in the shared directory, and a code that conflicts with the one on file is flagged needs_confirm and listed on the Gate codes page, with no bell (owner ruling 2026-10-03); read at call time via neighborhoodAccessLive(), dark by default; off = the save is byte-identical to before)
  *   GATE_NEIGHBORHOOD_TECH_ACTIONS=true (on a visit assigned to them, a technician can add a keypad gate code to that visit's neighborhood (live at once; other live codes there then need confirming) and mark a neighborhood code wrong (it drops to needs_confirm, the office decides whether to retire it); owner ruling 2026-10-03. Honoured only while GATE_NEIGHBORHOOD_ACCESS is live; read at call time via neighborhoodTechActionsLive(), dark by default; off = the two routes answer 404 and the schedule feed carries no action data. No bell, nothing sent to a customer.)
+ *   GATE_GEOFENCE_AUTO_CLOCK_IN=true (owner 2026-10-06: in automatic geofence mode, a technician with no shift today who arrives at their own scheduled visit for today is clocked in automatically (source geofence_auto) and the job timer starts, so the first stop starts the paid day; never on an unscheduled, multi-stop, other-tech, other-day, stale, inactive-tech or already-clocked-in arrival. Read at call time via geofenceAutoClockInLive(), dark by default; off = today's behavior; rollback = unset)
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
@@ -4494,6 +4495,13 @@ function neighborhoodTechActionsLive() {
   return neighborhoodAccessLive() && process.env.GATE_NEIGHBORHOOD_TECH_ACTIONS === 'true';
 }
 
+// Geofence auto clock-in at the first stop (services/geofence-handler.js
+// handleArrival, automatic mode only), read at CALL time. Strict
+// `=== 'true'`, dark in every environment; unsetting it is the kill switch.
+function geofenceAutoClockInLive() {
+  return process.env.GATE_GEOFENCE_AUTO_CLOCK_IN === 'true';
+}
+
 // Caller demotion + booking-confirmation replay after an on-site contact's YES
 // (services/recipient-optin.js settleOnSiteFollowUps), read at CALL time.
 // Strict `=== 'true'`, dark in every environment.
@@ -5861,3 +5869,5 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
 module.exports.lawnV13Live = lawnV13Live;
+// GATE_GEOFENCE_AUTO_CLOCK_IN reader, on its own line so gate PRs never conflict.
+module.exports.geofenceAutoClockInLive = geofenceAutoClockInLive;
