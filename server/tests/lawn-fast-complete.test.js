@@ -282,6 +282,26 @@ describe('buildLawnFastContext', () => {
     expect(ctx.plannedProducts.month).toBe(10);
   });
 
+  test('a plan that offers the bermuda removal mix sends the visit to the full form: ineligible with the reason, no sheet payload', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    const step = (id) => ({ product: { id, name: id }, applicationMethod: 'spot_treatment', group: 'bermuda_removal' });
+    buildPlanForService.mockResolvedValue({
+      completionDefaults: {
+        items: [{ product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast', mix: { amount: 20, amountUnit: 'lb' } }],
+        options: [step('rec'), step('fus'), step('nis')],
+      },
+    });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    expect(ctx).toMatchObject({ ok: true, eligible: false, reason: 'bermuda_removal', needsFullForm: 'Bermuda removal mix this visit: use the full form' });
+    expect(ctx.plannedProducts).toBeUndefined();
+    // No bermuda option in the plan: the sheet works as before, with no needsFullForm key anywhere.
+    buildPlanForService.mockResolvedValue({ completionDefaults: { items: [], options: [{ product: { id: P_GRAN, name: 'x' } }] } });
+    const plain = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    expect(plain.eligible).toBe(true);
+    expect(JSON.stringify(plain)).not.toMatch(/needsFullForm/);
+  });
+
   describe('program defaults only on a recurring program appointment', () => {
     const PLAN = {
       completionDefaults: {

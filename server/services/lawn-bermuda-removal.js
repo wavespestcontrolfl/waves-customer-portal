@@ -493,7 +493,7 @@ const addTestPatchNote = (items) => items.map((item) => (isStepLine(item)
 // unavailable lines when some was). Returns { items, blocks, warnings }.
 async function projectBermudaStep(items, { knex, rows, probeLimits, testPatch = false }) {
   const members = items.filter(isStepLine);
-  if (!members.length) return { items, blocks: [], warnings: [] };
+  if (!members.length) return { items, blocks: [], warnings: [], limitWarnings: [] };
   // The limited products are Recognition and Fusilade II by catalog id (the surfactant has
   // no limits; it is held to the step by the staged row, below). Program rows missing: the
   // step is unavailable, never judged on names.
@@ -501,11 +501,13 @@ async function projectBermudaStep(items, { knex, rows, probeLimits, testPatch = 
   const limited = new Set([ids.recognition, ids.fusilade].filter(Boolean));
   const probe = members.filter((m) => m.product?.id && limited.has(String(m.product.id)))
     .map((m) => ({ selected: true, bermudaStep: true, product: { id: m.product.id, name: m.product.name } }));
-  const capped = probe.length ? (await probeLimits(probe)).capped.size > 0 : false;
+  // The probe gets the staged rows, so a step line's planned rate counts in the year's total.
+  const found = probe.length ? await probeLimits(probe, rows) : null;
+  const capped = found ? found.capped.size > 0 : false;
   const usable = ids.tagged && !capped && members.every((m) => m.product && m.product.active !== false && rows.get(String(m.product.id)));
   const settled = settleStep(items, usable);
   const noted = withRowGateNotes(settled.items, rows);
-  return { ...settled, items: testPatch ? addTestPatchNote(noted) : noted };
+  return { ...settled, items: testPatch ? addTestPatchNote(noted) : noted, limitWarnings: found?.warnings || [] };
 }
 
 // A step line that carries no gate notes of its own (the completion actions are built
@@ -592,7 +594,7 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
 // while the step is off (gate, track, month, account, cultivar), so a route carries no
 // branch of its own for it. `loadRows(options)` loads the window's staged rows;
 // `probeLimits` is the route's own limit read.
-async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows, probeLimits }) {
+async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows, probeLimits, reportLimitWarnings = false }) {
   // `loadVisit` is called only when the step could apply at all (gate, track, month).
   const eligible = bermudaRemovalVisit({ trackKey, month }) && featureGates.lawnV13Live?.() === true;
   const step = eligible ? await stepForVisit(knex, await loadVisit(), { trackKey, month }) : { active: false };
@@ -615,7 +617,9 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
       state.blocks = settled.blocks;
       state.mark = step.cultivar === 'test_patch';
       // `warningFields`: a response that carries warnings only when there are some.
-      const warnings = [...stepWarnings, ...settled.warnings];
+      // A reader that runs no limit check of its own (the completion actions) reports the probe's
+      // warning-level results (the label-rate warning) beside the step's own.
+      const warnings = [...stepWarnings, ...settled.warnings, ...(reportLimitWarnings ? settled.limitWarnings : [])];
       return { ...settled, warnings, warningFields: warnings.length ? { warnings } : {} };
     },
     // The response items: the test-patch note, and the unavailable mark a blocked step keeps.

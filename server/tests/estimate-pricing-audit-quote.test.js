@@ -198,6 +198,34 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(without.lines.find((l) => l.serviceKey === 'lawn_care').cogs).not.toHaveProperty('bermudaRemovalCost');
   });
 
+  test('a legacy estimate with the suppression marker and no stored removal cost gets the engine\'s own cost from the lawn area (gate on); gate off or no marker adds nothing', async () => {
+    const { calcBermudaRemovalAnnualCost } = require('../services/pricing-engine/service-pricing');
+    const legacy = (resultExtra, inputs = { measuredTurfSf: 5000 }) => ({
+      id: 'est-legacy', status: 'sent', source: 'manual', monthly_total: '55.00', annual_total: '660.00', onetime_total: null,
+      estimate_data: {
+        engineInput: inputs,
+        result: { recurring: { services: [{ service: 'lawn_care', name: 'Lawn Care', mo: 55, monthly: 55, tier: 'enhanced', cadence: 'every_6_weeks', visitsPerYear: 9 }] }, ...resultExtra },
+      },
+    });
+    const cogs = async (extra, inputs) => (await buildEstimatePricingAudit(legacy(extra, inputs))).lines.find((l) => l.serviceKey === 'lawn_care').cogs;
+    const marker = { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } };
+    const saved = process.env.GATE_LAWN_BERMUDA_REMOVAL;
+    try {
+      process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
+      expect((await cogs(marker)).bermudaRemovalCost).toBe(calcBermudaRemovalAnnualCost(5000));
+      expect(calcBermudaRemovalAnnualCost(5000)).toBe(71.25);
+      // A stored cost still wins; no marker or no lawn area adds nothing.
+      expect((await cogs({ results: { lawnMeta: { bermudaSuppression: { perApp: 25 }, costs: { annualBermudaRemoval: 10 } } } })).bermudaRemovalCost).toBe(10);
+      expect(await cogs({ results: { lawnMeta: { bermudaSuppression: null } } })).not.toHaveProperty('bermudaRemovalCost');
+      expect(await cogs(marker, {})).not.toHaveProperty('bermudaRemovalCost');
+      // Gate off: the audit is the old one.
+      delete process.env.GATE_LAWN_BERMUDA_REMOVAL;
+      expect(await cogs(marker)).not.toHaveProperty('bermudaRemovalCost');
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_BERMUDA_REMOVAL; else process.env.GATE_LAWN_BERMUDA_REMOVAL = saved;
+    }
+  });
+
   test('a current result is authoritative for the bermuda removal cost: a stale engineResult left by a revision is never read', async () => {
     const lawnService = { service: 'lawn_care', name: 'Lawn Care', mo: 55, monthly: 55, tier: 'enhanced', cadence: 'every_6_weeks', visitsPerYear: 9, perTreatment: 64 };
     const staleEngine = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, costs: { annualBermudaRemoval: 99 } }] };

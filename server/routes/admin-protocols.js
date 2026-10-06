@@ -1231,7 +1231,8 @@ router.get('/completion-actions', async (req, res, next) => {
       trackKey: track, month,
       parseLines: (text, role) => parseProtocolLines(text, role, { exactName }),
       loadRows: (options) => loadV13RowsForMonth(db, track, month, options),
-      probeLimits: (probe) => v13VisitLimits(db, bermudaVisit, probe, new Map()),
+      probeLimits: (probe, rows) => v13VisitLimits(db, bermudaVisit, probe, rows || new Map()),
+      reportLimitWarnings: true,
     });
     const actionLines = [...baseLines, ...parseProtocolLines(visit.secondary, 'conditional', { exactName }), ...bermuda.lines];
     const settled = await bermuda.settle(bermuda.tagActions(buildCompletionActions({

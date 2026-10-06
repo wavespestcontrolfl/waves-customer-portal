@@ -444,6 +444,19 @@ describe('the account decides, on the server', () => {
       expect(excluded.warnings.map((w) => w.code)).toEqual(['lawn_bermuda_cultivar_excluded']);
     });
 
+    test('the step probe gets the staged rate, and a label-rate warning (0.12 recorded + 0.03 planned) reaches the response warnings, never a block', async () => {
+      const message = 'Recognition Post Emergent Herbicide: cumulative 0.150 oz/1000sf/year (0.120 recorded plus 0.030 for this application) approaching/exceeding max 0.1437.';
+      // The limit check warns only when the planned rate is counted: the proposal carries the staged 0.03.
+      applicationLimits.checkLimits.mockImplementation(async (_customer, productId, _date, _db, opts) => (productId === 'rec' && opts?.program === 'bermuda_removal' && opts?.proposed?.ratePer1000 === 0.03
+        ? { blocks: [], warnings: [{ type: 'annual_max_rate', message }] } : { blocks: [], warnings: [] }));
+      const body = await actionsFor();
+      expect(body.actions.filter((a) => a.group)).toHaveLength(3);
+      expect(body.warnings).toEqual([expect.objectContaining({ code: 'lawn_v13_limit_warning', productId: 'rec', message })]);
+      // Without a planned rate counted there is nothing to warn about: the proposal is what makes the warning.
+      applicationLimits.checkLimits.mockImplementation(async () => ({ blocks: [], warnings: [] }));
+      expect((await actionsFor()).warnings).toBeUndefined();
+    });
+
     test('nothing limited: the three actions are offered and there is no warning; the program is passed to the limit check', async () => {
       const body = await actionsFor();
       expect(body.actions.filter((a) => a.group)).toHaveLength(3);

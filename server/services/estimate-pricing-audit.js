@@ -712,6 +712,16 @@ function rawLawnBermudaCost(result) {
   return lawn ? lawn.costs.annualBermudaRemoval : undefined;
 }
 
+// A legacy estimate whose result carries the bermuda suppression marker but no stored removal
+// cost (it was priced before the cost existed): the cost the engine would state, from the
+// marker and the lawn area in that result, by the engine's own calculation. Gate off: nothing
+// (the audit is the old one); no marker or no area: nothing.
+function derivedBermudaCost(result, lawnSqFt) {
+  if (require('../config/feature-gates').lawnBermudaRemovalLive?.() !== true) return undefined;
+  if (!(Number(lawnSqFt) > 0) || !require('./pricing-engine/v1-legacy-mapper').estimateResultCarriesBermudaSuppression({ result })) return undefined;
+  return require('./pricing-engine/service-pricing').calcBermudaRemovalAnnualCost(Number(lawnSqFt));
+}
+
 function visitsFor(line, result) {
   // A one-time row can still cover N units of service (multi-treatment
   // packages persisting visits:3, authored quantity>1 lines) — its COGS
@@ -1140,7 +1150,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     // lawn COGS. Absent (gate off, no add-on) = 0.
     const bermudaRemovalCost = raw.serviceKey === 'lawn_care'
       ? Number(result?.results?.lawnMeta?.costs?.annualBermudaRemoval ?? result?.lawnMeta?.costs?.annualBermudaRemoval
-        ?? rawLawnBermudaCost(result)) || 0
+        ?? rawLawnBermudaCost(result) ?? derivedBermudaCost(result, dimensions.lawnSqFt)) || 0
       : 0;
     const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0) + bermudaRemovalCost);
     const grossProfit = money(raw.price - estimatedCost);

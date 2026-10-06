@@ -254,6 +254,14 @@ async function analyzeAndComplete() {
 }
 
 describe('opening the sheet', () => {
+  test('a visit whose plan offers the bermuda removal mix (the server answers ineligible, bermuda_removal) opens the full form once', async () => {
+    const request = makeRequest({ ctx: context({ eligible: false, reason: 'bermuda_removal', needsFullForm: 'Bermuda removal mix this visit: use the full form' }) });
+    const onFullForm = vi.fn();
+    render(<FastCompleteLawnSheet service={SERVICE} request={request} catalog={CATALOG} onClose={() => {}} onFullForm={onFullForm} />);
+    await waitFor(() => expect(onFullForm).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('heading', { name: 'Lawn assessment' })).toBeNull();
+  });
+
   test('a visit the server calls ineligible is handed to the parent once, with no button on the sheet', async () => {
     const request = makeRequest({ ctx: context({ eligible: false, reason: 'has_companions' }) });
     const onFullForm = vi.fn();
