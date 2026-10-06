@@ -139,7 +139,7 @@ function validPersisted() {
 
 describe('schema validation', () => {
   test('schema version is 1.21.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.23.0');
+    expect(SCHEMA_VERSION).toBe('1.24.0');
   });
 
   describe('model-output schema', () => {

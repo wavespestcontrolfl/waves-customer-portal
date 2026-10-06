@@ -66,19 +66,22 @@ const LEGACY_PHOTO_FLOOR = Object.freeze({ minPhotos: 3 });
  * or tier (a WaveGuard member's one-time job is not a program visit), by the
  * report's own rule (lawn-program-line.resolveProgramVisit): not a callback, a
  * real (not synthesized) completion profile whose billing type is recurring and
- * whose key is a recurring lawn plan key. A customer billed per application is
- * 'per_application' whatever the visit's key, since those visits start blank.
+ * whose key is a recurring lawn plan key. Billing per application is how most
+ * program customers pay (prod 10-06: 28 of 34 recurring lawn customers), and the
+ * plan engine treats it as a membership lane, so a per-application customer's
+ * recurring lawn plan visit is 'recurring' like any other; their other visits
+ * (callbacks, non-plan keys) stay 'per_application'.
  */
 function lawnFastVisitType(profile, billingMode, isCallback = false) {
   // A failed billing read cannot assert any type (a per-application customer would
   // read as recurring), so it is 'unknown' and gets no program defaults.
   if (billingMode === BILLING_MODE_UNKNOWN) return 'unknown';
-  if (billingMode === 'per_application') return 'per_application';
+  const notProgram = billingMode === 'per_application' ? 'per_application' : 'other';
   const billingType = String(profile?.billingType || '').toLowerCase();
   if (billingType === 'one_time' || billingMode === 'one_time') return 'one_time';
-  if (isCallback === true || !profile || profile.synthesized) return 'other';
+  if (isCallback === true || !profile || profile.synthesized) return notProgram;
   if (billingType === 'recurring' && require('./service-report/lawn-program-line').isRecurringLawnPlanKey(profile.serviceKey)) return 'recurring';
-  return 'other';
+  return notProgram;
 }
 
 /**

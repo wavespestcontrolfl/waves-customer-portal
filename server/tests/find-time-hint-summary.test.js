@@ -39,6 +39,8 @@ jest.mock('../services/geocoder', () => ({
   buildAddress: jest.requireActual('../services/geocoder').buildAddress,
 }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutDates: jest.fn(async () => new Set()) }));
+// The best-times rows' rain lookup: no live NWS call from a test.
+jest.mock('../services/weather-forecast', () => ({ getHourlyRainOutlook: jest.fn(async () => null) }));
 jest.mock('../services/technician-eligibility', () => ({ absentTechDays: jest.fn(async () => new Set()) }));
 jest.mock('../services/scheduling/find-time', () => ({
   ...jest.requireActual('../services/scheduling/find-time'),
@@ -154,8 +156,8 @@ test('summary gate on: one row per date, empty days carry a status, hours in clo
     ['2026-09-05', 'full', []],
   ]);
   expect(body.summary.days[0].hours[0]).toEqual({
-    start_time: '09:00', end_time: '10:00', detour_minutes: 11, estimated_arrival: null,
-    stops_that_day: 3, technician: TECH,
+    start_time: '09:00', end_time: '10:00', detour_minutes: 11, drive_in_minutes: 5,
+    from_home_base: null, from_name: null, estimated_arrival: null, stops_that_day: 3, technician: TECH,
   });
   expect(typeof body.summary.elapsed_ms).toBe('number');
   // Engine-internal counts stay inside.
@@ -430,7 +432,10 @@ describe('summary helpers', () => {
       { date: '2026-09-01', status: 'full', hours: [] },
       {
         date: '2026-09-02', status: 'open',
-        hours: [{ start_time: '10:00', end_time: '11:00', detour_minutes: null, estimated_arrival: null, stops_that_day: null, technician: null }],
+        hours: [{
+          start_time: '10:00', end_time: '11:00', detour_minutes: null, drive_in_minutes: null,
+          from_home_base: null, from_name: null, estimated_arrival: null, stops_that_day: null, technician: null,
+        }],
       },
     ]);
   });

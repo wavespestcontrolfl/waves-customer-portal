@@ -469,7 +469,9 @@ router.post('/property-lookup', lookupLimiter, async (req, res) => {
       return res.status(500).json({ error: 'Property lookup failed. Please call (941) 297-5749 to speak with our team.' });
     }
 
-    const result = await performPropertyLookup(parcelLookupAddress);
+    // Scope decision: lookup-callers.js (public_property_lookup: customer surface, never suite sizing).
+    const { lookupOptionsFor } = require('../services/property-lookup/lookup-callers');
+    const result = await performPropertyLookup(parcelLookupAddress, lookupOptionsFor('public_property_lookup'));
     const propertyRecord = publicPropertySummary(result.propertyRecord || result.rentcast);
     const enriched = publicEnrichedProfile(result.enriched);
 
