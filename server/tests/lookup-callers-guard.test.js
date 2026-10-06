@@ -26,15 +26,20 @@ function walk(dir, out = []) {
 const files = walk(SERVER_ROOT);
 const rel = (f) => path.relative(SERVER_ROOT, f).split(path.sep).join('/');
 
-// Every local name the file gives the lookup: the function itself plus any
-// alias bound from it (`const performLookup = lookup || require(...).performPropertyLookup`,
+// Every local name a file gives a function: the name itself plus any alias
+// bound from it (`const performLookup = lookup || require(...).performPropertyLookup`,
 // `const { performPropertyLookup: lookupFn } = ...`, `const x = performPropertyLookup`).
-function lookupAliases(src) {
-  const names = new Set(['performPropertyLookup']);
-  for (const m of src.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;\n]*\bperformPropertyLookup\b/g)) names.add(m[1]);
-  for (const m of src.matchAll(/performPropertyLookup\s*:\s*([A-Za-z_$][\w$]*)/g)) if (m[1] !== 'jest') names.add(m[1]);
+function aliasesOf(src, name) {
+  const names = new Set([name]);
+  for (const m of src.matchAll(new RegExp('(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=[^;\\n]*\\b' + name + '\\b', 'g'))) names.add(m[1]);
+  for (const m of src.matchAll(new RegExp(name + '\\s*:\\s*([A-Za-z_$][\\w$]*)', 'g'))) if (m[1] !== 'jest') names.add(m[1]);
   return [...names];
 }
+const lookupAliases = (src) => aliasesOf(src, 'performPropertyLookup');
+
+// The one sanctioned place the scope decision is changed after the registry
+// answered: the admin route turning the leg OFF for a whole-property job.
+const SANCTIONED_OVERRIDE = { file: 'routes/property-lookup-v2.js', line: /^\s*if \(wholeProperty === true\) callerOptions\.commercialSuiteSizing = false;\s*$/ };
 
 // Lines that CALL the lookup (not the definition, not a comment, not a jest mock).
 function callLines(src, name) {
@@ -61,18 +66,42 @@ describe('property-lookup callers declare their scope decision', () => {
         if (!/lookupOptionsFor\(/.test(line) && !(/callerOptions/.test(line) && /callerOptions = lookupOptionsFor\(/.test(above))) {
           offenders.push(`${r}:${n}: ${line.trim()}`);
         }
+        // No override of the decision at the call: the options argument may
+        // not mention commercialSuiteSizing ("{ ...lookupOptionsFor('x'), commercialSuiteSizing: true }").
+        if (/commercialSuiteSizing/.test(line)) offenders.push(`${r}:${n}: overrides the registry's scope decision`);
+      }
+      // ...and a caller never SETS the option anywhere else in its file
+      // either, except the one sanctioned whole-property switch-off in the
+      // admin route. The lookup's own modules read the option; they are not
+      // callers.
+      if (!/^(routes\/property-lookup-v2\.js$|services\/property-lookup\/|config\/feature-gates\.js$)/.test(r)) {
+        src.split('\n').forEach((line, i) => {
+          if (/^\s*(\/\/|\*)/.test(line) || !/commercialSuiteSizing\s*[:=]/.test(line)) return;
+          offenders.push(`${r}:${i + 1}: sets commercialSuiteSizing outside the registry`);
+        });
+      } else if (r === SANCTIONED_OVERRIDE.file) {
+        src.split('\n').forEach((line, i) => {
+          if (/^\s*(\/\/|\*)/.test(line) || !/callerOptions\.commercialSuiteSizing/.test(line)) return;
+          if (!SANCTIONED_OVERRIDE.line.test(line)) offenders.push(`${r}:${i + 1}: unsanctioned override of callerOptions`);
+        });
       }
     }
     expect(offenders).toEqual([]);
   });
 
-  test('every direct lookupPropertyFromAITrio caller is a declared bypass', () => {
+  test('every direct lookupPropertyFromAITrio caller (by any alias) is a declared bypass', () => {
     const offenders = [];
+    // Only the defining module and the lookup that composes the trio into a
+    // profile are exempt; a helper anywhere else, the lookup directory
+    // included, must declare itself.
+    const EXEMPT = new Set(['routes/property-lookup-v2.js', 'services/property-lookup/ai-property-lookup.js']);
     for (const file of files) {
       const r = rel(file);
-      if (r === 'routes/property-lookup-v2.js' || r.startsWith('services/property-lookup/')) continue;
+      if (EXEMPT.has(r)) continue;
       const src = fs.readFileSync(file, 'utf8');
-      if (callLines(src, 'lookupPropertyFromAITrio').length && !TRIO_CALLERS[r]) offenders.push(r);
+      const calls = aliasesOf(src, 'lookupPropertyFromAITrio').flatMap((name) => callLines(src, name)
+        .filter(({ line }) => !new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line) && !/module\.exports/.test(line)));
+      if (calls.length && !TRIO_CALLERS[r]) offenders.push(r);
     }
     expect(offenders).toEqual([]);
   });
