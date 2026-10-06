@@ -265,6 +265,120 @@ function cogsTotalLine(terms) {
   return `Total COGS per application: ${parts.join(' + ')}${suffix}`;
 }
 
+// Tag on the four lawn protocol entries while they hold the v13 program.
+const LAWN_V13_TAG = 'lawn-v13';
+// Which program each index corpus last finished syncing ('v13' | 'legacy'), written to
+// system_settings only AFTER that corpus's sync succeeds. The four entry tags say what the
+// KB entries hold; these say what the index chunks hold, so a failure after the entries
+// were rewritten still reads as stale on the next tick. An absent marker is unknown and reads as stale
+// (the corpus may hold either program), so the first tick after deploy syncs it once.
+const LAWN_CORPUS_MARKERS = { protocol: 'lawn_knowledge.protocol_corpus', kb: 'lawn_knowledge.kb_corpus' };
+const LAWN_TRACK_SLUGS = ['st_augustine', 'bermuda', 'zoysia', 'bahia'].map((trackId) => `protocol-${slugify(trackId)}`);
+
+// Upsert one auto-synced entry by slug: 'created' | 'updated' | 'skipped' (unchanged,
+// or an insert that lost a race). The one writer both the full sync and the lawn-only
+// sync use.
+async function upsertKnowledgeEntry(slug, title, content, category, tags = []) {
+  const safeSlug = slugify(slug || title);
+  const safeTitle = cleanText(title) || humanizeSlug(safeSlug);
+  const safeCategory = normalizeCategory(category);
+  const safeContent = cleanText(content);
+  const safeTags = normalizeTags(tags);
+  const safePath = knowledgePath(safeCategory, safeSlug);
+  const existing = await db('knowledge_base')
+    .where({ slug: safeSlug })
+    .orWhere({ path: safePath })
+    .first();
+  if (existing) {
+    const tagJson = JSON.stringify(safeTags);
+    const existingTagJson = JSON.stringify(normalizeTags(existing.tags));
+    const unchanged = existing.content === safeContent && existing.title === safeTitle && existing.path === safePath
+      && existing.category === safeCategory && existingTagJson === tagJson;
+    if (unchanged) return 'skipped';
+    // A content change returns an AI-hidden entry to search
+    // (kb_restore_ai_flag_on_content_change trigger).
+    await db('knowledge_base').where({ id: existing.id }).update({
+      slug: safeSlug,
+      path: safePath,
+      content: safeContent,
+      title: safeTitle,
+      category: safeCategory,
+      tags: tagJson,
+      last_verified_at: new Date(), verified_by: 'auto-sync', updated_at: new Date(),
+    });
+    return 'updated';
+  }
+  try {
+    await db('knowledge_base').insert({
+      path: safePath,
+      slug: safeSlug,
+      title: safeTitle,
+      content: safeContent,
+      category: safeCategory,
+      tags: JSON.stringify(safeTags),
+      source: 'auto-sync', confidence: 'high', status: 'active',
+      last_verified_at: new Date(), verified_by: 'auto-sync',
+    });
+    return 'created';
+  } catch (e) {
+    if (!e.message?.includes('duplicate')) logger.error(`[kb-sync] Insert failed: ${e.message}`);
+    return 'skipped';
+  }
+}
+
+// ── Protocol entries (the same rendering for the full sync and the lawn-only sync) ──
+// Visit costs are NUMERIC only on the lawn tracks; the other programs carry token
+// costs ('inventory', 'standard'), which once rendered as literal "$inventory" garbage.
+function protocolCostLine(v) {
+  const mc = Number(v.material_cost);
+  const lc = Number(v.labor_cost);
+  // Zero-zero placeholders (termite v1) are as uninformative as tokens.
+  if (Number.isFinite(mc) && Number.isFinite(lc) && (mc > 0 || lc > 0)) {
+    return `  Legacy materials: $${mc} | Labor: $${lc}`;
+  }
+  return '  Materials: inventory/rate-based (see admin protocols for product detail)';
+}
+
+function protocolEntry(programKey, track, tags) {
+  if (!track || typeof track !== 'object') return null;
+  const lines = [`**${track.name || programKey}**\n`];
+  if (track.notes?.length) lines.push('Key Notes:\n' + track.notes.map(n => `- ${n}`).join('\n') + '\n');
+  if (track.visits?.length) {
+    lines.push(`**${track.visits.length} Visits/Year:**\n`);
+    for (const v of track.visits) {
+      const tierList = Object.entries(v.tiers || {}).filter(([, on]) => on).map(([t]) => t).join(', ');
+      lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
+      lines.push(`${protocolCostLine(v)}${tierList ? ` | Tiers: ${tierList}` : ''}`);
+      if (v.notes) lines.push(`  Notes: ${v.notes}`);
+    }
+  }
+  return { slug: `protocol-${slugify(programKey)}`, title: track.name || programKey, content: lines.join('\n'), category: 'protocols', tags };
+}
+
+// The four lawn entries from lawnProtocols(). They carry a 'lawn-v13' tag while they
+// hold the v13 program, so a sync after the gate flips either way replaces them (the
+// tag is part of what the upsert compares) and lawnKnowledgeStale can tell which
+// program they hold.
+function lawnProtocolEntries() {
+  const { lawnProtocols } = require('./lawn-program');
+  const v13Tags = require('../config/feature-gates').lawnV13Live?.() === true ? [LAWN_V13_TAG] : [];
+  return Object.entries(lawnProtocols() || {})
+    .map(([trackId, track]) => protocolEntry(trackId, track, ['lawn', trackId, ...v13Tags]))
+    .filter(Boolean);
+}
+
+// The index corpora still on the other program (a corpus with no chunks is never stale).
+async function staleCorpora(gateOn) {
+  const want = gateOn ? 'v13' : 'legacy';
+  const keys = Object.values(LAWN_CORPUS_MARKERS);
+  const stored = Object.fromEntries((await db('system_settings').whereIn('key', keys).select('key', 'value')).map((row) => [row.key, row.value]));
+  const stale = Object.keys(LAWN_CORPUS_MARKERS).filter((source) => stored[LAWN_CORPUS_MARKERS[source]] !== want);
+  // A corpus is checked only while it has chunks; each source on its own (the nightly can
+  // leave one corpus populated and the other empty after a connector failure).
+  const inUse = await Promise.all(stale.map((source) => db('knowledge_embeddings').where({ source }).first('id')));
+  return stale.filter((_, i) => inUse[i]);
+}
+
 const KnowledgeBaseService = {
   async create({ title, content, category, tags, source, confidence, metadata, status }) {
     const safeTitle = cleanText(title) || 'Knowledge Base Entry';
@@ -746,56 +860,8 @@ const KnowledgeBaseService = {
   // AUTO-SYNC — populate KB from live data sources
   // ══════════════════════════════════════════════════════════════
   async autoSync() {
-    let created = 0, updated = 0, skipped = 0;
-
-    // Helper: upsert by slug
-    async function upsert(slug, title, content, category, tags = []) {
-      const safeSlug = slugify(slug || title);
-      const safeTitle = cleanText(title) || humanizeSlug(safeSlug);
-      const safeCategory = normalizeCategory(category);
-      const safeContent = cleanText(content);
-      const safeTags = normalizeTags(tags);
-      const safePath = knowledgePath(safeCategory, safeSlug);
-      const existing = await db('knowledge_base')
-        .where({ slug: safeSlug })
-        .orWhere({ path: safePath })
-        .first();
-      if (existing) {
-        const tagJson = JSON.stringify(safeTags);
-        const existingTagJson = JSON.stringify(normalizeTags(existing.tags));
-        if (existing.content !== safeContent || existing.title !== safeTitle || existing.path !== safePath || existing.category !== safeCategory || existingTagJson !== tagJson) {
-          // A content change returns an AI-hidden entry to search
-          // (kb_restore_ai_flag_on_content_change trigger).
-          await db('knowledge_base').where({ id: existing.id }).update({
-            slug: safeSlug,
-            path: safePath,
-            content: safeContent,
-            title: safeTitle,
-            category: safeCategory,
-            tags: tagJson,
-            last_verified_at: new Date(), verified_by: 'auto-sync', updated_at: new Date(),
-          });
-          updated++;
-        } else { skipped++; }
-      } else {
-        try {
-          await db('knowledge_base').insert({
-            path: safePath,
-            slug: safeSlug,
-            title: safeTitle,
-            content: safeContent,
-            category: safeCategory,
-            tags: JSON.stringify(safeTags),
-            source: 'auto-sync', confidence: 'high', status: 'active',
-            last_verified_at: new Date(), verified_by: 'auto-sync',
-          });
-          created++;
-        } catch (e) {
-          if (!e.message?.includes('duplicate')) logger.error(`[kb-sync] Insert failed: ${e.message}`);
-          skipped++;
-        }
-      }
-    }
+    const tally = { created: 0, updated: 0, skipped: 0 };
+    const upsert = async (...entry) => { tally[await upsertKnowledgeEntry(...entry)] += 1; };
 
     // ── 1. PRODUCTS from products_catalog ──
     try {
@@ -830,39 +896,12 @@ const KnowledgeBaseService = {
     // 'standard'), which previously rendered as literal "$inventory" garbage.
     try {
       const protocols = require('../config/protocols.json');
-      const costLine = (v) => {
-        const mc = Number(v.material_cost);
-        const lc = Number(v.labor_cost);
-        // Zero-zero placeholders (termite v1) are as uninformative as tokens.
-        if (Number.isFinite(mc) && Number.isFinite(lc) && (mc > 0 || lc > 0)) {
-          return `  Legacy materials: $${mc} | Labor: $${lc}`;
-        }
-        return '  Materials: inventory/rate-based (see admin protocols for product detail)';
-      };
-      const syncProgram = async (programKey, track, tags) => {
-        if (!track || typeof track !== 'object') return;
-        const lines = [`**${track.name || programKey}**\n`];
-        if (track.notes?.length) lines.push('Key Notes:\n' + track.notes.map(n => `- ${n}`).join('\n') + '\n');
-        if (track.visits?.length) {
-          lines.push(`**${track.visits.length} Visits/Year:**\n`);
-          for (const v of track.visits) {
-            const tierList = Object.entries(v.tiers || {}).filter(([, on]) => on).map(([t]) => t).join(', ');
-            lines.push(`Visit ${v.visit} (${v.month}): ${v.primary?.split('\n')[0] || ''}`);
-            lines.push(`${costLine(v)}${tierList ? ` | Tiers: ${tierList}` : ''}`);
-            if (v.notes) lines.push(`  Notes: ${v.notes}`);
-          }
-        }
-        const slug = `protocol-${slugify(programKey)}`;
-        await upsert(slug, track.name || programKey, lines.join('\n'), 'protocols', tags);
-      };
-
-      for (const [trackId, track] of Object.entries(protocols.lawn || {})) {
-        await syncProgram(trackId, track, ['lawn', trackId]);
-      }
-      for (const [programKey, program] of Object.entries(protocols)) {
-        if (programKey === 'lawn') continue;
-        await syncProgram(programKey, program, [programKey]);
-      }
+      const entries = [
+        ...lawnProtocolEntries(),
+        ...Object.entries(protocols).filter(([programKey]) => programKey !== 'lawn')
+          .map(([programKey, program]) => protocolEntry(programKey, program, [programKey])).filter(Boolean),
+      ];
+      for (const entry of entries) await upsert(entry.slug, entry.title, entry.content, entry.category, entry.tags);
       logger.info(`[kb-sync] Protocols synced (all categories)`);
     } catch (e) { logger.error(`[kb-sync] Protocols sync failed: ${e.message}`); }
 
@@ -953,8 +992,91 @@ const KnowledgeBaseService = {
       logger.info('[kb-sync] COGS synced');
     } catch (e) { logger.error(`[kb-sync] COGS sync failed: ${e.message}`); }
 
-    logger.info(`[kb-sync] Auto-sync complete: ${created} created, ${updated} updated, ${skipped} unchanged`);
-    return { created, updated, skipped };
+    logger.info(`[kb-sync] Auto-sync complete: ${tally.created} created, ${tally.updated} updated, ${tally.skipped} unchanged`);
+    return tally;
+  },
+
+  // Just the four lawn protocol entries (what reconcileLawnProtocolKnowledge needs
+  // when GATE_LAWN_V13 changes): the same writer and rendering as autoSync.
+  async syncLawnProtocolEntries() {
+    const tally = { created: 0, updated: 0, skipped: 0 };
+    for (const entry of lawnProtocolEntries()) {
+      tally[await upsertKnowledgeEntry(entry.slug, entry.title, entry.content, entry.category, entry.tags)] += 1;
+    }
+    // An insert that failed reports 'skipped': never advance the corpora on a partial set.
+    const stored = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug');
+    if (stored.length < LAWN_TRACK_SLUGS.length) throw new Error(`lawn KB entries incomplete (${stored.length} of ${LAWN_TRACK_SLUGS.length})`);
+    return tally;
+  },
+
+  // True when the stored lawn knowledge holds the other program than the one
+  // GATE_LAWN_V13 selects now: a KB entry tagged for the other program, or (only while the
+  // knowledge index is in use) an index corpus whose last finished sync was for the other
+  // program. No entry yet is not stale: the nightly sync creates it; a partial set (some of
+  // the four missing) is. Two small reads when nothing changed.
+  async lawnKnowledgeStale() {
+    const gateOn = require('../config/feature-gates').lawnV13Live?.() === true;
+    const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
+    if (rows.length && rows.length < LAWN_TRACK_SLUGS.length) return true;
+    if (rows.some((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG) !== gateOn)) return true;
+    return (await staleCorpora(gateOn)).length > 0;
+  },
+
+  // The lawn program an index corpus is ABOUT to load, read before its load so a gate flip
+  // mid-sync can only make the marker conservative: 'protocol' loads lawnProtocols() (the
+  // gate); 'kb' loads the stored KB entries (what their tags say they hold).
+  async lawnCorpusProgram(source) {
+    if (source === 'protocol') return require('../config/feature-gates').lawnV13Live?.() === true ? 'v13' : 'legacy';
+    const rows = await db('knowledge_base').whereIn('slug', LAWN_TRACK_SLUGS).select('slug', 'tags');
+    return rows.length === LAWN_TRACK_SLUGS.length && rows.every((row) => normalizeTags(row.tags).includes(LAWN_V13_TAG)) ? 'v13' : 'legacy';
+  },
+
+  // Called by syncCorpus for the 'protocol' and 'kb' corpora after a sync that really ran
+  // (never a skipped one), by the reconcile and the nightly alike: the marker says which
+  // program those chunks now hold. One writer at a time (the knowledge-index lock):
+  // update, else insert.
+  async recordLawnCorpusProgram(source, program) {
+    const key = LAWN_CORPUS_MARKERS[source];
+    const updated = await db('system_settings').where({ key }).update({ value: program, updated_at: new Date() });
+    if (!updated) await db('system_settings').insert({ key, value: program, category: 'knowledge', updated_at: new Date() });
+  },
+
+  // The reconcile under the nightly knowledge-index lock ('knowledge-index-sync', the
+  // same one the 02:40 ET run takes), so the two never rebuild the corpora together:
+  // a held lock skips this tick and the next one retries. The outer lock records no
+  // job health (it is the nightly's row); the reconcile records its own under
+  // 'lawn-knowledge-reconcile' while holding it.
+  async runLawnKnowledgeReconcile() {
+    const { runExclusive } = require('../utils/cron-lock');
+    return runExclusive(
+      'knowledge-index-sync',
+      () => runExclusive('lawn-knowledge-reconcile', () => this.reconcileLawnProtocolKnowledge()),
+      { recordHealth: false },
+    );
+  },
+
+  // Unsetting (or setting) GATE_LAWN_V13 must not wait for the 2:40 / 3:30 AM runs:
+  // the lawn protocol entries and the knowledge-index corpora built from them
+  // (protocol directly, kb through those entries) are rewritten from lawnProtocols()
+  // as soon as this notices they hold the other program. Cheap no-op otherwise.
+  // The index rows re-embed on the next nightly run; full-text search is current now.
+  async reconcileLawnProtocolKnowledge() {
+    if (!(await this.lawnKnowledgeStale())) return { stale: false };
+    const gateOn = require('../config/feature-gates').lawnV13Live?.() === true;
+    const kb = await this.syncLawnProtocolEntries();
+    const index = {};
+    // Each corpus that still holds the other program, kb after the entries above so the
+    // index never re-persists the old text. A failure here is retried on the next tick
+    // (the finished corpora are skipped).
+    const { syncCorpus } = require('./knowledge-index/ingest');
+    const { CONNECTORS } = require('./knowledge-index/connectors');
+    // syncCorpus itself writes the marker (see recordLawnCorpusProgram), and only when the
+    // sync really ran: a skipped corpus leaves it stale for the next tick.
+    for (const source of await staleCorpora(gateOn)) {
+      index[source] = await syncCorpus(CONNECTORS.find((connector) => connector.source === source));
+    }
+    logger.info(`[kb-sync] Lawn protocol knowledge reconciled: ${JSON.stringify({ kb, index })}`);
+    return { stale: true, kb, index };
   },
 };
 

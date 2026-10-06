@@ -829,8 +829,8 @@ async function getUnansweredThreads(input) {
   // phone — applicants are answered from Recruiting.
   const inbound = await db('sms_log')
     .modify((qb) => excludeRecruitingSmsLog(qb))
-    .where('direction', 'inbound')
-    .where('created_at', '>=', since)
+    .where('sms_log.direction', 'inbound')
+    .where('sms_log.created_at', '>=', since)
     .leftJoin('customers', 'sms_log.customer_id', 'customers.id')
     .select(
       'sms_log.from_phone', 'sms_log.to_phone', 'sms_log.message_body',

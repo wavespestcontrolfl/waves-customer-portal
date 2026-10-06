@@ -3,7 +3,11 @@
 // "Payment failed", "Prepaid coverage needs review", and "Estimate accepted". All names are
 // synthetic. docs/admin-notifications.md is the contract (composeAdminAlert throws under
 // NODE_ENV=test on any breach, so a green run proves the rule too).
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
+  // The real close helpers: the supersede selection is what the tests read.
+  _private: jest.requireActual('../services/notification-service')._private,
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -14,7 +18,20 @@ const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
 const { buildAcceptNotificationPayload } = require('../routes/estimate-public');
 const { _prepayCoverageCopy: prepayCoverageCopy } = require('../services/schedule-integrity-watchdog');
 
-const trxFor = (customer) => () => ({ where: () => ({ first: async () => customer }) });
+// The customer lookup is faked. A notifications query is a real knex builder (no
+// connection): awaiting it records the UPDATE it would have sent.
+const kx = require('knex')({ client: 'pg' });
+const sentUpdates = [];
+const trxFor = (customer) => {
+  const trx = (table) => {
+    if (table !== 'notifications') return { where: () => ({ first: async () => customer }) };
+    const builder = kx(table);
+    builder.then = (resolve, reject) => { sentUpdates.push(builder.toSQL().toNative()); return Promise.resolve(1).then(resolve, reject); };
+    return builder;
+  };
+  trx.raw = (...args) => kx.raw(...args);
+  return trx;
+};
 const CUSTOMER_ID = '00000000-0000-4000-8000-0000000000c1';
 const sourceAt = new Date('2026-09-29T14:46:00Z'); // 10:46 AM ET
 
@@ -29,7 +46,10 @@ const ring = (over = {}, customer = { first_name: 'Albert', last_name: 'Clark' }
 });
 const lastCall = () => NotificationService.notifyAdmin.mock.calls.at(-1);
 
-beforeEach(() => NotificationService.notifyAdmin.mockClear());
+beforeEach(() => {
+  NotificationService.notifyAdmin.mockClear();
+  sentUpdates.length = 0;
+});
 
 describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   test('an unanswered estimate request names the customer and quotes their words', async () => {
@@ -52,6 +72,34 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(opts.metadata).toMatchObject({ triggerKey: 'sms_operational_followup', customerId: CUSTOMER_ID, sms_log_id: 'sms-1',
       commitment_id: 'commit-1', kind: 'send_estimate', verification: 'open',
       area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', subject: { type: 'customer', id: CUSTOMER_ID } });
+  });
+
+  test('one open row per promise: a fresh row closes the older rows with the same key', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-new', deduped: false });
+    await ring();
+    expect(sentUpdates).toHaveLength(1);
+    const { sql, bindings } = sentUpdates[0];
+    expect(sql).toMatch(/^update "notifications" set "done_at" = COALESCE\(done_at, \$1::timestamptz\), "done_by" = \$2/);
+    expect(bindings).toEqual(expect.arrayContaining(['supersede', 'Replaced by a newer reminder for the same promise', 'admin', 'sms-commitment:commit-1', 'n-new']));
+    // The newest row is excluded; the older ones are selected by the system closer's rule.
+    expect(sql).toContain('and not "id" = $7');
+    // Open rows, OR rows a PERSON marked done (taken over, so their Reopen cannot
+    // bring an obsolete duplicate back). A row a system component closed matches
+    // neither arm, so it is left alone.
+    expect(sql).toMatch(/\("done_at" is null or COALESCE\(\(done_by ~ '\^\[0-9\]\+\$' OR .*done_by = 'claude'\), false\)\)/);
+  });
+
+  test('a deduped ring also closes rows an older build left open; the email bell shares the fix', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-standing', deduped: true });
+    await ring({ args: { sourceIdField: 'email_id', triggerKey: 'email_operational_followup' } });
+    expect(sentUpdates).toHaveLength(1);
+    expect(sentUpdates[0].bindings).toContain('n-standing');
+  });
+
+  test('a suppressed ring has no row to keep, so nothing is closed', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
+    await ring();
+    expect(sentUpdates).toHaveLength(0);
   });
 
   test('a staff promise is worded as ours, and a late finish says so', async () => {

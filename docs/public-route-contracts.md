@@ -77,6 +77,20 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Ask Waves AI answers (owner 2026-10-05): `POST /api/reports/:token/ask` keeps
+its request (`{ question }`, 500 characters), its reply (`{ answer }`), its
+headers, its limiter and its recorded event (`report_question_asked` with
+`question_length` and `topic` only). `GATE_REPORT_ASK_AI` (dark, off unless
+exactly `true`, read at call time) changes only who writes `answer`: Claude
+Sonnet 5.5 from a fact sheet of the report (no rates, totals, EPA numbers or
+per-product target pests; the question and all free text scrubbed of phones,
+emails, codes and street addresses, but a customer name written in prose is
+not detectable), screened, with the fixed-rule answer as the reply on
+any model miss
+(`server/services/service-report/report-ask-ai.js`). The AI answers Pest reports only (`data.serviceLine === 'pest'`). Lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks). On pest reports the AI answers only the rule router's `applied`, `results`, `findings`, `summary`, `next_visit` and `unrouted` topics. The `reentry`, `watering` and `next_steps` topics keep the fixed-rule answer, which states recorded instructions word for word.
+
+Symptom and exposure questions (behavior change to the public route, owner review round 5, 2026-10-05): a question that reports a symptom or an exposure ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged.
+
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly
@@ -145,7 +159,7 @@ when the card is present.
 `pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
 your treatment" card is gone from the pest report (live page and PDF) for good;
 `data.pestReportV2.expectations` carries at most `spiders` and `whatToExpect`,
-and the pest PDF key suffix stays `-pex3`. Already-frozen
+and the pest PDF key suffix is `-pex4` (2026-10-05: the Gentrol growth regulator line gained its label's 4-month duration). Already-frozen
 `structured_notes.pestWeekWeather` values are left in place, unread.
 The same day the live page changed two client-only lines from fields it
 already receives: "Today's result" on a routine Pest V2 visit (the
@@ -335,7 +349,7 @@ key, with no model call and no read): on the tree/shrub service-report payload
 (`/api/reports/:token/data` and the PDF) the one new optional key is
 `reportV2.techParagraph`, a string made ONLY of the sentences in the code constant
 `TS_SENTENCES` (`tree-shrub-tech-paragraph.js`), in this fixed order: "Our technician
-saw {items}." (up to 3 closed-list conditions, each optionally "on the {plant}"),
+saw {items}." (up to 3 closed-list conditions, each optionally "on the {plant}", or "in the garden beds"; a confirmed photo category the "saw" line already names is not repeated),
 "There may be early signs of {labels}; we will keep an eye on it." (low-confidence
 kept photo findings the note does not cover, at most 2), "Our technician confirmed
 signs of {labels}." (findings the technician confirmed), "Today we applied
@@ -2359,24 +2373,35 @@ stamp while the gate is on, so gate-off PDFs are never served after the flip
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit
 surface): instead of the peak / shoulder / dormant note it is one calendar-based,
-tier-neutral sentence for the visit's month and grass (St. Augustine,
-Bermuda, Zoysia, Bahia; any other or missing grass takes a generic line) that
-says what the program focuses on that time of year, never what the visit
-applied. It is written from `server/config/protocols.json` months, and any step
-the protocol makes conditional (skipped, soil-test or weather gated, optional,
-or on request) is only stated with a qualifier such as "where the
-lawn needs it" or "when conditions allow". It is at most about 30 words, and
-never naming a product, an ordinance, a county, a blackout, a law, a clock time,
-plan tiers, or watering, rain or mowing guidance, and never ordinal or sequence
-wording (first, final, again, re-check) since a customer may join mid-year. While the line is in use the snapshot also
-carries `seasonalNoteSource: "program"` (the key is absent otherwise). The line
-is null, and the old note stays, for a visit that is not a recurring lawn plan
+tier-neutral sentence for the visit's month that says what the lawn program
+focuses on that time of year, never what the visit applied. It is the universal
+lawn program v13 month sentence (the same twelve sentences for every grass,
+written from `server/config/lawn-protocol-v13.json`), and any step the program makes
+conditional is only stated with a qualifier such as "where needed" or "where it
+fits the property". It is at most about 30 words, and never naming a product,
+an ordinance, a county, a blackout, a law, a clock time, plan tiers, a soil
+test, or watering, rain or mowing guidance, and never ordinal or sequence
+wording (first, final, again, re-check) since a customer may join mid-year.
+While the line is in use the snapshot also carries
+`seasonalNoteSource: "program"` (the key is absent otherwise). The line is
+null, and the old note stays, for a visit that is not a recurring lawn plan
 visit (the visit's catalog service identity must be a recurring lawn plan:
 one-time lawn jobs, callbacks and unresolved identities get no line; the
 WaveGuard tier is never the signal), for a visit with no assessment date, and
 for a June to September visit that may have applied nitrogen (the program
 applies none then): a catalog `analysis_n` above zero, a fertilizer-type row
 with no `analysis_n`, or any applied product the catalog cannot resolve.
+The line also needs `GATE_LAWN_V13` on (read at call time) and the visit's
+RECORDED lawn protocol version to be `2026.10-v13`: the version on the visit's
+completion ledger row, or, only when the visit has no completion row at all,
+the version pinned on its scheduled visit. A completion row whose version is
+empty (attribution `none`) is authoritative and gets no line, as does any visit
+with no recorded version (completed before protocol assignment existed), one
+pinned to an older version, every visit while `GATE_LAWN_V13` is off, and a
+visit whose record cannot be read: each keeps the old peak / shoulder / dormant
+note. The retired per-grass sentences were removed, so a permanent past report
+is never rewritten with a program its visit did not run. The payload shape
+(keys, types, route, token, privacy, rate limit) is unchanged.
 The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
 lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,
 renders a program line once as a small "This time of year" card above the
@@ -5610,8 +5635,9 @@ content. Optional body field `intent` — one of `findings` / `treatment` /
 `recommendations` / `next_visit`, sent by the shipped prompt chips — selects
 that answer directly; any other value is ignored and the question is
 keyword-routed as before, so older clients are unaffected. The service-report
-`/api/reports/:token/ask` (deterministic `report-assistant.js` answers, no
-LLM) writes one `service_report_events` row, `report_question_asked`, with
+`/api/reports/:token/ask` (deterministic `report-assistant.js` answers; with
+`GATE_REPORT_ASK_AI` on, a model-written answer for the topics and lines
+described under that gate, with the deterministic answer as fallback) writes one `service_report_events` row, `report_question_asked`, with
 metadata `{ question_length, topic }` — never the question text or the answer
 (owner ruling 2026-09-28: topic only). `topic` is the answer family the
 question was routed to, one of `REPORT_QUESTION_TOPICS` (`reentry`, `watering`,

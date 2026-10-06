@@ -556,7 +556,7 @@ const ISSUE_TOPIC = {
  *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, photoLimit = 6 } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null, nitrogenApplied = null, programVisit = false, protocolVersion = null, photoLimit = 6 } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -740,16 +740,17 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // explanation instead of leaving the customer to reconcile separate cards.
   const rootCause = aftercareWaterAction ? null : buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan: water ? water.weekPlan : null });
   // GATE_LAWN_EXPECTATIONS (P9): while live, snapshot.seasonalNote is the
-  // month's program line from protocols.json, anchored on the same noon-UTC
-  // visit month the dormancy guard uses (host-timezone safe, stable for a
-  // permanent token). A null line (no honest line for this visit) keeps the old
-  // season note. `seasonalNoteSource` marks the program line so the lead layout
-  // renders it and only it; gate off adds no key (byte-identical payload).
-  // The gate is read defensively: a partial feature-gates mock (or a missing
-  // export) means off, never a crash in a report build. Only recurring lawn
-  // plan visits (`programVisit`, resolved by the caller) get the line.
+  // month's lawn program v13 line, anchored on the same noon-UTC visit month
+  // the dormancy guard uses (host-timezone safe, stable for a permanent token).
+  // A null line (no honest line for this visit, including every visit whose
+  // plan did not resolve v13) keeps the old season note. `seasonalNoteSource`
+  // marks the program line so the lead layout renders it and only it; gate off
+  // adds no key (byte-identical payload). The gate is read defensively: a
+  // partial feature-gates mock (or a missing export) means off, never a crash
+  // in a report build. Only recurring lawn plan visits (`programVisit`,
+  // resolved by the caller) get the line.
   const programLine = typeof featureGates.lawnExpectationsLive === 'function' && featureGates.lawnExpectationsLive()
-    ? buildProgramLine({ grassType: lawnAssessment.turfProfile?.grassType, month: assessMonth, applications, nitrogenApplied, programVisit })
+    ? buildProgramLine({ month: assessMonth, applications, nitrogenApplied, programVisit, protocolVersion })
     : null;
   const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
 

@@ -154,7 +154,10 @@ describe('send paths resolve the single recipient through the opt-in hold', () =
     // Every site goes through summarySmsRecipient, which falls to the
     // opt-in aware resolver whenever the contact is the recipient.
     expect(source.match(/await summarySmsRecipient\(/g).length).toBe(5);
-    expect(source).toMatch(/return resolveServiceContactSmsRecipient\(customer, opts\);/);
+    // The contact branch still resolves through the opt-in aware resolver
+    // (the tenant report rule may then hand the text to the holder instead).
+    expect(source).toMatch(/const recipient = await resolveServiceContactSmsRecipient\(customer, opts\);/);
+    expect(source).toMatch(/return recipient;\n\}/);
   });
 
   test('the review ask uses the stamp-only resolver only to list where a past send could have gone', () => {

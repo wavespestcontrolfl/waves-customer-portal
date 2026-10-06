@@ -59,7 +59,8 @@ const MAX_TEXT_CHARS = 1200;
  */
 const TS_SENTENCES = Object.freeze({
   observed: 'Our technician saw {items}.',
-  observedItemWithPlant: '{condition} on the {plant}',
+  // {prep} is the place's own word: "on the hedges", "in the garden beds".
+  observedItemWithPlant: '{condition} {prep} the {plant}',
   observedItem: '{condition}',
   maybe: 'There may be early signs of {labels}; we will keep an eye on it.',
   confirmed: 'Our technician confirmed signs of {labels}.',
@@ -69,38 +70,40 @@ const TS_SENTENCES = Object.freeze({
 
 // ── Closed lists ──────────────────────────────────────────────────────────
 
-// id -> how the note names it (plural tolerant) and how the customer reads it.
+// id -> how the note names it (plural tolerant), how the customer reads it, and the
+// photo-finding category it belongs to (a confirmed finding of that category is
+// not repeated beside it).
 // No palm disease, no decline, no crown/spear/frond-health term, no root rot.
 const CONDITIONS = Object.freeze({
-  scale: { display: 'scale', re: /\bscale(?:\s+(?:insects?|crawlers?))?\b/i },
-  whitefly: { display: 'whitefly', re: /\bwhite[\s-]?(?:fly|flies)\b/i },
-  aphids: { display: 'aphids', re: /\baphids?\b/i },
+  scale: { display: 'scale', re: /\bscale(?:\s+(?:insects?|crawlers?))?\b/i, category: 'pest_activity' },
+  whitefly: { display: 'whitefly', re: /\bwhite[\s-]?(?:fly|flies)\b/i, category: 'pest_activity' },
+  aphids: { display: 'aphids', re: /\baphids?\b/i, category: 'pest_activity' },
   // "Mites" alone stays "mites": the customer copy never adds a species the
   // technician did not name (Codex r8).
-  mites: { display: 'mites', re: /\bmites?\b/i },
-  spider_mites: { display: 'spider mites', re: /\bspider\s+mites?\b/i },
-  caterpillars: { display: 'caterpillars', re: /\bcaterpillars?\b|\b(?:web|bag|army)worms?\b/i },
-  thrips: { display: 'thrips', re: /\bthrips\b/i },
-  mealybugs: { display: 'mealybugs', re: /\bmealy\s*bugs?\b/i },
-  lace_bugs: { display: 'lace bugs', re: /\blace\s*bugs?\b/i },
-  sooty_mold: { display: 'sooty mold', re: /\bsooty\s+mou?ld\b/i },
-  leaf_spot: { display: 'leaf spot', re: /\bleaf[\s-]?spots?\b/i },
-  yellowing: { display: 'yellowing leaves', re: /\bchlorosis\b|\byellow(?:ing|ed)?\b/i },
-  heat_stress: { display: 'heat stress', re: /\bheat\s+stress\b/i },
-  cold_damage: { display: 'cold damage', re: /\b(?:cold|freeze|frost)\s+damage\b/i },
-  weeds: { display: 'weeds', re: /\bweeds?\b/i },
-  potassium_deficiency: { display: 'potassium deficiency', re: /\bpotassium\s+deficien(?:cy|t)\b/i },
-  magnesium_deficiency: { display: 'magnesium deficiency', re: /\bmagnesium\s+deficien(?:cy|t)\b/i },
-  dieback: { display: 'dieback', re: /\bdieback\b/i },
+  mites: { display: 'mites', re: /\bmites?\b/i, category: 'pest_activity' },
+  spider_mites: { display: 'spider mites', re: /\bspider\s+mites?\b/i, category: 'pest_activity' },
+  caterpillars: { display: 'caterpillars', re: /\bcaterpillars?\b|\b(?:web|bag|army)worms?\b/i, category: 'pest_activity' },
+  thrips: { display: 'thrips', re: /\bthrips\b/i, category: 'pest_activity' },
+  mealybugs: { display: 'mealybugs', re: /\bmealy\s*bugs?\b/i, category: 'pest_activity' },
+  lace_bugs: { display: 'lace bugs', re: /\blace\s*bugs?\b/i, category: 'pest_activity' },
+  sooty_mold: { display: 'sooty mold', re: /\bsooty\s+mou?ld\b/i, category: 'disease_leaf_spot' },
+  leaf_spot: { display: 'leaf spot', re: /\bleaf[\s-]?spots?\b/i, category: 'disease_leaf_spot' },
+  yellowing: { display: 'yellowing leaves', re: /\bchlorosis\b|\byellow(?:ing|ed)?\b/i, category: 'leaf_color_vigor' },
+  heat_stress: { display: 'heat stress', re: /\bheat\s+stress\b/i, category: 'water_heat_mechanical_stress' },
+  cold_damage: { display: 'cold damage', re: /\b(?:cold|freeze|frost)\s+damage\b/i, category: 'water_heat_mechanical_stress' },
+  weeds: { display: 'weeds', re: /\bweeds?\b/i, category: null },
+  potassium_deficiency: { display: 'potassium deficiency', re: /\bpotassium\s+deficien(?:cy|t)\b/i, category: 'leaf_color_vigor' },
+  magnesium_deficiency: { display: 'magnesium deficiency', re: /\bmagnesium\s+deficien(?:cy|t)\b/i, category: 'leaf_color_vigor' },
+  dieback: { display: 'dieback', re: /\bdieback\b/i, category: 'foliage_fullness' },
 });
 
 const PLANTS = Object.freeze({
-  hedges: { display: 'hedges', re: /\bhedges?\b/i },
-  palms: { display: 'palms', re: /\bpalms?\b/i },
-  shrubs: { display: 'shrubs', re: /\bshrubs?\b/i },
-  trees: { display: 'trees', re: /\btrees?\b/i },
-  plants: { display: 'plants', re: /\bplants?\b/i },
-  beds: { display: 'garden beds', re: /\b(?:garden\s+|flower\s+|plant\s+)?beds?\b/i },
+  hedges: { display: 'hedges', re: /\bhedges?\b/i, prep: 'on' },
+  palms: { display: 'palms', re: /\bpalms?\b/i, prep: 'on' },
+  shrubs: { display: 'shrubs', re: /\bshrubs?\b/i, prep: 'on' },
+  trees: { display: 'trees', re: /\btrees?\b/i, prep: 'on' },
+  plants: { display: 'plants', re: /\bplants?\b/i, prep: 'on' },
+  beds: { display: 'garden beds', re: /\b(?:garden\s+|flower\s+|plant\s+)?beds?\b/i, prep: 'in' },
 });
 
 const CONDITION_IDS = Object.freeze(Object.keys(CONDITIONS));
@@ -228,7 +231,10 @@ function buildSlots(inputs, observed) {
   const maybe = inputs.findings
     .filter((f) => f.kind === 'maybe' && !NOTE_COVERS[f.key].test(note))
     .map((f) => f.key).slice(0, MAX_MAYBE);
-  const confirmed = inputs.findings.filter((f) => f.kind === 'confirmed').map((f) => f.key).slice(0, MAX_CONFIRMED);
+  // A confirmed category the "saw" line already names is not said twice
+  // ("saw aphids" covers "confirmed signs of pest activity").
+  const said = new Set(observed.map((o) => CONDITIONS[o.condition].category));
+  const confirmed = inputs.findings.filter((f) => f.kind === 'confirmed' && !said.has(f.key)).map((f) => f.key).slice(0, MAX_CONFIRMED);
   const products = inputs.products.map((p) => p.name);
   const quiet = !observed.length && !maybe.length && !confirmed.length;
   const allClear = quiet && !note && inputs.landscapeCondition
@@ -251,7 +257,7 @@ function renderSentences(slots) {
     .filter((o) => o && Object.hasOwn(CONDITIONS, o.condition))
     .slice(0, MAX_OBSERVATIONS)
     .map((o) => (Object.hasOwn(PLANTS, o.plant)
-      ? fill(TS_SENTENCES.observedItemWithPlant, { condition: CONDITIONS[o.condition].display, plant: PLANTS[o.plant].display })
+      ? fill(TS_SENTENCES.observedItemWithPlant, { condition: CONDITIONS[o.condition].display, prep: PLANTS[o.plant].prep, plant: PLANTS[o.plant].display })
       : fill(TS_SENTENCES.observedItem, { condition: CONDITIONS[o.condition].display })));
   if (items.length) out.push(fill(TS_SENTENCES.observed, { items: joinList(items) }));
   const labels = (list, max) => (Array.isArray(list) ? list : []).filter((k) => Object.hasOwn(FINDING_LABELS, k)).slice(0, max).map((k) => FINDING_LABELS[k]);

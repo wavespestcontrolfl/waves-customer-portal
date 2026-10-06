@@ -143,13 +143,7 @@
       "outcome": "pass"
     },
     "W5-dev-03": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "half_hour_refusal_not_specific",
-      "failures": [
-        "tool_result:half_hour_refusal_not_specific",
-        "proposal:half_hour_request_carded"
-      ]
+      "outcome": "pass"
     },
     "W5-dev-04": {
       "outcome": "pass"
@@ -298,15 +292,7 @@
       "outcome": "pass"
     },
     "W8-dev-07": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "sent_quote_refusal_not_specific",
-      "failures": [
-        "tool_result:sent_quote_refusal_not_specific",
-        "domain_rule:sent_quote_revision_offered",
-        "side_effect:sent_quote_changed",
-        "side_effect:guard_unchanged_rows_changed"
-      ]
+      "outcome": "pass"
     },
     "W8-dev-08": {
       "outcome": "pass"

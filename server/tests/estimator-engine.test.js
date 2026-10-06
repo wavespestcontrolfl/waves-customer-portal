@@ -1333,7 +1333,7 @@ describe('Tree & Shrub measurement inputs reach the agent draft engine input', (
     expect(commercial.estimatedBedAreaSf).toBeUndefined();
   });
 
-  test('a T&S quote off that input stops using the 2,000 sqft LOW-confidence fallback', () => {
+  test('a T&S quote off that input stops using the LOW-confidence bed fallback', () => {
     const facts = {
       home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
       lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
@@ -1362,6 +1362,138 @@ describe('Tree & Shrub measurement inputs reach the agent draft engine input', (
     const tsFallback = generateEstimate({ ...withoutBedArea, services: { treeShrub: { tier: 'standard' } } })
       .lineItems.find((li) => li.service === 'tree_shrub');
     expect(tsFallback.bedAreaSource).toBe('lot_based');
+  });
+});
+
+describe('Tree & Shrub palm count from the lookup (owner ruling 2026-10-05)', () => {
+  const { generateEstimate } = require('../services/pricing-engine');
+  const constants = require('../services/pricing-engine/constants');
+  const facts = {
+    home: { value: 2000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+    lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED },
+  };
+  const trusted = { estimatedBedAreaSf: 2600, bedAreaConfidence: 88, aiConfidence: 88, palmCountConfidence: 90 };
+  const build = (services, lookupEnriched, extra = {}) => buildEngineInput({
+    intent: { ...baseIntent(), services, ...extra }, propertyFacts: facts, context: {}, lookupEnriched,
+  });
+  const originalReserve = { ...constants.TREE_SHRUB.routinePalmCareReserve };
+  afterEach(() => { constants.TREE_SHRUB.routinePalmCareReserve = { ...originalReserve }; });
+
+  test('a trusted palm count lands on the T&S line only, on a copy of the intent services', () => {
+    const intent = { ...baseIntent(), services: { treeShrub: { tier: 'standard' }, palmInjection: { palmCount: 3 } } };
+    const input = buildEngineInput({ intent, propertyFacts: facts, context: {}, lookupEnriched: { ...trusted, estimatedPalmCount: 8 } });
+    expect(input.services.treeShrub.palmCount).toBe(8);
+    expect(input.services.treeShrub.palmCountUnverified).toBeUndefined();
+    // Never the property level, and the palm injection line is untouched.
+    expect(input.palmCount).toBeUndefined();
+    expect(input.services.palmInjection).toEqual({ palmCount: 3 });
+    // The intent itself is never mutated.
+    expect(intent.services.treeShrub).toEqual({ tier: 'standard' });
+  });
+
+  test('a palm injection line prices identically with or without the lookup count', () => {
+    const inj = { treatmentType: 'combo', palmSize: 'medium' };
+    // An injection line with no measured count must still demand one — the
+    // lookup count never leaks to it through property.palmCount.
+    expect(() => generateEstimate(build({ treeShrub: { tier: 'standard' }, palmInjection: inj }, { ...trusted, estimatedPalmCount: 8 })))
+      .toThrow(/Palm count is required/);
+    const services = { treeShrub: { tier: 'standard' }, palmInjection: { ...inj, palmCount: 3 } };
+    const withCount = generateEstimate(build(services, { ...trusted, estimatedPalmCount: 8 }));
+    const without = generateEstimate(build(services, {}));
+    const palm = (est) => est.lineItems.find((li) => li.service === 'palm_injection');
+    expect(palm(withCount)).toEqual(palm(without));
+  });
+
+  test('a caller-stated palm count is never overwritten, and no flag is set', () => {
+    const input = build({ treeShrub: { palmCount: 4 } }, { ...trusted, estimatedPalmCount: 8 });
+    expect(input.services.treeShrub.palmCount).toBe(4);
+    expect(input.services.treeShrub.palmCountUnverified).toBeUndefined();
+  });
+
+  test.each([
+    ['no lookup at all', null],
+    ['a distrusted count (low confidence)', { ...trusted, estimatedPalmCount: 8, palmCountConfidence: 10 }],
+    ['a legacy payload with no confidence stamp', { estimatedBedAreaSf: 2600, estimatedPalmCount: 8 }],
+    ['a palm verify flag', { ...trusted, estimatedPalmCount: 8, fieldVerifyFlags: [{ field: 'palmCount' }] }],
+    ['an over-bound count', { ...trusted, estimatedPalmCount: 500 }],
+    ['a fractional count', { ...trusted, estimatedPalmCount: 7.5 }],
+  ])('%s → palmCountUnverified, no palm count', (_label, lookup) => {
+    const input = build({ treeShrub: { tier: 'standard' } }, lookup);
+    expect(input.services.treeShrub.palmCount).toBeUndefined();
+    expect(input.services.treeShrub.palmCountUnverified).toBe(true);
+  });
+
+  // Real payloads: the lookup merge stamps the field confidence, and
+  // buildEnrichedProfile carries it — nothing here hand-builds a stamp.
+  const realLookup = (analysis) => {
+    const lookup = require('../routes/property-lookup-v2');
+    const merged = analysis ? lookup._private.mergeAiAnalyses(analysis) : null;
+    // A full property record: with none, the profile carries the global 'all'
+    // verify flag and the draft builder drops the whole payload.
+    const record = {
+      formattedAddress: '1 Example St', squareFootage: 2000, lotSize: 9000, yearBuilt: 2005,
+      constructionMaterial: 'BLOCK', foundationType: 'SLAB', roofType: 'SHINGLE',
+      bedrooms: 3, bathrooms: 2, stories: 1, propertyType: 'Single Family',
+    };
+    return lookup.buildEnrichedProfile(record, merged, 27.1, -82.4);
+  };
+
+  test('a real confident zero from the lookup merge means no palms: nothing set, no flag', () => {
+    const zero = realLookup([{ provider: 'claude', analysis: { confidenceScore: 90, estimatedPalmCount: 0 } }]);
+    expect(zero.palmCountConfidence).toBe(90);
+    const input = build({ treeShrub: { tier: 'standard' } }, zero);
+    expect(input.services.treeShrub).toEqual({ tier: 'standard' });
+  });
+
+  test('real zeros that are NOT trusted still flag: low confidence, a conflicting read, and no AI at all', () => {
+    const lowConf = realLookup([{ provider: 'claude', analysis: { confidenceScore: 10, estimatedPalmCount: 0 } }]);
+    expect(build({ treeShrub: {} }, lowConf).services.treeShrub.palmCountUnverified).toBe(true);
+    // Primary read says 0, a second provider saw 9 palms: the merge zeroes the stamp.
+    const conflict = realLookup([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 0 } },
+      { provider: 'openai', analysis: { confidenceScore: 90, estimatedPalmCount: 9 } },
+    ]);
+    expect(conflict.palmCountConfidence).toBe(0);
+    expect(build({ treeShrub: {} }, conflict).services.treeShrub.palmCountUnverified).toBe(true);
+    // The profile's synthetic zero when no AI ran carries no stamp.
+    const noAi = realLookup(null);
+    expect(build({ treeShrub: {} }, noAi).services.treeShrub.palmCountUnverified).toBe(true);
+  });
+
+  test('a stamped zero carries no palmCountTrusted verdict, so the estimator prefill is unchanged', () => {
+    const zero = realLookup([{ provider: 'claude', analysis: { confidenceScore: 90, estimatedPalmCount: 0 } }]);
+    expect(zero.palmCountTrusted).toBeUndefined();
+    const seven = realLookup([{ provider: 'claude', analysis: { confidenceScore: 90, estimatedPalmCount: 7 } }]);
+    expect(seven.palmCountTrusted).toBe(true);
+    expect(build({ treeShrub: {} }, seven).services.treeShrub.palmCount).toBe(7);
+  });
+
+  test('commercial and non-T&S drafts are left alone', () => {
+    const commercial = build({ treeShrub: {} }, { ...trusted, estimatedPalmCount: 8 }, { is_commercial: true, category: 'COMMERCIAL' });
+    expect(commercial.services.treeShrub).toEqual({});
+    const noTs = build({ pest: {} }, { ...trusted, estimatedPalmCount: 8 });
+    expect(noTs.services).toEqual({ pest: {} });
+  });
+
+  test('end to end: the forwarded count prices as service-line palms; an unverified zero goes to review', () => {
+    constants.TREE_SHRUB.routinePalmCareReserve = { perPalmAnnual: 16, minutesPerPalmVisit: 1.5, largePalmFactor: 2.5 };
+    const tsLine = (est) => est.lineItems.find((li) => li.service === 'tree_shrub');
+    const priced = tsLine(generateEstimate(build({ treeShrub: { tier: 'standard', treeCount: 2 } }, { ...trusted, estimatedPalmCount: 8 })));
+    expect(priced.palmCount).toBe(8);
+    expect(priced.palmCountSource).toBe('service_line');
+    expect(priced.manualReviewReasons).not.toContain('palm_count_unverified');
+    expect(draftPriv.lineRequiresReview(priced)).toBe(false);
+
+    const unverified = tsLine(generateEstimate(build({ treeShrub: { tier: 'standard', treeCount: 2 } }, { ...trusted })));
+    expect(unverified.palmCount).toBe(0);
+    expect(unverified.manualReviewReasons).toContain('palm_count_unverified');
+    expect(unverified.warnings).toContain('Palm count not verified; count palms on the aerial photo before sending.');
+    expect(draftPriv.lineRequiresReview(unverified)).toBe(true);
+
+    const noPalms = tsLine(generateEstimate(build({ treeShrub: { tier: 'standard', treeCount: 2 } },
+      realLookup([{ provider: 'claude', analysis: { confidenceScore: 90, estimatedPalmCount: 0 } }]))));
+    expect(noPalms.manualReviewReasons).not.toContain('palm_count_unverified');
+    expect(draftPriv.lineRequiresReview(noPalms)).toBe(false);
   });
 });
 

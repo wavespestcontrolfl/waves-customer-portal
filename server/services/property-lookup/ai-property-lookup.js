@@ -5881,7 +5881,20 @@ function summarizeProviderError(err) {
   };
 }
 
+// The county-roll MATCHER's version (address-match round 1, PR 3). A cached
+// roll-miss row (no county evidence) records the matcher that failed to
+// place it; when the matcher changes — a new route alias, a suffix spelling,
+// a guard, a new county source — the row is a stale failure and the next
+// lookup re-runs instead of waiting out the 21-day roll-miss TTL. Bump this
+// string in the PR that changes the matcher; a cached hit with county
+// evidence is never affected, and tech-verified overrides live on the same
+// row and survive (they are re-applied to the live result).
+//   2026-10-03  route aliases (#5641), USPS suffix table / Charlotte situs
+//               ZIP / Florida-only geocode (#5661), multi-situs cell split
+const ROLL_MATCHER_VERSION = '2026-10-03';
+
 module.exports = {
+  ROLL_MATCHER_VERSION,
   // Lot values from the county parsers are capped at this bound —
   // consumers combining them with UNCAPPED figures (e.g. _buildings gross
   // areas) must treat an at-cap lot as unusable for geometry math.

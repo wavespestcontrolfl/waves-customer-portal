@@ -115,6 +115,15 @@ const recordCard = () => screen.getByRole('region', { name: 'Bed bug record hear
 // A field's row on the card: its label, its value, the words heard.
 const fieldRow = (label) => within(recordCard()).getByText(label).closest('.tech-lane-row');
 
+// Owner 2026-10-05: the "Swept eaves and webs" box is a plain pest visit's.
+describe('the swept eaves and webs box on a lane visit', () => {
+  test('is not on the visit step', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    expect(screen.queryByRole('checkbox', { name: 'Swept eaves and webs' })).toBeNull();
+  });
+});
+
 describe('the lane record on the sheet', () => {
   test('reads the visit\'s own record from the note, shows each field with its words, and writes the report and the completion from it', async () => {
     const request = makeRequest();
