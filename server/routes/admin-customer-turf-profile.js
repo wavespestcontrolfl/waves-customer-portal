@@ -276,10 +276,6 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
   }
 });
 
-// The role check resolves at request time, so suites that mock admin-auth with a
-// partial factory still load this router.
-const adminOnly = (req, res, next) => requireAdmin(req, res, next);
-
 // =========================================================================
 // PUT /:customerId/turf-profile/bermuda-removal — the staff switch
 // (GATE_LAWN_BERMUDA_REMOVAL). Admin only. Gate off: 404, as if the route did
@@ -288,7 +284,7 @@ const adminOnly = (req, res, next) => requireAdmin(req, res, next);
 // always allowed. Stamps who and when, and moves updated_at so a completion
 // built on the older profile re-reads it.
 // =========================================================================
-router.put('/:customerId/turf-profile/bermuda-removal', adminOnly, async (req, res, next) => {
+router.put('/:customerId/turf-profile/bermuda-removal', requireAdmin, async (req, res, next) => {
   try {
     if (featureGates.lawnBermudaRemovalLive?.() !== true) return res.status(404).json({ error: 'Not found' });
     const { customerId } = req.params;

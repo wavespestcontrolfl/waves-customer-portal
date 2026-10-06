@@ -1543,6 +1543,31 @@ it('the /completion-actions fallback records every bermuda action as spot work, 
   }
 });
 
+it('the /completion-actions warnings show in the drawer, so the reason the bermuda mix is not offered is visible', async () => {
+  const reason = 'Bermuda removal is not offered on this visit: Recognition, Fusilade II and the surfactant go together, and one of them is blocked or has no planned row.';
+  const excluded = 'Bermuda removal is off for this lawn: the St. Augustine cultivar on file (ProVista, Captiva or Seville) is not eligible.';
+  completionActions = {
+    programKey: 'lawn', visit: { visit: 6, month: 'Jun' },
+    actions: [{ id: 'warn-action', label: 'Warn product', note: 'Warn product', raw: 'Warn product', scope: 'exterior', treatmentApplied: true, product: { id: 'warn-product', name: 'Warn product' } }],
+    // A repeated message shows once.
+    warnings: [{ code: 'lawn_bermuda_step_unavailable', severity: 'warning', message: reason }, { code: 'lawn_bermuda_cultivar_excluded', severity: 'warning', message: excluded }, { code: 'lawn_bermuda_step_unavailable', severity: 'warning', message: reason }],
+  };
+  render(<CompletionPanel service={service} products={[...catalog, { id: 'warn-product', name: 'Warn product', category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1 }]} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByRole('option', { name: 'Warn product' });
+  expect(screen.getAllByText(reason)).toHaveLength(1);
+  expect(screen.getAllByText(excluded)).toHaveLength(1);
+});
+
+it('no warnings, no warning lines beside the Additional work selector', async () => {
+  completionActions = {
+    programKey: 'lawn', visit: { visit: 6, month: 'Jun' },
+    actions: [{ id: 'quiet-action', label: 'Quiet product', note: 'Quiet product', raw: 'Quiet product', scope: 'exterior', treatmentApplied: true, product: { id: 'quiet-product', name: 'Quiet product' } }],
+  };
+  render(<CompletionPanel service={service} products={[...catalog, { id: 'quiet-product', name: 'Quiet product', category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1 }]} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByRole('option', { name: 'Quiet product' });
+  expect(screen.queryByText(/Bermuda removal is/)).toBeNull();
+});
+
 it('the bermuda removal mix options go on together and come off together', async () => {
   enableDefaults();
   const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal' }));

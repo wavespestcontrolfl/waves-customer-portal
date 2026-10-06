@@ -19030,6 +19030,9 @@ export function CompletionPanel({
     .flatMap((action) => action.gateNotes || [])
     .filter((note) => BERMUDA_CONDITION_KEYS.includes(note.key))
     .map((note) => (note.key === "testPatchFirst" ? BERMUDA_TEST_PATCH_LINE : note.text)))];
+  // The actions list's own warnings (/completion-actions): why the bermuda removal mix is not
+  // offered (an excluded cultivar, a blocked or capped product), one short line each.
+  const protocolActionWarningLines = [...new Set((protocolActionMeta?.warnings || []).map((warning) => warning?.message).filter(Boolean))];
   const selectedProtocolActionCount = protocolActionSelectOptions.filter(
     (opt) => opt.selected,
   ).length;
@@ -20523,6 +20526,11 @@ export function CompletionPanel({
                     </select>
                     {bermudaConditionLines.map((line) => (
                       <div key={line} style={{ fontFamily: font, fontSize: 12, color: M.ink3, marginTop: 6 }}>
+                        {line}
+                      </div>
+                    ))}
+                    {protocolActionWarningLines.map((line) => (
+                      <div key={line} role="note" style={{ fontFamily: font, fontSize: 12, color: M.ink3, marginTop: 6 }}>
                         {line}
                       </div>
                     ))}
@@ -23045,6 +23053,9 @@ export function CompletionPanel({
                   </select>
                   {bermudaConditionLines.map((line) => (
                     <div key={line} style={{ fontSize: 11, color: D.muted }}>{line}</div>
+                  ))}
+                  {protocolActionWarningLines.map((line) => (
+                    <div key={line} role="note" style={{ fontSize: 11, color: D.muted }}>{line}</div>
                   ))}
                   {selectedProtocolActionCount > 0 && (
                     <div style={{ fontSize: 11, color: D.muted }}>

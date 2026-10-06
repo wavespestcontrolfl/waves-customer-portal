@@ -11,6 +11,8 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
   const db = require('../models/db');
   const wateringBackfill = require('../models/migrations/20261006220000_watering_rule_bermuda_removal_backfill');
   const watering = require('../models/migrations/20261006200000_watering_rule_bermuda_removal');
+  const unitToken = require('../models/migrations/20261006220200_bermuda_fusilade_unit_token');
+  const RATE_UNITS = require('../../shared/rate-units.json');
   const pricingSeed = require('../models/migrations/20261006220100_lawn_pricing_bermuda_cost_seed');
   const ROLLBACK = new Error('rollback');
   const rolledBack = (run) => db.transaction(async (trx) => { await run(trx); throw ROLLBACK; }).catch((err) => { if (err !== ROLLBACK) throw err; });
@@ -44,6 +46,51 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
         await trx('products_catalog').where({ name: NAMES[1] }).update({ post_application_watering: null });
         await wateringBackfill.up(trx);
         expect(parsed((await row(trx, NAMES[1])).post_application_watering)).toEqual(watering.RULE);
+      });
+    });
+  });
+
+  describe('20261006220200 Fusilade II unit token', () => {
+    const FUS = 'Fusilade II Post Emergent Liquid Herbicide';
+    const REC = 'Recognition Post Emergent Herbicide';
+
+    test('on a database built from migrations alone, both catalog rows carry unit tokens every completion accepts, so the mix records with no unit edit', async () => {
+      const rows = await db('products_catalog').whereIn('name', [REC, FUS]).select('name', 'rate_unit', 'cost_unit', 'inventory_unit');
+      expect(rows).toHaveLength(2);
+      for (const row of rows) {
+        for (const unit of [row.rate_unit, row.cost_unit, row.inventory_unit].filter(Boolean)) expect(RATE_UNITS).toContain(unit);
+      }
+      expect(rows.find((row) => row.name === FUS).rate_unit).toBe('fl_oz');
+      expect(rows.find((row) => row.name === REC).rate_unit).toBe('oz');
+    });
+
+    test('changes only a row 190400 created and only while it is exactly "fl oz"; audited; down puts it back only while unedited; idempotent', async () => {
+      await rolledBack(async (trx) => {
+        const unit = async () => (await trx('products_catalog').where({ name: FUS }).first('rate_unit')).rate_unit;
+        const audits = async () => (await trx('audit_log').where({ action: 'migration:20261006220200_bermuda_fusilade_unit_token:seeded' })).length;
+        // The state 190400 left: 'fl oz'.
+        await trx('products_catalog').where({ name: FUS }).update({ rate_unit: 'fl oz' });
+        const before = await audits();
+        await unitToken.up(trx);
+        expect(await unit()).toBe('fl_oz');
+        expect(await audits()).toBe(before + 1);
+        await unitToken.up(trx);
+        expect(await audits()).toBe(before + 1);
+        // Down restores only what it changed.
+        await unitToken.down(trx);
+        expect(await unit()).toBe('fl oz');
+        await unitToken.down(trx);
+        expect(await unit()).toBe('fl oz');
+        // An edited unit is left alone by up (an admin chose 'ml') and by a later down.
+        await unitToken.up(trx);
+        await trx('products_catalog').where({ name: FUS }).update({ rate_unit: 'ml' });
+        await unitToken.down(trx);
+        expect(await unit()).toBe('ml');
+        // A row 190400 did not create is never touched: a catalog row with no seeding audit keeps 'fl oz'.
+        await trx('audit_log').where({ action: 'migration:20261006190400_lawn_bermuda_removal_catalog:seeded', resource_type: 'products_catalog' }).del();
+        await trx('products_catalog').where({ name: FUS }).update({ rate_unit: 'fl oz' });
+        await unitToken.up(trx);
+        expect(await unit()).toBe('fl oz');
       });
     });
   });

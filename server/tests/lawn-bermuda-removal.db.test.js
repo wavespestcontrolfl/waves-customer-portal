@@ -1019,6 +1019,27 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await knex('products_catalog').whereIn('id', [rec.id, fus.id])).toHaveLength(2);
     });
 
+    test('a recorded rate is converted from its own unit into the cap\'s: 0.01 lb counts as 0.16 oz; an unconvertible rate counts for nothing', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      const insert = (rows) => knex('property_application_history').insert(rows.map((row, index) => ({ customer_id: f.customerId, product_id: rec.id, application_date: index ? '2026-04-20' : '2026-03-01', ...row })));
+      const rateWarnings = (result) => result.warnings.filter((w) => w.type === 'annual_max_rate');
+      const planned = { proposed: { ratePer1000: 0.03, unit: 'oz' } };
+      // 0.01 lb x 16 = 0.16 oz: already over the cap on its own.
+      await insert([{ application_rate: 0.01, rate_unit: 'lb' }]);
+      const over = rateWarnings(await check(f, f.property.id));
+      expect(over).toHaveLength(1);
+      expect(over[0].message).toMatch(/cumulative 0\.160/);
+      // A rate with a per-1,000 basis in its unit converts the same way.
+      await knex('property_application_history').where({ customer_id: f.customerId }).update({ rate_unit: 'lb/1000sf' });
+      expect(rateWarnings(await check(f, f.property.id))[0].message).toMatch(/cumulative 0\.160/);
+      // No unit, or a unit of another dimension or basis: not counted as it stands.
+      for (const unit of [null, 'fl_oz', 'gal', 'oz/gal']) {
+        await knex('property_application_history').where({ customer_id: f.customerId }).update({ rate_unit: unit });
+        expect(rateWarnings(await check(f, f.property.id, planned))).toHaveLength(0);
+      }
+    });
+
     test('a history row with no recorded rate counts by its quantity over the treated area, unit-checked', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-20', bermuda: true });
