@@ -208,6 +208,24 @@ function lawnPlanAttributesVisit(plan) {
     && matchesLawnCompletionProtocol(plan?.protocol?.structured, plan?.appointmentAssignment || {}, plan?.propertyGate?.trackKey);
 }
 
+// The window's other protocol products, as the plan built them: its opt-in
+// rows (conditional options the plan did not select, and any selected row that
+// is not a default), each once, with the plan's own product (the visit's
+// substitute where one applies), mix, method and gate notes. The lawn Fast
+// Complete sheet offers them as one-tap add-ons ("Also in this month's
+// protocol"), so an add-on row and a planned row come from one plan.
+function completionAddOns(plan, defaults, protocolProductFor) {
+  const seen = new Set(defaults.map((item) => String(item.product.id)));
+  const addOns = [];
+  for (const item of [...plan.mixCalculator.items, ...(plan.mixCalculator.conditionalOptions || [])]) {
+    const id = item.product?.id ? String(item.product.id) : null;
+    if (!id || seen.has(id) || item.product.active === false || !protocolProductFor(item)) continue;
+    seen.add(id);
+    addOns.push(completionItem(item, protocolProductFor(item)));
+  }
+  return addOns;
+}
+
 function buildLawnCompletionDefaults(plan, context) {
   const protocol = plan.protocol.structured;
   const assigned = plan.appointmentAssignment;
@@ -222,6 +240,7 @@ function buildLawnCompletionDefaults(plan, context) {
     // carry annual counters or safety metadata on a selected base product.
     return item.selected === true && item.product?.active !== false && product?.defaultInPlan;
   }).map((item) => completionItem(item, protocolProductFor(item))) : [];
+  const addOns = eligible ? completionAddOns(plan, items, protocolProductFor) : [];
   // The planner's recipe comes from the field reference (protocols.json);
   // the defaults list is the owner-edited operating layer. When a live
   // window registers none of the recipe's selected products as defaults,
@@ -233,7 +252,7 @@ function buildLawnCompletionDefaults(plan, context) {
     enabled: true, serviceId: plan.serviceId, propertyId: context.propertyId,
     lawnSqft: context.propertyMatchesProfile ? plan.mixCalculator.lawnSqft : null,
     propertyMatchesProfile: context.propertyMatchesProfile,
-    items, history: context.history,
+    items, addOns, history: context.history,
     // An option carries the protocol row's application mode: the catalog
     // category alone reads a broadcast herbicide (SpeedZone in its window) as
     // spot work, and the closeout must record the mode the protocol prescribes.

@@ -254,3 +254,35 @@ test.each([
   expect(lawnPlanAttributesVisit(plan)).toBe(expected);
   expect(lawnPlanAttributesVisit(null)).toBe(false);
 });
+
+test('addOns are the window\'s opt-in products as the plan built them: substitute, mix and gate notes; never a default, an inactive product, an unlisted one, or one product twice', () => {
+  const { plan, context } = fixture();
+  plan.protocol.structured.products.push(
+    { productId: 'celsius', defaultInPlan: false, gates: {}, applicationMode: 'spot' },
+    { productId: 'chinch', defaultInPlan: false, gates: {}, applicationMode: 'spot' },
+    { productId: 'retired', defaultInPlan: false, gates: {}, applicationMode: 'spot' },
+  );
+  const sub = { id: 'sub', name: 'Substitute spray', category: 'insecticide', active: true };
+  plan.mixCalculator.conditionalOptions = [
+    { role: 'conditional', selected: false, raw: 'If sedge: Celsius WG', gateNotes: [{ key: 'tankMixWith', severity: 'note', text: 'Tank mix with NIS.' }], product: { id: 'celsius', name: 'Celsius WG', active: true }, mix: { amount: 0.4, amountUnit: 'oz', ratePer1000: 0.085, rateUnit: 'oz', treatedSqft: 4000 } },
+    // A substituted line: the plan offers the substitute; the protocol row is found by the original id.
+    { role: 'conditional', selected: false, raw: 'If chinch: Talak', product: sub, substitution: { originalProductId: 'chinch', originalProductName: 'Talak 7.9%' }, mix: { amount: 8, amountUnit: 'fl oz', ratePer1000: 2, rateUnit: 'fl oz', treatedSqft: 4000 } },
+    { role: 'conditional', selected: false, product: { id: 'retired', name: 'Retired', active: false } },
+    { role: 'conditional', selected: false, product: { id: 'unlisted', name: 'Not in this protocol', active: true } },
+    // The plan default again (a second line naming it): never an add-on.
+    { role: 'conditional', selected: false, product: { id: 'product', name: 'Fixture product', active: true } },
+    { role: 'conditional', selected: false, product: { id: 'celsius', name: 'Celsius WG', active: true } },
+  ];
+  const { addOns } = buildLawnCompletionDefaults(plan, context);
+  expect(addOns.map((item) => item.product.id)).toEqual(['celsius', 'sub']);
+  expect(addOns[0]).toMatchObject({ applicationMethod: 'spot_treatment', raw: 'If sedge: Celsius WG', gateNotes: [{ text: 'Tank mix with NIS.' }], mix: { amount: 0.4, ratePer1000: 0.085 } });
+  expect(addOns[1]).toMatchObject({ product: { id: 'sub' }, substitution: { originalProductName: 'Talak 7.9%' }, mix: { amount: 8, ratePer1000: 2 } });
+});
+
+test('no addOns when the plan is not eligible (no program on the visit)', () => {
+  const { plan, context } = fixture();
+  plan.propertyGate.serviceTier = null;
+  plan.protocol.structured.products.push({ productId: 'celsius', defaultInPlan: false, gates: {}, applicationMode: 'spot' });
+  plan.mixCalculator.conditionalOptions = [{ role: 'conditional', selected: false, product: { id: 'celsius', name: 'Celsius WG', active: true } }];
+  expect(buildLawnCompletionDefaults(plan, context).addOns).toEqual([]);
+});
