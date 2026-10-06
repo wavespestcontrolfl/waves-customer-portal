@@ -794,6 +794,8 @@ describe('symptoms and exposure never reach the model', () => {
     'The ants ate the bait. Is that good?',
     'Was the bait eaten by the roaches?',
     'Was the bait eaten?',
+    'Was there a little bit of bait left?',
+    'Mosquitoes bit me after the treatment',
     'Was the rodent bait eaten?',
     'Was any bait consumed?',
     'Was the rat poisoned?',
