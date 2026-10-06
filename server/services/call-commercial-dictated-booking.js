@@ -42,7 +42,28 @@
  * it was. Only commercial_requires_quote is cleared, and it rides in
  * failedOpenFlags so the office still gets the advisory card (book-and-flag).
  *
- * Contract: commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quoteBookable })
+ * SECOND mode, no price (owner ruling 2026-10-06, GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING):
+ * a commercial Waves Assessment that staff book on the call with NO price
+ * discussed books at the catalog price, on outbound callback calls (lead_auto_bridge)
+ * as well as inbound. It skips the price terms (there is no price to ground) and
+ * keeps everything else: the same word-for-word grounding of the staff
+ * commitment and the caller's acceptance (here also the shape where STAFF
+ * proposes the slot, the caller says yes and staff commits), the confirmed
+ * on-the-hour slot canAutoRoute checks, and the catalog check that EVERY service
+ * view of the call resolves to the Waves Assessment row. Any price at all (an
+ * extracted amount, a price judgement, or a "$"/"dollars" in the transcript)
+ * sends the call to the priced path above, unchanged.
+ * Outbound recordings need one more proof. Speaker labels are LLM-inferred and
+ * have swapped on outbound calls, so a customer's own line could ground as a
+ * staff commitment. Recordings are single-channel, so staff identity is anchored
+ * on the words: an Agent-labeled turn says "this is <name> with|from|at Waves"
+ * and no Caller-labeled turn does (outboundStaffIdentityProven); otherwise the
+ * call holds ('outbound_staff_identity_unproven'). ONE predicate: canAutoRoute
+ * reaches this function from the live lane, the shadow pass and the audit
+ * reconstruction alike.
+ *
+ * Contract: commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quoteBookable,
+ *   pricedPath = true, assessmentBooking = null })   // assessmentBooking: { bookable(v2), outbound }
  *   -> { ok, reason }
  */
 'use strict';
@@ -185,12 +206,47 @@ function acceptedEntryFor(svc, quoted) {
   return entries.find((e) => e && e.accepted === true && e.amount_usd === quoted && !(e.amount_max_usd > e.amount_usd));
 }
 
-function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quoteBookable } = {}) {
+// Did a price come up on the call at all? Any amount in the extraction (the quoted
+// total, a price entry with an amount or a range end), either price judgement, or a
+// dollar figure / "dollars" / "bucks" in the transcript. The no-price assessment mode
+// needs ALL of these quiet; one of them sends the call to the priced path.
+const DOLLAR_TALK = /\$\s*\d|\bdollars?\b|\bbucks?\b/i;
+function priceDiscussed(svc = {}, transcript = '') {
+  if (svc.quoted_price_usd != null) return true;
+  if (svc.price_offered_by_staff === true || svc.price_accepted_by_caller === true) return true;
+  const entries = [svc.price, ...(Array.isArray(svc.prices) ? svc.prices : [])];
+  if (entries.some((e) => e && typeof e === 'object' && (e.amount_usd != null || e.amount_max_usd != null))) return true;
+  return DOLLAR_TALK.test(String(transcript || ''));
+}
+
+// Staff identity on an OUTBOUND recording, independent of who the labels say is who:
+// an Agent-labeled turn introduces itself as Waves ("this is Adam with Waves") and
+// no Caller-labeled turn does. A swapped or mixed labeling puts the introduction on
+// the Caller side (or on neither), and the call holds.
+const STAFF_INTRO = /\bthis is\s+[a-z][a-z'.-]*(?:\s+[a-z][a-z'.-]*){0,2}\s*,?\s+(?:with|from|at)\s+waves\b/i;
+function outboundStaffIdentityProven(transcript) {
+  const turns = parseTurns(transcript);
+  if (!turns) return false;
+  const introduces = (turn) => STAFF_INTRO.test(String(turn.raw || ''));
+  return turns.some((t) => t.agent && introduces(t)) && !turns.some((t) => !t.agent && introduces(t));
+}
+
+function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quoteBookable, pricedPath = true, assessmentBooking = null } = {}) {
   const fail = (reason) => ({ ok: false, reason });
   const scheduling = v2?.scheduling;
   if (!scheduling || typeof scheduling !== 'object') return fail('no_scheduling');
   if (scheduling.status !== 'confirmed' || !scheduling.confirmed_start_at) return fail('not_confirmed');
   const svc = v2.service_request || {};
+  if (assessmentBooking && !priceDiscussed(svc, transcript)) {
+    // Every service view must resolve to the Waves Assessment row (the caller's check).
+    if (typeof assessmentBooking.bookable !== 'function' || assessmentBooking.bookable(v2) !== true) return fail('assessment_service_not_resolved');
+    if (assessmentBooking.outbound === true && !outboundStaffIdentityProven(transcript)) return fail('outbound_staff_identity_unproven');
+    const agreed = groundNewBookingAgreement({ v2, transcript, callStartedAt, allowAgentProposed: true });
+    if (!agreed.ok) return fail(agreed.reason);
+    return { ok: true, reason: 'assessment_booking_grounded', mode: agreed.mode, assessment: true };
+  }
+  // A price came up (or the assessment mode is off): only the priced path may book it.
+  if (!pricedPath) return fail('price_discussed');
   const terms = { v2, agreed: resolveCallAgreedPrice(v2), quoted: svc.quoted_price_usd, entry: acceptedEntryFor(svc, svc.quoted_price_usd), quoteBookable };
   const failedTerm = PRICE_TERM_CHECKS.find(([, fails]) => fails(terms));
   if (failedTerm) return fail(failedTerm[0]);
@@ -201,4 +257,4 @@ function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quot
   return { ok: true, reason: 'dictated_booking_grounded', mode: grounding.mode };
 }
 
-module.exports = { commercialDictatedBookingGrounded };
+module.exports = { commercialDictatedBookingGrounded, outboundStaffIdentityProven, priceDiscussed };

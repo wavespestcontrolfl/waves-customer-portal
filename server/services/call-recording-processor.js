@@ -158,6 +158,26 @@ function commercialDictatedBookingActive(call = {}, gates = {}) {
   const live = gates.commercialLive || (() => require('../config/feature-gates').callCommercialDictatedBookingLive?.());
   return enabled('callAgentCommitBooking') === true && !isOutboundCall(call) && live() === true;
 }
+// GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING (owner ruling 2026-10-06): a Waves Assessment
+// staff book on the call with no price discussed, OUTBOUND callback calls included.
+// Needs GATE_CALL_AGENT_COMMIT_BOOKING too (the kill switch of the commercial
+// exception) and is read at call time. Independent of the priced lane's gate and of
+// call direction; the staff-identity proof outbound needs lives in
+// call-commercial-dictated-booking.js, reached through canAutoRoute from every lane.
+// ONE predicate for both processor lanes AND buildFailOpenRoutingContext (the offline
+// audits), like commercialDictatedBookingActive (codex #5377 r6).
+function commercialAssessmentBookingActive(_call = {}, gates = {}) {
+  const enabled = gates.isEnabled || isEnabled;
+  const live = gates.assessmentLive || (() => require('../config/feature-gates').callCommercialAssessmentBookingLive?.());
+  return enabled('callAgentCommitBooking') === true && live() === true;
+}
+// The canAutoRoute options of that lane: {} when it is off (so the options shape every
+// lane and audit compares is unchanged gate-off), else the switch, the call direction
+// (outbound adds the staff-identity proof) and the catalog check, built only when on.
+function commercialAssessmentRoutingOptions(call, makeBookable, gates = {}) {
+  if (!commercialAssessmentBookingActive(call, gates)) return {};
+  return { commercialAssessmentBooking: true, commercialOutbound: isOutboundCall(call), commercialAssessmentBookable: makeBookable() };
+}
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
@@ -2167,6 +2187,23 @@ function auditCommercialDictatedOptions({ call, gates, transcript, extracted, bo
   };
 }
 
+// The same for the no-price assessment lane: the trusted-label gate, the routed
+// transcript and the call's own start (what the grounding reads), plus the lane's options.
+function auditCommercialAssessmentOptions({ call, gates, transcript, extracted, bookableServices }) {
+  // The shared part is the priced lane's own builder (one source for the label gate, the
+  // routed transcript and the call start); the priced switch and quote check are dropped.
+  const { commercialDictatedBooking: _priced, commercialQuoteBookable: _quote, ...shared } = auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices });
+  const routedTranscript = shared.transcript;
+  return {
+    ...shared,
+    ...commercialAssessmentRoutingOptions(call, () => auditCommercialAssessmentBookableFor({
+      extracted: extracted !== undefined ? extracted : parseLooseJson(call.ai_extraction),
+      transcription: routedTranscript,
+      services: bookableServices,
+    }), gates),
+  };
+}
+
 function buildFailOpenRoutingContext({
   call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
   unclearServiceAssessmentEnabled = false,
@@ -2211,6 +2248,7 @@ function buildFailOpenRoutingContext({
       // off the call row every audit already has. Absent when the gate is off,
       // so the options shape the audits compare is unchanged gate-off.
       ...(commercialDictatedBookingActive(call, gates) ? auditCommercialDictatedOptions({ call, gates, transcript, extracted, bookableServices }) : {}),
+      ...(commercialAssessmentBookingActive(call, gates) ? auditCommercialAssessmentOptions({ call, gates, transcript, extracted, bookableServices }) : {}),
     },
   };
 }
@@ -6710,6 +6748,52 @@ function auditCommercialQuoteBookableFor({ extracted = {}, transcription = '', s
   };
 }
 
+// The no-price assessment lane's catalog check (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING):
+// `(v2Extraction) => boolean`, true only when EVERY view of the call's service (the V1
+// record before V2 adoption, the merged fields, the V2-overridden view the booking
+// books — the views commercialQuoteBookableFor judges) resolves to the Waves
+// Assessment catalog row. FAILS CLOSED: no catalog, a view that resolves elsewhere or
+// to nothing, a re-service revisit, any error.
+function commercialAssessmentBookableFor({ extracted = {}, preAdoptionExtracted = null, transcription = '', services = null } = {}) {
+  return (v2Extraction = null) => {
+    try {
+      if (!Array.isArray(services) || !services.length) return false;
+      const views = [];
+      if (preAdoptionExtracted) views.push(preAdoptionExtracted);
+      views.push(extracted || {});
+      const finalView = v2BookingServiceView(extracted || {}, v2Extraction);
+      if (finalView) views.push(finalView);
+      if (views.some((view) => hasCallReServiceIntent(view))) return false;
+      const serviceNames = services.map((sv) => sv.name).filter(Boolean);
+      return views.map((view) => applyRecurringIntentDefault(view, transcription, serviceNames)).every((view) => {
+        const coarse = resolveSchedulableCallService(view, { transcription });
+        const row = resolveCallBookingCatalogService({
+          extracted: view,
+          transcription,
+          services,
+          coarseServiceLabel: coarse.ok ? coarse.service : null,
+        });
+        return !!row && /^waves assessment$/i.test(String(row.name || '').trim());
+      });
+    } catch (_e) {
+      return false;
+    }
+  };
+}
+
+// The audits' version (buildFailOpenRoutingContext): the live views rebuilt from the
+// persisted extraction; a V2 row with no pre-adoption record holds (codex #5377 r17 P1).
+function auditCommercialAssessmentBookableFor({ extracted = {}, transcription = '', services = null } = {}) {
+  const recorded = extracted?.pre_adoption_service_fields;
+  const hasRecord = !!recorded && typeof recorded === 'object' && !Array.isArray(recorded);
+  const preAdoptionExtracted = hasRecord && Object.keys(recorded).length ? { ...extracted, ...recorded } : null;
+  const check = commercialAssessmentBookableFor({ extracted, preAdoptionExtracted, transcription, services });
+  return (v2Extraction = null) => {
+    if (!hasRecord && isV2Extraction(v2Extraction)) return false;
+    return check(v2Extraction);
+  };
+}
+
 function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = null, transcription = '', services = null } = {}) {
   return (quoted, v2Extraction = null) => {
     try {
@@ -8443,6 +8527,10 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // Cross-call threading: prior call from this number, so a continuation
     // completes the earlier record instead of restarting from nothing.
     priorCall: opts.priorCall,
+    // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: also read the shape where staff propose the
+    // slot, the caller says yes and staff commit. Absent (false) off, so the prompt is
+    // byte-identical off.
+    ...(opts.agentProposedSlotCommitment === true ? { agentProposedSlotCommitment: true } : {}),
   });
 
   // Cross-provider dispatch with the model-output schema validated INSIDE
@@ -10189,6 +10277,9 @@ const CallRecordingProcessor = {
           // Who is staff and who is the customer follows from who dialed —
           // the prompt's greeting rule needs it (codex #4618 r1 P1).
           callDirection: isOutboundCall(call) ? 'outbound' : 'inbound',
+          // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING (owner ruling 2026-10-06): read the
+          // agent-proposed slot shape for the booking this lane can now clear.
+          ...(commercialAssessmentBookingActive(call) ? { agentProposedSlotCommitment: true } : {}),
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -11280,6 +11371,11 @@ const CallRecordingProcessor = {
                 extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
               }),
             } : {}),
+            // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING (owner ruling 2026-10-06): a Waves
+            // Assessment staff booked with no price discussed, outbound included. {} when off.
+            ...commercialAssessmentRoutingOptions(call, () => commercialAssessmentBookableFor({
+              extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
+            })),
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
             callStartedAt: callStartedAt(call) || call.created_at,
@@ -21707,6 +21803,10 @@ const CallRecordingProcessor = {
               extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
             }),
           } : {}),
+          // Mirrors the enforce lane (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING).
+          ...commercialAssessmentRoutingOptions(call, () => commercialAssessmentBookableFor({
+            extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
+          })),
           callStartedAt: callStartedAt(call) || call.created_at,
           // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
           unclearServiceAssessment: unclearServiceAssessmentActive(),
@@ -23262,8 +23362,12 @@ CallRecordingProcessor._test = {
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
   commercialDictatedBookingActive,
+  commercialAssessmentBookingActive,
+  commercialAssessmentRoutingOptions,
+  commercialAssessmentBookableFor,
   commercialQuoteBookableFor,
   auditCommercialQuoteBookableFor,
+  auditCommercialAssessmentBookableFor,
   preAdoptionServiceFields,
   resolveKnownCallerCustomer,
   v2IsoToEtWallClock,

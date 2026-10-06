@@ -153,6 +153,12 @@ PRIOR_CALL_DATA>>>
 `;
 }
 
+// A third agent_committed_booking shape: STAFF proposes the slot, the caller says yes,
+// staff commits. Rendered only when the processor asks for it (see buildExtractionPrompt).
+const AGENT_PROPOSED_SLOT_BLOCK = `
+AGENT-PROPOSED SLOT (applies to agent_committed_booking, an exception to its "state both the day and time" rule): when the AGENT's own turn proposes ONE exact day and on-the-hour time ("How does noon on Thursday sound?", "Can we do Thursday at two?"), the CALLER's very next turn accepts that WHOLE proposal on its own ("Perfect.", "Yes, that works."), and the AGENT's very next turn after that commits in the agent's own plain words without repeating the day or time ("Awesome. I'll book you for that, and we'll see you then."), then set agent_committed_booking true, confirmed_start_at (resolved against the call date), status "confirmed", caller_accepted_slot true and definite_commitment true, and record the proposal's words in agreed_slot_words (day, hour, period, copied verbatim from the AGENT's proposal turn). Pin THREE quotes: (1) the agent's proposal turn to /scheduling/confirmed_start_at with speaker "agent", containing every non-null agreed_slot_words value; (2) the caller's acceptance, the ENTIRE turn, to /scheduling/caller_accepted_slot with speaker "caller"; (3) the agent's commitment sentence from that third turn to /scheduling/agent_committed_booking with speaker "agent". The three turns must be consecutive. Do not use this when the caller hedged, changed the time or answered something else, when the agent offered several options, or when the agent only said it would check or call back; then agent_committed_booking stays null or false.
+`;
+
 function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}) {
   const bookableServiceNames = Array.isArray(opts.bookableServiceNames)
     ? opts.bookableServiceNames.filter(Boolean)
@@ -187,13 +193,18 @@ function buildExtractionPrompt(transcription, callerPhone, callDateET, opts = {}
     : (opts.callDirection === 'inbound'
       ? '\nCALL DIRECTION: INBOUND — the caller dialed our office; the person who answered is Waves staff.\n'
       : '');
+  // The agent-proposed slot shape (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING, owner
+  // ruling 2026-10-06). Per-call variable, off by default and deliberately outside
+  // the version hash like the blocks above: empty (nothing rendered) unless the
+  // processor turns it on, so the prompt is byte-identical with the gate off.
+  const agentProposedSlotBlock = opts.agentProposedSlotCommitment === true ? AGENT_PROPOSED_SLOT_BLOCK : '';
   return `You are an extraction engine for Waves Pest Control & Lawn Care, a family-owned company serving Southwest Florida (Manatee, Sarasota, and Charlotte counties, plus the south-Hillsborough towns Ruskin, Apollo Beach, Sun City Center, Wimauma, Gibsonton, and Riverview).
 
 Analyze this phone call transcript and extract structured data matching the JSON OUTPUT CONTRACT appended at the end of this prompt. Every field must conform to the contract's type and enum constraints.
 
 Caller phone (from Twilio ANI): ${callerPhone || 'unknown'}
 Call date in Eastern Time: ${callDateET}${callTimeBlock}
-${knownCallerBlock}${callerIdBlock}${callDirectionBlock}${priorCallBlock}
+${knownCallerBlock}${callerIdBlock}${callDirectionBlock}${agentProposedSlotBlock}${priorCallBlock}
 
 Transcript:
 ${transcription}

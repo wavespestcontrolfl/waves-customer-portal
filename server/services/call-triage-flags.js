@@ -2258,7 +2258,13 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // address, unit, capacity and every other hold below still apply. The flag
   // rides in failedOpenFlags so the office still gets the advisory card.
   // Required lazily: that module requires this one.
-  if (opts.commercialDictatedBooking === true && opts.transcriptLabelsTrusted === true
+  // opts.commercialAssessmentBooking (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING, owner
+  // ruling 2026-10-06) opens the SAME block to a Waves Assessment booked with no price
+  // discussed, outbound calls included: the processor passes the catalog check
+  // (commercialAssessmentBookable) and whether the call is outbound (commercialOutbound,
+  // which adds the staff-identity proof). The priced path stays exactly opts.commercialDictatedBooking.
+  if ((opts.commercialDictatedBooking === true || opts.commercialAssessmentBooking === true)
+      && opts.transcriptLabelsTrusted === true
       && confirmedWithStart
       && commitStartOnTheHour
       && appointmentBlockingFlags.includes('commercial_requires_quote')
@@ -2272,6 +2278,10 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
       && require('./call-commercial-dictated-booking').commercialDictatedBookingGrounded({
         v2: extraction, transcript: opts.transcript, callStartedAt: opts.callStartedAt,
         quoteBookable: opts.commercialQuoteBookable,
+        ...(opts.commercialAssessmentBooking === true ? {
+          pricedPath: opts.commercialDictatedBooking === true,
+          assessmentBooking: { bookable: opts.commercialAssessmentBookable, outbound: opts.commercialOutbound === true },
+        } : {}),
       }).ok) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'commercial_requires_quote') { failedOpenFlags.push(f); gateDemotedFlags.push(f); return false; }
