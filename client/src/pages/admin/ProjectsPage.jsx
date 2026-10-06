@@ -2800,6 +2800,7 @@ export function ProjectDetail({
                 )}
             </div>
             <ProjectFindingFieldInput
+              dictationContext={{ customerId: project.customer_id }}
               field={field}
               id={fieldInputId(field.key)}
               name={`findings.${field.key}`}

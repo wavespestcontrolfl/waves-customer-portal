@@ -9915,6 +9915,9 @@ export function TypedFindingsSection({
   // EPA numbers, gallons and traced feet). Off by default.
   voiceFill = false,
   sources = null,
+  // { customerId, serviceId } of the visit: the finding mics send it so server
+  // dictation spells this customer's name.
+  dictationContext,
 }) {
   // Owner directive 2026-08-27: the desktop closeout mirrors the mobile
   // sheet — same monochrome tokens and Roboto chrome on both variants.
@@ -10002,6 +10005,7 @@ export function TypedFindingsSection({
         )}
       </div>
       <ProjectFindingFieldInput
+        dictationContext={dictationContext}
         /* Owner directive 2026-08-27: no chip walls anywhere on the
            completion panel — chips-type findings render as the same
            multi_select dropdown the T&S closeout proved out (same
@@ -12165,6 +12169,9 @@ export function CompletionPanel({
   // .stop() can still deliver a final result asynchronously, which would mutate
   // notes after the payload was snapshotted and then be lost when the response
   // replaces the notes.
+  // The visit's ids for server dictation (GATE_SERVER_DICTATION): the notes mic
+  // and the finding-field mics send them so this customer's name is spelled right.
+  const findingsDictationContext = { customerId: service?.customerId || service?.customer_id, serviceId: service?.id };
   const dictation = useSpeechDictation(
     (text) => {
       if (generating) return;
@@ -12175,7 +12182,7 @@ export function CompletionPanel({
     // it into this same notes box. Typing always works — the mic is optional.
     // GATE_SERVER_DICTATION: with it on, every browser records and the server
     // spells this customer's name right (ids only).
-    { uploadServiceId: service?.id, dictationContext: { customerId: service?.customerId || service?.customer_id, serviceId: service?.id } },
+    { uploadServiceId: service?.id, dictationContext: findingsDictationContext },
   );
   // A finding-field mic (DictationButton) recording or transcribing: its words are still on the
   // way, so Generate and Complete wait for them like they do for the notes mic above.
@@ -20895,6 +20902,7 @@ export function CompletionPanel({
             {/* Service findings — typed specialty completion */}
             {isTypedFindings && (
               <TypedFindingsSection
+                dictationContext={findingsDictationContext}
                 variant="mobile"
                 frozen={generating}
                 pesticideProductPresent={pesticideProductPresent}
@@ -20921,6 +20929,7 @@ export function CompletionPanel({
               const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
               return (
                 <TypedFindingsSection
+                  dictationContext={findingsDictationContext}
                   key={schema.type}
                   variant="mobile"
                   frozen={generating}
@@ -23373,6 +23382,7 @@ export function CompletionPanel({
           {/* Service findings — typed specialty completion */}
           {isTypedFindings && (
             <TypedFindingsSection
+              dictationContext={findingsDictationContext}
               variant="desktop"
               frozen={generating}
               pesticideProductPresent={pesticideProductPresent}
@@ -23399,6 +23409,7 @@ export function CompletionPanel({
             const entry = companionState[schema.type] || EMPTY_COMPANION_ENTRY;
             return (
               <TypedFindingsSection
+                dictationContext={findingsDictationContext}
                 key={schema.type}
                 variant="desktop"
                 frozen={generating}

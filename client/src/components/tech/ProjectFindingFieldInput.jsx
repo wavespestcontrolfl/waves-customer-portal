@@ -812,6 +812,9 @@ export default function ProjectFindingFieldInput({
   palette,
   appearance = 'light',
   optionDisabledReason = null,
+  // { customerId, serviceId } of the record these findings belong to: the
+  // field's mic sends it so server dictation spells that customer's name.
+  dictationContext,
 }) {
   const T = resolveFieldTheme(appearance, palette);
   if (field.type === 'applications') {
@@ -972,7 +975,7 @@ export default function ProjectFindingFieldInput({
         />
         {!suppressDictation && (
           <div style={{ position: 'absolute', right: 8, bottom: 8 }}>
-            <DictationButton palette={palette} onAppend={(text) => onChange(appendDictation(value, text))} />
+            <DictationButton palette={palette} dictationContext={dictationContext} onAppend={(text) => onChange(appendDictation(value, text))} />
           </div>
         )}
       </div>
@@ -1008,7 +1011,7 @@ export default function ProjectFindingFieldInput({
       />
       {!isDateOrTime && !suppressDictation && (
         <div style={{ position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)' }}>
-          <DictationButton palette={palette} onAppend={(text) => onChange(appendDictation(value, text))} />
+          <DictationButton palette={palette} dictationContext={dictationContext} onAppend={(text) => onChange(appendDictation(value, text))} />
         </div>
       )}
     </div>

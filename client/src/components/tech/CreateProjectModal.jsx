@@ -2615,6 +2615,7 @@ export default function CreateProjectModal({
                     )}
                   </div>
                   <ProjectFindingFieldInput
+                    dictationContext={{ customerId }}
                     field={renderField}
                     id={`create-project-${projectType}-${field.key}`}
                     name={`findings.${field.key}`}
