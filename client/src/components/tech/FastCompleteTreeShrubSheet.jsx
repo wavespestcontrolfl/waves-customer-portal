@@ -65,6 +65,8 @@ import {
   visitChangedSinceSchedule,
 } from './FastCompleteParts';
 import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
+import { PestCheckSection, usePestCheck } from './FastCompleteTreeShrubPestCheck';
+import { withPestCheck } from '../../lib/tree-shrub-pest-check';
 import { Button, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -306,11 +308,12 @@ function contextFrom(data, service) {
     warningsUnavailable: data?.warningsUnavailable === true,
     visitIdentity: recapVisitIdentity(data?.service),
     watchList: watchListFrom(data),
+    pestCheck: data?.pestCheck && typeof data.pestCheck === 'object' ? data.pestCheck : null,
   };
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -568,7 +571,10 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
 
   const photoList = photos.list;
   const previewCurrent = !!photos.preview && sameSet(photos.preview.photos, photoList);
-  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending });
+  // GATE_TS_PEST_CHECK: gate off (no ctx.pestCheck) = no block, nothing sent.
+  const pestCheck = usePestCheck({ context: ctx.pestCheck, rows });
+  const removeMerit = (meritRows) => meritRows.forEach((row) => products.updateRow(row.productId, { active: false }));
+  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || pestCheck.evaluation.blockMessage;
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the photos and note.
   const stockRow = rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
@@ -586,7 +592,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable, watchChoices }),
+      () => withPestCheck(completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable, watchChoices }), pestCheck.payload),
       `${names || 'Inspection'} · ${inOptionOrder(PLANT_GROUP_OPTIONS, form.plantGroups)}`,
     );
   };
@@ -614,6 +620,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               locked={locked || dictationPending}
             />
           )}
+          <PestCheckSection state={pestCheck} locked={locked} onRemoveMerit={removeMerit} />
           <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
@@ -652,7 +659,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
       <CompleteFooter
         submission={submission}
         missingReason={missingReason}
-        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow}
+        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow || !!pestCheck.evaluation.blockMessage}
         label="Complete tree & shrub"
         onSubmit={submit}
         coverProps={picker.coverProps}
