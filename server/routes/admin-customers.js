@@ -1,4 +1,4 @@
-const { applyCustomerNameOrder, applyCustomerSearchFilter, applyStableCustomerOrder, customerSearchTerms } = require('../services/customer-list-search');
+const { applyCustomerNameOrder, applyCustomerSearchFilter, applyStableCustomerOrder, customerSearchTerms, matchedHomeAddressSql } = require('../services/customer-list-search');
 const express = require('express');
 const Joi = require('joi');
 const { normalizeContactRole } = require('../constants/contact-roles');
@@ -1227,6 +1227,7 @@ function mapPipelineCustomer(c, stage = c.pipeline_stage) {
 function mapCustomerListRow(c) {
   return {
     id: c.id, firstName: c.first_name, lastName: c.last_name,
+    ...(c.matched_home_address ? { matchedHomeAddress: c.matched_home_address } : {}),
     accountId: c.account_id, profileLabel: c.profile_label,
     isPrimaryProfile: !!c.is_primary_profile,
     contactRole: c.contact_role || null,
@@ -2549,6 +2550,10 @@ router.get('/', async (req, res, next) => {
     )).count('* as count').first();
     const totalCount = parseInt(total?.count || 0);
     const offset = (page - 1) * limit;
+    // A customer found through a second home shows that home (the access-code
+    // link picker names the address the text gave).
+    const matchedHome = filters.search ? matchedHomeAddressSql(db, filters.search) : null;
+    if (matchedHome) query = query.select(matchedHome);
     const customers = await query.limit(limit).offset(offset);
 
     // Pipeline counts

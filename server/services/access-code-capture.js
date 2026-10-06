@@ -54,10 +54,12 @@ const { hashExtractionSource, recordExtractionAttempt, TERMINAL_STATUSES } = req
 // the number it reached): a text reclassified as an opt-out or a reaction, or
 // moved to an excluded number, is read again, and the ineligible path then
 // clears what it filed.
+// The sender's number is covered too: an unlinked row shows it, so a
+// corrected number is read again.
 const sourceHash = (message) => hashExtractionSource([message.customer_id, message.direction, message.message_type,
-  message.to_phone, message.message_body].map((v) => v || '').join(':'));
+  message.to_phone, message.from_phone, message.message_body].map((v) => v || '').join(':'));
 const SOURCE_HASH_SQL = "encode(sha256(convert_to(concat_ws(':', coalesce(s.customer_id::text, ''), coalesce(s.direction, ''), "
-  + "coalesce(s.message_type, ''), coalesce(s.to_phone, ''), coalesce(s.message_body, '')), 'UTF8')), 'hex')";
+  + "coalesce(s.message_type, ''), coalesce(s.to_phone, ''), coalesce(s.from_phone, ''), coalesce(s.message_body, '')), 'UTF8')), 'hex')";
 const { stalePendingExtractionProposals } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
 const { stringifySmsEvidence } = require('./sms-operational-extractor');
@@ -209,6 +211,7 @@ function addressesIn(body) {
   addresses.forEach((a, k) => {
     const span = text.slice(starts[k], starts[k + 1]);
     a.zip = (/\b(?:FL|Florida)\.?,?\s+(\d{5})(?:-\d{4})?\b/i.exec(span) || [])[1] || null;
+    a.span = span;
   });
   return { addresses };
 }
@@ -419,11 +422,16 @@ async function loadContext(conn, message) {
 
 // The customer a no-customer text names: the one live home whose house number,
 // full street name (suffix and directional included) and, when the text names
-// one, unit all match an address in the text (a differing ZIP in the text rules
-// a home out). Two matches, or none, suggest nobody: the office picks.
+// one, unit all match an address in the text, and the ZIP (or, with no ZIP on
+// both sides, the home's city) matches too. Two matches, or none, suggest nobody: the office picks.
 async function suggestCustomer(conn, body) {
   return (await suggestedHome(conn, body)).customerId;
 }
+
+const cityNamed = (span, city) => {
+  const words = addressWords(city).join(' ');
+  return !!words && ` ${addressWords(span).join(' ')} `.includes(` ${words} `);
+};
 
 // The one matching live home and its customer (the exact home that matched,
 // so two units at one street number are never confused).
@@ -435,14 +443,17 @@ async function suggestedHome(conn, body) {
   const homes = await conn('customer_properties as p').join('customers as c', 'c.id', 'p.customer_id')
     .where('p.active', true).whereNull('c.deleted_at')
     .whereRaw(`substring(p.address_line1 from '^\\s*(\\d+)') in (${numbers.map(() => '?').join(', ')})`, numbers)
-    .select('p.id', 'p.customer_id', 'p.address_line1', 'p.address_line2', 'p.zip');
+    .select('p.id', 'p.customer_id', 'p.address_line1', 'p.address_line2', 'p.city', 'p.zip');
   const matches = homes.filter((home) => {
     const [number, ...street] = addressWords(stripTrailingUnit(home.address_line1));
     const unit = unitKey(streetEmbeddedUnitKey(home.address_line1) || home.address_line2);
     const zip = normalizeZip(home.zip);
-    // Street, unit and ZIP of the SAME address in the text.
+    // Street, unit and ZIP of the SAME address in the text. With no ZIP to
+    // compare, the home's city must be written after the street: the same
+    // street number and name exist in more than one town.
     return addresses.some((a) => a.number === number && a.street.join(' ') === street.join(' ')
-      && (!a.unit || a.unit === unit) && (!a.zip || !zip || a.zip === zip));
+      && (!a.unit || a.unit === unit)
+      && (a.zip && zip ? a.zip === zip : cityNamed(a.span, home.city)));
   });
   return matches.length === 1 ? { customerId: matches[0].customer_id, propertyId: matches[0].id } : none;
 }
@@ -504,7 +515,7 @@ async function sourceStillCurrent(trx, message, receipt) {
   if (!enabled() || !since || new Date(message.created_at) < since) return false;
   // A text with no customer has none to lock: the text row itself is the lock.
   if (message.customer_id && !(await lockCustomer(trx, message.customer_id))) return false;
-  const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'message_body');
+  const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'from_phone', 'message_body');
   return !!live && (live.customer_id || null) === (message.customer_id || null) && live.direction === 'inbound'
     && sourceHash(live) === receipt.source_hash;
 }
@@ -530,6 +541,10 @@ async function fileUnlinkedItems(trx, message, items, receipt) {
   const { refuse } = digitsToRefuse(message, []);
   items = items.filter((item) => !item.code || !NUMERIC_CODE.test(item.code) || !refuse.has(digitsOf(item.code)));
   await reconcileSource(trx, message, items);
+  // Rows still waiting to be linked show the text's sender as it is now.
+  await trx('customer_access_codes').where({ source_type: 'sms', source_id: message.id, status: 'found' })
+    .whereNull('customer_id').whereNot('sender_phone', String(message.from_phone).trim())
+    .update({ sender_phone: String(message.from_phone).trim(), updated_at: trx.fn.now() });
   const filed = new Set((await trx('customer_access_codes').where({ source_type: 'sms', source_id: message.id })
     .select('kind', 'value_hash', 'instructions')).map(rowKey));
   const toInsert = items.filter((item) => !filed.has(rowKey(item)));
@@ -1097,12 +1112,17 @@ async function listForVisit(conn, req, visitId) {
 // home in the neighborhood, of a live customer other than the visit's, from a
 // text the same customer still owns. Only the pass link crosses customers:
 // the neighbour's own words can name them or their street, so the shared row
-// reads "Visitor pass: <link>" and a pass with no link is not shared. The
+// reads "Visitor pass: <link>"; a pass with no link, or more than one, is not
+// shared. The
 // projection carries no id of the other customer, name, quote or address.
 // Identical links collapse to one row.
-// The https links of a pass, in order, as one key; '' when it has none.
-const passLinkKey = (text) => [...new Set((String(text || '').match(URL_RE) || []).map(trimLink)
-  .filter((u) => /^https:\/\//i.test(u)))].join(' ');
+// The pass link: the one https link of a pass; '' when it has none or more
+// than one (which link is the pass is then unclear, and another could be an
+// account or payment link, so nothing is shared).
+function passLinkKey(text) {
+  const links = [...new Set((String(text || '').match(URL_RE) || []).map(trimLink))];
+  return links.length === 1 && /^https:\/\//i.test(links[0]) ? links[0] : '';
+}
 
 async function neighborPasses(conn, customerId, hoodId) {
   const rows = await conn('customer_access_codes as a')

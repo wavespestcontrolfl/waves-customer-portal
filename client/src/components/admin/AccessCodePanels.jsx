@@ -260,7 +260,8 @@ export function ActiveCodeRow({ row, homes = [], onRetire }) {
 
 const customerLabel = (c) => {
   const name = [c.firstName, c.lastName].filter(Boolean).join(" ").trim() || c.companyName || c.email || c.phone || "Customer";
-  return [name, c.address, c.phone].filter(Boolean).join(" · ");
+  // The home the search matched (a second home), else the customer's address.
+  return [name, c.matchedHomeAddress || c.address, c.phone].filter(Boolean).join(" · ");
 };
 
 // A code texted from a number with no customer record: the office links it to

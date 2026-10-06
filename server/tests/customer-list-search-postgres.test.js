@@ -2,6 +2,7 @@ const knex = require('knex');
 const {
   applyCustomerNameOrder,
   applyCustomerSearchFilter,
+  matchedHomeAddressSql,
   applyStableCustomerOrder,
 } = require('../services/customer-list-search');
 
@@ -199,6 +200,7 @@ postgres('customer list search PostgreSQL behavior', () => {
   test('finds the owner from a second home pasted as written, unit and state included', async () => {
     await withCustomers(async (trx) => {
       await trx.raw(`CREATE TEMP TABLE customer_properties (
+        id uuid DEFAULT gen_random_uuid(), is_primary boolean DEFAULT false,
         customer_id uuid, active boolean, address_line1 text, address_line2 text, city text, state text, zip text
       ) ON COMMIT DROP`);
       await trx('customer_properties').insert({
@@ -208,6 +210,10 @@ postgres('customer list search PostgreSQL behavior', () => {
       expect(await matchingIds(trx, '100 Sample Main St, Apt 5, Sarasota, FL 34202')).toEqual([
         '00000000-0000-4000-8000-000000000010',
       ]);
+      // The result names the home that matched, not the customer row's address.
+      const [row] = await trx('customers').select('customers.id', matchedHomeAddressSql(trx, '100 Sample Main St Apt 5'))
+        .where('customers.id', '00000000-0000-4000-8000-000000000010');
+      expect(row.matched_home_address).toBe('100 Sample Main St, Apt 5, Sarasota');
       expect(await matchingIds(trx, '100 Sample Main St, Apt 6, Sarasota')).toEqual([]);
       // The 5 of a ZIP or of unit 52 is not unit 5.
       await trx('customer_properties').update({ address_line2: 'Apt 4', zip: '34205' });

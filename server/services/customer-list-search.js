@@ -114,13 +114,32 @@ function applyCustomerSearchFilter(query, value) {
     // Every word of the search must be a whole word of one home's address, so
     // a pasted "100 Main St, Apt 5, Sarasota, FL 34202" finds it as written and
     // "Apt 5" never matches the 5 in another home's ZIP or unit 52.
-    if (terms.length) {
-      const homeText = "CONCAT_WS(' ', cp.address_line1, cp.address_line2, cp.city, cp.state, cp.zip)";
-      this.orWhereRaw(`EXISTS (SELECT 1 FROM customer_properties cp WHERE cp.customer_id = customers.id AND cp.active
-        AND ${terms.map(() => `${homeText} ~* ?`).join(' AND ')})`,
-      terms.map((term) => `\\m${term}\\M`));
-    }
+    const home = homeMatch(search);
+    if (home) this.orWhereRaw(`EXISTS (SELECT 1 FROM customer_properties cp WHERE ${home.sql})`, home.bindings);
   });
+}
+
+// An active home of the customer whose address holds every search word as a
+// whole word; null when the search has no words.
+function homeMatch(value) {
+  const terms = customerSearchTerms(normalizedSearch(value));
+  if (!terms.length) return null;
+  const homeText = "CONCAT_WS(' ', cp.address_line1, cp.address_line2, cp.city, cp.state, cp.zip)";
+  return {
+    sql: `cp.customer_id = customers.id AND cp.active AND ${terms.map(() => `${homeText} ~* ?`).join(' AND ')}`,
+    bindings: terms.map((term) => `\\m${term}\\M`),
+  };
+}
+
+// The address of the home the search matched, so a customer found through a
+// second home shows that home, not the address on the customer row. The
+// primary home first; null when no home matched.
+function matchedHomeAddressSql(knex, value) {
+  const home = homeMatch(value);
+  if (!home) return null;
+  return knex.raw(`(SELECT CONCAT_WS(', ', cp.address_line1, NULLIF(cp.address_line2, ''), cp.city)
+    FROM customer_properties cp WHERE ${home.sql}
+    ORDER BY cp.is_primary DESC NULLS LAST, cp.id LIMIT 1) as matched_home_address`, home.bindings);
 }
 
 function applyCustomerNameOrder(query, value, direction = 'asc') {
@@ -165,6 +184,7 @@ module.exports = {
   compactNameSearch,
   customerSearchTerms,
   escapeLikePattern,
+  matchedHomeAddressSql,
   normalizedNameSearch,
   normalizedSearch,
 };

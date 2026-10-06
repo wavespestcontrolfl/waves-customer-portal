@@ -1964,6 +1964,16 @@ postgres('access codes section', () => {
       expect([res.status, res.body.code]).toEqual([409, 'not_pending']);
     });
 
+    test('a text whose sender number is corrected is read again and shows the new number', async () => {
+      const messageId = await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      await trx('sms_log').where({ id: messageId }).update({ from_phone: '+19415550177' });
+      const read = stub([passItem()]);
+      await sweep(read);
+      expect(read).toHaveBeenCalled();
+      expect((await unlinked()).map((r) => r.sender_phone)).toEqual(['+19415550177']);
+    });
+
     test('a text that later gets a customer drops its unlinked rows and files for that customer', async () => {
       const home = await customer();
       const messageId = await text(null, PASS_TEXT, { from: SENDER });
@@ -2108,6 +2118,9 @@ postgres('access codes section', () => {
       const shared = (await readVisit(atMe)).codes.map((r) => r.instructions).sort();
       expect(shared).toEqual([`Visitor pass: ${LINK}`, `Visitor pass: ${LINK}/two`]);
       expect(JSON.stringify(shared)).not.toMatch(/Sample|4460|guard/);
+      // Two links in one pass: which is the pass is unclear, so it is not shared.
+      await addPass(two, { instructions: `Pass ${LINK}/a and account https://example.com/acct/9` });
+      expect((await readVisit(atMe)).codes.map((r) => r.instructions).sort()).toEqual(shared);
       await addPass(me);
       const out = (await readVisit(atMe)).codes;
       expect(out.filter((r) => passLinkOf(r.instructions) === LINK).map((r) => r.shared)).toEqual([undefined]);
@@ -2196,6 +2209,12 @@ postgres('access codes section', () => {
         const north5 = await home('100 Main St N', 'Apt 5');
         await home('100 Main St S', 'Apt 4');
         expect(await access.suggestCustomer(trx, BODY)).toBe(north5);
+      });
+      test('with no ZIP, the home\'s city must be named: the same street in another town suggests nobody', async () => {
+        const id = await home('100 Main St N', 'Apt 5');
+        expect(await access.suggestCustomer(trx, 'Pass for 100 Main St N, Apt 5, Sarasota: https://pass.example.com/v/zz1')).toBeNull();
+        expect(await access.suggestCustomer(trx, 'Pass for 100 Main St N, Apt 5')).toBeNull();
+        expect(await access.suggestCustomer(trx, 'Pass for 100 Main St N, Apt 5, Lakewood Ranch')).toBe(id);
       });
       test('a ZIP qualifies only the address it follows', async () => {
         await home('100 Main St N', 'Apt 5');
