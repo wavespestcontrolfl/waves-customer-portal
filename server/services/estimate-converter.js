@@ -142,6 +142,21 @@ const RiderAcceptSeeding = require('./rider-accept-seeding');
 
 const WAVEGUARD_SETUP_FEE = 99;
 
+// The website funnel service an accepted estimate's FIRST visit is, or '' when
+// the website engine cannot represent it. One funnel service only: every sold
+// recurring line must map (through the explicit sms-book-funnel-map table, never
+// a keyword guess) to the SAME funnel key. A combined or multi-service plan (pest
+// plus lawn never share a stop), a service /book does not book (bait stations,
+// bond, palm injection ...) and an estimate with no recurring line the table can
+// name all return '' and keep the old by-city engine for that estimate.
+function funnelKeyForEstimate(recurringServices, estimate) {
+  const map = require('./sms-book-funnel-map');
+  const lines = (Array.isArray(recurringServices) ? recurringServices : []).filter((svc) => svc && typeof svc === 'object');
+  if (!lines.length) return map.funnelKeyForServiceName(estimate?.service_interest);
+  const keys = lines.map((svc) => map.funnelKeyForCatalogKey(recurringServiceKey(svc)));
+  return keys.every(Boolean) && new Set(keys).size === 1 ? keys[0] : '';
+}
+
 /**
  * Pick the first service date for a freshly-converted customer.
  *
@@ -154,25 +169,32 @@ const WAVEGUARD_SETUP_FEE = 99;
  *      can't resolve the customer's zone (empty city, new area) or when no
  *      tech is scheduled in that zone across the 14-day window.
  *
- * With GATE_MULTI_TECH_TEXT_TIMES on, step 1 reads the website booking engine
- * (per technician, route-aware) instead of the by-city engine; step 2 is unchanged.
+ * With GATE_MULTI_TECH_TEXT_TIMES on and a single website funnel service for the
+ * estimate (funnelKeyForEstimate), step 1 reads the website booking engine (per
+ * technician, route-aware) instead of the by-city engine; any other estimate
+ * keeps the by-city engine. Step 2 is unchanged.
  *
  * Returns a YYYY-MM-DD string ready for scheduled_services.scheduled_date.
  */
-async function pickFirstServiceDate(customer, estimateId) {
+async function pickFirstServiceDate(customer, estimateId, { serviceKey = '' } = {}) {
   try {
-    if (multiTechTextTimesLive()) {
+    if (multiTechTextTimesLive() && serviceKey) {
       // GATE_MULTI_TECH_TEXT_TIMES (multi-tech booking PR 4): the first day the
       // website booking engine (per technician, route-aware) has a feasible
-      // start for this customer — their own pin, else the middle of their city.
-      // No usable pin or no open day falls to the + 7 days rule below, as an
-      // empty by-city lookup does.
+      // start for THIS estimate's funnel service at the customer's pin, else the
+      // middle of their city. `internal`: staff-side scheduling never depends on
+      // the public funnel's kill switch (GATE_SELF_BOOKING) or on the account
+      // being signed in. No usable pin or no open day falls to the + 7 days rule
+      // below, as an empty by-city lookup does. An estimate the website engine
+      // cannot represent (serviceKey '') keeps the old engine below.
       const offered = (customer.id || customer.city)
-        ? await require('./scheduling/text-offer-times').textOfferDays({ customerId: customer.id || null, estimateId, city: customer.city || null })
+        ? await require('./scheduling/text-offer-times').textOfferDays({
+          customerId: customer.id || null, estimateId, city: customer.city || null, serviceKey, internal: true,
+        })
         : null;
       const first = (offered?.days || []).find((d) => d.slots?.length)?.date;
       if (first) {
-        logger.info(`[estimate-converter] Snapped first service to route day ${first} (website engine, pin: ${offered.pinSource})`);
+        logger.info(`[estimate-converter] Snapped first service to route day ${first} (website engine, ${serviceKey}, pin: ${offered.pinSource})`);
         return first;
       }
     } else if (customer.city) {
@@ -7116,7 +7138,9 @@ const EstimateConverter = {
       // today in createTermForAnnualPrepay).
       if (annualPrepayTermStart) termStartDate = annualPrepayTermStart;
     } else {
-      const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
+      const firstServiceDate = await pickFirstServiceDate(customer, estimateId, {
+        serviceKey: multiTechTextTimesLive() ? funnelKeyForEstimate(recurringServicesForConversion, estimate) : '',
+      });
       termStartDate = firstServiceDate;
       // Earliest date actually inserted by the loop below — replaces the
       // picked date when a seasonal roll moved the real first visit.
@@ -8920,3 +8944,4 @@ module.exports.acquireConverterInvoiceDepositLocks = acquireConverterInvoiceDepo
 module.exports.isTermiteAnnualSignBeforePayAccept = isTermiteAnnualSignBeforePayAccept;
 module.exports.frozenTermiteAnnualFinancialsFor = frozenTermiteAnnualFinancialsFor;
 module.exports.pickFirstServiceDate = pickFirstServiceDate;
+module.exports.funnelKeyForEstimate = funnelKeyForEstimate;

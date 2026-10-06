@@ -16,7 +16,8 @@
  * Where the pin comes from, in order:
  *   1. the customer's own booking pin (customerId, or the customer behind an
  *      estimate): the stored pin, else the staff-verified or geocoded address —
- *      the same pin /book commits at (customerBookingLocation);
+ *      the same pin /book commits at (customerBookingLocation) — and only for a
+ *      customer /book could book (bookableOfferCustomer);
  *   2. the CITY CENTRE (owner 2026-10-06: a lead known only by city is placed
  *      in the middle of that city; the offer is a hint, never a booking).
  *
@@ -78,16 +79,25 @@ async function customerIdFor({ customerId, estimateId }) {
 }
 
 // { lat, lng, source } or null.
-async function resolveTextOfferPin({ customerId = null, estimateId = null, city = null } = {}) {
+//
+// A KNOWN customer (customerId, or the customer behind the estimate) is offered
+// from their own pin and nothing else, exactly as availabilityForExistingCustomer
+// does: bookableOfferCustomer is the ONE eligibility predicate (active account,
+// no blocked pre-customer stage under bookingCustomersOnly), and a customer it
+// refuses, or one with no resolvable pin (staff review hold, no address), gets
+// no times — never the city centre, which is not what /book does for them.
+// `internal` (the estimate converter's date pick, never quoted to a customer)
+// skips the sign-in rules and may fall to the city centre for a customer whose
+// address does not geocode. No customer at all (a lead known only by city) is
+// placed at the city centre.
+async function resolveTextOfferPin({ customerId = null, estimateId = null, city = null, internal = false } = {}) {
   const booking = require('../../routes/booking')._internals;
   const cid = await customerIdFor({ customerId, estimateId });
-  if (cid) {
-    const customer = await db('customers').where({ id: cid }).whereNull('deleted_at')
-      .first('id', 'account_id', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
-    const pin = customer ? await booking.customerBookingLocation(customer) : null;
-    if (pin) return { lat: pin.lat, lng: pin.lng, source: 'customer' };
-  }
-  return cityCentre(city);
+  if (!cid) return cityCentre(city);
+  const customer = await booking.bookableOfferCustomer(cid, { internal });
+  const pin = customer ? await booking.customerBookingLocation(customer) : null;
+  if (pin) return { lat: pin.lat, lng: pin.lng, source: 'customer' };
+  return customer && internal ? cityCentre(city || customer.city) : null;
 }
 
 /**
@@ -95,16 +105,18 @@ async function resolveTextOfferPin({ customerId = null, estimateId = null, city 
  * Returns { days, pinSource } or null when nothing can be offered (no usable
  * pin, no funnel service, /book off). `days` is /book's own day shape
  * (date, dayOfWeek, dayNum, month, fullDate, slots[{ startTime24, ... }]).
+ * `internal` (see resolveTextOfferPin) also skips the PUBLIC funnel's kill
+ * switch (GATE_SELF_BOOKING): staff-side scheduling must not depend on it.
  * Errors throw: every caller already fails closed or falls back.
  */
-async function textOfferDays({ customerId = null, estimateId = null, city = null, serviceKey = 'pest_control' } = {}) {
-  const pin = await resolveTextOfferPin({ customerId, estimateId, city });
+async function textOfferDays({ customerId = null, estimateId = null, city = null, serviceKey = 'pest_control', internal = false } = {}) {
+  const pin = await resolveTextOfferPin({ customerId, estimateId, city, internal });
   if (!pin) {
-    logger.info('[text-offer-times] no booking pin (no customer pin, no served city) — nothing offered');
+    logger.info('[text-offer-times] no booking pin (customer not bookable or no pin, no served city) — nothing offered');
     return null;
   }
   const { availabilityForPin } = require('../../routes/booking')._internals;
-  const availability = await availabilityForPin({ lat: pin.lat, lng: pin.lng, serviceKey });
+  const availability = await availabilityForPin({ lat: pin.lat, lng: pin.lng, serviceKey, internal });
   if (!availability) return null;
   return { days: availability.days || [], pinSource: pin.source };
 }

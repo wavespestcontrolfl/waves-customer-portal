@@ -268,6 +268,36 @@ test('a malformed estimate_id is never queried', async () => {
   expect(db.mock.calls.map(([table]) => table)).not.toContain('estimates');
 });
 
+// The ONE customer-eligibility predicate the texting AI's offers share (Codex r1
+// P1 on #6073): availabilityForExistingCustomer and the pin-based text callers.
+describe('bookableOfferCustomer — who /book may offer times to', () => {
+  const { bookableOfferCustomer } = require('../routes/booking')._internals;
+
+  test('no id → null with no lookup', async () => {
+    await expect(bookableOfferCustomer(null)).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('an INACTIVE account is refused (the lookup requires active: true); internal reads only refuse a deleted row', async () => {
+    firstResults.customers = customerRow({ latitude: 27.3, longitude: -82.5, active: false });
+    await expect(bookableOfferCustomer(CUSTOMER_ID)).resolves.toBeNull();
+    const chain = () => db.mock.results.map((r, i) => ({ table: db.mock.calls[i][0], chain: r.value })).filter((c) => c.table === 'customers').pop().chain;
+    expect(chain().filters).toEqual({ id: CUSTOMER_ID, active: true });
+    db.mockClear();
+    await expect(bookableOfferCustomer(CUSTOMER_ID, { internal: true })).resolves.toMatchObject({ active: false });
+    expect(chain().filters).toEqual({ id: CUSTOMER_ID });
+  });
+
+  test('bookingCustomersOnly on + a pre-customer stage → refused; gate off or internal → allowed', async () => {
+    const gates = jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation(() => true);
+    firstResults.customers = customerRow({ pipeline_stage: 'new_lead' });
+    await expect(bookableOfferCustomer(CUSTOMER_ID)).resolves.toBeNull();
+    await expect(bookableOfferCustomer(CUSTOMER_ID, { internal: true })).resolves.toMatchObject({ id: CUSTOMER_ID });
+    gates.mockImplementation((gate) => gate !== 'bookingCustomersOnly');
+    await expect(bookableOfferCustomer(CUSTOMER_ID)).resolves.toMatchObject({ id: CUSTOMER_ID });
+  });
+});
+
 // The text-side callers that hold only a pin (GATE_MULTI_TECH_TEXT_TIMES, multi-tech
 // booking PR 4) share availabilityForExistingCustomer's tail: the same funnel
 // builder for one pin and one funnel service.
@@ -281,6 +311,17 @@ describe('availabilityForPin — refusals before any build runs', () => {
     for (const pin of [{}, { lat: null, lng: -82.5 }, { lat: 'x', lng: -82.5 }, { lat: 27.3, lng: undefined }]) {
       await expect(availabilityForPin({ ...pin, serviceKey: 'pest_control' })).resolves.toBeNull();
     }
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  // Codex r1 P1 on #6073: the estimate converter's date pick is staff-side and must
+  // not depend on the PUBLIC funnel's kill switch.
+  test('/book off + internal: the public switch is skipped (the booking config IS read); without internal it is not', async () => {
+    jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation((gate) => gate !== 'selfBooking');
+    await availabilityForPin({ lat: 27.3, lng: -82.5, serviceKey: 'pest_control', internal: true }).catch(() => {});
+    expect(db.mock.calls.map((c) => c[0])).toContain('booking_config');
+    db.mockClear();
+    await expect(availabilityForPin({ lat: 27.3, lng: -82.5, serviceKey: 'pest_control' })).resolves.toBeNull();
     expect(db).not.toHaveBeenCalled();
   });
 

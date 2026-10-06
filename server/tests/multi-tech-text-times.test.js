@@ -30,6 +30,7 @@ jest.mock('../services/estimate-automation-duplicates', () => ({}));
 
 const mockBook = {
   availabilityForPin: jest.fn(),
+  bookableOfferCustomer: jest.fn(),
   customerBookingLocation: jest.fn(),
   resolveBookingCoords: jest.fn(),
 };
@@ -57,6 +58,7 @@ beforeEach(() => {
   delete process.env[GATE];
   mockBook.availabilityForPin.mockResolvedValue({ days: BOOK_DAYS });
   mockBook.customerBookingLocation.mockResolvedValue(null);
+  mockBook.bookableOfferCustomer.mockImplementation(async (id) => (id ? { id, city: 'Sarasota' } : null));
   mockBook.resolveBookingCoords.mockResolvedValue({ lat: null, lng: null });
   mockOld.getAvailableSlots.mockResolvedValue({ zone: 'Old Zone', days: [{ date: '2026-10-07', dayOfWeek: 'Wed', slots: [{ start: '9:00 AM' }] }] });
 });
@@ -119,33 +121,57 @@ describe('textOfferDays — one reader, the website engine, a pin', () => {
 
   test('a lead known only by city is placed at the city centre and gets the website engine\'s days', async () => {
     const out = await textOfferDays({ city: 'Lakewood Ranch' });
-    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.4225, lng: -82.4082, serviceKey: 'pest_control' });
+    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.4225, lng: -82.4082, serviceKey: 'pest_control', internal: false });
     expect(out).toEqual({ days: BOOK_DAYS, pinSource: 'city_table' });
     expect(mockOld.getAvailableSlots).not.toHaveBeenCalled();
   });
 
   test('a customer with a booking pin is offered from that pin, not the city centre', async () => {
-    mockRows.customers = { id: CUSTOMER_ID, city: 'Sarasota' };
     mockBook.customerBookingLocation.mockResolvedValue({ lat: 27.31, lng: -82.49 });
     const out = await textOfferDays({ customerId: CUSTOMER_ID, city: 'Sarasota', serviceKey: 'lawn_care' });
-    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.31, lng: -82.49, serviceKey: 'lawn_care' });
+    expect(mockBook.bookableOfferCustomer).toHaveBeenCalledWith(CUSTOMER_ID, { internal: false });
+    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.31, lng: -82.49, serviceKey: 'lawn_care', internal: false });
     expect(out.pinSource).toBe('customer');
   });
 
   test('an estimate with no customer id on the call resolves the customer behind it', async () => {
     mockRows.estimates = { customer_id: CUSTOMER_ID };
-    mockRows.customers = { id: CUSTOMER_ID };
     mockBook.customerBookingLocation.mockResolvedValue({ lat: 27.2, lng: -82.45 });
     const out = await textOfferDays({ estimateId: ESTIMATE_ID });
-    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.2, lng: -82.45, serviceKey: 'pest_control' });
+    expect(mockBook.bookableOfferCustomer).toHaveBeenCalledWith(CUSTOMER_ID, { internal: false });
+    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.2, lng: -82.45, serviceKey: 'pest_control', internal: false });
     expect(out.pinSource).toBe('customer');
   });
 
-  test('a customer with no resolvable pin (staff review, no address) falls back to the city centre, never to a guess', async () => {
-    mockRows.customers = { id: CUSTOMER_ID };
-    const out = await textOfferDays({ customerId: CUSTOMER_ID, city: 'Venice' });
+  // Codex r1 P1 on #6073: an inactive account, or a blocked pre-customer stage
+  // under bookingCustomersOnly, cannot book on /book, so a text must not quote it
+  // times — and /book offers such a known customer nothing, so no city centre.
+  test('a customer /book would refuse (inactive, blocked pre-customer stage) gets NO times: no pin lookup, no city-centre fallback', async () => {
+    mockBook.bookableOfferCustomer.mockResolvedValue(null);
+    mockBook.customerBookingLocation.mockResolvedValue({ lat: 27.31, lng: -82.49 });
+    await expect(textOfferDays({ customerId: CUSTOMER_ID, city: 'Venice' })).resolves.toBeNull();
+    mockRows.estimates = { customer_id: CUSTOMER_ID };
+    await expect(textOfferDays({ estimateId: ESTIMATE_ID, city: 'Venice' })).resolves.toBeNull();
+    expect(mockBook.customerBookingLocation).not.toHaveBeenCalled();
+    expect(mockBook.availabilityForPin).not.toHaveBeenCalled();
+  });
+
+  test('the eligibility check is the ONE shared predicate from booking.js (no local copy of the active / stage rules)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduling/text-offer-times.js'), 'utf8');
+    expect(src).toContain('bookableOfferCustomer');
+    expect(src).not.toMatch(/active:\s*true|pipeline_stage|PRE_CUSTOMER/);
+  });
+
+  test('an eligible customer with no resolvable pin (staff review hold, no address) gets no times, not the city centre', async () => {
+    await expect(textOfferDays({ customerId: CUSTOMER_ID, city: 'Venice' })).resolves.toBeNull();
+    expect(mockBook.availabilityForPin).not.toHaveBeenCalled();
+  });
+
+  test('internal (the estimate converter): the sign-in rules are skipped, the public-funnel switch is skipped, and an ungeocodable address falls to the city centre', async () => {
+    const out = await textOfferDays({ customerId: CUSTOMER_ID, city: 'Venice', internal: true });
+    expect(mockBook.bookableOfferCustomer).toHaveBeenCalledWith(CUSTOMER_ID, { internal: true });
+    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.0998, lng: -82.4543, serviceKey: 'pest_control', internal: true });
     expect(out.pinSource).toBe('city_table');
-    expect(mockBook.availabilityForPin).toHaveBeenCalledWith(expect.objectContaining({ lat: 27.0998, lng: -82.4543 }));
   });
 
   test('no customer pin and no served city: nothing is offered and the engine is never asked', async () => {
@@ -181,7 +207,7 @@ describe('lead reply agent: check_next_availability', () => {
     process.env[GATE] = 'true';
     const out = await run();
     expect(mockOld.getAvailableSlots).not.toHaveBeenCalled();
-    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.4225, lng: -82.4082, serviceKey: 'pest_control' });
+    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.4225, lng: -82.4082, serviceKey: 'pest_control', internal: false });
     expect(out.city).toBe('Lakewood Ranch');
     expect(out.nextAvailable).toMatchObject({ date: '2026-10-08', dayOfWeek: 'Thu', firstSlot: '9:00 AM', slotCount: 3 });
     expect(out.options.map((d) => d.date)).toEqual(['2026-10-08', '2026-10-09']);
@@ -197,27 +223,38 @@ describe('lead reply agent: check_next_availability', () => {
 });
 
 describe('estimate converter: first service day', () => {
-  const { pickFirstServiceDate } = require('../services/estimate-converter');
+  const { pickFirstServiceDate, funnelKeyForEstimate } = require('../services/estimate-converter');
   const customer = { id: CUSTOMER_ID, city: 'Sarasota' };
 
   test('gate off: the old by-city engine picks the day', async () => {
-    await expect(pickFirstServiceDate(customer, ESTIMATE_ID)).resolves.toBe('2026-10-07');
+    await expect(pickFirstServiceDate(customer, ESTIMATE_ID, { serviceKey: 'pest_control' })).resolves.toBe('2026-10-07');
     expect(mockOld.getAvailableSlots).toHaveBeenCalledWith('Sarasota', ESTIMATE_ID);
     expect(mockBook.availabilityForPin).not.toHaveBeenCalled();
   });
 
-  test('gate on: the first day the website engine has a start for this customer', async () => {
+  test('gate on + a funnel service: the first day the website engine has a start, asked INTERNALLY for that estimate\'s service', async () => {
     process.env[GATE] = 'true';
-    mockRows.customers = { id: CUSTOMER_ID };
     mockBook.customerBookingLocation.mockResolvedValue({ lat: 27.31, lng: -82.49 });
-    await expect(pickFirstServiceDate(customer, ESTIMATE_ID)).resolves.toBe('2026-10-08');
+    await expect(pickFirstServiceDate(customer, ESTIMATE_ID, { serviceKey: 'lawn_care' })).resolves.toBe('2026-10-08');
     expect(mockOld.getAvailableSlots).not.toHaveBeenCalled();
-    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.31, lng: -82.49, serviceKey: 'pest_control' });
+    // Codex r1 P1 on #6073: internal skips GATE_SELF_BOOKING and the sign-in rules
+    // (staff scheduling must not depend on the public funnel); the service is the
+    // estimate's, not a default 60-minute pest visit.
+    expect(mockBook.bookableOfferCustomer).toHaveBeenCalledWith(CUSTOMER_ID, { internal: true });
+    expect(mockBook.availabilityForPin).toHaveBeenCalledWith({ lat: 27.31, lng: -82.49, serviceKey: 'lawn_care', internal: true });
+  });
+
+  test('gate on, an estimate the website engine cannot represent (no funnel service): the OLD engine keeps it', async () => {
+    process.env[GATE] = 'true';
+    await expect(pickFirstServiceDate(customer, ESTIMATE_ID, { serviceKey: '' })).resolves.toBe('2026-10-07');
+    await expect(pickFirstServiceDate(customer, ESTIMATE_ID)).resolves.toBe('2026-10-07');
+    expect(mockOld.getAvailableSlots).toHaveBeenCalledTimes(2);
+    expect(mockBook.availabilityForPin).not.toHaveBeenCalled();
   });
 
   test('gate on, an empty city and no customer pin: the + 7 days rule, not the old engine', async () => {
     process.env[GATE] = 'true';
-    const out = await pickFirstServiceDate({ id: null, city: '' }, ESTIMATE_ID);
+    const out = await pickFirstServiceDate({ id: null, city: '' }, ESTIMATE_ID, { serviceKey: 'pest_control' });
     expect(out).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     expect(mockOld.getAvailableSlots).not.toHaveBeenCalled();
     expect(mockBook.availabilityForPin).not.toHaveBeenCalled();
@@ -226,7 +263,31 @@ describe('estimate converter: first service day', () => {
   test('gate on, the engine throwing falls to the + 7 days rule instead of failing the acceptance', async () => {
     process.env[GATE] = 'true';
     mockBook.availabilityForPin.mockRejectedValue(new Error('engine down'));
-    const out = await pickFirstServiceDate({ id: null, city: 'Sarasota' }, ESTIMATE_ID);
+    const out = await pickFirstServiceDate({ id: null, city: 'Sarasota' }, ESTIMATE_ID, { serviceKey: 'pest_control' });
     expect(out).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  // Codex r1 P1 on #6073: the estimate's own service picks the funnel service.
+  describe('funnelKeyForEstimate', () => {
+    test('one funnel service across every sold recurring line maps through the explicit table', () => {
+      expect(funnelKeyForEstimate([{ service: 'Pest Control' }], {})).toBe('pest_control');
+      expect(funnelKeyForEstimate([{ service: 'Lawn Care' }, { serviceKey: 'lawn_care' }], {})).toBe('lawn_care');
+      expect(funnelKeyForEstimate([{ service_key: 'tree_shrub' }], {})).toBe('tree_shrub');
+      expect(funnelKeyForEstimate([{ service: 'Mosquito Control' }], {})).toBe('mosquito');
+    });
+
+    test('a multi-service plan, a combined plan or a service /book does not book is NOT representable (old engine)', () => {
+      expect(funnelKeyForEstimate([{ service: 'Pest Control' }, { service: 'Lawn Care' }], {})).toBe('');
+      expect(funnelKeyForEstimate([{ service: 'Pest Control' }, { service: 'Termite Bait Stations' }], {})).toBe('');
+      expect(funnelKeyForEstimate([{ service: 'Rodent Bait Stations' }], {})).toBe('');
+      expect(funnelKeyForEstimate([{ service: 'Palm Injection' }], {})).toBe('');
+      expect(funnelKeyForEstimate([{ service: 'Something Unmapped' }], {})).toBe('');
+    });
+
+    test('no recurring line: the estimate\'s own service name through the same table, else not representable', () => {
+      expect(funnelKeyForEstimate([], { service_interest: 'Lawn Care' })).toBe('lawn_care');
+      expect(funnelKeyForEstimate(undefined, { service_interest: 'One-off Wasp Removal' })).toBe('');
+      expect(funnelKeyForEstimate([], {})).toBe('');
+    });
   });
 });
