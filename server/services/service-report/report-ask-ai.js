@@ -559,7 +559,7 @@ const COMPACT_24H = /\b(?:at|around|about|by|after|before|until)\s+(?:[01]\d|2[0
 // A promised visit with no date ("We will be back soon", "the technician will
 // come back in the spring"): the model has no appointment to promise (Codex
 // P1 #5964 r25).
-const VISIT_PROMISE = /\b(?:we|we['’]ll|the\s+(?:tech|technician|team)|waves|someone|our\s+(?:team|technician|tech))\s+(?:will|['’]ll|are\s+going\s+to|is\s+going\s+to|plans?\s+to|can)?\s*(?:\w+\s+)?(?:return|come\s+back|be\s+back|revisit|visit\s+again|stop\s+by|come\s+out|check\s+back|follow\s+up|schedule)\b|\bin\s+a\s+fortnight\b/i;
+const VISIT_PROMISE = /\b(?:we|we['’]ll|the\s+(?:tech|technician|team)|waves|someone|our\s+(?:team|technician|tech))\s+(?:will|['’]ll|are\s+going\s+to|is\s+going\s+to|plans?\s+to|can)?\s*(?:\w+\s+)?(?:return|come\s+back|be\s+back|revisit|visit\s+again|stop\s+by|come\s+out|check\s+back|follow\s+up|schedule)\b|\bin\s+a\s+fortnight\b|\b(?:next|another|follow[\s-]?up|return|second|future)\s+(?:service|visit|treatment|appointment|follow[\s-]?up|stop)s?\b[^.?!]*\b(?:is|are|will|planned|scheduled|set|coming|soon|in\s+the|expected|due)\b|\b(?:a|the)\s+follow[\s-]?up\s+(?:is|will|was)\b|\bexpect\s+(?:another|a|your\s+next|the\s+next)\s+(?:visit|service|treatment|follow[\s-]?up)\b/i;
 const MONTH_MAY = /\b(?<!\d\s)(?:in|on|by|until|since|next|early|late|mid)[\s-]+(?:May|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\b\.?|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
@@ -575,7 +575,9 @@ const ASK_CHECKS = [
   ...ASK_EXTRA_BANNED.map(([rx, reason]) => [reason, (text) => rx.test(text)]),
   ['phone', (text) => otherPhoneNumbers(text).length > 0],
   ['forbidden_copy', (text) => !validateCustomerCopy(text)],
-  ['banned_copy', (text) => require('./activity-indicators').findBannedCustomerCopy(text).length > 0],
+  // The full report-copy screen (credential shapes included), not a subset
+  // (Codex P1 #5964 r27).
+  ['banned_copy', (text) => require('./technician-report-copy').customerCopyViolations(text).length > 0],
   ['compliance', (text) => require('../social-media').complianceLanguageIssues(text, { impliedTreatmentContext: true }).length > 0],
   ['target_list', leaksTargetList],
   ['states_a_date', (text) => [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, RELATIVE_OFFSET, MONTH_MAY, YEAR, VISIT_TIME_NUMBER, COMPACT_24H, VISIT_PROMISE].some((re) => re.test(text))],
@@ -678,7 +680,7 @@ const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_P
 // bait", "the bait was swallowed by John"): an eating verb and an exposure
 // word in one sentence, unless a pest is the one eating ("the ants ate the
 // bait") (Codex P1 #6016 r32). No subject list can name every person.
-const INGESTION_VERB = /\b(?:swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
+const INGESTION_VERB = /\b(?:bit|bites?|bitten|biting|mouthful|took\s+a\s+(?:bite|mouthful|sip|taste)|swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
 const EXPOSURE_WORD = /\b(?:bait\w*|spray\w*|pesticides?|chemicals?|granules?|granular|poison\w*|insecticides?|herbicides?|fungicides?|rodenticides?|products?|gel|pellets?|powder|dust|treatment|fertilizer)\b/i;
 // The pest is the eater only as the subject of the eating verb ("the ants ate
 // the bait", "eaten by the roaches"); a pest word right before a product word
@@ -695,7 +697,7 @@ const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\
 const NOT_A_NAME = '(?:was|were|is|are|did|does|do|has|have|had|be|been|got|what|why|how|when|where|which|who|will|can|could|should|the|this|that|these|those|some|any|it|its|a|an|and|or|but|then|also|just|bait\\w*|spray\\w*|products?|pesticides?|chemicals?|granules?|poison\\w*|gel|pellets?|powder|dust|treatment|insecticides?|herbicides?|fertilizer|nothing|everything|something|anything|ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)';
 const NAME = `(?!${NOT_A_NAME}\\b)[a-z][a-z'’-]+`;
 const PERSON = `(?:i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
-const INGEST = '(?:swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
+const INGEST = '(?:bit|bites?|biting|took\\s+a\\s+(?:bite|mouthful|sip|taste)|swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
 const EATER_ACTS = new RegExp(`(?:^|[^\\w])(?:${PERSON}\\s+(?:\\w+\\s+){0,2}?|${NAME}\\s+)${INGEST}\\b|\\bby\\s+(?:${PERSON}|${NAME})\\b`, 'i');
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence)
