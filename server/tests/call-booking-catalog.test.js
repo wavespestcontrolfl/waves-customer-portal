@@ -385,6 +385,31 @@ describe('Waves Assessment pick is the offered visit, not a placeholder (2026-10
     });
     expect(row?.service_key).toBe('pest_re_service');
   });
+
+  test('the assessment is known by its stable key even if its label changes', () => {
+    const renamed = { ...ASSESSMENT_ROW, name: 'Free Home Assessment' };
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Free Home Assessment', requested_service: 'rodent and termite plan' },
+      transcription: 'we have rodent boxes outside, can you come take a look',
+      services: [...CATALOG, renamed],
+    });
+    expect(row?.service_key).toBe('lawn_inspection');
+  });
+
+  test('an assessment never takes a quoted treatment price, so it is never invoiced', () => {
+    const priced = resolveCallBookingPrice({ quotedPrice: '$350', catalogRow: ASSESSMENT_ROW });
+    expect(priced).toEqual({ price: null, source: null });
+    expect(callBookingInvoiceOnComplete({ price: priced.price, catalogRow: ASSESSMENT_ROW })).toBe(false);
+  });
+
+  test('an assessment never books a follow-up treatment visit', () => {
+    expect(resolveCallFollowUpPlan({
+      extracted: { follow_up_visit_mentioned: true, follow_up_date_time: '2040-05-20T10:00' },
+      catalogRow: ASSESSMENT_ROW,
+      parentDate: '2040-05-01',
+      parentWindowStart: '09:00',
+    })).toBeNull();
+  });
 });
 
 describe('existing-customer revisit → covered re-service row (owner catalog rule)', () => {

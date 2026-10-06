@@ -200,8 +200,11 @@ function isGenericCallCatalogRow(row) {
     || GENERIC_CALL_CATALOG_ROW_RE.test(String(row.name || '').trim());
 }
 
-function isAssessmentCallCatalogRow(row) {
-  return !!row && /^waves assessment$/i.test(String(row.name || '').trim());
+// The canonical assessment identity (stable lawn_inspection key OR display
+// name). Lazy require: assessment-booking loads the db module, which this
+// otherwise-pure module must not load at import.
+function isAssessmentCatalogRow(row) {
+  return require('./assessment-booking').isAssessmentServiceRow(row);
 }
 
 function isReServiceCatalogRow(row) {
@@ -371,14 +374,10 @@ function resolveCallBookingCatalogService({
   // Computed before the re-service override so a concrete service keyword
   // ("rodent inspection re-visit", "roach re-treatment") anchors the real
   // specialty row, never a free re-service (codex #3222 r1 P2).
-  let keywordRow = null;
-  if (haystack) {
-    for (const rule of KEYWORD_SERVICE_RULES) {
-      if (!rule.matches(haystack)) continue;
-      const row = services.find((s) => s.service_key === rule.serviceKey);
-      if (row) { keywordRow = row; break; }
-    }
-  }
+  const keywordRow = KEYWORD_SERVICE_RULES
+    .filter((rule) => haystack && rule.matches(haystack))
+    .map((rule) => services.find((s) => s.service_key === rule.serviceKey))
+    .find(Boolean) || null;
 
   // Re-service override (see RE_SERVICE_INTENT_RE block above): AFFIRMATIVE
   // revisit intent from a LANE-ELIGIBLE customer anchors to the covered
@@ -430,14 +429,14 @@ function resolveCallBookingCatalogService({
   // Waves-Appointment pick books the inspection, not the generic anything-
   // row. A replaceable lane-family PLAN pick is still a SPECIFIC service the
   // model chose exactly — it keeps its precedence over keyword rules.
-  if (byModelPick && !isGenericCallCatalogRow(byModelPick)) return byModelPick;
   // A Waves Assessment pick is the visit the staff member offered ("let me
   // come out and take a look"), not a service-less placeholder: a passing
   // "rodent" in a pest + rodent + termite plan quote must not turn it into a
   // one-time rodent job (2026-10-05 call a12fd5ef). It stays generic above
   // only so the re-service override may still replace it.
-  if (isAssessmentCallCatalogRow(byModelPick)) return byModelPick;
-  return keywordRow || byModelPick || null;
+  const keywordMayReplacePick = !byModelPick
+    || (isGenericCallCatalogRow(byModelPick) && !isAssessmentCatalogRow(byModelPick));
+  return (keywordMayReplacePick && keywordRow) || byModelPick || null;
 }
 
 function sanitizeQuotedCallPrice(value) {
@@ -479,7 +478,10 @@ function resolveCallBookingPrice({ quotedPrice, catalogRow } = {}) {
   // visit's invoice amount (codex #3222 r2). Same shape the self-serve
   // callback insert uses: no price, and the insert stamps
   // create_invoice_on_complete false.
-  if (isReServiceCatalogRow(catalogRow)) {
+  // A Waves Assessment is the free look-before-quote visit: a treatment or
+  // plan price said on the same call is the quote, not this visit's charge.
+  // The forced-assessment path clears quoted_price for the same reason.
+  if (isReServiceCatalogRow(catalogRow) || isAssessmentCatalogRow(catalogRow)) {
     return { price: null, source: null };
   }
   if (!catalogRow || catalogRow.billing_type !== 'one_time') {
@@ -549,7 +551,10 @@ function isValidWindowTime(value) {
  * (default 14 days). Returns { scheduledDate, windowStart } or null.
  */
 function resolveCallFollowUpPlan({ extracted = {}, catalogRow = null, parentDate, parentWindowStart } = {}) {
-  if (!isValidCalendarDate(parentDate)) return null;
+  // A follow-up treatment talked about on an assessment call follows the
+  // quote, not the assessment (the forced-assessment path clears the same
+  // signals).
+  if (!isValidCalendarDate(parentDate) || isAssessmentCatalogRow(catalogRow)) return null;
 
   // A stated date only counts as a mention signal when it parses as a real
   // calendar date AND falls after the initial visit: the V1 normalizer merely
