@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import {
+  appendDictatedText,
   buildPhotoRecoveryOutcome,
   buildPhotoRetryFormBody,
   completionAutoCloseDelay,
@@ -139,5 +140,27 @@ describe("completionReportRulesPrompt", () => {
   it("ignores every other error", () => {
     expect(completionReportRulesPrompt({ code: "report_reconcile", message: "x" })).toBeNull();
     expect(completionReportRulesPrompt(null)).toBeNull();
+  });
+});
+
+describe("appendDictatedText", () => {
+  it("starts an empty notes box with the spoken words", () => {
+    expect(appendDictatedText("", "Treated the perimeter.")).toBe("Treated the perimeter.");
+  });
+
+  it("joins plain note text on the same line", () => {
+    expect(appendDictatedText("Treated the perimeter.", "Ants by the lanai.")).toBe("Treated the perimeter. Ants by the lanai.");
+  });
+
+  it("puts spoken words on a new line after a tagged chip line", () => {
+    for (const tag of ["Protocol", "Protocol optional", "Action", "Found", "Next"]) {
+      expect(appendDictatedText(`Note.\n[${tag}] Web sweep`, "Treated the perimeter.")).toBe(`Note.\n[${tag}] Web sweep\nTreated the perimeter.`);
+    }
+    expect(appendDictatedText("[Protocol]Web sweep  ", "Treated.")).toBe("[Protocol]Web sweep\nTreated.");
+  });
+
+  it("keeps later chunks on the spoken line", () => {
+    const first = appendDictatedText("[Protocol] Web sweep", "Treated the perimeter.");
+    expect(appendDictatedText(first, "Ants by the lanai.")).toBe("[Protocol] Web sweep\nTreated the perimeter. Ants by the lanai.");
   });
 });

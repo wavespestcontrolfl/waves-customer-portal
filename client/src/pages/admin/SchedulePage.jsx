@@ -359,6 +359,15 @@ function parseMarkerLine(line) {
   const match = String(line || "").trim().match(MARKER_LINE_RX);
   return match ? { tag: match[1].toLowerCase(), text: match[2].trim() } : null;
 }
+// Dictated words join the notes box's last line, except a tagged chip line
+// ([Protocol] Web sweep, [Found] …): joined there, the spoken note would be
+// read back as part of that completed action / finding at submit, and a
+// normal-length note trips the 240-character entry cap.
+export function appendDictatedText(notes, text) {
+  if (!notes) return text;
+  const lastLine = notes.slice(notes.lastIndexOf("\n") + 1);
+  return parseMarkerLine(lastLine) ? `${notes.trimEnd()}\n${text}` : `${notes} ${text}`;
+}
 function markerLines(notes) {
   return String(notes || "").split("\n").map(parseMarkerLine).filter(Boolean);
 }
@@ -12167,7 +12176,7 @@ export function CompletionPanel({
   const dictation = useSpeechDictation(
     (text) => {
       if (generating) return;
-      setNotes((b) => (b ? `${b} ${text}` : text));
+      setNotes((b) => appendDictatedText(b, text));
     },
     // GATE_TECH_DICTATION_UPLOAD: where the browser has no SpeechRecognition
     // (iOS home-screen PWA) the mic records a clip and the server transcribes
