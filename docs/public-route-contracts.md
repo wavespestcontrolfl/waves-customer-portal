@@ -6530,8 +6530,8 @@ shows it in the as-quoted state, and the `previewBasis` digest binds it so a
 one-time floor or multiplier change between preview and commit refuses the
 commit) as data. The
 picker's member judgement follows the accept's own order for an unlinked
-estimate: an accepted sibling in the property group hands over its customer
-first, then the phone match; strict and fail-closed. The commit sets `show_one_time_option` on a marked row from the lawn
+estimate: the shared `resolveGroupedEstimateOwnerId` (an accepted sibling's
+live customer) first, then the phone match; strict and fail-closed. The commit sets `show_one_time_option` on a marked row from the lawn
 line: on when lawn is removed (customer, or the staff send-time park) and
 the delivery validator allows the option on the repriced row; always off
 when lawn is added back, with the gate on or off — the one-time option never

@@ -17427,23 +17427,12 @@ async function offerTierMemberBlock(estimate, database = db) {
       return !!(await isActivePlanCustomer(database, estimate.customer_id, { strict: true }));
     }
     // The accept's own order for an unlinked estimate: an accepted sibling in
-    // the property group hands over its customer first; only then the phone.
-    if (estimate.estimate_group_id) {
-      const sibling = await database('estimates')
-        .where({ estimate_group_id: estimate.estimate_group_id })
-        .whereNot({ id: estimate.id })
-        .whereNotNull('customer_id')
-        .orderBy('accepted_at', 'asc')
-        .first('customer_id');
-      // The accept takes that owner only while the customer row is live
-      // (not soft-deleted); otherwise it falls through to the phone match,
-      // and so does this judgement.
-      const liveOwner = sibling?.customer_id
-        ? await database('customers').where({ id: sibling.customer_id }).whereNull('deleted_at').first('id')
-        : null;
-      if (liveOwner?.id) {
-        return !!(await isActivePlanCustomer(database, liveOwner.id, { strict: true }));
-      }
+    // the property group hands over its (live) customer first; only then the
+    // phone. One resolver for all readers (recurring-card-on-file), strict.
+    const { resolveGroupedEstimateOwnerId } = require('../services/recurring-card-on-file');
+    const groupedOwnerId = await resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true });
+    if (groupedOwnerId) {
+      return !!(await isActivePlanCustomer(database, groupedOwnerId, { strict: true }));
     }
     const { match } = await matchAcceptCustomerByPhone(estimate, database);
     return !!match && match.active !== false && isMembershipCustomerRow(match);

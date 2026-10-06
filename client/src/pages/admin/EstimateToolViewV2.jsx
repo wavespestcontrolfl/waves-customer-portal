@@ -4526,6 +4526,10 @@ export default function EstimateToolViewV2({
         // generate-then-save path saves a result this render has not stored
         // yet, and its form has not seen the auto-check either.
         offerTiers: !!nextFormForOfferTiers(form, E).offerTiers && E?.offerTiersAvailable === true,
+        // A staff uncheck, as distinct from the availability flag merely
+        // missing on a regenerated pest-only result: the server keeps a
+        // parked row's mark unless this is true.
+        offerTiersDeclined: !!form._offerTiersDeclined,
         billByInvoice: !!form.billByInvoice,
         // Explicit staff confirmation of a county-roll-flagged address
         // (never inferred from copied data — the server reads only this

@@ -126,10 +126,11 @@ function oneTimeOptionUpdateForMixChange({
  * mark stays valid: the office reopening it must still see (and keep) the
  * Good / Better / Best choice.
  */
-function offerTiersMarkedPestOnlyState(estData, { gateOn = offerTiersGateLive(), railGateOn = optOutRailGateLive() } = {}) {
-  // Dark feature: a mark saved earlier must not resurface the checkbox or
-  // survive a save while either gate is off.
-  if (!gateOn || !railGateOn) return false;
+// The HISTORICAL fact, read without any gate: a marked row whose lawn line
+// was removed through the rail and whose recurring rows are pest alone. The
+// opt-out history (the add-back path on the customer's token) must survive a
+// revision whatever the gates say; only the VISIBILITY of the tiers is gated.
+function offerTiersParkedHistory(estData) {
   if (!offerTiersRequested(estData)) return false;
   try {
     const OptOut = require('./estimate-service-opt-out');
@@ -141,7 +142,15 @@ function offerTiersMarkedPestOnlyState(estData, { gateOn = offerTiersGateLive(),
   }
 }
 
+function offerTiersMarkedPestOnlyState(estData, { gateOn = offerTiersGateLive(), railGateOn = optOutRailGateLive() } = {}) {
+  // Dark feature: a mark saved earlier must not resurface the checkbox or
+  // survive a save while either gate is off.
+  if (!gateOn || !railGateOn) return false;
+  return offerTiersParkedHistory(estData);
+}
+
 module.exports = {
+  offerTiersParkedHistory,
   offerTiersMarkedPestOnlyState,
   optOutRailGateLive,
   oneTimeOptionUpdateForMixChange,

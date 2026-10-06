@@ -2152,27 +2152,34 @@ async function resolveEstimateWritePayload({
     // The V2 revision payload rebuilds estimateData from the browser (inputs,
     // result, summary, engineRequest) and carries neither the opt-out history
     // nor the mark, so the parked state is judged on the ROW's stored data.
-    const storedParked = OfferTiers.offerTiersMarkedPestOnlyState(storedEstimateData);
+    // Read WITHOUT the gates: the history is a fact about the row.
+    const storedParkedHistory = OfferTiers.offerTiersParkedHistory(storedEstimateData);
+    let newKeys = [];
+    try { newKeys = OfferTiers.storedRecurringKeys(trustedEstimateData); } catch (_) { newKeys = []; }
+    const newResultPestOnly = newKeys.length === 1 && newKeys[0] === 'pest_control';
     // The revision replaces estimate_data wholesale, so a reopened parked row
-    // saved without lawn (a notes-only edit) keeps the ROW's opt-out history
-    // — the lawn removal and its add-back path on the customer's token. A
-    // revision whose new result carries lawn again put it back on purpose.
-    if (storedParked && !trustedEstimateData.serviceOptOut && storedEstimateData?.serviceOptOut) {
-      let newKeys = [];
-      try { newKeys = OfferTiers.storedRecurringKeys(trustedEstimateData); } catch (_) { newKeys = []; }
-      if (newKeys.length === 1 && newKeys[0] === 'pest_control') {
-        trustedEstimateData.serviceOptOut = storedEstimateData.serviceOptOut;
-        trustedEstimateData.offerTiersRequested = true;
-      }
+    // saved without lawn (a notes-only edit, or a re-priced pest-only result)
+    // keeps the ROW's opt-out history — the lawn removal and its add-back
+    // path on the customer's token — gates on or off. A revision whose new
+    // result carries lawn again put it back on purpose.
+    if (storedParkedHistory && newResultPestOnly && !trustedEstimateData.serviceOptOut && storedEstimateData?.serviceOptOut) {
+      trustedEstimateData.serviceOptOut = storedEstimateData.serviceOptOut;
     }
-    const markedPestOnly = OfferTiers.offerTiersMarkedPestOnlyState(trustedEstimateData)
-      || (storedParked && !!trustedEstimateData.serviceOptOut);
-    const tiersOk = body.offerTiers === true
-      && (markedPestOnly || (!showOneTimeOption
+    const parkedNow = storedParkedHistory && newResultPestOnly && !!trustedEstimateData.serviceOptOut;
+    // The MARK is gated: a dark deployment drops it (the history above stays).
+    const markedPestOnly = parkedNow
+      && OfferTiers.offerTiersMarkedPestOnlyState({ ...trustedEstimateData, offerTiersRequested: true });
+    // On a parked row the office checkbox cannot be re-derived from a fresh
+    // /calculate-estimate result (pest alone is "no_lawn" there), so the mark
+    // stays unless staff explicitly declined it (body.offerTiersDeclined);
+    // elsewhere the mark follows the checkbox as before.
+    const tiersOk = markedPestOnly
+      ? body.offerTiersDeclined !== true
+      : (body.offerTiers === true && !showOneTimeOption
         && OfferTiers.offerTiersSaveEligibility({
           estData: trustedEstimateData,
           commercial: isCommercialEstimateData(trustedEstimateData),
-        }).eligible === true));
+        }).eligible === true);
     if (tiersOk) trustedEstimateData.offerTiersRequested = true;
     else delete trustedEstimateData.offerTiersRequested;
   }

@@ -47,3 +47,14 @@ describe('nextFormForOfferTiers', () => {
     expect(nextFormForOfferTiers(form, { offerTiersAvailable: 1 })).toBe(form);
   });
 });
+
+describe('save body', () => {
+  it('sends offerTiersDeclined beside offerTiers so the server can tell a staff uncheck from a missing availability flag', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    // vitest runs from client/ locally and in CI; tolerate a repo-root cwd too
+    const candidates = ['src/pages/admin/EstimateToolViewV2.jsx', 'client/src/pages/admin/EstimateToolViewV2.jsx'].map((rel) => path.resolve(process.cwd(), rel));
+    const src = fs.readFileSync(candidates.find((f) => fs.existsSync(f)), 'utf8');
+    expect(src).toMatch(/offerTiersDeclined: !!form\._offerTiersDeclined,/);
+  });
+});
