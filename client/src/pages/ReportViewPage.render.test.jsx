@@ -1949,3 +1949,11 @@ describe('ReportViewPage — four-section report in the termite dashboard', () =
     expect(screen.queryByText('Next monitoring visit')).toBeNull();
   });
 });
+
+describe('print (Codex r2 on #6088)', () => {
+  it('the per-visit Reschedule control is hidden when the live view is printed', async () => {
+    const { default: src } = await import('./ReportViewPage.jsx?raw');
+    const printBlocks = src.split('@media print').slice(1).map((b) => b.slice(0, 2500));
+    expect(printBlocks.some((b) => /\.plan-visit-reschedule\s*\{\s*display:\s*none;/.test(b))).toBe(true);
+  });
+});

@@ -342,6 +342,18 @@ describe('per-visit rescheduleUrl (owner 2026-10-06, GATE_REPORT_PLAN_RESCHEDULE
     expect(buildRescheduleLink).not.toHaveBeenCalledWith('scheduled-soon', expect.anything());
   });
 
+  test('an unreviewed voice-agent booking (confirmed, customer_confirmed false) gets no link (codex #6088 r2)', async () => {
+    process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
+    process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';
+    buildRescheduleLink.mockImplementation(async (id) => ({ url: `https://short.test/l/${id}`, line: '' }));
+    const f = fixtures();
+    f.scheduled_services[1] = { ...f.scheduled_services[1], source_action: 'voice_agent', customer_confirmed: false };
+    const data = await buildReportV1Data(BASE_SERVICE, 'token-voice', makeKnex(f), LIVE);
+    const urls = Object.fromEntries(data.upcomingVisitsCard.visits.map((v) => [v.serviceType, v.rescheduleUrl]));
+    expect(urls['Lawn Care Treatment'] ?? null).toBeNull();
+    expect(buildRescheduleLink).not.toHaveBeenCalledWith('scheduled-lawn', expect.anything());
+  });
+
   test('a tooSoonToMove result is null even if a url were present', async () => {
     process.env.GATE_REPORT_UPCOMING_VISITS = 'true';
     process.env.GATE_REPORT_PLAN_RESCHEDULE = 'true';

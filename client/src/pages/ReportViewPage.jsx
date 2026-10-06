@@ -9433,6 +9433,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
              report content (the PDF has no equivalent). This comment
              renders into the page text, so it never quotes the CTA copy. */
           .reservice-card-cta { display: none; }
+          .plan-visit-reschedule { display: none; }
           /* The accordion is a control, not content: never print the
              "More information / Details" toggle bar or its frame. An open
              details (force-open on pdf/static, or customer-expanded on a
