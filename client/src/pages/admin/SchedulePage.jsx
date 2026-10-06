@@ -17051,7 +17051,12 @@ export function CompletionPanel({
       action.product?.id &&
       !selectedProducts.find((p) => p.productId === action.product.id)
     ) {
-      addProduct(action.prefillAmount === false ? { ...action.product, prefillAmount: false } : action.product);
+      addProduct({
+        ...action.product,
+        ...(action.prefillAmount === false ? { prefillAmount: false } : {}),
+        // A spot action (the bermuda removal mix, /completion-actions path) records as spot work.
+        ...(action.applicationMode === "spot" ? { applicationMode: "spot", applicationMethod: action.product.applicationMethod || "spot_treatment" } : {}),
+      });
     }
   }
   function handleOneTimeRecapOnlyChange(checked) {
@@ -17082,10 +17087,11 @@ export function CompletionPanel({
     // r6 P1) — under the protocol row's application mode: the catalog
     // category alone reads a broadcast herbicide (SpeedZone) as spot work, and
     // method, area requirement and rate prefill all follow the mode (r7 P1).
-    const catalogProduct = lawnDefaultsEnabled
+    const spotAction = product.applicationMode === "spot";
+    const catalogProduct = lawnDefaultsEnabled || spotAction
       ? products.find((row) => String(row.id) === String(product.id)) || product
       : product;
-    let row = buildSelectedProduct(lawnDefaultsEnabled && product.applicationMethod
+    let row = buildSelectedProduct((lawnDefaultsEnabled || spotAction) && product.applicationMethod
       ? { ...catalogProduct, application_method: product.applicationMethod }
       : catalogProduct);
     if (lawnDefaultsEnabled) {

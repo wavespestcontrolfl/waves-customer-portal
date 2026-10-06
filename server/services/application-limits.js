@@ -201,9 +201,19 @@ class ApplicationLimitChecker {
 
       case 'annual_max_rate': {
         if (limit.match_type === AI_CAP) return this.evaluateActiveIngredientCap(limit, product, { ...ctx, proposedDate }, database);
-        const totalApplied = history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || 0), 0);
+        const applied = history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || 0), 0);
         const maxRate = limitValue;
-        if (totalApplied >= maxRate * 0.95) return { violated: true, message: `${product.name}: cumulative ${totalApplied.toFixed(3)} ${limit.limit_unit} approaching/exceeding max ${maxRate}.`, current: totalApplied, max: maxRate };
+        // The bermuda removal row warns on the projected year, as the active-ingredient cap
+        // does: earlier sprays plus the one being planned (the staged rate) or recorded (the
+        // submitted rate), in the cap's own unit. Other rows judge recorded history only.
+        const proposed = isBermudaProgramRow(limit) && ctx.proposed
+          ? rateInUnit(ctx.proposed.ratePer1000, ctx.proposed.unit, capUnitOf(limit.limit_unit)) : null;
+        const adds = Number.isFinite(proposed) && proposed > 0 ? proposed : 0;
+        const totalApplied = applied + adds;
+        if (totalApplied >= maxRate * 0.95) {
+          const withThis = adds ? ` (${applied.toFixed(3)} recorded plus ${adds.toFixed(3)} for this application)` : '';
+          return { violated: true, message: `${product.name}: cumulative ${totalApplied.toFixed(3)} ${limit.limit_unit}${withThis} approaching/exceeding max ${maxRate}.`, current: totalApplied, max: maxRate };
+        }
         return { violated: false, current: totalApplied, max: maxRate };
       }
 

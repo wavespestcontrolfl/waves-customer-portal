@@ -1519,6 +1519,30 @@ it('selecting the bermuda removal group gives three spot rows with no suggested 
   for (const rate of screen.getAllByPlaceholderText('Rate').slice(2)) expect(rate.value).toBe('');
 });
 
+it('the /completion-actions fallback records every bermuda action as spot work, the surfactant included', async () => {
+  // Defaults off: the actions come from /completion-actions. A fertilizer-category product
+  // would default to a broadcast method; the action's spot mode overrides it.
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `fallback-${id}`, name: `Fallback ${id}`, category: 'fertilizer', rate_unit: 'fl_oz', default_rate_per_1000: 1 }));
+  completionActions = {
+    programKey: 'lawn', visit: { visit: 6, month: 'Jun' },
+    actions: mix.map((product) => ({
+      id: `fallback-action-${product.id}`, label: product.name, note: product.name, raw: product.name, scope: 'exterior', treatmentApplied: true,
+      product: { id: product.id, name: product.name }, group: 'bermuda_removal', bermudaStep: true, applicationMode: 'spot', prefillAmount: false,
+    })),
+  };
+  render(<CompletionPanel service={service} products={[...catalog, ...mix]} onClose={() => {}} onSubmit={submit} />);
+  await screen.findByRole('option', { name: 'Fallback nis' });
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'fallback-action-fallback-nis' } });
+  await waitFor(() => expect(screen.getAllByPlaceholderText('Total').length).toBeGreaterThanOrEqual(3));
+  // Each of the three rows (the surfactant too) is a spot row: the method select reads spot.
+  const rows = screen.getAllByPlaceholderText('Total').slice(-3);
+  expect(screen.getAllByPlaceholderText('Total')).toHaveLength(4);
+  for (const total of rows) {
+    expect(within(total.parentElement).getAllByRole('combobox')[2].value).toBe('spot_treatment');
+    expect(total.value).toBe('');
+  }
+});
+
 it('the bermuda removal mix options go on together and come off together', async () => {
   enableDefaults();
   const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal' }));

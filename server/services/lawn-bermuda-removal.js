@@ -257,6 +257,13 @@ const NOT_CONFIGURED_MESSAGE = 'Bermuda removal cannot be recorded: its applicat
 // The step products a completion submitted: { recognition, fusilade } (each a { id, name }
 // or null), matched by catalog ID; `unconfigured` is true when the program's tagged rows
 // are missing yet a step product is present by name (a completion check then refuses).
+// The rate a completion states for a product ({ ratePer1000, unit }), or null: the cap
+// warning projects the year with what was actually sprayed.
+function submittedRate(products, id) {
+  const entry = products.find((p) => String(p?.productId) === id);
+  return Number(entry?.rate) > 0 && entry?.rateUnit ? { ratePer1000: Number(entry.rate), unit: entry.rateUnit } : null;
+}
+
 async function submittedStepProducts(knex, products) {
   const none = { recognition: null, fusilade: null, unconfigured: false };
   if (!Array.isArray(products)) return none;
@@ -265,7 +272,10 @@ async function submittedStepProducts(knex, products) {
   const rows = await knex('products_catalog').whereIn('id', submitted).select('id', 'name');
   const ids = await stepProductIds(knex);
   if (ids.tagged) {
-    const byId = (id) => rows.find((row) => String(row.id) === id) || null;
+    const byId = (id) => {
+      const row = rows.find((candidate) => String(candidate.id) === id);
+      return row ? { ...row, proposed: submittedRate(products, id) } : null;
+    };
     return { recognition: byId(ids.recognition), fusilade: byId(ids.fusilade), unconfigured: false };
   }
   const byName = (key) => rows.find((row) => normalize(row.name) === key) || null;
@@ -319,6 +329,7 @@ async function capViolation(knex, visit, sprayed) {
   for (const product of sprayed) {
     const result = await limits.checkLimits(visit.customer_id, product.id, visit.scheduled_date, knex, {
       program: BERMUDA_GROUP, propertyId: visit.effective_property_id || null, excludeScheduledServiceId: visit.id,
+      ...(product.proposed ? { proposed: product.proposed } : {}),
     });
     if (result.blocks.length) return `${result.blocks[0].message} Bermuda removal cannot be recorded on this visit.`;
   }
@@ -327,11 +338,12 @@ async function capViolation(knex, visit, sprayed) {
 
 // Inside the completion transaction, right before the visit's application rows are
 // written: when the visit carries the step and a step product is being recorded, take a
-// transaction-scoped advisory lock keyed by the property (the customer when the visit
-// can be resolved; the property is resolved BEFORE locking: a propertyless visit of a
-// one-property customer locks on that sole property's key; the repo's
-// pg_advisory_xact_lock(hashtext, hashtext) idiom, as triage-locks),
-// then re-run the limit check on the SAME transaction. Two completions for one property
+// transaction-scoped advisory lock keyed by the CUSTOMER, always (the repo's
+// pg_advisory_xact_lock(hashtext, hashtext) idiom, as triage-locks). The history a cap
+// counts is still scoped per property, but a propertyless completion (judged against a
+// customer's sole or primary property) and a property-scoped one for the same customer
+// can read overlapping history, so every bermuda spray of one customer serializes on one key.
+// Then re-run the limit check on the SAME transaction. Two completions for one customer
 // serialize here, so the second sees the first's committed spray; a violation throws
 // code lawn_bermuda_limit_reached and the transaction rolls back. The preflight
 // (bermudaLimitViolation, before any write) stays; this closes the race after it.
@@ -356,7 +368,7 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   const visit = stepVisit || await resolvedVisitOf(trx, serviceId, { strict: true });
   if (!visit) return;
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-    [LOCK_NAMESPACE, visit.effective_property_id ? `property:${visit.effective_property_id}` : `customer:${visit.customer_id}`]);
+    [LOCK_NAMESPACE, `customer:${visit.customer_id}`]);
   const message = (unconfigured && stepVisit) ? NOT_CONFIGURED_MESSAGE : await capViolation(trx, visit, sprayed);
   if (message) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
 }

@@ -861,6 +861,29 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await knex('property_application_history').where({ customer_id: f.customerId, product_id: rec.id })).toHaveLength(2);
     });
 
+    test('a multi-property customer: a propertyless completion and a completion at another property serialize (the lock is the customer\'s)', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      const [other] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '200 Other Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      // One spray of unknown property: it counts at every property (1 of 2 used).
+      const [prior] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: null, scheduled_date: '2026-03-01', service_type: 'Lawn fixture' }).returning('*');
+      await ledger(knex, f, prior, '2026-03-01');
+      const [propertyless] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: null, scheduled_date: '2026-06-20', service_type: 'Lawn fixture' }).returning('*');
+      const [explicit] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: other.id, scheduled_date: '2026-06-20', service_type: 'Lawn fixture' }).returning('*');
+      const run = (visit) => knex.transaction(async (trx) => {
+        await enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: visit.id });
+        await sleep(400);
+        await ledger(trx, f, visit, '2026-06-20');
+      });
+      // The propertyless completion (judged for the primary property) takes the lock first;
+      // the other property's completion waits, then counts its spray (unknown property counts everywhere).
+      const first = run(propertyless);
+      await sleep(150);
+      const results = await Promise.allSettled([first, run(explicit)]);
+      expect(results[0].status).toBe('fulfilled');
+      expect(results[1]).toMatchObject({ status: 'rejected', reason: { code: 'lawn_bermuda_limit_reached' } });
+    });
+
     test('the propertyless visit is judged against that sole property\'s history', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-20', bermuda: true });
@@ -916,6 +939,21 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       return { f, other, ledger };
     }
     const check = (f, propertyId, extra = {}, product = rec) => limits.checkLimits(f.customerId, product.id, '2026-06-20', knex, { program: 'bermuda_removal', propertyId, ...extra });
+
+    test('the label-rate warning counts the application being planned: 0.12 recorded + 0.03 planned warns, 0.12 alone does not', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await knex('property_application_history').insert(['2026-03-01', '2026-04-20'].map((application_date) => ({
+        customer_id: f.customerId, product_id: rec.id, application_date, application_rate: 0.06, rate_unit: 'oz',
+      })));
+      const rateWarnings = (result) => result.warnings.filter((w) => w.type === 'annual_max_rate');
+      expect(rateWarnings(await check(f, f.property.id))).toHaveLength(0);
+      const planned = rateWarnings(await check(f, f.property.id, { proposed: { ratePer1000: 0.03, unit: 'oz' } }));
+      expect(planned).toHaveLength(1);
+      expect(planned[0].message).toMatch(/cumulative 0\.150 oz\/1000sf\/year.*max 0\.1437/);
+      // A rate stated in a unit that is not the cap's basis is not counted.
+      expect(rateWarnings(await check(f, f.property.id, { proposed: { ratePer1000: 0.03, unit: 'fl oz/gal' } }))).toHaveLength(0);
+    });
 
     test('the rows apply only to a caller that names the program; compliance and every other caller ignore them', async () => {
       const f = await lawn({ date: '2026-06-20', bermuda: true });
