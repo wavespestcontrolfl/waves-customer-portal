@@ -4541,6 +4541,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_pair_required'), db);
         return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
       }
+      // The step's own limits (a 3rd spray this calendar year, or fewer than 42 days after
+      // the last one at that property), judged the way the plan judges them.
+      const bermudaLimitMessage = await require('./lawn-bermuda-removal').bermudaLimitViolation(db, products, { serviceId: completionInput.serviceId });
+      if (bermudaLimitMessage) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_limit_reached'), db);
+        return { status: 400, body: { error: bermudaLimitMessage, code: 'lawn_bermuda_limit_reached' } };
+      }
       const companionValidationError = runCompanionValidation();
       if (companionValidationError) {
         await CompletionAttempts.markCompletionAttemptFailed(

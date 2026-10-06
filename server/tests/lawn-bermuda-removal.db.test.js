@@ -13,7 +13,7 @@ const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const rowsMigration = require('../models/migrations/20261006190100_lawn_bermuda_removal_rows');
 const programMigration = require('../models/migrations/20261006190300_lawn_bermuda_removal_limit_program');
 const auditMigration = require('../models/migrations/20261006190200_lawn_bermuda_removal_audit');
-const { bermudaPairViolation } = require('../services/lawn-bermuda-removal');
+const { bermudaPairViolation, bermudaLimitViolation } = require('../services/lawn-bermuda-removal');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
@@ -467,6 +467,66 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
     });
   });
 
+  describe('completion: the step\'s own limits (fresh attempts)', () => {
+    const submitted = (...items) => items.map((item) => ({ productId: item.id }));
+    const spray = async (customerId, propertyId, date) => {
+      const [visit] = await knex('scheduled_services').insert({ customer_id: customerId, property_id: propertyId, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+      const [record] = await knex('service_records').insert({ customer_id: customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+      await knex('property_application_history').insert({ customer_id: customerId, product_id: rec.id, application_date: date, service_record_id: record.id });
+      return visit;
+    };
+
+    test('a 3rd spray this calendar year is refused with the limit message', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await spray(f.customerId, f.property.id, '2026-03-01');
+      await spray(f.customerId, f.property.id, '2026-04-20');
+      const message = await bermudaLimitViolation(knex, submitted(rec, fus, nis), { serviceId: f.visit.id });
+      expect(message).toMatch(/2\/2 applications this year — LIMIT REACHED/);
+    });
+
+    test('a spray fewer than 42 days after the last one at that property is refused; 42 days is allowed', async () => {
+      setGates();
+      const early = await lawn({ date: '2026-06-10', bermuda: true });
+      await spray(early.customerId, early.property.id, '2026-04-30');
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: early.visit.id })).toMatch(/only 41 days since last app \(min 42\)/);
+      const ok = await lawn({ date: '2026-06-11', bermuda: true });
+      await spray(ok.customerId, ok.property.id, '2026-04-30');
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: ok.visit.id })).toBeNull();
+    });
+
+    test('another property\'s sprays and this visit\'s own earlier rows do not count; a retry of the visit is not judged against itself', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      const [other] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '400 Other Street', city: 'Fixture City', zip: '34201', is_primary: false }).returning('*');
+      await spray(f.customerId, other.id, '2026-03-01');
+      await spray(f.customerId, other.id, '2026-04-20');
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
+      // This visit's own ledger row (a first attempt) is left out.
+      const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: f.visit.id, service_date: '2026-06-20', service_type: 'Lawn fixture' }).returning('*');
+      await knex('property_application_history').insert({ customer_id: f.customerId, product_id: rec.id, application_date: '2026-06-20', service_record_id: record.id });
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
+    });
+
+    test('a visit that does not carry the step, no step product, gate off and v13 off are never refused', async () => {
+      setGates();
+      const unflagged = await lawn({ date: '2026-06-20' });
+      await spray(unflagged.customerId, unflagged.property.id, '2026-03-01');
+      await spray(unflagged.customerId, unflagged.property.id, '2026-04-20');
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: unflagged.visit.id })).toBeNull();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await spray(f.customerId, f.property.id, '2026-03-01');
+      await spray(f.customerId, f.property.id, '2026-04-20');
+      expect(await bermudaLimitViolation(knex, submitted(nis), { serviceId: f.visit.id })).toBeNull();
+      expect(await bermudaLimitViolation(knex, [], { serviceId: f.visit.id })).toBeNull();
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toMatch(/LIMIT REACHED/);
+      setGates({ removal: false });
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
+      setGates({ v13: false });
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
+    });
+  });
+
   describe('application limits: the bermuda removal rows (20261006190300)', () => {
     const limits = require('../services/application-limits');
     const rowsFor = (product) => knex('product_limits').where({ product_id: product.id });
@@ -554,6 +614,20 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await ledger(f.property.id, '2026-06-10');
       const [mine] = await knex('scheduled_services').where({ property_id: f.property.id, scheduled_date: '2026-06-10' });
       expect((await check(f, f.property.id, { excludeScheduledServiceId: mine.id })).blocks).toEqual([]);
+    });
+
+    test('history is bounded at the date judged: an April plan rebuilt after a June spray is not withheld', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-04-14', bermuda: true });
+      await history(f.customerId, rec, ['2026-03-01', '2026-06-10', '2026-06-20']);
+      const april = await limits.checkLimits(f.customerId, rec.id, '2026-04-14', knex, { program: 'bermuda_removal', propertyId: f.property.id });
+      expect(april.blocks).toEqual([]);
+      // One earlier spray counts normally; both June sprays count from June on.
+      const june = await limits.checkLimits(f.customerId, rec.id, '2026-07-01', knex, { program: 'bermuda_removal', propertyId: f.property.id });
+      expect(june.blocks.map((b) => b.type)).toEqual(expect.arrayContaining(['annual_max_apps']));
+      const planned = await plan(f.visit);
+      expect(codes(planned)).not.toContain('lawn_v13_annual_limit');
+      expect(planned.propertyGate.warnings.map((w) => w.code)).not.toContain('lawn_bermuda_step_unavailable');
     });
 
     test('every other product keeps whole-customer history, property named or not', async () => {

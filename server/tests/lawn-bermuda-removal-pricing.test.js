@@ -7,7 +7,7 @@
  * minutes at the $35 loaded labor rate; two sprays a year.
  */
 const { priceLawnCare } = require('../services/pricing-engine/service-pricing');
-const { LAWN_BERMUDA_REMOVAL_COST } = require('../services/pricing-engine/constants');
+const { LAWN_PRICING_V2, BERMUDA_SUPPRESSION_COST_DEFAULTS } = require('../services/pricing-engine/constants');
 
 const PROPERTY_5K = { turfSf: 5000 };
 // 2 x (4.50 x 5 + ((10 + 2.5 x 5) / 60) x 35) = 2 x (22.5 + 13.125)
@@ -24,9 +24,92 @@ describe('lawn bermuda removal pricing', () => {
   });
   const price = (track, bermudaSuppression = true) => priceLawnCare(PROPERTY_5K, { track, tier: 'enhanced', bermudaSuppression });
 
-  test('the cost constants are the owner prices of 2026-10-06 ($2.82 + $1.61 + $0.07 per 1,000 sq ft)', () => {
-    expect(LAWN_BERMUDA_REMOVAL_COST).toMatchObject({ spraysPerYear: 2, productPer1000Sqft: 4.5, laborMinutesBase: 10, laborMinutesPer1000Sqft: 2.5 });
+  test('the code defaults are the owner prices of 2026-10-06 ($2.82 + $1.61 + $0.07 per 1,000 sq ft) and sit in the lawn pricing config', () => {
+    expect(BERMUDA_SUPPRESSION_COST_DEFAULTS).toEqual({ recognitionPer1000: 2.82, fusiladePer1000: 1.61, surfactantPer1000: 0.07, mixMinutes: 10, minutesPer1000: 2.5 });
+    expect(LAWN_PRICING_V2.bermudaSuppression.cost).toEqual(BERMUDA_SUPPRESSION_COST_DEFAULTS);
     expect(Math.round((0.03 * 94 + 0.55 * (93.88 / 32) + 0.07) * 100) / 100).toBe(4.5);
+  });
+
+  describe('the cost is read from the lawn pricing config at call time (an admin edit needs no deploy)', () => {
+    const saved = JSON.stringify(LAWN_PRICING_V2.bermudaSuppression);
+    afterEach(() => { LAWN_PRICING_V2.bermudaSuppression = JSON.parse(saved); });
+    const cost = () => price('st_augustine').costs.annualBermudaRemoval;
+
+    test('an edited price or minutes changes the cost on the next call', () => {
+      process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
+      expect(cost()).toBe(COST_5K);
+      LAWN_PRICING_V2.bermudaSuppression.cost.recognitionPer1000 = 3.82; // +$1 per 1,000 sq ft
+      expect(cost()).toBe(Math.round((COST_5K + 2 * 1 * 5) * 100) / 100);
+      LAWN_PRICING_V2.bermudaSuppression.cost.mixMinutes = 70; // +60 min = +$35 per spray
+      expect(cost()).toBe(Math.round((COST_5K + 10 + 2 * 35) * 100) / 100);
+    });
+
+    test('a row without the cost block, or with a bad value, reads the code default', () => {
+      process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
+      delete LAWN_PRICING_V2.bermudaSuppression.cost;
+      expect(cost()).toBe(COST_5K);
+      LAWN_PRICING_V2.bermudaSuppression.cost = { recognitionPer1000: 'x', fusiladePer1000: -1, surfactantPer1000: 0, mixMinutes: null };
+      expect(cost()).toBe(COST_5K);
+    });
+
+  });
+
+  // The real sync over a pricing_config row, rolled back after each test.
+  (process.env.DATABASE_URL ? describe : describe.skip)('db-bridge sync of the cost block (PostgreSQL)', () => {
+    const db = require('../models/db');
+    const bridge = require('../services/pricing-engine/db-bridge');
+    afterAll(async () => { await db.destroy(); });
+
+    async function syncWith(mutate) {
+      const trx = await db.transaction();
+      try {
+        const row = await trx('pricing_config').where({ config_key: 'lawn_pricing_v2' }).first();
+        const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data;
+        mutate(data);
+        await trx('pricing_config').where({ config_key: 'lawn_pricing_v2' }).update({ data: JSON.stringify(data) });
+        expect(await bridge.syncConstantsFromDB(trx)).toBe(true);
+        return JSON.parse(JSON.stringify(LAWN_PRICING_V2.bermudaSuppression));
+      } finally {
+        await trx.rollback();
+      }
+    }
+
+    test('an edit on the row overlays the defaults; the knobs it kept stay; a row without the block gets the defaults', async () => {
+      const edited = await syncWith((data) => { data.bermudaSuppression = { perAppBase: 15, perAppPer1000Sqft: 2, cost: { ...BERMUDA_SUPPRESSION_COST_DEFAULTS, recognitionPer1000: 9.99 } }; });
+      expect(edited).toMatchObject({ perAppBase: 15, perAppPer1000Sqft: 2, cost: { recognitionPer1000: 9.99, fusiladePer1000: 1.61, mixMinutes: 10 } });
+      const partial = await syncWith((data) => { data.bermudaSuppression = { perAppBase: 15, perAppPer1000Sqft: 2, cost: { mixMinutes: 20 } }; });
+      expect(partial.cost).toEqual({ ...BERMUDA_SUPPRESSION_COST_DEFAULTS, mixMinutes: 20 });
+      const bare = await syncWith((data) => { data.bermudaSuppression = { perAppBase: 15, perAppPer1000Sqft: 2 }; });
+      expect(bare.cost).toEqual(BERMUDA_SUPPRESSION_COST_DEFAULTS);
+      // Key gone entirely: rebased to the code defaults, never the earlier edit.
+      const gone = await syncWith((data) => { delete data.bermudaSuppression; });
+      expect(gone).toEqual({ perAppBase: 15, perAppPer1000Sqft: 2, cost: BERMUDA_SUPPRESSION_COST_DEFAULTS });
+    });
+  });
+
+  describe('admin pricing-config validation of the cost block', () => {
+    const { validatePricingConfigData } = require('../routes/admin-pricing-config');
+    const knobs = { perAppBase: 15, perAppPer1000Sqft: 2 };
+    const full = { recognitionPer1000: 3, fusiladePer1000: 2, surfactantPer1000: 0.1, mixMinutes: 12, minutesPer1000: 3 };
+    const ok = (cost) => validatePricingConfigData('lawn_pricing_v2', { bermudaSuppression: { ...knobs, cost } }, null);
+
+    test('accepts a full block of positive numbers, and a row with no cost block', () => {
+      expect(ok(full).ok).toBe(true);
+      expect(validatePricingConfigData('lawn_pricing_v2', { bermudaSuppression: knobs }, null).ok).toBe(true);
+    });
+
+    test.each([
+      ['a numeric string', { ...full, mixMinutes: '10' }],
+      ['zero', { ...full, fusiladePer1000: 0 }],
+      ['negative', { ...full, recognitionPer1000: -1 }],
+      ['too large', { ...full, minutesPer1000: 5000 }],
+      ['a missing key', (({ mixMinutes, ...rest }) => rest)(full)],
+      ['an unknown key', { ...full, extra: 1 }],
+      ['not an object', 5],
+      ['an array', []],
+    ])('rejects %s', (_label, cost) => {
+      expect(ok(cost).ok).toBe(false);
+    });
   });
 
   describe('the estimate add-on stays St. Augustine only (owner has given no Zoysia wording)', () => {

@@ -177,26 +177,60 @@ const BERMUDA_GROUP = 'bermuda_removal';
 // the visit. Returns the refusal message, or null. Gate off: always null.
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-async function bermudaPairViolation(knex, products, { serviceId } = {}) {
-  if (!bermudaRemovalLive() || !Array.isArray(products)) return null;
-  const ids = [...new Set(products.map((p) => p?.productId).filter(Boolean).map(String))];
-  if (!ids.length) return null;
-  const rows = await knex('products_catalog').whereIn('id', ids).select('name');
-  const names = new Set(rows.map((row) => normalize(row.name)));
-  const hasRecognition = names.has(RECOGNITION_KEY);
-  const hasFusilade = names.has(FUSILADE_KEY);
-  if (hasRecognition === hasFusilade) return null;
-  // One of the two alone: judged only when this visit carries the step.
+// The visit when it carries the step (the checks above), else null.
+async function stepVisitOf(knex, serviceId) {
   if (featureGates.lawnV13Live?.() !== true || !UUID_RE.test(String(serviceId || ''))) return null;
-  const visit = await knex('scheduled_services').where({ id: serviceId }).first('customer_id', 'property_id', 'scheduled_date');
+  const visit = await knex('scheduled_services').where({ id: serviceId }).first('id', 'customer_id', 'property_id', 'scheduled_date');
   if (!visit?.customer_id || !visit.scheduled_date) return null;
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type');
   const month = MONTH_ABBR[Number(require('../utils/datetime-et').etCalendarDayOf(visit.scheduled_date).slice(5, 7)) - 1];
   const step = await stepForVisit(knex, visit, { trackKey: profileTrack(profile), month });
-  if (!step.active) return null;
-  return hasRecognition
+  return step.active ? visit : null;
+}
+
+// The catalog rows a completion submitted, by step product: { recognition, fusilade }
+// (each a { id, name } or null).
+async function submittedStepProducts(knex, products) {
+  if (!Array.isArray(products)) return { recognition: null, fusilade: null };
+  const ids = [...new Set(products.map((p) => p?.productId).filter(Boolean).map(String))];
+  if (!ids.length) return { recognition: null, fusilade: null };
+  const rows = await knex('products_catalog').whereIn('id', ids).select('id', 'name');
+  const find = (key) => rows.find((row) => normalize(row.name) === key) || null;
+  return { recognition: find(RECOGNITION_KEY), fusilade: find(FUSILADE_KEY) };
+}
+
+async function bermudaPairViolation(knex, products, { serviceId } = {}) {
+  if (!bermudaRemovalLive()) return null;
+  const { recognition, fusilade } = await submittedStepProducts(knex, products);
+  if (Boolean(recognition) === Boolean(fusilade)) return null;
+  // One of the two alone: judged only when this visit carries the step.
+  if (!(await stepVisitOf(knex, serviceId))) return null;
+  return recognition
     ? 'Recognition goes on with Fusilade II in the bermuda removal mix. Add Fusilade II too, or take Recognition off this visit.'
     : 'Fusilade II is never applied without Recognition. Add Recognition too, or take Fusilade II off this visit.';
+}
+
+// Completion check, beside the pair check (fresh attempts only): a step spray on a
+// step visit that would be the 3rd this calendar year or fewer than 42 days after the
+// last one at that property is refused with the limit's own message. Judged through
+// the same checkLimits path and program as the plan, bounded at the visit's date and
+// leaving this visit's own rows out. Returns the message, or null. Gate off, another
+// visit or no step product submitted: always null.
+async function bermudaLimitViolation(knex, products, { serviceId } = {}) {
+  if (!bermudaRemovalLive()) return null;
+  const { recognition, fusilade } = await submittedStepProducts(knex, products);
+  const sprayed = [recognition, fusilade].filter(Boolean);
+  if (!sprayed.length) return null;
+  const visit = await stepVisitOf(knex, serviceId);
+  if (!visit) return null;
+  const limits = require('./application-limits');
+  for (const product of sprayed) {
+    const result = await limits.checkLimits(visit.customer_id, product.id, visit.scheduled_date, knex, {
+      program: BERMUDA_GROUP, propertyId: visit.property_id || null, excludeScheduledServiceId: visit.id,
+    });
+    if (result.blocks.length) return `${result.blocks[0].message} Bermuda removal cannot be recorded on this visit.`;
+  }
+  return null;
 }
 
 // The step's lines are marked when the recipe lines are parsed, so every later
@@ -253,5 +287,5 @@ module.exports = {
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
   markStepLines, isStepLine, isRecognitionLine, isFusiladeLine,
   selectStepAtomically, settleStep,
-  stepForVisit, BERMUDA_GROUP, bermudaPairViolation,
+  stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation,
 };

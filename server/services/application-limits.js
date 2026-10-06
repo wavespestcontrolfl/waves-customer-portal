@@ -122,7 +122,7 @@ class ApplicationLimitChecker {
     for (const limit of allLimits) {
       let limitHistory = history;
       if (isBermudaProgramRow(limit)) {
-        if (!bermudaHistory) bermudaHistory = await this.propertyHistory(database, { customerId, yearStart, ...opts });
+        if (!bermudaHistory) bermudaHistory = await this.propertyHistory(database, { customerId, yearStart, proposedDate, ...opts });
         limitHistory = bermudaHistory;
       }
       const check = await this.evaluateLimit(limit, limitHistory, moaHistory, proposedDate, product, database, { customerId, yearStart, ...opts });
@@ -147,12 +147,15 @@ class ApplicationLimitChecker {
   // marker, for both products), the treated property's rows plus rows with an unknown
   // property (no property: the whole customer), leaving out the visit being planned or
   // rebuilt.
-  async propertyHistory(database, { customerId, yearStart, propertyId, excludeScheduledServiceId }) {
+  async propertyHistory(database, { customerId, yearStart, proposedDate, propertyId, excludeScheduledServiceId }) {
     const query = database('property_application_history as pah')
       .join('products_catalog as counted', 'counted.id', 'pah.product_id')
       .where({ 'pah.customer_id': customerId })
       .where('counted.name', BERMUDA_COUNTED_PRODUCT)
       .where('pah.application_date', '>=', yearStart)
+      // On or before the date judged, as the active-ingredient cap does: a plan rebuilt for
+      // April is not withheld by a June spray that had not happened yet.
+      .where('pah.application_date', '<=', etCalendarDayOf(proposedDate))
       .whereNull('pah.retracted_at');
     if (propertyId) scopeToProperty(query, propertyId);
     if (excludeScheduledServiceId) {

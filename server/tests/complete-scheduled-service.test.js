@@ -597,6 +597,32 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
     expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
   });
 
+  describe('the step limits (a 3rd spray this year, or fewer than 42 days after the last)', () => {
+    let limit;
+    beforeEach(() => {
+      pair.mockResolvedValue(null);
+      limit = jest.spyOn(removal, 'bermudaLimitViolation').mockResolvedValue('Recognition Post Emergent Herbicide: 2/2 applications this year — LIMIT REACHED. Bermuda removal cannot be recorded on this visit.');
+    });
+    afterEach(() => limit.mockRestore());
+
+    test('a fresh attempt is refused with 400 lawn_bermuda_limit_reached and the limit message', async () => {
+      const completionAttempt = { id: 'fixture-attempt' };
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+      const result = await complete({ products: [] });
+      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_limit_reached', error: expect.stringContaining('LIMIT REACHED') } });
+      expect(limit).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID });
+      expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
+    });
+
+    test('a replay and a resume never run the limit check', async () => {
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'replay', payload: { success: true } });
+      await complete({ products: [] });
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'resume', attempt: { id: 'fixture-attempt' }, releasedForResume: false });
+      try { await complete({ products: [] }); } catch { /* the resume proceeds into the committed flow */ }
+      expect(limit).not.toHaveBeenCalled();
+    });
+  });
+
   test('a resume of a committed completion is never refused by the check, even after the account was flagged', async () => {
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'resume', attempt: { id: 'fixture-attempt' }, releasedForResume: false });
     let result;

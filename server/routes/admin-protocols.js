@@ -1249,9 +1249,9 @@ router.get('/completion-actions', async (req, res, next) => {
     // GATE_LAWN_BERMUDA_REMOVAL: with `scheduledServiceId`, a visit whose account asked
     // for bermuda removal gets the April / June step's three lines (the server reads
     // the account, as the plan does). Gate off or no visit: the old actions.
-    const bermudaStep = programKey === 'lawn' && lawnV13On()
-      ? await bermudaRemoval.stepForVisit(db, await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q)), { trackKey: track, month })
-      : null;
+    const bermudaVisit = programKey === 'lawn' && lawnV13On()
+      ? await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q)) : null;
+    const bermudaStep = bermudaVisit ? await bermudaRemoval.stepForVisit(db, bermudaVisit, { trackKey: track, month }) : null;
     const bermudaAddOn = bermudaStep?.active ? bermudaStep.addOn : null;
     const conditionalLines = [
       ...parseProtocolLines(visit.secondary, 'conditional', { exactName }),
@@ -1266,9 +1266,26 @@ router.get('/completion-actions', async (req, res, next) => {
     });
     // The step's three actions share one group id, so the client adds and removes
     // them together (actions are built one per line, in line order).
-    const actions = bermudaAddOn
+    let actions = bermudaAddOn
       ? builtActions.map((action, index) => (actionLines[index].bermudaStep ? { ...action, group: bermudaRemoval.BERMUDA_GROUP } : action))
       : builtActions;
+    // The same step check the plan and the tank sheet make: when Recognition or Fusilade II
+    // is capped or too soon for this property (or any of the three has no catalog product),
+    // none of the three removal actions is offered, with a warning.
+    const bermudaWarnings = [];
+    if (bermudaAddOn) {
+      const stepActions = actions.filter((action) => action.group === bermudaRemoval.BERMUDA_GROUP);
+      const probe = await v13VisitLimits(db, bermudaVisit,
+        stepActions.filter((action) => action.product && (bermudaRemoval.isRecognitionLine(action) || bermudaRemoval.isFusiladeLine(action)))
+          .map((action) => ({ selected: true, bermudaStep: true, product: { id: action.product.id, name: action.product.name } })), new Map());
+      if (probe.capped.size > 0 || stepActions.some((action) => !action.product?.id)) {
+        actions = actions.filter((action) => action.group !== bermudaRemoval.BERMUDA_GROUP);
+        bermudaWarnings.push({
+          code: 'lawn_bermuda_step_unavailable', severity: 'warning',
+          message: 'Bermuda removal is not offered on this visit: Recognition, Fusilade II and the surfactant go together, and one of them is blocked, too soon after the last spray, or has no catalog product.',
+        });
+      }
+    }
     // GATE_LAWN_V13: this fallback never sizes a lawn product from the catalog defaults
     // (January Nutra-TECH is 6 fl oz in the v13 program, not the catalog's 12; spot
     // products have no amount). Amounts come from the visit plan's completion defaults,
@@ -1290,6 +1307,7 @@ router.get('/completion-actions', async (req, res, next) => {
         objective: visit.notes,
       },
       actions,
+      ...(bermudaWarnings.length ? { warnings: bermudaWarnings } : {}),
       ...v13Extra,
     }));
   } catch (err) { next(err); }

@@ -2,7 +2,7 @@
 // service-pricing.js — All service line pricing calculations
 // ============================================================
 const {
-  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_BERMUDA_REMOVAL_COST, LAWN_FREQS,
+  GLOBAL, PROPERTY_TYPE_ADJ, PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, BERMUDA_SUPPRESSION_COST_DEFAULTS, LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR, LAWN_FREQS,
   LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY, GRASS_TYPE_ALIASES, LAWN_BRACKETS,
   LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
@@ -2107,16 +2107,29 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
   };
 }
 
-// Annual cost of the bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL), for
-// margin reporting only: spraysPerYear x (product cost over the whole lawn +
-// labor). See LAWN_BERMUDA_REMOVAL_COST for the price sources.
+// Annual cost of the bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL), for margin
+// reporting only: sprays per year x (product cost over the whole lawn + labor). The
+// prices and minutes are LAWN_PRICING_V2.bermudaSuppression.cost, read here at call
+// time, so a pricing_config edit changes the cost with no deploy (see
+// BERMUDA_SUPPRESSION_COST_DEFAULTS for the sources). A key the row lacks or holds as a
+// non-number or non-positive value reads as its code default.
+function bermudaRemovalCostConfig() {
+  const row = LAWN_PRICING_V2.bermudaSuppression?.cost || {};
+  const pick = (key) => (Number.isFinite(Number(row[key])) && Number(row[key]) > 0 ? Number(row[key]) : BERMUDA_SUPPRESSION_COST_DEFAULTS[key]);
+  return {
+    productPer1000: pick('recognitionPer1000') + pick('fusiladePer1000') + pick('surfactantPer1000'),
+    mixMinutes: pick('mixMinutes'),
+    minutesPer1000: pick('minutesPer1000'),
+  };
+}
+
 function calcBermudaRemovalAnnualCost(lawnSqFt) {
-  const c = LAWN_BERMUDA_REMOVAL_COST;
+  const c = bermudaRemovalCostConfig();
   const turfK = lawnSqFt / 1000;
   const laborRate = LAWN_PRICING_V2.laborRateLoaded || GLOBAL.LABOR_RATE;
-  const perSpray = c.productPer1000Sqft * turfK
-    + ((c.laborMinutesBase + c.laborMinutesPer1000Sqft * turfK) / 60) * laborRate;
-  return Math.round(c.spraysPerYear * perSpray * 100) / 100;
+  const perSpray = c.productPer1000 * turfK
+    + ((c.mixMinutes + c.minutesPer1000 * turfK) / 60) * laborRate;
+  return Math.round(LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR * perSpray * 100) / 100;
 }
 
 function calcLawnAnnualCostFloor(lawnSqFt, track, visits, property = {}, options = {}) {

@@ -280,6 +280,34 @@ describe('the account decides, on the server', () => {
     expect(db.mock.calls.some(([table]) => table === 'scheduled_services')).toBe(false);
   });
 
+  describe('/completion-actions runs the plan\'s step limit check', () => {
+    const completionActions = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
+    const actionsFor = async () => {
+      const res = { json: jest.fn(), status: jest.fn() };
+      res.status.mockReturnValue(res);
+      await completionActions({ query: { serviceType: 'Lawn Care', track: 'st_augustine', month: '4', scheduledServiceId: SERVICE_ID } }, res, jest.fn());
+      return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
+    };
+    afterEach(() => applicationLimits.checkLimits.mockImplementation(async () => ({ blocks: [], warnings: [] })));
+
+    test.each([['rec'], ['fus']])('%s capped or too soon: none of the three removal actions is offered, with the warning; other actions stay', async (limited) => {
+      applicationLimits.checkLimits.mockImplementation(async (_customer, productId, _date, _db, opts) => (productId === limited && opts?.program === 'bermuda_removal'
+        ? { blocks: [{ message: 'Limit reached.' }], warnings: [] } : { blocks: [], warnings: [] }));
+      const body = await actionsFor();
+      expect(body.actions.filter((a) => a.group)).toEqual([]);
+      expect(body.actions.map((a) => a.product?.name)).not.toEqual(expect.arrayContaining([REC]));
+      expect(body.warnings.map((w) => w.code)).toEqual(['lawn_bermuda_step_unavailable']);
+      expect(body.actions.length).toBeGreaterThan(0);
+    });
+
+    test('nothing limited: the three actions are offered and there is no warning; the program is passed to the limit check', async () => {
+      const body = await actionsFor();
+      expect(body.actions.filter((a) => a.group)).toHaveLength(3);
+      expect(body.warnings).toBeUndefined();
+      expect(applicationLimits.checkLimits.mock.calls.some((call) => call[4]?.program === 'bermuda_removal')).toBe(true);
+    });
+  });
+
   test('the three completion actions share one group id; other actions carry none', async () => {
     const completionActions = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
     const res = { json: jest.fn(), status: jest.fn() };

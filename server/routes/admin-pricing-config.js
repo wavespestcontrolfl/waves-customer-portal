@@ -530,6 +530,24 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     if (!(base + per1000 > 0)) {
       return fail('lawn_pricing_v2.bermudaSuppression must produce a positive adder — these knobs only tune the price; to disable the add-on, turn off GATE_BERMUDA_SUPPRESSION');
     }
+    // The optional spray-cost block (margin reporting for GATE_LAWN_BERMUDA_REMOVAL): every
+    // key a positive number, and no unknown key, so a typo never reads as a silent default.
+    if (bs.cost !== undefined) {
+      const cost = bs.cost;
+      const costKeys = ['recognitionPer1000', 'fusiladePer1000', 'surfactantPer1000', 'mixMinutes', 'minutesPer1000'];
+      if (!cost || typeof cost !== 'object' || Array.isArray(cost)) {
+        return fail(`lawn_pricing_v2.bermudaSuppression.cost must be an object with ${costKeys.join(', ')}`);
+      }
+      for (const key of Object.keys(cost)) {
+        if (!costKeys.includes(key)) return fail(`lawn_pricing_v2.bermudaSuppression.cost.${key} is not a known cost key`);
+      }
+      for (const key of costKeys) {
+        const value = num(cost[key]);
+        if (!Number.isFinite(value) || !(value > 0) || value > 1000) {
+          return fail(`lawn_pricing_v2.bermudaSuppression.cost.${key} must be a positive number up to 1000`);
+        }
+      }
+    }
   } else if (configKey === 'pest_base') {
     // Validate every field the sync consumes — not just base. A row like
     // { base: 117, floor: -1 } would otherwise persist, then
