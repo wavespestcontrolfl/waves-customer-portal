@@ -603,7 +603,7 @@ describe('schedule questions keep the rule answer', () => {
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
-  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'Where are the ants coming from?', 'How do roaches arrive in the house?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(false);
   });
 });
@@ -674,6 +674,8 @@ describe('symptoms and exposure never reach the model', () => {
     "I've been sprayed",
     "We've been sprayed",
     "She's been sprayed",
+    'They were sprayed',
+    'They got sprayed',
   ])('a safety line before the answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
     expect(exposureSafetyLine(question)).toBe(EXPOSURE_SAFETY_LINE);
@@ -1028,6 +1030,9 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at 12 1/2 Example Street.', 'Ants at [number] Example Street.'],
     ['Ants at 88B Example Street.', 'Ants at [number] Example Street.'],
     ['Ants at 12-14 Main Street.', 'Ants at [number] Main Street.'],
+    ['Ants at 12 SR 70.', 'Ants at [number] SR 70.'],
+    ['Ants at 12 FL-70.', 'Ants at [number] FL-70.'],
+    ['Ants at 12 US 41.', 'Ants at [number] US 41.'],
     ['Ants at 12 José Lane.', 'Ants at [number] José Lane.'],
     ['Ants at 12 O’Neil Street.', 'Ants at [number] O’Neil Street.'],
     ['Ants at 18 North Martin Luther King Boulevard.', 'Ants at [number] North Martin Luther King Boulevard.'],
