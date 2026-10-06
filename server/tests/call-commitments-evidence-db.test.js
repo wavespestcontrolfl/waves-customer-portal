@@ -196,7 +196,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   const CASES = [
     ['other', null, 'an estimate sent to the customer', (w) => estimate(w), 'estimate_sent_to_same_customer_within_14_days', 'estimate_sent'],
     ['other', 'sms', 'a text a person sent to the caller', (w) => staffText(w), 'text_sent_to_caller_within_14_days', 'sms_sent'],
-    ['other', 'sms', 'the booking lane\'s link text to the caller (logged with no customer id)', (w) => sms(w, 'call_booking_link_text', { customer_id: null }), 'text_sent_to_caller_within_14_days', 'sms_sent'],
+    ['other', 'sms', 'the booking lane\'s link text to the caller', (w) => sms(w, 'call_booking_link_text'), 'text_sent_to_caller_within_14_days', 'sms_sent'],
     ['other', 'call', 'a call a person placed to the caller', (w) => outboundCall(w), 'outbound_call_to_caller_within_14_days', 'outbound_call'],
     ['schedule_visit', null, 'a visit completed for the customer', (w) => visit(w, { status: 'completed', completed_at: later(), created_at: new Date(Date.now() - 20 * DAY) }), 'visit_completed_for_same_customer_within_14_days', 'visit_completed'],
     ['send_report', null, 'a service report text to the caller', (w) => sms(w, 'service_report'), 'service_report_text_to_caller_within_14_days', 'sms_sent'],
@@ -375,17 +375,47 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { kind: 'outbound_call', record_id: back.id, strength: 'direct' } });
   });
 
-  test('a promise to call from an unlinked caller is kept by a staff call to that number; a booking-link text with no customer id keeps a linked caller\'s text promise', async () => {
+  test('a promise to call from an unlinked caller is kept by a staff call to that number; a booking-link text logged with no customer id is not guessed at for a linked caller', async () => {
     const w = await world({ kind: 'other', channel: 'call', customer: false });
     const back = await outboundCall(w);
     expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1, failed: 0 });
     expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { kind: 'outbound_call', record_id: back.id } });
     // The scan leaves an unlinked call proof alone (no flapping).
     expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+    // Another caller's link text (no customer id) on the same phone is not this call's proof.
     const linked = await world({ kind: 'other', channel: 'sms' });
-    const link = await sms(linked, 'call_booking_link_text', { customer_id: null });
-    expect(await cc.refreshFulfillment(db, linked.call.id)).toMatchObject({ fulfilled: 1, failed: 0 });
-    expect(await row(linked.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: link.id } });
+    await sms(linked, 'call_booking_link_text', { customer_id: null });
+    expect(await cc.refreshFulfillment(db, linked.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(linked.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+  });
+
+  test('a call-placed close is reopened by the lapse scan once its proof call is reprocessed to voicemail or invalid, or is not a staff-bridge call', async () => {
+    const changes = [
+      { ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) },
+      { v2_extraction_status: 'failed' },
+      { source: 'collections_voice' },
+      { duration_seconds: 30 },
+    ];
+    const worlds = [];
+    for (const change of changes) {
+      const w = await world({ kind: 'other', channel: 'call' });
+      const proofCall = await outboundCall(w);
+      await cc.refreshFulfillment(db, w.call.id);
+      expect((await row(w.commitment.id)).status).toBe('fulfilled');
+      worlds.push({ w, proofCall, change });
+    }
+    const steady = await world({ kind: 'other', channel: 'call' });
+    await outboundCall(steady);
+    await cc.refreshFulfillment(db, steady.call.id);
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(steady.call.id);
+    for (const { proofCall, change } of worlds) await db('call_log').where({ id: proofCall.id }).update(change);
+    const lapsed = await cc.listLapsedEvidenceClosedCallIds(db);
+    expect(lapsed).not.toContain(steady.call.id);
+    for (const { w } of worlds) {
+      expect(lapsed).toContain(w.call.id);
+      expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1, failed: 0 });
+      expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    }
   });
 
   test('closes an earlier version wrote on the wrong kind of evidence are listed by the lapse scan and reopen: a visit for an estimate, text or callback; the customer phoning in for a callback', async () => {

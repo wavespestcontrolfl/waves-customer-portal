@@ -1789,15 +1789,16 @@ async function reportEmailTo(conn, { after, until, customerId }) {
 
 // A text sent to the caller after the call: what a promise to text them is
 // kept by (the promise may be any "text you ..." — appointment options, a link,
-// a summary). Two kinds of row keep it. A text a PERSON wrote (operatorReply)
-// must also be DELIVERED (smsDelivered, the callback proof's bar): 'sent' is
-// only the provider handoff and the row can still turn undelivered. And the
-// booking lane's own link text, once the provider accepted it: that lane logs
-// it with no customer id (it texts a lead), so it is matched by the caller's
-// phone and its purpose-built type, never by the customer fence. A proactive
-// draft counts: a text nobody asked for is how "I'll text you" is kept. Never a
-// person's text to another household member (same-customer fence for a linked
-// call), and never an automated reminder, review ask or confirmation.
+// a summary). Two kinds of row keep it, each fenced to the call's customer when
+// the call has one (shared household numbers): a text a PERSON wrote
+// (operatorReply) that was DELIVERED (smsDelivered, the callback proof's bar:
+// 'sent' is only the provider handoff and the row can still turn undelivered),
+// and the booking lane's own link text once the provider accepted it. A
+// proactive draft counts: a text nobody asked for is how "I'll text you" is
+// kept. Never an automated reminder, review ask or confirmation. The booking
+// lane logs its text with no customer id when it texts a lead, and nothing the
+// portal keeps durably ties that row to this call, so such a row is not
+// guessed at by phone: it keeps no promise here.
 const PROMISED_TEXT_AUTOMATED_TYPES = ["call_booking_link_text"];
 async function textToCaller(conn, { after, until = null, phone, customerId }) {
   if (!phone) return null;
@@ -1805,15 +1806,11 @@ async function textToCaller(conn, { after, until = null, phone, customerId }) {
     .where("os.direction", "outbound")
     .whereIn("os.status", PROVIDER_ACCEPTED)
     .where(function promisedText() {
-      this.where(function personText() {
-        this.where(function person() {
-          this.whereRaw(operatorSentSql("os")).orWhereIn("os.message_type", STAFF_APPROVED_SMS_TYPES);
-        }).modify((b) => sameCustomerWhere(b, "os.customer_id", customerId));
-      }).orWhereIn("os.message_type", PROMISED_TEXT_AUTOMATED_TYPES);
+      this.whereRaw(operatorSentSql("os")).orWhereIn("os.message_type", [...STAFF_APPROVED_SMS_TYPES, ...PROMISED_TEXT_AUTOMATED_TYPES]);
     })
     .where("os.created_at", ">", after)
     .modify((b) => { if (until) b.where("os.created_at", "<=", until); })
-    .modify((b) => { phoneWhere(b, "os.to_phone", phone); afterCursor(b, "os", cursor); })
+    .modify((b) => { phoneWhere(b, "os.to_phone", phone); sameCustomerWhere(b, "os.customer_id", customerId); afterCursor(b, "os", cursor); })
     .orderBy([{ column: "os.created_at", order: "asc" }, { column: "os.id", order: "asc" }])
     .limit(size)
     .select("os.id", "os.created_at", conn.raw("os.created_at::text as cursor_at"), "os.status", "os.message_type", "os.from_phone", ...smsContactSelects(conn, "os")),
@@ -2737,6 +2734,12 @@ async function listLapsedEvidenceClosedCallIds(conn) {
           -- callback's DIRECT call proof carries no marker and never does.
           OR ((cc.fulfillment ->> 'record_type') = 'call_log'
               AND (ev.id IS NULL OR ((cc.fulfillment ->> 'judged_customer_id') IS NOT NULL AND ev.customer_id::text IS DISTINCT FROM (cc.fulfillment ->> 'judged_customer_id'))
+                -- A close on a call a person placed to the caller (call_placed):
+                -- it must still be a staff-bridge call that reached the customer
+                -- (personCallBack's SQL twin, >= 60 s), or a reprocess that
+                -- reads it as voicemail / invalid reopens the promise.
+                OR ((cc.fulfillment ->> 'kind') = 'outbound_call'
+                  AND (ev.direction IS DISTINCT FROM 'outbound' OR COALESCE(ev.duration_seconds, 0) < 60 OR (${personCallBackSql('ev')}) IS NOT TRUE))
                 -- A model-judged close on a person's call back: it must still
                 -- be a call a person placed that reached the customer
                 -- (personCallBack, read from the same extraction fields).
