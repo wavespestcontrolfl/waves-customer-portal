@@ -1501,3 +1501,14 @@ describe('answer screen, Codex round 35', () => {
     expect(screenAskAnswer(answer, { question: 'How can I help my lawn?', data, facts: buildReportAskFacts({ data }) })).toBe('own_instruction');
   });
 });
+
+describe('answer screen, Codex round 36', () => {
+  test.each(['Watering every day can help.', 'Mowing shorter can improve the grass.', 'Applying fertilizer could help the lawn.'])('gerund-led care advice is rejected: %s', (answer) => {
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    expect(screenAskAnswer(answer, { question: 'How can I help my lawn?', data, facts: buildReportAskFacts({ data }) })).toBe('own_instruction');
+  });
+
+  test.each(['My dog scarfed down the bait.', 'My puppy munched on the bait.'])('scarfing and munching are ingestion: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+});
