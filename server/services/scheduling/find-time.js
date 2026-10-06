@@ -178,17 +178,8 @@ async function findArrivalWindowSlots(opts) {
 // opts.providerTravel === false) uses the conservative model and spends none
 // of it; the save it advises checks with that same model. Everyone else keeps
 // the default allowance.
-// opts.providerTravel === 'hint' (New Appointment's best-times rows with
-// GATE_BEST_TIMES_ROAD_TIMES): a capacity search prices its own simulated
-// legs on Google, on the picker's own small allowance (never customer
-// booking's), so each leg is asked at the time the route really drives it.
 function travelAllowance(opts) {
-  if (opts.providerTravel === false) return { maxRequests: 0 };
-  if (opts.providerTravel === 'hint') {
-    const RouteOptimizer = require('../route-optimizer');
-    return { maxRequests: 30, maxElements: 60, budgetMs: 2500, sharedBudget: RouteOptimizer.hintTravelBudget };
-  }
-  return undefined;
+  return opts.providerTravel === false ? { maxRequests: 0 } : undefined;
 }
 
 async function findCapacitySlots(opts) {
@@ -330,7 +321,6 @@ async function findCapacitySlots(opts) {
       // The drive into this stop as the simulation drove it, so a picker can
       // show "N min here". from_name stays null: route rows carry no name.
       drive_in_minutes: legs.driveIn, from_home_base: legs.fromHome, from_name: null,
-      drive_source: fit.travelSource === 'google_traffic' ? 'google' : 'estimate',
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
@@ -794,9 +784,9 @@ function toPackingBoundAnchor(stop) {
 }
 
 // A capacity placement's drive in, as its own route simulation drove it
-// (waiting excluded), and whether it starts from home base. The simulation
-// prices its legs itself (on Google under the 'hint' allowance), so these
-// chips are never re-priced outside it (Codex #6045 r3-r7).
+// (waiting excluded), and whether it starts from home base. These are model
+// numbers: the road-times gate re-prices gap chips only, and capacity chips
+// show as estimates (Codex #6045 r3-r9).
 function capacityLegs({ fit, target }) {
   const arrivals = fit.arrivals || [];
   const at = arrivals.findIndex((row) => row.id === target.id);

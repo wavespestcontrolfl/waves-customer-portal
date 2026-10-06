@@ -12,7 +12,6 @@
  */
 
 const logger = require('../logger');
-const { gateEnvValue } = require('../../config/feature-gates');
 const { loadOccupancy, conflictsForTarget } = require('../rain-out');
 const { checkArrivalPlacement } = require('./arrival-route');
 const { DAY_START_HOUR, DAY_END_HOUR, GAP_LEGS } = require('./find-time');
@@ -282,7 +281,6 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
     // A capacity slot has no insertion; it carries its own origin labels.
     from_home_base: gap.insertion ? !gap.insertion.after_stop_id : (gap.from_home_base ?? null),
     from_name: gap.insertion?.after_name || gap.from_name || null,
-    ...(gap.drive_source ? { drive_source: gap.drive_source } : {}),
     technician: gap.technician || null,
     // Not serialized: lets the route re-price this verdict on real roads.
     [GAP_LEGS]: gap[GAP_LEGS],
@@ -451,8 +449,6 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
       drive_in_minutes: slot.drive_in_minutes ?? null,
       from_home_base: slot.insertion ? !slot.insertion.after_stop_id : (slot.from_home_base ?? null),
       from_name: slot.insertion?.after_name || slot.from_name || null,
-      // Set only by a capacity slot priced inside its own simulation.
-      ...(slot.drive_source ? { drive_source: slot.drive_source } : {}),
       estimated_arrival: slot.estimated_arrival || null,
       stops_that_day: slot.stops_that_day ?? null,
       technician: slot.technician ? { id: slot.technician.id, name: slot.technician.name } : null,
@@ -649,15 +645,6 @@ function withChipValues(days, rows) {
   }));
 }
 
-// New Appointment's rows with GATE_BEST_TIMES_ROAD_TIMES: a capacity search
-// prices its own simulated legs on the picker's allowance — only when this
-// request will really answer the rows (a summary plan) (Codex #6045 r8).
-function hintTravelOption({ hint, bestRows, plan }) {
-  if (!hint) return {};
-  const roads = bestRows === true && plan.summary && gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES');
-  return { providerTravel: roads ? 'hint' : false };
-}
-
 // Returns { summary, picked }: the summary (undefined for any other plan)
 // and the picked verdict with its drive numbers re-priced like the chips.
 async function buildHintSummary(plan, everyStart, {
@@ -681,5 +668,5 @@ async function buildHintSummary(plan, everyStart, {
 module.exports = {
   validateHintParams, markUnknownDetours, guardHintStarts, scorePickedHour, scorePickedHourByTech,
   hintSearchPlan, buildHintSummary, summarizeHintDays, summaryRangeEnd, SUMMARY_MAX_DAYS, loadSummaryDayFacts,
-  pickBestRows, buildBestRows, rainForWindow, hintTravelOption,
+  pickBestRows, buildBestRows, rainForWindow,
 };

@@ -228,19 +228,6 @@ describe('capacity-mode chips (Codex #6045 r3-r7)', () => {
     const fit = { arrivals: [{ id: 't', arrival: '08:30', departure: '09:00', drive: 30 }] };
     expect(capacityLegs({ fit, target })).toEqual({ driveIn: null, fromHome: null });
   });
-
-  test('a capacity chip keeps the source its simulation priced it with; it is never re-priced', async () => {
-    process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
-    try {
-      const chip = { date: '2026-10-08', start_time: '12:00', end_time: '13:00', detour_minutes: 30, drive_in_minutes: 18, drive_source: 'google' };
-      const factory = jest.fn();
-      const [out] = await priceChipsOnRoads([chip], { travelFactory: factory });
-      expect(out).toMatchObject({ drive_in_minutes: 18, drive_source: 'google' });
-      expect(factory).not.toHaveBeenCalled();
-    } finally {
-      delete process.env.GATE_BEST_TIMES_ROAD_TIMES;
-    }
-  });
 });
 
 describe('the day list matches the chips (Codex #6045 r7)', () => {
@@ -263,26 +250,22 @@ describe('the day list matches the chips (Codex #6045 r7)', () => {
   });
 });
 
-describe('Codex #6045 r8', () => {
-  const { hintTravelOption, summarizeHintDays } = require('../services/scheduling/find-time-hints');
+describe('capacity chips stay estimates (Codex #6045 r9)', () => {
+  const { summarizeHintDays } = require('../services/scheduling/find-time-hints');
 
-  test('capacity road pricing only for a summary plan that answers the rows', () => {
+  test('a capacity hour keeps its model drive in and is never re-priced', async () => {
+    const [day] = summarizeHintDays([
+      { date: '2026-10-08', start_time: '12:00', end_time: '13:00', detour_minutes: 30, drive_in_minutes: 18 },
+    ], { from: '2026-10-08', to: '2026-10-08' });
+    expect(day.hours[0]).toMatchObject({ drive_in_minutes: 18 });
     process.env.GATE_BEST_TIMES_ROAD_TIMES = 'true';
     try {
-      expect(hintTravelOption({ hint: true, bestRows: true, plan: { summary: true } })).toEqual({ providerTravel: 'hint' });
-      expect(hintTravelOption({ hint: true, bestRows: true, plan: { summary: false } })).toEqual({ providerTravel: false });
-      expect(hintTravelOption({ hint: true, bestRows: false, plan: { summary: true } })).toEqual({ providerTravel: false });
-      expect(hintTravelOption({ hint: false, bestRows: true, plan: { summary: true } })).toEqual({});
+      const factory = jest.fn();
+      const [out] = await priceChipsOnRoads([{ ...day.hours[0], date: day.date }], { travelFactory: factory });
+      expect(out).toMatchObject({ drive_in_minutes: 18, drive_source: 'estimate' });
+      expect(factory).not.toHaveBeenCalled();
     } finally {
       delete process.env.GATE_BEST_TIMES_ROAD_TIMES;
     }
-    expect(hintTravelOption({ hint: true, bestRows: true, plan: { summary: true } })).toEqual({ providerTravel: false });
-  });
-
-  test("a capacity slot's own source survives into the day rows", () => {
-    const [day] = summarizeHintDays([
-      { date: '2026-10-08', start_time: '12:00', end_time: '13:00', detour_minutes: 30, drive_in_minutes: 18, drive_source: 'google' },
-    ], { from: '2026-10-08', to: '2026-10-08' });
-    expect(day.hours[0]).toMatchObject({ drive_in_minutes: 18, drive_source: 'google' });
   });
 });

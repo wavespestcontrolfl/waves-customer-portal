@@ -87,9 +87,9 @@ function etNow(ms) {
  * Never throws.
  */
 async function priceChipsOnRoads(chips, { travelFactory, now = () => Date.now() } = {}) {
-  // A chip that already carries its source (a capacity slot, priced inside
-  // its own simulation) keeps it; only gap chips are re-priced here.
-  const estimate = (c) => ({ ...c, drive_source: c.drive_source || 'estimate' });
+  // Only gap chips (GAP_LEGS) are re-priced; a capacity chip stays an
+  // estimate (Codex #6045 r9: its admission and numbers stay on the model).
+  const estimate = (c) => ({ ...c, drive_source: 'estimate' });
   if (!Array.isArray(chips) || !chips.length) return [];
   if (!gateEnvValue('GATE_BEST_TIMES_ROAD_TIMES')) return chips.map(estimate);
   try {
