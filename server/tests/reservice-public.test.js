@@ -707,6 +707,9 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
       await post(result);
       expect(ring).toHaveBeenCalledTimes(1);
       expect(ring.mock.calls[0][0].id).toBe(CUST_ID);
+      // Only the booking this request committed counts as fresh (its push always goes).
+      const fresh = result.ok && !result.body.replayed ? 'booking-1' : undefined;
+      expect(ring.mock.calls[0][2]?.freshBookingId).toBe(fresh);
     });
 
     test('a slot race asks for no bell (nothing was booked)', async () => {
@@ -744,7 +747,22 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
       expect(triggerNotification).toHaveBeenCalledWith('reservice_self_booked', {
         customerId: CUST_ID, scheduledServiceId: 'visit-1', serviceDate: '2026-10-09', name: 'Jamie Doe',
         when: 'Fri, Oct 9 at 1:00 PM', pests: 'Roaches', request: 'roaches in the kitchen',
-      }, { dedupeKey: 'reservice-booked:visit-1' });
+      }, expect.objectContaining({ dedupeKey: 'reservice-booked:visit-1' }));
+    });
+
+    // Codex r3: a push-only admin setup writes no bell row, so a dedupe hit
+    // cannot stop a recovery dispatch from buzzing again.
+    test.each([
+      ['the booking this request committed', { freshBookingId: 'sba-1' }, false, true],
+      ['a recovery that writes the bell now', {}, true, true],
+      ['a recovery whose bell already landed, or with no bell row (push-only)', {}, false, false],
+      ['a fresh booking of another visit does not make this one fresh', { freshBookingId: 'sba-2' }, false, false],
+    ])('push for %s', async (_label, opts, written, pushes) => {
+      const { fn } = conn([{ id: 'visit-1', self_booking_id: 'sba-1', service_type: 'Pest Control Re-Service', service_key: 'pest_re_service', service_date: '2026-10-09' }]);
+      await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, fn, opts);
+      const { onBell, beforePush } = triggerNotification.mock.calls[0][2];
+      onBell(written);
+      expect(beforePush()).toBe(pushes);
     });
 
     test('no open link booking: no bell', async () => {

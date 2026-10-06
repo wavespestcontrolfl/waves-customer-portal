@@ -705,7 +705,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       logger.warn(`[reservice-public] reschedule-link lookup failed for booking ${result.body?.booking?.id}: ${err.message}`);
     }
 
-    ringReserviceBookedLater(customer);
+    ringReserviceBookedLater(customer, result.body?.replayed ? {} : { freshBookingId: result.body?.booking?.id || null });
 
     return res.json({
       success: true,
@@ -745,7 +745,11 @@ function timeLabel12(hhmm) {
   return `${((h + 11) % 12) + 1}:${m[2]} ${h < 12 ? 'AM' : 'PM'}`;
 }
 
-async function ringReserviceBooked(customer, conn = db) {
+// `freshBookingId`: the booking THIS request just committed (not a replay).
+// Its push always goes. Every other dispatch is a recovery: it pushes only
+// when it writes the bell row now, so a bell that landed (dedupe hit) or a
+// push-only setup (no bell row to prove delivery) never re-buzzes a phone.
+async function ringReserviceBooked(customer, conn = db, { freshBookingId = null } = {}) {
   const rows = await conn('scheduled_services as s')
     .join('self_booked_appointments as sba', 'sba.id', 's.self_booking_id')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
@@ -753,7 +757,7 @@ async function ringReserviceBooked(customer, conn = db) {
     .where('sba.source', 'reservice_link')
     .whereIn('s.status', OPEN_CALLBACK_STATUSES)
     .where('s.created_at', '>=', conn.raw(`now() - interval '${RESERVICE_BELL_RECOVERY_DAYS} days'`))
-    .select('s.id', 's.service_type', 'sv.service_key', 's.window_start', 's.customer_request', 's.customer_request_pests',
+    .select('s.id', 's.self_booking_id', 's.service_type', 'sv.service_key', 's.window_start', 's.customer_request', 's.customer_request_pests',
       conn.raw("to_char(s.scheduled_date, 'YYYY-MM-DD') as service_date"));
   const { triggerNotification } = require('../services/notification-triggers');
   const name = [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null;
@@ -764,6 +768,8 @@ async function ringReserviceBooked(customer, conn = db) {
       ? new Date(`${row.service_date}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })
       : null;
     const at = timeLabel12(row.window_start);
+    const fresh = !!freshBookingId && String(row.self_booking_id) === String(freshBookingId);
+    let bellWritten = false;
     await triggerNotification('reservice_self_booked', {
       customerId: customer.id,
       scheduledServiceId: row.id,
@@ -772,14 +778,18 @@ async function ringReserviceBooked(customer, conn = db) {
       when: day && at ? `${day} at ${at}` : day,
       pests: pests.length ? pests.join(', ') : null,
       request: row.customer_request || null,
-    }, { dedupeKey: `reservice-booked:${row.id}` });
+    }, {
+      dedupeKey: `reservice-booked:${row.id}`,
+      onBell: (written) => { bellWritten = written; },
+      beforePush: () => fresh || bellWritten,
+    });
   }
 }
 
 // Fire-and-forget from a handler: the customer's answer never waits on it.
-function ringReserviceBookedLater(customer) {
+function ringReserviceBookedLater(customer, opts) {
   // Through router._internals so the handler tests can observe the call.
-  void Promise.resolve().then(() => router._internals.ringReserviceBooked(customer))
+  void Promise.resolve().then(() => router._internals.ringReserviceBooked(customer, undefined, opts))
     .catch((err) => logger.warn(`[reservice-public] re-service bell failed for customer ${customer.id}: ${err.message}`));
 }
 
