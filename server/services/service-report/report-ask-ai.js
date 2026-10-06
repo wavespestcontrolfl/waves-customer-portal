@@ -305,6 +305,9 @@ const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suf
 // "12 1/2 Example Street", "88B Example Street" and "12-14 Main Street" mask whole; street-name
 // words may hold accents and curly apostrophes ("12 José Lane", "12 O’Neil St").
 const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:[-/]\\d{1,6}[a-z]?)?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
+const SPELLED_NUMBER = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)';
+// "Twelve Main Street", "One Hundred Bay Drive" (Codex P1 #5964 r23).
+const SPELLED_HOUSE_NUMBER = new RegExp(`\\b${SPELLED_NUMBER}(?:[\\s-]+(?:and\\s+)?${SPELLED_NUMBER})*(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
 // A numbered route has no suffix word: "12 SR 70", "12 FL-70", "12 N US 41",
 // "12 State Road 64" (Codex P1 #6016 r15).
 const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?:[-/]\d{1,6}[a-z]?)?(?:\s+\d\/\d)?(?=\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\.?\s+)?(?:fl|s\.?\s?r\.?|u\.?\s?s\.?|c\.?\s?r\.?|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
@@ -314,7 +317,7 @@ function scrubFreeText(value, max = Infinity) {
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]')).replace(/\d{3,}/g, '[number]');
+  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]')).replace(/\d{3,}/g, '[number]');
   return clip(masked, max);
 }
 
@@ -662,9 +665,20 @@ const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_P
  * The fixed answer when the question reports a symptom or an exposure, else
  * null. Pure and deterministic; the question is never logged.
  */
+// Ingestion of a product by anyone, named or not ("John swallowed some
+// bait", "the bait was swallowed by John"): an eating verb and an exposure
+// word in one sentence, unless a pest is the one eating ("the ants ate the
+// bait") (Codex P1 #6016 r32). No subject list can name every person.
+const INGESTION_VERB = /\b(?:swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
+const EXPOSURE_WORD = /\b(?:bait\w*|spray\w*|pesticides?|chemicals?|granules?|granular|poison\w*|insecticides?|herbicides?|fungicides?|rodenticides?|products?|gel|pellets?|powder|dust|treatment|fertilizer)\b/i;
+const PEST_EATING = /\b(?:ants?|roach(?:es)?|cockroach(?:es)?|rats?|mice|mouse|rodents?|pests?|bugs?|insects?|termites?|squirrels?|raccoons?|fleas?|ticks?|spiders?|snails?|slugs?|wildlife|colony|colonies)\b[^.?!]{0,25}\b(?:ate|eaten|eating|eats|swallow\w*|consum\w*|lick\w*|chew\w*|nibbl\w*|took|taking|takes|feed\w*|carr\w*)\b|\b(?:eaten|consumed|taken)\s+by\s+(?:the\s+)?(?:ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)\b/i;
+function ingestsProduct(text) {
+  return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence) && !PEST_EATING.test(sentence));
+}
+
 function medicalExposureAnswer(question) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
-  return MEDICAL_CUES.some((cue) => cue.test(text)) ? MEDICAL_EXPOSURE_ANSWER : null;
+  return MEDICAL_CUES.some((cue) => cue.test(text)) || ingestsProduct(text) ? MEDICAL_EXPOSURE_ANSWER : null;
 }
 
 /**
