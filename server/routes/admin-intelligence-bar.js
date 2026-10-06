@@ -1768,8 +1768,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   }
   // The property access write pins the plan the card showed; the confirmed
   // run refuses when its plan under the lock differs.
-  if (toolUse.name === 'update_property_access' && preview?.would_update) {
-    params._ib_property_plan = preview.would_update;
+  if (toolUse.name === 'update_property_access' && preview?.plan_hash) {
+    params._ib_property_plan_hash = String(preview.plan_hash);
   }
   if (toolUse.name === 'correct_invoice_address' && preview?.invoice_id) {
     params.invoice_id = String(preview.invoice_id);

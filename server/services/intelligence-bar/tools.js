@@ -2235,11 +2235,19 @@ async function planPropertyAccess(conn, customerId, requested, { lock = false } 
   return { updates, kept };
 }
 
-// Same keys and values, in any key order.
-const samePlan = (a, b) => {
-  const norm = (o) => JSON.stringify(Object.keys(o || {}).sort().map((k) => [k, o[k] ?? null]));
-  return norm(a) === norm(b);
-};
+// One hash of the full plan (keys in any order). The preview carries only
+// this hash and the new lines, never the stored notes: those can hold codes
+// and phone numbers, and the preview goes back to the model.
+const planHash = (o) => require('crypto').createHash('sha256')
+  .update(JSON.stringify(Object.keys(o || {}).sort().map((k) => [k, o[k] ?? null]))).digest('hex');
+// What the preview shows: a note field as the line it adds, not the whole note.
+function previewOfPlan(updates, requested) {
+  const out = { ...updates };
+  for (const field of PROPERTY_ACCESS_NOTE_FIELDS) {
+    if (out[field] && out[field] !== requested[field]) out[field] = `(new first line) ${requested[field]}`;
+  }
+  return out;
+}
 
 // Two-step write (issue #1568): no mutation without confirmed === true, which
 // only /confirm-action attaches server-side. Registered in write-gates.js.
@@ -2263,7 +2271,8 @@ async function updatePropertyAccess(input) {
       preview: true,
       customer_id: customerId,
       customer_name: customerName,
-      would_update: plan.updates,
+      would_update: previewOfPlan(plan.updates, requested),
+      plan_hash: planHash(plan.updates),
       ...(plan.kept.length ? { kept: plan.kept } : {}),
       note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. Notes are added as a new first line, never written over. After the operator approves, this commits via the confirmation card.',
     };
@@ -2276,18 +2285,18 @@ async function updatePropertyAccess(input) {
     result = await db.transaction(async (trx) => {
       // The same customer preference lock every preference writer holds.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
-      // Stamped after the lock wait: readers compare it with their own
-      // snapshot time, so it must not predate changes made while waiting.
-      const now = new Date();
       const plan = await planPropertyAccess(trx, customerId, requested, { lock: true });
       // The card the operator approved pinned its plan; a different plan under
       // the lock (another writer got in between) is refused, not done.
-      if (input._ib_property_plan && !samePlan(input._ib_property_plan, plan.updates)) {
+      if (input._ib_property_plan_hash && input._ib_property_plan_hash !== planHash(plan.updates)) {
         const err = new Error('Property access changed since this action was prepared. Review a fresh proposal.');
         err.previewChanged = true;
         throw err;
       }
       if (Object.keys(plan.updates).length) {
+        // Stamped after both locks (the advisory lock and the row lock in the
+        // plan): readers compare it with their own snapshot time.
+        const now = new Date();
         await trx('property_preferences')
           .insert({ customer_id: customerId, ...plan.updates, updated_at: now })
           .onConflict('customer_id')

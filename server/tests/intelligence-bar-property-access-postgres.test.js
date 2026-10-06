@@ -131,7 +131,7 @@ postgres('update_property_access keeps history and keeps community codes off the
   test('a plan that changed after the card was shown is refused', async () => {
     const preview = await executeTool('update_property_access', { customer_id: customerId, access_notes: 'Ring twice' });
     await mockDb('property_preferences').where({ customer_id: customerId }).update({ access_notes: 'Ring twice' });
-    const out = await run({ access_notes: 'Ring twice', _ib_property_plan: preview.would_update });
+    const out = await run({ access_notes: 'Ring twice', _ib_property_plan_hash: preview.plan_hash });
     expect(out).toMatchObject({ preview_changed: true });
     expect((await prefs()).access_notes).toBe('Ring twice');
   });
@@ -139,6 +139,13 @@ postgres('update_property_access keeps history and keeps community codes off the
   test('an empty value clears a note field', async () => {
     await run({ access_notes: '' });
     expect((await prefs()).access_notes).toBe('');
+  });
+
+  test('the preview shows the new line only, never the stored note', async () => {
+    const preview = await executeTool('update_property_access', { customer_id: customerId, access_notes: 'Ring twice' });
+    expect(preview.would_update).toEqual({ access_notes: '(new first line) Ring twice' });
+    expect(JSON.stringify(preview)).not.toMatch(/202-555-0101|punch in/);
+    expect(preview.plan_hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test('an empty field is simply filled', async () => {
