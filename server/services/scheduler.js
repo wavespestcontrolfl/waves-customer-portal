@@ -1377,9 +1377,12 @@ function initScheduledJobs() {
   // GATE_PERMIT_SYNC is set (checked inside syncPermits — single source of
   // truth); first enabled run on empty tables backfills, then
   // trailing-window refreshes. runExclusive: a deploy overlap must not run
-  // two ACA report sessions at once.
+  // two ACA report sessions at once. Re-run when a deploy kills it mid-run
+  // (2026-10-05: killed at 4:14 AM, so the week had no permit data): both
+  // steps upsert by permit number and the detail step skips permits it
+  // already read, so a second run on the same morning is harmless.
   // =========================================================================
-  cron.schedule('5 4 * * 1', async () => {
+  const runPermitSyncTick = async () => {
     // ONE lease for the whole sequence (codex #5673 P1): with separate
     // leases a deploy overlap could run the detail step on one replica while
     // another still runs the report sync (stale candidates, concurrent ACA
@@ -1413,7 +1416,9 @@ function initScheduledJobs() {
       // health records it (a swallowed error would read as success).
       if (failures.length) throw new Error(failures.join(' | '));
     }).catch((err) => logger.error(`Permit sync lease failed: ${err.message}`));
-  }, { timezone: 'America/New_York' });
+  };
+  cron.schedule('5 4 * * 1', runPermitSyncTick, { timezone: 'America/New_York' });
+  registerDeployKillRetry('permit-sync', runPermitSyncTick);
 
   // =========================================================================
   // DAILY 3:45AM — Inventory unit alias auto-fix (pure spelling/plural
@@ -6122,6 +6127,7 @@ function initScheduledJobs() {
   cron.schedule('*/2 * * * *', async () => {
     const results = await Promise.allSettled([
       Promise.resolve().then(() => require('./missed-call-bell').sweepMissedCalls()),
+      Promise.resolve().then(() => require('./missed-call-bell').retireCalledBackMissedCalls()),
       Promise.resolve().then(() => require('./repeat-caller-bell').sweepRepeatCallers()),
       Promise.resolve().then(() => require('./missed-call-text-back').sweepMissedCallTextBacks()),
       // The promise-chaser bell's ONE path: a stateless, idempotent sweep
@@ -6142,7 +6148,7 @@ function initScheduledJobs() {
         : Promise.resolve(0),
     ]);
     results.forEach((result, index) => {
-      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'repeat-caller', 'missed-call-text-back', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);
+      if (result.status === 'rejected') logger.warn(`[scheduler] ${['missed-call', 'missed-call-retire', 'repeat-caller', 'missed-call-text-back', 'promise-chaser'][index]} sweep failed: ${result.reason.message}`);
     });
   }, { timezone: 'America/New_York' });
 

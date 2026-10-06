@@ -75,6 +75,13 @@ afterEach(() => {
 });
 
 describe('CustomerAccessCodesBlock', () => {
+  it('labels a code mirrored from the profile "From the profile"', async () => {
+    stubFetch(() => response({ visits: VISITS, active: [row({ id: 'p1', kind: 'garage', code: '2468', instructions: null, sourceType: 'profile', sourceId: null, sourceAt: null })], found: [] }));
+    render(<CustomerAccessCodesBlock customerId="customer-a" />);
+    const code = await screen.findByText('2468');
+    expect(within(code.closest('.rounded-sm')).getByText('From the profile')).toBeInTheDocument();
+  });
+
   it('lists active codes with kind, monospace code, directions, life and source, and found codes with the client sentence', async () => {
     stubFetch(() => response({ visits: VISITS,
 active: [

@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const protocols = require('../config/protocols.json');
+const { lawnProtocols, LAWN_V13_VERSION } = require('./lawn-program');
+const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { summarizeLedgerRows } = require('./nutrient-ledger');
@@ -122,7 +123,7 @@ function productAliases(productOrName) {
   ].filter((alias, index, arr) => alias && alias.length > 5 && arr.indexOf(alias) === index);
 }
 
-function parseProtocolLines(text, role) {
+function parseProtocolLines(text, role, { exactName = false } = {}) {
   if (!text) return [];
   return String(text)
     .split('\n')
@@ -133,6 +134,7 @@ function parseProtocolLines(text, role) {
       role,
       conditional: role !== 'base' || /^if\b/i.test(raw) || /\bif\b/i.test(raw),
       product: null,
+      ...(exactName ? { exactName: true } : {}),
       ...classifyProtocolLine(raw, role),
     }));
 }
@@ -152,6 +154,11 @@ function matchCatalogProduct(line, products) {
     .map((product) => {
       const name = normalizeText(product.name);
       if (!name) return null;
+      // A line that spells whole catalog names (the v13 lawn program,
+      // `exact_catalog_names`) matches ONLY a product whose full name it spells:
+      // a missing product leaves the line unmatched, never a partial-name stand-in
+      // (Acelepryn for Tetrino because both say "Insecticide").
+      if (line.exactName && !normalizedLine.includes(name)) return null;
       const productNpk = parseNpkFromText(product.name);
       const aliases = productAliases(product);
       const direct = aliases.some((alias) => normalizedLine.includes(alias));
@@ -468,7 +475,150 @@ function resolveProtocolItems(lines, products, options = {}, context = {}) {
   });
 }
 
+// The staged v13 protocol's product rows by catalog id, only while GATE_LAWN_V13
+// is live and that version is the one resolved; empty otherwise.
+function v13ProtocolRows(structuredProtocol) {
+  if (featureGates.lawnV13Live?.() !== true || structuredProtocol?.version !== LAWN_V13_VERSION) return new Map();
+  return new Map((structuredProtocol.products || []).filter((row) => row.productId).map((row) => [String(row.productId), row]));
+}
+
+// GATE_LAWN_V13: every lawn visit plans from the staged v13 protocol or not at
+// all. The recipe lines come from lawnProtocols() for the whole portal, so any
+// other structured protocol (the staged row missing because the migration did not
+// run or the track had no active baseline, or a visit pinned to an older version)
+// would pair v13 products and catalog-default rates with another version's windows
+// and gates. The reverse also holds: a visit already pinned to the staged v13
+// protocol while the gate is OFF would show legacy-recipe amounts against v13
+// windows. Either way the plan withholds its calculated products and blocks
+// instead; the pin is read from the appointment itself, so this does not depend on
+// the completion-default gates. Returns the block, or null.
+function lawnV13PlanBlock({ trackKey, service, structuredProtocol }) {
+  if (featureGates.lawnV13Live?.() === true) {
+    if (!trackKey || structuredProtocol?.version === LAWN_V13_VERSION) return null;
+    return { code: 'lawn_v13_protocol_missing', severity: 'block', message: `This visit has no staged ${LAWN_V13_VERSION} lawn protocol (not loaded for this track, or the visit is pinned to an older version); suggested amounts are unavailable. Enter the actual work.` };
+  }
+  if (service?.lawn_protocol_version === LAWN_V13_VERSION || structuredProtocol?.version === LAWN_V13_VERSION) {
+    return { code: 'lawn_v13_gate_off', severity: 'block', message: `This visit is pinned to the ${LAWN_V13_VERSION} lawn protocol but GATE_LAWN_V13 is off; suggested amounts are unavailable. Enter the actual work.` };
+  }
+  return null;
+}
+
+// What a staged v13 product row's gates mean in the field, for the plan item the
+// panel and job card show: one table, one loop. `required` = a condition the tech
+// must meet or check before applying (the plan has no evidence to clear it);
+// otherwise an instruction. `when` is the extra test for a gate the plan CAN judge
+// from its context: novToMarOnly against the service month, northPortBlocked
+// against the visit's resolved municipality, spreaderVisitOnly against the window's
+// production mode. Keys not in the table carry no field text. Order is display order.
+const NOV_TO_MAR = (month) => month > 3 && month < 11;
+const V13_GATE_NOTES = [
+  { key: 'minDistanceFromWaterFt', required: true, text: (ft) => `Keep ${ft} ft from ponds, lakes and canals; skip that strip.` },
+  { key: 'holdForTropicalWatch', required: true, text: () => 'Hold the application if a tropical storm or hurricane is forecast.' },
+  { key: 'novToMarOnly', required: true, when: (ctx) => ctx.monthNumber != null && NOV_TO_MAR(ctx.monthNumber), text: () => 'Use only from November through March; this visit is outside that season.' },
+  { key: 'spreaderVisitOnly', required: true, when: (ctx) => /hose|reel/i.test(String(ctx.productionMode || '')), text: () => 'Granular product: apply on a spreader visit, not from the hose pass.' },
+  { key: 'northPortBlocked', required: true, when: (ctx) => /north\s*port/i.test(String(ctx.municipality || '')), text: () => 'Not allowed in North Port this month; skip this product.' },
+  { key: 'applyAlone', text: () => 'Apply alone: no other product in the tank.' },
+  { key: 'delayWateringHours', text: (hours) => `Delay watering for ${hours} hours.` },
+  { key: 'noWaterIn', text: () => 'Do not water this in.' },
+  { key: 'tankMixWith', text: (product) => `Tank mix with ${product}.` },
+  { key: 'concentration', text: (value) => `Concentration ${value}.` },
+  { key: 'paleTurfRate', text: (rate) => `Pale turf rate: ${rate}.` },
+  { key: 'rateRange', text: (range) => `Label rate range ${range}.` },
+  { key: 'sunnyTurfOnly', text: () => 'Sunny turf only; the amount covers the sunny share of the lawn.' },
+];
+
+function v13GateNotes(gates, context = {}) {
+  const g = gates && typeof gates === 'object' ? gates : {};
+  return V13_GATE_NOTES
+    .filter((entry) => g[entry.key] && (!entry.when || entry.when(context)))
+    .map((entry) => ({ key: entry.key, severity: entry.required ? 'required' : 'note', text: entry.text(g[entry.key]) }));
+}
+
+// The selected items' required gate notes as plan warnings, and an apply-alone
+// product selected beside any other product as a block. Shared by the plan and
+// the tank sheet so the two never disagree. Items need { product, gateNotes }.
+function v13SelectedGateWarnings(selectedItems) {
+  return selectedItems.flatMap((item) => (item.gateNotes || []).filter((note) => note.severity === 'required').map((note) => ({
+    code: 'lawn_v13_product_gate', severity: 'warning', gate: note.key,
+    productId: item.product?.id || null, productName: item.product?.name || null,
+    message: `${item.product?.name || 'Product'}: ${note.text}`,
+  })));
+}
+
+// The apply-alone blocks for the SELECTED lines of a visit or a tank sheet, judged
+// before any quantity is computed so both can withhold the selection's amounts.
+// A line is { product, selected }; rowOf(line) is its staged v13 row, or null.
+function v13SelectionBlocks(lines, rowOf, gateContext) {
+  return v13ApplyAloneBlocks(lines.filter((line) => line.selected && line.product).map((line) => ({
+    product: line.product,
+    gateNotes: v13GateNotes(rowOf(line)?.gates, gateContext),
+  })));
+}
+
+function v13ApplyAloneBlocks(selectedItems) {
+  return selectedItems
+    .filter((item) => item.product && item.gateNotes?.some((note) => note.key === 'applyAlone')
+      && selectedItems.some((other) => other !== item && other.product))
+    .map((item) => ({
+      code: 'lawn_v13_apply_alone', severity: 'block', productId: item.product.id, productName: item.product.name,
+      message: `${item.product.name} is applied alone, but other products are selected with it. Remove them from the mix or apply them separately.`,
+    }));
+}
+
+// The same rows for a reader with no visit (the tank sheet, the cost audit): one
+// track and month, read from the database. Empty with the gate off. With the gate
+// on and no staged v13 protocol it throws (code lawn_v13_protocol_missing): the v13
+// recipe must never be priced or mixed at catalog-default rates.
+async function loadV13RowsForMonth(knex, trackKey, monthName) {
+  if (featureGates.lawnV13Live?.() !== true) return new Map();
+  const serviceDate = new Date(Date.UTC(2026, MONTH_ABBR.indexOf(monthName), 15, 16));
+  const summary = summarizeProtocolContext(await getProtocolWindowContext(knex, { serviceDate, grassTrack: trackKey, strict: true, planning: true }));
+  if (summary?.version !== LAWN_V13_VERSION) {
+    throw Object.assign(new Error(`GATE_LAWN_V13 is on but the staged ${LAWN_V13_VERSION} protocol is missing for ${trackKey}`), { code: 'lawn_v13_protocol_missing' });
+  }
+  return v13ProtocolRows(summary);
+}
+
+// How a matched staged v13 protocol row sets the planned rate: its own stated
+// rate, else (a lb_n / lb_k nutrition row) the visit's nutrient target. Spread
+// into calculateProductAmount; {} for no row (gate off, or no v13 match).
+function v13RateOptions(row) {
+  if (!row) return {};
+  if (Number(row.ratePer1000) > 0) return { protocolRate: { rate: row.ratePer1000, unit: row.rateUnit } };
+  if (/^lb_[nk]/i.test(String(row.rateUnit || ''))) return { deriveNutrientFirst: true };
+  return {};
+}
+
+// A v13 row computes an amount only when it is a whole-lawn row that states a rate
+// (or a nutrient target to derive one from). A spot row (backpack work on an area
+// the tech measures) or a label-rate row (Dylox) has no area, carrier or rate the
+// plan knows, so it gets no quantity anywhere: the tech enters the area treated and
+// the amount used. This is the one chokepoint the plan, the tank sheet and the
+// completion defaults all go through.
+function v13RowCalculates(row) {
+  return row.applicationMode !== 'spot'
+    && (Number(row.ratePer1000) > 0 || /^lb_[nk]/i.test(String(row.rateUnit || '')));
+}
+
+// The label rate as reference text for a row that gets no quantity: a stated
+// concentration first (a surfactant is a percent of the tank, never a per-1,000 rate),
+// then the row's rate, the label range, the catalog default.
+function v13SpotReference(row, product) {
+  const gates = row.gates || {};
+  const perThousand = (rate, unit) => (Number(rate) > 0 ? `Label rate ${[rate, unit].filter(Boolean).join(' ')} per 1,000 sq ft` : null);
+  return (gates.concentration ? `Label concentration ${gates.concentration}` : null)
+    || perThousand(row.ratePer1000, row.rateUnit)
+    || (gates.rateRange ? `Label rate ${gates.rateRange}` : null)
+    || perThousand(product?.default_rate_per_1000, product?.rate_unit);
+}
+
+// A whole-lawn product the v13 program limits to sunny turf (Tetrino): the share
+// of the lawn that is sunny, from the turf profile's sun exposure. No sun
+// exposure on file is the half the cost model assumed.
+const SUNNY_TURF_SHARE = { full_sun: 1, partial_shade: 0.5, heavy_shade: 0 };
+
 function effectiveAreaFactor(line, property = {}) {
+  if (line?.scope === 'BROADCAST_FULL' && line.sunnyTurfOnly) return SUNNY_TURF_SHARE[property.sunExposure] ?? 0.5;
   if (line?.scope === 'BROADCAST_FULL' || line?.scope === 'BRANCH_ONE_OF') return 1;
   if (line?.scope === 'INSPECTION_ONLY') return 0;
   if (line?.scope === 'FIRST_YEAR_ONLY' && property.isFirstYear === false) return 0;
@@ -518,8 +668,19 @@ function derivedNutrientRate(product, nutrient, targetPer1000) {
 }
 
 function productRatePer1000(product, options = {}) {
+  // The matched staged v13 protocol row's own rate (GATE_LAWN_V13) comes first:
+  // a catalog row can carry no default rate (Stonewall 4FL) yet the program
+  // states one.
+  if (Number(options.protocolRate?.rate) > 0) {
+    return { rate: Number(options.protocolRate.rate), unit: options.protocolRate.unit || product?.rate_unit || null, source: 'protocol_rate' };
+  }
+  // A v13 nutrition row (rate unit lb_n / lb_k) states a nutrient target, not a
+  // bag rate: derive from the visit's N / K target before any catalog default
+  // (the catalog's 4.2 lb default is one bag rate, not every month's target).
+  const deriveFirst = options.deriveNutrientFirst === true;
   const catalogRate = Number(product?.default_rate_per_1000 || 0);
-  if (catalogRate > 0) {
+  if (catalogRate > 0 && !(deriveFirst && (derivedNutrientRate(product, 'analysis_n', options.targetNPer1000) != null
+    || derivedNutrientRate(product, 'analysis_k', options.targetKPer1000) != null))) {
     return {
       rate: catalogRate,
       unit: product?.rate_unit || null,
@@ -609,10 +770,12 @@ function calculateProductAmount({
   areaFactor = 1,
   targetNPer1000 = null,
   targetKPer1000 = null,
+  protocolRate = null,
+  deriveNutrientFirst = false,
 } = {}) {
   const factor = Math.max(0, Number(areaFactor ?? 1));
   const treatedUnits = (Number(lawnSqft || 0) * factor) / 1000;
-  const rateInfo = productRatePer1000(product, { targetNPer1000, targetKPer1000 });
+  const rateInfo = productRatePer1000(product, { targetNPer1000, targetKPer1000, protocolRate, deriveNutrientFirst });
   const rate = Number(rateInfo.rate || 0);
   const unit = rateInfo.unit || null;
   const amount = treatedUnits > 0 && rate > 0 ? Number((treatedUnits * rate).toFixed(3)) : null;
@@ -967,7 +1130,7 @@ function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: 
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
     || (recorded || requireKnownGrass ? null : 'st_augustine');
-  const track = trackKey ? protocols.lawn?.[trackKey] : null;
+  const track = trackKey ? lawnProtocols()?.[trackKey] : null;
   const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];
   const visit = track?.visits?.find((v) => v.month === month) || null;
   return { trackKey, track, month, visit };
@@ -1334,10 +1497,168 @@ async function customerBillingModeColumnExists(knex) {
   }
 }
 
+// ── Plan item projection (buildPlanForService) ──────────────────────────────
+// The approved substitute carries the visit's own rate over its catalog default.
+function substitutedProduct(substitution) {
+  return {
+    ...substitution.substitute,
+    default_rate_per_1000: substitution.rate_per_1000 != null
+      ? substitution.rate_per_1000
+      : substitution.substitute.default_rate_per_1000,
+    rate_unit: substitution.rate_unit || substitution.substitute.rate_unit,
+  };
+}
+
+// The protocol line's own fields, as the panel shows them.
+function planLineFields(item) {
+  return {
+    raw: item.raw,
+    role: item.role,
+    conditional: item.conditional,
+    scope: item.scope,
+    conditionFlag: item.conditionFlag,
+    branchGroupId: item.branchGroupId,
+    branch: item.branch || null,
+    areaFactorDefault: item.areaFactorDefault,
+    areaFactorClean: item.areaFactorClean,
+    areaFactorHeavy: item.areaFactorHeavy,
+    areaFactorBroadcast: item.areaFactorBroadcast,
+    selectionReason: item.selectionReason,
+    selected: item.selected,
+  };
+}
+
+// The ONE decision about what a v13 line may compute, for the plan and the tank
+// sheet alike (gate on, v13 protocol resolved). A line keeps its protocol product
+// (a saved substitution is never applied) and reads its own staged row:
+//   unavailable: no row is linked to the matched catalog product, so nothing is sized
+//                (never the catalog default);
+//   capped:      a hard application limit (annual cap, interval, blackout) is reached;
+//   spot:        a spot or label-rate row, no quantity (enter the area and amount used);
+//   calculate:   a whole-lawn row that states a rate or a nutrient target.
+function v13LineState(product, v13Rows, cappedIds = new Set()) {
+  const row = v13Rows.get(String(product.id)) || null;
+  if (!row) return { row, state: 'unavailable' };
+  if (cappedIds.has(String(product.id))) return { row, state: 'capped' };
+  return { row, state: v13RowCalculates(row) ? 'calculate' : 'spot' };
+}
+
+const V13_UNAVAILABLE = {
+  unavailable: 'No protocol row is linked to this product, so no amount is planned. Enter the actual work.',
+  capped: 'An application limit is reached for this product, so no amount is planned.',
+};
+
+// product_limits (annual caps, minimum intervals, blackouts) through the one
+// application-limits reader the completion path uses, over the customer's own
+// application history, for each SELECTED product: the hard blocks per product id
+// (`capped`: no amount) and the warning-level findings (`warnings`: a minimum
+// interval, an approaching cap; the dose stays). A failed read fails closed
+// (strict throws; otherwise the product reads as capped).
+async function v13Limits(knex, service, serviceDate, items, { strict = false } = {}) {
+  const limits = require('./application-limits');
+  const capped = new Map();
+  const warnings = [];
+  const checked = new Set();
+  for (const item of items.filter((candidate) => candidate.selected && candidate.product)) {
+    const id = String(item.product.id);
+    if (checked.has(id)) continue;
+    checked.add(id);
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k))
+      .catch((err) => {
+        if (strict) throw err;
+        return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };
+      });
+    if (result.blocks.length) capped.set(id, result.blocks.map((block) => ({ ...block, productName: item.product.name })));
+    warnings.push(...result.warnings.map((warning) => ({
+      code: 'lawn_v13_limit_warning', severity: 'warning', limitType: warning.type || null, productId: id, productName: item.product.name, message: warning.message,
+    })));
+  }
+  return { capped, warnings };
+}
+
+// Plan notices for the v13 lines: a hard limit is a block per limit (the existing
+// message), an unlinked line and an ignored substitution are warnings.
+function v13LineNotices(planItems, capped, ignoredSubstitutionIds) {
+  const blocks = [...capped].flatMap(([productId, found]) => found.map((block) => ({
+    code: 'lawn_v13_annual_limit', severity: 'block', productId, productName: block.productName, message: block.message,
+  })));
+  const warnings = planItems.filter((item) => item.unavailable && item.product).map((item) => ({
+    code: 'lawn_v13_line_unlinked', severity: 'warning', productId: item.product.id, productName: item.product.name,
+    message: `${item.product.name}: no protocol row is linked to this product, so no amount is planned.`,
+  }));
+  const substitutions = planItems.filter((item) => item.product && ignoredSubstitutionIds.has(String(item.product.id))).map((item) => ({
+    code: 'lawn_v13_substitution_ignored', severity: 'warning', productId: item.product.id, productName: item.product.name,
+    message: 'Substitution not applied: v13 line keeps its protocol product.',
+  }));
+  return { blocks, warnings: [...warnings, ...substitutions] };
+}
+
+// The staged v13 row's gates and what they mean in the field (null and empty for
+// every other plan), carried so the panel and job card can show them.
+function v13ItemFields(line, gateContext, product) {
+  const row = line?.row;
+  return {
+    gates: row?.gates && Object.keys(row.gates).length ? row.gates : null,
+    gateNotes: row ? v13GateNotes(row.gates, gateContext) : [],
+    // A row with no calculated quantity: selectable, label rate as reference, never an amount.
+    spot: line?.state === 'spot'
+      ? { note: 'Spot: enter the area treated and the amount used.', reference: v13SpotReference(row, product) }
+      : null,
+    // A line the plan cannot size at all: say why; the tech enters the actual work.
+    unavailable: V13_UNAVAILABLE[line?.state] ? { reason: V13_UNAVAILABLE[line.state] } : null,
+  };
+}
+
+const nullableNumber = (value) => (value != null ? Number(value) : null);
+
+function planProductSnapshot(product, mix) {
+  if (!product) return null;
+  return {
+    id: product.id,
+    name: product.name,
+    category: product.category,
+    activeIngredient: product.active_ingredient,
+    active: product.active !== false,
+    groups: getProductGroups(product),
+    labelVerifiedAt: product.label_verified_at,
+    applicationMethod: product.application_method,
+    formulation: product.formulation,
+    analysis_n: product.analysis_n,
+    analysis_p: product.analysis_p,
+    analysis_k: product.analysis_k,
+    bestPrice: nullableNumber(product.best_price),
+    costPerUnit: nullableNumber(product.cost_per_unit),
+    costUnit: product.cost_unit || null,
+    containerSize: product.container_size || null,
+    unitSizeOz: nullableNumber(product.unit_size_oz),
+    needsPricing: product.needs_pricing === true,
+    mixing_order_category: product.mixing_order_category,
+    mixing_instructions: product.mixing_instructions,
+    inventory: buildProductInventorySnapshot(product, mix),
+  };
+}
+
+function planSubstitutionSnapshot(substitution) {
+  if (!substitution) return null;
+  return {
+    id: substitution.id,
+    originalProductId: substitution.original_product_id,
+    originalProductName: substitution.original_product_name,
+    substituteProductId: substitution.substitute_product_id,
+    substituteProductName: substitution.substitute_product_name,
+    reason: substitution.reason || null,
+    approvedByName: substitution.approved_by_name || null,
+    approvedAt: substitution.approved_at || null,
+    ratePer1000: nullableNumber(substitution.rate_per_1000),
+    rateUnit: substitution.rate_unit || null,
+  };
+}
+
 async function buildPlanForService(serviceId, options = {}) {
   const knex = options.db || db;
   const now = options.now || new Date();
   const completionDefaultsEnabled = options.completionDefaultsEnabled ?? lawnCompletionDefaultsEnabled();
+  const lawnV13On = featureGates.lawnV13Live?.() === true;
   const billingModeColumnExists = typeof options.billingModeColumnExists === 'boolean'
     ? options.billingModeColumnExists
     : await customerBillingModeColumnExists(knex);
@@ -1396,12 +1717,19 @@ async function buildPlanForService(serviceId, options = {}) {
   const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
   const calendarProtocol = selectProtocolVisit(profile, serviceDate, service.lawn_type, { requireKnownGrass: completionDefaultsEnabled });
+  // GATE_LAWN_V13 resolves the visit's pinned assignment whatever the completion-
+  // default gates say: a pinned older visit must be seen as pinned, never as
+  // unpinned (which would resolve the staged v13 version for it).
   const structuredProtocolContext = (calendarProtocol.trackKey || !completionDefaultsEnabled) ? await getProtocolWindowContext(knex, {
     serviceDate,
     grassTrack: calendarProtocol.trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
+    planning: true,
     ...(completionDefaultsEnabled ? {
       strict: true, windowKey: service.lawn_protocol_window_key,
+      protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version,
+    } : lawnV13On ? {
+      windowKey: service.lawn_protocol_window_key,
       protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version,
     } : {}),
   }).catch((err) => { if (strict) throw err; return null; }) : null;
@@ -1415,8 +1743,9 @@ async function buildPlanForService(serviceId, options = {}) {
   const visit = completionDefaultsEnabled && service.lawn_protocol_window_key && !structuredProtocolContext?.window
     ? null : selection.visit;
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
-  const baseLines = parseProtocolLines(visit?.primary, 'base');
-  const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional');
+  const exactName = track?.exact_catalog_names === true;
+  const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
+  const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional', { exactName });
   const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
   const candidateItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,
@@ -1443,81 +1772,55 @@ async function buildPlanForService(serviceId, options = {}) {
   const lawnSqft = completionContext
     ? Number(options.lawnSqft !== undefined ? options.lawnSqft : (completionContext.propertyMatchesProfile ? profile?.lawn_sqft : 0)) || 0
     : Number(profile?.lawn_sqft || 0);
+  // GATE_LAWN_V13 with the staged v13 protocol resolved: each matched product's
+  // own protocol row supplies its rate and its sunny-turf limit.
+  const v13Rows = v13ProtocolRows(structuredProtocol);
+  // What every line's area factor and gate text share, built once.
+  const areaContext = {
+    sunExposure: profile?.sun_exposure,
+    plan: options.plan || service.waveguard_tier,
+    weedPressure: options.weedPressure,
+    conditionFlags: options.conditionFlags,
+    propertyFlags: options.propertyFlags,
+    stressFlags,
+    isFirstYear: options.isFirstYear,
+  };
+  const gateContext = {
+    monthNumber: MONTH_ABBR.indexOf(month) + 1 || null,
+    municipality: resolvedOrdinanceCity,
+    productionMode: structuredProtocol?.window?.productionMode,
+  };
+  // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
+  // through v13LineState (one decision per line) and keeps its protocol product.
+  const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
+  const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict }) : { capped: new Map(), warnings: [] };
+  const cappedProducts = v13Limit.capped;
+  const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts) : null);
+  // An apply-alone product selected beside any other product holds the mix: the plan
+  // blocks and withholds the selection's quantities (as the tank sheet does).
+  const applyAloneBlocks = v13SelectionBlocks(candidateItems, (item) => v13LineOf(item)?.row, gateContext);
   const planItems = candidateItems.map((item) => {
-    const substitution = item.product ? substitutions.get(String(item.product.id)) : null;
-    const plannedProduct = substitution
-      ? {
-          ...substitution.substitute,
-          default_rate_per_1000: substitution.rate_per_1000 != null
-            ? substitution.rate_per_1000
-            : substitution.substitute.default_rate_per_1000,
-          rate_unit: substitution.rate_unit || substitution.substitute.rate_unit,
-        }
-      : item.product;
-    const mix = plannedProduct ? calculateProductAmount({
+    const line = v13LineOf(item);
+    // One product per line: the approved substitute when one is on the visit, else the
+    // matched catalog row. A v13 line never takes a substitute (it keeps its protocol
+    // product, rate scope and gates; the plan warns).
+    const substitution = !v13Active && item.product ? substitutions.get(String(item.product.id)) : null;
+    const plannedProduct = substitution ? substitutedProduct(substitution) : item.product;
+    const mix = plannedProduct && (!line || line.state === 'calculate') && !(applyAloneBlocks.length && item.selected) ? calculateProductAmount({
       product: plannedProduct,
       lawnSqft,
       carrierGalPer1000: carrier,
-      areaFactor: effectiveAreaFactor(item, {
-        plan: options.plan || service.waveguard_tier,
-        weedPressure: options.weedPressure,
-        conditionFlags: options.conditionFlags,
-        propertyFlags: options.propertyFlags,
-        stressFlags,
-        isFirstYear: options.isFirstYear,
-      }),
+      areaFactor: effectiveAreaFactor(line?.row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item, areaContext),
       ...nutrientTargets,
+      ...v13RateOptions(line?.row),
     }) : null;
     return {
-      raw: item.raw,
-      role: item.role,
-      conditional: item.conditional,
-      scope: item.scope,
-      conditionFlag: item.conditionFlag,
-      branchGroupId: item.branchGroupId,
-      branch: item.branch || null,
-      areaFactorDefault: item.areaFactorDefault,
-      areaFactorClean: item.areaFactorClean,
-      areaFactorHeavy: item.areaFactorHeavy,
-      areaFactorBroadcast: item.areaFactorBroadcast,
-      selectionReason: item.selectionReason,
-      selected: item.selected,
+      ...planLineFields(item),
+      // Gate off: no v13 field at all, the payload is the old one.
+      ...(v13Active ? v13ItemFields(line, gateContext, plannedProduct) : {}),
       matched: !!plannedProduct,
-      product: plannedProduct ? {
-        id: plannedProduct.id,
-        name: plannedProduct.name,
-        category: plannedProduct.category,
-        activeIngredient: plannedProduct.active_ingredient,
-        active: plannedProduct.active !== false,
-        groups: getProductGroups(plannedProduct),
-        labelVerifiedAt: plannedProduct.label_verified_at,
-        applicationMethod: plannedProduct.application_method,
-        formulation: plannedProduct.formulation,
-        analysis_n: plannedProduct.analysis_n,
-        analysis_p: plannedProduct.analysis_p,
-        analysis_k: plannedProduct.analysis_k,
-        bestPrice: plannedProduct.best_price != null ? Number(plannedProduct.best_price) : null,
-        costPerUnit: plannedProduct.cost_per_unit != null ? Number(plannedProduct.cost_per_unit) : null,
-        costUnit: plannedProduct.cost_unit || null,
-        containerSize: plannedProduct.container_size || null,
-        unitSizeOz: plannedProduct.unit_size_oz != null ? Number(plannedProduct.unit_size_oz) : null,
-        needsPricing: plannedProduct.needs_pricing === true,
-        mixing_order_category: plannedProduct.mixing_order_category,
-        mixing_instructions: plannedProduct.mixing_instructions,
-        inventory: buildProductInventorySnapshot(plannedProduct, mix),
-      } : null,
-      substitution: substitution ? {
-        id: substitution.id,
-        originalProductId: substitution.original_product_id,
-        originalProductName: substitution.original_product_name,
-        substituteProductId: substitution.substitute_product_id,
-        substituteProductName: substitution.substitute_product_name,
-        reason: substitution.reason || null,
-        approvedByName: substitution.approved_by_name || null,
-        approvedAt: substitution.approved_at || null,
-        ratePer1000: substitution.rate_per_1000 != null ? Number(substitution.rate_per_1000) : null,
-        rateUnit: substitution.rate_unit || null,
-      } : null,
+      product: planProductSnapshot(plannedProduct, mix),
+      substitution: planSubstitutionSnapshot(substitution),
       mix,
     };
   });
@@ -1525,7 +1828,10 @@ async function buildPlanForService(serviceId, options = {}) {
   // catalog rate. Keep its stored protocol visible, but offer no calculated
   // products when the old recipe cannot be reproduced from the current inputs.
   const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems);
-  if (archivedRecipeUnavailable) planItems.length = 0;
+  // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
+  // either (the block below says why), never amounts from catalog defaults.
+  const v13PlanBlock = lawnV13PlanBlock({ trackKey, service, structuredProtocol });
+  if (archivedRecipeUnavailable || v13PlanBlock) planItems.length = 0;
   const plannedItems = planItems.filter((item) => item.selected);
   const materialCostSummary = summarizeMaterialCost(plannedItems);
 
@@ -1547,6 +1853,17 @@ async function buildPlanForService(serviceId, options = {}) {
   }
   if (completionContext && !completionContext.propertyMatchesProfile) {
     blocks.push({ code: 'lawn_property_unresolved', severity: 'block', message: 'The saved turf profile does not prove this service property; suggested amounts are unavailable.' });
+  }
+  if (v13PlanBlock) blocks.push(v13PlanBlock);
+  // Restored v13 product gates on the selected items: a condition the plan cannot
+  // clear is a visible warning; an apply-alone product selected beside any other
+  // product holds the mix.
+  warnings.push(...v13SelectedGateWarnings(plannedItems));
+  blocks.push(...applyAloneBlocks);
+  if (v13Active) {
+    const notices = v13LineNotices(planItems, cappedProducts, new Set(substitutions.keys()));
+    blocks.push(...notices.blocks);
+    warnings.push(...notices.warnings, ...v13Limit.warnings);
   }
   if (completionDefaultsEnabled && !matchesLawnCompletionProtocol(structuredProtocol, {
     protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version, windowKey: service.lawn_protocol_window_key,
@@ -1766,7 +2083,8 @@ async function buildPlanForService(serviceId, options = {}) {
       source: service.lawn_protocol_assignment_source || null,
       assignedAt: service.lawn_protocol_assigned_at || null,
     },
-    mixingOrder: buildMixOrder(plannedItems),
+    // An apply-alone conflict holds the mix: no combined order is offered.
+    mixingOrder: applyAloneBlocks.length ? [] : buildMixOrder(plannedItems),
     closeout: {
       requiredPhotos: ['before', 'after'],
       captureActualProductAmounts: true,
@@ -1795,6 +2113,18 @@ module.exports = {
   parseVisitNutrientTargets,
   summarizeMaterialCost,
   effectiveAreaFactor,
+  v13ProtocolRows,
+  v13RateOptions,
+  loadV13RowsForMonth,
+  lawnV13PlanBlock,
+  v13GateNotes,
+  v13ItemFields,
+  v13RowCalculates,
+  planLineFields,
+  v13SelectedGateWarnings,
+  v13ApplyAloneBlocks,
+  v13SelectionBlocks,
+  v13LineState,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,

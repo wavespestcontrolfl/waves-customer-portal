@@ -54,6 +54,8 @@ export function lifeLabel(row) {
 
 export function sourceLabel(row) {
   if (row.sourceType === "staff") return "Added by office";
+  // Copied from the customer's profile field by the one-list sweep.
+  if (row.sourceType === "profile") return "From the profile";
   const day = fmtDay(dayKey(row.sourceAt));
   return day ? `Text, ${day}` : "Text";
 }

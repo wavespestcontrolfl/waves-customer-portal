@@ -89,7 +89,8 @@ import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
   AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
-  SavedView, TipSection, VisitNote, methodChoicesOf, methodLabel, rateUnitForRecord, techTipsOf, unitLabel, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
+  RecoveredCompletion, SavedView, TipSection, VisitNote, methodChoicesOf, methodLabel, rateUnitForRecord, refusalWithoutContext, submissionHolds,
+  techTipsOf, unitLabel, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
@@ -770,7 +771,7 @@ function TimeOnSite({ since }) {
   );
 }
 
-export default function FastCompleteLawnSheet({ service, request, catalog = [], onClose, onCompleted, onFullForm, onViewDetails }) {
+export default function FastCompleteLawnSheet({ service, request, operatorId, catalog = [], onClose, onCompleted, onFullForm, onViewDetails }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
@@ -784,7 +785,9 @@ export default function FastCompleteLawnSheet({ service, request, catalog = [], 
   const reloadAreas = useRef(null);
   reloadAreas.current = propertyAreas.refresh;
   const submitRequest = useMemo(() => plainErrors(request, reloadAreas), [request]);
-  const submission = useFastCompleteSubmit({ base, request: submitRequest });
+  // `sheet` tags a saved attempt as this sheet's: its findings type matches the
+  // lawn re-service sheet's, and Tech Home cannot open this one.
+  const submission = useFastCompleteSubmit({ base, request: submitRequest, serviceId: service?.id, operatorId, sheet: 'lawn_visit' });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. "+ Other
   // product" and Complete wait for it, so the words are not missed.
@@ -793,14 +796,16 @@ export default function FastCompleteLawnSheet({ service, request, catalog = [], 
   const [overlay, setOverlay] = useState(null);
 
   // The server says this visit does not use this sheet: the parent opens the
-  // full form, once. (No button on the sheet leads there.)
+  // full form, once. (No button on the sheet leads there.) Not while a saved
+  // attempt is checked for or shown: a fresh full-form completion would race it.
   const handedOff = useRef(false);
+  const holdsSaved = submission.recovering || submission.restored;
   useEffect(() => {
-    if (ctx.handoff && !handedOff.current) {
+    if (ctx.handoff && !handedOff.current && !holdsSaved) {
       handedOff.current = true;
       onFullForm?.();
     }
-  }, [ctx.handoff, onFullForm]);
+  }, [ctx.handoff, holdsSaved, onFullForm]);
 
   // Any dismissal the schedule may be stale for asks the parent to refresh: a
   // sheet blocked on a stale or changed visit, or an attempt whose outcome is
@@ -814,7 +819,7 @@ export default function FastCompleteLawnSheet({ service, request, catalog = [], 
   }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for good.
-  const locked = submitting || submission.failure !== null;
+  const locked = submissionHolds(submission);
 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} dialogClassName="tech-lawn-sheet" onDismiss={close} hiddenProps={overlay ? INERT : undefined} overlay={overlay}>
@@ -825,7 +830,11 @@ export default function FastCompleteLawnSheet({ service, request, catalog = [], 
 }
 
 function SheetBody({ service, request, catalog, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+  if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
+  if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  const refusal = refusalWithoutContext(submission, ctx);
+  if (refusal) return refusal;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   if (ctx.handoff) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Opening the full form…</ActionFeedback>;
   if (ctx.loadError) {

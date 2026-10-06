@@ -116,6 +116,7 @@
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
  *   GATE_REPORT_WRITER_RULES=true (owner rules for the AI service report, owner "go" 2026-09-30, four-section report owner "ok go" 2026-10-01: WHAT WE FOUND / WHAT WE DID AND WHY / WHAT TO EXPECT / WHAT'S NEXT, length by the record, timeframes only from approved expectation wording, the reach-out date on one-time services and re-services, no booking state in the text (the report shows the next visit live); four-section notes are read only while this switch is on; one OWNER RULES block, no product/active names, amounts, footage, "safe", "per visit" or other company names in the copy, the technician note sorted by provenance, customer messages labeled and scrubbed, and output screens that reject what slips through. Every writer EXCEPT lawn and tree/shrub/palm, which stay byte-identical (owner: another lane owns them). Also the promise check at completion (owner "ok yes add these" 2026-10-01): the completion form lists the customer's open technician promises (GET /admin/dispatch/:id/promises), the report says only what the tech marked, Done closes the promise and Partly adds a still-left note (visit-promises.js). Off unless exactly 'true', read at call time via reportWriterRulesLive(); off = byte-identical prompts, inputs and screens, and no promise check)
  *   GATE_REPORT_BLOG_POST=true (Waves blog post on the service report, owner "ok go" 2026-10-01: the completion forms search the live Waves blog (GET /admin/dispatch/:id/blog-posts), the picked post is frozen on the record at completion (structured_notes.blogPost: title and live URL on the site's own host) and the customer's report shows it at the bottom as "From the Waves blog". Strict opt-in: exactly 'true' in every environment, read at call time via reportBlogPostLive(). Ships DARK; off = the search answers {available:false}, a picked post is ignored at completion and the report shows none, frozen ones included.)
+ *   GATE_REPORT_ASK_AI=true (service report "Ask Waves" answers written by AI, owner 2026-10-05, "use sonnet 5.5": POST /api/reports/:token/ask builds a short fact sheet from the report (service, date, technician first name, weather, pest pressure label, the customer's concern and the reviewed report sections, each applied product's approved plain wording, label precaution and re-entry text with inside or outside from the recorded area, the re-entry status, the next visit; never amounts, rates, totals, EPA numbers, prices or the per-product target pests) and has Claude Sonnet 5.5 (TEXT_POLICIES.reportAsk, OpenAI backup, MODEL_REPORT_ASK) answer the question in one to four plain sentences, screened by the report copy guards (no "safe", guarantees, prices, amounts). A miss, a timeout (about 8 s), an empty or rejected answer returns the old fixed-rule answer. The stored event stays question_length and topic; the question text is never stored or logged. Strict opt-in: exactly 'true', read at call time via reportAskAiLive(). Ships DARK; off = the fixed-rule answer alone, byte-identical, no model call.)
  *   GATE_STANDARD_WORDING_PREVIEW=true (owner mockup approval 2026-10-03: when a typed visit's record says nothing was found, the office Complete Service form, which greys out Generate AI report for it, shows the exact standard sentences the customer's report will use: POST /admin/dispatch/:id/standard-wording { values, activityScore } builds the report's own Today's Result as /complete builds it (the visit's own form, the score the completion keeps, the visit number and trend from the customer's earlier scores) and answers them only when the report would keep its standard wording (service-report/standard-wording-preview.js). Read-only, display-only. Strict opt-in: exactly 'true', read at call time via standardWordingPreviewLive(). Ships DARK; off = the route answers { available: false } and the form shows no card.)
  *   GATE_BLOG_SEARCH_SUGGEST=true (Suggest a post from the completion forms' blog search, owner mockup approval 2026-10-03; owner ruling 2026-10-02: straight into the autonomous blog queue, written and published automatically, no approval step. With GATE_REPORT_BLOG_POST on, a search no live post holds every word of says so, shows the closest posts and offers "Suggest a post about …" to the office (an admin login only): POST /admin/dispatch/:id/blog-suggestions writes one operator-pinned new_supporting_blog row into opportunity_queue (bucket operator_intercept, score 79, no city, service and specialty topic inferred from the phrase, signal_metadata.source tech_blog_search; unlike a manifest intercept it is SERP-profiled, the router's public-health, navigational and do_not_publish demotions apply to it, and the quality gate waives only GSC evidence), refusing a near-me, out-of-area or personal-data phrase (a customer's name in our records included), one with a letter outside a-z, a search a live post now covers, a topic the chain tried and skipped (declined), or more than 10 a person a day; the same phrase from any source answers already_queued. The phrase is never logged. Strict opt-in: exactly 'true', read at call time via blogSearchSuggestLive(). Ships DARK; off = the search answers suggest:false, the forms show no button, the route answers 404 { enabled: false }, and suggestions already queued are not claimed (opportunity-queue fences source tech_blog_search; they wait, and expire unclaimed after 45 days).)
  *   GATE_PORTAL_CHAT_FACTS=true (portal Waves Assistant payment card: a charge / payment / receipt question shows the customer a server-rendered card of their last three payments from the Billing tab's own read, plus an Open Billing button; the model is told only that it was shown and the status words. Off unless exactly 'true', read at call time via portalChatFactsLive(); needs PORTAL_CHAT_SELF_SERVE live (default on). Off = the self-serve chat alone, byte-identical. Sends nothing to a customer.)
@@ -189,6 +190,7 @@
  *   GATE_LAWN_REPORT_PHOTO_FINDINGS=true (lawn report rebuild P23b: a short "What the photos showed" block on the lawn report, built only from the technician-reviewed, kept findings of the visit's current confirmed assessment run (lawn_assessment_runs.reviewed_findings), symptom labels only, each with the thumbnails it cites and, where the technician marked it undeterminable from the photos, one fixed sentence naming the shot that would confirm it; it prints only while the report's own category card for that topic shows a concern. Exists only when BOTH this gate and GATE_LAWN_REPORT_PHOTO_SET are on and the visit has a photo set. Needs no migration. Ships DARK, read at call time via lawnReportPhotoFindingsLive(); off = no run read, and byte-identical report payload, PDF cache key and PDF)
  *   GATE_LAWN_LIGHTING=true (lawn lighting-aware color, owner 2026-10-04: sun, shade and cloud change a lawn's color in a photo, so (1) the lawn visit assessment reads each photo's light (full sun, overcast, open shade, mixed sun and shade, low light, unknown; hard shadows yes/no/unknown) under its own prompt version (lawn-visit-v1-lighting, or lawn-visit-v1-shot-list-lighting for a shot-list capture), tells the model to judge color from turf in even light and never to read shadowed turf as thinner or darker, and stores the read beside each photo's quality in the run's photo_quality (never shown to the technician, no new technician step, no new weather call); (2) the paired-photo recheck reads under lawn-paired-recheck-v3, which is told each pair's light and drops color from any pair whose two photos are not in compatible light; (3) the report's "Since your last visit" lines (live web view only) say nothing about color unless BOTH visits have a known, compatible light read (full sun with full sun, or overcast and open shade with each other), a color move under 8 points is no change (a "behind" resting on it is withheld), and the overall line is kept only when thickness, weeds and stress damage agree with it, so color alone never produces up or down (the gate only ever removes a gate-off sentence, never prints a different one); (4) the report writer's prior-visit score line drops the color delta unless the light is compatible. A visit with no light read (every visit before this gate) is unknown, so its color is never compared. (5) the report's "Color & Vigor" trend, and the portal's Color / Nutrients since-first-visit comparison, are left out unless the latest visit and the one before are in known, compatible light. Needs GATE_LAWN_VISIT_ASSESSMENT also on (the light read comes only from that assessment; the reader reports off without it). Needs no migration. Ships DARK, read at call time via lawnLightingLive(); off = byte-identical prompt, schema, stored run, since-last lines, trends and recheck prompt)
  *   GATE_LAWN_TECH_PARAGRAPH=true (lawn report "From your technician" paragraph, owner 2026-10-05: at completion ONE model call turns the technician's spoken note, the products applied (with their stored targets), the confirmed scores, the technician-kept photo findings, the last visit's products and fixed progress lines, and the headline and watering facts the report already prints into 2 to 4 plain sentences (70 words at most, first person plural), with a per-sentence sources list; code rejects the whole paragraph, and stores nothing, if it names a product, pest or condition no input carries, states a number, date, timing, promise or visit commitment, compares color between visits, claims the photos confirmed a cause, or fails the customer-copy screens; the survivor freezes first-writer-wins in structured_notes.lawnTechParagraph[assessmentId] (never regenerated at render; a failed or slow call = no paragraph, completion unaffected) and rides reportV2.lead.techParagraph under the "What we applied today" line on the web report and the PDF; lane lawn_tech_paragraph on TEXT_POLICIES.report; REQUIRES GATE_LAWN_REPORT_LEAD (it renders only in the lead); lawn only; ships DARK, read at call time via lawnTechParagraphLive(); off = no model call, byte-identical payload, PDF and PDF cache key)
+ *   GATE_TS_TECH_PARAGRAPH=true (tree & shrub report "From your technician" paragraph, owner 2026-10-05, go-ahead; FIXED SENTENCES: the AI picks facts and code writes every word. At completion at most ONE model call (lane ts_tech_paragraph on TEXT_POLICIES.report, only when the technician left a note) extracts up to 3 closed-list { condition, plant } ids from the note; code verifies each against the note (the model's seenToday judgment must be true and its quote must be the technician's exact words naming the condition; plant only when the quote names it) and renders only the sentences in the TS_SENTENCES constant, plus deterministic lines from the products applied, low-confidence and confirmed kept photo findings, and the technician's own Excellent/Good rating; none of the model's text is printed. The watch list, the last visit, the report headline and product ingredients are not inputs; palm-banned terms (Ganoderma, conk, lethal bronzing, fusarium, crown, spear leaf, newest fronds) can never render. The survivor freezes first-writer-wins in structured_notes.treeShrubTechParagraph[assessmentId] as { text, slots } (never regenerated at render; at read time the text must equal render(slots) under the current templates; a failed or slow call freezes the deterministic lines only) and rides reportV2.techParagraph on the web report and the PDF; REQUIRES GATE_TS_TECH_FINDINGS_COPY (the technician's hide / confirm / edit decisions must govern the report the paragraph sits in); tree & shrub only; customer copy, so strict opt-in: exactly 'true' in every environment, read at call time via tsTechParagraphLive(). Ships DARK; off = no model call, byte-identical payload, PDF and PDF cache key)
  *   GATE_LAWN_FAST_COMPLETE=true (Lawn Fast Complete, server half, PR-C1: for a lawn visit of any type (recurring program, per-application or one-time), GET /:serviceId/lawn-fast/context answers what the one-screen completion sheet opens with (eligibility verdict with a reason, the visit's planned products each with its post-application watering rule, whether a confirmed lawn assessment exists, the soft photo status), POST /:serviceId/lawn-fast/watering-preview answers the per-product rules and the one watering sentence the report would print for the chosen products (the report's own builder, so they cannot differ), and a /complete body carrying a `lawnFast` block must pass a preflight: gate on, an eligible visit and a CONFIRMED lawn assessment. The photo minimum is advisory only, never a refusal. The schedule payload carries `lawnFastCompleteEnabled` per service. Customer-silent: sends no text or email and changes no completion messaging. Strict opt-in: exactly 'true' in every environment, read at call time via lawnFastCompleteLive(). Ships DARK; off = both routes answer 404 {enabled:false}, a `lawnFast` block on /complete is refused 409 lawn_fast_disabled, and the flag is false.)
  *   GATE_LAWN_WATERING_SMS=true (lawn visit watering text: a SEPARATE customer SMS right after the completion text carrying the visit's frozen watering instruction, rendered from the editable lawn_watering_instruction sms_templates row. Customer messaging, so strict opt-in: exactly 'true' in every environment, read at call time via lawnWateringSmsLive(); ALSO requires GATE_LAWN_WATERING_RULE (no frozen instruction exists without it). Ships DARK; off = byte-identical completion behavior, no extra reads or structured_notes writes.)
  *   GATE_TS_FAST_COMPLETE=true (Tree & Shrub Fast Complete, server half: GET /:serviceId/tree-shrub/fast-context answers the one-screen completion sheet's month products, last-visit values and IRAC/palm-spacing warnings, and the schedule payload carries `treeShrubFastCompleteEnabled` for every technician (owner 2026-10-01: no per-tech flag; this gate is the only switch). Customer-silent; strict opt-in: exactly 'true' in every environment, read at call time via tsFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false} and the flag is false.)
@@ -3861,6 +3863,10 @@ const gates = {
   // admin-dispatch.js, complete-scheduled-service.js and report-data.js
   // read GATE_REPORT_BLOG_POST at call time via reportBlogPostLive().
   reportBlogPost: process.env.GATE_REPORT_BLOG_POST === 'true',
+  // Service report Ask Waves AI answers (owner 2026-10-05). Ships DARK.
+  // report-ask-ai.js reads GATE_REPORT_ASK_AI at call time via
+  // reportAskAiLive(); this entry is for logGateStatus only.
+  reportAskAi: process.env.GATE_REPORT_ASK_AI === 'true',
   // GATE_STANDARD_WORDING_PREVIEW — the office form shows the standard
   // wording a nothing-found report keeps; read at call time via
   // standardWordingPreviewLive().
@@ -4021,6 +4027,13 @@ const gates = {
   // the fast-context answer and the completion freeze read GATE_TS_WATCH_LIST
   // at call time via tsWatchListLive().
   tsWatchList: process.env.GATE_TS_WATCH_LIST === 'true',
+
+  // Tree & Shrub report "From your technician" paragraph (proposed 2026-10-05, owner go-ahead pending): one
+  // model call at completion, frozen, printed on the T&S report. Ships DARK in
+  // every environment. This entry is for logGateStatus only: the completion
+  // step and the report build read GATE_TS_TECH_PARAGRAPH at call time via
+  // tsTechParagraphLive().
+  tsTechParagraph: process.env.GATE_TS_TECH_PARAGRAPH === 'true',
   // Lawn re-service Fast Complete (owner 2026-10-01): the one-screen completion
   // sheet for the free between-visit lawn callback (lawn_re_service). Ships DARK
   // in every environment. This entry is for logGateStatus only: admin-dispatch.js
@@ -4179,6 +4192,13 @@ const gates = {
   // report build read GATE_LAWN_TECH_PARAGRAPH at call time via
   // lawnTechParagraphLive().
   lawnTechParagraph: gateEnvValue('GATE_LAWN_TECH_PARAGRAPH'),
+  // Lawn protocol v13 (owner 2026-10-05): one universal lawn program for every
+  // grass, loaded beside the old program. Ships DARK: off unless exactly
+  // 'true'. This entry is for logGateStatus only: every lawn recipe reader
+  // (server/services/lawn-program.js) and the structured protocol lookup
+  // (lawn-protocol-operating-layer.js) read GATE_LAWN_V13 at call time via
+  // lawnV13Live(), so unsetting it is the kill switch (no redeploy).
+  lawnV13: process.env.GATE_LAWN_V13 === 'true',
 
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
@@ -4336,6 +4356,18 @@ function tsTechFindingsCopyLive() {
 // the fast-context `watchList` and the completion freeze of watch items.
 function tsWatchListLive() {
   return process.env.GATE_TS_WATCH_LIST === 'true';
+}
+
+// GATE_TS_TECH_PARAGRAPH read at CALL time — strict `=== 'true'`, dark in every
+// environment (customer copy). The one reader for the tree & shrub report's
+// "From your technician" paragraph (tree-shrub-tech-paragraph.js): the
+// completion step makes its one model call and freezes the text, and the report
+// build hands a frozen text to the report, only while this is live. It also
+// needs GATE_TS_TECH_FINDINGS_COPY: the technician's hide / confirm / edit
+// decisions must govern the report the paragraph sits in. Off = no model call,
+// no read, and the payload, the PDF and its cache key are byte-identical.
+function tsTechParagraphLive() {
+  return process.env.GATE_TS_TECH_PARAGRAPH === 'true' && tsTechFindingsCopyLive();
 }
 
 // GATE_LAWN_RESERVICE_FAST_COMPLETE read at CALL time — strict `=== 'true'`, dark
@@ -4586,6 +4618,13 @@ function reportWriterRulesLive() {
 // is ignored at completion and no report shows one (frozen picks included).
 function reportBlogPostLive() {
   return process.env.GATE_REPORT_BLOG_POST === 'true';
+}
+
+// GATE_REPORT_ASK_AI read at CALL time — strict `=== 'true'`, dark in every
+// environment. Off, POST /api/reports/:token/ask answers with the fixed-rule
+// text alone and makes no model call.
+function reportAskAiLive() {
+  return process.env.GATE_REPORT_ASK_AI === 'true';
 }
 
 // GATE_STANDARD_WORDING_PREVIEW read at CALL time — strict `=== 'true'`, dark
@@ -5572,6 +5611,15 @@ function lawnTechParagraphLive() {
   return gateEnvValue('GATE_LAWN_TECH_PARAGRAPH') && lawnReportLeadLive();
 }
 
+// GATE_LAWN_V13 read at CALL time — strict `'true'` only, so an unset variable
+// is the kill switch. The one reader for the v13 lawn program: lawn-program.js
+// hands every recipe reader the v13 program instead of protocols.json `lawn`,
+// and getActiveLawnProtocol resolves the staged v13 protocol version for a
+// visit with no assignment. Off = every output is byte-identical to before.
+function lawnV13Live() {
+  return process.env.GATE_LAWN_V13 === 'true';
+}
+
 // GATE_PORTAL_CHAT_FACTS read at CALL time — ships DARK, off unless exactly
 // 'true'. The one reader for the portal assistant's account-fact tools
 // (services/ai-assistant): on, the portal chat can show the customer a
@@ -5676,6 +5724,7 @@ module.exports.seriesMoveCarriesVisitLive = seriesMoveCarriesVisitLive;
 module.exports.reportWriterRulesLive = reportWriterRulesLive;
 // GATE_REPORT_BLOG_POST reader, on its own line beside the writer rules'.
 module.exports.reportBlogPostLive = reportBlogPostLive;
+module.exports.reportAskAiLive = reportAskAiLive;
 module.exports.standardWordingPreviewLive = standardWordingPreviewLive;
 module.exports.blogSearchSuggestLive = blogSearchSuggestLive;
 module.exports.kbSpeciesQaLive = kbSpeciesQaLive;
@@ -5702,6 +5751,8 @@ module.exports.photoPrivacyMode = photoPrivacyMode;
 module.exports.tsFastCompleteLive = tsFastCompleteLive;
 module.exports.tsTechFindingsCopyLive = tsTechFindingsCopyLive;
 module.exports.tsWatchListLive = tsWatchListLive;
+// GATE_TS_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.
+module.exports.tsTechParagraphLive = tsTechParagraphLive;
 module.exports.lawnReserviceFastCompleteLive = lawnReserviceFastCompleteLive;
 module.exports.lawnFastCompleteLive = lawnFastCompleteLive;
 module.exports.noteBoxPhotosLive = noteBoxPhotosLive;
@@ -5768,3 +5819,5 @@ module.exports.onSiteCallerDemoteLive = onSiteCallerDemoteLive;
 module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 // GATE_ESTIMATE_OFFER_TIERS reader, on its own line so gate PRs never conflict.
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
+// GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
+module.exports.lawnV13Live = lawnV13Live;

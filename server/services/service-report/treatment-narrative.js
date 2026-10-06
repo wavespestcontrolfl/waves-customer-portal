@@ -175,7 +175,8 @@ function rowSignature(row) {
  * for the EXACT row state the text came from (null when uncacheable); it
  * travels WITH the text so a PDF store can never key a fallback render as
  * final even when the background generation lands mid-render (codex P2 r15).
- * Returns null when the visit has no classifiable treatment.
+ * Returns null when the visit has no classifiable treatment. `skipGeneration`
+ * makes the call side-effect free: cached text or the template, no claim, no model.
  */
 async function buildTreatmentNarrative({
   serviceRecordId,
@@ -184,6 +185,7 @@ async function buildTreatmentNarrative({
   findingsText = '',
   photoSummary = '',
   knex = db,
+  skipGeneration = false,
 } = {}) {
   // The fallback is served while generation is pending and when it fails, so
   // it follows the same no-timing rule.
@@ -215,6 +217,12 @@ async function buildTreatmentNarrative({
       const parsed = typeof existing.summary_json === 'string' ? JSON.parse(existing.summary_json) : existing.summary_json;
       return { text: parsed?.text || fallback, signature: rowSignature(existing) };
     }
+
+    // A read that must have no side effects (the T&S "From your technician" paragraph's
+    // input gather) takes the cached text or the deterministic template: it never
+    // claims the key and never dispatches the narrative lane. The signature is null
+    // (uncacheable), so no PDF is keyed on this render.
+    if (skipGeneration) return { text: fallback, signature: null };
 
     // Atomically claim the cache key: exactly ONE reader generates.
     const claimStamp = new Date();
