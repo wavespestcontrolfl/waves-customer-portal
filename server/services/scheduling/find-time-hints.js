@@ -544,12 +544,14 @@ async function buildBestRows(days, { pickedDate, today, lat, lng, picked = null,
   const pickedStartMin = picked ? toMin(picked.start) : null;
   const pickedEndMin = pickedStartMin == null ? null
     : Math.max(pickedStartMin + spanMin, toMin(pickedEnd) ?? 0);
-  const pickedChip = picked?.fits === true && picked[GAP_LEGS] && pickedStartMin != null ? {
+  // Every fitting verdict gets rain; only one with GAP_LEGS can be re-priced
+  // (a capacity verdict stays an estimate) (Codex #6045 r11).
+  const pickedChip = picked?.fits === true && pickedStartMin != null ? {
     ...picked,
     date: pickedDate,
     start_time: picked.start,
     end_time: toHHMM(pickedEndMin),
-    [GAP_LEGS]: { ...picked[GAP_LEGS], durationMinutes: pickedEndMin - pickedStartMin },
+    ...(picked[GAP_LEGS] ? { [GAP_LEGS]: { ...picked[GAP_LEGS], durationMinutes: pickedEndMin - pickedStartMin } } : {}),
   } : null;
   const priceChips = deps.priceChipsOnRoads || require('./hint-road-times').priceChipsOnRoads;
   const rainLookup = deps.hourlyRain || (async (la, ln) => {

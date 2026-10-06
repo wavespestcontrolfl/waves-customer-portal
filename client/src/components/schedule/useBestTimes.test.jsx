@@ -39,6 +39,14 @@ it('scores the picked hour on the day and searches the next 3 days for the singl
   expect(result.current.bestInRange).toMatchObject({ date: '2035-01-03', start: '13:00', driveInMinutes: 5, fromHomeBase: true });
 });
 
+it('a capacity slot (no insertion) keeps its own origin labels on the plain path (Codex #6045 r11)', async () => {
+  const capacity = { date: '2035-01-02', start_time: '09:00', end_time: '10:00', detour_minutes: 20, drive_in_minutes: 15, from_home_base: true, from_name: null, technician: { id: 'tech', name: 'A' } };
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [capacity] }) }));
+  const { result } = renderHook(() => useBestTimes({ date: '2035-01-02', serviceId: 'fixture', technicianId: 'tech' }));
+  await waitFor(() => expect(result.current.bestTimes).toHaveLength(1));
+  expect(result.current.bestTimes[0]).toMatchObject({ driveInMinutes: 15, fromHomeBase: true, fromName: null });
+});
+
 it('trims a stored HH:MM:SS window to the picked hour (edit form initial state)', async () => {
   const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
   vi.stubGlobal('fetch', fetch);

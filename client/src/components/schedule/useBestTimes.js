@@ -72,8 +72,9 @@ function mapSlot(s, scopedToTech) {
     // Arrival-window slots score the whole route and carry no single
     // insertion leg — driveIn stays null and the label shows the detour only.
     driveInMinutes: s.drive_in_minutes ?? null,
-    fromHomeBase: s.insertion ? !s.insertion.after_stop_id : null,
-    fromName: s.insertion?.after_name || null,
+    // A capacity slot has no insertion; it carries its own origin labels.
+    fromHomeBase: s.insertion ? !s.insertion.after_stop_id : (s.from_home_base ?? null),
+    fromName: s.insertion?.after_name || s.from_name || null,
     stopsThatDay: s.stops_that_day,
     estimatedArrival: s.estimated_arrival || null,
     arrivalWindows: s.route_mode === 'arrival_windows',

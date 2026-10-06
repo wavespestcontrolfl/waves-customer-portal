@@ -294,3 +294,17 @@ describe('Codex #6045 r10', () => {
     jest.dontMock('../services/weather-forecast');
   });
 });
+
+describe('Codex #6045 r11', () => {
+  test('a fitting verdict without road legs (capacity) still gets rain and stays an estimate', async () => {
+    const picked = { start: '12:00', fits: true, detour_minutes: 30, drive_in_minutes: 18 };
+    const out = await buildBestRows([day('2026-10-08', [])], {
+      pickedDate: '2026-10-08', today: '2026-10-06', lat: 1, lng: 2, picked, spanMin: 60,
+      deps: {
+        priceChipsOnRoads: async (chips) => chips.map((c) => ({ ...c, drive_source: 'estimate' })),
+        hourlyRain: async () => [{ startTime: '2026-10-08T12:00:00-04:00', rainChance: 40 }],
+      },
+    });
+    expect(out.picked).toMatchObject({ fits: true, drive_in_minutes: 18, drive_source: 'estimate', rain_chance: 40 });
+  });
+});
