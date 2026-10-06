@@ -594,10 +594,11 @@ const MEDICAL_CUES = [
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
-  /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
+  // "On my skin", "in the baby's eyes", "on the cat's skin" (Codex P1 #5964 r10).
+  /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our|(?:the|a|my|our|his|her|their|your)\s+[\w-]+['’]s)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?|paws?|fur)\b/i,
   // Sprayed in the eyes, on the skin, in the face, with or without a possessive;
   // never "the face of the house".
-  /\bspray\w*\s+(?:\w+\s+){0,3}?(?:in|into|on|onto|at)\s+(?:the\s+|my\s+|his\s+|her\s+|their\s+|our\s+|your\s+)?(?:eyes?|skin|face|mouth|nose)\b(?!\s+of\b)/i,
+  /\bspray\w*\s+(?:\w+\s+){0,3}?(?:(?:in|into|on|onto|at)\s+(?:the\s+|my\s+|his\s+|her\s+|their\s+|our\s+|your\s+|[\w-]+['’]s\s+)?|(?:my|his|her|their|our|your|[\w-]+['’]s)\s+)(?:eyes?|skin|face|mouth|nose)\b(?!\s+of\b)/i,
 ];
 
 // ── A question that sounds like a spray exposure: a safety line first ──

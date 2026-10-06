@@ -627,6 +627,11 @@ describe('symptoms and exposure never reach the model', () => {
     'I was sprayed in the eyes',
     'He was sprayed on the skin',
     'The technician sprayed me in the face',
+    'The technician sprayed my eyes',
+    'You sprayed my skin',
+    "You sprayed my dog's face",
+    "The spray got in the baby's eyes",
+    "The product got on the cat's skin",
   ])('a fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
   });
@@ -643,7 +648,6 @@ describe('symptoms and exposure never reach the model', () => {
     'The tech sprayed my partner',
     'You sprayed my roommate',
     'The tech sprayed my hamster',
-    "You sprayed my dog's face",
     'My roommate got sprayed',
     'I got sprayed in the yard',
     'The tech sprayed my hamster inside',
