@@ -260,6 +260,11 @@ describe('best-times rows', () => {
     expect(v.detail).toBe('Adds +11 min to the day · estimated.');
   });
 
+  it('a drive-in with no priced detour still says estimated (Codex #6045 r3)', () => {
+    const v = availabilityVerdict(answer({ start: '09:00', fits: true, reason: null, detourMinutes: null, driveInMinutes: 17, fromName: 'Stop A' }), at('2035-01-02', '09:00'));
+    expect(v.detail).toBe('Drive here: 17 min from Stop A · estimated.');
+  });
+
   it('without bestRows the strip keeps its closest offers', () => {
     render(<AvailabilityStrip availability={withBest({ start: '09:00', fits: false, reason: 'arrival_window' })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
     expect(screen.queryByTestId('best-row')).toBeNull();

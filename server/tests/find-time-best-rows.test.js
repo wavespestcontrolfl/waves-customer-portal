@@ -202,3 +202,28 @@ describe('opt-in', () => {
     expect(out.summary.days[0].hours).toHaveLength(1);
   });
 });
+
+describe('capacity-mode chips (Codex #6045 r3)', () => {
+  const { _internals: { capacityLegs } } = require('../services/scheduling/find-time');
+  const rows = new Map([['a', { id: 'a', ...PREV }], ['b', { id: 'b', ...NEXT }]]);
+  const target = { id: 't', ...NEW };
+
+  test('a middle stop carries its drive in and both neighbours', () => {
+    const fit = { arrivals: [
+      { id: 'a', arrival: '11:00', departure: '12:00' }, { id: 't', arrival: '12:19', departure: '12:49' }, { id: 'b', arrival: '14:00', departure: '15:00' },
+    ] };
+    const legs = capacityLegs({ fit, byId: rows, target, durationMinutes: 30 });
+    expect(legs.driveIn).toBe(19);
+    expect(legs.fromHome).toBe(false);
+    expect(legs.gap).toMatchObject({ prev: PREV, next: NEXT, prevEndMin: 720, prevIsHome: false, durationMinutes: 30 });
+  });
+
+  test('the first stop drives in from home base', () => {
+    const fit = { arrivals: [{ id: 't', arrival: '08:30', departure: '09:00' }, { id: 'a', arrival: '10:00', departure: '11:00' }] };
+    const legs = capacityLegs({ fit, byId: rows, target, durationMinutes: 30 });
+    expect(legs.driveIn).toBeNull();
+    expect(legs.fromHome).toBe(true);
+    expect(legs.gap.prevIsHome).toBe(true);
+    expect(legs.gap.next).toEqual(PREV);
+  });
+});

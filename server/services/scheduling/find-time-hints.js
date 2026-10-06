@@ -446,8 +446,8 @@ function summarizeHintDays(slots, { from, to, rejectionsByDate, closedDates, off
       // it beside what the stop adds to the day (owner 2026-10-06). null =
       // no single insertion leg (arrival-window mode) or an unpinned stop.
       drive_in_minutes: slot.drive_in_minutes ?? null,
-      from_home_base: slot.insertion ? !slot.insertion.after_stop_id : null,
-      from_name: slot.insertion?.after_name || null,
+      from_home_base: slot.insertion ? !slot.insertion.after_stop_id : (slot.from_home_base ?? null),
+      from_name: slot.insertion?.after_name || slot.from_name || null,
       estimated_arrival: slot.estimated_arrival || null,
       stops_that_day: slot.stops_that_day ?? null,
       technician: slot.technician ? { id: slot.technician.id, name: slot.technician.name } : null,

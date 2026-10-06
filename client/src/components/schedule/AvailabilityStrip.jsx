@@ -89,7 +89,11 @@ function pickedDetail(verdict) {
   if (rain) parts.push(rain);
   // Any number not priced by Google is the straight-line model, including
   // an arrival-window detour with no single leg (Codex #6045 r2).
-  if ((added || verdict.driveInMinutes != null) && verdict.driveSource !== 'google' && verdict.detourMinutes != null) parts.push('estimated');
+  // Any shown number not priced by Google is the straight-line model: a
+  // drive-in alone (unpinned next stop) or an arrival-window detour alone
+  // (Codex #6045 r2/r3).
+  const shownNumber = (verdict.driveInMinutes != null && Number.isFinite(mins)) || verdict.detourMinutes != null;
+  if (shownNumber && verdict.driveSource !== 'google') parts.push('estimated');
   return parts.length ? `${parts.join(' · ')}.` : null;
 }
 

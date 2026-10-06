@@ -315,8 +315,13 @@ async function findCapacitySlots(opts) {
     const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),
       context.target.service_type, { before: byId.get(fit.routeOrder[index - 1]), after: byId.get(fit.routeOrder[index + 1]) });
     const daysOut = Math.max(0, (new Date(`${date}T12:00:00Z`) - new Date(`${dateFrom}T12:00:00Z`)) / 86400000);
+    const legs = capacityLegs({ fit, byId, target: context.target, durationMinutes: options.durationMinutes });
     slots.push({ date, technician: { id: tech.id, name: tech.name }, start_time: options.windowStart,
       end_time: options.windowEnd, detour_minutes: fit.detourMinutes, total_drive_minutes: fit.driveMinutes,
+      // The drive into this stop and its neighbours' pins, so a picker can
+      // show "N min here" and re-price the chip on real roads like a gap
+      // slot (Codex #6045 r3). from_name stays null: route rows carry no name.
+      drive_in_minutes: legs.driveIn, from_home_base: legs.fromHome, from_name: null, [GAP_LEGS]: legs.gap,
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
@@ -777,6 +782,34 @@ function toPackingBoundAnchor(stop) {
   const windowMinutes = stop.endMin - stop.startMin;
   const expected = Number.isFinite(stop.expectedMinutes) ? Math.min(stop.expectedMinutes, windowMinutes) : windowMinutes;
   return { rawStartMin: stop.startMin, rawEndMin: stop.endMin, expectedEndMin: stop.startMin + expected };
+}
+
+// A capacity placement's neighbours in its simulated route: the stop before
+// the target (home base when first) and after it (home base when last), the
+// drive in as the simulation timed it, and GAP_LEGS for road re-pricing.
+function capacityLegs({ fit, byId, target, durationMinutes }) {
+  const arrivals = fit.arrivals || [];
+  const at = arrivals.findIndex((row) => row.id === target.id);
+  const none = { driveIn: null, fromHome: null, gap: undefined };
+  if (at < 0 || !hasCoords(target)) return none;
+  const pin = (row) => (row && hasCoords(row) ? { lat: Number(row.lat), lng: Number(row.lng) } : null);
+  const prevRow = at > 0 ? byId.get(arrivals[at - 1].id) : null;
+  const nextRow = at < arrivals.length - 1 ? byId.get(arrivals[at + 1].id) : null;
+  const prevEndMin = at > 0 ? timeToMinutes(arrivals[at - 1].departure) : null;
+  const arriveMin = timeToMinutes(arrivals[at].arrival);
+  const driveIn = at > 0 && prevEndMin != null && arriveMin != null ? Math.max(0, arriveMin - prevEndMin) : null;
+  return {
+    driveIn,
+    fromHome: at === 0,
+    gap: {
+      prev: at > 0 ? pin(prevRow) : { lat: HQ.lat, lng: HQ.lng },
+      next: at < arrivals.length - 1 ? pin(nextRow) : { lat: HQ.lat, lng: HQ.lng },
+      prevEndMin: prevEndMin ?? 0,
+      prevIsHome: at === 0,
+      newStop: { lat: Number(target.lat), lng: Number(target.lng) },
+      durationMinutes,
+    },
+  };
 }
 
 // The geometry of ONE route gap (between consecutive anchors prev/next):
@@ -1287,6 +1320,7 @@ module.exports = {
   DAY_START_HOUR,
   DAY_END_HOUR,
   _internals: {
+    capacityLegs,
     enumerateDates,
     packCapacityEnds,
     capacityGapNeighbours,
