@@ -323,6 +323,9 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
     // A grouped move drags every member, so a member a person placed
     // protects the whole visit, whichever member the run evaluated.
     const placed = await isPersonPlacedVisit(r, trx);
+    // An unreadable history is a failure, not a refusal: it must reach the
+    // run's failed count (previewGroupMove rethrows any non-409 error).
+    if (placed.degraded) throw new Error(`grouped service ${r.id}: ${placed.reason_description}`);
     if (placed.placed) throw refuse(r.id, `was placed by a person (${placed.reason_code}: ${placed.reason_description})`);
   }
 }

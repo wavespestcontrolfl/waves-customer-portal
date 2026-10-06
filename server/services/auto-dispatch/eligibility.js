@@ -150,42 +150,50 @@ async function isRecurringPlanActive(service, db) {
  * visit breaks that promise silently (prod 10-06: a customer picked Sun 9 AM
  * at 8:49 PM; the 4:10 AM run moved it to Mon 3 PM; nobody told them).
  *
- * Evidence is the visit's OWN reschedule_log: every series move writes one
- * row per visit it moves, the anchor and each carried grouped partner, tagged
- * with series_move_id (rebooker.js). The visit counts as person-placed when
- * its newest series-move row belongs to a committed, unreverted move, landed
- * the visit on the date it holds now, and no later row (any mover, auto-
- * dispatch included) exists. Every series_moves initiator is a person (staff
- * surfaces, the customer page, a customer's text reply).
+ * Evidence is the visit's OWN newest reschedule_log row. Every mover writes
+ * one: a series move one row per visit it moves (anchor and each carried
+ * grouped partner), a single-visit move one row, auto-dispatch one row
+ * through the rebooker. The visit is person-placed when that newest row was
+ * written by a person (PERSON_INITIATORS — an allowlist, so automatic and
+ * unknown movers never freeze a visit) and landed it on the date it holds
+ * now. Any later row, from any mover, ends the protection.
  *
- * Fails CLOSED: a read error skips the visit for this run.
+ * A windowless recurring due visit is never protected: it has no promised
+ * time yet, and the run exists to place it (index.js loadEligibleServices).
+ *
+ * Fails CLOSED and DEGRADED: a read error skips the visit for this run and
+ * marks the result degraded so the run does not report as healthy.
  */
-const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_sms', 'sms_offer_ai']);
+const PERSON_INITIATORS = new Set([
+  'admin', 'admin_ib', 'admin_bulk', 'operator', 'tech',
+  'customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai',
+]);
+const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai']);
 
 async function isPersonPlacedVisit(service, db) {
   const dateStr = toDateStr(service.scheduled_date);
   if (!service.id || !dateStr) return { placed: false };
+  if (service.recurring_dispatch_due_date && !service.window_start) return { placed: false };
   try {
-    const placement = await db('reschedule_log as r')
-      .join('series_moves as m', 'm.id', 'r.series_move_id')
-      .where('r.scheduled_service_id', service.id)
-      .where('r.new_date', dateStr)
-      .where('m.status', 'committed')
-      .whereNull('m.reverted_at')
-      .orderBy('r.created_at', 'desc')
-      .first('m.id as series_move_id', 'm.initiated_by', 'r.created_at');
-    if (!placement) return { placed: false };
-    // Rows one move writes share its transaction's created_at, so only a
-    // strictly later row is a later placement.
-    const later = await db('reschedule_log')
+    const newest = await db('reschedule_log')
       .where('scheduled_service_id', service.id)
-      .where('created_at', '>', placement.created_at)
-      .first('id');
-    if (later) return { placed: false };
+      .orderBy('created_at', 'desc')
+      .first('created_at');
+    if (!newest) return { placed: false };
+    // Rows one move writes share its transaction's created_at; a person row
+    // among them is the placement.
+    const placement = await db('reschedule_log')
+      .where('scheduled_service_id', service.id)
+      .where('created_at', newest.created_at)
+      .where('new_date', dateStr)
+      .whereIn('initiated_by', [...PERSON_INITIATORS])
+      .first('initiated_by', 'series_move_id');
+    if (!placement) return { placed: false };
     const who = CUSTOMER_INITIATORS.has(placement.initiated_by) ? 'the customer' : 'staff';
-    return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${who} (series move ${placement.series_move_id})` };
+    const how = placement.series_move_id ? `series move ${placement.series_move_id}` : 'single-visit move';
+    return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${who} (${how})` };
   } catch (err) {
-    return { placed: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: `Could not read the move history: ${err.message}` };
+    return { placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: `Could not read the move history: ${err.message}` };
   }
 }
 

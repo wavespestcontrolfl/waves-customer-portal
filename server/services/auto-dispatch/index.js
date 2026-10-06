@@ -618,6 +618,7 @@ async function evaluateServiceForRun(service, run) {
   if (!planCheck.active) return logSkip(run, service, planCheck);
 
   const personPlaced = await isPersonPlacedVisit(service, db);
+  if (personPlaced.degraded) run.guardReadDegraded = true;
   if (personPlaced.placed) return logSkip(run, service, personPlaced);
 
   const prefs = await getCustomerSchedulingPreferences(service.customer_id, service.service_type);
@@ -640,10 +641,11 @@ async function evaluateServiceForRun(service, run) {
   const evalResult = await evaluatePlacement(service, prefs, ctx, config, run.lockBoundary);
   totals.evaluated++;
 
-  // FLEX-TIER (Codex #4995 r4 P2): a grouped move is only as legal as its
-  // siblings — preview the apply-time member guard now, so neither a dry-run
-  // recommendation nor a planned move carries one apply would refuse.
-  const refusal = evalResult.kind === 'move' && guardMode === 'flex'
+  // A grouped move is only as legal as its siblings (Codex #4995 r4 P2) —
+  // preview the apply-time member guard now, in every mode (Codex #6055 r2:
+  // a person-placed sibling must refuse a dry-run recommendation too), so
+  // neither a recommendation nor a planned move carries one apply would refuse.
+  const refusal = evalResult.kind === 'move'
     ? await previewGroupMove(service, evalResult.best, { ...config, prefs, lockBoundary: run.lockBoundary })
     : null;
   const noChange = evalResult.kind === 'no_change' ? evalResult : refusal && guardSkipReason(refusal);

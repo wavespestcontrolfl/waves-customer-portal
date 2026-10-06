@@ -162,10 +162,13 @@ test('an unreadable canonical arrival refuses the move AND degrades the run — 
   }
 });
 
-test('route tiers never run the flex group preview (gate-off behavior unchanged)', async () => {
+// Changed by Codex #6055 r2: the grouped-member preview now runs in every
+// mode, so a sibling the apply-time guard would refuse (e.g. person-placed)
+// never shows up as a route-tier or legacy recommendation either.
+test('route tiers run the group preview too', async () => {
   reminderResults = [[], []];
   await runAutoDispatch({ mode: 'apply', routeTiersEnabled: true });
-  expect(apply.previewGroupMove).not.toHaveBeenCalled();
+  expect(apply.previewGroupMove).toHaveBeenCalled();
 });
 
 test('flexTierEnabled takes precedence when routeTiersEnabled is also on', async () => {
