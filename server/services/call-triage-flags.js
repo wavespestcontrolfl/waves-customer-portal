@@ -1,5 +1,5 @@
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
-const { toE164, isLikelyE164 } = require('../utils/phone');
+const { toE164, isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { sameGmailInbox } = require('../utils/email-equivalence');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
@@ -13,8 +13,14 @@ const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte']);
 // blocked/unavailable caller ID as text ("anonymous", "unknown", "restricted",
 // "unavailable") rather than a dialable E.164, so "truthy" is not enough — we
 // require at least 10 digits before treating an ANI as a real callback number.
+// An impossible NANP number (a spoken "173-303-8616") has the digits but no
+// line behind it: it is never dialable, so a spoken callback like that never
+// counts as a way to reach the caller. The ten-digit floor matches the shared
+// phone utilities (toE164, isLikelyE164, comparablePhoneKey): a number they
+// cannot normalize must not count as reachable here either.
 function isDialablePhone(value) {
   if (!value) return false;
+  if (isImpossibleNanpPhone(value)) return false;
   return String(value).replace(/\D/g, '').length >= 10;
 }
 
@@ -483,7 +489,11 @@ function computeDeterministicTriageFlags(extraction, opts = {}) {
   // as "anonymous"/"unknown" text, which must NOT count as reachable (else we'd
   // auto-route a customer we can't call or text back). Without the ANI threaded
   // in, this fired on nearly every inbound call and sent everything to triage.
-  if (!caller.phone_e164 && !isDialablePhone(opts.contactPhone)) {
+  // A spoken number that is not dialable (an impossible NANP number such as a
+  // 173 area code) is no better than none: the call-recording guard nulls it,
+  // and a bare !phone_e164 test here would let an unusable spoken value hide
+  // that neither it nor the ANI can reach the caller.
+  if (!isDialablePhone(caller.phone_e164) && !isDialablePhone(opts.contactPhone)) {
     flags.push('caller_phone_missing');
   }
 
