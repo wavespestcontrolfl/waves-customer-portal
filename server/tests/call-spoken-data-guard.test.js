@@ -146,7 +146,7 @@ describe('spelled names win', () => {
 
   test('the spelled name beats a name the model took from the record on file', () => {
     // Extraction kept the on-file spelling although the caller spelled another.
-    const t = 'Caller: It is Hallbrook. H-O-L-B-R-O-O-K.';
+    const t = 'Agent: What is your name?\n\nCaller: It is Hallbrook. H-O-L-B-R-O-O-K.';
     const extracted = { first_name: 'Isaac', last_name: 'Hallbrook' };
     const { spelledNameFields } = applyCallerDataGuards({ extracted, v2Extraction: null, transcripts: [t] });
     expect(extracted.last_name).toBe('Holbrook');
@@ -154,14 +154,14 @@ describe('spelled names win', () => {
   });
 
   test('Mc names keep their capital letters', () => {
-    const t = 'Caller: McGlaughlin, M-C-G-L-O-U-G-H-L-I-N.';
+    const t = 'Agent: What is your name?\n\nCaller: McGlaughlin, M-C-G-L-O-U-G-H-L-I-N.';
     const extracted = { first_name: 'Carol', last_name: 'McGlaughlin' };
     applyCallerDataGuards({ extracted, transcripts: [t] });
     expect(extracted.last_name).toBe('McGloughlin');
   });
 
   test('a spelled run that equals the heard name changes nothing and marks it spelled', () => {
-    const t = 'Caller: Natasha, N-A-T-A-S-H-A, Serov, S-E-R-O-V.';
+    const t = 'Agent: What is your name?\n\nCaller: Natasha, N-A-T-A-S-H-A, Serov, S-E-R-O-V.';
     const extracted = { first_name: 'Natasha', last_name: 'Serov' };
     const result = applyCallerDataGuards({ extracted, transcripts: [t] });
     expect(extracted).toMatchObject({ first_name: 'Natasha', last_name: 'Serov' });
@@ -170,7 +170,7 @@ describe('spelled names win', () => {
   });
 
   test('first and last are matched to their own runs, not swapped', () => {
-    const t = 'Caller: Natasha, N-A-T-A-S-H-A, Sirov, S-E-R-O-V.';
+    const t = 'Agent: What is your name?\n\nCaller: Natasha, N-A-T-A-S-H-A, Sirov, S-E-R-O-V.';
     const extracted = { first_name: 'Natasha', last_name: 'Sirov' };
     applyCallerDataGuards({ extracted, transcripts: [t] });
     expect(extracted).toMatchObject({ first_name: 'Natasha', last_name: 'Serov' });
@@ -214,34 +214,66 @@ describe('spelled names win', () => {
   });
 });
 
-describe('a surname glued to "over at" is split', () => {
-  const t = 'Caller: Hi, this is Sally Hartwellover at 12 Palm Court with John.';
-
-  test('splits the stem off in V1, V2 and name_full', () => {
-    const extracted = { first_name: 'Sally', last_name: 'Hartwellover', name_full: 'Sally Hartwellover' };
-    const v2Extraction = v2({ first_name: 'Sally', last_name: 'Hartwellover', name_full: 'Sally Hartwellover' });
-    applyCallerDataGuards({ extracted, v2Extraction, transcripts: [t] });
-    expect(extracted.last_name).toBe('Hartwell');
-    expect(extracted.name_full).toBe('Sally Hartwell');
-    expect(v2Extraction.caller.last_name).toBe('Hartwell');
+describe('spelled runs are attributed before they rewrite anyone', () => {
+  test('a secondary party\'s spelled surname never rewrites the caller or the record', () => {
+    const t = [
+      'Agent: What is your last name?',
+      'Caller: Smith.',
+      'Agent: And the buyer?',
+      "Caller: The buyer's last name is Smythy, S-M-Y-T-H-Y.",
+    ].join('\n\n');
+    const extracted = { first_name: 'John', last_name: 'Smith', secondary_contact: { first_name: 'Lena', last_name: 'Smithy' } };
+    const result = applyCallerDataGuards({ extracted, transcripts: [t] });
+    expect(extracted.last_name).toBe('Smith');
+    expect(result.spelledNameFields.last_name).toBe(false);
+    expect(extracted.secondary_contact.last_name).toBe('Smythy');
   });
 
-  test('real "-over" surnames and unrelated usage stay', () => {
-    for (const last of ['Hanover', 'Glover', 'Hoover', 'Vanover']) {
-      const extracted = { first_name: 'Sam', last_name: last };
-      applyCallerDataGuards({ extracted, transcripts: [`Caller: This is Sam ${last} at 12 Palm Court.`] });
+  test('a run beside a named secondary contact is theirs even without a relation word', () => {
+    const t = 'Caller: And Lena is S-M-Y-T-H-Y.';
+    const extracted = { first_name: 'John', last_name: 'Smith', secondary_contact: { first_name: 'Lena', last_name: 'Smithy' } };
+    applyCallerDataGuards({ extracted, transcripts: [t] });
+    expect(extracted.last_name).toBe('Smith');
+  });
+
+  test('a spelling the caller offers with no question and no own-name cue is left alone', () => {
+    const extracted = { first_name: 'Dana', last_name: 'Brantly' };
+    const result = applyCallerDataGuards({ extracted, transcripts: ['Agent: Okay.\n\nCaller: B-R-A-N-T-L-E-Y.'] });
+    expect(extracted.last_name).toBe('Brantly');
+    expect(result.spelledNameFields.last_name).toBe(false);
+  });
+
+  test('"my last name is" in the caller\'s own sentence counts without a staff question', () => {
+    const extracted = { first_name: 'Dana', last_name: 'Brantly' };
+    applyCallerDataGuards({ extracted, transcripts: ['Caller: Hi, my last name is B-R-A-N-T-L-E-Y.'] });
+    expect(extracted.last_name).toBe('Brantley');
+  });
+
+  test('a staff question about someone else\'s name does not make the answer the caller\'s', () => {
+    const extracted = { first_name: 'John', last_name: 'Smith' };
+    applyCallerDataGuards({ extracted, transcripts: ["Agent: What's your wife's last name?\n\nCaller: S-M-Y-T-H-Y."] });
+    expect(extracted.last_name).toBe('Smith');
+  });
+
+  test('a staff aside between the name question and the answer still counts as the caller\'s own answer', () => {
+    const t = [
+      'Agent: Let me grab your first, last name and email.',
+      'Caller: Do you want me to text it instead?',
+      'Agent: No, you can give it to me.',
+      'Caller: Okay. Natasha, N-A-T-A-S-H-A, Sirov, S-E-R-O-V.',
+    ].join('\n\n');
+    const extracted = { first_name: 'Natasha', last_name: 'Sirov' };
+    applyCallerDataGuards({ extracted, transcripts: [t] });
+    expect(extracted.last_name).toBe('Serov');
+  });
+
+  test('a surname that ends in "over" is never split', () => {
+    for (const last of ['Westover', 'Passover', 'Hanover']) {
+      const extracted = { first_name: 'Jane', last_name: last, name_full: `Jane ${last}` };
+      applyCallerDataGuards({ extracted, transcripts: [`Caller: This is Jane ${last} at 12 Palm Court.`] });
       expect(extracted.last_name).toBe(last);
+      expect(extracted.name_full).toBe(`Jane ${last}`);
     }
-    // Same token but never said right before a preposition: not a merge.
-    const extracted = { first_name: 'Sally', last_name: 'Hartwellover' };
-    applyCallerDataGuards({ extracted, transcripts: ['Caller: Hi, this is Sally Hartwellover.'] });
-    expect(extracted.last_name).toBe('Hartwellover');
-  });
-
-  test('a spelled surname takes precedence over the split', () => {
-    const extracted = { first_name: 'Sally', last_name: 'Hartwellover' };
-    applyCallerDataGuards({ extracted, transcripts: ['Caller: This is Sally Hartwellover at 12 Palm Court. H-A-R-T-W-E-L-L-O-V-E-R.'] });
-    expect(extracted.last_name).toBe('Hartwellover');
   });
 });
 
@@ -281,7 +313,7 @@ describe('"you can\'t text this one" and relay callers', () => {
   test('the guard sets caller_id_disclaimed with the quote, and the existing hold fires', () => {
     const t = "Caller: I have a different number that's a text number only. You can't text this one.";
     const v2Extraction = v2({ phone_e164: null, phone_source: 'caller_id' });
-    const result = applyCallerDataGuards({ extracted: { first_name: 'Miranda' }, v2Extraction, transcripts: [t] });
+    const result = applyCallerDataGuards({ extracted: { first_name: 'Miranda' }, v2Extraction, transcripts: [t], ani: ANI });
     expect(v2Extraction.caller.caller_id_disclaimed).toBe(true);
     expect(v2Extraction.caller.phone_note).toMatch(/can't text this one/);
     expect(result.textRefusalQuote).toBeTruthy();
@@ -290,19 +322,30 @@ describe('"you can\'t text this one" and relay callers', () => {
     expect(callbackNumberNeededBlocksSms(flags)).toBe(true);
   });
 
-  test('a separate spoken text number replaces the ANI: no card, and the processor texts the spoken number', () => {
+  test('a separate spoken text number: the disclaimer is NOT set (booking-link text lane keeps the alternate), texts go to it, no card', () => {
     const t = "Caller: You can't text this one. Text me at 941-555-7781.";
     const v2Extraction = v2({ phone_e164: '+19415557781', phone_source: 'spoken' });
-    applyCallerDataGuards({ extracted: { first_name: 'Miranda', phone: '+19415557781' }, v2Extraction, transcripts: [t] });
-    expect(v2Extraction.caller.caller_id_disclaimed).toBe(true);
+    const result = applyCallerDataGuards({ extracted: { first_name: 'Miranda', phone: '+19415557781' }, v2Extraction, transcripts: [t], ani: ANI });
+    expect(v2Extraction.caller.caller_id_disclaimed).toBeUndefined();
+    expect(result.textRefusalQuote).toBeNull();
     const flags = computeDeterministicTriageFlags(v2Extraction, { contactPhone: ANI });
     expect(flags).not.toContain('callback_number_needed');
     expect(processor.resolveCallContactPhone({ direction: 'inbound', from_phone: ANI, to_phone: '+19415550199' }, '+19415557781')).toBe('+19415557781');
   });
 
+  test('a spoken "text number" that is only the ANI again, or an impossible one, still sets the disclaimer', () => {
+    const t = "Caller: You can't text this one.";
+    const same = v2({ phone_e164: ANI, phone_source: 'both' });
+    applyCallerDataGuards({ extracted: {}, v2Extraction: same, transcripts: [t], ani: ANI });
+    expect(same.caller.caller_id_disclaimed).toBe(true);
+    const bad = v2({ phone_e164: '+11733038616', phone_source: 'spoken' });
+    applyCallerDataGuards({ extracted: {}, v2Extraction: bad, transcripts: [t], ani: ANI });
+    expect(bad.caller.caller_id_disclaimed).toBe(true);
+  });
+
   test('an already-disclaimed caller keeps the model\'s own note', () => {
     const v2Extraction = v2({ caller_id_disclaimed: true, phone_note: 'office line' });
-    applyCallerDataGuards({ extracted: {}, v2Extraction, transcripts: ["Caller: You can't text this one."] });
+    applyCallerDataGuards({ extracted: {}, v2Extraction, transcripts: ["Caller: You can't text this one."], ani: ANI });
     expect(v2Extraction.caller.phone_note).toBe('office line');
   });
 

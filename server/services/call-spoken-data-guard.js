@@ -11,8 +11,7 @@
  *    the transcript (the email dictation parser's approach, applied to names)
  *    and overrides the extracted name when a spelled run is a near-spelling of
  *    it. It never invents a name: a run that matches no extracted name closely
- *    is ignored. It also splits the "Dingman over at ..." transcription merge
- *    ("Dingmanover at 1083 ...") back into the surname.
+ *    is ignored.
  *
  * 2. IMPOSSIBLE PHONES ARE NEVER SAVED. NANP area and exchange codes cannot
  *    start with 0 or 1. A spoken number that does is a mishearing; saved as a
@@ -35,6 +34,7 @@
 
 const { properCase } = require('../utils/name-case');
 const { isImpossibleNanpPhone } = require('../utils/phone');
+const { callerIdDisclaimedNeedsCallback } = require('./call-triage-flags');
 
 const normLetters = (v) => String(v || '').toLowerCase().replace(/[^a-z]/g, '');
 
@@ -183,19 +183,57 @@ function runIsEmailOrAddressContext(turnText, run) {
   return false;
 }
 
-// Every name-shaped spelled run the CALLER produced, in call order. Staff turns
+// Attribution. A run belongs to the CALLER only when the caller introduces it
+// as their own name: an explicit "my last name is" / "this is" in the same
+// sentence, or a plain answer ("it's", "spelled", or just the letters) to a
+// staff question that asks for the caller's own name. Anything near another
+// person (a buyer, a relative, a named secondary contact) belongs to that
+// person, and an unclear run belongs to nobody. When unsure, do nothing.
+const OTHER_PERSON = /\b(?:buyer|seller|tenant|landlord|owner|lender|realtor|agent's|husband|wife|spouse|partner|mom|mother|dad|father|son|daughter|brother|sister|grandmother|grandfather|grandma|grandpa|aunt|uncle|cousin|neighbor|friend|boss|coworker|his|her|their|him|she|he|they)\b/i;
+const EXPLICIT_OWN = /\b(?:my|our)\s+(?:(?:last|first|full|sur)\s*)?name\b|\bthis is\b|\bi(?:'|\u2019)?m\b|\bmy\s+(?:last|first)\b/i;
+const WEAK_OWN = /\bit(?:'|\u2019)?s\b|\bthat(?:'|\u2019)?s\b|\bspell(?:ed|ing)?\b/i;
+const ASKS_FOR_NAME = /\b(?:last|first|full|sur)?\s*name\b|\bwho(?:'|\u2019)?s calling\b|\bspell\b/i;
+
+function sentenceBeforeRun(turnText, run) {
+  const head = turnText.slice(0, run.start);
+  const cut = Math.max(head.lastIndexOf('.'), head.lastIndexOf('?'), head.lastIndexOf('!'));
+  return head.slice(cut + 1);
+}
+
+function mentionsAnyName(text, names) {
+  const lower = String(text || '').toLowerCase();
+  return names.some((n) => new RegExp(`\\b${n}\\b`).test(lower));
+}
+
+function attributeRun(turnText, run, prevStaff, otherNames) {
+  const before = sentenceBeforeRun(turnText, run);
+  const staffAsk = prevStaff ? prevStaff.text : '';
+  const other = OTHER_PERSON.test(before) || mentionsAnyName(before, otherNames);
+  const staffOther = OTHER_PERSON.test(staffAsk) || mentionsAnyName(staffAsk, otherNames);
+  const own = !other && (EXPLICIT_OWN.test(before)
+    || (!staffOther && (WEAK_OWN.test(before) || (!!prevStaff && ASKS_FOR_NAME.test(staffAsk)))));
+  return { own, other: other || (!own && staffOther) };
+}
+
+// Every name-shaped spelled run the CALLER produced, in call order, each tagged
+// own (the caller's own name) or other (belongs to another person). Staff turns
 // are skipped (an agent's read-back is one more chance to mishear); an
-// unlabeled transcript is read as the caller's.
-function findSpelledNameRuns(transcripts) {
+// unlabeled transcript has no staff question and is read as the caller's.
+function findSpelledNameRuns(transcripts, { otherNames = [] } = {}) {
   const list = (Array.isArray(transcripts) ? transcripts : [transcripts]).filter(Boolean);
   const runs = [];
   for (const transcript of list) {
+    // The last two staff turns: the name question is often followed by a
+    // short staff aside ("No, you can give it to me") before the answer.
+    let recentStaff = [];
     for (const turn of splitTurns(transcript)) {
-      if (STAFF_SPEAKER.test(turn.speaker)) continue;
-      for (const run of spelledRunsInTurn(turn.text)) {
-        if (runIsEmailOrAddressContext(turn.text, run)) continue;
-        runs.push({ letters: run.letters });
-      }
+      if (STAFF_SPEAKER.test(turn.speaker)) { recentStaff = [...recentStaff, turn.text].slice(-2); continue; }
+      const found = spelledRunsInTurn(turn.text).filter((run) => !runIsEmailOrAddressContext(turn.text, run));
+      // Only the staff turn that actually asks for a name speaks for the answer.
+      const asking = recentStaff.filter((text) => ASKS_FOR_NAME.test(text)).pop();
+      const prevStaff = asking ? { text: asking } : null;
+      for (const run of found) runs.push({ letters: run.letters, ...attributeRun(turn.text, run, prevStaff, otherNames) });
+      if (found.length) recentStaff = [];
     }
   }
   return runs;
@@ -249,29 +287,6 @@ function resolvePersonNames(person, runs, changes, role) {
   return decided;
 }
 
-// A surname the transcriber glued to the next words: "Sally Dingmanover at
-// 1083 Blue Shell" is "Dingman over at". Splits only a single-token surname of
-// 4+ letters plus "over" that the caller says directly before a preposition
-// introducing the address ("...over at", "...over in"). Real surnames of this
-// shape (Hanover, Stover, Glover, Grover, Hoover, Vanover) have a stem under 4
-// letters, so they never qualify.
-const OVER_PREPOSITION = '(?:at|in|on|from|with|near)';
-function splitMergedSurname(person, transcripts, changes, role) {
-  if (!person || typeof person.last_name !== 'string') return false;
-  const m = /^([A-Za-z]{4,})over$/i.exec(person.last_name.trim());
-  if (!m) return false;
-  const token = person.last_name.trim();
-  const seen = new RegExp(`\\b${token}\\s+${OVER_PREPOSITION}\\b`, 'i');
-  const heardMerged = (Array.isArray(transcripts) ? transcripts : [transcripts]).filter(Boolean)
-    .some((t) => splitTurns(t).some((turn) => !STAFF_SPEAKER.test(turn.speaker) && seen.test(turn.text)));
-  if (!heardMerged) return false;
-  const to = properCase(m[1]);
-  if (typeof person.name_full === 'string') person.name_full = replaceToken(person.name_full, token, to);
-  person.last_name = to;
-  changes.push({ kind: 'merged_surname_split', role, field: 'last_name' });
-  return true;
-}
-
 function secondaryPeople(extracted, v2Extraction) {
   const out = [];
   const push = (p, role) => { if (p && typeof p === 'object') out.push({ person: p, role }); };
@@ -284,52 +299,27 @@ function secondaryPeople(extracted, v2Extraction) {
   return out;
 }
 
+// First names of the secondary contacts, lowercased: a spelled run next to one
+// of them is that person's, never the caller's.
+function secondaryFirstNames(people) {
+  return people.map(({ person }) => normLetters(person.first_name)).filter((n) => n.length >= 3);
+}
+
 function applySpelledNames({ extracted, v2Extraction, transcripts, changes }) {
-  const runs = findSpelledNameRuns(transcripts);
+  const people = secondaryPeople(extracted, v2Extraction);
+  const runs = findSpelledNameRuns(transcripts, { otherNames: secondaryFirstNames(people) });
+  const ownRuns = runs.filter((r) => r.own);
+  const otherRuns = runs.filter((r) => r.other);
   const spelled = { first_name: false, last_name: false };
-  const callerObjects = [extracted, v2Extraction && v2Extraction.caller].filter(Boolean);
 
-  // The V1 view and the V2 caller are the same person: resolve on the V1 view
-  // first, then mirror what it decided onto V2 so the two never disagree.
-  if (extracted) {
-    const decided = resolvePersonNames(extracted, runs, changes, 'caller');
-    spelled.first_name = decided.first_name;
-    spelled.last_name = decided.last_name;
+  // The V1 view and the V2 caller are the same person. Both resolve against the
+  // same caller-owned runs, so they land on the same spelling.
+  for (const caller of [extracted, v2Extraction && v2Extraction.caller]) {
+    const decided = resolvePersonNames(caller, ownRuns, changes, 'caller');
+    spelled.first_name = spelled.first_name || decided.first_name;
+    spelled.last_name = spelled.last_name || decided.last_name;
   }
-  const v2Caller = v2Extraction && v2Extraction.caller;
-  if (v2Caller) {
-    if (extracted) {
-      for (const field of ['first_name', 'last_name']) {
-        if (spelled[field] && extracted[field] && normLetters(v2Caller[field]) !== normLetters(extracted[field])
-            && (closeSpelling(normLetters(extracted[field]), normLetters(v2Caller[field]))
-              || normLetters(extracted[field]) === normLetters(v2Caller[field]))) {
-          if (typeof v2Caller.name_full === 'string' && v2Caller[field]) {
-            v2Caller.name_full = replaceToken(v2Caller.name_full, String(v2Caller[field]), extracted[field]);
-          }
-          v2Caller[field] = extracted[field];
-        }
-      }
-    } else {
-      const decided = resolvePersonNames(v2Caller, runs, changes, 'caller');
-      spelled.first_name = decided.first_name;
-      spelled.last_name = decided.last_name;
-    }
-  }
-
-  for (const { person, role } of secondaryPeople(extracted, v2Extraction)) {
-    resolvePersonNames(person, runs, changes, role);
-  }
-
-  // Merged "...over at" surname: only when the spelled letters did not already
-  // decide the last name.
-  if (!spelled.last_name) {
-    for (const person of callerObjects) splitMergedSurname(person, transcripts, changes, 'caller');
-    if (extracted && v2Caller && extracted.last_name && v2Caller.last_name
-        && normLetters(v2Caller.last_name) !== normLetters(extracted.last_name)
-        && normLetters(v2Caller.last_name) === `${normLetters(extracted.last_name)}over`) {
-      v2Caller.last_name = extracted.last_name;
-    }
-  }
+  for (const { person, role } of people) resolvePersonNames(person, otherRuns, changes, role);
   return spelled;
 }
 
@@ -400,11 +390,17 @@ function detectTextRefusalQuote(transcripts) {
   return relay ? relay.trim().slice(0, 160) : null;
 }
 
-function applyTextRefusal({ v2Extraction, transcripts, changes }) {
+function applyTextRefusal({ v2Extraction, transcripts, ani, changes }) {
   const caller = v2Extraction && v2Extraction.caller;
   if (!caller || caller.caller_id_disclaimed === true) return null;
   const quote = detectTextRefusalQuote(transcripts);
   if (!quote) return null;
+  // A separate, dialable text number the caller spoke already routes texts
+  // there (resolveCallContactPhone prefers it) and clears the existing hold;
+  // setting the disclaimer anyway would make the booking-link text lane refuse
+  // that alternate number. Only mark the line when no usable alternate exists.
+  const flagged = { ...caller, caller_id_disclaimed: true };
+  if (!callerIdDisclaimedNeedsCallback(flagged, { ani })) return null;
   caller.caller_id_disclaimed = true;
   if (!caller.phone_note) caller.phone_note = quote;
   changes.push({ kind: 'text_refusal_disclaimed', role: 'caller', field: 'caller_id_disclaimed' });
@@ -418,11 +414,11 @@ function applyTextRefusal({ v2Extraction, transcripts, changes }) {
 // or null. Returns { extracted, changes, spelledNameFields,
 // rejectedSecondaryPhones, textRefusalQuote }. Throws nothing the caller needs
 // to handle beyond a defensive try/catch.
-function applyCallerDataGuards({ extracted, v2Extraction = null, transcripts = [] } = {}) {
+function applyCallerDataGuards({ extracted, v2Extraction = null, transcripts = [], ani = null } = {}) {
   const changes = [];
   const spelledNameFields = applySpelledNames({ extracted, v2Extraction, transcripts, changes });
   const phones = rejectImpossiblePhones({ extracted, v2Extraction, changes });
-  const textRefusalQuote = applyTextRefusal({ v2Extraction, transcripts, changes });
+  const textRefusalQuote = applyTextRefusal({ v2Extraction, transcripts, ani, changes });
   return {
     extracted,
     changes,

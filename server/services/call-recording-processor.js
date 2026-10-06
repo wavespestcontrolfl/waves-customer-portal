@@ -903,7 +903,7 @@ const CONFIRM_REASON_TEXT = {
   email_unverified: 'email was spelled out on the call — read it back to the caller before relying on it (spelled letters mishear)',
   email_invalid: 'captured email is not a valid address — re-collect it on the callback',
   email_bounced: 'email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
-  secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications (a number that is not a valid US number was dropped, not saved — ask for it again)',
+  secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications',
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
@@ -10372,6 +10372,7 @@ const CallRecordingProcessor = {
         extracted,
         v2Extraction: v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction) ? v2Result.extraction : null,
         transcripts: [contactPassTranscript, transcription],
+        ani: contactPhone,
       });
       extracted = callerDataGuard.extracted;
       if (callerDataGuard.changes.length) {
@@ -12560,31 +12561,6 @@ const CallRecordingProcessor = {
     // existing_customer_scheduling, which are precisely the linked-customer
     // calls this backfill exists to repair (GH codex #4432 r1 P1).
     // Fail-soft.
-    // A caller who SPELLED their name corrects a record that holds a near-
-    // misspelling of it. Runs before the pre-linked backfill below so that
-    // backfill's name-agreement check sees the corrected record. Same trust
-    // bar as that backfill: the identity number must be the customer's own, no
-    // voicemail, no third-party call nature. Fail-soft: a failure never blocks
-    // the call.
-    if (callerDataGuard?.spelledNameFields && customerId && !createdCustomerFromCall && !explicitUnlink
-        && !extracted.is_voicemail && !v2ThirdPartyCallNature) {
-      try {
-        const identityPhone = prelinkedBackfillIdentityPhone(call);
-        const corrected = identityPhone ? await correctOnFileSpelledName({
-          customerId,
-          extracted,
-          spelledNameFields: callerDataGuard.spelledNameFields,
-          accept: (row) => customerPhoneMatches(identityPhone, row),
-          callSid,
-        }) : null;
-        if (corrected) {
-          logger.info(`[call-proc] Corrected on-file ${Object.keys(corrected).join('+')} from the caller's spelled letters for ${maskSid(callSid)} (customer ${customerId})`);
-        }
-      } catch (e) {
-        logger.warn(`[call-proc] spelled-name record correction skipped for ${maskSid(callSid)}: ${e.code || e.name || 'error'}`);
-      }
-    }
-
     const prelinkedGate = prelinkedBackfillGate({
       call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted, explicitUnlink,
       thirdPartyCallNature: v2ThirdPartyCallNature,
@@ -14264,6 +14240,23 @@ const CallRecordingProcessor = {
       && String(customerId || call.customer_id) === String(call.customer_id))
       ? contactCasBaselineAtClaim
       : null;
+    // Name auto-apply provenance, shared by the contact-correction lane and the
+    // spelled-name record correction below. Historical/forced/RETRY passes never
+    // auto-apply names (codex #3413 r22, tightened r25): the claim-time baseline
+    // of any pass that is not the call's FIRST processing reflects post-call
+    // values, so an admin edit made between a failed first pass and its retry
+    // would be adopted as the baseline and overwritten by the older transcript.
+    // processing_generation === 1 identifies the first claim (recovery reclaims
+    // and force passes increment it); a missing generation fails closed. A
+    // claim-time snapshot FOR THIS TARGET is required (r26), the customer row
+    // must be untouched since the CALL (r42), and the 24h bound covers a first
+    // claim arriving late off a backlog.
+    const allowNameAutoApply = !opts.force
+      && procGeneration === 1
+      && Boolean(claimSnapshotForTarget)
+      && Boolean(call.created_at)
+      && new Date(claimSnapshotForTarget?.updated_at || 0).getTime() <= new Date(call.created_at).getTime()
+      && (Date.now() - new Date(call.created_at).getTime()) < 24 * 60 * 60 * 1000;
     const candidateStaging = await stageCustomerFieldCandidates({
       callId: call.id,
       customerId: customerId || call.customer_id || null,
@@ -14325,15 +14318,39 @@ const CallRecordingProcessor = {
       // updated_at past the call start means someone changed something
       // and the source-time baseline cannot be proven, so names stay in
       // the review lane.
-      allowNameAutoApply: !opts.force
-        && procGeneration === 1
-        && Boolean(claimSnapshotForTarget)
-        && Boolean(call.created_at)
-        && new Date(claimSnapshotForTarget?.updated_at || 0).getTime() <= new Date(call.created_at).getTime()
-        && (Date.now() - new Date(call.created_at).getTime()) < 24 * 60 * 60 * 1000,
+      allowNameAutoApply,
     }).catch((err) => {
       logger.warn(`[call-proc] Contact correction skipped for ${maskSid(callSid)}: ${err.message}`);
     });
+
+    // A caller who SPELLED their own name corrects a record that holds a near-
+    // misspelling of it. Same provenance gates as the contact-correction name
+    // auto-apply above (allowNameAutoApply: first timely pass only, never
+    // force/retry/recovery, claim-time snapshot for THIS target, row untouched
+    // since the call), plus a CAS against that snapshot's name so a staff edit
+    // landing after the claim is never overwritten. Same trust bar as the
+    // pre-linked backfill: the identity number is the customer's own, no
+    // voicemail, no third-party nature. Fail-soft.
+    if (allowNameAutoApply && callerDataGuard?.spelledNameFields && customerId && !createdCustomerFromCall
+        && !explicitUnlink && !extracted.is_voicemail && !v2ThirdPartyCallNature) {
+      try {
+        const identityPhone = prelinkedBackfillIdentityPhone(call);
+        const corrected = identityPhone ? await correctOnFileSpelledName({
+          customerId,
+          extracted,
+          spelledNameFields: callerDataGuard.spelledNameFields,
+          accept: (row) => customerPhoneMatches(identityPhone, row)
+            && normalizeNamePart(row.first_name) === normalizeNamePart(claimSnapshotForTarget.first_name)
+            && normalizeNamePart(row.last_name) === normalizeNamePart(claimSnapshotForTarget.last_name),
+          callSid,
+        }) : null;
+        if (corrected) {
+          logger.info(`[call-proc] Corrected on-file ${Object.keys(corrected).join('+')} from the caller's spelled letters for ${maskSid(callSid)} (customer ${customerId})`);
+        }
+      } catch (e) {
+        logger.warn(`[call-proc] spelled-name record correction skipped for ${maskSid(callSid)}: ${e.code || e.name || 'error'}`);
+      }
+    }
 
     if (!(await stillOwnsClaim())) return abandonToPeer('the lead write');
     // Step 4b: Create lead in leads table for pipeline tracking
@@ -16001,6 +16018,11 @@ const CallRecordingProcessor = {
           }
           if (bridgeNeedsConfirmation.length) {
             triageNotes.push(`⚠ CONFIRM BEFORE DISPATCH: ${bridgeNeedsConfirmation.map(describeConfirmReason).join('; ')}`);
+          }
+          // Only when the spoken-data guard actually dropped a second person's
+          // impossible number (payload.secondary_phone_rejected on the card).
+          if (secondaryPhoneRejected) {
+            triageNotes.push("a second contact's number was not a valid US number and was dropped, not saved — ask for it again");
           }
           const triageDesc = triageNotes.length ? `${triageBase} — ${triageNotes.join(' — ')}` : triageBase;
           // codex #4919 round-9 P2: snapshot BEFORE the insert (a copy, not
