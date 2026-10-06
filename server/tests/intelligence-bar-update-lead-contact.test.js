@@ -256,3 +256,82 @@ test('authorization contract: one before/after effect per changed field, tier ye
   ]));
   expect(c.preview_fingerprint).toEqual(expect.any(String));
 });
+
+// Address (owner IB history 10-06: the bar could not fix a lead's street
+// address). Same lead-only edit, same before → after card; the parts take the
+// lead editor's rules (trimmed, blank clears, its length caps); no state field.
+describe('address fields', () => {
+  const ADDR_LEAD = { ...LEAD, address: '21 Palm Ave', city: 'Sarasota', zip: '34201' };
+
+  test('unconfirmed: address, city and zip diff before → after, trimmed, and nothing is written', async () => {
+    const leads = chain({ first: ADDR_LEAD });
+    db.mockReturnValue(leads);
+    const res = await executeLeadsTool('update_lead_contact', {
+      lead_id: 'lead-1', address: ' 12 Palm Ave ', city: 'Bradenton', zip: '34208',
+    });
+    expect(res.preview).toBe(true);
+    expect(res.changes).toEqual({
+      address: { from: '21 Palm Ave', to: '12 Palm Ave' },
+      city: { from: 'Sarasota', to: 'Bradenton' },
+      zip: { from: '34201', to: '34208' },
+    });
+    expect(res.estimates_keep_address).toBe(true);
+    expect(res.note).toMatch(/estimates already made for this lead keep their own address/);
+    expect(leads.update).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a name-only edit does not mention estimates', async () => {
+    db.mockReturnValue(chain({ first: ADDR_LEAD }));
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', first_name: 'Tess' });
+    expect(res.estimates_keep_address).toBeUndefined();
+  });
+
+  test('blank clears; an unchanged address is not a change; over-long parts are refused', async () => {
+    db.mockReturnValue(chain({ first: ADDR_LEAD }));
+    const cleared = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '' });
+    expect(cleared.changes).toEqual({ zip: { from: '34201', to: null } });
+    const same = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '21 Palm Ave' });
+    expect(same.error).toMatch(/already has those contact details/);
+    expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: 'x'.repeat(256) })).error).toMatch(/address is too long/);
+    expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'x'.repeat(121) })).error).toMatch(/city is too long/);
+    expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '1'.repeat(21) })).error).toMatch(/zip is too long/);
+  });
+
+  test('the schema offers address, city and zip but no state (leads have no state column)', () => {
+    const props = LEADS_TOOLS.find(t => t.name === 'update_lead_contact').input_schema.properties;
+    expect(props).toEqual(expect.objectContaining({ address: expect.any(Object), city: expect.any(Object), zip: expect.any(Object) }));
+    expect(props).not.toHaveProperty('state');
+  });
+
+  test('confirmed: writes the new address and re-asserts the old one in the WHERE', async () => {
+    const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
+    const activities = chain({ insert: undefined });
+    db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+    const res = await executeLeadsTool('update_lead_contact', {
+      lead_id: 'lead-1', address: '12 Palm Ave', confirmed: true,
+      _approved_changes: { address: { from: '21 Palm Ave', to: '12 Palm Ave' } },
+    });
+    expect(res.success).toBe(true);
+    expect(res.updated_fields).toEqual(['address']);
+    expect(leads.where).toHaveBeenCalledWith('address', '21 Palm Ave');
+    const written = leads.update.mock.calls[0][0];
+    expect(written.address).toBe('12 Palm Ave');
+    expect(written).not.toHaveProperty('email_confirmed_at');
+    expect(activities.insert).toHaveBeenCalledWith(expect.objectContaining({ description: 'Contact updated: address' }));
+  });
+
+  test('authorization contract: one line per changed address part, plus the estimates line', () => {
+    const preview = {
+      preview: true, lead_id: 'lead-1', lead_name: 'Testc Beta', lead_status: 'contacted', estimates_keep_address: true,
+      changes: { address: { from: '21 Palm Ave', to: '12 Palm Ave' }, zip: { from: null, to: '34208' } },
+    };
+    const c = buildContract({ toolName: 'update_lead_contact', params: { lead_id: 'lead-1', address: '12 Palm Ave', zip: '34208' }, displayParams: {}, preview });
+    expect(c.effects).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'customer', label: 'Lead Testc Beta: address 21 Palm Ave → 12 Palm Ave', before: '21 Palm Ave', after: '12 Palm Ave' }),
+      expect.objectContaining({ kind: 'customer', label: 'Lead Testc Beta: zip (empty) → 34208' }),
+      expect.objectContaining({ kind: 'operational', label: 'Estimates already made for this lead keep the address they were made with' }),
+    ]));
+    expect(c.notifies_customer).toBe(false);
+  });
+});

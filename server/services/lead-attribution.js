@@ -1,4 +1,4 @@
-const { scopeToProspects, OPEN_LEAD_STATUSES } = require('./lead-statuses');
+const { scopeToProspects, OPEN_LEAD_STATUSES, handledStatusRefusal, unlessHandledSince } = require('./lead-statuses');
 const db = require('../models/db');
 const logger = require('./logger');
 
@@ -254,6 +254,46 @@ async function markConverted(leadId, { customerId, monthlyValue, initialServiceV
 
   logger.info(`[LeadAttribution] Lead ${leadId} converted${triggerSource ? ` (${triggerSource})` : ''}`);
   return true;
+}
+
+// The manual lead → customer conversion: POST /api/admin/leads/:id/convert
+// (the Leads page "Convert to Customer" button) and the Intelligence Bar's
+// convert_lead card both run this one body. It links the lead to an EXISTING
+// customer and marks it won through markConverted; it never creates a
+// customer and sends no message. Returns { lead } or { status, error } with
+// the route's own refusals.
+// `seenStatus` / `seenUpdatedAt`: the lead as the caller showed it. Same
+// stale-view rule as the PUT and mark-lost (codex #5477 r14): a request the
+// customer's booking closed after staff loaded it is not won from that view —
+// judged here and re-asserted in the win's own UPDATE.
+// `expectedStatus` (optional, the bar's card): the win's UPDATE also requires
+// the lead to still hold the status the card showed. The route passes none.
+async function convertLeadToCustomer(leadId, { customerId: rawCustomerId, monthlyValue, initialServiceValue, waveguardTier, seenStatus, seenUpdatedAt, expectedStatus } = {}) {
+  const customerId = typeof rawCustomerId === 'string' ? rawCustomerId.trim() : rawCustomerId;
+  if (!customerId) return { status: 400, error: 'customer_id is required to convert a lead' };
+
+  const lead = await db('leads').where('id', leadId).whereNull('deleted_at').first();
+  if (!lead) return { status: 404, error: 'Lead not found' };
+
+  const customer = await db('customers').where('id', customerId).first();
+  if (!customer) return { status: 404, error: 'Customer not found' };
+
+  const refusal = handledStatusRefusal('won', seenStatus, lead.status, seenUpdatedAt, lead.updated_at);
+  if (refusal) return { status: refusal.code, error: refusal.error };
+  const won = await markConverted(leadId, {
+    customerId,
+    monthlyValue,
+    initialServiceValue,
+    waveguardTier,
+    // Only 'handled' is excluded, unless it is the very close the page showed (any
+    // other status converts exactly as before): the claim's where() takes a callback,
+    // re-asserting it in the win's own UPDATE.
+    onlyIfIdentity: unlessHandledSince(seenStatus, seenUpdatedAt),
+    ...(expectedStatus ? { onlyIfStatusIn: [expectedStatus] } : {}),
+  });
+  if (won === false) return { status: 409, error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' };
+  const updatedLead = await db('leads').where('id', leadId).first();
+  return { lead: updatedLead };
 }
 
 // Where a won lead's win lands in the ad funnel — the ONE mechanism for every
@@ -748,6 +788,7 @@ module.exports = {
   normalizePhone,
   attributeInboundContact,
   markConverted,
+  convertLeadToCustomer,
   settleWonFunnelRow,
   markLost,
   logFirstResponse,

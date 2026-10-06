@@ -154,6 +154,7 @@ const WRITE_TWO_STEP = [
   'remove_saved_payment_method',
   'correct_invoice_address',
   'update_lead_contact',
+  'convert_lead',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
   // FULL_ACCESS_TWO_STEP_TOOL_NAMES, enforced by the route), PREVIEW ONLY:
@@ -579,6 +580,11 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
     // The seeded lead's first name differs, so the preview reaches the gate
     // with a real diff to show (an identical value is refused before it).
     ['leads-tools', 'executeLeadsTool', 'update_lead_contact', { lead_id: 'lead-1', first_name: 'Roadie' }],
+    // convert_lead needs the existing customer it links to (the shared SEED
+    // leaves customers unseeded for create_customer).
+    ['leads-tools', 'executeLeadsTool', 'convert_lead', { lead_id: 'lead-1', customer_id: '00000000-0000-0000-0000-00000000b001' }, {
+      customers: [{ id: '00000000-0000-0000-0000-00000000b001', first_name: 'Road', last_name: 'Tester', phone: '9415550100', deleted_at: null }],
+    }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_all_routes', { date: '2026-06-11' }],
     ['schedule-tools', 'executeScheduleTool', 'optimize_tech_route', { date: '2026-06-11', technician_name: 'Adam' }],
     ['schedule-tools', 'executeScheduleTool', 'assign_technician', { service_ids: [STOPS[0].id], technician_name: 'Jose' }],

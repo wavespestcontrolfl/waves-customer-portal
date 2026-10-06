@@ -47,6 +47,8 @@ const REVIEWED_PII_TOOL_NAMES = new Set([
   // update_lead_contact accepts and echoes a lead's name, phone and email
   // (before → after on the preview) — same PII class.
   'update_lead_contact',
+  // convert_lead echoes the lead's and the customer's name, phone, email and address on its preview.
+  'convert_lead',
   // block_sender inputs/results carry the full sender address (pre-push
   // P1) — redact its telemetry like the comms tools.
   'block_sender',

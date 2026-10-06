@@ -1299,40 +1299,23 @@ router.post('/:id/activity', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// POST /api/admin/leads/:id/convert — convert to customer
+// POST /api/admin/leads/:id/convert — convert to customer (link the lead to an
+// existing customer and mark it won). The body lives in
+// leadAttribution.convertLeadToCustomer, shared with the Intelligence Bar's
+// convert_lead card.
 router.post('/:id/convert', async (req, res, next) => {
   try {
     const { customer_id, monthly_value, initial_service_value, waveguard_tier } = req.body;
-    const customerId = typeof customer_id === 'string' ? customer_id.trim() : customer_id;
-    if (!customerId) {
-      return res.status(400).json({ error: 'customer_id is required to convert a lead' });
-    }
-
-    const lead = await db('leads').where('id', req.params.id).whereNull('deleted_at').first();
-    if (!lead) return res.status(404).json({ error: 'Lead not found' });
-
-    const customer = await db('customers').where('id', customerId).first();
-    if (!customer) return res.status(404).json({ error: 'Customer not found' });
-
-    // Same stale-view rule as the PUT and mark-lost (codex #5477 r14): a request the
-    // customer's booking closed after staff loaded it is not won from that view.
-    // Judged on the status the client showed, and re-asserted in the win's own UPDATE.
-    const seen = req.body.seen_status;
-    const refusal = handledStatusRefusal('won', seen, lead.status, req.body.seen_updated_at, lead.updated_at);
-    if (refusal) return res.status(refusal.code).json({ error: refusal.error });
-    const won = await leadAttribution.markConverted(req.params.id, {
-      customerId,
+    const result = await leadAttribution.convertLeadToCustomer(req.params.id, {
+      customerId: customer_id,
       monthlyValue: monthly_value,
       initialServiceValue: initial_service_value,
       waveguardTier: waveguard_tier,
-      // Only 'handled' is excluded, unless it is the very close the page showed (any
-      // other status converts exactly as before): the claim's where() takes a callback,
-      // re-asserting it in the win's own UPDATE.
-      onlyIfIdentity: unlessHandledSince(seen, req.body.seen_updated_at),
+      seenStatus: req.body.seen_status,
+      seenUpdatedAt: req.body.seen_updated_at,
     });
-    if (won === false) return res.status(409).json({ error: 'This lead changed since the page loaded (it may have closed on its own when the customer booked online). Reload to see it.' });
-    const updatedLead = await db('leads').where('id', req.params.id).first();
-    res.json({ lead: updatedLead });
+    if (result.error) return res.status(result.status).json({ error: result.error });
+    res.json({ lead: result.lead });
   } catch (err) { next(err); }
 });
 

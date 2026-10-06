@@ -152,8 +152,8 @@ Use for: "move all unresponsive leads older than 30 days to lost", "mark all no-
   },
   {
     name: 'update_lead_contact',
-    description: `Correct a lead's contact details: first name, last name, phone, or email (the lead record only — a linked customer account is NOT changed). Pass ONLY the fields to change. A blank last_name / phone / email clears that field; first_name cannot be cleared.
-Use for: "the Henderson lead's first name is Mike, not Michael", "fix the phone on the Smith lead", "update lead #42's email"
+    description: `Correct a lead's contact details: first name, last name, phone, email, or address (street address, city, zip) — the lead record only; a linked customer account is NOT changed. Pass ONLY the fields to change. A blank last_name / phone / email / address / city / zip clears that field; first_name cannot be cleared. Leads have no state field.
+Use for: "the Henderson lead's first name is Mike, not Michael", "fix the phone on the Smith lead", "update lead #42's email", "the Smith lead's street address is 12 Palm Ave, not 21"
 ALWAYS show the operator the before → after values and get approval before saving.`,
     input_schema: {
       type: 'object',
@@ -164,7 +164,26 @@ ALWAYS show the operator the before → after values and get approval before sav
         last_name: { type: 'string' },
         phone: { type: 'string', description: 'Any US format; stored as E.164' },
         email: { type: 'string' },
+        address: { type: 'string', description: 'Street address as the lead record holds it (the Leads page address field). Stored as written, trimmed.' },
+        city: { type: 'string' },
+        zip: { type: 'string', description: '5-digit ZIP code' },
       },
+    },
+  },
+  {
+    name: 'convert_lead',
+    description: `Convert one lead to a customer: links the lead to an EXISTING customer record and marks the lead won — the same action as the Leads page "Convert to Customer" button. It never creates a customer: if the person is not a customer yet, use create_customer first (its own card), then call this with the new customer's id. Refused when the lead is already won or is already linked to a different customer.
+Side effects (all shown on the card): lead status → won, converted now, marked qualified; the lead's estimates with no customer yet are attached to this customer; a converted entry in the lead's history; the ad-attribution funnel row (if any) advances to booked; the lead becomes eligible for the next daily qualified-lead conversion upload to Google Ads and Meta. No message is sent to the customer.
+Use for: "convert the Henderson lead to a customer", "make lead #42 a customer so I can send the estimate"
+Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card. Call ONCE per intended action — never retry, never claim completion.`,
+    input_schema: {
+      type: 'object',
+      properties: {
+        lead_id: { type: 'string', format: 'uuid' },
+        lead_name: { type: 'string', description: 'Find the lead by name (partial match, active leads only) when lead_id is unknown' },
+        customer_id: { type: 'string', format: 'uuid', description: 'The existing customer this lead becomes (from query_customers or a create_customer result)' },
+      },
+      required: ['customer_id'],
     },
   },
 ];
@@ -185,6 +204,7 @@ async function executeLeadsTool(toolName, input, actionContext = {}) {
       case 'update_lead_status': return await updateLeadStatus(input);
       case 'bulk_update_leads': return await bulkUpdateLeads(input);
       case 'update_lead_contact': return await updateLeadContact(input);
+      case 'convert_lead': return await convertLead(input);
       default: return { error: `Unknown leads tool: ${toolName}` };
     }
   } catch (err) {
@@ -652,7 +672,16 @@ async function matchBulkLeads(input) {
 // re-asserts every old value as well (same atomic guard as the status
 // write) — the fingerprint check and the commit are not one statement.
 
-const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email'];
+const LEAD_CONTACT_FIELDS = ['first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip'];
+
+// Address parts take the lead editor's own rules (PUT /api/admin/leads/:id
+// stores them as sent; its create-side schema trims and caps them at these
+// lengths): trimmed text, blank clears. No street normalization: leads.address
+// often holds a whole "street, city, FL zip" line, which the street-line
+// normalizer would corrupt (see the contact-normalization backfill). Leads
+// have no state column.
+const LEAD_ADDRESS_MAX = { address: 255, city: 120, zip: 20 };
+const LEAD_ADDRESS_FIELDS = Object.keys(LEAD_ADDRESS_MAX);
 
 // Normalize one requested contact field. Returns { value } (null = clear)
 // or { error }.
@@ -692,6 +721,11 @@ function normalizeLeadContactField(field, raw) {
     // leads.email is varchar(255) (Codex r2 P2): refuse at preview, not at commit.
     if (email.length > 255) return { error: 'email is too long (255 characters max).' };
     return { value: email };
+  }
+  if (LEAD_ADDRESS_MAX[field]) {
+    if (!text) return { value: null };
+    if (text.length > LEAD_ADDRESS_MAX[field]) return { error: `${field} is too long (${LEAD_ADDRESS_MAX[field]} characters max).` };
+    return { value: text };
   }
   return { error: `Unknown contact field: ${field}` };
 }
@@ -738,7 +772,7 @@ async function updateLeadContact(input) {
     requested[field] = norm.value;
   }
   if (Object.keys(requested).length === 0) {
-    return { error: 'Nothing to update — pass at least one of first_name, last_name, phone, email.' };
+    return { error: 'Nothing to update — pass at least one of first_name, last_name, phone, email, address, city, zip.' };
   }
 
   const lead = await resolveLeadForUpdate(input);
@@ -765,6 +799,9 @@ async function updateLeadContact(input) {
     lead_status: lead.status,
     changes,
     ...(lead.customer_id ? { linked_customer_unchanged: true } : {}),
+    // The lead editor runs no address fan-out: an estimate keeps the address
+    // it was drafted with (estimates.address is its own column).
+    ...(LEAD_ADDRESS_FIELDS.some(f => changes[f]) ? { estimates_keep_address: true } : {}),
   };
 
   if (input.confirmed !== true) {
@@ -773,6 +810,7 @@ async function updateLeadContact(input) {
       ...preview,
       note: 'PREVIEW ONLY — nothing was saved. Updates the lead record only'
         + (lead.customer_id ? ' (the linked customer account is NOT changed)' : '')
+        + (preview.estimates_keep_address ? '; estimates already made for this lead keep their own address' : '')
         + '. After the operator approves, this commits via the confirmation card.',
     };
   }
@@ -819,6 +857,100 @@ async function updateLeadContact(input) {
     success: true,
     ...preview,
     updated_fields: Object.keys(changes),
+  };
+}
+
+// ─── CONVERT TO CUSTOMER (two-step write) ───────────────────────
+//
+// The Leads page "Convert to Customer" action (POST /api/admin/leads/:id/
+// convert) as a card: both run leadAttribution.convertLeadToCustomer. Without
+// `confirmed` it resolves the lead and the existing customer and returns what
+// the card shows; nothing is written. The route pins the previewed lead id,
+// status and version; the confirmed run passes them as the "seen" lead, so the
+// win's own UPDATE refuses a lead that moved after the card was shown.
+
+const leadDisplayName = (row) => `${row.first_name || ''} ${row.last_name || ''}`.trim() || '(no name)';
+const addressLine = (parts) => parts.map(p => (p === null || p === undefined ? '' : String(p).trim())).filter(Boolean).join(', ') || null;
+
+async function convertLead(input) {
+  const lead = await resolveLeadForUpdate(input);
+  if (!lead) return { error: input.lead_id ? 'Lead not found' : 'No active lead matches that name.' };
+  if (lead.error) return lead;
+  const leadName = leadDisplayName(lead);
+  const customerId = typeof input.customer_id === 'string' ? input.customer_id.trim() : '';
+  if (!customerId) {
+    return { error: 'customer_id is required — find the customer with query_customers, or create one with create_customer first, then convert.' };
+  }
+  const customer = await db('customers').where('id', customerId).whereNull('deleted_at').first();
+  if (!customer) return { error: 'Customer not found', code: 'target_not_found' };
+  const customerName = leadDisplayName(customer);
+  if (lead.status === 'won') {
+    return { error: `Lead ${leadName} is already converted (won). Nothing to do.`, code: 'already_converted' };
+  }
+  if (lead.customer_id && String(lead.customer_id).toLowerCase() !== String(customer.id).toLowerCase()) {
+    return {
+      error: `Lead ${leadName} is already linked to a different customer. Change that link on the Leads page first.`,
+      code: 'target_relationship_mismatch',
+    };
+  }
+
+  const preview = {
+    lead_id: lead.id,
+    lead_name: leadName,
+    lead_status: lead.status,
+    lead_contact: {
+      phone: lead.phone || null,
+      email: lead.email || null,
+      address: addressLine([lead.address, lead.city, lead.zip]),
+    },
+    customer_id: customer.id,
+    customer_name: customerName,
+    customer_record: {
+      phone: customer.phone || null,
+      email: customer.email || null,
+      address: addressLine([customer.address_line1, customer.city, [customer.state, customer.zip].filter(Boolean).join(' ')]),
+    },
+    // Lead and customer versions bind the card (the two-step fingerprint
+    // hashes `_version`): an edit to either after the card was shown refuses.
+    _version: [lead.updated_at, customer.updated_at].map(v => (v ? new Date(v).toISOString() : '')).join('|'),
+    // The route pins this as the "seen" lead version (see the handled rule).
+    _lead_updated_at: lead.updated_at ? new Date(lead.updated_at).toISOString() : null,
+  };
+
+  if (input.confirmed !== true) {
+    return {
+      preview: true,
+      ...preview,
+      note: 'PREVIEW ONLY — nothing was saved. Links this lead to the existing customer record and marks the lead won; the customer record is not changed and no message is sent. After the operator approves, this commits via the confirmation card.',
+    };
+  }
+
+  // The route pins the status and version the card showed; without them this
+  // is not an approved card.
+  if (!input._expected_status) {
+    return { error: 'This conversion has no approved card. Rebuild the confirmation card.', preview_changed: true };
+  }
+  const result = await leadAttribution.convertLeadToCustomer(lead.id, {
+    customerId: customer.id,
+    seenStatus: input._expected_status,
+    seenUpdatedAt: input._expected_updated_at || null,
+    expectedStatus: input._expected_status,
+  });
+  if (result.error) {
+    return result.status === 409
+      ? { error: 'Lead changed while the conversion was being applied. Re-check the lead and rebuild the confirmation card.', preview_changed: true }
+      : { error: result.error };
+  }
+
+  logger.info(`[intelligence-bar:leads] Converted lead ${lead.id} to customer ${customer.id}`);
+  return {
+    success: true,
+    lead_id: lead.id,
+    lead_name: leadName,
+    old_status: lead.status,
+    new_status: 'won',
+    customer_id: customer.id,
+    customer_name: customerName,
   };
 }
 

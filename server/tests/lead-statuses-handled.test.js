@@ -105,10 +105,13 @@ describe("lead status 'handled'", () => {
     // mark-lost: the same refusal, re-asserted in markLost's UPDATE (notIfStatusIn)
     expect(route).toMatch(/const refusal = handledStatusRefusal\('lost', seen, existing\.status, req\.body\.seen_updated_at, existing\.updated_at\);/);
     expect(route).toMatch(/onlyIf: unlessHandledSince\(seen, req\.body\.seen_updated_at\)/);
-    // manual convert (won): the same refusal, re-asserted in markConverted's claim (codex #5477 r14)
-    expect(route).toMatch(/const refusal = handledStatusRefusal\('won', seen, lead\.status, req\.body\.seen_updated_at, lead\.updated_at\);/);
-    expect(route).toMatch(/onlyIfIdentity: unlessHandledSince\(seen, req\.body\.seen_updated_at\),/);
+    // manual convert (won): the same refusal, re-asserted in markConverted's claim (codex #5477 r14).
+    // The body lives in leadAttribution.convertLeadToCustomer (shared with the bar's convert_lead card);
+    // the route hands it the status and version its page showed.
     const la = fs.readFileSync(path.join(__dirname, '../services/lead-attribution.js'), 'utf8');
+    expect(route).toMatch(/seenStatus: req\.body\.seen_status,\s*seenUpdatedAt: req\.body\.seen_updated_at,/);
+    expect(la).toMatch(/const refusal = handledStatusRefusal\('won', seenStatus, lead\.status, seenUpdatedAt, lead\.updated_at\);/);
+    expect(la).toMatch(/onlyIfIdentity: unlessHandledSince\(seenStatus, seenUpdatedAt\),/);
     expect(la).toMatch(/\.modify\(\(q\) => \{ if \(onlyIf\) q\.where\(onlyIf\); \}\)\.update\(\{\s*status: 'lost',/);
     const ui = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/LeadsTabs.jsx'), 'utf8');
     expect(ui).toMatch(/body: \{ status, seen_status: seenStatus, seen_updated_at: seenUpdatedAt \}/);
