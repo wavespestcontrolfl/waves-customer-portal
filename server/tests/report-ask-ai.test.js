@@ -599,6 +599,9 @@ describe('symptoms and exposure never reach the model', () => {
     'My kids ran outside and the tech sprayed them',
     'My dogs were in the yard and he sprayed them',
     'I was accidentally sprayed',
+    'The tech sprayed my neck area',
+    'The tech sprayed my left side',
+    'You sprayed my arm and hand',
   ])('a fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
   });
@@ -634,6 +637,11 @@ describe('symptoms and exposure never reach the model', () => {
     'The product was sprayed outside; what was it?',
     'The chemical was sprayed near the door',
     'Was the treatment sprayed on the front?',
+    'What was sprayed on my back yard?',
+    'You sprayed the back door',
+    'What was sprayed on the side of the house?',
+    'Was the front door sprayed?',
+    'You sprayed my left side of the yard',
     '',
   ])('no fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();

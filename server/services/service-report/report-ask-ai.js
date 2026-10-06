@@ -569,6 +569,8 @@ const MEDICAL_CUES = [
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
+  // "My left side", never "the left side of the house" (Codex P1 #6016 r4).
+  /\bsprayed\s+(?:on\s+)?(?:my|his|her|their|your|our)\s+(?:left|right)\s+side\b(?!\s+of\b)/i,
   // A pronoun object, "them" included ("my kids ran out and he sprayed them").
   /\bsprayed\s+(?:on\s+)?(?:me|myself|him|himself|her|herself|us|ourselves|them|themselves)\b/i,
   // First person, "sprayed" right after the verb: "I got sprayed", never the
@@ -611,17 +613,25 @@ const NOT_A_PATIENT_WORDS = new Set(('lawn yard yards grass turf fence fences pa
   + 'herbicide herbicides fungicide fungicides repellent bait baits granule granules liquid liquids material materials '
   + 'solution mix mixture barrier application applications').split(' '));
 
-function headNoun(phrase) {
+// The words of the noun phrase, up to a stop word, possessives trimmed.
+function phraseWords(phrase) {
   const words = phrase.toLowerCase().split(/\s+/).map((word) => word.replace(/[^a-z'’-]/g, ''));
   const stop = words.findIndex((word, i) => i > 0 && PHRASE_STOP_WORDS.has(word));
-  const kept = (stop === -1 ? words : words.slice(0, stop)).slice(0, 4).filter(Boolean);
-  return (kept[kept.length - 1] || '').replace(/['’]s?$/, '');
+  return (stop === -1 ? words : words.slice(0, stop)).slice(0, 4).filter(Boolean)
+    .map((word) => word.replace(/['’]s?$/, ''));
 }
 
+// Body parts that also name a side of a place ("back yard", "front door")
+// count only as the head noun.
+const PLACE_SIDE_WORDS = new Set(['back', 'front']);
+
 function namesPatient(phrase) {
-  const head = headNoun(phrase);
+  const words = phraseWords(phrase);
+  const head = words[words.length - 1];
   if (!head) return false;
-  return BODY_PART_WORDS.has(head) || !NOT_A_PATIENT_WORDS.has(head);
+  // A body part anywhere counts: "my neck area", "my left side" (Codex P1 #6016 r4).
+  if (words.some((word, i) => BODY_PART_WORDS.has(word) && (i === words.length - 1 || !PLACE_SIDE_WORDS.has(word)))) return true;
+  return !NOT_A_PATIENT_WORDS.has(head);
 }
 
 // A passive subject is the 1 to 3 words right before the verb; a stop word
