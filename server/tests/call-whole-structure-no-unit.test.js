@@ -208,7 +208,7 @@ describe('call-level waiver (service resolved the way the booking resolves it)',
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
     expect(src.indexOf('const preAdoptionExtracted = { ...extracted };')).toBeGreaterThan(0);
     expect(src.indexOf('const preAdoptionExtracted = { ...extracted };')).toBeLessThan(src.indexOf('const adoption = adoptV2PrimaryFields('));
-    expect(src).toContain('preAdoptionExtracted,\n            transcription,');
+    expect(src).toContain('preAdoptionExtracted,\n              transcription,');
   });
 
   test('both gates on: a call the Assessment gate may force to Waves Assessment is not waived (pre-push P1)', () => {
@@ -334,7 +334,8 @@ describe('gate wiring', () => {
 
   test('the processor reads the gate and hands the waiver only the pure helper', () => {
     const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain("isEnabled('callWholeStructureNoUnit') && isMissingUnitNumber(v2AddressValidation)");
+    expect(src).toContain("(isEnabled('callWholeStructureNoUnit') || isEnabled('callBusinessWholeBuildingNoUnit')) && isMissingUnitNumber(v2AddressValidation)");
+    expect(src).toContain("let wsAv = isEnabled('callWholeStructureNoUnit')");
     // The persisted shadow row is written BEFORE the waiver rewrites the verdict.
     expect(src.indexOf('ai_address_validation: v2AddressValidation')).toBeLessThan(src.lastIndexOf('wholeStructureUnitWaiverForCall({'));
   });
