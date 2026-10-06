@@ -951,3 +951,85 @@ describe('codex #6046 round 5', () => {
     });
   });
 });
+
+describe('codex #6046 round 6: any number in an agent turn is price talk (bare amounts)', () => {
+  const withAgentLine = (line, base = OUTBOUND) => base.replace('Caller: Great, thank you.', `Caller: Great, thank you.\n${line}`);
+
+  test('bare amounts, digits and number words, send the call to the priced path', () => {
+    for (const line of [
+      "Agent: It'll be 149.", 'Agent: It will be one forty-nine.', 'Agent: One forty nine.', 'Agent: A hundred and fifty.', 'Agent: Two hundred.',
+      'Agent: Fifteen hundred.', 'Agent: About eighty five.', 'Agent: Say forty-nine.', 'Agent: A thousand.', 'Agent: Ninety.', 'Agent: 149.99.',
+      'Agent: One second.', // an article "one" fails closed too
+    ]) {
+      expect([line, grounded(extraction(), withAgentLine(line))]).toEqual([line, { ok: false, reason: 'price_discussed' }]);
+      expect([line, route(extraction(), { transcript: withAgentLine(line) }).allowed]).toEqual([line, false]);
+    }
+    expect(priceDiscussed(extraction().service_request, withAgentLine('Agent: It will be one forty-nine.'), [], extraction())).toBe(true);
+  });
+
+  test('caller turns are not screened for bare numbers (addresses, zips, sizes)', () => {
+    for (const line of ['Caller: It is 4120 Palm Lane, zip 34202.', 'Caller: About two thousand square feet, a hundred and fifty feet of fence.', 'Caller: Forty-nine.']) {
+      expect([line, grounded(extraction(), withAgentLine(line)).ok]).toEqual([line, true]);
+    }
+  });
+
+  test('the slot turn is exempt for its own recorded hour/day words and ordinal dates, and for nothing else', () => {
+    const slotCase = ({ proposal, words, start, extra = '' }) => {
+      const ex = extraction({
+        scheduling: { agreed_slot_words: words, confirmed_start_at: start },
+        evidence: [quote('/scheduling/confirmed_start_at', 'agent', proposal), AGENT_PROPOSED_EVIDENCE[1], AGENT_PROPOSED_EVIDENCE[2]],
+      });
+      return { ex, transcript: lines({ proposal: `Agent: ${proposal}${extra}` }) };
+    };
+    const ten = { words: { day: 'Thursday', hour: '10', period: 'AM' }, start: '2026-09-24T10:00:00-04:00' };
+    const a = slotCase({ proposal: 'How about Thursday at 10 AM?', ...ten });
+    expect(grounded(a.ex, a.transcript)).toMatchObject({ ok: true, mode: 'agent_proposed' });
+    const two = { words: { day: 'Thursday', hour: 'two', period: 'PM' }, start: '2026-09-24T14:00:00-04:00' };
+    const b = slotCase({ proposal: 'How about Thursday at two PM?', ...two });
+    expect(grounded(b.ex, b.transcript)).toMatchObject({ ok: true });
+    // an ordinal date in the same turn
+    const c = slotCase({ proposal: 'How about Thursday the 24th at 10:00 AM?', ...ten });
+    expect(grounded(c.ex, c.transcript).reason).not.toBe('price_discussed');
+    // "noon" is not a number at all
+    expect(grounded(extraction()).ok).toBe(true);
+    // ANY other number in that same turn is not exempt
+    const d = slotCase({ proposal: 'How about Thursday at 10 AM for 149?', ...ten });
+    expect(grounded(d.ex, d.transcript)).toEqual({ ok: false, reason: 'price_discussed' });
+    const e = slotCase({ proposal: 'How about Thursday at 10 AM? It is one forty-nine.', ...ten, extra: '' });
+    expect(grounded(e.ex, e.transcript)).toEqual({ ok: false, reason: 'price_discussed' });
+    // the recorded hour in ANOTHER agent turn that is not a pinned slot turn is not exempt
+    const f = slotCase({ proposal: 'How about Thursday at two PM?', ...two });
+    expect(grounded(f.ex, f.transcript.replace('Agent: I am following up', 'Agent: Two of our techs are out. I am following up')).reason).toBe('price_discussed');
+  });
+
+  test('the real shape (synthetic names) still grounds, outbound lead_auto_bridge', () => {
+    const real = [
+      'Agent: Hey Jordan, this is Alex with Waves. How are you?',
+      'Caller: Good, thanks.',
+      'Agent: What you got going on?',
+      'Caller: We have some critters in the break room at the office.',
+      "Agent: Do you think they're mice?",
+      'Caller: Probably, we hear scratching in the ceiling.',
+      'Agent: And where are you located?',
+      'Caller: It is 4120 Palm Lane in Bradenton.',
+      "Agent: What's the zip there, do you know?",
+      'Caller: 34202.',
+      'Agent: Let me just quickly check my schedule and see if we can get someone out there to do an assessment.',
+      'Caller: Sure.',
+      "Agent: Yep. Just give me a second, I'll just get to my—",
+      'Caller: No problem.',
+      'Agent: How does noon on Thursday sound?',
+      'Caller: Perfect.',
+      "Agent: Awesome. I'll book you for that, and we'll see you then.",
+      'Caller: Great.',
+      "Agent: Perfect. Yep, we'll get you notifications to your phone.",
+      'Caller: Thank you.',
+      'Agent: Thank you.',
+      'Caller: Bye-bye.',
+      'Agent: Bye-bye.',
+    ].join('\n');
+    const views = [{ requested_service: 'Waves Assessment', quoted_price: null, quote_requested: false, quote_promised: false }];
+    expect(grounded(extraction(), real, { assessmentBooking: assess({ outbound: true, v1Views: views }) })).toEqual({ ok: true, reason: 'assessment_booking_grounded', mode: 'agent_proposed', assessment: true });
+    expect(route(extraction(), { transcript: real, commercialAssessmentV1Views: views }).allowed).toBe(true);
+  });
+});

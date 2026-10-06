@@ -75,7 +75,7 @@ const { resolveCallAgreedPrice } = require('../utils/call-agreed-price');
 // catalog price or none): reuse it, never copy the bounds.
 const { sanitizeQuotedCallPrice } = require('./call-booking-catalog');
 
-const { parseTurns, turnsHolding, spokenFiguresIn } = groundingTools;
+const { parseTurns, turnsHolding, spokenFiguresIn, spokenNumbersIn } = groundingTools;
 
 // Does a text state this amount, as digits ("$1,500", "150.00") or as spoken words
 // ("a hundred forty nine dollars")? The ONLY number reading left in this file: it
@@ -213,7 +213,9 @@ function acceptedEntryFor(svc, quoted) {
 //    a quoted price, a price amount, a price entry, quote_requested or quote_promised;
 //  - the transcript, in ANY turn: a price noun (price, cost, charge, fee, total, quote, rate,
 //    pay, payment, invoice, bill, deposit) or a currency word / figure ($, dollars, bucks).
-//    "free" and "no charge" / "no cost" / "no fee" are not price talk.
+//    "free" and "no charge" / "no cost" / "no fee" are not price talk;
+//  - ANY number in an agent-labeled turn, bare amounts included (agentSaidNumber), except the
+//    recorded slot words of the grounded slot turn.
 // The no-price assessment mode needs ALL of these quiet; one of them sends the call to the
 // priced path.
 const PRICE_TALK = /\$\s*\d|\b(?:dollars?|bucks?|price[sd]?|pricing|costs?|charg(?:e|es|ed|ing)|fees?|totals?|quot(?:e|es|ed|ing)|rates?|pay|pays|paying|paid|payments?|invoic(?:e|es|ed|ing)|bill|bills|billed|billing|deposits?)\b/i;
@@ -225,13 +227,42 @@ function v1ViewPriced(view) {
   return [view.quoted_price, view.quoted_price_usd, view.price_amount_usd, view.price_amount_max_usd].some((v) => v != null)
     || view.quote_requested === true || view.quote_promised === true || entries.some(hasAmount);
 }
-function priceDiscussed(svc = {}, transcript = '', v1Views = []) {
+// A bare amount ("It'll be 149." / "one forty-nine" / "a hundred and fifty") says no price noun,
+// so the screen above misses it. The class is closed instead: ANY number in an AGENT-labeled turn
+// (digits, or number words of any size, including the ambiguous runs and "one"/"two" as words)
+// means price may have come up. The ONE exemption is the grounded slot turn itself: the agent
+// turn holding the pinned slot proposal or commitment quote may carry the recorded hour, day and
+// period words (and ordinal dates) of the agreed slot, and nothing else numeric. Caller turns are
+// not screened (addresses, zips, sizes). An article "one" ("one second") fails closed too.
+const ORDINAL_DATE = /\b(?:\d{1,2}(?:st|nd|rd|th)|(?:twenty|thirty)[\s-]?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|thirtieth))\b/gi;
+const escapeRe = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function withoutSlotWords(text, words) {
+  let out = String(text || '').replace(ORDINAL_DATE, ' ');
+  for (const w of [words?.hour, words?.day, words?.period]) {
+    if (typeof w === 'string' && w.trim()) out = out.replace(new RegExp(`(?<![\\w])${escapeRe(w.trim())}(?::00)?(?![\\w])`, 'gi'), ' ');
+  }
+  return out.replace(/\bo['’]?\s?clock\b/gi, ' ');
+}
+const hasNumber = (text) => /\d/.test(text) || spokenNumbersIn(text).length > 0;
+function agentSaidNumber(v2, transcript) {
+  const turns = parseTurns(transcript);
+  if (!turns) return false; // an unlabeled transcript never grounds the agreement anyway
+  const words = v2?.scheduling?.agreed_slot_words;
+  const slotQuotes = (Array.isArray(v2?.evidence) ? v2.evidence : [])
+    .filter((e) => e?.speaker === 'agent' && typeof e.quote === 'string'
+      && ['/scheduling/confirmed_start_at', '/scheduling/agent_committed_booking'].includes(e.field_path));
+  const slotTurns = new Set(slotQuotes.flatMap((e) => turnsHolding(turns, e.quote, 'agent')));
+  return turns.some((t) => t.agent && hasNumber(slotTurns.has(t) ? withoutSlotWords(t.raw, words) : t.raw));
+}
+
+function priceDiscussed(svc = {}, transcript = '', v1Views = [], v2 = null) {
   const entries = [svc.price, ...(Array.isArray(svc.prices) ? svc.prices : [])];
   return svc.quoted_price_usd != null
     || [svc.price_offered_by_staff, svc.price_accepted_by_caller, svc.price_is_final].some((j) => j != null)
     || entries.some(hasAmount)
     || (Array.isArray(v1Views) ? v1Views : []).some(v1ViewPriced)
-    || PRICE_TALK.test(String(transcript || '').replace(NO_CHARGE, ' '));
+    || PRICE_TALK.test(String(transcript || '').replace(NO_CHARGE, ' '))
+    || agentSaidNumber(v2, transcript);
 }
 
 // Staff identity on an OUTBOUND recording, independent of who the labels say is who:
@@ -287,7 +318,7 @@ function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt, quot
   const early = SCHEDULE_CHECKS.find(([, fails]) => fails(v2?.scheduling));
   if (early) return { ok: false, reason: early[0] };
   const svc = v2.service_request || {};
-  const noPriceMode = !!assessmentBooking && !priceDiscussed(svc, transcript, assessmentBooking.v1Views);
+  const noPriceMode = !!assessmentBooking && !priceDiscussed(svc, transcript, assessmentBooking.v1Views, v2);
   const terms = { v2, transcript, assessmentBooking, pricedPath, agreed: resolveCallAgreedPrice(v2), quoted: svc.quoted_price_usd, entry: acceptedEntryFor(svc, svc.quoted_price_usd), quoteBookable };
   const failedTerm = (noPriceMode ? ASSESSMENT_CHECKS : PRICED_PATH_CHECKS).find(([, fails]) => fails(terms));
   if (failedTerm) return { ok: false, reason: failedTerm[0] };
