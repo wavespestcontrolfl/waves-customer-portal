@@ -801,6 +801,30 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       }
     });
 
+    test.each([
+      ['Recognition', 'annual_max_apps'], ['Recognition', 'min_interval_days'], ['Recognition', 'annual_max_rate'],
+      ['Fusilade II', 'annual_max_apps'], ['Fusilade II', 'min_interval_days'],
+    ])('the step is configured only with all five tagged rows: %s %s missing is unconfigured (plan withholds it, completion refuses)', async (name, limitType) => {
+      setGates();
+      const product = name === 'Recognition' ? rec : fus;
+      const saved = await knex('product_limits').where({ match_value: 'bermuda_removal', product_id: product.id, limit_type: limitType });
+      expect(saved).toHaveLength(1);
+      await knex('product_limits').where({ id: saved[0].id }).del();
+      try {
+        const f = await lawn({ date: '2026-06-20', bermuda: true });
+        const offered = await plan(f.visit);
+        for (const stepName of [REC, FUS, NIS]) expect(optionNames(offered)).not.toContain(stepName);
+        expect(await bermudaPairViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toMatch(/limits are not loaded/);
+        expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toMatch(/limits are not loaded/);
+      } finally {
+        const { id, ...row } = saved[0];
+        await knex('product_limits').insert(row);
+      }
+      // All five back: the step is offered again.
+      const back = await lawn({ date: '2026-06-20', bermuda: true });
+      expect(optionNames(await plan(back.visit))).toEqual(expect.arrayContaining([REC, FUS, NIS]));
+    });
+
     test('the tagged rows missing: a mix spelled by a catalog alias or linked from the staged rows still triggers the refusal (links and aliases before names)', async () => {
       setGates();
       const saved = await knex('product_limits').where({ match_value: 'bermuda_removal' });

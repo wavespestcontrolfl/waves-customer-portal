@@ -244,13 +244,20 @@ async function effectivePropertyId(knex, visit) {
 
 // The step products' catalog ids, from the program's own tagged product_limits rows (never a
 // display name): Recognition is the product on the tagged annual_max_rate row (the label
-// rate is its alone), Fusilade II the other tagged product. `tagged` is false when the
-// program's rows are missing (then readers fall back to names; a completion check refuses).
+// rate is its alone), Fusilade II the other tagged product. `tagged` is false unless all five
+// expected rows exist (then readers fall back to names; a completion check refuses).
 async function stepProductIds(knex) {
   const rows = await knex('product_limits').where({ match_value: BERMUDA_GROUP }).select('product_id', 'limit_type');
   const recognition = rows.find((row) => row.limit_type === 'annual_max_rate')?.product_id || null;
   const fusilade = rows.map((row) => row.product_id).find((id) => id && id !== recognition) || null;
-  return { recognition: recognition ? String(recognition) : null, fusilade: fusilade ? String(fusilade) : null, tagged: rows.length > 0 && !!recognition && !!fusilade };
+  // Configured only when ALL five expected rows exist: Recognition's annual count, interval and label
+  // rate, and Fusilade II's annual count and interval. Anything less is unconfigured, so the plan and
+  // sheet withhold the step and a completion refuses, never a half-limited step.
+  const has = (product, type) => rows.some((row) => String(row.product_id) === String(product) && row.limit_type === type);
+  const complete = !!recognition && !!fusilade
+    && ['annual_max_apps', 'min_interval_days', 'annual_max_rate'].every((type) => has(recognition, type))
+    && ['annual_max_apps', 'min_interval_days'].every((type) => has(fusilade, type));
+  return { recognition: recognition ? String(recognition) : null, fusilade: fusilade ? String(fusilade) : null, tagged: complete };
 }
 
 const NOT_CONFIGURED_MESSAGE = 'Bermuda removal cannot be recorded: its application limits are not loaded for Recognition and Fusilade II. Ask the office to load them before recording this mix.';

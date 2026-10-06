@@ -1618,7 +1618,8 @@ it.each([[false], [true]])('a group member added by hand BEFORE the group is app
   const recRow = totals()[2];
   expect(recRow.value).toBe(typed ? '7' : '');
   expect(within(recRow.parentElement).getAllByRole('combobox')[2].value).toBe('spot_treatment');
-  if (!typed) expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('');
+  // The catalog rate is cleared either way; only a typed total stays.
+  expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('');
 });
 
 it('the bermuda removal mix options go on together and come off together', async () => {

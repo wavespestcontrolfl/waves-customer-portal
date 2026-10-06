@@ -19261,8 +19261,8 @@ export function CompletionPanel({
     }
   }
   // A product of the group that was added or restored BEFORE the group was applied has its own row
-  // (a catalog method, a catalog rate and area): it takes the group's spot shape, no catalog area,
-  // rate or total, unless the tech typed that total. Rows the group adds already have it.
+  // (a catalog method, a catalog rate and area): it takes the group's spot shape, no catalog area
+  // or rate, and no derived total (a total the tech typed stays). Rows the group adds already have it.
   function normalizeGroupRows(group) {
     const members = new Map(effectiveProtocolActions.filter((a) => a.group === group && a.product?.id).map((a) => [String(a.product.id), a]));
     setSelectedProducts((prev) => prev.map((row) => {
@@ -19270,10 +19270,13 @@ export function CompletionPanel({
       if (!member || (member.prefillAmount !== false && member.applicationMode !== "spot")) return row;
       const method = member.product.applicationMethod || "spot_treatment";
       const unit = requiredApplicationArea(method, serviceTypeForArea)?.unit || "";
+      // A typed total is the tech's actual and stays (with its manual flag); the catalog rate, the area
+      // and the area default flags are cleared either way.
       const kept = row.totalAmountManual === true;
       return {
         ...row, applicationMethod: method, group, areaUnit: unit,
-        ...(kept ? {} : { rate: "", totalAmount: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false, lawnAmountReason: "Spot work: enter the area treated and the amount used." }),
+        rate: "", areaValue: "", applicationArea: "", applicationAreaDefault: false, lawnAreaDefault: false,
+        ...(kept ? {} : { totalAmount: "", lawnAmountReason: "Spot work: enter the area treated and the amount used." }),
       };
     }));
   }

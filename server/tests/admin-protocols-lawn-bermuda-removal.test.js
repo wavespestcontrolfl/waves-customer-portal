@@ -54,8 +54,8 @@ const freshAccount = () => ({
   visitDate: '2026-04-14',
   serviceType: 'Lawn Care',
   pin: null,
-  // The program's tagged product_limits rows: Recognition holds the label-rate row, Fusilade II the others.
-  tagged: [{ product_id: 'rec', limit_type: 'annual_max_apps' }, { product_id: 'rec', limit_type: 'annual_max_rate' }, { product_id: 'fus', limit_type: 'annual_max_apps' }],
+  // The program's five tagged product_limits rows: Recognition holds the label-rate row, Fusilade II the other two.
+  tagged: [{ product_id: 'rec', limit_type: 'annual_max_apps' }, { product_id: 'rec', limit_type: 'min_interval_days' }, { product_id: 'rec', limit_type: 'annual_max_rate' }, { product_id: 'fus', limit_type: 'annual_max_apps' }, { product_id: 'fus', limit_type: 'min_interval_days' }],
 });
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
