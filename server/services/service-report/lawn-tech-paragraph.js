@@ -32,6 +32,7 @@
 
 const { createTechParagraphEngine, clean } = require('./tech-paragraph-engine');
 const { customerCopyViolations } = require('./technician-report-copy');
+const { FIELD_WORD_CAPS } = require('./lawn-report-lead');
 
 const PROMPT_VERSION = 'lawn_tech_paragraph_v2';
 const FREEZE_KEY = 'lawnTechParagraph';
@@ -49,6 +50,9 @@ const MAX_QUOTE_CHARS = 200;
 // The longest text any valid slots can render (pinned by a test): the read-time
 // guard must never reject a paragraph the renderer can legally write.
 const MAX_TEXT_CHARS = 1600;
+// The lead prints the paragraph only up to its own field cap (lawn-report-lead.js):
+// render fits the text to it, so a frozen paragraph is never one the lead hides.
+const MAX_WORDS = FIELD_WORD_CAPS.techParagraph;
 
 /**
  * EVERY sentence the paragraph can contain (owner approved 2026-10-06). Change it
@@ -213,28 +217,54 @@ function buildSlots(inputs, observed) {
 }
 
 /** Slots -> sentences, in the fixed order. Unknown ids render nothing. Pure. */
-function renderSentences(slots) {
-  const s = slots && typeof slots === 'object' ? slots : {};
+function renderSentences(s) {
   const out = [];
-  const items = (Array.isArray(s.observed) ? s.observed : [])
-    .filter((o) => o && Object.hasOwn(CONDITIONS, o.condition))
-    .slice(0, MAX_OBSERVATIONS)
-    .map((o) => (Object.hasOwn(PLACES, o.place)
-      ? fill(LAWN_SENTENCES.observedItemWithPlace, { condition: CONDITIONS[o.condition].display, prep: PLACES[o.place].prep, place: PLACES[o.place].display })
-      : fill(LAWN_SENTENCES.observedItem, { condition: CONDITIONS[o.condition].display })));
+  const items = s.observed.map((o) => (Object.hasOwn(PLACES, o.place)
+    ? fill(LAWN_SENTENCES.observedItemWithPlace, { condition: CONDITIONS[o.condition].display, prep: PLACES[o.place].prep, place: PLACES[o.place].display })
+    : fill(LAWN_SENTENCES.observedItem, { condition: CONDITIONS[o.condition].display })));
   if (items.length) out.push(fill(LAWN_SENTENCES.observed, { items: joinList(items) }));
-  const maybe = [...new Set((Array.isArray(s.maybe) ? s.maybe : []).filter((k) => Object.hasOwn(FINDING_LABELS, k)))]
-    .slice(0, MAX_MAYBE).map((k) => FINDING_LABELS[k]);
-  if (maybe.length) out.push(fill(LAWN_SENTENCES.maybe, { labels: joinList(maybe) }));
-  const products = (Array.isArray(s.products) ? s.products : []).map((n) => clean(n)).filter(Boolean).slice(0, MAX_PRODUCTS);
-  if (products.length) out.push(fill(LAWN_SENTENCES.products, { products: joinList(products) }));
+  if (s.maybe.length) out.push(fill(LAWN_SENTENCES.maybe, { labels: joinList(s.maybe.map((k) => FINDING_LABELS[k])) }));
+  if (s.products.length) out.push(fill(LAWN_SENTENCES.products, { products: joinList(s.products) }));
   return out;
 }
 
+// The slots render reads: known ids only, each list at its cap.
+function usableSlots(slots) {
+  const s = slots && typeof slots === 'object' ? slots : {};
+  return {
+    observed: (Array.isArray(s.observed) ? s.observed : []).filter((o) => o && Object.hasOwn(CONDITIONS, o.condition)).slice(0, MAX_OBSERVATIONS),
+    maybe: [...new Set((Array.isArray(s.maybe) ? s.maybe : []).filter((k) => Object.hasOwn(FINDING_LABELS, k)))].slice(0, MAX_MAYBE),
+    products: (Array.isArray(s.products) ? s.products : []).map((n) => clean(n)).filter(Boolean).slice(0, MAX_PRODUCTS),
+  };
+}
+
+const wordsIn = (sentences) => sentences.join(' ').split(/\s+/).filter(Boolean).length;
+
+// Fit to the lead's word cap, deterministically: drop product names from the end
+// (keeping one), then the "may be" labels, then observed items (keeping one).
+// The same slots always give the same text, so the read-time check still holds.
+function fitted(slots) {
+  const s = usableSlots(slots);
+  while (wordsIn(renderSentences(s)) > MAX_WORDS) {
+    if (s.products.length > 1) s.products.pop();
+    else if (s.maybe.length) s.maybe.pop();
+    else if (s.observed.length > 1) s.observed.pop();
+    else return { observed: [], maybe: [], products: [] };
+  }
+  return s;
+}
+
+// The copy screen reads the template text with the catalog product names masked:
+// a name is a store record, never model text, and a real one ("Combo AM 1%") can
+// look like an access code to the screen (Codex r2). Everything else is screened.
+const maskProducts = (text, products) => products.reduce((t, name) => t.split(name).join('the product'), text);
+const screenProblem = (text, products) => customerCopyViolations(maskProducts(text, products)).length > 0;
+
 /** Slots -> the paragraph text, or '' when none. A sentence that fails the
- * customer-copy screen (a catalog product name is the only free string) drops. */
+ * customer-copy screen drops on its own. Pure. */
 function render(slots) {
-  return renderSentences(slots).filter((sentence) => customerCopyViolations(sentence).length === 0).join(' ');
+  const s = fitted(slots);
+  return renderSentences(s).filter((sentence) => !screenProblem(sentence, s.products)).join(' ');
 }
 
 // ── Model call (extraction only) ──────────────────────────────────────────
@@ -313,7 +343,7 @@ function frozenEntryProblem(entry) {
   if (!text || text.length > MAX_TEXT_CHARS) return 'shape';
   if (!entry.slots || typeof entry.slots !== 'object' || Array.isArray(entry.slots)) return 'no_slots';
   if (render(entry.slots) !== text) return 'drift';
-  if (customerCopyViolations(text).length) return 'copy';
+  if (screenProblem(text, fitted(entry.slots).products)) return 'copy';
   return null;
 }
 
@@ -368,6 +398,7 @@ module.exports = {
   FINDING_LABELS,
   FINDING_OF_PHOTO_LABEL,
   MAX_TEXT_CHARS,
+  MAX_WORDS,
   MAX_PRODUCT_NAME_CHARS,
   SYSTEM_PROMPT,
   normalizeInputs,

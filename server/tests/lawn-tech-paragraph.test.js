@@ -163,7 +163,7 @@ describe('deterministic lines', () => {
   });
 
   test('a long catalog product name is printed whole, never cut (Codex r1: an 82-character row exists)', () => {
-    const name = 'LESCO Dimension 0.10% Plus Fertilizer 16-0-8 with 50% Polyon Slow Release Nitrogen Fertilizer';
+    const name = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
     expect(name.length).toBeGreaterThan(80);
     expect(textFor({ technicianNote: '', products: [{ name }] }, [])).toBe(`Today we applied ${name}.`);
   });
@@ -177,17 +177,37 @@ describe('deterministic lines', () => {
     expect(textFor({ technicianNote: '', products: [] }, [])).toBe('');
   });
 
-  test('the longest paragraph valid slots can render passes the read-time guard', () => {
-    const longest = (map) => Object.keys(map).sort((a, b) => map[b].display.length - map[a].display.length);
+  test('a real catalog name the copy screen would mistake for an access code still prints (Codex r2)', () => {
+    const combo = 'LESCO High Manganese Combo AM 1% Mg 5.75% S 3% Fe 4% Mn Chelated Micronutrient Liquid Fertilizer';
+    const text = textFor({ technicianNote: '', products: [{ name: combo }] }, []);
+    expect(text).toBe(`Today we applied ${combo}.`);
+    const slots = { observed: [], maybe: [], products: [combo] };
+    expect(tech.readFrozenTechParagraph({ lawnTechParagraph: { 77: { v: tech.FREEZE_VERSION, assessmentId: '77', text, slots } } }, 77)).toBe(text);
+  });
+
+  test('the text is fitted to the lead\'s own word cap: extra product names drop from the end, never a cut word', () => {
+    const { FIELD_WORD_CAPS } = require('../services/service-report/lawn-report-lead');
+    expect(tech.MAX_WORDS).toBe(FIELD_WORD_CAPS.techParagraph);
+    const long = (c) => `${c} ${'Turf Builder Pro Granular Formula '.repeat(4).trim()}`;
     const slots = {
-      observed: longest(CONDITIONS).slice(0, 3).map((condition) => ({ condition, place: longest(PLACES)[0] })),
-      maybe: Object.keys(FINDING_LABELS).sort((a, b) => FINDING_LABELS[b].length - FINDING_LABELS[a].length).slice(0, 2),
-      products: ['A', 'B', 'C', 'D', 'E'].map((c) => `${c}${'x'.repeat(tech.MAX_PRODUCT_NAME_CHARS - 1)}`),
+      observed: [{ condition: 'chinch_bugs', place: 'front_lawn' }, { condition: 'gray_leaf_spot', place: 'back_lawn' }, { condition: 'mole_crickets', place: 'side_yard' }],
+      maybe: ['thinning_turf', 'nutrient_stress'],
+      products: ['A', 'B', 'C', 'D', 'E'].map(long),
     };
     const text = tech.render(slots);
-    expect(text.length).toBeLessThanOrEqual(tech.MAX_TEXT_CHARS);
+    expect(text.split(/\s+/).length).toBeLessThanOrEqual(tech.MAX_WORDS);
+    expect(text).toMatch(/^Our technician saw chinch bugs in the front lawn, gray leaf spot in the back lawn and mole crickets in the side yard\./);
+    expect(text).toContain(long('A'));
+    expect(text).not.toContain(long('E'));
+    expect(onlyTemplateShapes(text)).toBe(true);
+    // Same slots, same text: the frozen entry reads back.
     const entry = { v: tech.FREEZE_VERSION, promptVersion: tech.PROMPT_VERSION, assessmentId: '77', text, slots };
     expect(tech.readFrozenTechParagraph({ lawnTechParagraph: { 77: entry } }, 77)).toBe(text);
+  });
+
+  test('every legal render is within the read-time character cap', () => {
+    const slots = { observed: [], maybe: [], products: ['A', 'B', 'C', 'D', 'E'].map((c) => `${c}${'x'.repeat(tech.MAX_PRODUCT_NAME_CHARS - 1)}`) };
+    expect(tech.render(slots).length).toBeLessThanOrEqual(tech.MAX_TEXT_CHARS);
   });
 });
 

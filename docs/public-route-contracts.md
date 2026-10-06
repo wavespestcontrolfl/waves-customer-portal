@@ -2650,7 +2650,11 @@ optionally "in the {front lawn | back lawn | side yard}"), "There may be early
 signs of {labels}; we will keep an eye on it." (low-confidence technician-kept photo
 findings the note does not cover, at most 2: weed pressure, thinning turf, nutrient
 stress, lawn stress) and "Today we applied {products}." (applied product display
-names only). There is no all-clear, confirmed, progress, comparison or color line.
+names only, printed whole). The text is fitted to the lead's own 70-word field cap
+(product names drop from the end first, then the "may be" labels), so a frozen
+paragraph is never one the lead hides; the copy screen reads it with the catalog
+product names masked (a real name such as "Combo AM 1%" is not an access code).
+There is no all-clear, confirmed, progress, comparison or color line.
 No model text is ever printed. It is written ONCE, at completion
 (`finalizeLawnReportSynthesis`, `lawn-report-write-gate.js`), with at most one model
 call (lane `lawn_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second deadline
