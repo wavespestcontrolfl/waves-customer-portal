@@ -155,6 +155,12 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(lastCall()[2]).toBe('We said “وسأرسلها غدا” (Sep 29) — nothing on record shows it done.');
   });
 
+  test('a description that runs across a sentence break keeps only its first sentence', async () => {
+    const quote = 'Thanks! I will mail the receipt. Then I will call you Friday';
+    await ring({ row: { kind: 'other', description: 'mail the receipt. Then I will call you', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “mail the receipt” (Sep 29) — nothing on record shows it done.');
+  });
+
   test('a description that is not in the quote keeps the first sentence', async () => {
     await ring({ row: { kind: 'other', description: 'reschedule the visit', evidence: [{ quote: 'Gonna knock out your quarterly spray tomorrow. Thanks!' }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “Gonna knock out your quarterly spray tomorrow” (Sep 29) — nothing on record shows it done.');

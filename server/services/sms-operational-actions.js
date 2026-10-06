@@ -995,7 +995,9 @@ function headlineWords(quote, description, redact) {
     const lead = needsEdge(chars) ? '(?<![\\p{L}\\p{N}\\p{M}_])' : '';
     const tail = needsEdge([...chars].reverse()) ? '(?![\\p{L}\\p{N}\\p{M}_])' : '';
     const found = new RegExp(`${lead}${escaped}${tail}`, 'iu').exec(quote);
-    if (found) return found[0];
+    // The headline is one sentence (admin-alert-compose), so a description
+    // that runs across a sentence break keeps only its first sentence.
+    if (found) return compose.firstSentence(found[0]).replace(/[.!?]+$/, '');
   }
   return compose.firstSentence(quote).replace(/[.!?]+$/, '');
 }
