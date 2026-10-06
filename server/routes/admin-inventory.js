@@ -817,7 +817,10 @@ function protocolProductReferences(definition) {
   const refs = [];
   for (const [trackKey, track] of Object.entries(lawnProtocols() || {})) {
     for (const visit of track.visits || []) {
-      const text = normalizeProtocolText([visit.primary, visit.secondary, visit.notes].filter(Boolean).join('\n'));
+      // A cadence variant's step (v13 April on the 9x plan) is part of the visit: its
+      // products are referenced by that month too.
+      const variantSteps = Object.values(visit.cadenceVariants || {}).flatMap((variant) => [variant.primary, variant.secondary]);
+      const text = normalizeProtocolText([visit.primary, visit.secondary, visit.notes, ...variantSteps].filter(Boolean).join('\n'));
       if (definition.aliases.some((alias) => text.includes(normalizeProtocolText(alias)))) {
         refs.push({
           turf: trackKey,

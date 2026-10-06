@@ -548,6 +548,23 @@ describe('the material-cost audit reads the gate-aware program', () => {
     expect(JSON.stringify(on)).not.toBe(JSON.stringify(off));
   });
 
+  test('the cadence report prices April by the plan: Dimension 18-0-10 at the 9x row, the 24-0-11 at 12x and 6x', () => {
+    const DIM = 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer';
+    const catalog = [
+      { id: 'f24', name: migration.NAMES.F24, aliases: [], default_rate_per_1000: 4.2, rate_unit: 'lb', analysis_n: 24, analysis_k: 11, cost_per_unit: 1, cost_unit: 'lb', needs_pricing: false },
+      { id: 'dim', name: DIM, aliases: [], default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_k: 10, cost_per_unit: 2, cost_unit: 'lb', needs_pricing: false },
+    ];
+    const aprilRows = new Map([['f24', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }], ['dim', { ratePer1000: null, rateUnit: 'lb_n', gates: {} }]]);
+    const v13Rows = new Map([['st_augustine|Apr', aprilRows]]);
+    const report = withGate('true', () => auditScript.buildCadenceReport(catalog, lawnProtocols(), v13Rows));
+    const april = (tier) => report.rows.find((r) => r.track === 'st_augustine' && r.tier === tier).visits.find((v) => v.month === 'Apr');
+    const selected = (result) => result.items.filter((i) => i.selected && i.product).map((i) => i.product.name);
+    expect(selected(april('enhanced'))).toEqual([DIM]);
+    expect(april('enhanced').items.find((i) => i.product?.name === DIM).mix.ratePer1000).toBeCloseTo(2.7778, 3);
+    expect(selected(april('premium'))).toEqual([migration.NAMES.F24]);
+    expect(selected(april('standard'))).toEqual([migration.NAMES.F24]);
+  });
+
   test('analyzeVisit resolves a v13 line by its exact catalog name', () => {
     const catalog = Object.values(migration.NAMES).map((name, i) => ({ id: `c${i}`, name, aliases: [], default_rate_per_1000: 1, rate_unit: 'oz', needs_pricing: true }))
       .concat([{ id: 'dec', name: 'Dylox 420 SL T&O Insecticide', aliases: [], default_rate_per_1000: 1, rate_unit: 'oz', cost_per_unit: 9 }, { id: 'ace', name: 'Acelepryn Xtra', aliases: [], cost_per_unit: 9 }]);

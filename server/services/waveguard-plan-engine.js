@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const { lawnProtocols, LAWN_V13_VERSION } = require('./lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
 const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -944,7 +944,9 @@ function summarizeInventoryStatus(items = []) {
   };
 }
 
-function buildMixOrder(items) {
+// `cappedIds`: products an application limit holds (v13 capped lines): they get no amount
+// and no place in the mix.
+function buildMixOrder(items, cappedIds = new Set()) {
   const order = [
     'water_conditioner',
     'dry_wg_wdg_wp_df',
@@ -956,7 +958,7 @@ function buildMixOrder(items) {
   ];
   const rank = new Map(order.map((key, index) => [key, index]));
   return items
-    .filter((item) => item.product)
+    .filter((item) => item.product && !cappedIds.has(String(item.product.id)))
     .slice()
     .sort((a, b) => {
       const ar = rank.has(a.product.mixing_order_category) ? rank.get(a.product.mixing_order_category) : 99;
@@ -1121,6 +1123,40 @@ function findNutrientProductsMissingConversions(items) {
     if (!hasComplianceNutrients) return false;
     return amountToPounds(item.mix.amount, item.mix.amountUnit || item.product.rate_unit) == null;
   });
+}
+
+// The applications a year of a lawn visit's series, from the recurrence the
+// scheduler places its visits by (`recurring_pattern`, plus `recurring_interval_days`
+// for a 'custom' gap; every_6_weeks is the 42-day gap). null for any other recurrence.
+const RECURRENCE_VISITS = { every_6_weeks: 9, monthly: 12, monthly_nth_weekday: 12, bimonthly: 6 };
+function lawnVisitsFromRecurrence(pattern, intervalDays) {
+  const key = String(pattern || '').toLowerCase();
+  if (RECURRENCE_VISITS[key]) return RECURRENCE_VISITS[key];
+  const days = Number(intervalDays);
+  if (key !== 'custom' || !(days > 0)) return null;
+  return [[38, 46, 9], [28, 33, 12], [56, 65, 6]].find(([min, max]) => days >= min && days <= max)?.[2] ?? null;
+}
+
+// The applications a year (6, 9 or 12) of the lawn plan this visit belongs to, or
+// null when no source states one. Ranked by authority: the catalog service the
+// visit is booked under (its key and name are the plan's own identity; the
+// codebase already trusts it over stale labels), then the series' recurrence (what
+// actually dates the visits, and what a generic "Lawn Care" booking carries), then
+// the visit's own service name. All text goes through the one resolver the plan
+// sync uses; its catch-all ("Lawn Care Program", quarterly) is not a stated plan.
+// `service` needs service_id, recurring_pattern, recurring_interval_days, service_type.
+async function lawnVisitsPerYear(knex, service) {
+  const { resolveLawnCareRecurringPlan } = require('./self-booking-plan-sync');
+  const stated = (text) => {
+    const plan = text ? resolveLawnCareRecurringPlan(text) : null;
+    return plan && plan.planKey !== 'lawn_care' && Number(plan.visitsPerYear) > 0 ? Number(plan.visitsPerYear) : null;
+  };
+  const catalog = service.service_id
+    ? await savepointRead(knex, (k) => k('services').where({ id: service.service_id }).first('service_key', 'name')).catch(() => null)
+    : null;
+  return stated(catalog && `${catalog.service_key} ${catalog.name}`)
+    ?? lawnVisitsFromRecurrence(service.recurring_pattern, service.recurring_interval_days)
+    ?? stated(service.service_type);
 }
 
 function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: assignedMonth, requireKnownGrass } = {}) {
@@ -1544,8 +1580,11 @@ const V13_UNAVAILABLE = {
 // application history, for each SELECTED product: the hard blocks per product id
 // (`capped`: no amount) and the warning-level findings (`warnings`: a minimum
 // interval, an approaching cap; the dose stays). A failed read fails closed
-// (strict throws; otherwise the product reads as capped).
-async function v13Limits(knex, service, serviceDate, items, { strict = false } = {}) {
+// (strict throws; otherwise the product reads as capped). The line's own staged
+// rate is the application being planned, so a yearly cap shared across
+// formulations (prodiamine) counts it with the season's earlier applications; the
+// visit's own earlier ledger rows are left out so a re-plan never counts it twice.
+async function v13Limits(knex, service, serviceDate, items, { strict = false, rows = new Map() } = {}) {
   const limits = require('./application-limits');
   const capped = new Map();
   const warnings = [];
@@ -1554,7 +1593,9 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false } =
     const id = String(item.product.id);
     if (checked.has(id)) continue;
     checked.add(id);
-    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k))
+    const row = rows.get(id);
+    const proposed = Number(row?.ratePer1000) > 0 ? { ratePer1000: Number(row.ratePer1000), unit: row.rateUnit } : null;
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null }))
       .catch((err) => {
         if (strict) throw err;
         return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };
@@ -1565,6 +1606,34 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false } =
     })));
   }
   return { capped, warnings };
+}
+
+// The lawn-visit step for a recipe visit and the visit's plan: `override` (applications a
+// year, when the caller states it) else the plan the booked visit resolves to. One path
+// for the plan, the tank sheet and everything else that reads a cadence-dependent step.
+async function visitForPlan(knex, recipeVisit, service, override = null) {
+  const stated = Number(override) > 0 ? Number(override) : null;
+  const perYear = stated ?? (recipeVisit?.cadenceVariants && service ? await lawnVisitsPerYear(knex, service) : null);
+  const found = visitForCadence(recipeVisit, perYear);
+  return { ...found, warnings: found.unknownCadence ? [unknownCadenceWarning(found.unknownCadence)] : [] };
+}
+
+// The booked visit a reader is opened from, by id (null for no id, a malformed id or an
+// unknown visit): the columns the cadence and the application limits read.
+// scope narrows the read to what the caller may see (a technician's current or recent
+// assignments); a visit outside it reads as no visit, so nothing of it is used.
+async function loadVisitForPlan(knex, id, scope = (q) => q) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''))) return null;
+  return (await scope(knex('scheduled_services').where({ 'scheduled_services.id': id }))
+    .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days')) || null;
+}
+
+// v13Limits for a reader that has a booked visit (the tank sheet), plus the plan's own
+// block notices for what it capped. Gate off or no visit (no customer): nothing is checked.
+async function v13VisitLimits(knex, service, items, rows) {
+  if (!service || featureGates.lawnV13Live?.() !== true) return { capped: new Map(), warnings: [], blocks: [] };
+  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows });
+  return { ...found, blocks: v13LineNotices([], found.capped, new Set()).blocks };
 }
 
 // Plan notices for the v13 lines: a hard limit is a block per limit (the existing
@@ -1731,8 +1800,12 @@ async function buildPlanForService(serviceId, options = {}) {
       requireKnownGrass: true, month: structuredProtocolContext?.window?.month,
     }) : calendarProtocol;
   const { trackKey, track, month } = selection;
-  const visit = completionDefaultsEnabled && service.lawn_protocol_window_key && !structuredProtocolContext?.window
+  const recipeVisit = completionDefaultsEnabled && service.lawn_protocol_window_key && !structuredProtocolContext?.window
     ? null : selection.visit;
+  // A visit whose step depends on the plan's cadence (v13 April: the 9x plan takes
+  // Dimension 18-0-10 where every other plan takes 24-0-11) reads the cadence
+  // from the booked service; unknown keeps the 12x step and warns.
+  const { visit, unknownCadence } = await visitForPlan(knex, recipeVisit, service);
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const exactName = track?.exact_catalog_names === true;
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
@@ -1784,7 +1857,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // GATE_LAWN_V13 with the staged v13 protocol resolved: every matched line goes
   // through v13LineState (one decision per line) and keeps its protocol product.
   const v13Active = featureGates.lawnV13Live?.() === true && structuredProtocol?.version === LAWN_V13_VERSION;
-  const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict }) : { capped: new Map(), warnings: [] };
+  const v13Limit = v13Active ? await v13Limits(knex, service, serviceDate, candidateItems, { strict, rows: v13Rows }) : { capped: new Map(), warnings: [] };
   const cappedProducts = v13Limit.capped;
   const v13LineOf = (item) => (v13Active && item.product ? v13LineState(item.product, v13Rows, cappedProducts) : null);
   // An apply-alone product selected beside any other product holds the mix: the plan
@@ -1850,6 +1923,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // clear is a visible warning; an apply-alone product selected beside any other
   // product holds the mix.
   warnings.push(...v13SelectedGateWarnings(plannedItems));
+  if (unknownCadence && v13Active) warnings.push(unknownCadenceWarning(unknownCadence));
   blocks.push(...applyAloneBlocks);
   if (v13Active) {
     const notices = v13LineNotices(planItems, cappedProducts, new Set(substitutions.keys()));
@@ -2075,7 +2149,7 @@ async function buildPlanForService(serviceId, options = {}) {
       assignedAt: service.lawn_protocol_assigned_at || null,
     },
     // An apply-alone conflict holds the mix: no combined order is offered.
-    mixingOrder: applyAloneBlocks.length ? [] : buildMixOrder(plannedItems),
+    mixingOrder: applyAloneBlocks.length ? [] : buildMixOrder(plannedItems, cappedProducts),
     closeout: {
       requiredPhotos: ['before', 'after'],
       captureActualProductAmounts: true,
@@ -2115,6 +2189,10 @@ module.exports = {
   v13ApplyAloneBlocks,
   v13SelectionBlocks,
   v13LineState,
+  lawnVisitsPerYear,
+  visitForPlan,
+  loadVisitForPlan,
+  v13VisitLimits,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,
