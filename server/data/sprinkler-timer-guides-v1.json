@@ -165,6 +165,93 @@
         "irrigation repair or service scenes of any kind: no hands with tools on a controller, valve or sprinkler head, no opened valve boxes, no dug-up lines, no replacement parts laid out on a bench, no technician servicing irrigation equipment — this post states plainly that Waves does not repair irrigation",
         "manufacturer logos, brand marks or legible model badging on any controller, and no invented text on a faceplate or display"
       ]
+    },
+    {
+      "id": "ST03",
+      "action": "new_supporting_blog",
+      "slug": "/lawn-care/sprinkler-timer-app-setup/",
+      "working_title": "Sprinkler Timer Apps: How to Set Up Rain Bird, Hunter, Rachio and B-hyve and Run Your Lawn From Your Phone",
+      "primary_kw": "sprinkler timer app setup",
+      "secondary_kws": [
+        "rain bird app setup",
+        "rain bird lnk2 wifi module setup",
+        "hunter hydrawise app setup",
+        "hunter x2 wand setup",
+        "run sprinklers from phone"
+      ],
+      "intent": "informational",
+      "window": "immediate",
+      "byline": "adam",
+      "cta": [
+        "CONTACT"
+      ],
+      "schema_types": [
+        "Article",
+        "HowTo",
+        "FAQPage"
+      ],
+      "thesis": "The phone app is a remote control, not a new watering plan: the same weekly watering plan Waves lawn customers receive still decides how many runs and how long, and the same county rules decide the day and hours. Rain Bird dial timers (ESP-TM2, ESP-Me3, ESP-Me, ESP-RZXe) need the LNK2 Wi-Fi module, sold separately, and Hunter's X2 needs the WAND module before an app can run them; Hydrawise, Rachio and B-hyve timers are built around their apps. Once paired, the reader uses the app's manual run for the grass zones with the plan's minutes, and keeps the app's weather-based features from changing those grass minutes. A reader happy running the dial by hand needs no module or app at all.",
+      "sources": [
+        "https://rainbird.com/media/4145",
+        "https://www.rainbird.com/products/lnk2-enhanced-control",
+        "https://www.hunterirrigation.com/support/x2tm-wand-support",
+        "https://www.wavespestcontrol.com/sprinkler-timers/rachio/",
+        "https://www.wavespestcontrol.com/sprinkler-timers/orbit-b-hyve/",
+        "https://www.wavespestcontrol.com/sprinkler-timers/hunter/",
+        "https://www.wavespestcontrol.com/lawn-care/rain-bird-sprinkler-timer-guide/",
+        "https://www.wavespestcontrol.com/lawn-care/hunter-sprinkler-timer-guide/",
+        "MECHANICS SOURCE, Rain Bird, binding: Rain Bird's LNK2 WiFi Module User Guide (rainbird.com/media/4145, a fetchable PDF) is the authority for every Rain Bird app and module step. It states: LNK2 is compatible with ESP-TM2, ESP-RZXe, ESP-ME3 and ESP-ME controllers manufactured after November 2, 2016, which carry the 'LNK Ready' Wi-Fi symbol on the front panel; the network must be 2.4 GHz (not 5 GHz); setup is (1) download the Rain Bird app, (2) open the front panel and insert the LNK2 into the accessory slot, where it starts blinking blue, (3) in the app select Add Controller (bottom left) and follow the setup wizard, with the Wi-Fi network name, Wi-Fi password, email address and ZIP code ready; the app has Manually Water Zone, a Manual Water Delay of up to 14 days, an Edit Program screen holding Seasonal Adjust, and a Wi-Fi tab whose signal reading in the -70s, -80s or -90s means a signal booster is needed; holding the module's button more than five seconds resets its Wi-Fi settings to factory default and the guide says watering schedules are retained. Do not add any Rain Bird app screen, button or step the guide does not state.",
+        "MECHANICS SOURCE, Hunter, binding: Hunter's site returns 403 to automated requests, so these facts from Hunter's X2 with WAND quick start guide are the ONLY Hunter app facts the post may state: the WAND module plugs into the X2 after removing its Wi-Fi cover; the WAND's serial number is entered when adding the controller to a Hydrawise account in the Hydrawise app; Hunter says to check Wi-Fi signal strength at the controller with a phone first, because a poor signal will not connect, and publishes its Wi-Fi requirements at hunter.help/wifispecs; with the WAND installed the X2's dial and button functions, its existing schedule and its settings are disabled and Hydrawise takes over, though manual Start/Stop Station and Test All Stations still work at the controller; the dial must stay on RUN or the X2 will not operate remotely. For a manual run in Hydrawise (app, or the touchscreen on HC / Pro-HC / HPC): pick the zone, change its run time before starting (otherwise it runs for the zone's default configured run length), then start it. Link hunterirrigation.com support as the manufacturer's authority; do not deep-link any other Hunter page and do not describe any other Hydrawise screen, menu or feature by name.",
+        "MECHANICS SOURCE, Rachio and B-hyve, binding: every Rachio and B-hyve app step must match the owner-reviewed Waves guides at /sprinkler-timers/rachio/ and /sprinkler-timers/orbit-b-hyve/ — Rachio: Quick Run, Standby must be off for Quick Run because Rachio does not water in Standby, a Fixed rather than Flex schedule, Seasonal Shift off; B-hyve: the app's manual run, grass kept out of Smart Watering, and the small indoor timer's manual button runs only a short fixed cycle. Take ONLY the controls from those pages. Their cadence wording ('once a week', 'skip week: do nothing', 'Monday's email') is superseded by the plan rules in this manifest's notes and must NOT be copied.",
+        "Locate and cite the applicable county or Southwest Florida Water Management District watering-restriction page for the assigned-day and allowed-hours rules; the post must link a real restriction page and must not state a specific day or hour itself."
+      ],
+      "internal_links": [
+        "/lawn-care-sarasota-fl/",
+        "/lawn-treatment-prep/",
+        "/lawn-care/overwatering-lawn-vs-underwatering/",
+        "/lawn-care/rain-bird-sprinkler-timer-guide/",
+        "/lawn-care/hunter-sprinkler-timer-guide/",
+        "/sprinkler-timers/rachio/",
+        "/sprinkler-timers/orbit-b-hyve/"
+      ],
+      "outline": [
+        "Quick answer: which timers need a plug-in module first (Rain Bird dial timers need the LNK2; Hunter X2 needs the WAND) and which are app-ready (Hydrawise, Rachio, B-hyve), and the move in one line — pair once, keep weather features off the grass minutes, then use the app's manual run for each run the plan asks for. Do not restate the plan rules here — point to the plan section.",
+        "What this week's plan is telling you — the single place the post explains WHEN and HOW MUCH, referenced by every other section rather than repeated, and stated as true for a run started from a phone exactly as for one started at the box: (a) HOW MANY runs it asks for, which can be more than one; (b) the minutes per grass zone — or, when the saved head type is missing or mixed, no minutes and a full cycle by events instead, in which case follow the plan's own full-cycle wording and never type in a number it did not give; (c) a hold week usually carries a CONDITION (run a fallback cycle if the grass shows wilt cues, or if you did not run the previous week) — only a week when watering is not permitted at all means no run; (d) the rain check before EVERY run: if half an inch or more has fallen before that run (measured since the previous permitted watering day when the plan asks for more than one — except the FIRST run of the week, measured from the start of this week), skip THAT run, not the week; (e) the plan never names a weekday — the assigned day or days and the allowed hours come from the county lookup. A run from the app counts the same as any other run.",
+        "Which timers can use an app: a ComparisonTable (rows: app name, extra part needed, dial or box position while using the app, manual run in the app) for Rain Bird dial timers, Hunter X2, Hunter Hydrawise, Rachio, B-hyve, with NO prices; then one sentence that Hunter's X-Core and Pro-C stay with the hand-run steps in the Hunter post.",
+        "Rain Bird: add the LNK2 and pair the app — CONTROLS ONLY, from the LNK2 user guide: compatibility check (made after November 2, 2016, 'LNK Ready' Wi-Fi symbol), 2.4 GHz only and signal at the timer, the three setup steps, the Wi-Fi tab signal reading. Manual run: Manually Water Zone, one grass zone at a time with the plan's minutes. Keep the dial on AUTO while using the app, because Rain Bird's manuals say nothing waters with the dial on OFF — and therefore clear the start times in the GRASS program (per the Rain Bird post's start-time check) so AUTO does not fire a lawn run on its own, while keeping any bed or drip program's start times. Seasonal Adjust at 100%. The 14-day delay pauses every zone. The module's Wi-Fi reset for a house where it was already set up.",
+        "Hunter: X2 with the WAND, then running zones in Hydrawise — CONTROLS ONLY, from the Hunter facts in sources: install, serial number, Hydrawise account, dial stays on RUN. State plainly that two pieces of the Hunter post's dial advice do not apply to a WAND timer: do not rest the dial on SYSTEM OFF, and do not set Run Times or Start Times at the dial. Manual run in Hydrawise for X2+WAND and HC / Pro-HC / HPC: change the run time to the plan's minutes before starting each grass zone. To keep grass from running on its own, remove grass zones from every automatic program while keeping bed and drip zones and their settings; delete a program only if no zone still needs it; a temporary zone suspension expires.",
+        "Rachio: app only — CONTROLS ONLY, from the Waves Rachio guide: Standby off, Quick Run for the grass zones with the plan's minutes; for an automatic grass schedule, Fixed not Flex and Seasonal Shift off; link /sprinkler-timers/rachio/ for keeping beds and drip running.",
+        "Orbit B-hyve: app first — CONTROLS ONLY, from the Waves B-hyve guide: the app's manual run for the grass zones with the plan's minutes; keep grass out of Smart Watering and out of custom programs you do not want running; the small indoor timer needs the app to run custom minutes; link /sprinkler-timers/orbit-b-hyve/.",
+        "An HonestRejection: a reader with a working dial timer who is happy walking to it does not need a module or an app; the hand-run steps in the Rain Bird and Hunter posts do the same job; say 'check current pricing' if price comes up.",
+        "App problems we see most (framed as our own experience, no figures): setup failing on Wi-Fi band or weak signal; minutes not matching the plan because a weather or seasonal feature changed them; odd-time runs from an old automatic schedule; a controller-wide rain delay stopping beds and drip; the app runs but no water comes out, which is a hardware job.",
+        "When it is the sprinklers, not the app: Waves does not install, set up Wi-Fi on, or repair irrigation; a zone that will not come on, a broken head or a controller fault goes to an irrigation contractor; app and module trouble goes to the brand's support; Waves still tells you what to water and when.",
+        "FAQ (4–6 questions): do I need an app to follow a watering plan; does a run from the app count against my watering day; can my Rain Bird ESP-TM2 work with the app; why will my Hunter X2 not respond to Hydrawise (dial on RUN, then Wi-Fi); can I still use the X2's buttons after adding the WAND; should I turn on weather-based watering for the grass zones."
+      ],
+      "verify_notes": [
+        "Every Rain Bird app or module step must be stated in the LNK2 WiFi Module User Guide (rainbird.com/media/4145). If a step, screen or button is not in that guide, OMIT it.",
+        "Hunter app facts are LIMITED to the list in this brief's Hunter mechanics source. Hunter's site cannot be fetched to check, so any other Hydrawise screen, menu, feature name, or Hunter model compatibility claim ships uncorrected — do not add one. Do not state which other Hunter controllers can or cannot be upgraded to Wi-Fi beyond 'Hunter sells the WAND for the X2'.",
+        "Do not state whether a Rain Bird run started from the app works with the dial on OFF. Tell the reader to keep the dial on AUTO while using the app, because Rain Bird's manuals say nothing waters on OFF.",
+        "AUTO with armed start times waters on its own. Wherever the post tells a Rain Bird reader to keep the dial on AUTO, it must carry the instruction to clear the grass program's start times first and to keep any bed or drip program's start times.",
+        "The X2 with the WAND must stay on RUN. Never tell a WAND reader to rest the dial on SYSTEM OFF or to program Run Times or Start Times at the dial.",
+        "Do not state how many watering days per week are allowed, which weekday, or which hours — anywhere, including the FAQ and the table. Say 'your assigned day and your county's allowed hours'.",
+        "Cadence comes from the weekly plan, never from this post: never say 'once a week', never write 'skip means do nothing', and never name a weekday for the plan's arrival. Mention the plan only as 'the weekly watering plan Waves lawn customers receive'.",
+        "The weekly plan does not always include per-zone minutes. Every manual-run step that enters minutes must also carry the events-only path in the plan's own wording, and never invent a number.",
+        "The half-inch rain check applies before every run, from the app or the box, and skips only that run.",
+        "The weekly plan's minutes are TURF-ONLY. Never apply them to bed or drip zones, and never prescribe a relative duration ('shorter', 'half') for those zones — low-flow drip often needs longer. Send the reader to their own irrigation guidance for non-turf zones.",
+        "Any controller-wide pause (app rain delay, watering delay, Standby, OFF, SYSTEM OFF) stops EVERY zone. Wherever one is offered, say so and give mixed-yard readers a grass-only alternative.",
+        "Weather-based and seasonal features (Rain Bird's weather adjustments and Seasonal Adjust, Rachio Flex and Seasonal Shift, B-hyve Smart Watering, any Hydrawise weather-based adjustment) must be described conditionally as features that can change the grass minutes on their own; the advice is to keep the grass zones on the plan's minutes. Do not claim any of these features waste water, fail, or harm the lawn.",
+        "Do not claim Waves installs, services, configures, sets up Wi-Fi on, or repairs irrigation or controllers. The referral to an irrigation contractor for hardware problems is mandatory.",
+        "No prices for any controller, module or app; no 'safe' language; no manufacturer imagery, logos or reproduced manual text; no app screenshots — link the manufacturer instead.",
+        "No cross-brand ranking. Any preference must read explicitly as our own hands-on opinion, never as fact or a superlative.",
+        "No promise that an app prevents a problem, saves a stated amount of water, or improves the lawn — do not repeat any manufacturer water-saving percentage (writer-agent-config PREVENTION_PROMISE).",
+        "REQUIRED HUB LINK: the post must link the lawn care service page /lawn-care-sarasota-fl/ as a natural in-body anchor.",
+        "The author is Adam Benetti; do not invent any work history, years of experience or prior employer. First-person statements stay to what Waves does for lawn customers."
+      ],
+      "image_avoid": [
+        "irrigation repair or service scenes of any kind: no hands with tools on a controller, valve or sprinkler head, no opened valve boxes, no dug-up lines, no replacement parts laid out on a bench, no technician servicing irrigation equipment — this post states plainly that Waves does not install, set up or repair irrigation",
+        "manufacturer logos, brand marks or legible model badging on any controller or phone, and no invented text on a faceplate, display or phone screen",
+        "a legible app interface on a phone screen: show a phone only from an angle where no screen content can be read"
+      ]
     }
   ]
 }

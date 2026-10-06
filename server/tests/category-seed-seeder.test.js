@@ -530,3 +530,18 @@ describe('regional service-diversity manifest', () => {
     expect(plan).toContain('How we put this list together');
   });
 });
+
+describe('sprinkler timer guide manifest', () => {
+  test('loads with unique slugs, and the ST03 app post carries its hub link and mechanics sources', () => {
+    const manifest = seeder.loadManifest(path.join(__dirname, '../data/sprinkler-timer-guides-v1.json'));
+    expect(new Set(manifest.briefs.map((b) => b.slug)).size).toBe(manifest.briefs.length);
+    const st03 = manifest.briefs.find((b) => b.id === 'ST03');
+    expect(st03.slug).toBe('/lawn-care/sprinkler-timer-app-setup/');
+    expect(st03.internal_links).toContain('/lawn-care-sarasota-fl/');
+    const row = seeder._internals.rowForBrief(st03, manifest);
+    expect(row.dedupe_key).toBe('catseed:v1:ST03');
+    const overlay = seeder.buildCategoryOverlay({ opportunity: { signal_metadata: row.signal_metadata }, pageType: 'supporting-blog' });
+    expect(overlay.operator_brief.required_sources).toContain('https://rainbird.com/media/4145');
+    expect(overlay.operator_brief.byline.key).toBe('adam');
+  });
+});
