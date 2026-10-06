@@ -308,6 +308,9 @@ const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suf
 // "12 1/2 Example Street", "88B Example Street" and "12-14 Main Street" mask whole; street-name
 // words may hold accents and curly apostrophes ("12 José Lane", "12 O’Neil St").
 const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:[-/]\\d{1,6}[a-z]?)?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
+// A numbered route has no suffix word: "12 SR 70", "12 FL-70", "12 US 41",
+// "12 State Road 64" (Codex P1 #6016 r15).
+const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?=\s+(?:fl|sr|us|cr|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
 
 // "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
 // directly by a short value is a credential even with no "code" or "pin"
@@ -324,7 +327,7 @@ function scrubFreeText(value, max = Infinity) {
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, (match, box, gap, value) => (LOCKBOX_PROSE_WORDS.has(value.toLowerCase()) ? match : `${box}${gap}[redacted]`)))
+  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, (match, box, gap, value) => (LOCKBOX_PROSE_WORDS.has(value.toLowerCase()) ? match : `${box}${gap}[redacted]`)))
     .replace(/\d{3,}/g, '[number]');
   return clip(masked, max);
 }
@@ -930,6 +933,7 @@ const MEASUREMENTS = [
   [/\bstress\b|\bdamage\b/i, /stress|damage/],
   [/\bpests?\b|\binsects?\b/i, /pest/],
   [/\boverall\b|\bhealth\b/i, /overall|plant_health/],
+  [/\bscores?\b/i, /out_of_100|score/],
 ];
 const SMALL_NUMBERS = 'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(' ');
 const TENS = 'twenty thirty forty fifty sixty seventy eighty ninety'.split(' ');
@@ -951,12 +955,23 @@ function factNumbers(value, key = '', out = []) {
   return out;
 }
 
+// "3.5 to 4 inches": the first number of a range takes the second's unit.
+const RANGE_TAIL_RE = /^\s*(?:to|-|–|and)\s*\d+(?:\.\d+)?/i;
+
 function numberIsKnown(value, after, sentence, known) {
-  const kind = NUMBER_KINDS.find(([, unitRe]) => unitRe.test(after));
+  const unitText = after.replace(RANGE_TAIL_RE, '');
+  const kind = NUMBER_KINDS.find(([, unitRe]) => unitRe.test(unitText));
   const named = MEASUREMENTS.filter(([wordRe]) => wordRe.test(sentence)).map(([, keyRe]) => keyRe);
+  // A number with no score or inch unit must match the measurement its clause
+  // names ("the score went from 70 to 100"); with none named ("82 days") it
+  // may only repeat a number the report's own text states (Codex P1 r12).
+  if (!kind) {
+    return known.some((fact) => fact.value === value
+      && (named.length ? named.some((keyRe) => keyRe.test(fact.key)) : fact.key === ''));
+  }
   return known.some((fact) => fact.value === value
-    && (!kind || kind[2].test(fact.key))
-    && (!kind || !named.length || named.some((keyRe) => keyRe.test(fact.key))));
+    && kind[2].test(fact.key)
+    && (!named.length || named.some((keyRe) => keyRe.test(fact.key))));
 }
 
 // Fact-sheet lines that hold digits but no measurement: the office phone,
@@ -1140,7 +1155,7 @@ const EXPOSURE_SAFETY_LINE = `If anyone or a pet was exposed or feels unwell, ca
 const SPRAY_WORD = /\bspray(?:ed|ing|s)?\b/i;
 const BODY_PARTS = '(?:eyes?|skin|mouth|face|hands?|fingers?|arms?|legs?|feet|foot|toes?|back|side|neck|head|hair|ears?|nose|lips?|throat|chest|stomach|belly|body|shoulders?|knees?|ankles?|wrists?|clothes|clothing|paws?|fur)';
 // "Me" and "us" after a request verb ("tell me", "text us") name no one exposed.
-const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|relatives?|cousins?|coworkers?|co-workers?|colleagues?|aunts?|uncles?|nanny|nannies|babysitters?|visitors?|workers?|landlords?|animals?|snakes?|reptiles?|rabbits?|bunny|bunnies|pigs?|cows?|horses?|livestock|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you)(?:['’](?:ve|s|re|m|d))?\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b|\\bsprayed\\s+(?:on\\s+|at\\s+)?(?:you|yourself)\\b`, 'i');
+const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|relatives?|cousins?|coworkers?|co-workers?|colleagues?|aunts?|uncles?|nanny|nannies|babysitters?|visitors?|workers?|landlords?|animals?|snakes?|reptiles?|rabbits?|bunny|bunnies|pigs?|cows?|horses?|livestock|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you|they)(?:['’](?:ve|s|re|m|d))?\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b|\\bsprayed\\s+(?:on\\s+|at\\s+)?(?:you|yourself)\\b`, 'i');
 
 /**
  * The fixed answer when the question reports a symptom or an exposure, else
@@ -1179,7 +1194,7 @@ function defaultCallModel(payload, options) {
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|arriv\w*|show\s+up|coming(?!\s+back)|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }

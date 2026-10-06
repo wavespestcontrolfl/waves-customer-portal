@@ -951,3 +951,14 @@ describe('answer screen, Codex round 11', () => {
     expect(ask('It may take 2026 days to improve.')).toBe('unstated_number');
   });
 });
+
+describe('answer screen, Codex round 12', () => {
+  test('a unitless number may not borrow a measurement value', () => {
+    const data = lawnData({ reportV2: null });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'How long?', data, facts });
+    expect(facts.lawn_assessment.overall_out_of_100).toBe(82);
+    expect(ask('It may take 82 days to improve.')).toBe('unstated_number');
+    expect(ask('Your lawn health score is 82 out of 100.')).toBeNull();
+  });
+});
