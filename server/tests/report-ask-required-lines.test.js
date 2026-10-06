@@ -1094,3 +1094,33 @@ describe('answer screen, Codex round 17', () => {
     expect(ruleAnswerReason({ serviceLine: serviceType === 'Dethatching' ? 'lawn' : 'pest', serviceType })).toBe('specialty_service');
   });
 });
+
+describe('answer screen, Codex round 18', () => {
+  test.each(['Your lawn will improve soon.', 'The turf should recover.', 'The shrubs will bounce back.', 'The damage will heal.'])(
+    'an improvement promise is rejected: %s',
+    (answer) => {
+      const data = lawnData({ reportV2: null });
+      expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('result promise');
+    },
+  );
+
+  test.each(['When is the follow-up?', 'What is the follow-up date?'])('a follow-up date question keeps the rule answer: %s', (question) => {
+    expect(ruleAnswerReason(pestData(), [], 'next_steps', question)).toBe('next_visit');
+  });
+
+  test('compound lockbox values mask whole', () => {
+    const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'lockbox A-B, key safe A/B, lockbox BLUE-RED, keypad 12-34' }) });
+    expect(facts.customer_concern).toBe('lockbox [redacted], key safe [redacted], lockbox [redacted], keypad [redacted]');
+  });
+
+  test.each(['The baby sucked on the bait', 'My dog lapped up the pesticide', 'My puppy mouthed the bait'])('oral exposure gets the full answer: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+
+  test('a question about an unrecorded product keeps the rule answer', () => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' } }] });
+    expect(ruleAnswerReason(data, [], 'applied', 'Did you use Roundup?')).toBe('unrecorded_product');
+    expect(ruleAnswerReason(data, [], 'applied', 'Did you use Alpine?')).toBeNull();
+    expect(ruleAnswerReason(data, [], 'applied', 'What did you spray outside?')).toBeNull();
+  });
+});
