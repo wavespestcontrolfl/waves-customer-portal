@@ -227,7 +227,8 @@ describe('buildReportAskFacts', () => {
     expect(facts.report_sections).toHaveLength(2);
     expect(facts.weather_during_visit).toBe('about 86°F, wind about 6 mph, no rain in the last 24 hours');
     expect(facts.pest_pressure).toEqual({ label: 'Low', trend: 'improving', score_out_of_5: null, what_it_means: null, trend_summary: null });
-    expect(facts.next_visit).toEqual({ service: 'Quarterly Pest Control', date: 'Tuesday, January 5, 2027', arrival_window: 'between 9:00 AM and 11:00 AM' });
+    // No appointment reaches the model: next-visit questions keep the rule answer.
+    expect(facts.next_visit).toBeUndefined();
     expect(facts.reentry).toEqual([{ area: 'outside', status: 'dry time has passed' }]);
   });
 
@@ -323,7 +324,7 @@ describe('buildReportAskPrompt', () => {
     expect(user).toContain('Waves Pest Control');
     expect(user).toContain(WAVES_SUPPORT_PHONE_DISPLAY);
     expect(user).toContain('Friday, October 2, 2026');
-    expect(user).toContain('Tuesday, January 5, 2027');
+    expect(user).not.toContain('January 5, 2027');
     expect(user).toContain('Alpine WSG');
   });
 
@@ -441,6 +442,11 @@ describe('screenAskAnswer', () => {
     expect(screen('Your next visit is 5 January.')).toBe('states_a_date');
     expect(screen('Your next visit is the 5th of January.')).toBe('states_a_date');
     expect(screen("The technician arrives at 2 o'clock.")).toBe('states_a_date');
+    expect(screen('The technician arrives January the 5th.')).toBe('states_a_date');
+    expect(screen('The technician arrives January fifth.')).toBe('states_a_date');
+    expect(screen('The technician arrives 1-5-2027.')).toBe('states_a_date');
+    expect(screen('The technician arrives at two PM.')).toBe('states_a_date');
+    expect(screen('The technician arrives tomorrow.')).toBe('states_a_date');
     expect(screen('The technician arrives at half past two.')).toBe('states_a_date');
     expect(screen('Activity often settles after the sun comes out.')).toBeNull();
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
@@ -576,6 +582,19 @@ describe('GATE_REPORT_ASK_AI', () => {
     }
     process.env.GATE_REPORT_ASK_AI = 'true';
     expect(featureGates.reportAskAiLive()).toBe(true);
+  });
+});
+
+describe('schedule questions keep the rule answer', () => {
+  const { asksAboutSchedule } = require('../services/service-report/report-ask-ai');
+  test.each([
+    'When are you returning?', 'When will the technician return?', 'When are you coming again?',
+    'Can I reschedule?', 'When is my next appointment?',
+  ])('schedule: %s', (question) => {
+    expect(asksAboutSchedule(question)).toBe(true);
+  });
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?'])('not schedule: %s', (question) => {
+    expect(asksAboutSchedule(question)).toBe(false);
   });
 });
 
@@ -771,13 +790,14 @@ describe('scripts/dev/report-ask-prompt.js', () => {
   test('a bare report and a wrapped one read the same camelCase nextAppointment', () => {
     const bare = run({ serviceLine: 'pest', applications: [], nextAppointment: camel });
     const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: camel });
-    expect(bare.user).toContain('Tuesday, January 5, 2027');
+    // The prompt carries no appointment (next-visit questions keep the rule answer).
+    expect(bare.user).not.toContain('January 5, 2027');
     expect(wrapped.user).toBe(bare.user);
   });
 
   test('a wrapped route-shaped (snake_case) appointment still works', () => {
     const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: { service_type: 'Quarterly Pest Control', scheduled_date: '2027-01-05', window_start: '09:00:00' } });
-    expect(wrapped.user).toContain('Tuesday, January 5, 2027');
+    expect(wrapped.user).not.toContain('January 5, 2027');
   });
 });
 
@@ -980,6 +1000,7 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at 21 Harbor Crossing.', 'Ants at [number] Harbor Crossing.'],
     ['Ants at 21 heron bluff.', 'Ants at [number] heron bluff.'],
     ['Ants at 21 HERON BLUFF.', 'Ants at [number] HERON BLUFF.'],
+    ['Ants at 21 Palm Is.', 'Ants at [number] Palm Is.'],
     ['Ants at 18 North Martin Luther King Boulevard.', 'Ants at [number] North Martin Luther King Boulevard.'],
     // Everyday nouns in the USPS table lose only the count.
     ['We saw 2 rats by the lake.', 'We saw [number] rats by the lake.'],

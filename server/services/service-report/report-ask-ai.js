@@ -36,7 +36,6 @@ const AREA_SCOPES = require('../../../shared/treatment-area-scopes.json');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { validateCustomerCopy } = require('./customer-copy-forbidden');
 const { writerRulesRejection } = require('./report-writer-rules');
-const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../../utils/sms-time-format');
 
 const PROMPT_VERSION = 'report-ask-v1';
 // Total wall-clock budget for the whole chain, and the cap on the first leg so
@@ -169,16 +168,6 @@ function pressureFact(data) {
   };
 }
 
-function nextVisitFact(appointment) {
-  if (!appointment?.scheduled_date) return null;
-  const arrival = spokenArrivalWindow(appointment.window_start);
-  return dropEmpty({
-    service: cleanText(appointment.service_type),
-    date: longDate(etDateIso(appointment.scheduled_date)),
-    arrival_window: arrival === UNKNOWN_ARRIVAL_WINDOW ? null : arrival,
-  });
-}
-
 // ── Re-entry readiness ──────────────────────────────────────────────────
 function reentryFacts(data = {}, now = new Date()) {
   const reentry = data.dynamicContext?.reentry;
@@ -220,8 +209,16 @@ function petPrecautionFact(data = {}) {
 // Rule-router topics the AI may answer. Re-entry, watering and next steps
 // stay on the fixed rules: they carry recorded instructions word for word.
 // next_visit stays on the rule answer: it states the scheduled date and
-// window exactly, and an AI answer states no date (Codex P1s on #6020).
+// window exactly, and an AI answer states no date (Codex P1s on #6020). The
+// fact sheet carries no appointment at all, so the model has none to restate.
 const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'unrouted']);
+
+// A schedule question the rule router left unrouted ("when are you coming
+// again?") keeps the rule answer too (Codex P1 #6016 r9).
+const SCHEDULE_QUESTION = /\b(?:return(?:s|ing)?|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:come|coming)\s+(?:back|again|out)|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|my)\b)/i;
+function asksAboutSchedule(question) {
+  return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
+}
 
 // A pressure reading, or null for a missing one: Number(null) is 0, and a
 // made-up zero would contradict the report (pre-push audit P1).
@@ -291,7 +288,8 @@ function productsNamedIn(question, products) {
 // house number past two digits) is masked (Codex P1 r1 #5957). It cannot see a
 // customer's NAME in prose, or a street name without a number and a suffix: no
 // pattern tells those from ordinary words, so those pass through.
-// A house number before a street: a number, one to four words and any USPS
+// A house number before a street: a number, one to six street-name words
+// (at least one, so "2 is improving" is prose and "21 Palm Is" an address) and any USPS
 // street type (Publication 28, the table the address matcher reads, in any
 // case: "21 heron bluff", "18 Bay Pass"). Only the number is masked: a street
 // name without its number is not an address, and the table's everyday nouns
@@ -300,13 +298,10 @@ function productsNamedIn(question, products) {
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 
 const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'trace', 'mews', 'landing', 'hollow', 'vista'];
-// "is" (ISLE) is an everyday verb: "index 2 is improving".
-const NOT_STREET_SUFFIXES = new Set(['is']);
 const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
-  .filter((suffix) => !NOT_STREET_SUFFIXES.has(suffix))
   .sort((x, y) => y.length - x.length)
   .join('|');
-const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}(?=\\s+(?:[a-z0-9'.-]+\\s+){0,4}(?:${STREET_SUFFIX})\\b)`, 'gi');
+const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}(?=\\s+(?:[a-z0-9'.-]+\\s+){1,6}(?:${STREET_SUFFIX})\\b)`, 'gi');
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
@@ -323,7 +318,7 @@ function scrubFreeText(value, max = Infinity) {
 // serialized into the prompt, so a new field cannot skip it. Left as built:
 // the fixed company and contact lines, the calendar dates and arrival window
 // (a four digit year would read as a code), and each product's catalog name.
-const VERBATIM_FACTS = new Set(['company', 'contact', 'service_date', 'next_visit', 'asked_about_product']);
+const VERBATIM_FACTS = new Set(['company', 'contact', 'service_date', 'asked_about_product']);
 
 function scrubLeaves(value) {
   if (typeof value === 'string') return scrubFreeText(value);
@@ -341,7 +336,7 @@ function scrubFacts(facts) {
 }
 
 // ── The fact sheet ──────────────────────────────────────────────────────
-function buildReportAskFacts({ question, data = {}, nextAppointment, now } = {}) {
+function buildReportAskFacts({ question, data = {}, now } = {}) {
   const allProducts = asArray(data.applications).map(productFacts).filter(Boolean);
   const named = productsNamedIn(question, allProducts);
   const products = named.length ? named : allProducts;
@@ -396,7 +391,6 @@ function buildReportAskFacts({ question, data = {}, nextAppointment, now } = {})
     // The visit's own recorded pet precaution (pre-push audit P1): the
     // fixed-rule re-entry answer carries it, so the AI must see it too.
     pet_precaution_today: petPrecautionFact(data),
-    next_visit: nextVisitFact(nextAppointment),
     contact: `text us or call ${WAVES_SUPPORT_PHONE_DISPLAY}`,
   }));
 }
@@ -523,8 +517,13 @@ function leaksTargetList(text, { question, data, facts }) {
 // mistyped appointment can never reach the customer (Codex P1s on #6020).
 // Next-visit questions keep the rule answer, which states the schedule.
 const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec';
-const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?(?:${MONTHS})|noon|midnight|o['’]?clock|half\\s+past|quarter\\s+(?:past|to)|(?:mon|tues|wednes|thurs|fri|satur|sun)day|\\d{4}-\\d{2}-\\d{2}|(?:[01]?\\d|2[0-3]):[0-5]\\d)\\b`, 'i');
+const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?(?:${MONTHS})|noon|midnight|o['’]?clock|half\\s+past|quarter\\s+(?:past|to)|\\d{1,2}-\\d{1,2}-\\d{2,4}|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\\s*(?:a\\.?m\\.?|p\\.?m\\.?|in\\s+the\\s+(?:morning|afternoon|evening))|(?:mon|tues|wednes|thurs|fri|satur|sun)day|\\d{4}-\\d{2}-\\d{2}|(?:[01]?\\d|2[0-3]):[0-5]\\d)\\b`, 'i');
 // Abbreviated weekdays only capitalized: a lowercase "sun" or "sat" is a word.
+// A month name alone ("January the 5th", "January fifth", "in February"), a
+// spelled ordinal ("on the fifth") or a relative day ("tomorrow", "next
+// week") also states a schedule (Codex P1 #6016 r9, #5964 r8). "This week"
+// stays: rain and watering facts speak of it. "May" is left out (a verb).
+const RELATIVE_DATE = /\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|next\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|the\s+(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\s-](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\s-]first))\b/i;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 // The output screen, in order: the first check that fails names the rejection.
@@ -542,7 +541,7 @@ const ASK_CHECKS = [
   ['banned_copy', (text) => require('./activity-indicators').findBannedCustomerCopy(text).length > 0],
   ['compliance', (text) => require('../social-media').complianceLanguageIssues(text, { impliedTreatmentContext: true }).length > 0],
   ['target_list', leaksTargetList],
-  ['states_a_date', (text) => DATE_TOKEN.test(text) || WEEKDAY_ABBR.test(text)],
+  ['states_a_date', (text) => DATE_TOKEN.test(text) || WEEKDAY_ABBR.test(text) || RELATIVE_DATE.test(text)],
 ];
 
 /**
@@ -694,4 +693,5 @@ module.exports = {
   placeOfApplication,
   answerReportQuestionWithAI,
   AI_ASK_TOPICS,
+  asksAboutSchedule,
 };

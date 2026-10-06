@@ -1906,14 +1906,16 @@ router.post('/:token/ask', async (req, res, next) => {
     // precautions with fixed waits, technician recommendations, aftercare)
     // that must reach the customer word for word, so they keep the rule
     // answer (pre-push audit, several rounds).
-    const { AI_ASK_TOPICS, medicalExposureAnswer, exposureSafetyLine } = require('../services/service-report/report-ask-ai');
+    const {
+      AI_ASK_TOPICS, medicalExposureAnswer, exposureSafetyLine, asksAboutSchedule,
+    } = require('../services/service-report/report-ask-ai');
     // A question that reports a symptom or an exposure gets the fixed Poison
     // Control / 911 answer on every report and with the gate off too: the
     // fixed-rule answers have no medical handling. No model call.
     const urgent = medicalExposureAnswer(question);
     if (urgent) {
       answer = urgent;
-    } else if (data.serviceLine === 'pest' && AI_ASK_TOPICS.has(topic)
+    } else if (data.serviceLine === 'pest' && AI_ASK_TOPICS.has(topic) && !asksAboutSchedule(question)
       && require('../config/feature-gates').reportAskAiLive?.() === true) {
       const { answerReportQuestionWithAI } = require('../services/service-report/report-ask-ai');
       const ai = await answerReportQuestionWithAI({ question, data, nextAppointment });
