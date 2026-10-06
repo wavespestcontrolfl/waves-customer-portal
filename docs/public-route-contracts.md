@@ -99,7 +99,9 @@ technician typed (a recommendation, the next step, a finding's recommendation)
 never goes to the model: that question keeps the fixed-rule answer.
 Next-visit questions also keep the fixed-rule answer, and an AI answer may
 not state a calendar date, weekday, clock time, month or relative day of its
-own (required lines keep theirs). Every number the model writes must be a
+own (required lines keep theirs; "today", the visit itself, and "this week"
+are allowed). An answer with required lines may not grant unconditional
+permission on their subject ("pets can go out right away"). Every number the model writes must be a
 fact-sheet number of the same kind (a score out of 100, an inch figure).
 While the aftercare holds watering, no model sentence may tell the customer
 to water. Scrub: a house number before a street (any USPS street type, any

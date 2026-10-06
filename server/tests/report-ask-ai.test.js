@@ -578,11 +578,11 @@ describe('schedule questions keep the rule answer', () => {
   test.each([
     'When are you returning?', 'When will the technician return?', 'When are you coming again?',
     'Can I reschedule?', 'When is my next appointment?',
-  
+    'What time will you be here?', 'What day are you coming?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
-  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Will the ants return?', 'Will roaches return after treatment?', 'When can my dog go back outside?'])('not schedule: %s', (question) => {
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'Will the ants return?', 'Will roaches return after treatment?', 'When can my dog go back outside?'])('not schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(false);
   });
 });
@@ -604,6 +604,9 @@ describe('symptoms and exposure never reach the model', () => {
     'I feel lightheaded since this morning',
     'He passed out in the kitchen',
     'It sprayed on my face',
+    'I was sprayed in the eyes',
+    'He was sprayed on the skin',
+    'The technician sprayed me in the face',
   ])('a fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
   });
@@ -675,6 +678,7 @@ describe('symptoms and exposure never reach the model', () => {
     'When can my dog go back outside?',
     'Are there bee hives near my shed?',
     'How many numbers are on the pressure scale?',
+    'What was sprayed on the face of the house?',
     'What was sprayed on my lawn?',
     'What was sprayed on the fence?',
     'Was anything sprayed on my patio?',

@@ -14,6 +14,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const {
+  medicalExposureAnswer,
   SYSTEM_PROMPT,
   buildReportAskFacts,
   buildReportAskPrompt,
@@ -891,5 +892,37 @@ describe('answer screen, Codex round 9', () => {
       water: { rain_this_week_inches: 0.4, irrigation_inches: 0.6, watering_type: 'Drip', status: 'balanced' },
       trends: { overall_out_of_100: { from: { month: 'Aug', value: 60 }, to: { month: 'Oct', value: 71 } } },
     });
+  });
+});
+
+describe('answer screen, Codex round 10', () => {
+  test('each number is bound to its own clause', () => {
+    const data = lawnData({ reportV2: { aftercare: {}, water: { rainInches: 1.23, status: 'balanced' }, mowing: { measuredHeightInches: 3.5, status: 'ideal' } } });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'How is my lawn?', data, facts });
+    expect(ask('Rain was 3.5 inches, and the mowing height was 1.23 inches.')).toBe('unstated_number');
+    expect(ask('Rain was 1.23 inches, and the mowing height was 3.5 inches.')).toBeNull();
+  });
+
+  test.each(['Product X also treats crabgrass.', 'Product X also treats brown patch.', 'Product X also treats dollar spot.'])(
+    'a canonical lawn target the facts never name is rejected: %s',
+    (answer) => {
+      const data = lawnData({ reportV2: null, applications: [{ product: { name: 'Product X' }, targets: ['ants'] }] });
+      const facts = buildReportAskFacts({ question: 'What is Product X for?', data });
+      expect(screenAskAnswer(answer, { question: 'What is Product X for?', data, facts })).toBe('target_list');
+    },
+  );
+
+  test('an answer may not grant unconditional permission next to a required line', () => {
+    const line = 'Keep pets off treated zones until fully dry.';
+    const data = pestData();
+    const facts = buildReportAskFacts({ data, requiredLines: [line] });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'Can my dog go out?', data, facts, requiredLines: [line] });
+    expect(ask(`${line} However, pets can go out right away.`)).toBe('second_instruction');
+    expect(ask(`Yes, once it is dry. ${line}`)).toBeNull();
+  });
+
+  test.each(["The product got on the cat's skin", "The spray got in the baby's eyes"])('possessive contact gets the full answer: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
   });
 });

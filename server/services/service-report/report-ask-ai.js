@@ -305,7 +305,9 @@ const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'tr
 const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
   .sort((x, y) => y.length - x.length)
   .join('|');
-const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}(?=\\s+(?:[a-z0-9'.-]+\\s+){1,6}(?:${STREET_SUFFIX})\\b)`, 'gi');
+// "12 1/2 Example Street" and "88B Example Street" mask whole; street-name
+// words may hold accents and curly apostrophes ("12 José Lane", "12 O’Neil St").
+const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
 
 // "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
 // directly by a short value with a digit in it is a credential even with no
@@ -791,6 +793,15 @@ function targetLabelsOf(data = {}) {
 // the findings, the reviewed sections, the lawn and typed-visit facts, the
 // recorded required lines or the selected products' own approved wording
 // (what_it_does, labeled_for) did not already name is a leaked list.
+function canonicalTargetTerms() {
+  const vocab = require('../../config/treatment-target-vocabulary');
+  const names = [...vocab.PEST_TARGET_SUGGESTIONS, ...vocab.LAWN_TARGET_SUGGESTIONS, ...vocab.ORNAMENTAL_TARGET_SUGGESTIONS];
+  return names.flatMap((name) => String(name).replace(/\([^)]*\)/g, ' ').split(/[/&]/))
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean)
+    .flatMap((part) => [part, part.split(/\s+/).pop()]);
+}
+
 // Pests the model may only name when the question or the facts already do:
 // with a product recorded for ants, "it also treats termites" is outside
 // knowledge (Codex P1 #5964 r7). Stems, compared the same way as targets.
@@ -803,6 +814,10 @@ const PEST_TERMS = [
   'thrip', 'thrips', 'scale', 'leafminer', 'leaf miner', 'lace bug', 'spittlebug', 'borer', 'sawfly', 'psyllid', 'bagworm',
   'katydid', 'grasshopper', 'lubber', 'stink bug', 'palmetto bug', 'billbug', 'ground pearl', 'nematode', 'springtail',
   'booklice', 'termite swarmer', 'carpenter ant', 'carpenter bee', 'mud dauber', 'paper wasp', 'lovebug', 'love bug',
+  'brown patch', 'rust', 'mildew', 'mold', 'fungus',
+  // The canonical treatment-target vocabulary (pest, lawn and ornamental
+  // target suggestions), each name and its last word ("Large patch", "patch").
+  ...canonicalTargetTerms(),
 ].map((term) => stemmedTerms(term));
 // Any "-bug", "-worm", "-fly", "-miner" or "-borer" compound is a pest name too.
 const PEST_SHAPE_RE = /\b[a-z]+(?:bugs?|worms?|fl(?:y|ies)|miners?|borers?)\b/gi;
@@ -869,12 +884,14 @@ const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th
 // Abbreviated weekdays only capitalized: a lowercase "sun" or "sat" is a word.
 // A month name alone ("January the 5th", "January fifth", "in February"), a
 // spelled ordinal ("on the fifth") or a relative day ("tomorrow", "next
-// week") also states a schedule (Codex P1 #6016 r9, #5964 r8). "This week"
-// stays: rain and watering facts speak of it. "May" is left out (a verb).
+// week", "next weekend") also states a schedule (Codex P1 #6016 r9-r11, #5964
+// r8). "This week" and "today" stay: rain and watering facts speak of this
+// week, and "today" is the visit itself. "May" counts only with a date
+// word ("in May", "May 5"): alone it is a verb.
 const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]first)';
 // A spelled ordinal is a date only with time context ("on the fifth", "the
 // fifth of January"); "the first application" is report content.
-const RELATIVE_DATE = new RegExp(`\\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|next\\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:on|by|until|before|after)\\s+the\\s+${ORDINAL_WORDS}|the\\s+${ORDINAL_WORDS}\\s+of\\s+(?:the\\s+)?(?:month|${MONTHS}))\\b`, 'i');
+const RELATIVE_DATE = new RegExp(`\\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|(?:this|next|the)\\s+weekend|(?:in|on|by|until|since|this|next|early|late|mid)[\\s-]+may|may\\s+\\d|the\\s+\\d{1,2}(?:st|nd|rd|th)|next\\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:on|by|until|before|after)\\s+the\\s+${ORDINAL_WORDS}|the\\s+${ORDINAL_WORDS}\\s+of\\s+(?:the\\s+)?(?:month|${MONTHS}))\\b`, 'i');
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 function statesADate(text, { requiredLines }) {
@@ -942,7 +959,10 @@ function statesUnknownNumber(text, { facts, requiredLines }) {
   if (!NUMBER_RE.test(own)) return false;
   NUMBER_RE.lastIndex = 0;
   const known = factNumbers([facts || {}, requiredLines]);
-  return splitSentences(own).some((sentence) => [...sentence.matchAll(NUMBER_RE)].some((m) => {
+  // Each number is bound to its own clause ("Rain was 1.23 inches, and the
+  // mowing height was 3.5 inches"), not the whole sentence (Codex P1 r10).
+  const clauses = splitSentences(own).flatMap((sentence) => sentence.split(/[,;:]\s*|\s+(?:and|but|while|whereas)\s+/i));
+  return clauses.some((sentence) => [...sentence.matchAll(NUMBER_RE)].some((m) => {
     const value = Number(m[0]);
     // "out of 100" names the scale, not a value.
     if (value === 100 && /out\s+of\s*$/i.test(sentence.slice(0, m.index))) return false;
@@ -975,6 +995,17 @@ function statesLineAlone(sentences, line) {
 // moist", "run the hose") (Codex P1 #5964 r8).
 const WATERING_DIRECTIVE = /\b(?:keep\s+(?:the\s+|your\s+)?(?:soil|lawn|turf|grass|yard|beds?|plants?|roots?)\s+(?:\w+\s+)?(?:moist|wet|damp|watered|hydrated)|run\s+(?:the\s+|your\s+)?(?:hose|sprinklers?|irrigation|sprinkler\s+system|system)|(?:add|give)\s+(?:\w+\s+){0,2}(?:moisture|water|a\s+drink)|soak(?:s|ing)?\b|hose\s+(?:it\s+|them\s+)?(?:down|off|over)|hand[\s-]?water|sprinkle\s+(?:it|the|some))/i;
 
+const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;
+// A grant of permission with no condition: "can go out", "right away", "no
+// need to wait". "Once it is dry" and "until" keep the instruction's terms.
+const UNCONDITIONAL_PERMISSION_RE = /\b(?:right\s+away|immediately|right\s+now|any\s*time|no\s+need\s+to\s+(?:wait|keep|stay)|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not)\s+(?:need|have)\s+to\s+(?:wait|keep|stay)|(?:can|may|could)\s+(?:go|play|return|use|come|walk|water|run)|(?:okay|ok|fine|free|good)\s+to|go\s+ahead)\b/i;
+const CONDITION_RE = /\b(?:once|after|until|when|as\s+soon\s+as|unless|before)\b/i;
+// The answer's sentences that are not part of a required line.
+function ownSentences(text, requiredLines) {
+  const lines = requiredLines.map(matchForm);
+  return splitSentences(matchForm(text)).filter((sentence) => !lines.some((line) => line.includes(sentence.replace(/[.!?]$/, ''))));
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
@@ -985,6 +1016,13 @@ const ASK_CHECKS = [
   // A dismissal anywhere in an answer that carries required lines, before or
   // after them ("…until dry. However, ignore that.") (Codex P1 #5964 r4).
   ['dismisses_required_line', (text, { requiredLines }) => requiredLines.length > 0 && DISMISSAL_CUE.test(text)],
+  // With required lines, the model's own sentences may not grant unconditional
+  // permission on the same subjects (pets and kids, re-entry, watering,
+  // rinsing): "However, pets can go out right away" after the dry line
+  // contradicts it without any dismissal word (Codex P1 #5964 r10).
+  ['second_instruction', (text, { requiredLines }) => requiredLines.length > 0
+    && ownSentences(text, requiredLines).some((sentence) => REQUIRED_SUBJECT_RE.test(sentence)
+      && UNCONDITIONAL_PERMISSION_RE.test(sentence) && !CONDITION_RE.test(sentence))],
   ['states_a_date', statesADate],
   ['unstated_number', statesUnknownNumber],
   // While the aftercare holds watering, no sentence of the model's own may
@@ -1066,7 +1104,11 @@ const MEDICAL_CUES = [
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
-  /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
+  // "On my skin", "in the baby's eyes", "on the cat's skin" (Codex P1 #5964 r10).
+  /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our|(?:the|a|my|our|his|her|their|your)\s+[\w-]+['’]s)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?|paws?|fur)\b/i,
+  // Sprayed in the eyes, on the skin, in the face, with or without a possessive;
+  // never "the face of the house".
+  /\bspray\w*\s+(?:\w+\s+){0,3}?(?:in|into|on|onto|at)\s+(?:the\s+|my\s+|his\s+|her\s+|their\s+|our\s+|your\s+)?(?:eyes?|skin|face|mouth|nose)\b(?!\s+of\b)/i,
 ];
 
 // ── A question that sounds like a spray exposure: a safety line first ──
@@ -1118,8 +1160,9 @@ function defaultCallModel(payload, options) {
 // state something the page does not. Narrowed on purpose (owner/lead
 // 2026-10-05) until a line's facts are proven equal to what its page shows.
 // A schedule question the rule router left unrouted ("when are you coming
-// again?") keeps the rule answer too (Codex P1 #6016 r9).
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+// again?", "what time will you be here?") keeps the rule answer too (Codex
+// P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
+const SCHEDULE_QUESTION = /\b(?:what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|arriv\w*|show\s+up|coming(?!\s+back)|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }
