@@ -163,6 +163,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const handoff = await estimate(c, { createdAt: minutesAgo(60) });
     const clarify = await estimate(c, { createdAt: minutesAgo(60) });
     const wizard = await estimate(c, { createdAt: minutesAgo(60), source: 'quote_wizard' });
+    const assessmentLinked = await estimate(c, { createdAt: minutesAgo(60), data: { scheduled_service_id: randomUUID() } });
     await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
     await mockPg('booking_intents').insert({ id: randomUUID(), phone: '+12025550123', pricing_estimate_id: handoff, suppressed: false });
     await mockPg('message_drafts').insert({ id: randomUUID(), intent: 'estimate_clarify', flags: JSON.stringify({ estimate_id: clarify }) });
@@ -172,7 +173,7 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     expect((await row(staffDraft)).archived_at).not.toBeNull();
     expect((await row(autoDraft)).archived_at).not.toBeNull();
     expect((await mockPg('leads').where({ id: leadId }).first()).estimate_id).toBeNull();
-    for (const id of [handoff, clarify, wizard]) expect((await row(id)).archived_at).toBeNull();
+    for (const id of [handoff, clarify, wizard, assessmentLinked]) expect((await row(id)).archived_at).toBeNull();
     const bell = await mockPg('notifications').where({ id: bellId }).first();
     expect(bell.done_at).not.toBeNull();
     expect(bell.resolution).toBe('estimate_draft_replaced');

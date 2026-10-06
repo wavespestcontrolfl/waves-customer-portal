@@ -22,7 +22,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, ADDRESS_UNVERIFIED_ABSENT_SQL, ASSESSMENT_EXCEPTION_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 
 const RETIRE_BATCH_LIMIT = 200;
 
@@ -42,8 +42,9 @@ const DRAFT_HOLD_MARKERS_ABSENT_SQL = `(
   AND ${ADDRESS_UNVERIFIED_ABSENT_SQL}
 )`;
 
-// A draft with its own live lifecycle is never retired (codex #6081 r1-r4):
-// a booking-page handoff (booking_intents, which the public capture can
+// A draft with its own live lifecycle is never retired (codex #6081 r1-r6):
+// an assessment-linked pre-draft (ASSESSMENT_EXCEPTION_ABSENT_SQL, kept for
+// staff to price after the visit), a booking-page handoff (booking_intents, which the public capture can
 // re-open) or a staged clarification text. A linked lead is not a blocker:
 // the link is cleared, as the Delete action does (see retireOneDraft).
 const NO_LIVE_DEPENDENTS_SQL = `(
@@ -60,6 +61,7 @@ const DRAFT_ELIGIBLE_SQL = `
   AND price_locked_at IS NULL
   AND COALESCE(source, '') NOT IN ('one_tap_purchase', 'quote_wizard')
   AND ${NO_LIVE_DEPENDENTS_SQL}
+  AND ${ASSESSMENT_EXCEPTION_ABSENT_SQL}
   AND ${DELIVERY_CLAIM_NOT_LIVE_SQL}
   AND ${DRAFT_HOLD_MARKERS_ABSENT_SQL}
 `;
