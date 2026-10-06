@@ -169,6 +169,13 @@ postgres('update_property_access keeps history and keeps community codes off the
     expect((await prefs()).parking_notes.split('\n')[0]).toBe('[bar] Park on street');
   });
 
+  test('changing the community code clears the old one from the property gate field', async () => {
+    await mockDb('property_preferences').where({ customer_id: customerId }).update({ property_gate_code: '5550' });
+    await run({ neighborhood_gate_code: '6661' });
+    const after = await prefs();
+    expect([after.neighborhood_gate_code, after.property_gate_code]).toEqual(['6661', null]);
+  });
+
   test('an empty field is simply filled', async () => {
     await run({ parking_notes: 'Park on the street' });
     expect((await prefs()).parking_notes).toBe('Park on the street');
