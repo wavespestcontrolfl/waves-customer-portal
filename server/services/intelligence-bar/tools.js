@@ -34,6 +34,7 @@ const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require(
 const {
   normalizeContactName,
   normalizeContactPhone,
+  contactPhoneProblem,
   normalizeContactEmail,
   normalizeContactStreet,
   normalizeContactCity,
@@ -1193,6 +1194,8 @@ async function createCustomer(input) {
   const lastName = normalizeContactName(String(input.last_name || '').trim()) || null;
   const phone = normalizeContactPhone(String(input.phone || '').trim());
   if (!firstName || !phone) return { error: 'first_name and phone are required' };
+  const phoneProblem = contactPhoneProblem(input.phone);
+  if (phoneProblem) return { error: phoneProblem };
 
   const phoneDigits = phone.replace(/\D/g, '').slice(-10);
   if (phoneDigits.length < 10) return { error: 'phone must include at least 10 digits' };
@@ -1314,6 +1317,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   // live check before this (GH r9 P1).
   if (before.deleted_at) {
     return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
+  }
+
+  // A phone being entered now must be a number that can exist; an unchanged
+  // stored number echoed back is not a new write.
+  if (clean.phone && clean.phone !== before.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
   }
 
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
@@ -1647,6 +1657,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
+  // A bulk write stamps one number onto every selected row, so an impossible
+  // US phone is refused here, before either execution path (codex #6028 P2).
+  if (clean.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
+  }
 
   // A bulk phone change re-points every row's primary number → drop their
   // line_type caches (no per-row before-state here, so clear unconditionally
