@@ -462,6 +462,8 @@ describe('screenAskAnswer', () => {
     expect(screen('Your next visit is in two days.')).toBe('states_a_date');
     expect(screen('We will return later this month.')).toBe('states_a_date');
     expect(screen('We will return in Sept.')).toBe('states_a_date');
+    expect(screen('We will return in 2027.')).toBe('states_a_date');
+    expect(screen('Your next service is in 2027.')).toBe('states_a_date');
     expect(screen('Your next visit is in Jan.')).toBe('states_a_date');
     expect(screen('We will come in Oct')).toBe('states_a_date');
     expect(screen('Activity often drops between 2 and 4 weeks after treatment.')).toBeNull();
@@ -615,7 +617,7 @@ describe('schedule questions keep the rule answer', () => {
     'When are you returning?', 'When will the technician return?', 'When are you coming again?',
     'Can I reschedule?', 'When is my next appointment?',
     'What time will you be here?', 'What day are you coming?',
-    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', "When's my service?", 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
+    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', 'Are we still on for tomorrow?', 'When can I expect you?', "When's my service?", 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
