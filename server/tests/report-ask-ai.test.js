@@ -485,6 +485,11 @@ describe('screenAskAnswer', () => {
     expect(screen('The treatment does not pose any risk to pets.')).toBe('safety claim');
     expect(screen('The treatment is unlikely to harm pets.')).toBe('safety claim');
     expect(screen('The treatment will never harm pets.')).toBe('safety claim');
+    expect(screen("It shouldn't hurt children.")).toBe('safety claim');
+    expect(screen('A technician will arrive soon.')).toBe('states_a_date');
+    expect(screen('Your technician is coming soon.')).toBe('states_a_date');
+    expect(screen('We will send someone out soon.')).toBe('states_a_date');
+    expect(screen('The technician arrived and treated the outside.')).toBeNull();
     // Past or negative facts are no visit promise.
     expect(screen('A technician did return today.')).toBeNull();
     expect(screen('The next visit is not scheduled.')).toBeNull();
@@ -707,6 +712,7 @@ describe('symptoms and exposure never reach the model', () => {
     'My dog has taken a bite of bait',
     'My dog is taking a bite of bait',
     'My dog takes a bite of bait',
+    'My dog took a bite of rodenticide',
     'My child took a mouthful of pesticide.',
     'The rat poison was eaten by John',
     'Ants were nearby when John ate the bait',
@@ -1154,6 +1160,8 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at Twelve U S 41.', 'Ants at [number] U S 41.'],
     ['Call me at nine four one five five five one two three four.', 'Call me at [phone].'],
     ['Call nine forty-one, two ninety-seven, fifty-seven forty-nine.', 'Call [phone].'],
+    ['Call nine four one, triple five, triple one, two.', 'Call [phone].'],
+    ['Ants at One Hundred Florida 70.', 'Ants at [number] Florida 70.'],
     ['Ants at One Oh Five U S 41.', 'Ants at [number] U S 41.'],
     ['We saw twenty five ants.', 'We saw twenty five ants.'],
     ['I saw two or three ants.', 'I saw two or three ants.'],
