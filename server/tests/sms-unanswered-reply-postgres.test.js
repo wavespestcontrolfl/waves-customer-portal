@@ -82,7 +82,12 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     await trx.raw('SET LOCAL search_path TO ??, public', [schema]);
     db.connection = trx;
     customerId = randomUUID();
-    await trx('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Tester', phone: CUSTOMER_PHONE, active: true });
+    // A fixed time before the inbound text: a database-default now() would read
+    // as "customer changed" once the real clock passes NOW (2026-10-06 18:00Z).
+    const FIXTURE_AT = at('2026-10-06T12:00:00Z');
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Tester', phone: CUSTOMER_PHONE, active: true, created_at: FIXTURE_AT, updated_at: FIXTURE_AT,
+    });
     jest.spyOn(graduation, 'evaluateJudgeBackstop').mockResolvedValue({ clear: true, blockers: [] });
     jest.spyOn(gratitudeContext, 'gratitudeRolloutSettled').mockReturnValue(true);
     sendCustomerMessage.mockReset();
