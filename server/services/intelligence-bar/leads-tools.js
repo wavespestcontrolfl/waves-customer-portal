@@ -733,7 +733,7 @@ function normalizeLeadContactField(field, raw) {
 //   ONE-LINE row (parses to a state or ZIP, or names the lead's city): the only
 //   accepted edit is a WHOLE corrected address; any partial edit refuses.
 //   WHOLE address: parseRawAddress yields a street, a city with a letter that is
-//   not a unit / floor designator, a state and a 5-digit ZIP. `address` is
+//   not a unit / floor designator, a state and a ZIP (5 digits, or ZIP+4). `address` is
 //   written as formatAddress of the parts (one canonical line); city and zip
 //   come from the parse. Explicit city / zip fields beside it must agree.
 // Nothing is ever rebuilt from parts.
@@ -741,10 +741,10 @@ const ADDRESS_FIELDS = ['address', 'city', 'zip'];
 const COMPOSED_REFUSAL = "This lead's address is stored as one line (street, city, ZIP). Give the whole corrected address in one message.";
 
 // A city the parse can be trusted on: at least one letter, and not a unit or
-// floor designator ("Fl", "Unit", "Apt B").
+// floor designator ("Fl", "Unit", "Apt B"), nor a unit value like "2B".
 function cityIsReal(city) {
   const text = String(city || '').trim();
-  if (!/[A-Za-z]/.test(text)) return false;
+  if (!/[A-Za-z]/.test(text) || /^#?\d+[A-Za-z]?$/.test(text)) return false;
   const first = text.split(/\s+/)[0].replace(/[.,#]/g, '').toLowerCase();
   return !UNIT_DESIGNATORS.has(first);
 }
@@ -753,7 +753,7 @@ function cityIsReal(city) {
 function parseWholeAddress(text) {
   if (typeof text !== 'string' || !text.trim()) return null;
   const parts = parseRawAddress(text);
-  if (!parts.line1 || !parts.state || !/^\d{5}$/.test(parts.zip || '') || !cityIsReal(parts.city)) return null;
+  if (!parts.line1 || !parts.state || !/^\d{5}(-\d{4})?$/.test(parts.zip || '') || !cityIsReal(parts.city)) return null;
   return parts;
 }
 
@@ -801,8 +801,20 @@ function resolveLeadAddressRequest(lead, requested) {
     if (fields.error) return { error: fields.error };
     return { requested: { ...requested, ...fields.values }, asserted: ADDRESS_FIELDS };
   }
-  if (storedIsOneLine(lead)) return { error: COMPOSED_REFUSAL };
+  if (storedIsOneLine(lead) || localityShaped(lead, requested.address)) return { error: COMPOSED_REFUSAL };
   return { requested, asserted: [] };
+}
+
+// On a bare row, a given text that is not whole but carries a state, or a real
+// city other than the lead's own, is locality-shaped but incomplete (Codex r7):
+// written as a street it would contradict the city column. "21 Oak Ave, Unit 4"
+// and "21 Oak Ave, Sarasota" for a Sarasota lead are plain streets.
+function localityShaped(lead, text) {
+  if (typeof text !== 'string' || !text.trim()) return false;
+  const parts = parseRawAddress(text);
+  if (parts.state) return true;
+  if (!cityIsReal(parts.city)) return false;
+  return parts.city.toLowerCase() !== String(lead.city || '').trim().toLowerCase();
 }
 
 // { field: { from, to } } for every requested field whose stored value
@@ -853,6 +865,18 @@ function collectRequestedContact(input) {
   return { requested };
 }
 
+// The fields the UPDATE guards and writes. A whole address asserts city and
+// zip even when they did not change at card time (Codex r7): those are guarded
+// at their asserted value and written too, so a column another editor moved
+// meanwhile fails the WHERE instead of ending up inconsistent with the line.
+function guardedLeadWrites(changes, asserted, requested) {
+  const guarded = { ...changes };
+  for (const field of asserted) {
+    if (!(field in guarded)) guarded[field] = { from: requested[field], to: requested[field] };
+  }
+  return guarded;
+}
+
 async function updateLeadContact(input) {
   const collected = collectRequestedContact(input);
   if (collected.error) return { error: collected.error };
@@ -900,18 +924,20 @@ async function updateLeadContact(input) {
   }
 
   const updates = { updated_at: new Date() };
-  for (const [field, { to }] of Object.entries(changes)) updates[field] = to;
   // A real email change stamps its confirmation time (Codex r1 P1), as the
   // lead editor does: admin-triage's emailDisagreementConfirmed reads
   // email_confirmed_at — not updated_at — as the only proof a customer-less
   // voicemail lead's email-disagreement card was corrected after it was filed.
   if (changes.email) updates.email_confirmed_at = updates.updated_at;
 
+  const guarded = guardedLeadWrites(changes, resolved.asserted, requested);
+  for (const [field, { to }] of Object.entries(guarded)) updates[field] = to;
+
   const updatedRows = await db.transaction(async (trx) => {
     let q = trx('leads').where('id', lead.id).whereNull('deleted_at');
     // Re-assert every value the card showed as "from" — a concurrent edit
     // matches zero rows instead of being overwritten.
-    for (const [field, { from }] of Object.entries(changes)) {
+    for (const [field, { from }] of Object.entries(guarded)) {
       if (from === null) q = q.where(function () { this.whereNull(field).orWhere(field, ''); });
       else if (field === 'email') q = q.whereRaw('LOWER(TRIM(email)) = ?', [from]);
       else q = q.where(field, from);

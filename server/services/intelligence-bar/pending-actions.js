@@ -152,7 +152,9 @@ const SUPERSEDE_RULES = {
   update_lead_contact: {
     key: p => idPart(p.lead_id ?? p.leadId),
     covers: (newer, older) => {
-      const written = leadFieldsChanged(older);
+      // Both sides count asserted fields (Codex r7): an older whole-address
+      // card that keeps the current city is still replaced by a newer city card.
+      const written = leadFieldsAsserted(older);
       const covered = leadFieldsAsserted(newer);
       return written.some(f => covered.includes(f));
     },

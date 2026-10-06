@@ -417,12 +417,20 @@ test('a whole address whose parsed city is over 120 characters, or whose line is
   expect(line.error).toMatch(/address is too long/);
 });
 
-test('bare row: a street is written as typed with no parsing; a whole address replaces all three', async () => {
-  db.mockReturnValue(chain({ first: ADDR_LEAD }));
-  for (const address of ['12 Oak Ave, Bradenton', '123 Main St, Fl 2', '12 Oak Ave, FL', '21 Oak Ave Unit 4', '1200 Main St 2B']) {
+test('bare row: a plain street is written as typed; a locality-shaped but incomplete text refuses; a whole address replaces all three', async () => {
+  const leads = chain({ first: ADDR_LEAD });
+  db.mockReturnValue(leads);
+  // Plain streets: a unit segment, a floor token, or the lead's own city.
+  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B', '21 Oak Ave, Testville', '12 Oak Ave, testville']) {
     const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address });
     expect(res.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: address } });
   }
+  // A state, or a different real city, without the rest: refused, nothing written.
+  for (const address of ['12 Oak Ave, Bradenton, FL', '12 Oak Ave, FL', '123 Main St, Fl 2', '12 Oak Ave, Bradenton', '12 Oak Ave Bradenton FL']) {
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address, confirmed: true });
+    expect(res.error).toBe(ONE_LINE_REFUSAL);
+  }
+  expect(leads.update).not.toHaveBeenCalled();
   const whole = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Rd, Bradenton, FL 34201' });
   expect(whole.changes).toEqual({
     address: { from: '21 Synthetic Oak Ave', to: '12 Pine Rd, Bradenton, FL 34201' },
@@ -467,4 +475,39 @@ test('confirmed whole address: one guarded UPDATE writes line, city and zip and 
   expect(stale.success).toBe(true); // the pinned "from" values ride into the WHERE; the mock returns a row
   expect(moved.where).toHaveBeenCalledWith('address', TWO_SEG);
   expect(moved.where).not.toHaveBeenCalledWith('address', '99 Other St, Elsewhere, FL 34111');
+});
+
+test('a ZIP+4 whole address replaces the line and the zip column as parsed', async () => {
+  db.mockReturnValue(chain({ first: TWO_SEG_LEAD }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Rd, Bradenton, FL 34201-1234' });
+  expect(res.changes).toEqual({
+    address: { from: TWO_SEG, to: '12 Pine Rd, Bradenton, FL 34201-1234' },
+    city: { from: 'Sarasota', to: 'Bradenton' },
+    zip: { from: '34200', to: '34201-1234' },
+  });
+});
+
+test('confirmed whole address: an asserted but unchanged column is guarded and written; a column moved meanwhile refuses', async () => {
+  // City stays Sarasota: not in the approved diff, but asserted by the whole address.
+  const leads = chain({ first: TWO_SEG_LEAD, update: [{ id: 'lead-1' }] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  const approved = { address: { from: TWO_SEG, to: '12 Pine Rd, Sarasota, FL 34201' }, zip: { from: '34200', to: '34201' } };
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', address: '12 Pine Rd, Sarasota, FL 34201', confirmed: true, _approved_changes: approved, _asserted_fields: ['address', 'city', 'zip'],
+  });
+  expect(res.success).toBe(true);
+  expect(res.updated_fields).toEqual(['address', 'zip']);
+  expect(leads.where).toHaveBeenCalledWith('city', 'Sarasota');
+  expect(leads.update).toHaveBeenCalledWith(expect.objectContaining({ city: 'Sarasota', zip: '34201' }), ['id']);
+  // Another editor moved the city between card and confirm: the guard matches zero rows.
+  jest.clearAllMocks();
+  const moved = chain({ first: { ...TWO_SEG_LEAD, city: 'Venice' }, update: [] });
+  db.mockImplementation((table) => (table === 'leads' ? moved : activities));
+  const stale = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', address: '12 Pine Rd, Sarasota, FL 34201', confirmed: true, _approved_changes: approved, _asserted_fields: ['address', 'city', 'zip'],
+  });
+  expect(stale.preview_changed).toBe(true);
+  expect(stale.success).toBeUndefined();
+  expect(activities.insert).not.toHaveBeenCalled();
 });

@@ -151,6 +151,20 @@ suite('IB superseded confirmation cards in isolated Postgres', () => {
     expect(confirmed.action.params._asserted_fields).toEqual(['address', 'city', 'zip']);
   });
 
+  test('an older whole-address card that keeps the current city is superseded by a newer city card', async () => {
+    const change = (from, to) => ({ from, to });
+    const older = await propose('update_lead_contact', {
+      lead_id: otherLeadId, address: '12 Pine Rd, Sarasota, FL 34236',
+      _approved_changes: { address: change('12 Pine Road', '12 Pine Rd, Sarasota, FL 34236') },
+      _asserted_fields: ['address', 'city', 'zip'],
+    }, { noTask: true, startedAt: at(-2000) });
+    expect(await status(older.id)).toBe('pending');
+    const city = await propose('update_lead_contact', { lead_id: otherLeadId, city: 'Bradenton', _approved_changes: { city: change('Sarasota', 'Bradenton') } }, { noTask: true, startedAt: at(-1000) });
+    expect(await status(older.id)).toBe('cancelled');
+    expect(await claim(older)).toEqual({ error: 'cancelled' });
+    expect(await status(city.id)).toBe('pending');
+  });
+
   test('a booking request started long ago and resumed after a newer card was confirmed is stored cancelled', async () => {
     const day = '2030-04-12';
     const minutesAgo = m => new Date(Date.now() - m * 60 * 1000);
