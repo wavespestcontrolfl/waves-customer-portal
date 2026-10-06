@@ -55,9 +55,9 @@ describe('POST /aio-sweep', () => {
   });
 
   test('passes valid maxCostUsd, minImpressions and max through', async () => {
-    const res = await call('POST', '/aio-sweep', { maxCostUsd: 25, minImpressions: 0, max: 5000 });
+    const res = await call('POST', '/aio-sweep', { maxCostUsd: 25, minImpressions: 10, max: 5000 });
     expect(res.status).toBe(201);
-    expect(mockSweep.startSweep).toHaveBeenCalledWith({ trigger: 'manual', maxCostUsd: 25, minImpressions: 0, max: 5000 });
+    expect(mockSweep.startSweep).toHaveBeenCalledWith({ trigger: 'manual', maxCostUsd: 25, minImpressions: 10, max: 5000 });
   });
 
   test.each([
@@ -67,6 +67,9 @@ describe('POST /aio-sweep', () => {
     [{ maxCostUsd: 'lots' }],
     [{ maxCostUsd: true }],
     [{ minImpressions: -1 }],
+    [{ minImpressions: 0 }],
+    [{ maxCostUsd: 0.006 }],
+    [{ maxCostUsd: 2.345 }],
     [{ minImpressions: 1.5 }],
     [{ minImpressions: 'x' }],
     [{ max: 5001 }],

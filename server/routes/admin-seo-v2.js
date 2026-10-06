@@ -804,12 +804,14 @@ router.post('/aio-sweep', requireAdmin, async (req, res, next) => {
     const opts = {};
     if (body.maxCostUsd !== undefined) {
       const n = Number(body.maxCostUsd);
-      if (typeof body.maxCostUsd === 'boolean' || !Number.isFinite(n) || n <= 0 || n > AIO_SWEEP_MAX_COST_USD) return res.status(400).json({ error: `maxCostUsd must be a number above 0 and at most ${AIO_SWEEP_MAX_COST_USD}` });
+      // Whole cents, at least $1: max_cost_usd is stored to the cent.
+      if (typeof body.maxCostUsd === 'boolean' || !Number.isFinite(n) || n < 1 || n > AIO_SWEEP_MAX_COST_USD || Math.round(n * 100) !== n * 100) return res.status(400).json({ error: `maxCostUsd must be whole cents from 1 to ${AIO_SWEEP_MAX_COST_USD}` });
       opts.maxCostUsd = n;
     }
     if (body.minImpressions !== undefined) {
       const n = Number(body.minImpressions);
-      if (typeof body.minImpressions === 'boolean' || !Number.isInteger(n) || n < 0 || n > 1000000) return res.status(400).json({ error: 'minImpressions must be a whole number, 0 or more' });
+      // Floor of 10: one-off searches are the ones most likely to hold a name.
+      if (typeof body.minImpressions === 'boolean' || !Number.isInteger(n) || n < 10 || n > 1000000) return res.status(400).json({ error: 'minImpressions must be a whole number, 10 or more' });
       opts.minImpressions = n;
     }
     if (body.max !== undefined) {

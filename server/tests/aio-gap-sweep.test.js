@@ -169,6 +169,21 @@ describe('mergeCandidates', () => {
     expect(out.map((c) => c.query)).toEqual(['high', 'gap only', 'managed only']);
   });
 
+  test('searches that look like contact details are never candidates', () => {
+    const out = sweep.mergeCandidates({ gscRows: [
+      { query: 'pest control call 941 555 0100', impressions: 90 },
+      { query: 'someone@example.test termite', impressions: 90 },
+      { query: '1234 example oak st ants', impressions: 90 },
+      { query: 'ant control 2 visits a year', impressions: 90 },
+    ] });
+    expect(out.map((c) => c.query)).toEqual(['ant control 2 visits a year']);
+  });
+
+  test('an operator after punctuation is still an operator', () => {
+    const out = sweep.mergeCandidates({ gscRows: [{ query: '(site:rival.example) pest control', impressions: 90 }, { query: 'pest control', impressions: 80 }] });
+    expect(out.map((c) => c.query)).toEqual(['pest control']);
+  });
+
   test('searches with a Google operator (5x DataForSEO price) are left out', () => {
     const out = sweep.mergeCandidates({ gscRows: [
       { query: 'site:example.test pest control', impressions: 90 },

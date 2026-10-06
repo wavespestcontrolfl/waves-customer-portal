@@ -80,7 +80,17 @@ function locationForCity(city) {
 const isWavesQuery = (q) => q.includes('waves');
 // Google search operators are not customer searches, and DataForSEO bills them
 // at 5x, past the per-call budget reservation.
-const OPERATOR_RE = /(^|\s)-?(site|inurl|allinurl|intitle|allintitle|intext|allintext|filetype|ext|related|cache|link|info|define|before|after|source|map):/i;
+// A search that looks like it holds a person's contact details is never sent to
+// DataForSEO: an email, a run of 7+ digits (phone), or a house number followed by
+// a street word. Search Console already hides rare queries; the route's
+// impressions floor keeps one-off searches out as well.
+const PERSONAL_RE = [
+  /[^\s@]+@[^\s@]+\.[a-z]{2,}/i,
+  /\d(?:[\s().-]*\d){6,}/,
+  /\b\d{2,6}\s+(?:[a-z]+\s+){0,3}(?:st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|ln|lane|ct|court|cir|circle|way|pl|place|ter|terrace|trl|trail|pkwy|parkway|hwy|highway)\b/i,
+];
+const looksPersonal = (q) => PERSONAL_RE.some((re) => re.test(q));
+const OPERATOR_RE = /(^|[^a-z0-9])-?(site|inurl|allinurl|intitle|allintitle|intext|allintext|filetype|ext|related|cache|link|info|define|before|after|source|map):/i;
 
 // Sums a Search Console row into a candidate; position is impression-weighted.
 function addGscNumbers(c, r, impressions) {
@@ -104,7 +114,7 @@ function mergeCandidates({ gscRows = [], gapRows = [], managedRows = [], minImpr
   const byQuery = new Map();
   const touch = (query, source) => {
     const key = normQuery(query);
-    if (!key || isWavesQuery(key) || OPERATOR_RE.test(key)) return null;
+    if (!key || isWavesQuery(key) || OPERATOR_RE.test(key) || looksPersonal(key)) return null;
     let c = byQuery.get(key);
     if (!c) {
       c = { query: key, sources: [], cityLabels: [], impressions_90d: null, clicks_90d: null, gsc_position: null, posWeight: 0 };
