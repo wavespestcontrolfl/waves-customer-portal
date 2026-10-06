@@ -486,6 +486,9 @@ describe('screenAskAnswer', () => {
     expect(screen('The treatment is unlikely to harm pets.')).toBe('safety claim');
     expect(screen('The treatment will never harm pets.')).toBe('safety claim');
     expect(screen("It shouldn't hurt children.")).toBe('safety claim');
+    expect(screen("It shouldn't affect children.")).toBe('safety claim');
+    expect(screen('We are coming soon.')).toBe('states_a_date');
+    expect(screen("We're on our way.")).toBe('states_a_date');
     expect(screen('A technician will arrive soon.')).toBe('states_a_date');
     expect(screen('Your technician is coming soon.')).toBe('states_a_date');
     expect(screen('We will send someone out soon.')).toBe('states_a_date');
@@ -713,6 +716,7 @@ describe('symptoms and exposure never reach the model', () => {
     'My dog is taking a bite of bait',
     'My dog takes a bite of bait',
     'My dog took a bite of rodenticide',
+    'My dog took more than two bites of bait',
     'My child took a mouthful of pesticide.',
     'The rat poison was eaten by John',
     'Ants were nearby when John ate the bait',
@@ -1161,6 +1165,8 @@ describe('street-address scrub keeps prose', () => {
     ['Call me at nine four one five five five one two three four.', 'Call me at [phone].'],
     ['Call nine forty-one, two ninety-seven, fifty-seven forty-nine.', 'Call [phone].'],
     ['Call nine four one, triple five, triple one, two.', 'Call [phone].'],
+    ['Call triple two, double five, double nine.', 'Call [phone].'],
+    ['Ants at One Hundred U S Forty One.', 'Ants at [number] U S Forty One.'],
     ['Ants at One Hundred Florida 70.', 'Ants at [number] Florida 70.'],
     ['Ants at One Oh Five U S 41.', 'Ants at [number] U S 41.'],
     ['We saw twenty five ants.', 'We saw twenty five ants.'],
