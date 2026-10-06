@@ -332,6 +332,61 @@ describe('resolveCallBookingCatalogService', () => {
   });
 });
 
+describe('Waves Assessment pick is the offered visit, not a placeholder (2026-10-05 call a12fd5ef)', () => {
+  const ASSESSMENT_ROW = { id: 'svc-assessment', service_key: 'lawn_inspection', name: 'Waves Assessment', short_name: 'Assessment', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 };
+  const RE_SERVICES = [
+    { id: 'svc-pest-re', service_key: 'pest_re_service', name: 'Pest Control Re-Service', billing_type: 'one_time', pricing_type: 'variable', base_price: null, default_duration_minutes: 60 },
+  ];
+  const CATALOG_WITH_ASSESSMENT = [...CATALOG, ASSESSMENT_ROW];
+
+  test('a pest + rodent + termite plan quote with an assessment pick stays an assessment', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Waves Assessment', requested_service: 'Pest control, rodent, and termite maintenance plan' },
+      transcription: "I'm looking for rodent, pest control, ants, and termite. Do you mind if I come out and take a look?",
+      services: CATALOG_WITH_ASSESSMENT,
+    });
+    expect(row?.service_key).toBe('lawn_inspection');
+  });
+
+  test('a termite assessment is never turned into a roach or rodent job by a stray keyword', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Waves Assessment', requested_service: 'Termite assessment' },
+      transcription: 'we saw swarmers, and we had a roach last week too, can you inspect the house',
+      services: CATALOG_WITH_ASSESSMENT,
+    });
+    expect(row?.service_key).toBe('lawn_inspection');
+  });
+
+  test('a specific model pick still outranks the assessment', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'Rodent Trapping Service', matched_service: 'Waves Assessment' },
+      transcription: 'rats in the attic, please set traps',
+      services: CATALOG_WITH_ASSESSMENT,
+    });
+    expect(row?.service_key).toBe('rodent_trapping');
+  });
+
+  test('with no model pick, keyword rules still book the rodent job', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { requested_service: 'rats in the attic' },
+      transcription: 'I have rats in my attic',
+      services: CATALOG_WITH_ASSESSMENT,
+    });
+    expect(row?.service_key).toBe('rodent_general_one_time');
+  });
+
+  test('revisit intent from a plan customer still replaces an assessment pick', () => {
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Waves Assessment', requested_service: 'pest control revisit' },
+      services: CATALOG_WITH_ASSESSMENT,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(row?.service_key).toBe('pest_re_service');
+  });
+});
+
 describe('existing-customer revisit → covered re-service row (owner catalog rule)', () => {
   const GENERIC_ROW = {
     id: 'svc-generic-appt',

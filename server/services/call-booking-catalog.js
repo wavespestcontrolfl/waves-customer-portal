@@ -200,6 +200,10 @@ function isGenericCallCatalogRow(row) {
     || GENERIC_CALL_CATALOG_ROW_RE.test(String(row.name || '').trim());
 }
 
+function isAssessmentCallCatalogRow(row) {
+  return !!row && /^waves assessment$/i.test(String(row.name || '').trim());
+}
+
 function isReServiceCatalogRow(row) {
   return !!row && Object.values(RE_SERVICE_KEYS).includes(row.service_key);
 }
@@ -427,6 +431,12 @@ function resolveCallBookingCatalogService({
   // row. A replaceable lane-family PLAN pick is still a SPECIFIC service the
   // model chose exactly — it keeps its precedence over keyword rules.
   if (byModelPick && !isGenericCallCatalogRow(byModelPick)) return byModelPick;
+  // A Waves Assessment pick is the visit the staff member offered ("let me
+  // come out and take a look"), not a service-less placeholder: a passing
+  // "rodent" in a pest + rodent + termite plan quote must not turn it into a
+  // one-time rodent job (2026-10-05 call a12fd5ef). It stays generic above
+  // only so the re-service override may still replace it.
+  if (isAssessmentCallCatalogRow(byModelPick)) return byModelPick;
   return keywordRow || byModelPick || null;
 }
 
