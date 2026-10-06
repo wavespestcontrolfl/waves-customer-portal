@@ -38,11 +38,12 @@ postgres('update_property_access keeps history and keeps community codes off the
   const prefs = () => mockDb('property_preferences').where({ customer_id: customerId }).first();
   const run = (input) => executeTool('update_property_access', { customer_id: customerId, ...input, confirmed: true });
 
-  test('access notes gain a dated line; the earlier notes stay', async () => {
+  test('access notes gain a new first line; the earlier notes stay below it', async () => {
     await run({ access_notes: 'Gate code 5550 at the gate.' });
     const notes = (await prefs()).access_notes.split('\n');
-    expect(notes[0]).toBe('Example Glen gate: punch in 5550. Cell 202-555-0101 if problems (email 10/1).');
-    expect(notes[1]).toMatch(/^\[bar \d{4}-\d{2}-\d{2}\] Gate code 5550 at the gate\.$/);
+    // First, because the job card shows only the start of the note.
+    expect(notes[0]).toBe('[bar] Gate code 5550 at the gate.');
+    expect(notes[1]).toBe('Example Glen gate: punch in 5550. Cell 202-555-0101 if problems (email 10/1).');
   });
 
   test('a note already on file is not added twice', async () => {
@@ -66,12 +67,29 @@ postgres('update_property_access keeps history and keeps community codes off the
     expect((await prefs()).access_notes.split('\n')).toHaveLength(2);
   });
 
-  test('the note stamp is the Eastern date', async () => {
-    jest.useFakeTimers({ now: new Date('2026-10-06T02:30:00Z'), doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'clearTimeout'] });
+  test('the plan is the same before and after midnight, so a card confirmed late still matches', async () => {
+    const preview = () => executeTool('update_property_access', { customer_id: customerId, access_notes: 'Side door sticks' });
+    jest.useFakeTimers({ now: new Date('2026-10-06T03:59:00Z'), doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'clearTimeout'] });
+    let before;
+    let after;
     try {
-      await run({ access_notes: 'Side door sticks' });
+      before = await preview();
+      jest.setSystemTime(new Date('2026-10-06T04:01:00Z'));
+      after = await preview();
     } finally { jest.useRealTimers(); }
-    expect((await prefs()).access_notes).toContain('[bar 2026-10-05] Side door sticks');
+    expect(after.would_update).toEqual(before.would_update);
+  });
+
+  test('a code of a switched-off neighborhood is not a community code', async () => {
+    const hoodId = randomUUID();
+    await mockDb('neighborhoods').insert({ id: hoodId, name: 'Example Glen', match_key: `example-glen-${hoodId}`, source: 'office', active: false });
+    await mockDb('neighborhood_access').insert({ neighborhood_id: hoodId, access_type: 'keypad', code: '#9090', status: 'active', source: 'office' });
+    await mockDb('customer_properties').insert({
+      id: randomUUID(), customer_id: customerId, label: 'Synthetic', occupancy_type: 'owner_occupied', is_primary: true,
+      address_line1: '4455 Example Lane', city: 'Lakewood Ranch', zip: '34202', active: true, neighborhood_id: hoodId,
+    });
+    await run({ property_gate_code: '#9090' });
+    expect((await prefs()).property_gate_code).toBe('#9090');
   });
 
   test('a side gate note that would pass its 200 characters is not saved, and the result says so', async () => {

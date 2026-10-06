@@ -246,7 +246,7 @@ IMPORTANT: Always show the list of affected customers and ask for confirmation b
 
 Pass ONLY the fields you want to set or change:
 - neighborhood_gate_code / property_gate_code / garage_code / lockbox_code — access codes (use property_gate_code ONLY for a gate on the customer's own lot; a community/HOA/subdivision gate such as \"Del Webb gate\" is neighborhood_gate_code. A community code is never also saved as property_gate_code)
-- parking_notes / side_gate_access / access_notes — where to park / how to get in (ADDED as a new dated line; existing notes are never replaced — pass only the new line)
+- parking_notes / side_gate_access / access_notes — where to park / how to get in (ADDED as a new first line; existing notes are never replaced — pass only the new line)
 - pet_count (number) / pet_details (e.g. "2 indoor cats") — pets on the property
 - pets_secured_plan — how the tech should keep pets safe, e.g. "keep the screen doors closed during service so the cats don't get out"
 - special_instructions — any other field instruction
@@ -2163,7 +2163,7 @@ function sanitizePropertyAccess(input) {
   return clean;
 }
 
-// Free-text fields keep their history: a new line is ADDED with a dated tag,
+// Free-text fields keep their history: a new line is ADDED with a [bar] tag,
 // never written over what is there (2026-10-05: a bar write replaced a
 // customer's access notes and lost where his gate code came from).
 const PROPERTY_ACCESS_NOTE_FIELDS = ['parking_notes', 'side_gate_access', 'access_notes', 'pet_details', 'pets_secured_plan', 'special_instructions'];
@@ -2188,21 +2188,25 @@ async function planPropertyAccess(conn, customerId, requested, { lock = false } 
   const current = (await (lock ? q.forUpdate() : q).first()) || {};
   const updates = { ...requested };
   const kept = [];
-  const stamp = `[bar ${etDateString()}]`;
+  // No date in the tag: the confirm step re-runs this plan and compares, so a
+  // clock value would void a card confirmed after midnight.
+  const stamp = '[bar]';
   for (const field of PROPERTY_ACCESS_NOTE_FIELDS) {
     if (updates[field] === undefined) continue;
     const had = String(current[field] || '').trim();
     const add = updates[field];
     if (!add || noteHas(had, add)) { delete updates[field]; kept.push(`${field}: already holds this, left as is`); continue; }
     if (!had) continue;
-    const joined = `${had}\n${stamp} ${add}`;
+    // Newest line first: the job card cuts these notes to their first
+    // 80-120 characters, so the latest instruction must lead.
+    const joined = `${stamp} ${add}\n${had}`;
     if (PROPERTY_ACCESS_NOTE_LIMITS[field] && joined.length > PROPERTY_ACCESS_NOTE_LIMITS[field]) {
       delete updates[field];
       kept.push(`${field}: not saved; with the earlier note it passes ${PROPERTY_ACCESS_NOTE_LIMITS[field]} characters. Shorten it, or edit the profile.`);
       continue;
     }
     updates[field] = joined;
-    kept.push(`${field}: added as a new line; the earlier notes stay`);
+    kept.push(`${field}: added as a new first line; the earlier notes stay below`);
   }
   if (updates.property_gate_code !== undefined) {
     // The community code this same call sets counts, else the one on file;
@@ -2211,9 +2215,12 @@ async function planPropertyAccess(conn, customerId, requested, { lock = false } 
     const neighborhoodCode = updates.neighborhood_gate_code !== undefined ? updates.neighborhood_gate_code : current.neighborhood_gate_code;
     let isCommunity = sameCode(neighborhoodCode, updates.property_gate_code) && !!neighborhoodCode;
     if (!isCommunity) {
+      // A switched-off neighborhood shows no code on the stop card, so it
+      // does not count (the stop card reader's rule).
       const directory = await conn('customer_properties')
         .join('neighborhood_access', 'neighborhood_access.neighborhood_id', 'customer_properties.neighborhood_id')
-        .where({ 'customer_properties.customer_id': customerId, 'customer_properties.active': true })
+        .join('neighborhoods', 'neighborhoods.id', 'customer_properties.neighborhood_id')
+        .where({ 'customer_properties.customer_id': customerId, 'customer_properties.active': true, 'neighborhoods.active': true })
         .whereIn('neighborhood_access.status', ['active', 'needs_confirm'])
         .whereNotNull('neighborhood_access.code').pluck('neighborhood_access.code');
       isCommunity = directory.some((code) => sameCode(code, updates.property_gate_code));
@@ -2250,7 +2257,7 @@ async function updatePropertyAccess(input) {
       customer_name: customerName,
       would_update: plan.updates,
       ...(plan.kept.length ? { kept: plan.kept } : {}),
-      note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. Notes are added as a new line, never written over. After the operator approves, this commits via the confirmation card.',
+      note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. Notes are added as a new first line, never written over. After the operator approves, this commits via the confirmation card.',
     };
   }
 
