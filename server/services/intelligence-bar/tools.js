@@ -2228,11 +2228,12 @@ async function planPropertyAccess(conn, customerId, requested, { lock = false } 
   }
   // A property code on file that is the community code shows twice on the
   // stop card (as the gate and as the yard gate): clear it.
-  // The old community code counts too: changing it from A to B leaves no A
-  // behind as a yard gate.
+  // The old community code counts only when this call REPLACES it with
+  // another code (A to B leaves no A behind as a yard gate). Clearing the
+  // community code alone keeps the property code: then it is the only code.
   if (updates.property_gate_code === undefined && current.property_gate_code
     && (communityCodeShown(neighborhoodCode, current.property_gate_code)
-      || communityCodeShown(current.neighborhood_gate_code, current.property_gate_code))) {
+      || (updates.neighborhood_gate_code && communityCodeShown(current.neighborhood_gate_code, current.property_gate_code)))) {
     updates.property_gate_code = null;
     kept.push('property_gate_code: cleared; the code on file there is the community gate code');
   }
