@@ -182,6 +182,22 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(audit.quote.request.priorQualifyingServices).toEqual([{ service: 'pest_control', mode: 'recurring' }]);
   });
 
+  test('the bermuda removal cost is read from the raw engine lawn line when the mapped lawnMeta is absent', async () => {
+    const wizard = (lawnLine) => ({
+      id: 'est-bermuda', status: 'sent', source: 'quote_wizard',
+      monthly_total: '55.00', annual_total: '660.00', onetime_total: null,
+      estimate_data: { engineResult: { lineItems: [lawnLine] } },
+    });
+    const lawn = { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9 };
+    const withCost = await buildEstimatePricingAudit(wizard({ ...lawn, costs: { annualBermudaRemoval: 71.25 } }));
+    const line = withCost.lines.find((l) => l.serviceKey === 'lawn_care');
+    expect(line.cogs.bermudaRemovalCost).toBe(71.25);
+    expect(line.cogs.estimatedCost).toBeGreaterThanOrEqual(71.25);
+    // No cost on the raw line (and no lawnMeta): nothing is added.
+    const without = await buildEstimatePricingAudit(wizard(lawn));
+    expect(without.lines.find((l) => l.serviceKey === 'lawn_care').cogs).not.toHaveProperty('bermudaRemovalCost');
+  });
+
   test('wizard rows with ONLY engineResult.lineItems still produce audit lines', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-li', status: 'sent', source: 'quote_wizard',

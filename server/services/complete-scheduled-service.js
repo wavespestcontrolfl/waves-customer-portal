@@ -8952,6 +8952,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
         const LimitChecker = require('../services/application-limits');
         const { createAlert } = require('../services/dispatch-alerts');
         const capDate = svc.scheduled_date instanceof Date ? svc.scheduled_date : new Date(`${svc.scheduled_date}T12:00:00`);
+        // The bermuda removal label-rate warning (Recognition's yearly maximum), read after the
+        // spray is ledgered: an advisory line in the same list, never a block.
+        const bermudaRate = await require('./lawn-bermuda-removal').rateAdvisories(connection, svc.id, ledgered.map((row) => row.product_id));
+        if (bermudaRate.length) {
+          applicationLimitAdvisory = {
+            advisory: true,
+            blocks: [...(applicationLimitAdvisory?.blocks || []), ...bermudaRate.map((message) => ({ code: 'application_limit_bermuda_annual_rate', message }))],
+          };
+        }
         const reported = new Set();
         for (const { product_id: productId } of ledgered) {
           const { blocks } = await LimitChecker.checkLimits(svc.customer_id, productId, capDate, connection, { propertyId: svc.property_id || null });

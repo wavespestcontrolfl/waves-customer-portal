@@ -227,6 +227,18 @@ describe('send-boundary gate for persisted suppression estimates', () => {
     expect(estimateDataCarriesBermudaSuppression({ engineRequest: { options: {} }, result: { results: { lawnMeta: { bermudaSuppression: null } } } })).toBe(false);
     expect(estimateDataCarriesBermudaSuppression('not json')).toBe(false);
     expect(estimateDataCarriesBermudaSuppression(null)).toBe(false);
+    // The narrower reader the step's account check uses: the CURRENT priced result only.
+    const { estimateResultCarriesBermudaSuppression: carries } = require('../services/pricing-engine/v1-legacy-mapper');
+    expect(carries({ engineRequest: { options: { bermudaSuppression: true } } })).toBe(false);
+    expect(carries({ engineRequest: { options: { bermudaSuppression: true } }, result: { results: { pest: {} } } })).toBe(false);
+    expect(carries({ result: { results: { lawnMeta: { bermudaSuppression: null } } } })).toBe(false);
+    expect(carries({ result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } } })).toBe(true);
+    expect(carries(JSON.stringify({ result: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }))).toBe(true);
+    expect(carries({ result: { results: { lawn: [{ prov: { bermudaSuppressionPerApp: 25 } }] } } })).toBe(true);
+    expect(carries({ engineResult: { lineItems: [{ service: 'lawn_care', costs: { annualBermudaRemoval: 13.08 } }] } })).toBe(true);
+    expect(carries({ engineResult: { lineItems: [{ service: 'pest_control', bermudaSuppression: { perApp: 25 } }] } })).toBe(false);
+    expect(carries('not json')).toBe(false);
+    expect(carries(null)).toBe(false);
   });
 
   test('detector works on an ACTUAL engine-mapped result (result-only persistence)', () => {

@@ -133,8 +133,8 @@ async function profilePropertyScope(knex, customerId, visitPropertyId, strict) {
 // Is the visit's lawn a bermuda removal lawn? The ACTIVE turf profile's grass is the
 // track (St. Augustine or Zoysia, and the caller's `trackKey` must agree), and the
 // visit's property must be the property the profile speaks for (see
-// profilePropertyScope). Then the staff switch, then an accepted estimate that carries
-// the add-on: the add-on is St. Augustine only, and the estimate must be for THIS
+// profilePropertyScope). Then the staff switch, then an accepted estimate whose CURRENT priced result
+// still carries the add-on on its lawn line (not just a request option an opt-out left behind): the add-on is St. Augustine only, and the estimate must be for THIS
 // property (its property_id equals the visit's, or it names none and the customer has
 // one property). A failed read throws under `strict` (the job card fails closed) and
 // otherwise reads as "not requested".
@@ -147,7 +147,7 @@ async function accountWantsBermudaRemoval(knex, { customerId, profile, trackKey,
   const scope = await profilePropertyScope(knex, customerId, propertyId, strict);
   if (!scope.ok) return none;
   if (staff) return { requested: true, source: 'staff' };
-  const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
+  const { estimateResultCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
   const { savepointRead } = require('../utils/savepoint-read');
   let rows;
   try {
@@ -160,7 +160,7 @@ async function accountWantsBermudaRemoval(knex, { customerId, profile, trackKey,
     return none;
   }
   const forThisProperty = (row) => (row.property_id ? String(row.property_id) === scope.effective : scope.sole === scope.effective);
-  return rows.some((row) => forThisProperty(row) && estimateDataCarriesBermudaSuppression(row.estimate_data))
+  return rows.some((row) => forThisProperty(row) && estimateResultCarriesBermudaSuppression(row.estimate_data))
     ? { requested: true, source: 'estimate' }
     : none;
 }
@@ -254,9 +254,6 @@ async function stepProductIds(knex) {
 
 const NOT_CONFIGURED_MESSAGE = 'Bermuda removal cannot be recorded: its application limits are not loaded for Recognition and Fusilade II. Ask the office to load them before recording this mix.';
 
-// The step products a completion submitted: { recognition, fusilade } (each a { id, name }
-// or null), matched by catalog ID; `unconfigured` is true when the program's tagged rows
-// are missing yet a step product is present by name (a completion check then refuses).
 // The rate a completion states for a product ({ ratePer1000, unit }), or null: the cap
 // warning projects the year with what was actually sprayed.
 function submittedRate(products, id) {
@@ -264,6 +261,9 @@ function submittedRate(products, id) {
   return Number(entry?.rate) > 0 && entry?.rateUnit ? { ratePer1000: Number(entry.rate), unit: entry.rateUnit } : null;
 }
 
+// The step products a completion submitted: { recognition, fusilade } (each a { id, name }
+// or null), matched by catalog ID; `unconfigured` is true when the program's tagged rows
+// are missing yet a step product is present by name (a completion check then refuses).
 async function submittedStepProducts(knex, products) {
   const none = { recognition: null, fusilade: null, unconfigured: false };
   if (!Array.isArray(products)) return none;
@@ -371,6 +371,28 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
     [LOCK_NAMESPACE, `customer:${visit.customer_id}`]);
   const message = (unconfigured && stepVisit) ? NOT_CONFIGURED_MESSAGE : await capViolation(trx, visit, sprayed);
   if (message) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
+}
+
+// After a completion ledgered its sprays: the label-rate WARNING for Recognition (its yearly
+// maximum, judged on the history as it now stands, this spray included), as advisory messages
+// for the completion response. Never a block, never a refusal: gate off, no Recognition
+// recorded, an unreadable account or no warning all give none.
+async function rateAdvisories(knex, serviceId, productIds = []) {
+  if (!bermudaRemovalLive()) return [];
+  try {
+    // The reads below isolate themselves (savepoints inside a transaction), so a failed one
+    // leaves the caller's transaction usable; a nested savepoint here would deadlock them.
+    const ids = await stepProductIds(knex);
+    if (!ids.tagged || !productIds.map(String).includes(String(ids.recognition))) return [];
+    const visit = await resolvedVisitOf(knex, serviceId, { strict: true });
+    if (!visit) return [];
+    const result = await require('./application-limits').checkLimits(visit.customer_id, ids.recognition, visit.scheduled_date, knex, {
+      program: BERMUDA_GROUP, propertyId: visit.effective_property_id || null,
+    });
+    return result.warnings.filter((warning) => warning.type === 'annual_max_rate').map((warning) => warning.message);
+  } catch (err) {
+    return [];
+  }
 }
 
 // The step's lines are marked when the recipe lines are parsed, so every later
@@ -566,5 +588,5 @@ module.exports = {
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
   markStepLines, isStepLine,
   selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, effectivePropertyId, stepProductIds, inMixingOrder, mixOrderField, optionNotes, stepOptionFields, EXCLUDED_CULTIVAR_WARNING,
-  excludedCultivarSql, stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction,
+  excludedCultivarSql, stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, rateAdvisories,
 };

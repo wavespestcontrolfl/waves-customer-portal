@@ -23,6 +23,8 @@ const applicationLimits = require('../services/application-limits');
 const adminProtocolsRouter = require('../routes/admin-protocols');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 
+// An accepted estimate whose current priced result still carries the add-on on its lawn line.
+const BERMUDA_ESTIMATE = { engineRequest: { options: { bermudaSuppression: true } }, result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } } };
 const REC = 'Recognition Post Emergent Herbicide';
 const FUS = 'Fusilade II Post Emergent Liquid Herbicide';
 const NIS = 'LESCO 90/10 Nonionic Surfactant';
@@ -201,7 +203,7 @@ test.each([
 describe('the account decides, on the server', () => {
   const stepNames = (body) => body.items.filter((item) => item.bermudaStep).map((item) => item.product?.name).sort();
   const all = [FUS, NIS, REC].sort();
-  const estimate = { estimate_data: { engineRequest: { options: { bermudaSuppression: true } } } };
+  const estimate = { estimate_data: BERMUDA_ESTIMATE };
 
   test('staff switch on: the step is on the sheet for the visit', async () => {
     expect(stepNames(await lawnMix({ scheduledServiceId: SERVICE_ID }))).toEqual(all);

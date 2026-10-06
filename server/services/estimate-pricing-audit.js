@@ -702,6 +702,15 @@ async function inventoryCostFor(serviceKey, dimensions) {
   return inventoryCostFromRows(serviceKey, dimensions, await loadInventoryCostRows());
 }
 
+// The bermuda removal cost on the raw engine lawn line (engineResult.lineItems), for an
+// estimate whose mapped lawnMeta is absent.
+function rawLawnBermudaCost(data, result) {
+  const lines = [...(Array.isArray(data?.engineResult?.lineItems) ? data.engineResult.lineItems : []),
+    ...(Array.isArray(result?.lineItems) ? result.lineItems : [])];
+  const lawn = lines.find((item) => item?.service === 'lawn_care' && item?.costs?.annualBermudaRemoval != null);
+  return lawn ? lawn.costs.annualBermudaRemoval : undefined;
+}
+
 function visitsFor(line, result) {
   // A one-time row can still cover N units of service (multi-treatment
   // packages persisting visits:3, authored quantity>1 lines) — its COGS
@@ -1246,7 +1255,8 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     // not in the lawn inventory registry, so the quote's own cost line joins the
     // lawn COGS. Absent (gate off, no add-on) = 0.
     const bermudaRemovalCost = raw.serviceKey === 'lawn_care'
-      ? Number(result?.results?.lawnMeta?.costs?.annualBermudaRemoval ?? result?.lawnMeta?.costs?.annualBermudaRemoval) || 0
+      ? Number(result?.results?.lawnMeta?.costs?.annualBermudaRemoval ?? result?.lawnMeta?.costs?.annualBermudaRemoval
+        ?? rawLawnBermudaCost(data, result)) || 0
       : 0;
     const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0) + bermudaRemovalCost);
     const grossProfit = money(raw.price - estimatedCost);

@@ -1489,4 +1489,26 @@ function estimateDataCarriesBermudaSuppression(estimateDataRaw) {
     || !!d.result?.lawnMeta?.bermudaSuppression;
 }
 
-module.exports = { mapV1ToLegacyShape, estimateDataCarriesBermudaSuppression, treeShrubLegacyTierRows };
+// Does the estimate's CURRENT stored result still carry the bermuda suppression add-on on
+// its lawn line? Narrower than estimateDataCarriesBermudaSuppression (which also reads the
+// request options, and an opt-out leaves the request option behind): only the priced result
+// counts, the mapped lawnMeta, a lawn tier's provenance, or the raw engine lawn line. An
+// estimate with no lawn line in its result (pest only) never carries it.
+function estimateResultCarriesBermudaSuppression(estimateDataRaw) {
+  let d = estimateDataRaw;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch (_) { return false; }
+  }
+  if (!d || typeof d !== 'object') return false;
+  const positive = (value) => Number(value) > 0;
+  if (d.result?.results?.lawnMeta?.bermudaSuppression || d.result?.lawnMeta?.bermudaSuppression) return true;
+  const tiers = Array.isArray(d.result?.results?.lawn) ? d.result.results.lawn : [];
+  if (tiers.some((tier) => positive(tier?.prov?.bermudaSuppressionPerApp))) return true;
+  const lines = [...(Array.isArray(d.engineResult?.lineItems) ? d.engineResult.lineItems : []),
+    ...(Array.isArray(d.result?.lineItems) ? d.result.lineItems : [])];
+  return lines.some((line) => line && line.service === 'lawn_care' && (
+    !!line.bermudaSuppression || positive(line.costs?.annualBermudaRemoval)
+    || (Array.isArray(line.tiers) && line.tiers.some((tier) => positive(tier?.bermudaSuppressionPerApp)))));
+}
+
+module.exports = { mapV1ToLegacyShape, estimateDataCarriesBermudaSuppression, estimateResultCarriesBermudaSuppression, treeShrubLegacyTierRows };

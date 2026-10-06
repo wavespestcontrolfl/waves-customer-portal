@@ -39,6 +39,28 @@ function capShare(row) {
   return rate == null ? null : { share: rate / cap, estimated: true };
 }
 
+// A bermuda removal history row with no recorded rate: its rate per 1,000 sq ft, from the
+// quantity over the treated area, in the cap's own unit (0 when it cannot be sized or the unit
+// does not convert). Other rows keep counting only a recorded rate.
+const WEIGHT_UNITS = new Set(['oz', 'ounce', 'ounces', 'lb', 'lbs', 'pound', 'pounds', 'g', 'gram', 'grams', 'kg', 'mg']);
+const VOLUME_UNITS = new Set(['fl oz', 'floz', 'fl_oz', 'gal', 'gallon', 'gallons', 'qt', 'pt', 'ml', 'l', 'liter', 'liters', 'tsp', 'tbsp']);
+function unitFamily(unit) {
+  const key = String(unit || '').trim().toLowerCase().replace(/\./g, '');
+  if (WEIGHT_UNITS.has(key)) return 'weight';
+  return VOLUME_UNITS.has(key) ? 'volume' : null;
+}
+
+function recordedRatePer1000(row, limit) {
+  if (!isBermudaProgramRow(limit)) return 0;
+  const area = Number(row.area_treated_sqft);
+  if (!(area > 0)) return 0;
+  const capUnit = capUnitOf(limit.limit_unit);
+  // Unit-checked: a weight quantity counts against a weight cap and a volume against a volume
+  // cap; a gallon quantity never reads as ounces of dry product.
+  if (unitFamily(row.quantity_unit) == null || unitFamily(row.quantity_unit) !== unitFamily(capUnit)) return 0;
+  return rateInUnit(Number(row.quantity_applied) / (area / 1000), row.quantity_unit, capUnit) || 0;
+}
+
 // What could not be counted exactly, for the end of a cap message.
 function sizingNote(unsized, estimated) {
   const notes = [
@@ -201,7 +223,7 @@ class ApplicationLimitChecker {
 
       case 'annual_max_rate': {
         if (limit.match_type === AI_CAP) return this.evaluateActiveIngredientCap(limit, product, { ...ctx, proposedDate }, database);
-        const applied = history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || 0), 0);
+        const applied = history.reduce((sum, h) => sum + (parseFloat(h.application_rate) || recordedRatePer1000(h, limit)), 0);
         const maxRate = limitValue;
         // The bermuda removal row warns on the projected year, as the active-ingredient cap
         // does: earlier sprays plus the one being planned (the staged rate) or recorded (the

@@ -12,9 +12,12 @@ const { buildPlanForService } = require('../services/waveguard-plan-engine');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const rowsMigration = require('../models/migrations/20261006190100_lawn_bermuda_removal_rows');
 const programMigration = require('../models/migrations/20261006190300_lawn_bermuda_removal_limit_program');
+const catalogMigration = require('../models/migrations/20261006190400_lawn_bermuda_removal_catalog');
 const auditMigration = require('../models/migrations/20261006190200_lawn_bermuda_removal_audit');
 const { bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, accountWantsBermudaRemoval, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
 
+// An accepted estimate whose current priced result still carries the add-on on its lawn line.
+const BERMUDA_ESTIMATE = { engineRequest: { options: { bermudaSuppression: true } }, result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } } };
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
 const TRACKS = [
@@ -65,7 +68,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       'equipment_systems', 'equipment_calibrations', 'municipality_ordinances', 'property_nutrient_ledger',
       'service_products', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_gates',
       'lawn_protocol_service_completions', 'lawn_protocol_product_actuals', 'product_limits', 'property_application_history',
-      'estimates', 'lawn_protocol_audit_log']);
+      'estimates', 'lawn_protocol_audit_log', 'audit_log']);
     rec = await product(REC);
     fus = await product(FUS, { default_rate_per_1000: 0.55, rate_unit: 'fl oz', inventory_unit: 'fl oz' });
     nis = await product(NIS, { category: 'adjuvant', default_rate_per_1000: 0.25, rate_unit: 'fl oz', inventory_unit: 'fl oz' });
@@ -98,7 +101,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
     if (acceptedEstimate) {
       await knex('estimates').insert({
         customer_id: f.customerId, status: 'accepted',
-        estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }),
+        estimate_data: JSON.stringify(BERMUDA_ESTIMATE),
       });
     }
     const visit = await f.visit(0, { scheduled_date: date });
@@ -167,12 +170,29 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
     test('a lawn that did not ask never gets it, and neither does a draft or archived estimate', async () => {
       setGates();
       const plain = await lawn({});
-      await knex('estimates').insert({ customer_id: plain.customerId, status: 'draft', estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }) });
-      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', archived_at: new Date(), estimate_data: JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } }) });
+      await knex('estimates').insert({ customer_id: plain.customerId, status: 'draft', estimate_data: JSON.stringify(BERMUDA_ESTIMATE) });
+      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', archived_at: new Date(), estimate_data: JSON.stringify(BERMUDA_ESTIMATE) });
       const result = await plan(plain.visit);
       expect(result.bermudaRemoval).toBeUndefined();
       expect(optionNames(result)).not.toEqual(expect.arrayContaining([REC]));
       expect(optionNames(result)).not.toContain(FUS);
+    });
+
+    test('an accepted estimate whose current result has no bermuda lawn line gets no step, even with the request option left behind', async () => {
+      setGates();
+      const plain = await lawn({});
+      // Pest only: an opt-out leaves engineRequest.options.bermudaSuppression behind, and the result has no lawn line.
+      const pestOnly = { engineRequest: { options: { bermudaSuppression: true } }, result: { results: { pest: { apps: 4 } } }, engineResult: { lineItems: [{ service: 'pest_control' }] } };
+      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify(pestOnly) });
+      // A lawn line priced without the add-on, the same leftover option.
+      const lawnOptedOut = { ...pestOnly, result: { results: { lawnMeta: { bermudaSuppression: null } } }, engineResult: { lineItems: [{ service: 'lawn_care', bermudaSuppression: null }] } };
+      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify(lawnOptedOut) });
+      const result = await plan(plain.visit);
+      expect(result.bermudaRemoval).toBeUndefined();
+      expect(optionNames(result)).not.toContain(REC);
+      // The raw engine lawn line alone (no mapped result) counts as the current result.
+      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify({ engineResult: { lineItems: [{ service: 'lawn_care', bermudaSuppression: { perApp: 25 } }] } }) });
+      expect((await plan(plain.visit)).bermudaRemoval).toMatchObject({ active: true, source: 'estimate' });
     });
 
     test.each(['bermuda', 'bahia'])('%s never gets it, even with the switch on and the estimate flag set', async (grass) => {
@@ -955,6 +975,70 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(rateWarnings(await check(f, f.property.id, { proposed: { ratePer1000: 0.03, unit: 'fl oz/gal' } }))).toHaveLength(0);
     });
 
+    test('20261006190400 on a migrations-only database: up adds the catalog rows, links the staged rows and tags the limits; idempotent; down removes only its own; up again', async () => {
+      const ROLLBACK = new Error('rollback');
+      const names = [REC, FUS];
+      const state = async (trx) => ({
+        catalog: (await trx('products_catalog').whereIn('name', names).select('name', 'category', 'epa_reg_number')).sort((a, b) => a.name.localeCompare(b.name)),
+        unlinked: Number((await trx('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").whereNull('product_id').count('* as n').first()).n),
+        tagged: Number((await trx('product_limits').where({ match_value: 'bermuda_removal' }).count('* as n').first()).n),
+      });
+      await knex.transaction(async (trx) => {
+        // A database built from migrations alone: no Recognition or Fusilade II catalog rows, so
+        // the staged rows are unlinked and the limits were never written.
+        await trx('product_limits').where({ match_value: 'bermuda_removal' }).del();
+        await trx('lawn_protocol_products').whereIn('product_id', [rec.id, fus.id]).update({ product_id: null });
+        await trx('products_catalog').whereIn('id', [rec.id, fus.id]).del();
+        const surfactant = await trx('products_catalog').where({ name: NIS }).first('id');
+        expect(await state(trx)).toMatchObject({ catalog: [], tagged: 0 });
+        await catalogMigration.up(trx);
+        const after = await state(trx);
+        expect(after.catalog).toEqual([
+          { name: FUS, category: 'herbicide', epa_reg_number: '100-1084' },
+          { name: REC, category: 'herbicide', epa_reg_number: '100-1658' },
+        ]);
+        expect(after.tagged).toBe(5);
+        // Recognition and Fusilade II rows (2 protocols x 2 windows x 2 products) are linked; the surfactant row was linked by its own catalog row.
+        const linked = await trx('lawn_protocol_products').whereRaw("gates->>'bermudaRemoval' = 'true'").whereNotNull('product_id').select('product_name');
+        expect(linked.filter((row) => row.product_name === REC || row.product_name === FUS)).toHaveLength(8);
+        expect(surfactant).toBeTruthy();
+        // Idempotent.
+        await catalogMigration.up(trx);
+        expect(await state(trx)).toEqual(after);
+        expect(await trx('audit_log').where({ action: 'migration:20261006190400_lawn_bermuda_removal_catalog:seeded' })).toHaveLength(15);
+        // Down removes exactly what it wrote, and a second down does nothing.
+        await catalogMigration.down(trx);
+        expect(await state(trx)).toMatchObject({ catalog: [], tagged: 0 });
+        expect(await trx('lawn_protocol_products').whereIn('product_name', names).whereNotNull('product_id')).toHaveLength(0);
+        await catalogMigration.down(trx);
+        await catalogMigration.up(trx);
+        expect(await state(trx)).toEqual(after);
+        throw ROLLBACK;
+      }).catch((err) => { if (err !== ROLLBACK) throw err; });
+      // The fixture's own rows are back after the rollback.
+      expect(await knex('products_catalog').whereIn('id', [rec.id, fus.id])).toHaveLength(2);
+    });
+
+    test('a history row with no recorded rate counts by its quantity over the treated area, unit-checked', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      // 0.6 oz over 10,000 sq ft = 0.06 oz per 1,000, twice = 0.12; no application_rate on either row.
+      await knex('property_application_history').insert(['2026-03-01', '2026-04-20'].map((application_date) => ({
+        customer_id: f.customerId, product_id: rec.id, application_date, quantity_applied: 0.6, quantity_unit: 'oz', area_treated_sqft: 10000,
+      })));
+      const rateWarnings = (result) => result.warnings.filter((w) => w.type === 'annual_max_rate');
+      expect(rateWarnings(await check(f, f.property.id))).toHaveLength(0);
+      const planned = rateWarnings(await check(f, f.property.id, { proposed: { ratePer1000: 0.03, unit: 'oz' } }));
+      expect(planned).toHaveLength(1);
+      expect(planned[0].message).toMatch(/cumulative 0\.150/);
+      // A quantity in a unit that does not convert to oz is not counted.
+      await knex('property_application_history').where({ customer_id: f.customerId }).update({ quantity_unit: 'gal' });
+      expect(rateWarnings(await check(f, f.property.id, { proposed: { ratePer1000: 0.03, unit: 'oz' } }))).toHaveLength(0);
+      // No treated area: not counted either.
+      await knex('property_application_history').where({ customer_id: f.customerId }).update({ quantity_unit: 'oz', area_treated_sqft: null });
+      expect(rateWarnings(await check(f, f.property.id, { proposed: { ratePer1000: 0.03, unit: 'oz' } }))).toHaveLength(0);
+    });
+
     test('the rows apply only to a caller that names the program; compliance and every other caller ignore them', async () => {
       const f = await lawn({ date: '2026-06-20', bermuda: true });
       await history(f.customerId, rec, ['2026-03-01', '2026-04-20']);
@@ -1102,7 +1186,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
 
     test('estimate evidence counts only for the visit\'s property (or a property-less estimate of a one-property customer)', async () => {
       setGates();
-      const estimateData = JSON.stringify({ engineRequest: { options: { bermudaSuppression: true } } });
+      const estimateData = JSON.stringify(BERMUDA_ESTIMATE);
       const { f, second, secondVisit } = await twoProps({ bermuda: false });
       await knex('estimates').insert({ customer_id: f.customerId, status: 'accepted', property_id: second.id, estimate_data: estimateData });
       // The estimate is for the second property; the profile speaks for the primary one: nothing carries.
