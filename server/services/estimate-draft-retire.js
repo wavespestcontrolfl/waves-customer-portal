@@ -62,7 +62,9 @@ function sameProperty(pair) {
   if (pair.draft_property_id && pair.sent_property_id) return pair.draft_property_id === pair.sent_property_id;
   const { samePremiseDisplay, parseDisplayAddress } = require('./lead-address-unverified');
   if (!samePremiseDisplay(pair.draft_address, pair.sent_address, { requireLocality: true })) return false;
-  const unit = (text) => String(parseDisplayAddress(text).unit || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  // Canonical unit key, so "Apt 4", "Unit 4" and "#4" are one door.
+  const { normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const unit = (text) => unitLineValueKey(normalizeUnitLine(parseDisplayAddress(text).unit));
   return unit(pair.draft_address) === unit(pair.sent_address);
 }
 
@@ -74,6 +76,10 @@ async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BA
   const batch = Math.max(1, Math.min(Number(limit) || RETIRE_BATCH_LIMIT, 1000));
   // Unqualified columns in DRAFT_ELIGIBLE_SQL resolve to the draft: the
   // subquery reads one table.
+  // No LIMIT on the pairs: the property match runs in JS, and a fixed prefix
+  // of other-door pairs would otherwise starve every later draft. The set is
+  // bounded by drafts that already have a newer sent sibling; the WRITES are
+  // capped at `batch`.
   const pairs = (await conn.raw(`
     SELECT d.id AS draft_id, d.property_id AS draft_property_id, d.address AS draft_address,
            s.id AS sent_id, s.sent_at, s.property_id AS sent_property_id, s.address AS sent_address
@@ -85,8 +91,7 @@ async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BA
        AND s.created_at > d.created_at
        AND d.updated_at <= s.sent_at
      ORDER BY d.created_at, d.id, s.sent_at DESC
-     LIMIT ?
-  `, [batch * 10]))?.rows || [];
+  `))?.rows || [];
 
   const chosen = new Map();
   for (const pair of pairs) {
@@ -95,8 +100,9 @@ async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BA
   }
 
   // One row per write, every predicate re-checked on the row itself: a draft
-  // edited, sent or claimed since the read — or a send since invalidated —
-  // is left alone.
+  // edited, sent or claimed since the read — or a send since invalidated,
+  // re-pointed or moved to another address — is left alone. Both rows'
+  // property_id and address must still be what the JS match judged.
   const rows = [];
   for (const pair of chosen.values()) {
     const result = await conn.raw(`
@@ -110,10 +116,21 @@ async function retireDraftsReplacedBySentEstimate({ conn = db, limit = RETIRE_BA
              )
        WHERE id = ?
          AND updated_at <= ?
+         AND property_id IS NOT DISTINCT FROM ?
+         AND address IS NOT DISTINCT FROM ?
          AND ${DRAFT_ELIGIBLE_SQL}
-         AND EXISTS (SELECT 1 FROM estimates s WHERE s.id = ? AND ${SENT_EVIDENCE_SQL('s')})
+         AND EXISTS (
+           SELECT 1 FROM estimates s
+            WHERE s.id = ?
+              AND s.customer_id = estimates.customer_id
+              AND s.created_at > estimates.created_at
+              AND s.property_id IS NOT DISTINCT FROM ?
+              AND s.address IS NOT DISTINCT FROM ?
+              AND ${SENT_EVIDENCE_SQL('s')}
+         )
       RETURNING id, customer_id
-    `, [pair.sent_id, pair.draft_id, pair.sent_at, pair.sent_id]);
+    `, [pair.sent_id, pair.draft_id, pair.sent_at, pair.draft_property_id, pair.draft_address,
+      pair.sent_id, pair.sent_property_id, pair.sent_address]);
     const row = result?.rows?.[0];
     if (!row) continue;
     rows.push({ ...row, sent_id: pair.sent_id });

@@ -130,9 +130,27 @@ postgres('estimate draft retire (PostgreSQL)', () => {
     const spelled = await estimate(c, { createdAt: minutesAgo(60), address: '100 Fixture Terrace, Testville, FL 34000' });
     const otherUnit = await estimate(c, { createdAt: minutesAgo(60), address: '100 Fixture Ter Apt 3, Testville, FL 34000' });
     await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10), address: '100 Fixture Ter, Testville, FL 34000, USA' });
-    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(1);
+    const c2 = await customer();
+    const unitAlias = await estimate(c2, { createdAt: minutesAgo(60), address: '9 Fixture Ct Unit 4, Testville, FL 34000' });
+    await estimate(c2, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10), address: '9 Fixture Ct #4, Testville, FL 34000' });
+    expect((await retireDraftsReplacedBySentEstimate()).retired).toBe(2);
     expect((await row(spelled)).archived_at).not.toBeNull();
+    expect((await row(unitAlias)).archived_at).not.toBeNull();
     expect((await row(otherUnit)).archived_at).toBeNull();
+  });
+
+  test('a sent estimate moved to another address after the read does not archive the old draft', async () => {
+    const c = await customer();
+    const draft = await estimate(c, { createdAt: minutesAgo(60) });
+    const sent = await estimate(c, { status: 'sent', createdAt: minutesAgo(20), sentAt: minutesAgo(10) });
+    // The move lands between the pair read and the write.
+    const realRaw = mockPg.raw.bind(mockPg);
+    const conn = { raw: async (sql, bindings) => {
+      if (/^\s*UPDATE/.test(sql)) await mockPg('estimates').where({ id: sent }).update({ address: '500 Elsewhere Blvd, Testville, FL 34000' });
+      return realRaw(sql, bindings);
+    } };
+    expect((await retireDraftsReplacedBySentEstimate({ conn })).retired).toBe(0);
+    expect((await row(draft)).archived_at).toBeNull();
   });
 
   test('a retired draft comes back through the normal unarchive predicate (no permanent marker)', async () => {
