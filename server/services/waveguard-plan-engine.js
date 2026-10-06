@@ -1,6 +1,6 @@
 const db = require('../models/db');
 const { savepointRead } = require('../utils/savepoint-read');
-const { lawnProtocols, LAWN_V13_VERSION, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
+const { lawnProtocols, LAWN_V13_VERSION, lawnV13AnyGrassTrack, visitForCadence, unknownCadenceWarning } = require('./lawn-program');
 const featureGates = require('../config/feature-gates');
 const { normalizeGrassType, resolveTrackKey } = require('./lawn-grass-context');
 const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
@@ -1165,6 +1165,9 @@ function selectProtocolVisit(profile, serviceDate, legacyGrass = null, { month: 
   const recorded = profileRecorded || String(legacyGrass || '').trim();
   const trackKey = resolveTrackKey(profile?.track_key, normalizeGrassType(profile?.grass_type))
     || (!profileRecorded && resolveTrackKey(null, normalizeGrassType(legacyGrass)))
+    // GATE_LAWN_V13: a recorded grass with no track of its own (mixed, unknown,
+    // free text) runs the one v13 program instead of blocking the visit.
+    || (recorded ? lawnV13AnyGrassTrack() : null)
     || (recorded || requireKnownGrass ? null : 'st_augustine');
   const track = trackKey ? lawnProtocols()?.[trackKey] : null;
   const month = MONTH_ABBR[(assignedMonth || etParts(serviceDate).month) - 1];

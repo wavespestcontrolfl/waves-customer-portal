@@ -1601,11 +1601,19 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
     {
       const { runExclusive } = require('./utils/cron-lock');
       if (config.nodeEnv !== 'test') {
-        require('./utils/scheduled-cron').schedule('*/15 * * * *', async () => {
+        // Every minute, so GATE_SERIES_MOVE_TEXT_COALESCE can release a held
+        // staff series-move text when its 3-minute hold ends. Gate off: the
+        // job returns before its lock except on the quarter hour, so it runs
+        // exactly as the old */15 schedule did. Gate on: the quarter-hour tick
+        // also releases held texts; the ticks between release only those.
+        require('./utils/scheduled-cron').schedule('* * * * *', async () => {
           try {
+            const quarterHour = new Date().getMinutes() % 15 === 0;
+            const coalesce = require('./services/series-move-text-coalesce').enabled();
+            if (!quarterHour && !coalesce) return;
             await runExclusive('series-move-effects-reconcile', async () => {
               const { reconcileSeriesMoveEffects } = require('./routes/admin-dispatch');
-              const out = await reconcileSeriesMoveEffects();
+              const out = await reconcileSeriesMoveEffects(coalesce ? { heldTexts: quarterHour ? 'with' : 'only' } : {});
               if (out.candidates) logger.info(`[cron] series move effects reconcile: ${out.finished}/${out.candidates} finished`);
             });
           } catch (err) {

@@ -81,14 +81,21 @@ async function closeClaim(dbh, decisionId, status, execution) {
  * The checks the move runs under its own locks, and the two writes that
  * commit with it. `expected` is the visit as the decide step checked it.
  */
-function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, expected, inboundSmsLogId, repliedAt }) {
+// The move notice rule on the LOCKED row: an office move approval read
+// before the lock may have been cleared by a move away and back (codex
+// #6039 r3 P1). A missed visit (noticeApplies false) is being rebooked.
+function refuseInsideMoveNotice(row, noticeApplies) {
+  if (noticeApplies && require('./scheduling/self-serve-notice').visitInsideMoveNoticeWindow(row)) throw guardError('self_serve_notice');
+}
+
+function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, expected, inboundSmsLogId, repliedAt, noticeApplies }) {
   return async ({ trx }) => {
     const fences = require('./call-reschedule-apply');
     // The visit's own row lock: the portal request route holds it while it
     // files a schedule-change request, so that request is either visible
     // below or starts after this move.
     const row = await trx('scheduled_services').where({ id: visitId }).forUpdate()
-      .first('scheduled_date', 'window_start', 'window_end', 'status', 'customer_id', 'visit_id', 'source_action', 'customer_confirmed');
+      .first('scheduled_date', 'window_start', 'window_end', 'status', 'customer_id', 'visit_id', 'source_action', 'customer_confirmed', 'office_move_approved_for');
     // The locked visit is still the one the decide step checked: an Edit
     // appointment save logs no move, and the series mover pins only date and
     // start, so the comparison is made here for both movers.
@@ -96,6 +103,7 @@ function buildMoveGuard({ decisionId, offer, visitId, customerId, now, target, e
       && hhmm(row.window_start) === expected.start && hhmm(row.window_end) === expected.end
       && row.status === expected.status && String(row.customer_id) === String(customerId) && !row.visit_id;
     if (!unchanged) throw guardError('visit_changed');
+    refuseInsideMoveNotice(row, noticeApplies);
     // The decide step's ownership checks, on the locked row: an office-review
     // booking can go back to unconfirmed with no change to its date, window
     // or status.
@@ -301,6 +309,7 @@ async function moveVisit({ dbh, decisionId, offer, slot, visit, inboundSmsLogId,
   const moveGuard = buildMoveGuard({
     decisionId, offer, visitId: svc.id, customerId: svc.customer_id, now, target, inboundSmsLogId, repliedAt,
     expected: { date: dateOnlyString(svc.scheduled_date), start: hhmm(svc.window_start), end: hhmm(svc.window_end), status: svc.status },
+    noticeApplies: !eligible.missed,
   });
   // Customer-facing move: the offer was built under the travel-gap rule.
   // operationKey: this decision's own, so the series mover never answers with
