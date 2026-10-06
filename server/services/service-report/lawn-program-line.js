@@ -227,7 +227,7 @@ const DRY = 'Water about \u00be inch only when the lawn shows thirst (blades fol
 const RAIN = 'Summer rain usually covers the lawn. Turn irrigation down or off in weeks with regular rain, and water only when the lawn shows thirst. Extra water now invites fungus.';
 const PROGRAM_DETAIL_V13 = Object.freeze({
   1: Object.freeze({
-    whyNow: 'January is the coolest stretch of the year. Winter weeds are sprouting while the grass grows slowly, so the weed barrier is renewed and a micronutrient feeding keeps the color up without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
+    whyNow: 'January is the coolest stretch of the year. Winter weeds are sprouting while the grass grows slowly, so the weed barrier is renewed where it fits the property and a micronutrient feeding keeps the color up without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
     whatYouSee: 'Color holds steady and growth stays slow, so mowing is light. A few weeds that sprouted earlier may still show; we spot treat them.',
     watering: [DRY, 'In cool weather the lawn needs water less often than in spring.'],
   }),
@@ -237,7 +237,7 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     watering: [DRY],
   }),
   3: Object.freeze({
-    whyNow: 'In March the soil warms and summer weeds such as crabgrass start to sprout. The spring weed barrier goes down now, ahead of them, with a micronutrient feeding for color. Spring is also when the root disease take-all can show, so mapped trouble areas get a treatment.',
+    whyNow: 'In March the soil warms and summer weeds such as crabgrass start to sprout. The spring weed barrier goes down now where it fits the property, ahead of them, with a micronutrient feeding for color. Spring is also when the root disease take-all can show, so mapped trouble areas get a treatment.',
     whatYouSee: 'The weed barrier is invisible: it works by stopping new weeds before they start. Color deepens and growth speeds up.',
     watering: [DRY],
   }),
@@ -252,7 +252,7 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     watering: [DRY, 'April and May are usually the driest months, so check for thirst more often.'],
   }),
   6: Object.freeze({
-    whyNow: 'The rainy season starts in June, and local summer fertilizer rules limit nitrogen until fall. The lawn gets iron and micronutrients for color instead, plus a weed barrier for summer weeds. Heat and rain bring gray leaf spot and chinch bugs, which we spot treat.',
+    whyNow: 'The rainy season starts in June, and local summer fertilizer rules limit nitrogen until fall. The lawn gets iron and micronutrients for color instead, plus a weed barrier for summer weeds where it fits the property. Heat and rain bring gray leaf spot and chinch bugs, which we spot treat.',
     whatYouSee: 'Color from the micronutrients shows without extra top growth. Growth is fast with the rain, so mowing stays weekly.',
     watering: [RAIN],
   }),
@@ -272,7 +272,7 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     watering: [RAIN, 'As the rains taper off, turn irrigation back up only as the lawn needs it.'],
   }),
   10: Object.freeze({
-    whyNow: 'As the soil cools in October, winter weeds like annual bluegrass and chickweed start to sprout. The weed barrier goes down now, with a fall feeding, so it is in place before they come up. Cooler, damp nights also bring large patch, a fungus that shows as tan or orange rings, so we check for it and treat any spots.',
+    whyNow: 'As the soil cools in October, winter weeds like annual bluegrass and chickweed start to sprout. The fall feeding goes down now, with a weed barrier where it fits the property, so the barrier is in place before they come up. Cooler, damp nights also bring large patch, a fungus that shows as tan or orange rings, so we check for it and treat any spots.',
     whatYouSee: 'The feeding greens the lawn as it settles in. Growth slows as the days get shorter, so you will mow less. The weed barrier is invisible: it works by stopping new weeds before they start.',
     watering: [DRY, 'Wet grass overnight invites large patch, so water in the morning only.'],
   }),
@@ -288,10 +288,15 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
   }),
 });
 
-// The month's detail, only beside a v13 program line (same visits, same month).
-function buildProgramDetail({ month, programLine } = {}) {
-  if (!programLine) return null;
-  return PROGRAM_DETAIL_V13[Number(month)] || null;
+// The month's detail, only beside a v13 program line (same visits, same month)
+// and only while GATE_LAWN_PROGRAM_DETAIL is live. When the visit carries its
+// own label aftercare (a water-in or a hold), the seasonal watering lines step
+// aside so the report never gives two watering directions (codex #6091 r1).
+function buildProgramDetail({ month, programLine, aftercare = null } = {}) {
+  if (!programLine || typeof featureGates.lawnProgramDetailLive !== 'function' || !featureGates.lawnProgramDetailLive()) return null;
+  const detail = PROGRAM_DETAIL_V13[Number(month)] || null;
+  const visitWatering = !!(aftercare && (aftercare.waterInRequired || aftercare.neutral === false));
+  return detail && visitWatering ? { whyNow: detail.whyNow, whatYouSee: detail.whatYouSee, watering: [] } : detail;
 }
 
 module.exports = {

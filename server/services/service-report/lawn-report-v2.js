@@ -753,6 +753,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     ? buildProgramLine({ month: assessMonth, applications, nitrogenApplied, programVisit, protocolVersion })
     : null;
   const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
+  const seasonalDetail = buildProgramDetail({ month: assessMonth, programLine, aftercare });
 
   const snapshot = {
     overallScore,
@@ -763,9 +764,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     seasonalNote,
     ...(programLine ? { seasonalNoteSource: 'program' } : {}),
     // GATE_LAWN_PROGRAM_DETAIL: the month's detail lines under the program line.
-    ...(programLine && typeof featureGates.lawnProgramDetailLive === 'function' && featureGates.lawnProgramDetailLive()
-      ? (() => { const d = buildProgramDetail({ month: assessMonth, programLine }); return d ? { seasonalDetail: d } : {}; })()
-      : {}),
+    ...(seasonalDetail ? { seasonalDetail } : {}),
     todaysFocus: treatment ? treatment.focus : [],
     // Plain-language applied-solutions sentence for the hero card (owner
     // 2026-07-21 — the summary must say what was applied, not just tags).
