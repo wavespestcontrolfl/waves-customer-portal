@@ -94,6 +94,9 @@ class ApplicationLimitChecker {
     const historyQuery = database('property_application_history')
       .where({ customer_id: customerId, product_id: productId })
       .where('application_date', '>=', yearStart)
+      // Applications on or before the day judged, as the shared cap reads them: a backdated
+      // completion is not held against an application that had not happened yet.
+      .where('application_date', '<=', etCalendarDayOf(proposedDate))
       .whereNull('retracted_at');
     // The treated property and the visit being planned scope this history exactly as they
     // scope the shared cap below; a caller that passes neither reads the customer's whole year.

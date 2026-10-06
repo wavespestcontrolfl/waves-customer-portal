@@ -19,6 +19,7 @@ const labelMaxMigration = require('../models/migrations/20261006170000_lawn_v13_
 const ownershipMigration = require('../models/migrations/20261006180000_lawn_v13_april_9x_ownership');
 const octoberMigration = require('../models/migrations/20261007120000_lawn_v13_october_dimension');
 const commercialMigration = require('../models/migrations/20261007130000_lawn_v13_october_dimension_commercial_rate');
+const priceMigration = require('../models/migrations/20261007134000_lawn_v13_dimension_price_and_cap_clamp');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const { randomUUID } = require('crypto');
@@ -158,7 +159,7 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       'equipment_systems', 'equipment_calibrations', 'municipality_ordinances', 'property_nutrient_ledger',
       'service_products', 'lawn_protocols', 'lawn_protocol_windows', 'lawn_protocol_products', 'lawn_protocol_gates',
       'lawn_protocol_service_completions', 'lawn_protocol_product_actuals', 'lawn_protocol_audit_log', 'product_limits',
-      'property_application_history', 'services']) {
+      'property_application_history', 'services', 'vendors', 'vendor_pricing', 'price_history', 'price_snapshots']) {
       await knex.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [owned.schema, table, table]);
       const columns = await knex(table).columnInfo();
       if (String(columns.id?.defaultValue || '').includes('nextval(')) {
@@ -177,7 +178,8 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
     await product(STW_15, { active_ingredient: 'Prodiamine', formulation: 'granular', default_rate_per_1000: 4.02, rate_unit: 'lb', analysis_n: 15, analysis_p: 0, analysis_k: 15, max_label_rate_per_1000: 5.34 });
     await product(WDG, { active_ingredient: 'Prodiamine 65.0%', formulation: 'WDG', default_rate_per_1000: 0.37, rate_unit: 'oz', min_label_rate_per_1000: 0.185, max_label_rate_per_1000: 0.83 });
     await product(F24, { category: 'fertilizer', formulation: 'granular', default_rate_per_1000: 4.2, rate_unit: 'lb', analysis_n: 24, analysis_p: 0, analysis_k: 11 });
-    await product(DIMENSION, { active_ingredient: 'Dithiopyr', formulation: 'granular', default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10, max_label_rate_per_1000: 5.48 });
+    await product(DIMENSION, { active_ingredient: 'Dithiopyr', formulation: 'granular', default_rate_per_1000: 2.78, rate_unit: 'lb', analysis_n: 18, analysis_p: 0, analysis_k: 10, max_label_rate_per_1000: 5.48, container_size: '50 lb', unit_size_oz: 800 });
+    await knex('vendors').insert({ name: 'SiteOne' });
     await product(DIM_2EW, { active_ingredient: 'Dithiopyr', formulation: 'liquid', default_rate_per_1000: 0.5, rate_unit: 'fl oz', min_label_rate_per_1000: 0.37, max_label_rate_per_1000: 0.73 });
 
     await knex('lawn_protocols').insert({ protocol_key: KEY, version: '2026.06', name: 'Fixture old', status: 'active', grass_track: 'bermuda', region: 'swfl' });
@@ -330,6 +332,69 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       await commercialMigration.up(knex);
       expect(JSON.stringify(await state())).toBe(final);
       expect(await knex('product_limits').where({ match_value: 'dithiopyr' })).toHaveLength(2);
+    });
+
+    test('the SiteOne price goes in through the vendor-pricing path: an eligible vendor row, the catalog winner and cache fields, and a later recalcBestPrice keeps it; the granular cap is clamped to the label\'s 16.38 lb; down removes only what it made', async () => {
+      const { recalcBestPrice } = require('../routes/admin-inventory');
+      const productId = catalog[DIMENSION].id;
+      const catalogRow = () => knex('products_catalog').where({ id: productId }).first();
+      const vendorRows = () => knex('vendor_pricing').where({ product_id: productId });
+      const granularCap = () => knex('product_limits').where({ match_value: 'dithiopyr', product_id: productId, limit_type: 'annual_max_rate' }).first('limit_value');
+      const before = await catalogRow();
+      expect(await vendorRows()).toHaveLength(0);
+      expect(Number((await granularCap()).limit_value)).toBe(16.3977);
+      expect(Number(before.unit_size_oz)).toBe(800);
+
+      await priceMigration.up(knex);
+      try {
+        const [row] = await vendorRows();
+        expect(row).toMatchObject({ approval_status: 'approved', is_active: true, price_type: 'manual', quantity: '50 lb', vendor_sku: '702032', is_best_price: true });
+        expect(Number(row.price)).toBe(44.23);
+        const priced = await catalogRow();
+        expect(priced).toMatchObject({ best_vendor: 'SiteOne', best_vendor_pricing_id: row.id, best_price_status: 'current', needs_pricing: false });
+        expect(Number(priced.best_price)).toBe(44.23);
+        expect(Number(priced.best_price_amount_cached)).toBe(44.23);
+        expect(String(priced.best_price_vendor_id_cached)).toBe(String(row.vendor_id));
+        expect(Number((await granularCap()).limit_value)).toBe(16.38);
+        // A later recalcBestPrice re-ranks the same row and keeps the price, the status and the winner.
+        await recalcBestPrice(productId, knex);
+        const again = await catalogRow();
+        expect([Number(again.best_price), again.best_vendor, again.best_vendor_pricing_id, again.best_price_status, again.needs_pricing])
+          .toEqual([44.23, 'SiteOne', row.id, 'current', false]);
+        // Idempotent: a second run adds no vendor row and clamps nothing.
+        await priceMigration.up(knex);
+        expect(await vendorRows()).toHaveLength(1);
+        expect(await knex('lawn_protocol_audit_log').where({ action: priceMigration.ACTION })).toHaveLength(1);
+      } finally {
+        await priceMigration.down(knex);
+      }
+      expect(await vendorRows()).toHaveLength(0);
+      expect(await knex('price_history').where({ product_id: productId })).toHaveLength(0);
+      expect(await knex('price_snapshots').where({ product_id: productId })).toHaveLength(0);
+      expect(Number((await granularCap()).limit_value)).toBe(16.3977);
+      const restored = await catalogRow();
+      for (const column of ['best_price', 'best_vendor', 'best_vendor_pricing_id', 'best_price_amount_cached', 'best_price_vendor_id_cached', 'best_price_status', 'needs_pricing', 'cost_per_unit', 'cost_unit', 'unit_size_oz']) {
+        expect({ column, value: restored[column] }).toEqual({ column, value: before[column] });
+      }
+      expect(await knex('lawn_protocol_audit_log').where({ action: priceMigration.ACTION })).toHaveLength(0);
+    });
+
+    test('a product that already has an eligible vendor row is left alone (no second row, no price change)', async () => {
+      const productId = catalog[DIMENSION].id;
+      const [siteOne] = await knex('vendors').where({ name: 'SiteOne' }).select('id');
+      await knex('vendor_pricing').insert({
+        product_id: productId, vendor_id: siteOne.id, price: 51, price_amount: 51, quantity: '50 lb', price_type: 'manual', source_type: 'manual',
+        approval_status: 'approved', is_active: true, currency: 'USD', price_per_oz: 51 / 800, normalized_unit_price: 51 / 800, unit_normalized: 'oz',
+      });
+      try {
+        const before = await knex('products_catalog').where({ id: productId }).first('best_price', 'best_vendor');
+        await priceMigration.up(knex);
+        expect(await knex('vendor_pricing').where({ product_id: productId })).toHaveLength(1);
+        expect(await knex('products_catalog').where({ id: productId }).first('best_price', 'best_vendor')).toEqual(before);
+      } finally {
+        await knex('vendor_pricing').where({ product_id: productId }).del();
+        await priceMigration.down(knex);
+      }
     });
 
     // The whole stack, in deployment order and in rollback order.
@@ -587,6 +652,14 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
         await applied(customerId, WDG, '2026-01-06', 0.84, 'oz');
         expect((await check(propertyB)).blocks).toHaveLength(1);
       });
+    });
+
+    test('the product\'s own history stops at the day judged: a November application does not block an October one, and the day itself counts', async () => {
+      const { customerId } = await visit('2026-10-12');
+      await applied(customerId, DIMENSION, '2026-11-01', 2.78, 'lb');
+      const intervalBlocks = async (date) => (await applicationLimits.checkLimits(customerId, catalog[DIMENSION].id, date, knex)).blocks.filter((b) => b.type === 'min_interval_days');
+      expect(await intervalBlocks(new Date('2026-10-12T16:00:00Z'))).toEqual([]);
+      expect(await intervalBlocks(new Date('2026-11-01T16:00:00Z'))).toHaveLength(1);
     });
 
     test('the product\'s own limits (the 60-day interval) follow the treated property and the planned visit; a row with no known property counts anywhere', async () => {

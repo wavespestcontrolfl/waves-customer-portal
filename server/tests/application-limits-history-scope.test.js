@@ -78,6 +78,16 @@ describe('checkLimits: the product history honors the treated property and the p
     expect(methods).not.toContain('whereNotExists');
   });
 
+  test('the history stops at the proposed day: a later application is not read, the day itself is', async () => {
+    const history = mockDb([]);
+    await applicationLimits.checkLimits('cust-1', 'prod-1', new Date('2026-10-12T16:00:00Z'));
+    expect(history.calls).toContainEqual(['where', 'application_date', '<=', '2026-10-12']);
+    // A pg DATE proposed day keeps its own calendar day.
+    const second = mockDb([]);
+    await applicationLimits.checkLimits('cust-1', 'prod-1', new Date(2026, 0, 12));
+    expect(second.calls).toContainEqual(['where', 'application_date', '<=', '2026-01-12']);
+  });
+
   test('both options together apply both scopes; the retraction and year filters stay', async () => {
     const history = mockDb([]);
     await applicationLimits.checkLimits('cust-1', 'prod-1', new Date('2026-10-12T16:00:00Z'), db, { propertyId: 'prop-A', excludeScheduledServiceId: 'visit-9' });

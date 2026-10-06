@@ -986,3 +986,52 @@ describe('migration 20261007130000: Dimension 0.21% at the commercial label rate
     expect(db.products_catalog.find((c) => c.id === 'cat-dim')).toMatchObject({ best_price: 47, max_label_rate_per_1000: 2.73 });
   });
 });
+
+// ── Granular cap clamp (Codex round 2 on #6084) ──────────────────────────────
+describe('migration 20261007134000: the granular dithiopyr cap is the label\'s 16.38 lb', () => {
+  const priceMigration = require('../models/migrations/20261007134000_lawn_v13_dimension_price_and_cap_clamp');
+  const caps = (db) => db.product_limits.filter((r) => r.match_value === 'dithiopyr');
+  const build = () => {
+    // No vendor tables here: the price half skips itself (it is proved against PostgreSQL), the cap half runs.
+    const db = { product_limits: [], lawn_protocol_audit_log: [], products_catalog: [] };
+    db.product_limits.push(
+      { id: 'cap-2ew', product_id: 'p1', match_type: 'active_ingredient', match_value: 'dithiopyr', limit_type: 'annual_max_rate', limit_value: 2.2039, limit_unit: 'fl oz/1000sf/year' },
+      { id: 'cap-gr', product_id: 'p2', match_type: 'active_ingredient', match_value: 'dithiopyr', limit_type: 'annual_max_rate', limit_value: 16.3977, limit_unit: 'lb/1000sf/year' },
+      { id: 'cap-pr', product_id: 'p3', match_type: 'active_ingredient', match_value: 'prodiamine', limit_type: 'annual_max_rate', limit_value: 16.3977, limit_unit: 'lb/1000sf/year' },
+    );
+    return { db, knex: makeKnex(db) };
+  };
+
+  test('only the granular dithiopyr row moves, 16.3977 -> 16.38, and it is audited', async () => {
+    const { db, knex } = build();
+    await priceMigration.up(knex);
+    expect(caps(db).map((r) => [r.id, Number(r.limit_value)])).toEqual([['cap-2ew', 2.2039], ['cap-gr', 16.38]]);
+    expect(db.product_limits.find((r) => r.id === 'cap-pr').limit_value).toBe(16.3977);
+    expect(db.lawn_protocol_audit_log.filter((a) => a.action === priceMigration.ACTION)).toHaveLength(1);
+  });
+
+  test('idempotent; a cap someone set to another figure is left alone', async () => {
+    const { db, knex } = build();
+    db.product_limits.find((r) => r.id === 'cap-gr').limit_value = 15;
+    await priceMigration.up(knex);
+    expect(db.product_limits.find((r) => r.id === 'cap-gr').limit_value).toBe(15);
+    expect(db.lawn_protocol_audit_log).toHaveLength(0);
+    db.product_limits.find((r) => r.id === 'cap-gr').limit_value = 16.3977;
+    await priceMigration.up(knex);
+    await priceMigration.up(knex);
+    expect(db.product_limits.find((r) => r.id === 'cap-gr').limit_value).toBe(16.38);
+    expect(db.lawn_protocol_audit_log).toHaveLength(1);
+  });
+
+  test('down puts 16.3977 back only while the row still holds 16.38', async () => {
+    const { db, knex } = build();
+    await priceMigration.up(knex);
+    await priceMigration.down(knex);
+    expect(db.product_limits.find((r) => r.id === 'cap-gr').limit_value).toBe(16.3977);
+    expect(db.lawn_protocol_audit_log).toHaveLength(0);
+    await priceMigration.up(knex);
+    db.product_limits.find((r) => r.id === 'cap-gr').limit_value = 16;
+    await priceMigration.down(knex);
+    expect(db.product_limits.find((r) => r.id === 'cap-gr').limit_value).toBe(16);
+  });
+});
