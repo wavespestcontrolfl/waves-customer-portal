@@ -951,12 +951,15 @@ function serialize(row) {
 // A row filed from a text belongs to the customer that text belongs to now. A
 // merge undo moves the text back to the restored customer without knowing
 // about rows derived from it, so every read and decision checks the owner.
+const ownsSource = (source, row) => (source.customer_id
+  ? source.customer_id === row.customer_id
+  : !row.customer_id || !!row.linked_at);
 async function sourceStillOwned(trx, row) {
   if (row.source_type !== 'sms' || !row.source_id) return true;
   const source = await trx('sms_log').where({ id: row.source_id }).first('customer_id');
-  // A text with no customer has no owner to move away from: the office linked
-  // its codes to the customer it chose.
-  return !source || !source.customer_id || source.customer_id === row.customer_id;
+  // A text with no customer: a row the office linked belongs to the customer
+  // it chose; a row filed for a customer the text has since lost does not.
+  return !source || ownsSource(source, row);
 }
 
 // At an office accept the text must still say what the row quotes: a text
@@ -968,7 +971,7 @@ async function sourceStillSupports(trx, row) {
   if (!source) return true;
   // Still a text the sweep would read: inbound, eligible, this owner's.
   // (A text with no customer is the office's to link: its rows answer to it.)
-  if ((source.customer_id && source.customer_id !== row.customer_id) || source.direction !== 'inbound'
+  if (!ownsSource(source, row) || source.direction !== 'inbound'
     || !eligibleMessage(source, { unlinked: !source.customer_id })) return false;
   // The sweep has read these exact words for this owner, and that read left
   // this row waiting (reconcile removes what it no longer supports), so its
@@ -986,8 +989,13 @@ async function sourceStillSupports(trx, row) {
     .first('id');
   return !!read;
 }
+// A row's text belongs to the row's customer, or (an office link) the text
+// has no customer and the office linked the row. A text that lost its
+// customer after the row was filed is no longer that customer's evidence.
 const OWNED_SOURCE_SQL = `(a.source_type <> 'sms' OR a.source_id IS NULL OR NOT EXISTS (
-  SELECT 1 FROM sms_log src WHERE src.id = a.source_id AND src.customer_id IS NOT NULL AND src.customer_id IS DISTINCT FROM a.customer_id))`;
+  SELECT 1 FROM sms_log src WHERE src.id = a.source_id
+    AND src.customer_id IS DISTINCT FROM a.customer_id
+    AND NOT (src.customer_id IS NULL AND a.linked_at IS NOT NULL)))`;
 
 async function listForCustomer(conn, customerId) {
   const rows = await conn('customer_access_codes as a')
@@ -1493,7 +1501,7 @@ async function link(conn, id, { customerId, adminUserId = null } = {}) {
       else if (homes.length === 1) home = homes[0];
       const [updated] = await trx('customer_access_codes').where({ id }).update({
         customer_id: customerId, property_id: home, sender_phone: null,
-        suggested_customer_id: null, updated_at: trx.fn.now(),
+        suggested_customer_id: null, linked_at: trx.fn.now(), updated_at: trx.fn.now(),
       }).returning('*');
       await audit(trx, adminUserId, 'access_code.linked', id, {
         customer_id: customerId, kind: row.kind, life: row.life, source_type: row.source_type,

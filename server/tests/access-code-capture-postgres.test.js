@@ -887,6 +887,18 @@ postgres('access codes section', () => {
       expect(ev).toMatchObject({ actor_type: 'system', actor_id: null });
     });
 
+    test('a text that loses its customer stops being that customer\'s code; an office link is not affected', async () => {
+      const owner = await customer();
+      const id = await text(owner.id, 'The garage code is 1357');
+      await sweep(stub([gateItem({ kind: 'garage', code: '1357', quote: 'The garage code is 1357' })]));
+      const [row] = await rows(owner.id);
+      await access.accept(trx, row.id, { adminUserId: ADMIN_ID });
+      await trx('sms_log').where({ id }).update({ customer_id: null });
+      expect((await access.listForCustomer(trx, owner.id)).active).toEqual([]);
+      await sweep(stub([]));
+      expect((await trx('customer_access_codes').where({ id: row.id }).first()).status).toBe('retired');
+    });
+
     test('with the gate off the sweep still retires a code whose text moved', async () => {
       const winner = await customer();
       const loser = await customer();
