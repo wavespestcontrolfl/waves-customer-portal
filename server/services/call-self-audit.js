@@ -29,9 +29,15 @@ const BASELINE_DISAGREE_RATE = 0.11; // measured in the 2026-07 mining run (fast
 const FIELD_DRIFT_ALERT = BASELINE_DISAGREE_RATE + 0.03;
 const DISPOSITION_MISMATCH_ALERT = 0.05;
 
+// appointment_agreed is graded by the extractor's own rule text (one source):
+// a paraphrase here drifted from production twice (10-05, #5994).
+const { auditAppointmentContract } = require('./prompts/appointment-confirmed-rules');
+
 const AUDIT_PROMPT = `You are auditing one phone-call analysis for Waves Pest Control (pest control + lawn care, SW Florida; "Agent" = staff, "Caller" = the external customer/contact). Judge ONLY from the transcript. Return ONLY JSON:
 {"is_lead": boolean, "is_spam": boolean, "is_voicemail": boolean, "appointment_agreed": boolean, "quote_promised": boolean, "complaint": boolean, "excerpt": "<=25 words supporting your most important judgment"}
-Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead. Each transcript is preceded by a CALL DIRECTION line — read it, since it can warn that the printed speaker labels are unreliable and tell you to judge by what each party says instead.`;
+Rules: a two-party conversation (both speakers 3+ turns) is never a voicemail; a caller with a service request/address/quoted price is never spam; an existing customer coordinating a visit is not a new lead. Each transcript is preceded by a CALL DIRECTION line — read it, since it can warn that the printed speaker labels are unreliable and tell you to judge by what each party says instead.
+appointment_agreed is production's appointment_confirmed field: answer it exactly as these production extraction rules decide it (the preferred_date_time and confirmed_start_at details do not apply to you):
+${auditAppointmentContract('the date the call took place')}`;
 
 
 const OUTBOUND_DIRECTION_SQL = "COALESCE(direction, '') LIKE 'outbound%'";
@@ -66,7 +72,7 @@ function compactDirection(direction) {
     : 'INBOUND: the caller dialed Waves; the person who answered is staff.';
 }
 
-// Shadow: put the same call to TypeSafe Jev (call_judge.v2) and record its
+// Shadow: put the same call to TypeSafe Jev (call_judge.v3) and record its
 // answers beside production's and the deep judge's in decision_reviews. Dark
 // behind GATE_TYPED_DECISIONS. With GATE_TYPED_DECISIONS_CLEF also on, the
 // same package goes to Cloudflare Clef as a second leg and each provider's
@@ -99,7 +105,7 @@ async function shadowJevJudge(call, prod, verdict, tally, gateBaselines = {}) {
   const bool = (v) => (typeof v === 'boolean' ? v : undefined);
   const judgeBaselines = { complaint: { deep_judge: bool(verdict.complaint) } };
   for (const f of JEV_SHARED_FIELDS) judgeBaselines[f] = { production: prod[f], deep_judge: bool(verdict[f]) };
-  count(tally, clef, await askAndRecord(call, { packageId: 'call_judge.v2', baselines: judgeBaselines }, clef));
+  count(tally, clef, await askAndRecord(call, { packageId: 'call_judge.v3', baselines: judgeBaselines }, clef));
   // The dark call gates' own decisions beside the same providers' answers
   // (call_gate_checks.v1); tallied apart so call_judge's counts keep their meaning.
   // Asked only when the WHOLE transcript fits the span the models and the

@@ -131,6 +131,8 @@ function ownerGateOnCell(ownerDirect, tool) {
 //     card (the scope named name, phone and address)
 //   - update_lead_contact: direct only by lead_id alone, never by name
 //   - reschedule_appointment: direct only when the pinned visit is ungrouped
+//   - adjust_stock, update_restock_request: always a card on the owner login (owner 2026-10-05),
+//     because both change the stock count and the wording cannot be trusted for the amount
 const OWNER_KNOWN_DIFFERENCES = [
   'switch_appointment_property:owner',
   'save_customer_estimate:owner',
@@ -139,6 +141,8 @@ const OWNER_KNOWN_DIFFERENCES = [
   'update_customer:owner',
   'update_lead_contact:owner',
   'reschedule_appointment:owner',
+  'adjust_stock:owner',
+  'update_restock_request:owner',
 ];
 
 function classify(name, action, gates) {

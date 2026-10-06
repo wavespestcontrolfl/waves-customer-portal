@@ -680,7 +680,8 @@ describe('report ask event metadata (topic only, owner ruling 2026-09-28)', () =
   });
 
   test('the topic comes from the same routing that produced the answer', () => {
-    expect(src).toMatch(/const \{ answer, topic \} = routeServiceReportQuestion\(\{/);
+    expect(src).toMatch(/const routed = routeServiceReportQuestion\(\{/);
+    expect(src).toMatch(/const \{ topic \} = routed;/);
   });
 });
 

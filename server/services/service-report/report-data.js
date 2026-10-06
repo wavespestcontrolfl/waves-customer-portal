@@ -5707,6 +5707,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           findingsText: lawnAssessment.observations || lawnAssessment.customerSummary || '',
           photoSummary: reportV2.photoSummary || '',
           knex,
+          skipGeneration: opts.skipNarrativeGeneration === true,
         });
         reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
         treatmentNarrativeRenderedSignature = narrative?.signature || null;
@@ -6048,6 +6049,19 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // (undefined while dark: the builder output is unchanged).
           ...(tsCopyFindings ? { techFindings: tsCopyFindings } : {}),
         });
+        // GATE_TS_TECH_PARAGRAPH: the "From your technician" paragraph written once
+        // at completion and frozen (tree-shrub-tech-paragraph.js). A render only
+        // READS it, from the record this build already loaded: no new query and no
+        // model call. A frozen entry that fails the read-time screens, or any read
+        // error, prints nothing. The PDF key follows the same read
+        // (treeShrubTechParagraphPdfSignature), so a cached PDF never lacks text
+        // the page shows. Absent key = nothing renders.
+        if (reportV2 && featureGates.tsTechParagraphLive()) {
+          try {
+            const techParagraph = require('./tree-shrub-tech-paragraph').readFrozenTechParagraph(service.structured_notes, treeShrubAssessment.assessmentId);
+            if (techParagraph) reportV2.techParagraph = techParagraph;
+          } catch { /* a missing paragraph prints nothing */ }
+        }
         // AI "What we applied today" narrative (owner 2026-07-21): why each
         // product, what it does, the benefit — cached per input hash; the
         // deterministic template stands in when generation misses.
@@ -6063,6 +6077,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             findingsText: reportV2.photoSummary || '',
             photoSummary: reportV2.photoSummary || '',
             knex,
+            skipGeneration: opts.skipNarrativeGeneration === true,
           });
           reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
           // Signature of the EXACT text rendered — PDF stores key off this,

@@ -19,6 +19,9 @@ import {
   DRAFT_RETENTION_MS,
   deleteFastCompletionAttempt,
   getFastCompletionAttempt,
+  FAST_COMPLETION_TIMEOUT_MS,
+  hasFastCompletionMarker,
+  listFastCompletionMarkers,
   listFastCompletionAttempts,
   pruneFastCompletionAttempts,
   putFastCompletionAttempt,
@@ -108,6 +111,45 @@ describe("completion resume store (IndexedDB)", () => {
     expect(await getFastCompletionAttempt("svc-2", "tech-a")).toEqual({ available: true, attempt: null });
     expect(await deleteFastCompletionAttempt("svc-1", "tech-a", attempt.body)).toBe(true);
     expect((await getFastCompletionAttempt("svc-1", "tech-a")).attempt).toBeNull();
+  });
+
+  it("marks a saved Fast Complete attempt outside IndexedDB and clears the mark with the row (GitHub Codex P2 on #5979)", async () => {
+    localStorage.clear();
+    const body = { idempotencyKey: "marker-key", technicianNotes: "Marked" };
+    expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(false);
+    expect(await putFastCompletionAttempt("svc-m", "tech-m", { body, summary: "Marked" })).toBe(true);
+    expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(true);
+    expect(hasFastCompletionMarker("svc-m", "tech-other")).toBe(false);
+    expect(listFastCompletionMarkers("tech-m")).toEqual(["svc-m"]);
+    expect(listFastCompletionMarkers("tech-other")).toEqual([]);
+    expect(await putFastCompletionAttempt("svc-m", "tech-m", { body, summary: "Marked", expectedBody: body, sheet: "lawn_visit" })).toBe(true);
+    expect((await getFastCompletionAttempt("svc-m", "tech-m")).attempt.sheet).toBe("lawn_visit");
+    expect(await deleteFastCompletionAttempt("svc-m", "tech-m", { ...body, technicianNotes: "Other" })).toBe(false);
+    expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(true);
+    expect(await deleteFastCompletionAttempt("svc-m", "tech-m", body)).toBe(true);
+    expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(false);
+    expect(listFastCompletionMarkers("tech-m")).toEqual([]);
+  });
+
+  it("a Fast Complete read that never answers times out without holding the next one (GitHub Codex P2 on #5979)", async () => {
+    vi.useFakeTimers();
+    const factory = globalThis.indexedDB;
+    try {
+      globalThis.indexedDB = { open: () => ({}) };
+      const stalled = getFastCompletionAttempt("svc-stall", "tech-s");
+      await vi.advanceTimersByTimeAsync(FAST_COMPLETION_TIMEOUT_MS);
+      expect(await stalled).toEqual({ available: false, attempt: null });
+      const listed = listFastCompletionAttempts("tech-s");
+      await vi.advanceTimersByTimeAsync(FAST_COMPLETION_TIMEOUT_MS);
+      expect(await listed).toEqual({ available: false, attempts: [] });
+    } finally {
+      globalThis.indexedDB = factory;
+      vi.useRealTimers();
+    }
+    // The same visit's queue moved on: a write and read now go through.
+    const body = { idempotencyKey: "after-stall", technicianNotes: "After" };
+    expect(await putFastCompletionAttempt("svc-stall", "tech-s", { body, summary: "After" })).toBe(true);
+    expect((await getFastCompletionAttempt("svc-stall", "tech-s")).attempt.body).toEqual(body);
   });
 
   it("survives the legacy unmarked-body pruner in an older open tab", async () => {

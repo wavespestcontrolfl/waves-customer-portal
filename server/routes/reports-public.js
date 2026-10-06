@@ -160,6 +160,7 @@ const {
   applicatorRenderedPdfSignature,
 } = require('../services/service-report/pdf-storage');
 const { summaryCopySignature } = require('../services/service-report/technician-report-copy');
+const { treeShrubTechParagraphPdfSignature } = require('../services/service-report/tree-shrub-tech-paragraph-gate');
 const { customerSafeVisitNotes } = require('../services/context-aggregator');
 const {
   mosquitoReportV2PdfSignature,
@@ -1885,11 +1886,39 @@ router.post('/:token/ask', async (req, res, next) => {
     // resolved for the report display (report-data.js's
     // attachApprovedReportProductFacts) — never a second, ungated live
     // products_catalog lookup.
-    const { answer, topic } = routeServiceReportQuestion({
+    const routed = routeServiceReportQuestion({
       question,
       data,
       nextAppointment,
     });
+    const { topic } = routed;
+    let { answer } = routed;
+    // GATE_REPORT_ASK_AI (dark): Claude Sonnet 5.5 writes the answer from the
+    // report's own facts (report-ask-ai.js). Any miss (model failure, ~8 s
+    // timeout, empty or rejected answer) keeps the fixed-rule answer above, so
+    // the reply shape and the recorded event are the same either way. Off =
+    // the fixed-rule answer alone, no model call.
+    // Pest reports only: a lawn or tree & shrub report carries aftercare the
+    // fact sheet does not hold (watering holds, water-in tasks), which the
+    // fixed-rule answer must keep honoring (pre-push audit P1).
+    // Only the topics whose facts the sheet carries in full. Re-entry,
+    // watering and next steps answer from recorded instructions (pet
+    // precautions with fixed waits, technician recommendations, aftercare)
+    // that must reach the customer word for word, so they keep the rule
+    // answer (pre-push audit, several rounds).
+    const { AI_ASK_TOPICS, medicalExposureAnswer } = require('../services/service-report/report-ask-ai');
+    // A question that reports a symptom or an exposure gets the fixed Poison
+    // Control / 911 answer on every report and with the gate off too: the
+    // fixed-rule answers have no medical handling. No model call.
+    const urgent = medicalExposureAnswer(question);
+    if (urgent) {
+      answer = urgent;
+    } else if (data.serviceLine === 'pest' && AI_ASK_TOPICS.has(topic)
+      && require('../config/feature-gates').reportAskAiLive?.() === true) {
+      const { answerReportQuestionWithAI } = require('../services/service-report/report-ask-ai');
+      const ai = await answerReportQuestionWithAI({ question, data, nextAppointment });
+      if (ai) answer = ai.answer;
+    }
     // The question's text is never stored — only its length and the topic
     // the answer came from (report-assistant.js REPORT_QUESTION_TOPICS), so
     // the engagement stats can say what customers ask about per report type.
@@ -2081,6 +2110,8 @@ router.get('/:token', async (req, res, next) => {
       // Narrative key component (audit P2 2026-07-22) — see pdf-queue.js.
       const tnSignature = await treatmentNarrativePdfSignature(service.id, db, { serviceLine: service.service_line || detectServiceLine(service.service_type) });
       const apSignature = await applicatorIdentityPdfSignature(service.id, db);
+      // T&S "From your technician" paragraph (GATE_TS_TECH_PARAGRAPH): '' unless the gate is live and a whole frozen entry exists.
+      const tsParagraphSignature = await treeShrubTechParagraphPdfSignature(service, db);
       // Assessment identity + copy version, computed ONCE before the render and
       // reused for both the expected-key check and the store, so the key always
       // describes the same assessment on both sides (#3168).
@@ -2092,7 +2123,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + apSignature + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachV2Signature + reserviceV2Signature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + apSignature + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -2240,7 +2271,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + apRenderedSignature + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsSignature + photoSetSignature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + apRenderedSignature + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

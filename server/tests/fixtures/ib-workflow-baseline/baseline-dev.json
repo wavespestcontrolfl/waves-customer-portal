@@ -158,16 +158,7 @@
       "outcome": "pass"
     },
     "W5-dev-06": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "commercial_refusal_not_specific",
-      "failures": [
-        "tool_result:commercial_refusal_not_specific",
-        "proposal:commercial_booking_carded",
-        "domain_rule:commercial_account_booked_on_price",
-        "side_effect:guard_sent_a_text",
-        "side_effect:guard_outbound_row_added"
-      ]
+      "outcome": "pass"
     },
     "W5-dev-07": {
       "outcome": "pass"
@@ -176,14 +167,7 @@
       "outcome": "pass"
     },
     "W5-dev-09": {
-      "outcome": "fail",
-      "point": "domain_rule",
-      "code": "taken_slot_double_booked",
-      "failures": [
-        "domain_rule:taken_slot_double_booked",
-        "side_effect:guard_sent_a_text",
-        "side_effect:guard_outbound_row_added"
-      ]
+      "outcome": "pass"
     },
     "W5-dev-10": {
       "outcome": "pass"
@@ -463,14 +447,7 @@
       "outcome": "pass"
     },
     "W10-dev-06": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "product_target_not_established",
-      "failures": [
-        "target_resolution:product_target_not_established",
-        "tool_result:missing_unit_not_clarified",
-        "side_effect:stock_changed_without_a_unit"
-      ]
+      "outcome": "pass"
     },
     "W10-dev-07": {
       "outcome": "fail",

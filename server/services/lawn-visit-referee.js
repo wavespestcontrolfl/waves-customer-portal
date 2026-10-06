@@ -235,6 +235,13 @@ function usablePicks(json, disputes) {
   return Object.keys(picks).length ? picks : null;
 }
 
+// A leg's cap under the caller's shared deadline (an absolute time, or null):
+// its own ceiling, or what is left of the deadline when that is shorter. A
+// deadline already passed is checked before the leg starts (deadlinePassed),
+// so the floor here only pads a leg that began with time left.
+const capUnder = (capMs, deadline) => (deadline ? Math.min(capMs, Math.max(1000, deadline - Date.now())) : capMs);
+const deadlinePassed = (deadline) => Boolean(deadline) && Date.now() >= deadline;
+
 // Every dispatch is bounded from this side too, and can never reject.
 async function boundedDispatch(route, payload, capMs) {
   let timer;
@@ -315,18 +322,24 @@ const skipped = (reason, extra = {}) => ({
  * the GATE_LAWN_LIGHTING variant, so the second opinion is validated against it). Returns { json, referee } where
  * `json` is Gemini's own object untouched unless a dispute settled. Never throws.
  */
-async function refereeVisit({ policy, payload, geminiJson, visit }) {
+// `deadline` (optional, absolute ms): the caller's shared wall-clock deadline
+// for the whole visit read; each leg below runs under the shorter of its own
+// cap and what is left of it, so the pass never outlives the request window.
+async function refereeVisit({ policy, payload, geminiJson, visit, deadline = null }) {
   try {
     const reasons = secondOpinionReasons(geminiJson);
     if (!reasons.length) return { json: geminiJson, referee: skipped('not_unsure_or_serious') };
     const solRoute = policy?.fallback;
     if (!solRoute || !solRoute.provider || !solRoute.model) return { json: geminiJson, referee: skipped('no_second_opinion_route', { secondOpinion: { called: false, reasons, model: null, ok: false } }) };
 
+    // Out of time before the second opinion: Gemini's read stands as-is.
+    if (deadlinePassed(deadline)) return { json: geminiJson, referee: skipped('deadline_exhausted', { secondOpinion: { called: false, reasons, model: null, ok: false } }) };
+
     const version = payload.promptVersion || PROMPT_VERSION;
     // Same system prompt, images, schema; Gemini-only knobs dropped.
     const solPayload = { ...payload };
     delete solPayload.thinkingLevel;
-    const solResult = await boundedDispatch(solRoute, { ...solPayload, promptVersion: `${version}:second-opinion` }, SECOND_OPINION_MAX_MS);
+    const solResult = await boundedDispatch(solRoute, { ...solPayload, promptVersion: `${version}:second-opinion` }, capUnder(SECOND_OPINION_MAX_MS, deadline));
     const solInfo = { called: true, reasons, ...legInfo(solResult, solRoute) };
     const solValid = solResult.ok && validateAssessmentJson(solResult, visit.photoCount, { lighting: visit.lighting === true }) === null;
     if (solResult.ok && !solValid) {
@@ -343,6 +356,12 @@ async function refereeVisit({ policy, payload, geminiJson, visit }) {
     if (!disputes.length) return { json: geminiJson, referee: { ...skipped(ambiguous ? 'ambiguous_pairing' : 'no_dispute'), ...base } };
 
     const route = MODELS.ROUTES.lawnAssessmentReferee;
+    // Out of time before the tie-break: the disputes stay unsettled, like a
+    // referee call that timed out, with no call made.
+    if (deadlinePassed(deadline)) {
+      const unavailable = { ok: false, reason: 'deadline_exhausted' };
+      return { json: geminiJson, referee: { triggered: true, ...base, referee: legInfo(unavailable, route), usage: null, outcome: 'unavailable', reason: 'deadline_exhausted' } };
+    }
     const result = await boundedDispatch(route, {
       system: buildRefereeSystem(),
       text: `${buildUserText(visit.photoCount, visit.context)}\n\n${buildRefereeDisputes(disputes)}\n\nSettle only the disputed names listed above.`,
@@ -352,7 +371,7 @@ async function refereeVisit({ policy, payload, geminiJson, visit }) {
       maxTokens: REFEREE_MAX_TOKENS,
       laneId: 'lawn_assessment_referee',
       promptVersion: `${version}:referee`,
-    }, REFEREE_MAX_MS);
+    }, capUnder(REFEREE_MAX_MS, deadline));
     const picks = result.ok ? usablePicks(result.json, disputes) : null;
     if (result.ok && !picks) rejectCall(result, 'schema_invalid:referee');
     const refereeInfo = { triggered: true, ...base, referee: legInfo(result, route), usage: result.usage || null };

@@ -17,7 +17,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal, ibBookingOverlapProposal,
   CARD_CANCEL_REFUSED_MESSAGE,
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
@@ -1312,8 +1312,28 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._booking_discount_name = booking.discountName;
       params._booking_discount_type = booking.discountType;
       params._booking_discount_amount = booking.discountAmount;
+      // Whether another visit already overlaps this time when the card is
+      // built (owner 2026-10-05). The executor books through an overlap that
+      // already existed (warning only) but refuses one that is NEW since
+      // this card, so the operator sees a fresh card first. Set
+      // unconditionally: a model-supplied value can never stand in. A
+      // windowless or invalid-window booking has nothing to probe: no pin;
+      // neither does one whose probe could not be read.
+      let overlapNow = null;
+      try {
+        overlapNow = await ibBookingOverlapProposal(params.scheduled_date, params.time_window);
+      } catch (err) {
+        // A transient read error is less than a conflict, and a staff save
+        // never blocks on a conflict (owner 2026-08-25): no pin, so the
+        // executor keeps the warn-only behavior.
+        logger.warn(`[intelligence-bar] booking overlap pin unavailable for customer ${params.customer_id}: ${err.message}`);
+        overlapNow = null;
+      }
+      if (overlapNow == null) delete params._booking_overlap;
+      else params._booking_overlap = overlapNow;
       preview = {
         ...preview,
+        ...(overlapNow ? { slot_overlap: { already_overlaps: true } } : {}),
         pinned_price: {
           amount: booking.price,
           source: booking.source,

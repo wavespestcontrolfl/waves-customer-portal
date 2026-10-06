@@ -1204,6 +1204,22 @@ describe('tips from your tech', () => {
     expect(completeCalls()[0].body.techTips).toEqual({ ids: ['tip-sedge'], custom: null });
   });
 
+  test('a tip the note calls for leads the list, ahead of the library order', async () => {
+    tips = lib(['Mow high', 'Dollarweed', 'Chinch bugs']);
+    await openSheet();
+    const order = () => screen.getAllByRole('button', { name: /^(Mow high|Dollarweed|Chinch bugs)/ }).map((b) => b.textContent.split('Copy')[0].trim());
+    expect(order()[0]).toBe('Mow high');
+    fireEvent.change(screen.getByLabelText(/tell me about the visit/i), { target: { value: 'Chinch bugs in the trouble spot, treated with Arena.' } });
+    expect(order()[0]).toBe('Chinch bugs');
+    // Two matches: the tip with more matched keywords leads, not the library's earlier one.
+    tips = lib(['Dollarweed', 'Chinch bugs']);
+    tips.groups[0].tips[1].keywords.push('side strip');
+    cleanup();
+    await openSheet();
+    fireEvent.change(screen.getByLabelText(/tell me about the visit/i), { target: { value: 'Dollarweed near the lanai. Chinch bugs by the drive, chinch bugs in the side strip.' } });
+    expect(order().slice(0, 2)).toEqual(['Chinch bugs', 'Dollarweed']);
+  });
+
   test('no tip library, no section, and techTips is null', async () => {
     await openSheet();
     expect(screen.queryByLabelText('Search tips')).toBeNull();

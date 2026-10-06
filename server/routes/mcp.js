@@ -108,7 +108,7 @@ async function getService(serviceKey) {
 
 function getProtocol(protocolKey) {
    
-  const protocols = require('../config/protocols.json');
+  const protocols = { ...require('../config/protocols.json'), lawn: require('../services/lawn-program').lawnProtocols() };
   const node = String(protocolKey || '').split('.').reduce((acc, part) => (acc && typeof acc === 'object' ? acc[part] : undefined), protocols);
   if (!node || !Array.isArray(node.visits)) return { error: 'protocol not found', availableExamples: ['pest', 'termite', 'lawn.st_augustine', 'tree_shrub'] };
   return node;
