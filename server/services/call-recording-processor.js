@@ -11324,7 +11324,7 @@ const CallRecordingProcessor = {
           // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
           // cards only; finalFlags, the route decision and the routing
           // verdict keep every flag.
-          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction).dropped);
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1 }).dropped);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
             // Only cards this pass would file are skipped. Cards an earlier

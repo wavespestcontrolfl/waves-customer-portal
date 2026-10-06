@@ -51,6 +51,12 @@ describe('dropUnneededCallCards', () => {
     expect(r.flags).toEqual(['address_unverified', 'low_confidence_address']);
   });
 
+  test('a V1-only street on the merged record keeps the address cards', () => {
+    const flags = ['address_unverifiable', 'missing_service_address'];
+    const e = ext({ status: 'none', intent: 'follow_up_existing_service' });
+    expect(dropUnneededCallCards(flags, e, { canonicalStreet: '100 Sample Palm Dr' }).flags).toEqual(flags);
+  });
+
   test('a stated street keeps every address card even on a status call', () => {
     const e = ext({ status: 'none', intent: 'follow_up_existing_service' });
     e.property = { service_address: { street_line_1: '100 Sample Palm Dr' } };

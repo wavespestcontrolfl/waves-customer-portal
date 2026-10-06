@@ -743,7 +743,7 @@ function callMakesNoServiceAsk(extraction) {
   return !sr.service_intent || EXISTING_SERVICE_INTENTS.has(sr.service_intent);
 }
 
-function dropUnneededCallCards(flags, extraction) {
+function dropUnneededCallCards(flags, extraction, { canonicalStreet = null } = {}) {
   const list = Array.isArray(flags) ? flags : [];
   const dropped = new Set();
   const has = (f) => list.includes(f);
@@ -755,7 +755,9 @@ function dropUnneededCallCards(flags, extraction) {
   }
   const status = String(extraction?.scheduling?.status || 'none');
   if (status === 'none') dropped.add('existing_appointment_coordination');
-  const statedStreet = String(extraction?.property?.service_address?.street_line_1 || '').trim();
+  // The merged canonical record counts too: adoptV2PrimaryFields keeps a
+  // V1-only street V2 dropped, and Step 3's backfill can copy it.
+  const statedStreet = String(extraction?.property?.service_address?.street_line_1 || canonicalStreet || '').trim();
   if (callMakesNoServiceAsk(extraction) && !statedStreet) {
     for (const f of NO_ASK_ADDRESS_CARDS) dropped.add(f);
   }
