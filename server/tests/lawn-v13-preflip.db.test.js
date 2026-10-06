@@ -19,6 +19,7 @@ const labelMaxMigration = require('../models/migrations/20261006170000_lawn_v13_
 const ownershipMigration = require('../models/migrations/20261006180000_lawn_v13_april_9x_ownership');
 const octoberMigration = require('../models/migrations/20261007120000_lawn_v13_october_dimension');
 const commercialMigration = require('../models/migrations/20261007130000_lawn_v13_october_dimension_commercial_rate');
+const siteOneMigration = require('../models/migrations/20261007133000_lawn_v13_dimension_siteone_row_reconcile');
 const priceMigration = require('../models/migrations/20261007134000_lawn_v13_dimension_price_and_cap_clamp');
 const v13Recipe = require('../config/lawn-protocol-v13.json');
 const { LAWN_V13_VERSION } = require('../services/lawn-program');
@@ -394,6 +395,91 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       } finally {
         await knex('vendor_pricing').where({ product_id: productId }).del();
         await priceMigration.down(knex);
+      }
+    });
+
+    test('a pending $0 SiteOne row is updated in place by 133000, then 134000 skips its insert: no unique-key failure, one SiteOne row at $44.23, the best price set; down puts the pending row back', async () => {
+      const productId = catalog[DIMENSION].id;
+      const [siteOne] = await knex('vendors').where({ name: 'SiteOne' }).select('id');
+      const [pending] = await knex('vendor_pricing').insert({
+        product_id: productId, vendor_id: siteOne.id, price: 0, price_amount: 0, quantity: '50 lb', price_type: 'manual', source_type: 'manual',
+        approval_status: 'pending', is_active: false, currency: 'USD',
+      }).returning('*');
+      const rows = () => knex('vendor_pricing').where({ product_id: productId });
+      const catalogRow = () => knex('products_catalog').where({ id: productId }).first();
+      const catalogBefore = await catalogRow();
+      try {
+        // 134000 alone would hit the unique (product_id, vendor_id) key; 133000 runs first on a deploy.
+        await siteOneMigration.up(knex);
+        await priceMigration.up(knex);
+        const [row] = await rows();
+        expect(await rows()).toHaveLength(1);
+        expect(row).toMatchObject({ id: pending.id, approval_status: 'approved', is_active: true, price_type: 'manual', quantity: '50 lb', vendor_sku: '702032', is_best_price: true });
+        expect(Number(row.price)).toBe(44.23);
+        const priced = await catalogRow();
+        expect(priced).toMatchObject({ best_vendor: 'SiteOne', best_vendor_pricing_id: pending.id, best_price_status: 'current', needs_pricing: false });
+        expect(Number(priced.best_price)).toBe(44.23);
+        expect(await knex('price_snapshots').where({ vendor_pricing_id: pending.id })).toHaveLength(1);
+      } finally {
+        await priceMigration.down(knex);
+        await siteOneMigration.down(knex);
+      }
+      const [restored] = await rows();
+      expect(await rows()).toHaveLength(1);
+      expect(restored).toMatchObject({ id: pending.id, approval_status: 'pending', is_active: false, price_type: 'manual', vendor_sku: pending.vendor_sku, is_best_price: pending.is_best_price });
+      expect(Number(restored.price)).toBe(0);
+      expect(await knex('price_snapshots').where({ product_id: productId })).toHaveLength(0);
+      expect(await knex('price_history').where({ product_id: productId })).toHaveLength(0);
+      const after = await catalogRow();
+      for (const column of ['best_price', 'best_vendor', 'best_vendor_pricing_id', 'best_price_status', 'needs_pricing', 'unit_size_oz']) {
+        expect({ column, value: after[column] }).toEqual({ column, value: catalogBefore[column] });
+      }
+      await knex('vendor_pricing').where({ product_id: productId }).del();
+    });
+
+    test('on a database where 134000 already ran, 133000 leaves the vendor row, the catalog price, the history and the snapshots exactly as they are', async () => {
+      const productId = catalog[DIMENSION].id;
+      await priceMigration.up(knex);
+      try {
+        const snapshot = async () => JSON.stringify({
+          rows: await knex('vendor_pricing').where({ product_id: productId }).orderBy('id'),
+          catalog: await knex('products_catalog').where({ id: productId }).first(),
+          history: await knex('price_history').where({ product_id: productId }),
+          snapshots: await knex('price_snapshots').where({ product_id: productId }),
+        });
+        const before = await snapshot();
+        await siteOneMigration.up(knex);
+        expect(await snapshot()).toBe(before);
+        for (const log of await knex('lawn_protocol_audit_log').where({ action: siteOneMigration.ACTION })) expect(log.after_snapshot.price).toBeNull();
+      } finally {
+        await siteOneMigration.down(knex);
+        await priceMigration.down(knex);
+      }
+    });
+
+    test('133000 on real tables: a product limit that allows 5 applications or 30 days takes 3 and 60; down puts 5 and 30 back; the liquid cap text is neutral', async () => {
+      const productId = catalog[DIMENSION].id;
+      const limits = () => knex('product_limits').where({ product_id: productId, match_type: 'product' }).orderBy('limit_type').select('limit_type', 'limit_value', 'limit_unit');
+      const set = (type, value) => knex('product_limits').where({ product_id: productId, match_type: 'product', limit_type: type }).update({ limit_value: value });
+      await set('annual_max_apps', 5);
+      await set('min_interval_days', 30);
+      // A liquid dithiopyr cap row carrying the granular text, as 130000 leaves it.
+      const [liquid] = await knex('product_limits').insert({
+        product_id: catalog[DIM_2EW].id, match_type: 'active_ingredient', match_value: 'dithiopyr', limit_type: 'annual_max_rate', limit_value: 2.2039,
+        limit_unit: 'fl oz/1000sf/year', severity: 'hard_block', description: `Dithiopyr yearly cap, all products: ${siteOneMigration.CAP_GRANULAR_TEXT} for 2EW.`,
+      }).returning('*');
+      try {
+        await siteOneMigration.up(knex);
+        expect((await limits()).map((r) => [r.limit_type, Number(r.limit_value), r.limit_unit])).toEqual([['annual_max_apps', 3, 'applications'], ['min_interval_days', 60, 'days']]);
+        expect((await knex('product_limits').where({ id: liquid.id }).first()).description).toContain(siteOneMigration.CAP_NEUTRAL_TEXT);
+        await siteOneMigration.down(knex);
+        expect((await limits()).map((r) => [r.limit_type, Number(r.limit_value)])).toEqual([['annual_max_apps', 5], ['min_interval_days', 30]]);
+        expect((await knex('product_limits').where({ id: liquid.id }).first()).description).toContain(siteOneMigration.CAP_GRANULAR_TEXT);
+      } finally {
+        await set('annual_max_apps', 3);
+        await set('min_interval_days', 60);
+        await knex('product_limits').where({ id: liquid.id }).del();
+        await knex('lawn_protocol_audit_log').where({ action: siteOneMigration.ACTION }).del();
       }
     });
 

@@ -1035,3 +1035,69 @@ describe('migration 20261007134000: the granular dithiopyr cap is the label\'s 1
     expect(db.product_limits.find((r) => r.id === 'cap-gr').limit_value).toBe(16);
   });
 });
+
+// ── Weaker product limits and the liquid cap text (Codex round 3 on #6084) ───
+describe('migration 20261007133000: commercial limit values on existing rows, a formulation-neutral liquid cap text', () => {
+  const reconcile = require('../models/migrations/20261007133000_lawn_v13_dimension_siteone_row_reconcile');
+  const NEW = octoberMigration.NEW_NAME;
+  const limit = (db, id) => db.product_limits.find((r) => r.id === id);
+  const build = () => {
+    // No vendor tables here: the SiteOne row half skips itself (it is proved against PostgreSQL).
+    const db = {
+      products_catalog: [{ id: 'dim', name: NEW, active: true }],
+      lawn_protocol_audit_log: [],
+      product_limits: [
+        { id: 'apps', product_id: 'dim', match_type: 'product', limit_type: 'annual_max_apps', limit_value: 5, limit_unit: 'applications', severity: 'hard_block', description: 'Office rule' },
+        { id: 'days', product_id: 'dim', match_type: 'product', limit_type: 'min_interval_days', limit_value: 30, limit_unit: 'days', severity: 'warning', description: 'Office rule' },
+        { id: 'cap-2ew', product_id: 'p-2ew', match_type: 'active_ingredient', match_value: 'dithiopyr', limit_type: 'annual_max_rate', limit_value: 2.2039, limit_unit: 'fl oz/1000sf/year',
+          description: `Dithiopyr yearly cap, all products: 1.5 lb ai/acre/year ${reconcile.CAP_GRANULAR_TEXT}, written as 2.2039 fl oz of 2EW per 1,000 sq ft.` },
+        { id: 'cap-gr', product_id: 'dim', match_type: 'active_ingredient', match_value: 'dithiopyr', limit_type: 'annual_max_rate', limit_value: 16.38, limit_unit: 'lb/1000sf/year',
+          description: `Dithiopyr yearly cap, all products: 1.5 lb ai/acre/year ${reconcile.CAP_GRANULAR_TEXT}, written as 16.38 lb per 1,000 sq ft.` },
+      ],
+    };
+    return { db, knex: makeKnex(db) };
+  };
+
+  test('product limits that allow more than 3 applications or fewer than 60 days take the label values; a stricter row is left alone', async () => {
+    const { db, knex } = build();
+    await reconcile.up(knex);
+    expect(limit(db, 'apps')).toMatchObject({ limit_value: 3, limit_unit: 'applications' });
+    expect(limit(db, 'days')).toMatchObject({ limit_value: 60, limit_unit: 'days' });
+    const { db: strict, knex: strictKnex } = build();
+    Object.assign(limit(strict, 'apps'), { limit_value: 2 });
+    Object.assign(limit(strict, 'days'), { limit_value: 90 });
+    await reconcile.up(strictKnex);
+    expect([limit(strict, 'apps').limit_value, limit(strict, 'days').limit_value]).toEqual([2, 90]);
+    // A row for another product is not touched.
+    const { db: other, knex: otherKnex } = build();
+    limit(other, 'apps').product_id = 'someone-else';
+    await reconcile.up(otherKnex);
+    expect(limit(other, 'apps').limit_value).toBe(5);
+  });
+
+  test('the 2EW cap says the formulation-neutral label limit; the granular row keeps its 16.38 lb text', async () => {
+    const { db, knex } = build();
+    await reconcile.up(knex);
+    expect(limit(db, 'cap-2ew').description).toContain(reconcile.CAP_NEUTRAL_TEXT);
+    expect(limit(db, 'cap-2ew').description).not.toMatch(/16\.38/);
+    expect(limit(db, 'cap-gr').description).toContain('16.38 lb of product per 1,000 sq ft per year');
+  });
+
+  test('idempotent; one audit row; down puts every value back only while it still holds what was written', async () => {
+    const { db, knex } = build();
+    const before = JSON.stringify(db.product_limits);
+    await reconcile.up(knex);
+    await reconcile.up(knex);
+    expect(db.lawn_protocol_audit_log.filter((a) => a.action === reconcile.ACTION)).toHaveLength(1);
+    await reconcile.down(knex);
+    expect(JSON.stringify(db.product_limits)).toBe(before);
+    expect(db.lawn_protocol_audit_log).toHaveLength(0);
+    await reconcile.up(knex);
+    limit(db, 'apps').limit_value = 4;
+    limit(db, 'cap-2ew').description = 'Edited by the office';
+    await reconcile.down(knex);
+    expect(limit(db, 'apps').limit_value).toBe(4);
+    expect(limit(db, 'days').limit_value).toBe(30);
+    expect(limit(db, 'cap-2ew').description).toBe('Edited by the office');
+  });
+});
