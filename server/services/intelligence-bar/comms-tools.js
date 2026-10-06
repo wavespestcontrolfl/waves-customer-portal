@@ -20,6 +20,7 @@ const {
   sendManualCustomerSms,
   manualSmsDeliveryState,
 } = require('../messaging/send-manual-customer-sms');
+const { classifyDeliveryCertainty } = require('../messaging/send-customer-message');
 const { excludeRecruitingSmsLog, isRecruitingMessageType } = require('../../utils/recruiting-thread-scope');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 // cancel_queued_message is SMS-only (owner ruling, dunning-unification-style
@@ -335,10 +336,15 @@ function uncertainManualSmsResponse(outcome) {
   };
 }
 
+// Did this send's outcome come back ambiguous? Two canonical readings, no local
+// rule: the manual-send wrapper's own interlock state (manualSmsDeliveryState),
+// or classifyDeliveryCertainty on the result or on the outcome a thrown error
+// carries. The classification is asked only of a value that states a
+// deliveryOutcome: a legacy provider receipt without one ({ sent, providerMessageId },
+// the accepted-but-unaudited shape above) is accepted evidence, not ambiguity.
 function isUncertainManualSmsOutcome(outcome) {
   return manualSmsDeliveryState(outcome) === 'uncertain'
-    || outcome?.deliveryOutcome === 'uncertain'
-    || outcome?.providerOutcome?.deliveryOutcome === 'uncertain';
+    || [outcome, outcome?.providerOutcome].some((o) => o?.deliveryOutcome && classifyDeliveryCertainty(o) === 'unknown');
 }
 
 

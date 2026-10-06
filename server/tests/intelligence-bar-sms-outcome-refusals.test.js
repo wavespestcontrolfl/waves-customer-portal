@@ -241,27 +241,38 @@ describe('a customer who opts out between the card and the confirm', () => {
 
 describe('the reservation row for an unknown outcome', () => {
   const real = jest.requireActual('../services/intelligence-bar/sms-outcome-guard');
+  const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000);
+  const row = (status, metadata, ageHours = 1) => ({ id: `${status}-${ageHours}`, status, metadata, created_at: hoursAgo(ageHours), updated_at: hoursAgo(ageHours) });
 
-  test('carriesUnknownOutcome reads the markers the SMS layer already writes', () => {
-    expect(real.carriesUnknownOutcome({ provider_outcome_uncertain: true })).toBe(true);
-    expect(real.carriesUnknownOutcome('{"provider_outcome_uncertain":"true"}')).toBe(true);
-    expect(real.carriesUnknownOutcome({ scheduled_sms_claimed_at: '2026-10-05T12:00:00Z' })).toBe(true);
-    expect(real.carriesUnknownOutcome({ provider_retry_at: '2026-10-05T12:05:00Z' })).toBe(true);
-    expect(real.carriesUnknownOutcome({ review_delivery_uncertain_exhausted: true })).toBe(true);
-    // A queued text no worker has picked up, and a settled one, are not unknown.
-    expect(real.carriesUnknownOutcome({})).toBe(false);
-    expect(real.carriesUnknownOutcome(null)).toBe(false);
-    expect(real.carriesUnknownOutcome({ provider_outcome: 'accepted' })).toBe(false);
+  test('carriesUnknownOutcome is the repo\'s unresolved-reservation predicate plus the prior-attempt marker family', () => {
+    // isUnresolvedSendReservation: a reply reservation still sending inside its 24-hour hold.
+    expect(real.carriesUnknownOutcome(row('sending', { manual_send_reservation: true, provider_outcome_uncertain: true }))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('sending', '{"manual_send_reservation":true,"provider_outcome_uncertain":true}'))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('sending', { manual_send_reservation: true, provider_outcome_uncertain: true }, 25))).toBe(false);
+    expect(real.carriesUnknownOutcome(row('sent', { manual_send_reservation: true, provider_outcome: 'accepted' }))).toBe(false);
+    // A review-ask reservation in any non-delivered status, bounded to the 72-hour spacing window.
+    expect(real.carriesUnknownOutcome(row('failed', { review_ask_reservation: true }, 10))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('scheduled', { review_ask_reservation: true }, 48))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('scheduled', { review_ask_reservation: true, review_delivery_uncertain_exhausted: true }, 71))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('scheduled', { review_ask_reservation: true }, 73))).toBe(false);
+    expect(real.carriesUnknownOutcome(row('sent', { review_ask_reservation: true }, 1))).toBe(false);
+    expect(real.carriesUnknownOutcome(row('failed', { review_ask_reservation: true, finalize_only: true }, 1))).toBe(false);
+    // A queued row a worker picked up or requeued after an attempt (PRIOR_ATTEMPT_KEY_RE), while still queued.
+    expect(real.carriesUnknownOutcome(row('scheduled', { scheduled_sms_claimed_at: '2026-10-05T12:00:00Z' }))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('scheduled', { provider_retry_at: '2026-10-05T12:05:00Z' }))).toBe(true);
+    expect(real.carriesUnknownOutcome(row('failed', { provider_retry_at: '2026-10-05T12:05:00Z' }))).toBe(false);
+    // A queued text no worker has picked up, and a plain sent text, are not unknown.
+    expect(real.carriesUnknownOutcome(row('scheduled', {}))).toBe(false);
+    expect(real.carriesUnknownOutcome(row('sent', null))).toBe(false);
   });
 
-  test('findUnreconciledSend matches on number and the provider-bound body, and only rows still holding an unknown outcome inside their horizon', async () => {
-    const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000);
+  test('findUnreconciledSend matches on number and the provider-bound body, within the widest hold, and classifies the rows', async () => {
     const rows = [
-      { id: 'settled', metadata: { provider_outcome: 'accepted' }, updated_at: hoursAgo(1) },
-      { id: 'held', metadata: { manual_send_reservation: true, provider_outcome_uncertain: true }, updated_at: hoursAgo(1) },
+      row('sent', { manual_send_reservation: true, provider_outcome: 'accepted' }),
+      row('sending', { manual_send_reservation: true, provider_outcome_uncertain: true }),
     ];
     const q = {};
-    for (const m of ['where', 'whereIn', 'whereRaw']) q[m] = jest.fn(() => q);
+    for (const m of ['where', 'whereIn', 'whereRaw', 'whereNot']) q[m] = jest.fn(() => q);
     q.select = jest.fn(async () => rows);
     db.mockImplementation(() => q);
 
@@ -273,33 +284,36 @@ describe('the reservation row for an unknown outcome', () => {
     expect(found).toEqual(rows[1]);
     expect(db).toHaveBeenCalledWith('sms_log');
     expect(q.where).toHaveBeenCalledWith({ direction: 'outbound', message_body: "We'll be there Tuesday - see waves.example/portal" });
-    expect(q.whereIn).toHaveBeenCalledWith('status', ['sending', 'scheduled']);
+    // No status whitelist: the SQL window is the widest hold (72 h); each row is classified above.
+    expect(q.whereIn).not.toHaveBeenCalled();
+    const sqlCutoff = q.where.mock.calls.find((c) => c[0] === 'created_at')[2];
+    expect(Math.abs(sqlCutoff.getTime() - hoursAgo(72).getTime())).toBeLessThan(5000);
     expect(await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: '' })).toBeNull();
     expect(await real.findUnreconciledSend({ phone: '', body: SEND.message })).toBeNull();
   });
 
-  test('the hold horizon: a manual row 25 hours old no longer blocks; a review-ask reservation 48 hours old still does', async () => {
-    const hoursAgo = (h) => new Date(Date.now() - h * 60 * 60 * 1000);
+  test('the hold horizon: a manual row 25 hours old no longer blocks; a failed or scheduled review-ask reservation inside 72 hours still does', async () => {
     const q = {};
-    for (const m of ['where', 'whereIn', 'whereRaw']) q[m] = jest.fn(() => q);
+    for (const m of ['where', 'whereIn', 'whereRaw', 'whereNot']) q[m] = jest.fn(() => q);
     db.mockImplementation(() => q);
+    const only = async (r) => { q.select = jest.fn(async () => [r]); return real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message }); };
 
-    q.select = jest.fn(async () => [{ id: 'manual-old', metadata: { manual_send_reservation: true, provider_outcome_uncertain: true }, updated_at: hoursAgo(25) }]);
-    expect(await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message })).toBeNull();
+    expect(await only(row('sending', { manual_send_reservation: true, provider_outcome_uncertain: true }, 25))).toBeNull();
+    expect((await only(row('sending', { manual_send_reservation: true, provider_outcome_uncertain: true }, 23)))).toBeTruthy();
+    expect((await only(row('failed', { review_ask_reservation: true }, 10)))).toBeTruthy();
+    expect((await only(row('scheduled', { review_ask_reservation: true }, 48)))).toBeTruthy();
+    expect(await only(row('scheduled', { review_ask_reservation: true }, 73))).toBeNull();
+  });
 
-    q.select = jest.fn(async () => [{ id: 'manual-fresh', metadata: { manual_send_reservation: true, provider_outcome_uncertain: true }, updated_at: hoursAgo(23) }]);
-    expect((await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message })).id).toBe('manual-fresh');
-
-    q.select = jest.fn(async () => [{ id: 'ask-48h', metadata: { review_ask_reservation: true }, updated_at: hoursAgo(48) }]);
-    expect((await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message })).id).toBe('ask-48h');
-
-    q.select = jest.fn(async () => [{ id: 'ask-exhausted-71h', metadata: { review_ask_reservation: true, review_delivery_uncertain_exhausted: true }, updated_at: hoursAgo(71) }]);
-    expect((await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message })).id).toBe('ask-exhausted-71h');
-
-    q.select = jest.fn(async () => [{ id: 'ask-73h', metadata: { review_ask_reservation: true }, updated_at: hoursAgo(73) }]);
-    expect(await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: SEND.message })).toBeNull();
-    // The SQL window is the widest horizon (72 h); the per-row horizon is applied on the rows.
-    const sqlCutoff = q.where.mock.calls.find((c) => c[0] === 'updated_at')[2];
-    expect(Math.abs(sqlCutoff.getTime() - hoursAgo(72).getTime())).toBeLessThan(5000);
+  test('reservationState reads classifyDeliveryCertainty: the explicit deliveryOutcome wins over sent/blocked flags', () => {
+    expect(real.reservationState({ sent: true, deliveryOutcome: 'accepted' })).toBe('accepted');
+    // Ambiguous even though sent is true: held.
+    expect(real.reservationState({ sent: true, deliveryOutcome: 'uncertain' })).toBe('uncertain');
+    expect(real.reservationState({ sent: false, deliveryOutcome: 'not_sent', blocked: true })).toBe('not_sent');
+    expect(real.reservationState({ sent: false, blocked: true, code: 'SMS_OPTED_OUT' })).toBe('not_sent');
+    expect(real.reservationState({ sent: false, blocked: true, deliveryOutcome: 'uncertain', code: 'MANUAL_REPLY_OUTCOME_UNRESOLVED' })).toBe('not_sent');
+    expect(real.reservationState({ providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } }, { thrown: true })).toBe('not_sent');
+    expect(real.reservationState({ providerOutcome: { sent: true, deliveryOutcome: 'uncertain' } }, { thrown: true })).toBe('uncertain');
+    expect(real.reservationState(new Error('no outcome'), { thrown: true })).toBe('uncertain');
   });
 });

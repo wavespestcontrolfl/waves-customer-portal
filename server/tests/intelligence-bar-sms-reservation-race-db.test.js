@@ -243,6 +243,34 @@ suite('send_sms reservation on isolated Postgres', () => {
     expect(allowed).toMatchObject({ success: true });
   });
 
+  test('a failed review-ask reservation 10 hours old (stale-claim recovery kept its marker) still refuses a same-body send', async () => {
+    const phone = newPhone();
+    const message = newBody('failed-ask');
+    const tenHoursAgo = new Date(Date.now() - 10 * 60 * 60 * 1000);
+    await db('sms_log').insert({
+      direction: 'outbound', from_phone: '+19413529161', to_phone: phone, message_body: message, status: 'failed', message_type: 'review_request',
+      scheduled_for: tenHoursAgo, metadata: JSON.stringify({ review_ask_reservation: true, scheduled_sms_recovered_at: tenHoursAgo.toISOString() }),
+      created_at: tenHoursAgo, updated_at: tenHoursAgo,
+    });
+    const refused = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
+    expect(refused).toMatchObject({ success: false, blocked: true, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED' });
+    expect(sendManualCustomerSms).not.toHaveBeenCalled();
+  });
+
+  test('a result with sent: true but deliveryOutcome uncertain is ambiguous: the row is held and a retry is refused', async () => {
+    const phone = newPhone();
+    const message = newBody('sent-uncertain');
+    sendManualCustomerSms.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'uncertain', providerMessageId: null, manualSmsInterlock: { deliveryState: 'uncertain' } });
+    const first = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
+    expect(first).toMatchObject({ success: false, outcome_unknown: true });
+    const rows = await heldRows(message);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata).toMatchObject({ provider_outcome_uncertain: true, manual_wrapper_reservation: true });
+    const again = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
+    expect(again).toMatchObject({ success: false, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED' });
+    expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
+  });
+
   test('a wrapper-held row for the same text (its own reservation) makes ours redundant, not doubled', async () => {
     const phone = newPhone();
     const message = newBody('wrapper');

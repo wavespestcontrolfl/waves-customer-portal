@@ -37,28 +37,24 @@ const logger = require('../logger');
 const suggestMode = () => require('../sms-suggest-mode');
 // The body as the provider receives it (send-customer-message.js applies the same
 // function before Twilio): reservations are written and matched on this form.
-const { canonicalSmsBody } = require('../messaging/send-customer-message');
-// A scheduled review ask held after an ambiguous attempt (scheduled-sms-delivery.js)
-// stays unresolved for the ask-spacing window, longer than the wrapper's 24-hour hold.
-const { ASK_SPACING_MS } = require('../review-ask-history');
+// classifyDeliveryCertainty is the repo's one reading of a provider outcome.
+const { canonicalSmsBody, classifyDeliveryCertainty } = require('../messaging/send-customer-message');
+// The repo's one predicate for "this reservation row is still unresolved": the
+// review-ask arm across every non-delivered status, the reply arm while 'sending'
+// inside its 24-hour hold. The review-ask arm is unbounded there (a general-reader
+// hide); for a same-text resend it is bounded by the ask-spacing window, the same
+// REVIEW_ASK_RESERVATION_HOLD_HOURS the reservation's own reuse decision uses.
+const {
+  isUnresolvedSendReservation, REVIEW_ASK_MARKER, REVIEW_ASK_RESERVATION_HOLD_HOURS, REPLY_RESERVATION_HOLD_HOURS,
+} = require('../messaging/review-ask-reservation');
 const { phoneIdentityKey } = require('../../utils/phone');
 const { phoneIdentitySql } = require('../sms-response-policy');
 const { PRIOR_ATTEMPT_KEY_RE } = require('../scheduled-sms-cancel');
-const { manualSmsDeliveryState } = require('../messaging/send-manual-customer-sms');
 
 // The same bound the wrapper's reservation reader and the recovery sweep use.
-const UNRECONCILED_HOLD_HOURS = 24;
-const UNRECONCILED_HOLD_MS = UNRECONCILED_HOLD_HOURS * 60 * 60 * 1000;
-
-// How long a row's unknown outcome keeps blocking a same-text send: a review-ask
-// reservation for the ask-spacing window (72 h), every other row for the 24-hour
-// wrapper window.
-function holdHorizonMs(metadata) {
-  const meta = parseMeta(metadata);
-  return flag(meta.review_ask_reservation) || flag(meta.review_delivery_uncertain_exhausted) ? ASK_SPACING_MS : UNRECONCILED_HOLD_MS;
-}
-
-const flag = (v) => v === true || v === 'true';
+const UNRECONCILED_HOLD_HOURS = REPLY_RESERVATION_HOLD_HOURS;
+const REVIEW_ASK_HOLD_MS = REVIEW_ASK_RESERVATION_HOLD_HOURS * 60 * 60 * 1000;
+const WIDEST_HOLD_MS = Math.max(REVIEW_ASK_HOLD_MS, UNRECONCILED_HOLD_HOURS * 60 * 60 * 1000);
 
 function parseMeta(value) {
   if (!value) return {};
@@ -66,12 +62,27 @@ function parseMeta(value) {
   try { return JSON.parse(value); } catch { return {}; }
 }
 
-function carriesUnknownOutcome(metadata) {
-  const meta = parseMeta(metadata);
-  return flag(meta.provider_outcome_uncertain)
-    || flag(meta.review_delivery_uncertain_exhausted)
-    || flag(meta.review_ask_reservation)
-    || Object.keys(meta).some((k) => PRIOR_ATTEMPT_KEY_RE.test(k));
+/**
+ * Is this row a text that may already have reached the customer, with no
+ * confirmed outcome? Two existing notions, not a third:
+ *  - isUnresolvedSendReservation (review-ask-reservation.js): a review-ask
+ *    reservation in any non-delivered status (here bounded to the ask-spacing
+ *    window), a reply reservation still 'sending' inside its 24-hour hold, a
+ *    billing text-leg claim.
+ *  - a queued row a worker already picked up or requeued after a provider
+ *    attempt: any PRIOR_ATTEMPT_KEY_RE marker (the key family the cancel
+ *    writer's CAS and smsIneligibilityReason refuse on), while the row is still
+ *    'scheduled' or 'sending' (the deliveryLabel reading in comms-tools).
+ */
+function carriesUnknownOutcome(row, now = Date.now()) {
+  const meta = parseMeta(row.metadata);
+  const createdAt = row.created_at ? new Date(row.created_at).getTime() : NaN;
+  if (isUnresolvedSendReservation({ ...row, metadata: meta }, now)) {
+    if (meta[REVIEW_ASK_MARKER] !== true) return true;
+    return !Number.isFinite(createdAt) || createdAt >= now - REVIEW_ASK_HOLD_MS;
+  }
+  return ['scheduled', 'sending'].includes(String(row.status || ''))
+    && Object.keys(meta).some((k) => PRIOR_ATTEMPT_KEY_RE.test(k));
 }
 
 const REFUSAL = {
@@ -90,25 +101,23 @@ function unreconciledRefusal(extra = {}) {
 }
 
 /**
- * An outbound row to this number with this text (the provider-bound form) whose
- * provider outcome is still unknown, inside its hold horizon. Null when there is
- * none. `excludeId` skips the caller's own reservation.
+ * An outbound row to this number with this text (the provider-bound form) that
+ * may already have reached the customer with no confirmed outcome
+ * (carriesUnknownOutcome). Null when there is none. `excludeId` skips the
+ * caller's own reservation.
  */
 async function findUnreconciledSend({ phone, body }, dbh = db, { excludeId = null } = {}) {
   const identity = phoneIdentityKey(phone);
   const canonical = body ? canonicalSmsBody(body) : '';
   if (!identity || !canonical) return null;
   const now = Date.now();
-  const widest = new Date(now - Math.max(ASK_SPACING_MS, UNRECONCILED_HOLD_MS));
   const query = dbh('sms_log')
     .where({ direction: 'outbound', message_body: canonical })
-    .whereIn('status', ['sending', 'scheduled'])
-    .where('updated_at', '>=', widest)
+    .where('created_at', '>=', new Date(now - WIDEST_HOLD_MS))
     .whereRaw(`${phoneIdentitySql("BTRIM(COALESCE(to_phone, ''))")} = ?`, [identity]);
   if (excludeId) query.whereNot('id', excludeId);
-  const rows = await query.select('id', 'metadata', 'updated_at');
-  return (rows || []).find((row) => carriesUnknownOutcome(row.metadata)
-    && new Date(row.updated_at).getTime() >= now - holdHorizonMs(row.metadata)) || null;
+  const rows = await query.select('id', 'status', 'metadata', 'created_at');
+  return (rows || []).find((row) => carriesUnknownOutcome(row, now)) || null;
 }
 
 /**
@@ -171,23 +180,18 @@ async function settleSendReservation(id, state, { phone, body } = {}) {
   }
 }
 
-// What the send's reservation becomes from the provider result or the thrown
-// error: 'accepted' and 'not_sent' release it, 'uncertain' leaves it as the held
-// row. The wrapper's own interlock refusing THIS attempt sent nothing. A thrown
-// error that names no provider outcome could have crossed the handoff: held.
+// What the send's reservation becomes, read with the repo's one delivery
+// classification (classifyDeliveryCertainty: the explicit deliveryOutcome wins
+// over sent/blocked flags): 'sent' releases it, 'not_sent' releases it,
+// 'unknown' leaves it as the held row. A thrown error carries the outcome it
+// observed on err.providerOutcome; none means the handoff may have been crossed.
+// The wrapper's own interlock refusing THIS attempt (its code, the only hint it
+// gives) sent nothing even though it marks the thread's outcome uncertain.
 const INTERLOCK_REFUSAL_CODE = 'MANUAL_REPLY_OUTCOME_UNRESOLVED';
-function isUncertainOutcome(outcome) {
-  return manualSmsDeliveryState(outcome) === 'uncertain'
-    || outcome?.deliveryOutcome === 'uncertain'
-    || outcome?.providerOutcome?.deliveryOutcome === 'uncertain';
-}
+const STATE_BY_CERTAINTY = { sent: 'accepted', not_sent: 'not_sent', unknown: 'uncertain' };
 function reservationState(outcome, { thrown = false } = {}) {
-  if (outcome?.sent === true || outcome?.providerOutcome?.sent === true) return 'accepted';
   if (outcome?.code === INTERLOCK_REFUSAL_CODE) return 'not_sent';
-  if (isUncertainOutcome(outcome)) return 'uncertain';
-  const certainty = outcome?.deliveryOutcome || outcome?.providerOutcome?.deliveryOutcome;
-  if (certainty === 'not_sent' || outcome?.blocked === true) return 'not_sent';
-  return thrown ? 'uncertain' : 'not_sent';
+  return STATE_BY_CERTAINTY[classifyDeliveryCertainty(thrown ? outcome?.providerOutcome : outcome)];
 }
 
 /**

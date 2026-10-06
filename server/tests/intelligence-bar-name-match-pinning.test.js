@@ -32,6 +32,9 @@ jest.mock('../services/lead-attribution', () => ({
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true, providerMessageId: 'SM-test' }),
+  // The send reservation (sms-outcome-guard.js) reads the real body normalizer and delivery classification.
+  canonicalSmsBody: jest.requireActual('../services/messaging/send-customer-message').canonicalSmsBody,
+  classifyDeliveryCertainty: jest.requireActual('../services/messaging/send-customer-message').classifyDeliveryCertainty,
 }));
 jest.mock('../services/messaging/send-manual-customer-sms', () => ({
   sendManualCustomerSms: jest.fn((...args) => (
