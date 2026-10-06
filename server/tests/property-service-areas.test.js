@@ -198,16 +198,16 @@ test('the area-column probe caches only a positive answer', async () => {
 });
 
 describe('sameCustomerAddress', () => {
-  const row = (extra = {}) => ({ address_line1: '7210 Desert Ridge Gln', address_line2: null, city: 'Lakewood Ranch', zip: '34202', ...extra });
+  const row = (extra = {}) => ({ address_line1: '100 Fixture St', address_line2: null, city: 'Fixture', zip: '34201', ...extra });
   test('a ZIP on one side only falls back to street, unit and city', () => {
     expect(areas.sameCustomerAddress(row(), row({ zip: null }))).toBe(true);
     expect(areas.sameCustomerAddress(row({ zip: '' }), row())).toBe(true);
   });
   test('two different ZIPs, another city, another unit or another street never match', () => {
-    expect(areas.sameCustomerAddress(row(), row({ zip: '34211' }))).toBe(false);
-    expect(areas.sameCustomerAddress(row(), row({ zip: null, city: 'Bradenton' }))).toBe(false);
+    expect(areas.sameCustomerAddress(row(), row({ zip: '34299' }))).toBe(false);
+    expect(areas.sameCustomerAddress(row(), row({ zip: null, city: 'Othertown' }))).toBe(false);
     expect(areas.sameCustomerAddress(row(), row({ zip: null, address_line2: 'Unit 4' }))).toBe(false);
-    expect(areas.sameCustomerAddress(row(), row({ zip: null, address_line1: '7212 Desert Ridge Gln' }))).toBe(false);
+    expect(areas.sameCustomerAddress(row(), row({ zip: null, address_line1: '102 Fixture St' }))).toBe(false);
   });
   test('no city on the ZIP-less side is not enough to match', () => {
     expect(areas.sameCustomerAddress(row(), row({ zip: null, city: null }))).toBe(false);
