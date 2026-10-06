@@ -1903,6 +1903,7 @@ async function resolveEstimateWritePayload({
   recompute, // injectable for tests; defaults to serverRecomputeFromEstimateData
   pricingOut = null, // optional side-channel: { fallbackReason } for post-commit alerts
   storedProposal = null, // revise only: the ROW's estimate_data.proposal (server-owned, see stripClientProposal)
+  storedEstimateData = null, // revise only: the ROW's parsed estimate_data (the offer-tier parked state lives there)
   requireLivePricing = false,
 }) {
   const {
@@ -2148,7 +2149,11 @@ async function resolveEstimateWritePayload({
     // A row already in the pest-only state (lawn removed through the rail) is
     // the model's own second state: the mark stays, and there the one-time
     // option legitimately rides along (the rail turned it on).
-    const markedPestOnly = OfferTiers.offerTiersMarkedPestOnlyState(trustedEstimateData);
+    // The V2 revision payload rebuilds estimateData from the browser (inputs,
+    // result, summary, engineRequest) and carries neither the opt-out history
+    // nor the mark, so the parked state is judged on the ROW's stored data.
+    const markedPestOnly = OfferTiers.offerTiersMarkedPestOnlyState(trustedEstimateData)
+      || OfferTiers.offerTiersMarkedPestOnlyState(storedEstimateData);
     const tiersOk = body.offerTiers === true
       && (markedPestOnly || (!showOneTimeOption
         && OfferTiers.offerTiersSaveEligibility({
@@ -3043,15 +3048,19 @@ async function reviseAdminEstimate({
   // stays exactly as PUT /:id/proposal left it). The browser's copy is never
   // written — see stripClientProposal.
   let storedProposal = null;
+  let storedEstimateData = null;
   try {
     const parsedPrior = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data;
     storedProposal = parsedPrior?.proposal ?? null;
+    storedEstimateData = parsedPrior && typeof parsedPrior === 'object' ? parsedPrior : null;
   } catch {
     storedProposal = null;
+    storedEstimateData = null;
   }
   const writeFields = await resolveEstimateWritePayload({
     database,
     storedProposal,
+    storedEstimateData,
     body: {
       ...body,
       customerId: body.customerId || estimate.customer_id || null,

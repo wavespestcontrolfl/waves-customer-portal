@@ -129,6 +129,7 @@ describe('the tile block on /data', () => {
     success: true, dryRun: true, serviceKey: body.serviceKey, included: body.included,
     next: { monthlyTotal: 35.67, annualTotal: 428, onetimeTotal: 99, waveGuardTier: 'Bronze' },
     perApplication: [{ s: 'pest_control', pa: 107 }],
+    oneTimeChoiceAmount: 235,
     previewBasis: 'digest',
   } });
 
@@ -229,20 +230,22 @@ describe('Codex r2 on #5970', () => {
     const block = await buildOfferTiersBlock({
       estimate: { id: 'g', status: 'sent', category: 'RESIDENTIAL', expires_at: future, onetime_total: 218, waveguard_tier: 'Silver', show_one_time_option: false },
       estData: withRoach, pricingBundle: bundle, memberBlock: async () => false,
-      mixChange: async () => ({ status: 200, body: { dryRun: true, next: { onetimeTotal: 218, waveGuardTier: 'Bronze' }, perApplication: [{ s: 'pest_control', pa: 107 }],
-        // The POST-removal rows: here the roach row is unchanged by the removal.
-        oneTimeBreakdown: { total: 218, items: [{ service: 'pest_initial_roach', label: 'Initial Roach Knockdown', amount: 119 }, { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99 }] } } }),
+      // The dry run resolves the POST-removal one-time choice itself (pest 107 x 2.2 = 235 + the $119 roach row).
+      mixChange: async () => ({ status: 200, body: { dryRun: true, next: { onetimeTotal: 218, waveGuardTier: 'Bronze' }, perApplication: [{ s: 'pest_control', pa: 107 }], oneTimeChoiceAmount: 354 } }),
     });
-    // 107 x 2.2 = 235.4 → 235, plus the preserved $119 roach row the one-time choice carries.
     expect(block.good.oneTimeTotal).toBe(354);
-    // When the removal reallocates a discount onto the add-on, Good follows the post-change row, not the served bundle.
+    // Whatever the served bundle says, Good in the as-quoted state is the dry run's post-change figure.
     const reallocated = await buildOfferTiersBlock({
-      estimate: { id: 'g2', status: 'sent', category: 'RESIDENTIAL', expires_at: future, onetime_total: 218, waveguard_tier: 'Silver', show_one_time_option: false },
+      estimate: { id: 'g2', status: 'sent', category: 'RESIDENTIAL', expires_at: future, onetime_total: 218, waveGuardTier: 'Silver', show_one_time_option: false },
       estData: withRoach, pricingBundle: bundle, memberBlock: async () => false,
-      mixChange: async () => ({ status: 200, body: { dryRun: true, next: { onetimeTotal: 199, waveGuardTier: 'Bronze' }, perApplication: [{ s: 'pest_control', pa: 107 }],
-        oneTimeBreakdown: { total: 199, items: [{ service: 'pest_initial_roach', label: 'Initial Roach Knockdown', amount: 100 }, { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99 }] } } }),
+      mixChange: async () => ({ status: 200, body: { dryRun: true, next: { onetimeTotal: 199, waveGuardTier: 'Bronze' }, perApplication: [{ s: 'pest_control', pa: 107 }], oneTimeChoiceAmount: 335 } }),
     });
     expect(reallocated.good.oneTimeTotal).toBe(335);
+    // The rail's own dry run computes that figure with acceptance's resolver on the post-change result.
+    const { applyServiceMixChange } = require('../routes/estimate-public');
+    expect(typeof applyServiceMixChange).toBe('function');
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    expect(src).toMatch(/oneTimeChoiceAmount: oneTimeChoiceAmountForEstimate\(\s*\n\s*\{ \.\.\.estimate, show_one_time_option: true, onetime_total: next\.onetimeTotal \},\s*\n\s*\{ \.\.\.parsedData, result: afterResult \},/);
     delete process.env.GATE_ESTIMATE_OFFER_TIERS; delete process.env.GATE_ESTIMATE_SERVICE_OPT_OUT;
   });
 
@@ -263,5 +266,21 @@ describe('Codex r2 on #5970', () => {
   test('the lead-service send overrides the lead only while the tier gate is live', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-estimates.js'), 'utf8');
     expect(src).toMatch(/OfferTiersForSend\.offerTiersGateLive\(\)\s*\n\s*&& OfferTiersForSend\.offerTiersRequested\(estData\)/);
+  });
+});
+
+describe('member judgement order for an unlinked estimate', () => {
+  test('a property-group sibling that already belongs to a member blocks the picker before any phone match', async () => {
+    const { offerTierMemberBlock } = require('../routes/estimate-public');
+    const member = { id: 'm1', active: true, waveguard_tier: 'Silver', monthly_rate: 80 };
+    const database = (table) => ({
+      where: () => ({
+        whereNot: () => ({ whereNotNull: () => ({ orderBy: () => ({ first: async () => (table === 'estimates' ? { customer_id: 'm1' } : null) }) }) }),
+        first: async () => (table === 'customers' ? member : null),
+      }),
+    });
+    await expect(offerTierMemberBlock({ id: 'e1', customer_id: null, estimate_group_id: 'g1', customer_phone: '9415550100' }, database)).resolves.toBe(true);
+    // A read error anywhere fails closed.
+    await expect(offerTierMemberBlock({ id: 'e2', customer_id: null, estimate_group_id: 'g1' }, () => { throw new Error('db'); })).resolves.toBe(true);
   });
 });

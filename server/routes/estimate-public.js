@@ -17426,6 +17426,19 @@ async function offerTierMemberBlock(estimate, database = db) {
     if (estimate.customer_id) {
       return !!(await isActivePlanCustomer(database, estimate.customer_id, { strict: true }));
     }
+    // The accept's own order for an unlinked estimate: an accepted sibling in
+    // the property group hands over its customer first; only then the phone.
+    if (estimate.estimate_group_id) {
+      const sibling = await database('estimates')
+        .where({ estimate_group_id: estimate.estimate_group_id })
+        .whereNot({ id: estimate.id })
+        .whereNotNull('customer_id')
+        .orderBy('accepted_at', 'asc')
+        .first('customer_id');
+      if (sibling?.customer_id) {
+        return !!(await isActivePlanCustomer(database, sibling.customer_id, { strict: true }));
+      }
+    }
     const { match } = await matchAcceptCustomerByPhone(estimate, database);
     return !!match && match.active !== false && isMembershipCustomerRow(match);
   } catch (_) {
@@ -17524,19 +17537,13 @@ async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDra
   // Good is priced by the SAME one-time-choice breakdown acceptance uses
   // (the pest visit from the plan's list price PLUS any preserved one-time
   // add-on, e.g. a roach treatment), judged as if the option were on.
-  // In the as-quoted state Good is reached only AFTER the lawn removal, so
-  // its preserved one-time rows come from the dry run's post-change
-  // breakdown (a removal can reallocate a fixed discount); on the pest-only
-  // row the served bundle already is that state.
-  const goodBreakdown = state === 'best'
-    ? (dry.body.oneTimeBreakdown || normalizeOneTimeBreakdown(estData))
-    : (pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData));
-  const goodPest = oneTimePestChoiceAmountForEstimate({ ...estimate, show_one_time_option: true }, estData, pricingBundle) || 0;
-  const goodAddOns = goodPest > 0
-    ? preservedOneTimeAddOnRowsFromBreakdown(goodBreakdown, manualDiscountForChoiceBreakdown(goodBreakdown, estData))
-      .reduce((sum, item) => Math.round((sum + Number(item.price || 0)) * 100) / 100, 0)
-    : 0;
-  const goodTotal = goodPest > 0 ? Math.round((goodPest + goodAddOns) * 100) / 100 : 0;
+  // Good is the one-time CHOICE amount acceptance resolves. In the as-quoted
+  // state it is reached only AFTER the lawn removal, so the dry run computed
+  // it on the post-change result (discount reallocation included); on the
+  // pest-only row the served state is that result.
+  const goodTotal = state === 'best'
+    ? Number(dry.body.oneTimeChoiceAmount || 0)
+    : (oneTimeChoiceAmountForEstimate({ ...estimate, show_one_time_option: true }, estData, pricingBundle) || 0);
   return {
     state,
     companionKey: key,
@@ -17886,9 +17893,15 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         // Better / Best tiles read them; the disclosures say the same thing
         // in sentences).
         perApplication: impact.afterPerApplication,
-        // The post-change one-time rows (the Good tile prices from these in
-        // the as-quoted state: a removal can reallocate a fixed discount).
-        oneTimeBreakdown: normalizeOneTimeBreakdown({ ...parsedData, result: afterResult }),
+        // The one-time CHOICE amount the post-change row would offer and
+        // accept (the Good tile shows this in the as-quoted state): computed
+        // by the same resolver acceptance uses, on the post-change result,
+        // so a removal that reallocates a discount is already netted.
+        oneTimeChoiceAmount: oneTimeChoiceAmountForEstimate(
+          { ...estimate, show_one_time_option: true, onetime_total: next.onetimeTotal },
+          { ...parsedData, result: afterResult },
+          null,
+        ) || 0,
         // Echo this back on the commit; the write refuses if the row, the
         // pricing config, or the membership verdict moved since this preview.
         previewBasis: previewDigest,
@@ -31191,3 +31204,4 @@ module.exports.stampTreeShrubPalmCount = stampTreeShrubPalmCount;
 module.exports.stampedTreeShrubPalmCountInBundle = stampedTreeShrubPalmCountInBundle;
 module.exports.frequencyFromRecurringService = frequencyFromRecurringService;
 module.exports.buildOfferTiersBlock = buildOfferTiersBlock;
+module.exports.offerTierMemberBlock = offerTierMemberBlock;

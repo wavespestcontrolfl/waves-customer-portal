@@ -6520,8 +6520,14 @@ best: { rows, oneTimeTotal, waveGuardTier } }`, `rows` being
 row is NOT in are this rail's own dry run (a removal in `best`, an add-back
 in `pest_only`), so a tile never shows a price the rail would not persist;
 any refusal or error omits the block. The dry-run response carries
-`perApplication` (the per-line terms the `previewBasis` digest binds) as
-data. The commit sets `show_one_time_option` on a marked row from the lawn
+`perApplication` (the per-line terms the `previewBasis` digest binds) and
+`oneTimeChoiceAmount` (the one-time choice the POST-change row would offer
+and accept, resolved by the same `oneTimeChoiceAmountForEstimate` acceptance
+uses on the post-change result, so a removal that reallocates a discount is
+already netted; the Good tile shows it in the as-quoted state) as data. The
+picker's member judgement follows the accept's own order for an unlinked
+estimate: an accepted sibling in the property group hands over its customer
+first, then the phone match; strict and fail-closed. The commit sets `show_one_time_option` on a marked row from the lawn
 line: on when lawn is removed (customer, or the staff send-time park) and
 the delivery validator allows the option on the repriced row; always off
 when lawn is added back, with the gate on or off — the one-time option never
