@@ -5,7 +5,8 @@
 // NODE_ENV=test on any breach, so a green run proves the rule too).
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
-  _private: { doneColumns: jest.fn((cols) => ({ doneColumns: cols })) },
+  // The real close helpers: the supersede selection is what the tests read.
+  _private: jest.requireActual('../services/notification-service')._private,
 }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -17,15 +18,19 @@ const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
 const { buildAcceptNotificationPayload } = require('../routes/estimate-public');
 const { _prepayCoverageCopy: prepayCoverageCopy } = require('../services/schedule-integrity-watchdog');
 
-// Every transaction call is recorded. `first` answers the customer lookup; the
-// supersede of older bell rows is a notifications chain ending in `update`.
-const trxCalls = [];
-const trxFor = (customer) => (table) => {
-  const call = { table, steps: [], update: null };
-  trxCalls.push(call);
-  const q = { first: async () => customer, update: async (cols) => { call.update = cols; return 1; } };
-  for (const step of ['where', 'whereRaw', 'whereNot', 'whereNull']) q[step] = (...args) => { call.steps.push([step, ...args]); return q; };
-  return q;
+// The customer lookup is faked. A notifications query is a real knex builder (no
+// connection): awaiting it records the UPDATE it would have sent.
+const kx = require('knex')({ client: 'pg' });
+const sentUpdates = [];
+const trxFor = (customer) => {
+  const trx = (table) => {
+    if (table !== 'notifications') return { where: () => ({ first: async () => customer }) };
+    const builder = kx(table);
+    builder.then = (resolve, reject) => { sentUpdates.push(builder.toSQL().toNative()); return Promise.resolve(1).then(resolve, reject); };
+    return builder;
+  };
+  trx.raw = (...args) => kx.raw(...args);
+  return trx;
 };
 const CUSTOMER_ID = '00000000-0000-4000-8000-0000000000c1';
 const sourceAt = new Date('2026-09-29T14:46:00Z'); // 10:46 AM ET
@@ -43,8 +48,7 @@ const lastCall = () => NotificationService.notifyAdmin.mock.calls.at(-1);
 
 beforeEach(() => {
   NotificationService.notifyAdmin.mockClear();
-  NotificationService._private.doneColumns.mockClear();
-  trxCalls.length = 0;
+  sentUpdates.length = 0;
 });
 
 describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
@@ -70,33 +74,32 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
       area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', subject: { type: 'customer', id: CUSTOMER_ID } });
   });
 
-  test('one open row per promise: a fresh row closes the older open rows with the same key', async () => {
+  test('one open row per promise: a fresh row closes the older rows with the same key', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-new', deduped: false });
     await ring();
-    const supersede = trxCalls.find((c) => c.table === 'notifications');
-    expect(supersede.steps).toEqual([
-      ['where', { recipient_type: 'admin' }],
-      ['whereRaw', "metadata->>'dedupeKey' = ?", ['sms-commitment:commit-1']],
-      ['whereNot', { id: 'n-new' }],
-      ['whereNull', 'done_at'],
-    ]);
-    expect(NotificationService._private.doneColumns).toHaveBeenCalledWith(expect.objectContaining({
-      by: 'supersede', keepExisting: true, resolution: 'Replaced by a newer reminder for the same promise' }));
-    expect(supersede.update).toEqual({ doneColumns: expect.objectContaining({ by: 'supersede' }) });
+    expect(sentUpdates).toHaveLength(1);
+    const { sql, bindings } = sentUpdates[0];
+    expect(sql).toMatch(/^update "notifications" set "done_at" = COALESCE\(done_at, \$1::timestamptz\), "done_by" = \$2/);
+    expect(bindings).toEqual(expect.arrayContaining(['supersede', 'Replaced by a newer reminder for the same promise', 'admin', 'sms-commitment:commit-1', 'n-new']));
+    // The newest row is excluded; the older ones are selected by the system closer's rule.
+    expect(sql).toContain('and not "id" = $7');
+    // Open rows, OR rows a PERSON marked done (taken over, so their Reopen cannot
+    // bring an obsolete duplicate back). A row a system component closed matches
+    // neither arm, so it is left alone.
+    expect(sql).toMatch(/\("done_at" is null or COALESCE\(\(done_by ~ '\^\[0-9\]\+\$' OR .*done_by = 'claude'\), false\)\)/);
   });
 
   test('a deduped ring also closes rows an older build left open; the email bell shares the fix', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-standing', deduped: true });
     await ring({ args: { sourceIdField: 'email_id', triggerKey: 'email_operational_followup' } });
-    const supersede = trxCalls.find((c) => c.table === 'notifications');
-    expect(supersede.steps).toContainEqual(['whereNot', { id: 'n-standing' }]);
-    expect(supersede.update).toBeTruthy();
+    expect(sentUpdates).toHaveLength(1);
+    expect(sentUpdates[0].bindings).toContain('n-standing');
   });
 
   test('a suppressed ring has no row to keep, so nothing is closed', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
     await ring();
-    expect(trxCalls.some((c) => c.table === 'notifications')).toBe(false);
+    expect(sentUpdates).toHaveLength(0);
   });
 
   test('a staff promise is worded as ours, and a late finish says so', async () => {

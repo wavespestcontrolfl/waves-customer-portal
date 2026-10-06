@@ -4,7 +4,6 @@ function getGoogle() {
   if (!_googleapis) { try { _googleapis = require('googleapis').google; } catch { _googleapis = null; } }
   return _googleapis;
 }
-const crypto = require('crypto');
 const logger = require('./logger');
 const { scrubSentryText } = require('../utils/sentry-scrub');
 const {
@@ -2415,20 +2414,16 @@ class GoogleBusinessService {
               bell: true,
               link: '/admin/reviews',
               metadata: { locationId: loc.id, reason: 'reviews_missing', count: gone.length, reviewIds: gone.map(r => r.id) },
-              // A review that flaps (reinstated, then removed again) clears
-              // and re-stamps missing_since, so the claim above wins again and
-              // the same removal rang a second row (prod 2026-10-05, Oct 3 and
-              // Oct 5). Keyed on the location and the exact set of removed
-              // reviews: that set never rings twice; a different set does.
-              // `trx` (not `connection`) is the dedupe path's caller
-              // transaction: the lock, probe and insert stay atomic with the
-              // claim. A deduped return is a truthy row, so the null check
-              // below still means "insert failed".
-              dedupeKey: `gbp-reviews-removed:${loc.id}:${crypto.createHash('sha1').update(gone.map(r => String(r.id)).sort().join(',')).digest('hex').slice(0, 20)}`,
-              trx,
+              connection: trx,
             },
           );
           if (!notif) throw new Error('removal-alert notification insert failed');
+          // A flap (removed, reinstated, removed again) or a repeat alert for
+          // the same reviews must not leave two open removal rows: close older
+          // open ones this alert covers, in the same transaction as the insert.
+          if (notif.id) {
+            await this._closeRemovalAlerts(trx, loc.id, gone.map(r => r.id), { resolution: 'Replaced by a newer removal alert for the same reviews', exceptId: notif.id });
+          }
         });
       } catch (err) {
         logger.warn(`[gbp] Removal alert for ${loc.name} rolled back (${err.message}) — claim released, retrying next sync`);
@@ -2458,6 +2453,28 @@ class GoogleBusinessService {
       logger.warn(`[gbp] Missing-review reconcile failed for ${loc.name}: ${err.message}`);
       return { ok: false, error: err.message };
     }
+  }
+
+  /**
+   * Close the OPEN removal alerts (reason 'reviews_missing') at a location
+   * whose reviewIds all sit inside `coveringIds` (google_reviews.id, the id
+   * space both the removal and the restored alerts store). Used by the
+   * newer removal alert (same reviews, or a superset) and by the restored
+   * bell (the reviews are back). openToCloser: a row a person already marked
+   * done is taken over too, so their Reopen cannot bring an obsolete alert
+   * back; a row a system component closed is left alone.
+   */
+  async _closeRemovalAlerts(conn, locationId, coveringIds, { resolution, exceptId = null }) {
+    if (!coveringIds.length) return 0;
+    const { doneColumns, openToCloser } = NotificationService._private;
+    let query = conn('notifications')
+      .where({ recipient_type: 'admin', category: 'review' })
+      .whereRaw("metadata->>'reason' = 'reviews_missing'")
+      .whereRaw("metadata->>'locationId' = ?", [locationId])
+      .whereRaw("jsonb_typeof(metadata->'reviewIds') = 'array' AND ?::jsonb @> (metadata->'reviewIds')", [JSON.stringify(coveringIds)]);
+    if (exceptId) query = query.whereNot({ id: exceptId });
+    return openToCloser(query, 'supersede')
+      .update(doneColumns({ by: 'supersede', resolution, keepExisting: true, conn }));
   }
 
   /**
@@ -2497,6 +2514,9 @@ class GoogleBusinessService {
             metadata: { locationId, reason: 'reviews_restored', count: rows.length, reviewIds: rows.map(r => r.review_id) },
           },
         );
+        // The removal alert these reviews were named in is obsolete: close the
+        // open ones they fully cover (a row still naming a missing review stays).
+        await this._closeRemovalAlerts(db, locationId, rows.map(r => r.review_id), { resolution: 'The reviews are back on Google' });
         logger.info(`[gbp] ${rows.length} previously-missing review(s) at ${locName} reappeared — stamp cleared, admin notified`);
       } catch (err) {
         logger.warn(`[gbp] Restored-review notification failed for ${locationId}: ${err.message}`);

@@ -58,12 +58,14 @@ function createDbMock(initialRows = {}) {
     if (sql.includes("reviewer_name IS NULL OR reviewer_name != '_stats'")) {
       return row => row.reviewer_name == null || row.reviewer_name !== '_stats';
     }
-    // notifyAdmin's keyed dedupe probe: only a row carrying THIS key matches.
-    if (sql.includes("metadata->>'dedupeKey' = ?")) {
-      const key = bindings[0];
-      return row => {
-        try { return (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {}).dedupeKey === key; } catch { return false; }
-      };
+    // _closeRemovalAlerts' selection of removal rows at a location whose
+    // reviewIds are all inside the covering set.
+    const meta = row => (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {});
+    if (sql.includes("metadata->>'reason' = 'reviews_missing'")) return row => meta(row).reason === 'reviews_missing';
+    if (sql.includes("metadata->>'locationId' = ?")) return row => meta(row).locationId === bindings[0];
+    if (sql.includes("?::jsonb @> (metadata->'reviewIds')")) {
+      const covering = JSON.parse(bindings[0]);
+      return row => Array.isArray(meta(row).reviewIds) && meta(row).reviewIds.every(id => covering.includes(id));
     }
     if (sql.includes('publish_claimed_until IS NULL OR publish_claimed_until <')) {
       const cutoff = new Date(bindings[0]);
@@ -143,7 +145,10 @@ function createDbMock(initialRows = {}) {
       whereNull(column) { this._whereNull = column; return this; },
       whereNotNull(column) { this._rawFilters.push(row => row[column] != null); return this; },
       whereIn(column, values) { this._rawFilters.push(row => values.includes(row[column])); return this; },
-      whereNot() { return this; },
+      whereNot(arg, value) {
+        this._whereNot = { ...(this._whereNot || {}), ...(arg && typeof arg === 'object' ? arg : { [arg]: value }) };
+        return this;
+      },
       forUpdate() { return this; },
       select() { return this; },
       orderBy() { return this; },
@@ -216,6 +221,10 @@ function createDbMock(initialRows = {}) {
               const cur = row[key] ? new Date(row[key]) : new Date(0);
               rec[key] = bound > cur ? val.__bindings[0] : row[key];
             }
+            // doneColumns' keepExisting form: COALESCE(col, ?) keeps a value already there.
+            if (val && typeof val === 'object' && typeof val.__raw === 'string' && val.__raw.startsWith(`COALESCE(${key},`)) {
+              rec[key] = row[key] ?? val.__bindings[0];
+            }
           }
           Object.assign(row, rec);
           state.updates.push({ table, id: row.id, record: rec });
@@ -277,6 +286,10 @@ describe('Google Business review sync', () => {
     db = createDbMock();
     jest.doMock('../models/db', () => db);
     service = require('../services/google-business');
+    // The mock db cannot run openToCloser's person-done OR-group (its SQL is
+    // asserted with ringOverdueBell's in admin-alert-names-text.test.js); an
+    // open-rows-only stand-in keeps what these tests read: which removal rows close.
+    jest.spyOn(require('../services/notification-service')._private, 'openToCloser').mockImplementation(q => q.whereNull('done_at'));
     service._clients = {};
     service._getClient = jest.fn(async () => ({}));
     service._getHeaders = jest.fn(async () => ({ Authorization: 'Bearer test' }));
@@ -1589,43 +1602,88 @@ describe('Google Business review sync', () => {
     spy.mockRestore();
   });
 
-  test('a review that flaps (removed, reinstated, removed again) rings one removal row, not two (prod 2026-10-05)', async () => {
-    seedSyncedReview({
-      id: 'flap-1',
-      google_review_id: 'accounts/1/locations/2/reviews/rev-flap',
-      gbp_review_name: 'accounts/1/locations/2/reviews/rev-flap',
-      reviewer_name: 'Flappy Fran',
-      review_created_at: '2026-04-01T12:00:00Z',
+  describe('removal alerts never pile up as open duplicates (prod 2026-10-05, flapping review)', () => {
+    const feedRow = {
+      name: 'accounts/1/locations/2/reviews/rev-flap',
+      reviewer: { displayName: 'Flappy Fran' },
+      starRating: 'FIVE',
+      comment: 'Great work',
+      createTime: '2026-04-01T12:00:00Z',
+    };
+    const flapRow = () => db.__state.rows.google_reviews.find(r => r.id === 'flap-1');
+    const staleSync = () => { flapRow().synced_at = new Date(Date.now() - 60 * 60 * 1000).toISOString(); };
+    const removals = () => (db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'));
+    const isOpen = n => n.done_at == null;
+
+    beforeEach(() => {
+      seedSyncedReview({
+        id: 'flap-1',
+        google_review_id: 'accounts/1/locations/2/reviews/rev-flap',
+        gbp_review_name: 'accounts/1/locations/2/reviews/rev-flap',
+        reviewer_name: 'Flappy Fran',
+        review_created_at: '2026-04-01T12:00:00Z',
+      });
     });
-    const staleSync = () => { db.__state.rows.google_reviews.find(r => r.id === 'flap-1').synced_at = new Date(Date.now() - 60 * 60 * 1000).toISOString(); };
-    const removed = () => (db.__state.rows.notifications || []).filter(n => n.title.includes('removed at'));
 
-    gbpFeed([]);
-    await service.syncAllReviews();
-    expect(removed()).toHaveLength(1);
-    expect(JSON.parse(removed()[0].metadata).dedupeKey).toMatch(/^gbp-reviews-removed:bradenton:[0-9a-f]{20}$/);
+    test('removed, restored, removed again: the restore closes the first row and the genuine re-removal rings a new one', async () => {
+      gbpFeed([]);
+      await service.syncAllReviews();
+      expect(removals()).toHaveLength(1);
+      expect(isOpen(removals()[0])).toBe(true);
 
-    // Google reinstates it: the stamp clears.
-    db.__state.rows.google_reviews.find(r => r.id === 'flap-1').missing_since = null;
-    // ...then drops it again: the claim wins again, the alert must not.
-    staleSync();
-    gbpFeed([]);
-    await service.syncAllReviews();
+      // Google reinstates it: the restored bell rings and closes the removal row it answers.
+      staleSync();
+      gbpFeed([feedRow]);
+      await service.syncAllReviews();
+      expect(flapRow().missing_since).toBeNull();
+      expect(removals()).toHaveLength(1);
+      expect(removals()[0]).toMatchObject({ done_by: 'supersede' });
+      expect(removals()[0].done_at).toBeTruthy();
+      expect((db.__state.rows.notifications || []).filter(n => n.title.includes('restored at'))).toHaveLength(1);
 
-    expect(db.__state.rows.google_reviews.find(r => r.id === 'flap-1').missing_since).toBeTruthy();
-    expect(removed()).toHaveLength(1);
-
-    // A different removed set is news: it still rings its own row.
-    seedSyncedReview({
-      id: 'gone-2',
-      google_review_id: 'accounts/1/locations/2/reviews/rev-gone-2',
-      gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone-2',
-      reviewer_name: 'Other Olive',
-      review_created_at: '2026-04-02T12:00:00Z',
+      // Dropped again: a real new removal, so it rings, and exactly one removal row is open.
+      staleSync();
+      gbpFeed([]);
+      await service.syncAllReviews();
+      expect(flapRow().missing_since).toBeTruthy();
+      expect(removals()).toHaveLength(2);
+      expect(removals().filter(isOpen)).toHaveLength(1);
     });
-    gbpFeed([]);
-    await service.syncAllReviews();
-    expect(removed()).toHaveLength(2);
+
+    test('a repeat removal alert for the same reviews closes the older open row (no restore in between)', async () => {
+      gbpFeed([]);
+      await service.syncAllReviews();
+      // The stamp clears without a restore bell (e.g. a manual reset), then the review is dropped again.
+      flapRow().missing_since = null;
+      staleSync();
+      await service.syncAllReviews();
+
+      expect(removals()).toHaveLength(2);
+      const [older, newer] = removals();
+      expect(isOpen(newer)).toBe(true);
+      expect(older).toMatchObject({ done_by: 'supersede' });
+      expect(older.resolution).toBe('Replaced by a newer removal alert for the same reviews');
+    });
+
+    test('an open removal row naming a review that is still missing is not closed by a smaller restore', async () => {
+      seedSyncedReview({
+        id: 'gone-2',
+        google_review_id: 'accounts/1/locations/2/reviews/rev-gone-2',
+        gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone-2',
+        reviewer_name: 'Other Olive',
+        review_created_at: '2026-04-02T12:00:00Z',
+      });
+      gbpFeed([]);
+      await service.syncAllReviews();
+      expect(removals()).toHaveLength(1);
+
+      // Only flap-1 comes back; gone-2 is still missing, so the {flap-1, gone-2} row stays open.
+      staleSync();
+      db.__state.rows.google_reviews.find(r => r.id === 'gone-2').synced_at = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      gbpFeed([feedRow]);
+      await service.syncAllReviews();
+      expect(removals().every(isOpen)).toBe(true);
+    });
   });
 
   test('Places fallback clears missing_since when the sample confirms the review is live again', async () => {

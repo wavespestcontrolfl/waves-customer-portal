@@ -1036,15 +1036,15 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   // day gets a NEW row and the old one stayed open: one promise piled up four
   // to six unread rows (prod 2026-10-05). The daily re-ring stays; only the
   // newest row for this key may stay open. Runs for a deduped result too, so
-  // rows an older build left behind close on the next ring. Only rows still
-  // open: a row a person already marked done keeps its closer.
+  // rows an older build left behind close on the next ring. openToCloser: a
+  // row a person marked done is taken over too (their Reopen would bring an
+  // obsolete duplicate back); a row a system component closed is left alone.
   if (notification.id) {
-    const { doneColumns } = require('./notification-service')._private;
-    await trx('notifications')
+    const { doneColumns, openToCloser } = require('./notification-service')._private;
+    await openToCloser(trx('notifications')
       .where({ recipient_type: 'admin' })
       .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-      .whereNot({ id: notification.id })
-      .whereNull('done_at')
+      .whereNot({ id: notification.id }), 'supersede')
       .update(doneColumns({ by: 'supersede', resolution: 'Replaced by a newer reminder for the same promise', keepExisting: true, conn: trx }));
   }
   return notification;
