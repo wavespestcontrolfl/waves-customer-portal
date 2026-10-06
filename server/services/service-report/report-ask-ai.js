@@ -554,7 +554,6 @@ const MEDICAL_EXPOSURE_ANSWER = `Please call Poison Control at ${POISON_CONTROL_
 
 // A person or pet as the subject: "I", "my dog", "the baby", "our son".
 const PATIENT_NOUNS = '(?:dogs?|cats?|pets?|puppy|puppies|kittens?|birds?|horses?|rabbits?|child(?:ren)?|kids?|bab(?:y|ies)|toddlers?|sons?|daughters?|wife|husband|mom|mother|dad|father|grand(?:ma|pa|mother|father|son|daughter|kids?|children)|sisters?|brothers?|nephews?|nieces?|friends?|neighbou?rs?|guests?)';
-const BODY_PARTS = '(?:eyes?|skin|mouth|face|hands?|arms?|legs?|feet|foot|nose|lips?|head|hair|body)';
 const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS})`;
 const MEDICAL_CUES = [
   // Symptoms, said with or without a subject.
@@ -570,19 +569,45 @@ const MEDICAL_CUES = [
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
-  // Sprayed on a person, a pet or a body part only: "what was sprayed on my
-  // lawn" is a report question (Codex P1 #5964).
-  new RegExp(`\\bsprayed\\s+(?:on\\s+)?(?:me|myself|him|her|us|them|(?:my|our|his|her|their|the)\\s+(?:${PATIENT_NOUNS}|${BODY_PARTS}))\\b`, 'i'),
-  new RegExp(`\\b${PATIENT}\\s+(?:got|gets|was|were|is|are)\\s+sprayed\\b`, 'i'),
+  /\bsprayed\s+(?:on\s+)?(?:me|myself|him|himself|her|herself|us|ourselves)\b/i,
+  /\b(?:i|we|he|she)\s+(?:\w+\s+)?(?:got|get|gets|was|were|been)\s+(?:\w+\s+)?sprayed\b/i,
 ];
 
 /**
  * The fixed answer when the question reports a symptom or an exposure, else
  * null. Pure and deterministic; the question is never logged.
  */
+// "Sprayed (on) my/the X" and "my/the X got sprayed". Who or what X is cannot
+// be listed in full ("my partner", "my neck", "my hamster"), so X counts as a
+// person or pet unless it names a place, a plant, a pest or a thing ("my
+// lawn", "the dog bed", "the bird cage"). A missed exposure is worse than an
+// extra Poison Control answer (Codex P1 #5964, #6016).
+const SPRAYED_ON = /\bsprayed\s+(?:on\s+|onto\s+|at\s+)?(?:my|our|his|her|their|the|your)\s+((?:[\w'’-]+\s*){1,3})/gi;
+const SPRAYED_PASSIVE = /\b(?:my|our|his|her|their|the)\s+((?:[\w'’-]+\s+){1,3}?)(?:\w+\s+)?(?:got|gets|was|were|is|are|been)\s+(?:\w+\s+)?sprayed\b/gi;
+const BODY_PART_WORDS = new Set(('eye eyes skin mouth face hand hands arm arms leg legs foot feet nose lip lips head hair body neck '
+  + 'ear ears back chest throat stomach belly paw paws fur tongue finger fingers toe toes knee knees shoulder shoulders wrist ankle').split(' '));
+const NOT_A_PATIENT_WORDS = new Set(('lawn yard yards grass turf fence fences patio deck porch lanai pool garage driveway sidewalk walkway '
+  + 'house home roof wall walls window windows door doors floor floors baseboard baseboards cabinet cabinets kitchen bathroom '
+  + 'attic shed barn lanai screen screens perimeter foundation siding gutters gutter mulch soil dirt beds bed garden gardens '
+  + 'flower flowers plant plants shrub shrubs bush bushes hedge hedges tree trees palm palms weed weeds leaves roses '
+  + 'ant ants roach roaches spider spiders webs nest nests hive mosquito mosquitoes bug bugs insects wasps termites fleas ticks '
+  + 'mound mounds area areas spot spots side corner corners outside inside exterior interior property entry entries station stations '
+  + 'cage crate bowl bowls toy toys playset swing swingset trampoline furniture couch chair chairs table car truck boat trash can cans '
+  + 'bin bins grill hose sprinkler sprinklers it them this that everything stuff part parts room rooms closet laundry').split(' '));
+
+function namesPatient(span) {
+  const words = span.toLowerCase().replace(/['’]s?\b/g, ' ').split(/[^a-z-]+/).filter(Boolean);
+  if (words.some((word) => BODY_PART_WORDS.has(word))) return true;
+  return !words.some((word) => NOT_A_PATIENT_WORDS.has(word));
+}
+
+function sprayedOnSomeone(text) {
+  return [SPRAYED_ON, SPRAYED_PASSIVE].some((re) => [...text.matchAll(re)].some((m) => namesPatient(m[1])));
+}
+
 function medicalExposureAnswer(question) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
-  return MEDICAL_CUES.some((cue) => cue.test(text)) ? MEDICAL_EXPOSURE_ANSWER : null;
+  return MEDICAL_CUES.some((cue) => cue.test(text)) || sprayedOnSomeone(text) ? MEDICAL_EXPOSURE_ANSWER : null;
 }
 
 // ── The call ────────────────────────────────────────────────────────────
