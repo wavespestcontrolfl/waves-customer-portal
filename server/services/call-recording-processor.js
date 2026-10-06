@@ -24,10 +24,11 @@ function capitalizeName(name) {
   return properCase(name);
 }
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { applyCallerDataGuards, decideOnFileNameCorrection } = require('./call-spoken-data-guard');
 const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers');
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
-const { isLikelyE164 } = require('../utils/phone');
+const { isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
@@ -902,12 +903,12 @@ const CONFIRM_REASON_TEXT = {
   email_unverified: 'email was spelled out on the call — read it back to the caller before relying on it (spelled letters mishear)',
   email_invalid: 'captured email is not a valid address — re-collect it on the callback',
   email_bounced: 'email on file hard-bounced (mailbox rejected) — get a corrected address; estimates/receipts will not deliver',
-  secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications',
+  secondary_contact_captured: 'a second contact (buyer/tenant/spouse) was named on the call — confirm their name and number before relying on them for notifications (a number that is not a valid US number was dropped, not saved — ask for it again)',
   caller_phone_not_on_file: "caller's number isn't on the matched account — confirm it's really them, then save the number to the account",
   call_dropped_mid_intake: 'the call dropped mid-conversation before the address was captured — check the review card for the text/contact outcome before any outreach',
   address_unit_conflict: 'the street line and the unit disagree on the door (e.g. "…Apt 4" vs "Apt 5") — the street line was kept; confirm the unit with the caller before dispatch',
   street_level_address_review: 'web-form address: Google matched only the street, not the house — confirm the address with the customer, then confirm the visit (it is booked pending)',
-  callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) and gave no callback number — get a personal cell before texting confirmations or reminders',
+  callback_number_needed: 'caller said this incoming number is not theirs (shared/office line) or cannot take texts (relay service, landline) and gave no number to text — get a personal cell before texting confirmations or reminders',
 };
 const describeConfirmReason = (r) => CONFIRM_REASON_TEXT[r] || r;
 // Normalized street comparison (case/space/punctuation-insensitive) — "12338
@@ -1107,6 +1108,11 @@ function isUsableContactPhone(value) {
   const v = String(value || '').trim();
   if (!v || PHONE_SENTINEL_WORDS.test(v)) return false;
   if (!isLikelyE164(v)) return false;
+  // A spoken number with an impossible NANP area/exchange code (173-..., 941-1xx)
+  // is a mishearing, never a line: saving it as the contact number sent texts to
+  // a stranger (audited call 2026-10-01). The ANI fallback in firstExternalPhone
+  // takes over instead.
+  if (isImpossibleNanpPhone(v)) return false;
   const digits = v.replace(/\D/g, '');
   return !PHONE_SENTINELS.has(digits) && !PHONE_SENTINELS.has(digits.replace(/^1/, ''));
 }
@@ -7022,6 +7028,44 @@ async function backfillLinkedCustomerFromExtraction({ customerId, existing, extr
   return { updates, emailApplied: !!(updates.email && guarded.emailApplied) };
 }
 
+// Spelled-name RECORD correction (audit 2026-10-05, call "I-R-L-B-E-C-K"):
+// extraction already carries the spelled surname, but a customer record that
+// holds the old misspelling kept it forever (backfill is fill-only, and the
+// name mismatch even refused the email/address backfill). When the caller
+// SPELLED a name and the record's name is a near-spelling of it (same person,
+// written wrong once) with the other half of the name agreeing, the record is
+// corrected to the spelled letters and the name copies fan out through the same
+// service the Customer 360 edit uses. A record with a wholesale different name
+// (a spouse, tenant or colleague on a shared line) is never overwritten: the
+// existing name-conflict handling stays in charge there. No separate
+// name-correction card exists, so the correction is stamped on crm_notes the
+// way the disclaimed-number note is. Returns the applied fields or null.
+async function correctOnFileSpelledName({ customerId, extracted, spelledNameFields, accept, callSid }) {
+  if (!customerId || !spelledNameFields || (!spelledNameFields.first_name && !spelledNameFields.last_name)) return null;
+  const decide = (row) => (row && !row.deleted_at && (!accept || accept(row))
+    ? decideOnFileNameCorrection({ onFile: row, extracted, spelledNameFields, sameFirst: sameSpokenFirstName })
+    : null);
+  const pre = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
+  if (!decide(pre)) return null;
+  return db.transaction(async (trx) => {
+    const before = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forUpdate().first();
+    const fix = decide(before);
+    if (!fix) return null;
+    const oldName = [before.first_name, before.last_name].filter(Boolean).join(' ');
+    const newName = [fix.first_name || before.first_name, fix.last_name || before.last_name].filter(Boolean).join(' ');
+    const note = `Name corrected from "${oldName}" to "${newName}" — the caller spelled it out on a call (${String(callSid || '').slice(-8) || 'call'}).`;
+    await trx('customers').where({ id: customerId }).update({
+      ...fix,
+      crm_notes: trx.raw("CASE WHEN COALESCE(crm_notes, '') = '' THEN ? ELSE crm_notes || ? END", [note, `\n\n${note}`]),
+      updated_at: new Date(),
+    });
+    await require('./customer-contact-fanout').propagateCustomerNameChange(
+      { before, after: { ...before, ...fix } }, trx,
+    );
+    return fix;
+  });
+}
+
 async function backfillCustomerFromAppointmentContact(customerId, customer = {}, extracted = {}, callerPhone = null, { suppressPhone = false } = {}) {
   if (!customerId) return customer;
   const updates = {};
@@ -10311,6 +10355,34 @@ const CallRecordingProcessor = {
       extracted = { ...extracted, pre_adoption_service_fields: preAdoptionServiceFields(preAdoptionExtracted, serviceFieldsAdopted) };
     }
 
+    // ── Spoken caller-data guard (audit 2026-10-05) ───────────────────────
+    // Deterministic backstop for what the model gets wrong even under a correct
+    // prompt: (1) letters the caller SPELLED win over the heard word and the
+    // name on file ("M-C-L-O-U-G-H-L-I-N" saved as McLaughlin, "I-R-L-B-E-C-K"
+    // kept as the on-file Earlbeck) and a "Dingman over at" transcription merge
+    // is split back into the surname; (2) a spoken phone no NANP line can have
+    // (area/exchange code starting 0 or 1) is dropped instead of saved and
+    // texted; (3) "you can't text this one" / a video-relay caller sets
+    // caller_id_disclaimed so the existing callback_number_needed card + SMS
+    // hold fire. Runs after V2 adoption so V1 and V2 agree, before any
+    // customer, card or SMS decision reads the fields. Fail-open.
+    let callerDataGuard = null;
+    try {
+      callerDataGuard = applyCallerDataGuards({
+        extracted,
+        v2Extraction: v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction) ? v2Result.extraction : null,
+        transcripts: [contactPassTranscript, transcription],
+      });
+      extracted = callerDataGuard.extracted;
+      if (callerDataGuard.changes.length) {
+        // Kinds only — the values are caller PII (AGENTS.md PII-in-logs).
+        logger.info(`[call-proc] caller-data guard applied for ${maskSid(callSid)}: ${callerDataGuard.changes.map((c) => `${c.kind}:${c.role}.${c.field}`).join(', ')}`);
+      }
+    } catch (guardErr) {
+      callerDataGuard = null;
+      logger.warn(`[call-proc] caller-data guard skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
+    }
+
     // ── Tech follow-up short-circuit ── (see isTechFollowUpCall)
     // Extraction is final here and no side effect has run yet: the call
     // keeps its transcript, extraction, summary and commitments, and
@@ -12488,6 +12560,31 @@ const CallRecordingProcessor = {
     // existing_customer_scheduling, which are precisely the linked-customer
     // calls this backfill exists to repair (GH codex #4432 r1 P1).
     // Fail-soft.
+    // A caller who SPELLED their name corrects a record that holds a near-
+    // misspelling of it. Runs before the pre-linked backfill below so that
+    // backfill's name-agreement check sees the corrected record. Same trust
+    // bar as that backfill: the identity number must be the customer's own, no
+    // voicemail, no third-party call nature. Fail-soft: a failure never blocks
+    // the call.
+    if (callerDataGuard?.spelledNameFields && customerId && !createdCustomerFromCall && !explicitUnlink
+        && !extracted.is_voicemail && !v2ThirdPartyCallNature) {
+      try {
+        const identityPhone = prelinkedBackfillIdentityPhone(call);
+        const corrected = identityPhone ? await correctOnFileSpelledName({
+          customerId,
+          extracted,
+          spelledNameFields: callerDataGuard.spelledNameFields,
+          accept: (row) => customerPhoneMatches(identityPhone, row),
+          callSid,
+        }) : null;
+        if (corrected) {
+          logger.info(`[call-proc] Corrected on-file ${Object.keys(corrected).join('+')} from the caller's spelled letters for ${maskSid(callSid)} (customer ${customerId})`);
+        }
+      } catch (e) {
+        logger.warn(`[call-proc] spelled-name record correction skipped for ${maskSid(callSid)}: ${e.code || e.name || 'error'}`);
+      }
+    }
+
     const prelinkedGate = prelinkedBackfillGate({
       call, customerId, createdCustomerFromCall, phoneMatchedThisPass, extracted, explicitUnlink,
       thirdPartyCallNature: v2ThirdPartyCallNature,
@@ -12549,7 +12646,12 @@ const CallRecordingProcessor = {
     // contact info, but the office should confirm it before relying on it —
     // and when the persistence gate below is off, this triage item is the ONLY
     // surface carrying the second contact besides the lead's extracted_data.
-    if (callSecondaryContact && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
+    // A second person's number the guard rejected as impossible (no NANP line
+    // starts an area/exchange code with 0 or 1) is dropped, never saved — this
+    // card is the "ask again" signal, so it files even when the number was the
+    // only thing said about that person.
+    const secondaryPhoneRejected = (callerDataGuard?.rejectedSecondaryPhones || 0) > 0;
+    if ((callSecondaryContact || secondaryPhoneRejected) && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
       bridgeNeedsConfirmation.push('secondary_contact_captured');
       try {
         const secondaryTriageItem = buildTriageItem({
@@ -12557,7 +12659,10 @@ const CallRecordingProcessor = {
           flag: 'secondary_contact_captured',
           extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
           severity: 'advisory',
-          extraPayload: { secondary_contact: callSecondaryContact },
+          extraPayload: {
+            secondary_contact: callSecondaryContact || null,
+            ...(secondaryPhoneRejected ? { secondary_phone_rejected: 'not_a_valid_us_number' } : {}),
+          },
         });
         // MERGE the payload (not ignore): in enforce mode the deterministic-
         // flags loop inserts this flag first with the V2 extraction's contact,

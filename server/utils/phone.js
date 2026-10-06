@@ -83,6 +83,32 @@ function phoneIdentityKey(raw) {
   return isNanp ? digits.slice(-10) : `+${digits}`;
 }
 
+// NANP numbers can never start an area code or an exchange code with 0 or 1
+// (NANP numbering plan: NXX-NXX-XXXX, N = 2-9). A spoken "173-303-8616" or
+// "941-155-0123" is therefore a mishearing or a mis-recital, never a real
+// line, and a text sent to it reaches a stranger (audited call 2026-10-01: a
+// household member's phone was saved as +1 173-303-8616 and texts went to the
+// wrong person). True ONLY for a value that is clearly a NANP number (bare 10
+// digits, 1+10 digits, or +1 + 10 digits) whose area or exchange code
+// is impossible. Anything else (international numbers, short fragments,
+// non-phone text) returns false: "not impossible NANP" is not "valid", and
+// callers that need "dialable" keep their own length checks.
+function isImpossibleNanpPhone(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : String(raw ?? '').trim();
+  if (!text) return false;
+  const digits = text.replace(/\D/g, '');
+  let national = null;
+  if (text.startsWith('+')) {
+    if (digits.length === 11 && digits[0] === '1') national = digits.slice(1);
+  } else if (digits.length === 10) {
+    national = digits;
+  } else if (digits.length === 11 && digits[0] === '1') {
+    national = digits.slice(1);
+  }
+  if (!national) return false;
+  return national[0] === '0' || national[0] === '1' || national[3] === '0' || national[3] === '1';
+}
+
 module.exports = {
-  toE164, normalizePhone: toE164, isLikelyE164, phoneMatchDigits, phoneIdentityKey,
+  toE164, normalizePhone: toE164, isLikelyE164, phoneMatchDigits, phoneIdentityKey, isImpossibleNanpPhone,
 };
