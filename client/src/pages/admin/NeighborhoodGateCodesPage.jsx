@@ -169,12 +169,12 @@ function EntryRow({ entry, busyKey, editing, formError, onAction, onEdit, onCanc
 // owner (the page) reads the first page to learn whether the section is on.
 const FOUND_PAGE_SIZE = 50;
 
-function FoundInMessages({ items, total, loading, error, onRetry, onMore, onSave, onDismiss }) {
+function FoundInMessages({ items, total, loading, error, onRetry, onMore, onSave, onDismiss, onLink, onSearch }) {
   return (
     <div>
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-ui-body text-ink-secondary">
-        Access codes customers sent in a text. Save one to make it usable on the customer&apos;s page, or
-        dismiss it. Nothing here is saved until you decide.
+        Access codes sent in a text, from a customer or not. Save one to make it usable on the customer&apos;s page,
+        or dismiss it. A code from a number with no customer needs a customer first. Nothing here is saved until you decide.
       </div>
       {error && <ActionFeedback error onRetry={onRetry} className="mb-3">{error}</ActionFeedback>}
       {loading && !items.length && (
@@ -191,10 +191,12 @@ function FoundInMessages({ items, total, loading, error, onRetry, onMore, onSave
             visits={row.visitChoices || []}
             onSave={onSave}
             onDismiss={onDismiss}
+            onLink={onLink}
+            onSearch={onSearch}
             renderHeading={(r) => (
               r.customerId
                 ? <Link className="underline underline-offset-2 hover:no-underline u-focus-ring" to={`/admin/customers?customerId=${encodeURIComponent(r.customerId)}`}>{r.customerName || "Customer"}</Link>
-                : (r.customerName || "Customer")
+                : (r.customerName || "No customer yet")
             )}
           />
         ))}
@@ -276,6 +278,11 @@ export default function NeighborhoodGateCodesPage() {
   const foundDecision = async (path, body) => {
     await api(`/admin/access-codes${path}`, { method: "POST", body: JSON.stringify(body || {}) });
     await loadFound();
+  };
+  // The customer search behind "Find a customer" on a code from an unknown number.
+  const searchCustomers = async (term) => {
+    const data = await api(`/admin/customers?search=${encodeURIComponent(term)}&limit=8&sort=name`);
+    return data.customers || [];
   };
 
   useEffect(() => {
@@ -394,6 +401,8 @@ export default function NeighborhoodGateCodesPage() {
           onMore={() => loadFound({ offset: found.items.length })}
           onSave={(row, body) => foundDecision(`/${row.id}/accept`, body)}
           onDismiss={(row) => foundDecision(`/${row.id}/dismiss`)}
+          onLink={(row, customerId) => foundDecision(`/${row.id}/link`, { customerId })}
+          onSearch={searchCustomers}
         />
       ) : (
       <>

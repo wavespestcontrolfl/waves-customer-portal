@@ -1051,6 +1051,20 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
     // a missed visit's only guard, since it skips the current-visit check.
     expect(recheck).toMatch(/violatesSelfServeNotice\(\{ date, startTime: newWindow\.start \}\)/);
   });
+
+  test('both movers re-read the office move approval on the LOCKED row (moveGuard), missed visits exempt (codex #6039 r3)', () => {
+    const singleIdx = src.indexOf('await SmartRebooker.reschedule(');
+    const seriesIdx = src.indexOf('await SmartRebooker.rescheduleSeries(');
+    expect(src.slice(singleIdx, singleIdx + 1400)).toMatch(/moveGuard: officeApprovalRecheck/);
+    expect(src.slice(seriesIdx, singleIdx)).toMatch(/moveGuard: officeApprovalRecheck/);
+    const guardIdx = src.indexOf('const officeApprovalRecheck = async ({ trx }) => {');
+    expect(guardIdx).toBeGreaterThan(-1);
+    const guard = src.slice(guardIdx, guardIdx + 700);
+    expect(guard).toMatch(/if \(elig\.missed\) return;/);
+    expect(guard).toMatch(/\.forUpdate\(\)\s*\.first\('scheduled_date', 'window_start', 'office_move_approved_for'\)/);
+    expect(guard).toMatch(/visitInsideMoveNoticeWindow\(locked\)/);
+    expect(guard).toMatch(/code: 'SELF_SERVE_NOTICE'/);
+  });
 });
 
 describe('withSelfServeNotice (self-serve notice window, owner ruling 2026-09-23)', () => {
@@ -1114,6 +1128,12 @@ describe('pageEligibility — the ONE verdict the GET page, find-slots and the t
 
   test('a visit starting inside the self-serve move notice window → self_serve_notice', async () => {
     expect(await pageEligibility({ ...ok, scheduled_date: '2026-07-01', window_start: '18:00:00' }, NOW)).toEqual({ ok: false, reason: 'self_serve_notice' });
+  });
+
+  test('the same visit with the office move approval for its current start → ok (owner 2026-10-06)', async () => {
+    const soon = { ...ok, scheduled_date: '2026-07-01', window_start: '18:00:00' };
+    // 2026-07-01 18:00 EDT.
+    expect(await pageEligibility({ ...soon, office_move_approved_for: new Date('2026-07-01T22:00:00Z') }, NOW)).toEqual({ ok: true });
   });
 
   test('an ordinary future visit → ok', async () => {

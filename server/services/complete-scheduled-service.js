@@ -602,8 +602,8 @@ function advisorySafeMessage(text) {
 // Advisory messages recorded on a completion, flattened for the closeout
 // success view — the operator must see a recorded overrun/exception at
 // completion time, not only later in Customer 360.
-function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory }) {
-  return [blackout, nLimit, manager, calibration, inventory]
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit }) {
+  return [blackout, nLimit, manager, calibration, inventory, limit]
     .filter((record) => record && record.advisory)
     .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
     .map((block) => block && block.message)
@@ -3001,6 +3001,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let waveguardManagerApproval = null;
     let waveguardCalibrationAdvisory = null;
     let waveguardInventoryAdvisory = null;
+    // A yearly cap shared across formulations (prodiamine) that this visit's products
+    // crossed: an advisory in the response and one dispatch alert. The work is done;
+    // the completion is never blocked.
+    let applicationLimitAdvisory = null;
     let waveguardCalibrationCleared = false;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
@@ -8890,6 +8894,62 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // in the same MOA group; we only fire one alert per MOA group per
     // job. Without this guard a 3-product completion in the same
     // violating group would create 3 identical cards.
+    // Shared active-ingredient yearly cap (prodiamine across formulations): its own
+    // step, because the work is already done and ledgered whatever the outcome. It
+    // runs for an incomplete visit that applied product and again on a resume of a
+    // committed completion, reading the products from the ledger rows this record
+    // wrote (not the request body). The advisory is rebuilt from the computed
+    // violation every time, so a retry response still carries it; the dispatch alert
+    // is deduped durably per job and ingredient. Never blocks, never messages a customer.
+    if (record?.id) {
+      const reportSharedCap = async (trx = null) => {
+        const connection = trx || db;
+        if (packetEffects) {
+          const item = await connection('visit_completion_packet_items')
+            .where({ id: packetContext.itemId, service_record_id: record.id }).forUpdate().first('id');
+          if (!item) throw new Error('Visit member completion record changed');
+        }
+        const ledgered = await connection('property_application_history')
+          .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct('product_id');
+        if (!ledgered.length) return;
+        const LimitChecker = require('../services/application-limits');
+        const { createAlert } = require('../services/dispatch-alerts');
+        const capDate = svc.scheduled_date instanceof Date ? svc.scheduled_date : new Date(`${svc.scheduled_date}T12:00:00`);
+        const reported = new Set();
+        for (const { product_id: productId } of ledgered) {
+          const { blocks } = await LimitChecker.checkLimits(svc.customer_id, productId, capDate, connection, { propertyId: svc.property_id || null });
+          for (const v of blocks.filter((b) => b.type === 'annual_max_rate' && b.matchType === 'active_ingredient')) {
+            if (reported.has(v.matchValue)) continue;
+            reported.add(v.matchValue);
+            applicationLimitAdvisory = {
+              advisory: true,
+              blocks: [...(applicationLimitAdvisory?.blocks || []), { code: 'application_limit_active_ingredient', message: v.message }],
+            };
+            if (await connection('dispatch_alerts').where({ type: 'application_limit', job_id: svc.id })
+              .whereRaw("payload->>'active_ingredient' = ?", [v.matchValue]).first('id')) continue;
+            const capProduct = await connection('products_catalog').where({ id: productId }).first();
+            try {
+              await createAlert({
+                type: 'application_limit', severity: 'critical', techId: svc.technician_id, jobId: svc.id,
+                payload: { limit_type: v.type, active_ingredient: v.matchValue, product_name: capProduct?.name || null, current: v.current, max: v.max, message: v.message },
+                trx,
+              });
+            } catch (alertErr) {
+              if (packetEffects) throw alertErr;
+              logger.error(`[dispatch] application_limit createAlert failed: ${alertErr.message}`);
+            }
+          }
+        }
+      };
+      try {
+        if (packetEffects) await db.transaction(reportSharedCap);
+        else await reportSharedCap();
+      } catch (err) {
+        if (packetEffects) throw err;
+        logger.error(`[dispatch] shared-cap check failed (non-blocking): ${err.message}`);
+      }
+    }
+
     if (!isIncompleteVisit && (!resumingCommittedCompletion || packetEffects) && products?.length) {
       const writeMoaAlerts = async (trx = null) => {
         const connection = trx || db;
@@ -8927,11 +8987,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...result.warnings.map((v) => ({ ...v, alertSeverity: 'warn' })),
           ];
           for (const v of violations) {
-            // Only the MOA-rotation family of limit violations
-            // produces moa_violation alerts. Other limit types
-            // (annual_max_apps, seasonal_blackout, etc.) are
-            // operationally distinct and would belong to other
-            // alert kinds.
+            // The shared active-ingredient yearly cap has its own step below.
+            if (v.matchType === 'active_ingredient') continue;
+            // Only the MOA-rotation family of limit violations produces moa_violation alerts.
             if (!['moa_rotation_max', 'consecutive_use_max'].includes(v.type)) continue;
             const productCatalog = await connection('products_catalog').where({ id: p.productId }).first();
             const moaGroup = productCatalog?.moa_group;
@@ -9330,6 +9388,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           manager: waveguardManagerApproval,
           calibration: waveguardCalibrationAdvisory,
           inventory: waveguardInventoryAdvisory,
+          limit: applicationLimitAdvisory,
         }),
         ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
         ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -15122,6 +15181,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         manager: waveguardManagerApproval,
         calibration: waveguardCalibrationAdvisory,
         inventory: waveguardInventoryAdvisory,
+        limit: applicationLimitAdvisory,
       }),
       ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
       ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),

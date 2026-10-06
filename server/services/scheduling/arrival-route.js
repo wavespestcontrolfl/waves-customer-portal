@@ -446,7 +446,7 @@ function dayIsOvercommitted(sequencers, groupedPending, simulate) {
 
 /** Shape the certified winner into evaluateArrivalPlacement's public
  *  feasible result. */
-function buildFeasibleResult({ target, capacity, startMin, own, windowStart, winner }) {
+function buildFeasibleResult({ target, capacity, startMin, own, windowStart, winner, origin }) {
   const { simulation, order, usedLegs, baselineDrive } = winner;
   // Fixed blockers remain immovable; selected-technician holds are included
   // in the capacity route alongside that technician's appointments.
@@ -465,9 +465,12 @@ function buildFeasibleResult({ target, capacity, startMin, own, windowStart, win
         ...order.flatMap(row => row.memberIds || [row.id])],
       travelSource: usedLegs.every(leg => leg.source === 'google_traffic') ? 'google_traffic' : 'conservative_model',
       travelReasons: [...new Set(usedLegs.map(leg => leg.reason).filter(Boolean))],
+      // Where the van starts this route (home base, or today's last
+      // completed stop), so a picker can say where the first drive starts.
+      origin: origin ? { isHome: origin === RouteOptimizer.HQ } : null,
     } : {}),
     arrivalDelayMinutes: arrival.arrivalMin + (target.arrivalOffsetMinutes || 0) - minuteOfDay(windowStart),
-    arrivals: simulation.arrivals.map(row => ({ id: row.id, arrival: hhmm(row.arrivalMin), departure: hhmm(row.departureMin) })),
+    arrivals: simulation.arrivals.map(row => ({ id: row.id, arrival: hhmm(row.arrivalMin), departure: hhmm(row.departureMin), drive: row.driveMin })),
   };
 }
 
@@ -563,7 +566,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
       warning: `The route on ${date} already cannot keep every promised arrival window before this visit is added.` };
   }
   if (!winner) return fail;
-  return buildFeasibleResult({ target, capacity, startMin, own, windowStart, winner });
+  return buildFeasibleResult({ target, capacity, startMin, own, windowStart, winner, origin });
 }
 
 /** One on-the-hour enumeration for the staff finder and read-only gap

@@ -1,4 +1,4 @@
-const { applyCustomerNameOrder, applyCustomerSearchFilter, applyStableCustomerOrder, customerSearchTerms } = require('../services/customer-list-search');
+const { applyCustomerNameOrder, applyCustomerSearchFilter, applyStableCustomerOrder, customerSearchTerms, matchedHomeAddressSql } = require('../services/customer-list-search');
 const express = require('express');
 const Joi = require('joi');
 const { normalizeContactRole } = require('../constants/contact-roles');
@@ -32,6 +32,7 @@ const CustomerCredit = require('../services/customer-credit');
 const {
   normalizeContactName,
   normalizeContactPhone,
+  contactPhoneProblem,
   normalizeContactEmail,
   normalizeContactRecord,
   clearLineTypeOnPhoneChange,
@@ -74,6 +75,8 @@ const TECH_LIST_STRIPPED_FIELDS = [
   'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
   'landingPageUrl', 'lastContactDate', 'lastContactType', 'nextFollowUp',
   'lastRating', 'tags',
+  // The address of the customer's other home a search matched.
+  'matchedHomeAddress',
   // Account pricing is office-only — the field flows that search customers
   // never render plan price, and the server-priced estimate builder doesn't
   // take it from directory rows.
@@ -1227,6 +1230,7 @@ function mapPipelineCustomer(c, stage = c.pipeline_stage) {
 function mapCustomerListRow(c) {
   return {
     id: c.id, firstName: c.first_name, lastName: c.last_name,
+    ...(c.matched_home_address ? { matchedHomeAddress: c.matched_home_address } : {}),
     accountId: c.account_id, profileLabel: c.profile_label,
     isPrimaryProfile: !!c.is_primary_profile,
     contactRole: c.contact_role || null,
@@ -1360,8 +1364,8 @@ function compactServiceContactSlots(updates, before = {}) {
 }
 
 function applyCustomerListFilters(query, filters, healthColumns) {
-  const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited } = filters;
-  if (search) query = applyCustomerSearchFilter(query, search);
+  const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited, searchHomes } = filters;
+  if (search) query = applyCustomerSearchFilter(query, search, { homes: searchHomes === true });
   if (stage) query = query.where('pipeline_stage', stage);
   if (tier === 'none') query = query.whereNull('waveguard_tier');
   else if (tier) query = query.where('waveguard_tier', tier);
@@ -2348,6 +2352,8 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
     if (!firstName || !phone) {
       return res.status(400).json({ error: 'firstName and phone required' });
     }
+    const quickAddPhoneProblem = contactPhoneProblem(phone);
+    if (quickAddPhoneProblem) return res.status(400).json({ error: quickAddPhoneProblem, code: 'INVALID_PHONE' });
     const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
     if (normalizedAddress.unitConflict) {
       return res.status(400).json({ error: 'Address unit conflicts with the unit included in Address Line 1' });
@@ -2494,7 +2500,9 @@ router.get('/', async (req, res, next) => {
       .filter((key) => req.query[key] !== undefined).map((key) => [key, req.query[key]]));
     const healthValidation = customerHealthFilterSchema.validate(isTechRequest ? {} : healthInput);
     if (healthValidation.error) return res.status(400).json({ error: 'Invalid health or retention filter' });
-    const allFilters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited, ...healthValidation.value, retentionSince: new Date(Date.now() - 30 * 86400000) };
+    // searchHomes: an office search also matches a customer's other homes;
+    // techSafeListFilters drops it (a tech must not see sibling homes).
+    const allFilters = { searchHomes: true, search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited, ...healthValidation.value, retentionSince: new Date(Date.now() - 30 * 86400000) };
     const filters = isTechRequest ? techSafeListFilters(allFilters) : allFilters;
     const effectiveSort = isTechRequest ? techSafeSort(sort) : sort;
     const healthColumns = await getHealthScoreColumns();
@@ -2549,6 +2557,9 @@ router.get('/', async (req, res, next) => {
     )).count('* as count').first();
     const totalCount = parseInt(total?.count || 0);
     const offset = (page - 1) * limit;
+    // A customer found through a second home shows that home (the access-code
+    // link picker names the address the text gave).
+    query = query.select(matchedHomeAddressSql(db, filters.search, { homes: filters.searchHomes }));
     const customers = await query.limit(limit).offset(offset);
 
     // Pipeline counts
@@ -3694,6 +3705,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, billingMode, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel, contactRole } = req.body;
     if (!firstName || !phone) return res.status(400).json({ error: 'First name and phone required' });
+    const createPhoneProblem = contactPhoneProblem(phone);
+    if (createPhoneProblem) return res.status(400).json({ error: createPhoneProblem, code: 'INVALID_PHONE' });
     const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
     if (normalizedAddress.unitConflict) {
       return res.status(400).json({ error: 'Address unit conflicts with the unit included in Address Line 1' });
@@ -4070,6 +4083,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // and applied before the cross-account conflict check so dedup compares the
     // stored format.
     Object.assign(updates, normalizeContactRecord(updates));
+    // An unchanged stored number echoed by a full-form save is not a new write;
+    // only a number the operator is entering now is refused.
+    if (updates.phone && updates.phone !== before.phone) {
+      const phoneProblem = contactPhoneProblem(updates.phone);
+      if (phoneProblem) return res.status(400).json({ error: phoneProblem, code: 'INVALID_PHONE' });
+    }
     if (req.body.addressLine1 !== undefined || req.body.addressLine2 !== undefined) {
       const normalizedAddress = normalizeAdminAddressInput({
         addressLine1: req.body.addressLine1 !== undefined ? req.body.addressLine1 : before.address_line1,

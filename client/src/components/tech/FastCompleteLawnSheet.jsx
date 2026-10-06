@@ -14,8 +14,24 @@
 //     under the photos when the server asks for it). Confirm sends the default keep-all
 //     review, as the full form's button does;
 //  3. Products used: the plan's products, each with its method and amount
-//     (change the amount, remove, or add one from the catalog: an inline "Search
-//     products" box, one tap adds the row). No area box:
+//     (change the method or the amount, remove, or add one from the catalog: an
+//     inline "Search products" box, one tap adds the row; the box lists lawn
+//     products only). The method is one dropdown, the common three first (Spot
+//     treatment, Broadcast spray, Granular broadcast), offered by the context
+//     (`methods`), the lawn re-service sheet's own control read as a dropdown
+//     (owner 2026-10-05); a planned row starts on the protocol's own application
+//     mode, an added one on its category's default.
+//     Under the rows, "Also in October's protocol" (ProtocolAddOns): the plan's
+//     own opt-in products for this window (the context's `plannedProducts.addOns`,
+//     built by the same plan as the planned rows: the visit's substitute, the
+//     plan's mix, method and gate notes), one tap each. A tapped product opens as
+//     a row seeded from its plan item, so it figures like a planned row; it is
+//     never recorded as a skipped plan product. Recurring program visits only,
+//     under the completion-defaults gates (owner 2026-10-06).
+//     Nobody types an amount on a fast complete (owner 2026-10-05): a row with no
+//     plan quantity is figured from the catalog's rate per 1,000 sq ft times
+//     the area it goes down on (derivedAmount), and says so under the box; a
+//     typed amount wins. No area box:
 //     every lawn visit treats the whole lawn, so a sprayed or spread product
 //     goes down on its own planned area or the visit property's saved
 //     whole-lawn area (/complete requires one);
@@ -66,21 +82,23 @@ import LawnAssessmentCompletionBlock from '../lawn/LawnAssessmentCompletionBlock
 import { LAWN_FINDINGS_TYPE } from '../../lib/lawn-fast-complete';
 import { detectServiceCategory } from '../../lib/service-colors';
 import { LAWN_DEFAULT_AREAS, recordedLawnArea } from '../../lib/lawn-completion';
-import { defaultApplicationMethodForLine, normalizeApplicationMethod } from '../../lib/product-rate-prefill';
+import { defaultApplicationMethodForLine, isPerBasisUnit, normalizeApplicationMethod, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import {
   UNIT_CHOICES, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
-import { submittedAmount } from '../../lib/measure-units';
+import { isMlUnit, submittedAmount } from '../../lib/measure-units';
 import { tipsCalledForByNote } from '../../lib/tech-tips';
 import {
-  AmountRow, CLOSED_VISIT_STATUSES, isSendableRateUnit, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton,
-  RecoveredCompletion, SavedView, TipSection, VisitNote, methodLabel, refusalWithoutContext, submissionHolds, techTipsOf, useProductPicker, useTipLibrary,
-  visitChangedSinceSchedule, withFreshStock,
+  AmountRow, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton,
+  RecoveredCompletion, SavedView, TipSection, VisitNote, methodChoicesOf, rateUnitForRecord, refusalWithoutContext, submissionHolds,
+  methodLabel, techTipsOf, unitLabel, useProductPicker, useTipLibrary, visitChangedSinceSchedule, withFreshStock,
 } from './FastCompleteParts';
 import { BlogPostSection, CustomerHomeSection, DEFAULT_CUSTOMER_HOME, useBlogPostOffer } from './FastCompleteReport';
 import TechTreatmentZoneModal from './TechTreatmentZoneModal';
 import PropertyServiceAreas from './PropertyServiceAreas';
 import { elapsedSince } from '../../lib/on-site-time';
+import CallBridgeLink from '../admin/CallBridgeLink';
+import { useCanAccessCalls } from '../../hooks/useStaffCallAccess';
 import { Button, ActionFeedback } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -177,7 +195,7 @@ const RETRYABLE_REASONS = new Set(['profile_unavailable']);
 
 const EMPTY_CONTEXT = {
   loading: true, loadError: '', blockedReason: '', handoff: false, visit: null, raw: null,
-  visitType: null, turfHeightCapture: false, planned: [], plannedUnavailable: null, assessment: null,
+  visitType: null, turfHeightCapture: false, planned: [], addOns: [], addOnsMonth: null, plannedUnavailable: null, assessment: null, methods: [],
   findingsType: null, stockAdvisory: undefined,
 };
 
@@ -190,6 +208,7 @@ function blockedReasonFor(data, service) {
 }
 
 const plannedItemsOf = (data) => (Array.isArray(data?.plannedProducts?.items) ? data.plannedProducts.items.filter((item) => item?.productId) : []);
+const addOnsOf = (data) => (Array.isArray(data?.plannedProducts?.addOns) ? data.plannedProducts.addOns.filter((item) => item?.productId) : []);
 const assessmentOf = (data) => (data?.assessment && typeof data.assessment === 'object' ? data.assessment : { exists: false, id: null, confirmed: false });
 
 const LOAD_ERROR = 'Couldn’t load this visit. Try again.';
@@ -256,8 +275,13 @@ function contextFrom(data, service) {
     visitType: data?.visitType ?? null,
     turfHeightCapture: data?.turfHeightCapture === true,
     planned: plannedItemsOf(data),
+    // The plan's opt-in products for this window, and the visit's month (1-12).
+    addOns: addOnsOf(data),
+    addOnsMonth: Number(data?.plannedProducts?.month) || null,
     plannedUnavailable: data?.plannedProductsUnavailable || null,
     assessment: assessmentOf(data),
+    // The methods a row may take (the server's list; the common three when it has none).
+    methods: methodChoicesOf(data),
     ...optionalContextFields(data),
   };
 }
@@ -285,53 +309,74 @@ function useLawnFastContext({ base, request, service }) {
 
 // ── products ────────────────────────────────────────────────────────────────
 
+// The plan's quantity as the row starts: the plan's own measure and amount
+// when the plan gave one in a unit the row's measures know (a small liquid dose
+// in spoons), else the product's own measure with an empty box.
+function plannedSeed(planned, own) {
+  const amount = Number(planned?.amount);
+  const dimension = measureUnit(planned?.amountUnit, own.dimension)
+    ? own.dimension
+    : Object.keys(UNIT_CHOICES).find((name) => measureUnit(planned?.amountUnit, name));
+  if (!dimension || !(amount > 0)) return { dimension: own.dimension, amount: '', unit: own.unit };
+  return { dimension, ...seededAmount(amount, measureUnit(planned.amountUnit, dimension)) };
+}
+
+// The plan's own rate (ratePer1000 in rateUnit), in the record's spelling of
+// a unit /complete accepts ("fl oz" is sent as fl_oz); null when the plan
+// carries none, or one the record refuses (mL, percent_solution).
+function plannedRate(planned) {
+  const unit = planned && Number(planned.ratePer1000) > 0 ? rateUnitForRecord(planned.rateUnit) : null;
+  return unit ? { rate: Number(planned.ratePer1000), unit } : null;
+}
+
 // A row for a catalog product. `planned` carries the plan's amount, unit and
-// method; an added product has none and starts on its own default method.
+// method (a planned row's, or a tapped protocol add-on's plan item); an added
+// product has none and starts on its own default method.
 function productRow(product, { planned = null, added = false }) {
   const rawMethod = planned?.applicationMethod || defaultApplicationMethodForLine(product, 'lawn');
   // Held the way the server reads it, so the requirements table finds it.
   const method = normalizeApplicationMethod(rawMethod) || rawMethod;
-  const own = productUnits(product, { method });
-  const amount = Number(planned?.amount);
-  const plannedDimension = measureUnit(planned?.amountUnit, own.dimension)
-    ? own.dimension
-    : Object.keys(UNIT_CHOICES).find((name) => measureUnit(planned?.amountUnit, name));
-  let dimension = own.dimension;
-  let seeded = { amount: '', unit: own.unit };
-  if (plannedDimension && amount > 0) {
-    dimension = plannedDimension;
-    seeded = seededAmount(amount, measureUnit(planned.amountUnit, plannedDimension));
-  }
+  const seeded = plannedSeed(planned, productUnits(product, { method }));
   return {
     product,
     productId: product.id,
     name: product.name,
     added,
     planned: !!planned,
+    // A protocol add-on the tech tapped: seeded from its plan item like a
+    // planned row, labelled for where it came from.
+    fromProtocol: added && !!planned,
     method,
-    dimension,
+    dimension: seeded.dimension,
     totalAmount: seeded.amount,
     amountUnit: seeded.unit,
     fromPlan: seeded.amount !== '',
-    // The plan's own rate (ratePer1000 in rateUnit), only in a unit /complete
-    // accepts. Nobody types a rate on this sheet: an untouched planned row sends
-    // this exactly as the plan gave it, and the first change to the row's amount
-    // or amount unit (rateChanged) drops it.
-    planRate: planned && Number(planned.ratePer1000) > 0 && isSendableRateUnit(planned.rateUnit)
-      ? { rate: Number(planned.ratePer1000), unit: String(planned.rateUnit).trim() }
-      : null,
+    // Nobody types a rate on this sheet: an untouched planned row sends the
+    // plan's exactly as the plan gave it, and the first change to the row's
+    // amount or amount unit (rateChanged) drops it.
+    planRate: plannedRate(planned),
     rateChanged: false,
-    // The square feet the context's planned item carries, if any.
+    // The plan's method and the square feet it gives at that method, if any:
+    // the plan's area stands only while the row is on the plan's method.
+    plannedMethod: planned ? method : null,
     plannedSqft: planned && Number(planned.treatedSqft) > 0 && (!planned.areaUnit || planned.areaUnit === 'sqft') ? Number(planned.treatedSqft) : null,
   };
 }
 
-// The rate a row records: the plan's, for a planned row nobody has changed, and
-// nothing else (no typed rate, no catalog default, no recomputing: a nutrient
-// rate such as lb N cannot be got back from the product amount). So there is no
-// unit to get wrong. Added products, changed rows, plans with no rate and
-// units /complete does not accept all record none.
-const plannedRateOf = (row) => (row.planned && !row.rateChanged ? row.planRate : null);
+// The rate a row records: the plan's, for a planned row nobody has changed;
+// the rate a figured amount was figured FROM (derivedRate, the catalog's per
+// 1,000 sq ft in its base unit), so the application's rate
+// is on the record for the annual-limit checks; and nothing else (no typed
+// rate, no recomputing: a nutrient rate such as lb N cannot be got back from
+// the product amount). Typed amounts, changed planned rows, plans with no rate
+// and units /complete does not accept all record none.
+// A figured amount's own rate comes first: a planned row the plan gave a rate
+// but no quantity for is figured from the catalog, and records THAT rate, never
+// the plan's beside an amount the plan did not give.
+// The plan's rate rides only a planned row on the plan's own method whose
+// amount nobody changed: a method changed and changed back is the plan's
+// method again (Codex #5993 r8).
+const rateOf = (row) => row.derivedRate || (onPlannedMethod(row) && !row.rateChanged ? row.planRate : null);
 
 // AmountRow shows a rate box only when it is given a rate unit; this sheet never does.
 const NO_RATE = { rate: '', rateUnit: '', max: null };
@@ -385,11 +430,96 @@ function usePropertyAreaLifecycle() {
     blocked: refreshing || !settled,
   };
 }
+// A planned row on the plan's own method. Moved to another method, the plan's
+// area no longer describes where it goes down: a spot area is not a broadcast's
+// whole lawn, and a broadcast area is not a spot's (Codex #5993 r6, r7).
+const onPlannedMethod = (row) => row.planned && row.method === row.plannedMethod;
 const areaOf = (row, wholeLawn) => {
   const requirement = requirementOf(row);
   if (requirement?.unit !== 'sqft') return null;
-  return row.plannedSqft || wholeLawn || null;
+  return (onPlannedMethod(row) && row.plannedSqft) || wholeLawn || null;
 };
+
+// The amount a row is figured at when nobody typed one and the plan gave none
+// (owner 2026-10-05: a fast complete never asks the tech to work this out):
+// the catalog's rate per 1,000 sq ft times the area the row goes down on, in the rate's own
+// unit (spoons for a small liquid dose, as every seeded amount).
+// The area is the one the row submits (its sqft method's); a planned spot row
+// goes down on the plan's own area. No area, a per-basis rate (per gallon, per
+// acre, per spot), a rate in mL or a rate in another measure than the row's
+// figures nothing, and the box stays empty. Returns { amount, unit, note } or
+// null; `note` is the working, read under the box.
+// One measure's units against its base (fl oz; grams; each), for a figured
+// amount read in the unit the tech picked.
+const UNIT_SCALE = {
+  liquid: { tsp: 1 / 6, fl_oz: 1, gal: 128 },
+  weight: { g: 1, oz: 28.3495, lb: 453.592 },
+  count: { each: 1 },
+};
+function convertAmount(amount, from, to, dimension) {
+  const scale = UNIT_SCALE[dimension];
+  if (!scale || !(from in scale) || !(to in scale)) return null;
+  return amount * (scale[from] / scale[to]);
+}
+
+// The rate a row is figured at, { rate, base } (base = the rate's own unit
+// before any "/"), or null when there is none the sheet can figure from: the
+// catalog's. A per-basis rate (per gallon, per acre, per spot) or one in mL
+// figures nothing.
+function figuringRate(row) {
+  const source = resolveRatePrefill(row.product, { applicationMethod: row.method, serviceLine: 'lawn' });
+  const rate = Number(source?.rate);
+  const rateUnit = String(source?.rateUnit || '').trim();
+  if (!(rate > 0) || !rateUnit || isPerBasisUnit(rateUnit) || isMlUnit(rateUnit)) return null;
+  // The base in the record's own spelling ("fl oz" and "fl_oz" are one unit;
+  // shared/rate-units.json spells it fl_oz), so the figured rate is sendable.
+  const base = rateUnit.split('/')[0].trim().toLowerCase().replace(/\s+/g, '_');
+  return { rate, base };
+}
+
+// The area a row is figured on: the one it submits for a sqft method; a
+// planned spot row's own plan area while it is on the plan's method; else
+// none, so a planned row moved to spot treatment figures nothing from the old
+// plan area.
+const figuringArea = (row, lawnSqft) => (requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : (onPlannedMethod(row) ? row.plannedSqft : null));
+
+function derivedAmount(row, lawnSqft) {
+  if (row.amountPicked || row.fromPlan) return null;
+  const area = figuringArea(row, lawnSqft);
+  const figured = figuringRate(row);
+  if (!(area > 0) || !figured) return null;
+  const { rate, base } = figured;
+  const unit = measureUnit(base, row.dimension);
+  if (!unit) return null;
+  // In the unit the tech picked for the row (unitPicked), else the rate's own
+  // (spoons for a small liquid dose). Rounded ONCE, after that conversion, to
+  // the precision the record keeps for the unit (three decimals for fl oz and
+  // gal, as submittedAmount sends them; two for spoons and dry weights): a
+  // two-decimal pre-round in fl oz would zero a tiny dose (0.004 fl oz) and
+  // the record would disagree with the box.
+  const inBase = rate * (area / 1000);
+  const shown = row.unitPicked
+    ? { amount: convertAmount(inBase, unit, row.amountUnit, row.dimension), unit: row.amountUnit }
+    : seededAmount(inBase, unit);
+  if (shown.amount == null) return null;
+  const places = shown.unit === 'fl_oz' || shown.unit === 'gal' ? 1000 : 100;
+  const amount = Math.round(shown.amount * places) / places;
+  if (!(amount > 0)) return null;
+  return {
+    amount,
+    unit: shown.unit,
+    // The rate on the record, in its base unit (the plan's own shape).
+    rate: rateUnitForRecord(base) ? { rate, unit: rateUnitForRecord(base) } : null,
+    note: `${rate} ${unitLabel(base)} per 1,000 sq ft × ${area.toLocaleString('en-US')} sq ft`,
+  };
+}
+
+// A row as the sheet reads, checks and sends it: its figured amount in place
+// of an empty box. The tech's own entry and the plan's quantity pass through.
+function withDerivedAmount(row, lawnSqft) {
+  const derived = derivedAmount(row, lawnSqft);
+  return derived ? { ...row, totalAmount: derived.amount, amountUnit: derived.unit, derivedNote: derived.note, derivedRate: derived.rate } : row;
+}
 
 // One id, one planned product, however the plan lists it: the FIRST entry wins
 // (the full form's lawnPlanSelections keeps the first too). Ids compare
@@ -418,6 +548,11 @@ function useProductRows(ctx, catalog) {
   const updateRow = useCallback((productId, patch) => {
     setRows((prev) => prev.map((row) => {
       if (row.productId !== productId) return row;
+      // A unit change on a row whose amount is figured (nothing typed, no plan
+      // quantity) keeps the figure: the row remembers the unit (unitPicked) and
+      // derivedAmount figures in it. Only a typed number is the tech's amount.
+      const unitOnly = 'amountUnit' in patch && !('totalAmount' in patch) && !row.amountPicked && !row.fromPlan;
+      if (unitOnly) return { ...row, amountUnit: patch.amountUnit, unitPicked: true };
       return {
         ...row,
         ...patch,
@@ -427,10 +562,10 @@ function useProductRows(ctx, catalog) {
       };
     }));
   }, []);
-  const addProduct = useCallback((product) => {
+  const addProduct = useCallback((product, { planned = null } = {}) => {
     setRows((prev) => (prev.some((row) => row.productId === product.id) ? prev : [
       ...prev,
-      productRow(product, { added: true }),
+      productRow(product, { added: true, planned }),
     ]));
   }, []);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
@@ -530,7 +665,7 @@ function completionBody({ form, rows, ctx, assessmentId, gaugeHeightIn, lawnSqft
     lawnAssessmentId: assessmentId,
     products: rows.map((row) => {
       const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
-      const planRate = plannedRateOf(row);
+      const planRate = rateOf(row);
       const requirement = requirementOf(row);
       return {
         productId: row.productId,
@@ -589,7 +724,12 @@ function LawnSheetHeader({ titleId, title, showDetails, detailsDisabled, onDetai
 // customer, then address (directions), phone (call) and email (mail), each an
 // underlined link as there. The schedule row carries name, address and phone; the
 // email is read from the customer, as the full form does.
+// The phone goes through the Waves call bridge for a login that may place
+// customer calls (owner 2026-10-06): the server rings the caller's phone, then
+// the customer sees the Waves number, never the caller's own cell. Any other
+// login keeps the plain tel: link it had.
 function CustomerContact({ service, visit, request }) {
+  const canCall = useCanAccessCalls();
   const customerId = service?.customerId || service?.routedCustomerId || null;
   const [email, setEmail] = useState('');
   useEffect(() => {
@@ -609,7 +749,11 @@ function CustomerContact({ service, visit, request }) {
         ? <a className="tech-lawn-name" href={`/admin/customers?customerId=${encodeURIComponent(customerId)}`}>{name}</a>
         : <div className="tech-lawn-name">{name}</div>}
       {address ? <a href={`https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(address)}`} target="_blank" rel="noopener noreferrer">{address}</a> : null}
-      {service?.customerPhone ? <a href={`tel:${service.customerPhone}`}>{service.customerPhone}</a> : null}
+      {service?.customerPhone
+        ? (canCall
+          ? <CallBridgeLink styledButton className="tech-lawn-call" phone={service.customerPhone} customerName={name === 'Customer' ? '' : name} customerIdHint={customerId}>{service.customerPhone}</CallBridgeLink>
+          : <a href={`tel:${service.customerPhone}`}>{service.customerPhone}</a>)
+        : null}
       {email ? <a href={`mailto:${email}`} style={{ wordBreak: 'break-word' }}>{email}</a> : null}
     </div>
   );
@@ -778,12 +922,14 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   // From the context's findingsType only (the live profile), never the schedule row.
   const typed = ctx.findingsType === LAWN_FINDINGS_TYPE;
   const products = useProductRows(ctx, catalog);
-  const { rows } = products;
   // The whole-lawn area: this visit property's recorded lawn area (or the area
   // the technician set when none is recorded), never a planned product's own
   // (possibly partial) area and never the customer-wide turf profile (at a
   // secondary property that can be the primary's lawn).
   const lawnSqft = propertyAreas.wholeLawn;
+  // Every reader of the rows (Complete's checks, the stock hold, the body, the
+  // cards) sees the figured amounts; only the tech's entries live in state.
+  const rows = useMemo(() => products.rows.map((row) => withDerivedAmount(row, lawnSqft)), [products.rows, lawnSqft]);
   // Why the property areas hold Complete: the first read has not answered, or a
   // refresh after a refused completion has not brought a fresh version yet (or
   // failed: PropertyServiceAreas shows the error with Retry).
@@ -891,7 +1037,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               technicianNotes={form.note}
             />
           </section>
-          <ProductsSection ctx={ctx} products={products} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={ctx} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -958,11 +1104,11 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 
 // ── products ────────────────────────────────────────────────────────────────
 
-// Each product on the sheet: the plan's, or one the tech added. The amount can
-// change and any product can go (a removed plan product is recorded as
-// skipped). No area and no rate box.
-function ProductsSection({ ctx, products, lawnSqft, locked, other, popover, inlineSearch }) {
-  const { rows, updateRow, removeRow } = products;
+// Each product on the sheet: the plan's, or one the tech added. The method and
+// the amount can change and any product can go (a removed plan product is
+// recorded as skipped). No area and no rate box.
+function ProductsSection({ ctx, rows, products, catalog, lawnSqft, locked, other, popover, inlineSearch }) {
+  const { updateRow, removeRow, addProduct } = products;
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
@@ -972,31 +1118,88 @@ function ProductsSection({ ctx, products, lawnSqft, locked, other, popover, inli
         <p className="tech-visit-muted" role="status">The planned products could not be loaded. Add what you applied.</p>
       )}
       {rows.map((row) => (
-        <ProductEditor key={row.productId} row={row} lawnSqft={lawnSqft} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
+        <ProductEditor key={row.productId} row={row} methods={ctx.methods} lawnSqft={lawnSqft} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
       ))}
+      <ProtocolAddOns addOns={ctx.addOns} month={ctx.addOnsMonth} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
 }
 
-// A product: its name, how it goes down (and the whole-lawn area when the way
-// it goes down needs one), the amount, and Remove.
-function ProductEditor({ row, lawnSqft, locked, onChange, onRemove }) {
+const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+// "Also in October's protocol": the plan's opt-in products for this window,
+// one tap each. Every word on a line is the plan's: the visit's substitute
+// ("in place of" the original), the protocol line, the gate notes, the method
+// and the rate. A product the sheet's catalog does not list cannot be built
+// into a row and is left out; one already on the sheet reads as such.
+function ProtocolAddOns({ addOns, month, rows, catalog, locked, onAdd }) {
+  const titleId = useId();
+  const byId = new Map((catalog || []).map((product) => [String(product.id).toLowerCase(), product]));
+  const items = (addOns || [])
+    .map((item) => ({ ...item, product: byId.get(String(item.productId).toLowerCase()) || null }))
+    .filter((item) => item.product);
+  if (!items.length) return null;
+  const on = new Set(rows.map((row) => String(row.productId).toLowerCase()));
+  const monthName = month ? MONTH_NAMES[month - 1] : null;
+  return (
+    <div className="tech-protocol-addons" role="group" aria-labelledby={titleId}>
+      <div className="tech-protocol-addons-head">
+        <h4 id={titleId} className="tech-protocol-addons-title">{monthName ? `Also in ${monthName}’s protocol` : 'Also in this month’s protocol'}</h4>
+        <p className="tech-visit-muted">Tap what you applied.</p>
+      </div>
+      {items.map((item) => {
+        const onSheet = on.has(String(item.productId).toLowerCase());
+        const rate = Number(item.ratePer1000) > 0 && item.rateUnit ? `${item.ratePer1000} ${unitLabel(item.rateUnit)} per 1,000 sq ft` : '';
+        const why = [
+          item.substituteFor ? `In place of ${item.substituteFor}` : '',
+          item.line || '',
+          ...(item.gateNotes || []),
+          item.applicationMethod ? methodLabel(item.applicationMethod) : '',
+          rate,
+        ].filter(Boolean).join(' · ');
+        return (
+          <div key={item.productId} className="tech-protocol-addon">
+            <span className="tech-protocol-addon-text">
+              <span className="tech-protocol-addon-name">{item.product.name}</span>
+              <span className="tech-visit-muted">{onSheet ? 'On the sheet' : why}</span>
+            </span>
+            <Button
+              type="button"
+              variant="secondary"
+              className="tech-visit-action tech-protocol-addon-add"
+              aria-label={onSheet ? `${item.product.name} is on the sheet` : `Add ${item.product.name}`}
+              disabled={locked || onSheet}
+              onClick={() => onAdd(item.product, { planned: item })}
+            >
+              {onSheet ? '✓' : 'Add'}
+            </Button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// A product: its name, how it goes down (the method chips, and the area it will
+// submit when the method needs one), the amount, and Remove.
+function ProductEditor({ row, methods, lawnSqft, locked, onChange, onRemove }) {
   const nameId = useId();
-  const area = areaOf(row, lawnSqft);
   // The area this row will submit, named for what it is: "whole lawn" only when it
   // is the whole-lawn figure; a planned product's own smaller (or unchecked) area
-  // is "planned area".
-  const areaText = area ? `${area === lawnSqft ? 'whole lawn' : 'planned area'}, ${area.toLocaleString('en-US')} sq ft` : null;
-  const how = [methodLabel(row.method), areaText].filter(Boolean).join(' · ');
+  // is "planned area". Only a method that needs square feet shows one.
+  const area = requirementOf(row)?.unit === 'sqft' ? areaOf(row, lawnSqft) : null;
+  const areaText = area ? `${area === lawnSqft ? 'Whole lawn' : 'Planned area'}, ${area.toLocaleString('en-US')} sq ft` : null;
   return (
     <div role="group" aria-labelledby={nameId} className="tech-product-editor">
       <div className="tech-product-editor-head">
         <h4 id={nameId} className="tech-product-editor-name">{row.name}</h4>
-        <span className="tech-visit-muted">{[categoryLabel(row.product), row.added ? 'added by you' : 'planned'].filter(Boolean).join(' · ')}</span>
+        <span className="tech-visit-muted">{[categoryLabel(row.product), row.fromProtocol ? 'from the protocol' : row.added ? 'added by you' : 'planned'].filter(Boolean).join(' · ')}</span>
       </div>
-      <p className="tech-visit-muted">{how}</p>
+      <MethodSection row={row} methods={methods} locked={locked} onChange={onChange} layout="select" />
+      {areaText && <p className="tech-visit-muted">{areaText}</p>}
       <AmountRow row={row} rate={NO_RATE} onChange={onChange} />
+      {row.derivedNote && <p className="tech-visit-muted">{row.derivedNote}</p>}
       {!hasAmount(row) && <p className="tech-visit-muted" role="status">No amount entered. It is recorded without one.</p>}
       <div className="tech-product-editor-actions">
         <Button type="button" variant="secondary" className="tech-visit-action tech-product-remove" disabled={locked} onClick={onRemove}>Remove</Button>

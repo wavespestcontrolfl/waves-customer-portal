@@ -16,7 +16,7 @@ import { isMlUnit } from '../../lib/measure-units';
 import RATE_UNITS from '../../../../shared/rate-units.json';
 import DictationButton from './DictationButton';
 import FastCompleteProductPicker, { WarningIcon } from './FastCompleteProductPicker';
-import { UiSurface, ActionFeedback, Button, Field, Input, Textarea, cn } from '../ui';
+import { UiSurface, ActionFeedback, Button, Field, Input, Select, Textarea, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // Tips shown before the tech searches or opens the whole list.
@@ -43,6 +43,17 @@ export const methodLabel = (value) => {
 // server refuse the whole visit.
 const SENDABLE_RATE_UNITS = new Set(RATE_UNITS.filter((unit) => !isMlUnit(unit)));
 export const isSendableRateUnit = (unit) => SENDABLE_RATE_UNITS.has(String(unit || '').trim().toLowerCase());
+/**
+ * A rate unit as the record spells it, or null when /complete would refuse
+ * it: the catalog and the plan engine spell a unit with spaces ("fl oz",
+ * "Fl Oz") where shared/rate-units.json spells it fl_oz, and the server's own
+ * normalizer reads both as one unit; a rate sent in the record's spelling is
+ * the same rate, in a form the limit checks can sum.
+ */
+export const rateUnitForRecord = (unit) => {
+  const spelled = String(unit || '').trim().toLowerCase().replace(/\s+/g, '_');
+  return SENDABLE_RATE_UNITS.has(spelled) ? spelled : null;
+};
 
 // A catalog row with the stock on hand a fresh read has for it.
 export function withFreshStock(product, fresh) {
@@ -274,6 +285,79 @@ export function AmountRow({ row, rate, onChange }) {
         </div>
       ) : null}
       {overLabel && <p className="tech-visit-warning" role="status">&gt; label max {rate.max}</p>}
+    </div>
+  );
+}
+
+// The common lawn methods the sheets fall back to when the context offers none
+// (an older server): the three every lawn visit uses, in screen order. The
+// server's list (lawn-reservice-fast-context LAWN_METHODS) is the authority
+// when it is there.
+export const COMMON_LAWN_METHODS = [
+  { value: 'spot_treatment', label: 'Spot treatment', common: true },
+  { value: 'broadcast_spray', label: 'Broadcast spray', common: true },
+  { value: 'granular_broadcast', label: 'Granular broadcast', common: true },
+];
+
+/** The context's method list, or the common three when it has none. */
+export function methodChoicesOf(data) {
+  const offered = (Array.isArray(data?.methods) ? data.methods : []).filter((choice) => choice?.value);
+  return offered.length ? offered : COMMON_LAWN_METHODS;
+}
+
+// How a product went down. Two readings, shared by the two lawn sheets:
+// `layout="chips"` (the lawn re-service sheet) puts the common methods as chips
+// under "How" and the rest in a "More methods" select; `layout="select"` (the
+// lawn sheet, owner 2026-10-05) is one dropdown with every method, the common
+// ones first. `footnote` is the sheet's own line under the control, if any.
+export function MethodSection({ row, methods, locked, onChange, footnote = null, layout = 'chips' }) {
+  const methodId = useId();
+  if (layout === 'select') {
+    const ordered = [...methods.filter((choice) => choice.common), ...methods.filter((choice) => !choice.common)];
+    const known = ordered.some((choice) => choice.value === row.method);
+    return (
+      <div>
+        <label htmlFor={methodId} className="tech-product-editor-label">How</label>
+        <Select
+          id={methodId}
+          aria-label={`Method for ${row.name}`}
+          className="tech-visit-control"
+          disabled={locked}
+          value={known ? row.method : ''}
+          onChange={(e) => { if (e.target.value) onChange({ method: e.target.value }); }}
+        >
+          {!known && <option value="">Choose a method</option>}
+          {ordered.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+        </Select>
+        {footnote && <p className="tech-visit-muted">{footnote}</p>}
+      </div>
+    );
+  }
+  // An older context without `common` shows every method as a button.
+  const hasCommon = methods.some((choice) => choice.common);
+  const common = hasCommon ? methods.filter((choice) => choice.common) : methods;
+  const more = hasCommon ? methods.filter((choice) => !choice.common) : [];
+  return (
+    <div>
+      <span id={methodId} className="tech-product-editor-label">How</span>
+      <div role="group" aria-labelledby={methodId} className="tech-visit-tile-grid">
+        {common.map((choice) => (
+          <Chip disabled={locked} key={choice.value} label={choice.label} pressed={row.method === choice.value} onClick={() => onChange({ method: choice.value })} />
+        ))}
+      </div>
+      {more.length > 0 && (
+        <Select
+          aria-label={`More methods for ${row.name}`}
+          className="tech-visit-control"
+          disabled={locked}
+          value={more.some((choice) => choice.value === row.method) ? row.method : ''}
+          onChange={(e) => { if (e.target.value) onChange({ method: e.target.value }); }}
+        >
+          <option value="">More methods</option>
+          {more.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
+        </Select>
+      )}
+      {footnote && <p className="tech-visit-muted">{footnote}</p>}
     </div>
   );
 }

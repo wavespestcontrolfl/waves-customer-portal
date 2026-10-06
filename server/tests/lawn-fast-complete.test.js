@@ -118,7 +118,10 @@ describe('lawnFastVisitType: decided from the appointment, never the customer pl
     [PROFILE(), null, false, 'recurring'],
     [PROFILE({ serviceKey: 'lawn_care_recurring' }), 'monthly_membership', false, 'recurring'],
     [PROFILE(), 'per_visit', false, 'recurring'],
-    [PROFILE(), 'per_application', false, 'per_application'],
+    // Most program customers pay per application: their recurring plan visit is a program visit.
+    [PROFILE(), 'per_application', false, 'recurring'],
+    [PROFILE({ serviceKey: 'lawn_fertilization' }), 'per_application', false, 'per_application'],
+    [PROFILE(), 'per_application', true, 'per_application'],
     [PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }), null, false, 'one_time'],
     [PROFILE(), 'one_time', false, 'one_time'],
     [PROFILE({ billingType: null }), null, false, 'other'],
@@ -187,7 +190,7 @@ describe('buildLawnFastContext', () => {
 
   test.each([
     ['recurring', PROFILE(), null, 'recurring'],
-    ['per-application', PROFILE(), 'per_application', 'per_application'],
+    ['per-application', PROFILE({ serviceKey: 'lawn_fertilization' }), 'per_application', 'per_application'],
     ['one-time', PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }), null, 'one_time'],
   ])('a %s lawn visit opens the sheet (no plan: empty planned products, never refused)', async (_label, profile, billingMode, visitType) => {
     resolveCompletionProfileForScheduledService.mockResolvedValue(profile);
@@ -197,11 +200,20 @@ describe('buildLawnFastContext', () => {
     });
     expect(ctx).toMatchObject({
       ok: true, eligible: true, reason: null, visitType,
-      plannedProducts: { source: null, items: [] },
+      plannedProducts: { source: null, items: [], addOns: [] },
       assessment: { exists: false, id: null, confirmed: false },
       photoStatus: null,
       previousFrontPhoto: null,
     });
+    // The methods a product row may take: the lawn re-service sheet's own list,
+    // the common three first, each with /complete's sqft verdict.
+    expect(ctx.methods).toEqual(require('../services/lawn-reservice-fast-context').lawnMethodChoices());
+    expect(ctx.methods.slice(0, 3)).toEqual([
+      { value: 'spot_treatment', label: 'Spot treatment', common: true, requiresSqft: false },
+      { value: 'broadcast_spray', label: 'Broadcast spray', common: true, requiresSqft: true },
+      { value: 'granular_broadcast', label: 'Granular broadcast', common: true, requiresSqft: true },
+    ]);
+    expect(ctx.methods.every((choice) => choice.value !== 'perimeter_spray')).toBe(true);
   });
 
   test('a typed lawn visit hides the height capture the typed form never renders', async () => {
@@ -247,6 +259,32 @@ describe('buildLawnFastContext', () => {
     expect(JSON.stringify(ctx)).not.toMatch(/epa_reg|post_application_watering/);
   });
 
+  test('a recurring program visit carries the plan\'s opt-in products as add-ons, in the planned items\' shape plus the plan\'s words', async () => {
+    process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
+    process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
+    buildPlanForService.mockResolvedValue({
+      completionDefaults: {
+        items: [{ product: { id: P_GRAN, name: 'Test Feed Granular' }, applicationMethod: 'granular_broadcast', mix: { amount: 20, amountUnit: 'lb' } }],
+        addOns: [
+          {
+            product: { id: P_HERB, name: 'Test Weed Spray' }, applicationMethod: 'spot_treatment', raw: '  If sedge: Test Weed Spray ',
+            substitution: { originalProductName: 'Celsius WG' },
+            gateNotes: [{ key: 'tankMixWith', severity: 'note', text: 'Tank mix with NIS.' }, { key: 'x', text: '' }],
+            mix: { amount: 0.4, amountUnit: 'oz', ratePer1000: 0.085, rateUnit: 'oz', treatedSqft: 4000 },
+          },
+          { product: { name: 'No id' }, mix: {} },
+        ],
+      },
+    });
+    const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables({ products_catalog: [herbicide, granular] })) });
+    expect(ctx.plannedProducts.items.map((item) => item.productId)).toEqual([P_GRAN]);
+    expect(ctx.plannedProducts.addOns).toEqual([expect.objectContaining({
+      productId: P_HERB, applicationMethod: 'spot_treatment', amount: 0.4, amountUnit: 'oz', ratePer1000: 0.085, rateUnit: 'oz', treatedSqft: 4000, areaUnit: 'sqft',
+      line: 'If sedge: Test Weed Spray', substituteFor: 'Celsius WG', gateNotes: ['Tank mix with NIS.'], approvedForReport: true,
+    })]);
+    expect(ctx.plannedProducts.month).toBe(10);
+  });
+
   describe('program defaults only on a recurring program appointment', () => {
     const PLAN = {
       completionDefaults: {
@@ -269,14 +307,20 @@ describe('buildLawnFastContext', () => {
     test('a member\'s one-time appointment starts blank', async () => {
       const ctx = await ctxFor(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }), 'monthly_membership');
       expect(ctx.visitType).toBe('one_time');
-      expect(ctx.plannedProducts).toEqual({ source: null, items: [] });
+      expect(ctx.plannedProducts).toEqual({ source: null, items: [], addOns: [] });
       expect(buildPlanForService).not.toHaveBeenCalled();
     });
 
-    test('a per-application visit starts blank', async () => {
+    test("a per-application customer's recurring plan visit is a program visit (the plan is read)", async () => {
       const ctx = await ctxFor(PROFILE(), 'per_application');
+      expect(ctx.visitType).toBe('recurring');
+      expect(buildPlanForService).toHaveBeenCalled();
+    });
+
+    test('a per-application visit under a non-program key starts blank', async () => {
+      const ctx = await ctxFor(PROFILE({ serviceKey: 'lawn_fertilization' }), 'per_application');
       expect(ctx.visitType).toBe('per_application');
-      expect(ctx.plannedProducts).toEqual({ source: null, items: [] });
+      expect(ctx.plannedProducts).toEqual({ source: null, items: [], addOns: [] });
       expect(buildPlanForService).not.toHaveBeenCalled();
     });
 
@@ -298,7 +342,7 @@ describe('buildLawnFastContext', () => {
       const ctx = await ctxFor(PROFILE(), null);
       expect(ctx.visitType).toBe('recurring');
       expect(buildPlanForService).toHaveBeenCalledTimes(1);
-      expect(ctx.plannedProducts).toEqual({ source: 'plan', items: [] });
+      expect(ctx.plannedProducts).toEqual({ source: 'plan', items: [], addOns: [], month: 10 });
     });
   });
 
@@ -307,7 +351,7 @@ describe('buildLawnFastContext', () => {
     process.env.GATE_LAWN_PROPERTY_HISTORY = 'true';
     buildPlanForService.mockRejectedValue(new Error('plan down'));
     const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex(tables()) });
-    expect(ctx).toMatchObject({ eligible: true, plannedProducts: { source: null, items: [] } });
+    expect(ctx).toMatchObject({ eligible: true, plannedProducts: { source: null, items: [], addOns: [] } });
   });
 
   test('an existing confirmed assessment, with the advisory photo status', async () => {
@@ -483,11 +527,14 @@ describe('preflightLawnFastCompletion', () => {
       expect(await run(withLane(null), { lawnFast: { visitType: 'recurring' } })).toBeNull();
       resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
       expect(await run(withLane(null), { lawnFast: { visitType: 'one_time' } })).toBeNull();
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE());
+      expect(await run(withLane('per_application'), { lawnFast: { visitType: 'recurring' } })).toBeNull();
+      resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ serviceKey: 'lawn_fertilization' }));
       expect(await run(withLane('per_application'), { lawnFast: { visitType: 'per_application' } })).toBeNull();
     });
 
-    test('the customer moved to per_application after the sheet opened as recurring: refused as a changed visit (terminal)', async () => {
-      expect(await run(withLane('per_application'), { lawnFast: { visitType: 'recurring' } }))
+    test('the customer moved to one_time after the sheet opened as recurring: refused as a changed visit (terminal)', async () => {
+      expect(await run(withLane('one_time'), { lawnFast: { visitType: 'recurring' } }))
         .toMatchObject({ status: 409, payload: { code: 'visit_identity_changed', reason: 'visit_type_changed' } });
     });
 
@@ -524,7 +571,7 @@ describe('preflightLawnFastCompletion', () => {
 
     test('the context returns the visitType the sheet must echo', async () => {
       const ctx = await buildLawnFastContext(VISIT, { knex: fakeKnex({ scheduled_services: visit(), customers: { billing_mode: 'per_application' } }) });
-      expect(ctx.visitType).toBe('per_application');
+      expect(ctx.visitType).toBe('recurring');
     });
   });
 
@@ -657,13 +704,15 @@ describe('assertLawnFastVisitTypeUnderLock (the authority, inside the completion
 
   test('unchanged: passes (recurring, one_time and per_application)', async () => {
     await expect(lock(null)).resolves.toBeUndefined();
+    await expect(lock('per_application')).resolves.toBeUndefined();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ serviceKey: 'lawn_fertilization' }));
     await expect(lock('per_application', { visitType: 'per_application' })).resolves.toBeUndefined();
     resolveCompletionProfileForScheduledService.mockResolvedValue(PROFILE({ billingType: 'one_time', serviceKey: 'lawn_care_one_time' }));
     await expect(lock(null, { visitType: 'one_time' })).resolves.toBeUndefined();
   });
 
   test('billing_mode changed between the preflight and the transaction: visit_identity_changed / visit_type_changed', async () => {
-    await expect(lock('per_application')).rejects.toMatchObject({ code: 'visit_identity_changed', reason: 'visit_type_changed' });
+    await expect(lock('one_time')).rejects.toMatchObject({ code: 'visit_identity_changed', reason: 'visit_type_changed' });
   });
 
   test('the profile\'s billing type changed: the same abort', async () => {

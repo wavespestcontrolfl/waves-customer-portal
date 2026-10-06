@@ -121,7 +121,7 @@ const MATCH_ROW = {
   is_primary_profile: true,
   first_name: 'Existing',
   last_name: 'Owner',
-  phone: '+15551234567',
+  phone: '+15552344567',
   email: null,
   address_line1: '123 Main St',
   address_line2: null,
@@ -143,7 +143,7 @@ function freshState({ phoneMatch = true } = {}) {
 const BASE_BODY = {
   firstName: 'Testfirst',
   lastName: 'Testlast',
-  phone: '(555) 123-4567',
+  phone: '(555) 234-4567',
   city: 'Testville',
   state: 'FL',
   zip: '00000',
@@ -394,5 +394,33 @@ describe('POST /admin/customers/quick-add — phone-match confirm gate', () => {
       expect((await res.json()).code).toBe('PHONE_MATCH_CONFIRM');
     });
     expect(customersInserts(state)).toHaveLength(0);
+  });
+});
+
+describe('impossible US phone is refused by the customer writers', () => {
+  // Area code starts with 1: never assignable, so Twilio would reject it (21211).
+  const BAD = '(103) 555-0123';
+
+  it.each(['/', '/quick-add'])('POST %s refuses it with 400 INVALID_PHONE and writes nothing', async (path) => {
+    const state = freshState({ phoneMatch: false });
+    install(state);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, path, { phone: BAD });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.code).toBe('INVALID_PHONE');
+      expect(body.error).toMatch(/not a valid US phone number/);
+      expect(state.inserts).toEqual([]);
+    });
+  });
+
+  it('a valid number still creates the customer', async () => {
+    const state = freshState({ phoneMatch: false });
+    install(state);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, '/quick-add', { phone: '(203) 555-0123' });
+      expect(res.status).toBe(201);
+      expect(customersInserts(state)[0].row.phone).toBe('+12035550123');
+    });
   });
 });

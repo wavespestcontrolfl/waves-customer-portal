@@ -1033,7 +1033,7 @@ jest.setTimeout(30000);
       expect((await stored(row)).metadata).toEqual({});
     });
 
-    test('gate on: the sweep texts a 25s+ unknown caller whose recording was rejected, and stamps the outcome', async () => {
+    test('gate on: the sweep texts a 15s+ unknown caller whose recording was rejected, and stamps the outcome', async () => {
       gates(true);
       const row = rejected(READY_MINUTES_AGO + 4, 1);
       await database('call_log').insert(row);
@@ -1069,9 +1069,9 @@ jest.setTimeout(30000);
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'not_missed' });
     });
 
-    test('gate on: the 25s floor still applies', async () => {
+    test('gate on: the 15s floor still applies', async () => {
       gates(true);
-      const row = rejected(READY_MINUTES_AGO + 4, 1, { duration_seconds: 20 });
+      const row = rejected(READY_MINUTES_AGO + 4, 1, { duration_seconds: 10 });
       await database('call_log').insert(row);
       expect(await sweepMissedCallTextBacks()).toEqual({ sent: 0, offered: 0 });
       expect(await textBackIfMissed(row.twilio_call_sid)).toEqual({ outcome: 'skipped', reason: 'not_missed' });

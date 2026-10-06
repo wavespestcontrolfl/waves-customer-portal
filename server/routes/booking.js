@@ -2512,8 +2512,10 @@ async function createSelfBooking(payload = {}) {
     // RESERVICE_LANES-keyed open-callback dedupe — false for a caller whose
     // serviceKey isn't a re-service lane (that check's fallback classification
     // would false-hit on an unrelated open pest/lawn re-service); such a
-    // caller owns its own pre-commit idempotency check. alertLabel overrides
-    // the default "🔁 Free re-service self-booked:" internal SMS line. Like
+    // caller owns its own pre-commit idempotency check. alertLabel is the
+    // internal SMS line for a non-re-service caller; a re-service (no
+    // alertLabel) sends no internal SMS — reservice-public.js rings its own
+    // reservice_self_booked bell. Like
     // authedCustomer/payAtVisit, callbackVisit must be set AFTER the body
     // spread at every public call site (/confirm nulls it) — a crafted body
     // must never mint itself a free callback or skip the offer sig.
@@ -6394,15 +6396,14 @@ async function createSelfBooking(payload = {}) {
       });
       const startLabel = minToTime12(timeToMin(slot_start));
 
-      if (process.env.ADAM_PHONE) {
-        // Callbacks announce themselves as what they are — the office reads
-        // "re-service" and knows the 5-business-day callback protocol
-        // (original tech first) applies, instead of parsing a generic booking.
-        // callbackVisit.alertLabel overrides the re-service default for a
-        // different internal caller (inspection-public.js's free consultation).
-        const alertHead = callbackVisit
-          ? (callbackVisit.alertLabel || '🔁 Free re-service self-booked:')
-          : '📱 New self-booked appointment:';
+      // A free re-service (callbackVisit with no alertLabel) rings its own
+      // reservice_self_booked bell from reservice-public.js (owner
+      // 2026-10-05); this internal text would be a second alert for it.
+      const reserviceOwnBell = !!callbackVisit && !callbackVisit.alertLabel;
+      if (process.env.ADAM_PHONE && !reserviceOwnBell) {
+        // A non-re-service internal caller (inspection-public.js's free
+        // consultation) announces itself with its own alertLabel.
+        const alertHead = callbackVisit ? callbackVisit.alertLabel : '📱 New self-booked appointment:';
         await TwilioService.sendSMS(process.env.ADAM_PHONE,
           `${alertHead}\n${customer.first_name} ${customer.last_name}\n${resolvedServiceType}\n${dateLabel} ${startLabel}\n${customer.city}\nSource: ${source || 'portal'}\nCode: ${confCode}`,
           { messageType: 'internal_alert' }

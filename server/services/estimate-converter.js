@@ -34,7 +34,7 @@ const {
 const { etDateString } = require('../utils/datetime-et');
 const { visitsPerYearForCadence } = require('./prepay-cadence');
 const { FORMER_CUSTOMER_STAGES } = require('./customer-stages');
-const { normalizeGrassType } = require('./lawn-grass-context');
+const { normalizeGrassType, GRASS_SOURCE } = require('./lawn-grass-context');
 const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-services');
 // Termite annual-plan sign-before-pay (slice 3a, owner ruling 2026-09-24):
 // termiteAnnualPlanSelectionEnabled combines GATE_TERMITE_ANNUAL_PLAN with
@@ -5730,10 +5730,12 @@ const EstimateConverter = {
         // savepoint and the re-lock is a no-op.
         const { withTurfProfileFence } = require('./customer-pricing-ai');
         await withTurfProfileFence(database, customerId, (trx) => trx('customer_turf_profiles')
-          .insert({ customer_id: customerId, grass_type: grass })
+          .insert({ customer_id: customerId, grass_type: grass, grass_type_source: GRASS_SOURCE.ESTIMATE })
           .onConflict('customer_id')
           .merge({
             grass_type: trx.raw('COALESCE(customer_turf_profiles.grass_type, ?)', [grass]),
+            // The source follows the value: stamped only when this fill set it.
+            grass_type_source: trx.raw('CASE WHEN customer_turf_profiles.grass_type IS NULL THEN ? ELSE customer_turf_profiles.grass_type_source END', [GRASS_SOURCE.ESTIMATE]),
             updated_at: new Date(),
           }));
       }
@@ -6826,8 +6828,14 @@ const EstimateConverter = {
           reservation_service_mix: {
             ...combinedCapacity,
             scheduledDate: scheduledDateOnly(reservedStart.scheduled_date),
-            arrivalWindowStart: String(reservedStart.window_start).slice(0, 5),
-            allocatedServiceIds: capacityMembers.map((row) => row.id),
+            // Two stop groups (owner ruling 2026-10-05): each group has its own
+            // arrival hour, so a stopGroups hold stamps no arrivalWindowStart and
+            // each member's own window_start is its arrival. A hold stamped
+            // before the change keeps its shared arrival and member order.
+            ...(combinedCapacity.stopGroups === true ? {}
+              : { arrivalWindowStart: String(reservedStart.window_start).slice(0, 5) }),
+            allocatedServiceIds: VisitCapacity.orderMembersByStopGroup(reservedStart, capacityMembers, combinedCapacity)
+              .map((row) => row.id),
           },
         };
         await database('scheduled_services').whereIn('id', allocation.reservation_service_mix.allocatedServiceIds)

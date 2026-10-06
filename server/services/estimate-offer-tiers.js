@@ -119,7 +119,47 @@ function oneTimeOptionUpdateForMixChange({
   return optionError ? {} : { show_one_time_option: true };
 }
 
+/**
+ * A marked row that already moved to the pest plan (lawn removed through
+ * the rail, by the customer or the send-time park). Its stored rows no longer
+ * say "pest + lawn", but the row is in the model's own second state, so the
+ * mark stays valid: the office reopening it must still see (and keep) the
+ * Good / Better / Best choice.
+ */
+// The HISTORICAL fact, read without any gate: a marked row whose lawn line
+// was removed through the rail and whose recurring rows are pest alone. The
+// opt-out history (the add-back path on the customer's token) must survive a
+// revision whatever the gates say; only the VISIBILITY of the tiers is gated.
+function lawnParkedPestOnly(estData) {
+  try {
+    const OptOut = require('./estimate-service-opt-out');
+    if (!OptOut.currentlyOptedOutKeys(estData).includes(COMPANION_KEY)) return false;
+    const keys = storedRecurringKeys(estData);
+    return keys.length === 1 && keys[0] === 'pest_control';
+  } catch (_) {
+    return false;
+  }
+}
+
+// The same fact for a row that carries the tier mark. Kept for callers that
+// need the mark; the history carry on a revision uses lawnParkedPestOnly
+// alone, since a save that dropped the mark (dark, or staff declined) must
+// not drop the lawn removal's add-back path on the next one.
+function offerTiersParkedHistory(estData) {
+  return offerTiersRequested(estData) && lawnParkedPestOnly(estData);
+}
+
+function offerTiersMarkedPestOnlyState(estData, { gateOn = offerTiersGateLive(), railGateOn = optOutRailGateLive() } = {}) {
+  // Dark feature: a mark saved earlier must not resurface the checkbox or
+  // survive a save while either gate is off.
+  if (!gateOn || !railGateOn) return false;
+  return offerTiersParkedHistory(estData);
+}
+
 module.exports = {
+  lawnParkedPestOnly,
+  offerTiersParkedHistory,
+  offerTiersMarkedPestOnlyState,
   optOutRailGateLive,
   oneTimeOptionUpdateForMixChange,
   COMPANION_KEY,

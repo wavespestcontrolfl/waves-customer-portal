@@ -36,10 +36,12 @@
  *   polls; verify the error path swallows quietly and resumes.
  * - Notification dedupe: if the same notification id arrives twice
  *   (server retry, late ack), do we render two cards?
- * - Auto-dismiss timers (REMINDER_AUTODISMISS_MS, STOP_TOAST_MS): if
- *   the user confirms / dismisses manually before the timer fires,
- *   confirm we clear the pending timeout to avoid a late-firing
- *   dismiss racing with a fresh notification.
+ * - Auto-dismiss timers (REMINDER_AUTODISMISS_MS, STOP_TOAST_MS): they start
+ *   only once the card has been seen (SeenOnScreen: visible on screen for
+ *   SEEN_DWELL_MS, or tapped). An unseen card never expires on the clock and
+ *   stays unread on the server. If the user confirms / dismisses manually
+ *   before the timer fires, confirm we clear the pending timeout to avoid a
+ *   late-firing dismiss racing with a fresh notification.
  * - Backgrounded tab behavior: when the tech's phone backgrounds the
  *   tab, polls pause. On resume, do we catch up correctly? Skipped
  *   notifications during the gap should still render once.
@@ -57,8 +59,20 @@ import { formatETDateOnly } from '../../lib/timezone';
 
 const API = import.meta.env.VITE_API_URL || '';
 const POLL_MS = 10_000;
+// Timed cards (arrival, timer, storm) keep their clock, but it starts when the
+// tech has SEEN the card, not when it arrived (owner 2026-10-06, "keep
+// notices"): a card scrolled past or opened on a locked phone used to be
+// marked read after 5 minutes unseen.
 const REMINDER_AUTODISMISS_MS = 5 * 60 * 1000;
 const STOP_TOAST_MS = 15_000;
+// The server refuses Undo on a stop notice older than this (410), and stops
+// serving the notice then, so the toast offers no Undo past it either.
+const UNDO_WINDOW_MS = 30 * 60 * 1000;
+// Seen = at least half the card (or half the screen, for a tall card) in view
+// and not covered, continuously for this long on a visible page, or a tap.
+const SEEN_VISIBLE_RATIO = 0.5;
+const SEEN_DWELL_MS = 1500;
+const SEEN_SAMPLE_MS = 250;
 const MAX_STORM_CARDS = 2;
 // Visit cards never auto-dismiss, so a bulk assign or day swap could stack
 // dozens over the actionable geofence prompts: same cap + summary line as
@@ -84,6 +98,12 @@ const NUDGE_TYPES = new Set(['tech_open_visit_nudge']);
 const PHOTO_TYPES = new Set(['customer_visit_photos']);
 // Time-critical: these still float over Tools, More and an open visit.
 const FLOATING_TYPES = new Set(['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped']);
+// Types this component has a card for. Anything else in the feed (e.g. the
+// legacy `new_appointment` from admin-schedule "Notify technician") has no
+// card: it is never shown, so it can never be seen. It keeps the pre-seen
+// behaviour (marked read on the 5-minute clock) so it cannot sit unread
+// and eat the 20-row feed. Only rendered cards wait to be seen.
+const TIMED_RENDERED_TYPES = new Set([...FLOATING_TYPES, 'storm_watch_alert']);
 const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES]);
 // Waves Admin look: ink and stone, amber for a warning, red only where the
 // notice is a genuine alert (a cancelled visit, a late arrival check).
@@ -146,6 +166,15 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
   const isMobile = useIsMobile();
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
+  // When the tech first saw each card (id → ms). A card with no entry has not
+  // been seen and its auto-dismiss clock has not started.
+  const seenAt = useRef(new Map());
+  const [seenTick, setSeenTick] = useState(0);
+  const markSeen = useCallback((id) => {
+    if (seenAt.current.has(id)) return;
+    seenAt.current.set(id, Date.now());
+    setSeenTick((t) => t + 1);
+  }, []);
 
   const poll = useCallback(async () => {
     try {
@@ -157,19 +186,22 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
       if (fresh.some((n) => n.type === 'geofence_timer_started' || n.type === 'geofence_timer_stopped')) {
         window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
       }
-      // Visit cards never auto-dismiss, so the server feed is their only
-      // source of truth: one the feed no longer lists (tapped "Got it" on
-      // the tech's other device, or pushed out of the feed window by a
-      // burst) leaves this screen too — and is forgotten, so it can come
-      // back if the feed lists it again. Timed cards stay client-owned.
+      // The server feed is the source of truth for what is still open: a
+      // card the feed no longer lists leaves this screen too (tapped "Got it"
+      // on the tech's other device, pushed out of the feed window by a burst,
+      // or aged out by the server: an arrival prompt at ET midnight, a stop
+      // toast after its 30-minute Undo window, a storm nudge after 6 hours).
+      // It is forgotten, so it can come back if the feed lists it again. No
+      // /read post: the server already stopped serving it, or another device
+      // handled it.
       const listed = new Set(notifications.map((n) => n.id));
       // A photo card's date is re-read from the live visit on every poll
       // (visit-prep-tech-alert.js refreshPhotoCardDates), so a card already
       // on screen takes the new payload when the visit moves (Codex #5303 r6).
       const photoPayloads = new Map(notifications.filter((n) => PHOTO_TYPES.has(n.type)).map((n) => [n.id, n.payload]));
       setActive((prev) => {
-        const gone = prev.filter((n) => KEPT_TYPES.has(n.type) && !listed.has(n.id));
-        gone.forEach((n) => seenIds.current.delete(n.id));
+        const gone = prev.filter((n) => !listed.has(n.id));
+        gone.forEach((n) => { seenIds.current.delete(n.id); seenAt.current.delete(n.id); });
         let refreshed = false;
         const kept = prev.filter((n) => !gone.includes(n)).map((n) => {
           if (!photoPayloads.has(n.id)) return n;
@@ -267,18 +299,28 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     }
   }, [active]);
 
-  // Auto-dismiss timers — RENDERED cards only. Storm alerts for other stops
-  // held back by the cap must stay unread so they actually surface later;
-  // marking them read here would hide them from every future unreadOnly poll
-  // without the tech ever seeing them.
+  // Auto-dismiss timers — RENDERED and SEEN cards only. Storm alerts for other
+  // stops held back by the cap must stay unread so they actually surface
+  // later, and a card the tech has not yet seen must stay unread too: marking
+  // either read here would hide it from every future unreadOnly poll without
+  // the tech ever seeing it. The clock runs from the moment of first sight, so
+  // a re-run of this effect (a new card arriving) never restarts it.
   useEffect(() => {
-    const timers = cards.filter((n) => !KEPT_TYPES.has(n.type)).map((n) => {
-      const ms = n.type === 'geofence_timer_stopped' ? STOP_TOAST_MS : REMINDER_AUTODISMISS_MS;
-      return setTimeout(() => removeCard(n.id, { silent: true }), ms);
-    });
+    const timers = cards
+      .filter((n) => !KEPT_TYPES.has(n.type))
+      .filter((n) => {
+        // No card to see: its clock starts now (the pre-seen behaviour).
+        if (!TIMED_RENDERED_TYPES.has(n.type) && !seenAt.current.has(n.id)) seenAt.current.set(n.id, Date.now());
+        return seenAt.current.has(n.id);
+      })
+      .map((n) => {
+        const ms = n.type === 'geofence_timer_stopped' ? STOP_TOAST_MS : REMINDER_AUTODISMISS_MS;
+        const left = Math.max(0, ms - (Date.now() - seenAt.current.get(n.id)));
+        return setTimeout(() => removeCard(n.id, { silent: true }), left);
+      });
     return () => timers.forEach(clearTimeout);
 
-  }, [cards]);
+  }, [cards, seenTick]);
 
   function removeCard(id, { silent } = {}) {
     setActive((prev) => prev.filter((n) => n.id !== id));
@@ -322,7 +364,9 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     }
   }
 
-  const showStack = cards.length > 0 || hiddenVisitCount > 0 || hiddenStormCount > 0;
+  // Only types with a card render (and wait to be seen); the rest ride the timer above.
+  const shownCards = cards.filter((n) => TIMED_RENDERED_TYPES.has(n.type) || KEPT_TYPES.has(n.type));
+  const showStack = shownCards.length > 0 || hiddenVisitCount > 0 || hiddenStormCount > 0;
   if (!showStack && waitingCount === 0) return null;
 
   return (
@@ -335,8 +379,8 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
       // Arrival cards are few; a cap keeps even a burst from covering the page.
       maxHeight: '50dvh', overflowY: 'auto',
     } : { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 12 }}>
-      {cards.map((n) => (
-        <div key={n.id} style={elsewhere ? { pointerEvents: 'auto', filter: 'drop-shadow(0 6px 14px rgba(28,25,23,0.18))' } : undefined}>
+      {shownCards.map((n) => (
+        <SeenOnScreen key={n.id} id={n.id} onSeen={markSeen} style={elsewhere ? { pointerEvents: 'auto', filter: 'drop-shadow(0 6px 14px rgba(28,25,23,0.18))' } : undefined}>
           {n.type === 'geofence_arrival_reminder' && (
             <ReminderCard n={n} onStart={() => handleStart(n)} onDismiss={() => removeCard(n.id)} />
           )}
@@ -374,7 +418,7 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
               onDismiss={() => removeCard(n.id)}
             />
           )}
-        </div>
+        </SeenOnScreen>
       ))}
       {hiddenVisitCount > 0 && (
         <div style={{ ...cardStyle(COLORS.muted), padding: 10 }} data-testid="visit-notice-more">
@@ -393,6 +437,91 @@ export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleCha
     </div>}
     </>
   );
+}
+
+// Wraps one card and reports it SEEN once the tech has really had it on screen
+// for a continuous SEEN_DWELL_MS: at least SEEN_VISIBLE_RATIO of the card (or
+// of the viewport, for a card taller than the screen) shows and nothing sits on
+// top of it. IntersectionObserver only says when the card is near the viewport:
+// it ignores a modal or sheet drawn over the card and cannot express "half the
+// viewport" for a tall card. So while the card is near the viewport and the page
+// is visible, it is measured afresh (cardReallyInView) every SEEN_SAMPLE_MS, and
+// the dwell clock starts over whenever a sample fails: a card covered for most
+// of the dwell and uncovered just before the end does not count. Sampling stops
+// when the card leaves the viewport or the page is hidden. A tap on the card
+// counts too. A browser without IntersectionObserver samples on the same
+// schedule.
+function SeenOnScreen({ id, onSeen, style, children }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return undefined;
+    let nearViewport = typeof IntersectionObserver === 'undefined';
+    let sampler = null;
+    let okSince = null;
+    let done = false;
+    const pageVisible = () => typeof document === 'undefined' || document.visibilityState !== 'hidden';
+    const sample = () => {
+      if (done) return;
+      if (!cardReallyInView(el)) { okSince = null; return; }
+      if (okSince === null) okSince = Date.now();
+      if (Date.now() - okSince >= SEEN_DWELL_MS) { done = true; stop(); onSeen(id); }
+    };
+    const stop = () => {
+      if (sampler) { clearInterval(sampler); sampler = null; }
+      okSince = null;
+    };
+    const evaluate = () => {
+      if (done) return;
+      if (nearViewport && pageVisible()) {
+        if (!sampler) { sampler = setInterval(sample, SEEN_SAMPLE_MS); sample(); }
+      } else {
+        stop();
+      }
+    };
+    let observer = null;
+    if (!nearViewport) {
+      observer = new IntersectionObserver((entries) => {
+        const entry = entries[entries.length - 1];
+        if (!entry) return;
+        nearViewport = entry.isIntersecting;
+        evaluate();
+      }, { threshold: 0 });
+      observer.observe(el);
+    }
+    document.addEventListener('visibilitychange', evaluate);
+    evaluate();
+    return () => {
+      done = true;
+      stop();
+      document.removeEventListener('visibilitychange', evaluate);
+      if (observer) observer.disconnect();
+    };
+  }, [id, onSeen]);
+  return <div ref={ref} style={style} onClickCapture={() => onSeen(id)}>{children}</div>;
+}
+
+// Fresh measurement: the part of the card inside the viewport covers at least
+// SEEN_VISIBLE_RATIO of the card, or of the viewport when the card is taller
+// than half of it, and the element at the middle of that part belongs to the
+// card (nothing fixed on top of it).
+function cardReallyInView(el) {
+  const rect = el.getBoundingClientRect();
+  const viewportH = window.innerHeight || document.documentElement.clientHeight || 0;
+  const viewportW = window.innerWidth || document.documentElement.clientWidth || 0;
+  if (!(rect.width > 0 && rect.height > 0 && viewportH > 0 && viewportW > 0)) return false;
+  const left = Math.max(rect.left, 0);
+  const right = Math.min(rect.right, viewportW);
+  const top = Math.max(rect.top, 0);
+  const bottom = Math.min(rect.bottom, viewportH);
+  if (right <= left || bottom <= top) return false;
+  const shown = (right - left) * (bottom - top);
+  const enough = shown >= rect.width * rect.height * SEEN_VISIBLE_RATIO
+    || shown >= viewportW * viewportH * SEEN_VISIBLE_RATIO;
+  if (!enough) return false;
+  if (typeof document.elementFromPoint !== 'function') return true;
+  const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+  return !!hit && el.contains(hit);
 }
 
 // "N notices on Today": the one in-page line shown away from Today for the
@@ -637,12 +766,14 @@ function InfoCard({ n, onDismiss }) {
 }
 
 function StopToast({ n, onUndo, onDismiss }) {
+  const createdMs = new Date(n.created_at || 0).getTime();
+  const undoOpen = !Number.isFinite(createdMs) || !n.created_at || Date.now() - createdMs <= UNDO_WINDOW_MS;
   return (
     <div style={cardStyle(COLORS.amber)}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ fontSize: 14, color: COLORS.text }}>⏱️ {n.message}</div>
         <div style={{ display: 'flex', gap: 6 }}>
-          <button onClick={onUndo} style={btnSecondary}>Undo</button>
+          {undoOpen && <button onClick={onUndo} style={btnSecondary}>Undo</button>}
           <button onClick={onDismiss} style={closeX}>✕</button>
         </div>
       </div>

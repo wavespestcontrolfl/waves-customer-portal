@@ -34,6 +34,7 @@ const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require(
 const {
   normalizeContactName,
   normalizeContactPhone,
+  contactPhoneProblem,
   normalizeContactEmail,
   normalizeContactStreet,
   normalizeContactCity,
@@ -245,9 +246,9 @@ IMPORTANT: Always show the list of affected customers and ask for confirmation b
     description: `Update the STRUCTURED property-access and pet fields on a customer's property profile (the property_preferences record). Use this — not the free-text customer notes — for gate/lockbox/garage codes, pet info, parking/access details, and how a tech should keep pets safe. These fields render as their own labeled alerts on the technician's stop card (e.g. "Gate: 9292", a pet warning, a pet-securing reminder), so they are far more reliable in the field than a free-text note.
 
 Pass ONLY the fields you want to set or change:
-- neighborhood_gate_code / property_gate_code / garage_code / lockbox_code — access codes (use property_gate_code for the home/yard gate, neighborhood_gate_code for a community gate)
-- parking_notes / side_gate_access / access_notes — where to park / how to get in
-- pet_count (number) / pet_details (e.g. "2 indoor cats") — pets on the property
+- neighborhood_gate_code / property_gate_code / garage_code / lockbox_code — access codes (use property_gate_code ONLY for a gate on the customer's own lot; a community/HOA/subdivision gate such as \"Del Webb gate\" is neighborhood_gate_code. A community code is never also saved as property_gate_code)
+- parking_notes / side_gate_access / access_notes — where to park / how to get in (ADDED as a new first line; existing notes are never replaced — pass only the new line)
+- pet_count (number) / pet_details (e.g. "2 indoor cats") — pets on the property (pet_details, pets_secured_plan and special_instructions REPLACE what is there)
 - pets_secured_plan — how the tech should keep pets safe, e.g. "keep the screen doors closed during service so the cats don't get out"
 - special_instructions — any other field instruction
 
@@ -318,6 +319,7 @@ price: the visit price in dollars when the user states one. A stated price needs
         notes: { type: 'string' },
         customer_request: { type: 'string', description: 'Re-service visits only ("Pest Control Re-Service" / "Lawn Care Re-Service"): why the customer asked for it, as the user told you (e.g. "ants back in the kitchen since the weekend"). The technician sees it on the job card as why the visit was booked. Put the reason HERE, not in notes. Omit when the user gave no reason; never invent one.' },
         price: { type: 'number', exclusiveMinimum: 0, maximum: 100000, description: 'Visit price in dollars, only when the user states one' },
+        price_confirmed: { type: 'boolean', description: 'Set true ONLY after the user explicitly confirmed the stated price in reply to a price_read_back question (the stated price differed from the catalog price). Never set it on the first proposal.' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
     },
@@ -1193,6 +1195,8 @@ async function createCustomer(input) {
   const lastName = normalizeContactName(String(input.last_name || '').trim()) || null;
   const phone = normalizeContactPhone(String(input.phone || '').trim());
   if (!firstName || !phone) return { error: 'first_name and phone are required' };
+  const phoneProblem = contactPhoneProblem(input.phone);
+  if (phoneProblem) return { error: phoneProblem };
 
   const phoneDigits = phone.replace(/\D/g, '').slice(-10);
   if (phoneDigits.length < 10) return { error: 'phone must include at least 10 digits' };
@@ -1314,6 +1318,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   // live check before this (GH r9 P1).
   if (before.deleted_at) {
     return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
+  }
+
+  // A phone being entered now must be a number that can exist; an unchanged
+  // stored number echoed back is not a new write.
+  if (clean.phone && clean.phone !== before.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
   }
 
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
@@ -1647,6 +1658,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
+  // A bulk write stamps one number onto every selected row, so an impossible
+  // US phone is refused here, before either execution path (codex #6028 P2).
+  if (clean.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
+  }
 
   // A bulk phone change re-points every row's primary number → drop their
   // line_type caches (no per-row before-state here, so clear unconditionally
@@ -2163,14 +2180,116 @@ function sanitizePropertyAccess(input) {
   return clean;
 }
 
+// Free-text fields keep their history: a new line is ADDED with a [bar] tag,
+// never written over what is there (2026-10-05: a bar write replaced a
+// customer's access notes and lost where his gate code came from).
+// Pet details, the pet plan and special instructions are current state, not
+// history: they are replaced, as the tool description says.
+const PROPERTY_ACCESS_NOTE_FIELDS = ['parking_notes', 'side_gate_access', 'access_notes'];
+const sameCode = (a, b) => String(a || '').replace(/\s+/g, '').toLowerCase() === String(b || '').replace(/\s+/g, '').toLowerCase();
+// side_gate_access is varchar(200); the other note fields are text.
+const PROPERTY_ACCESS_NOTE_LIMITS = { side_gate_access: 200 };
+const noteWords = (text) => String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+// A note is already there only when it is the current (first) line, its
+// "[bar]" tag aside: an older line that becomes current again is added back
+// on top, and "Park on street" is new next to "Do not park on street".
+function noteHas(had, add) {
+  // Only this tool's own tag is set aside: "[DO NOT] Park on street" keeps its words.
+  const plain = (line) => noteWords(String(line || '').replace(/^\s*\[bar(?: \d{4}-\d{2}-\d{2})?\]\s*/i, '')).replace(/[.\s]+$/, '');
+  return plain(String(had || '').split('\n')[0]) === plain(add);
+}
+
+// Is this code the community gate code the stop card already shows? Only the
+// saved neighborhood code (this call's, else the one on file) counts: it shows
+// on every stop. Directory codes are not counted: whether one reaches a stop
+// depends on the visit (its home, its address, the directory gate).
+const communityCodeShown = (neighborhoodCode, code) => !!code && !!neighborhoodCode && sameCode(neighborhoodCode, code);
+
+// The gate code part of the plan (changes `updates` and `kept` in place): a
+// property code that is the community code is not saved, and one on file is
+// cleared.
+function planGateCodes(updates, current, kept) {
+  const neighborhoodCode = updates.neighborhood_gate_code !== undefined ? updates.neighborhood_gate_code : current.neighborhood_gate_code;
+  if (updates.property_gate_code !== undefined && communityCodeShown(neighborhoodCode, updates.property_gate_code)) {
+    delete updates.property_gate_code;
+    kept.push('property_gate_code: not saved; that is the community gate code, which the stop card already shows');
+  }
+  // A property code on file that is the community code shows twice on the
+  // stop card (as the gate and as the yard gate): clear it.
+  // The old community code counts only when this call REPLACES it with
+  // another code (A to B leaves no A behind as a yard gate). Clearing the
+  // community code alone keeps the property code: then it is the only code.
+  if (updates.property_gate_code === undefined && current.property_gate_code
+    && (communityCodeShown(neighborhoodCode, current.property_gate_code)
+      || (updates.neighborhood_gate_code && communityCodeShown(current.neighborhood_gate_code, current.property_gate_code)))) {
+    updates.property_gate_code = null;
+    kept.push('property_gate_code: cleared; the code on file there is the community gate code');
+  }
+}
+
+// What the write will actually do against the row as it is now: notes are
+// added as a new first line (or skipped when the same line is there), and a
+// "property gate" code that is the community gate code stays off the property
+// gate field; a property code already saved that is the community code is
+// cleared. Returns the final updates and a plain list of what was kept,
+// skipped or cleared, for the preview and the result.
+async function planPropertyAccess(conn, customerId, requested, { lock = false } = {}) {
+  const q = conn('property_preferences').where({ customer_id: customerId });
+  const current = (await (lock ? q.forUpdate() : q).first()) || {};
+  const updates = { ...requested };
+  const kept = [];
+  // No date in the tag: the confirm step re-runs this plan and compares, so a
+  // clock value would void a card confirmed after midnight.
+  const stamp = '[bar]';
+  for (const field of PROPERTY_ACCESS_NOTE_FIELDS) {
+    if (updates[field] === undefined) continue;
+    const had = String(current[field] || '').trim();
+    const add = updates[field];
+    // An empty value is an explicit clear of the field.
+    if (!add) continue;
+    if (noteHas(had, add)) { delete updates[field]; kept.push(`${field}: already holds this, left as is`); continue; }
+    if (!had) continue;
+    // Newest line first: the job card cuts these notes to their first
+    // 80-120 characters, so the latest instruction must lead.
+    const joined = `${stamp} ${add}\n${had}`;
+    if (PROPERTY_ACCESS_NOTE_LIMITS[field] && joined.length > PROPERTY_ACCESS_NOTE_LIMITS[field]) {
+      delete updates[field];
+      kept.push(`${field}: not saved; with the earlier note it passes ${PROPERTY_ACCESS_NOTE_LIMITS[field]} characters. Shorten it, or edit the profile.`);
+      continue;
+    }
+    updates[field] = joined;
+    kept.push(`${field}: added as a new first line; the earlier notes stay below`);
+  }
+  planGateCodes(updates, current, kept);
+  return { updates, kept, current };
+}
+
+// A keyed fingerprint of the plan AND of the stored values it replaces (keys
+// in any order). It is keyed with the server secret, so the model, which sees
+// the preview, cannot test guesses of a stored code against it; and it covers
+// the before-values, so a field another writer changed after the card was
+// shown makes the confirmed run refuse instead of overwriting it.
+const PLAN_KEY = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
+const planHash = (updates, current = {}) => require('crypto').createHmac('sha256', PLAN_KEY)
+  .update(JSON.stringify(Object.keys(updates || {}).sort().map((k) => [k, updates[k] ?? null, current[k] ?? null])))
+  .digest('hex');
+// What the preview shows: a note field as the line it adds, not the whole note.
+function previewOfPlan(updates, requested) {
+  const out = { ...updates };
+  for (const field of PROPERTY_ACCESS_NOTE_FIELDS) {
+    if (out[field] && out[field] !== requested[field]) out[field] = `(new first line) ${requested[field]}`;
+  }
+  return out;
+}
+
 // Two-step write (issue #1568): no mutation without confirmed === true, which
 // only /confirm-action attaches server-side. Registered in write-gates.js.
 async function updatePropertyAccess(input) {
   const customerId = input.customer_id;
   if (!customerId) return { error: 'customer_id is required' };
 
-  const updates = sanitizePropertyAccess(input);
-  if (Object.keys(updates).length === 0) {
+  const requested = sanitizePropertyAccess(input);
+  if (Object.keys(requested).length === 0) {
     return { error: 'No valid property-access fields to update' };
   }
 
@@ -2180,31 +2299,62 @@ async function updatePropertyAccess(input) {
     : null;
 
   if (input.confirmed !== true) {
+    const plan = await planPropertyAccess(db, customerId, requested);
     return {
       preview: true,
       customer_id: customerId,
       customer_name: customerName,
-      would_update: updates,
-      note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. After the operator approves, this commits via the confirmation card.',
+      would_update: previewOfPlan(plan.updates, requested),
+      plan_hash: planHash(plan.updates, plan.current),
+      ...(plan.kept.length ? { kept: plan.kept } : {}),
+      note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. Notes are added as a new first line, never written over. After the operator approves, this commits via the confirmation card.',
     };
   }
 
   if (!customer) return { error: 'Customer not found' };
 
-  const now = new Date();
-  await db('property_preferences')
-    .insert({ customer_id: customerId, ...updates, updated_at: now })
-    .onConflict('customer_id')
-    .merge({ ...updates, updated_at: now });
+  let result;
+  try {
+    result = await db.transaction(async (trx) => {
+      // The same customer preference lock every preference writer holds.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['property-preferences', String(customerId)]);
+      const plan = await planPropertyAccess(trx, customerId, requested, { lock: true });
+      // The card the operator approved pinned its plan; a different plan under
+      // the lock (another writer got in between) is refused, not done.
+      if (input._ib_property_plan_hash && input._ib_property_plan_hash !== planHash(plan.updates, plan.current)) {
+        const err = new Error('Property access changed since this action was prepared. Review a fresh proposal.');
+        err.previewChanged = true;
+        throw err;
+      }
+      if (Object.keys(plan.updates).length) {
+        // Stamped by the database clock as the row is written (after any lock
+        // or insert-conflict wait): readers compare it with their own
+        // snapshot time.
+        const now = trx.raw('clock_timestamp()');
+        await trx('property_preferences')
+          .insert({ customer_id: customerId, ...plan.updates, updated_at: now })
+          .onConflict('customer_id')
+          .merge({ ...plan.updates, updated_at: now });
+      }
+      return { updatedFields: Object.keys(plan.updates), kept: plan.kept };
+    });
+  } catch (e) {
+    if (e?.previewChanged) return { error: e.message, preview_changed: true };
+    throw e;
+  }
+  const { updatedFields, kept } = result;
 
   // Log only which fields changed — codes/notes are sensitive.
-  logger.info(`[intelligence-bar] Updated property access for customer ${customerId}: ${Object.keys(updates).join(', ')}`);
+  logger.info(`[intelligence-bar] Updated property access for customer ${customerId}: ${updatedFields.join(', ') || 'nothing (already on file)'}`);
 
   return {
     success: true,
     customer_id: customerId,
     customer_name: customerName,
-    updated_fields: Object.keys(updates),
+    updated_fields: updatedFields,
+    // Owner-direct writes show no preview: this is the only account of what
+    // was added, skipped or not saved.
+    ...(kept.length ? { kept } : {}),
   };
 }
 
@@ -2912,9 +3062,22 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
   if (request?.error) return { error: request.error };
   const discount = booking.pricing?.primaryDiscount || null;
+  // A STATED price shows the catalog price for this customer beside it when
+  // the two differ (display only). Same helper, same inputs, no stated price;
+  // best effort: any failure just leaves the card without the comparison.
+  let catalogPrice = null;
+  if (booking.source === 'stated') {
+    try {
+      const catalog = await ibBookingPricing({ customer, serviceType });
+      if (!catalog.error && catalog.price != null && !sameBookingPrice(catalog.price, booking.price)) catalogPrice = catalog.price;
+    } catch (err) {
+      logger.warn(`[intelligence-bar] catalog price comparison unavailable: ${err.message}`);
+    }
+  }
   return {
     price: booking.price,
     source: booking.source,
+    catalogPrice,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
     // The reason exactly as the insert will save it (trimmed, capped), so
@@ -2950,7 +3113,7 @@ const BOOKING_NEW_OVERLAP_ERROR = 'Another visit now overlaps this time. Nothing
 // true/false, or null when there is no timed window to probe (the executor
 // probes nothing then either). A read error THROWS so the proposal fails
 // closed; an invalid date or window returns null (the executor refuses it).
-async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+async function ibBookingOverlapRows(scheduledDate, timeWindow) {
   const dateStr = validScheduleDate(scheduledDate);
   if (!dateStr) return null;
   const win = parseTimeWindowStart(timeWindow);
@@ -2963,8 +3126,55 @@ async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
     if (err?.status === 422) return null;
     throw err;
   }
-  const overlap = await db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
-  return overlap.length > 0;
+  return db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
+}
+
+async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+  const overlap = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  return overlap == null ? null : overlap.length > 0;
+}
+
+// "9:00 AM" from a stored "09:00:00" (card text only).
+function clockLabel(hhmmss) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmmss || ''));
+  if (!m) return null;
+  const h = Number(m[1]);
+  return `${h % 12 || 12}:${m[2]} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+// The facts the booking card shows about each overlapping visit: customer
+// name, service, date and window, with the visit id. ONE function builds them
+// for both the proposal (the card line and the pin) and the executor (the
+// commit-time comparison), so the pin and the check can never drift apart.
+// `fact` is the single string that is pinned and compared.
+async function bookingOverlapFacts(conn, rows, dateStr) {
+  const ids = (rows || []).map((r) => r.id).filter(Boolean);
+  const names = ids.length
+    ? await conn('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .whereIn('scheduled_services.id', ids)
+      .select('scheduled_services.id', 'customers.first_name', 'customers.last_name')
+    : [];
+  const nameById = new Map((Array.isArray(names) ? names : []).map((n) => [String(n.id), `${n.first_name || ''} ${n.last_name || ''}`.trim()]));
+  return (rows || []).map((r) => {
+    const start = clockLabel(r.window_start);
+    const end = clockLabel(r.window_end);
+    const id = r.id ? String(r.id) : null;
+    const customer = nameById.get(String(r.id)) || null;
+    const service = r.service_type || null;
+    const window = start && end ? `${start}-${end}` : (start || null);
+    return { id, customer, service, window, fact: [id, customer, service, dateStr, window].map((v) => v ?? '').join('|') };
+  });
+}
+
+// Who the overlapping visit(s) are, for the booking card's line, plus the
+// pinned `fact` of each (the executor refuses an overlapping visit whose fact
+// is not in the pinned set). Every overlapping visit is returned; [] when
+// there is no overlap or no timed window.
+async function ibBookingOverlapWho(scheduledDate, timeWindow) {
+  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  if (!rows || !rows.length) return [];
+  return bookingOverlapFacts(db, rows, validScheduleDate(scheduledDate));
 }
 
 // Proposal-time window verdict for create_appointment (W5-dev-03): the SAME
@@ -3134,7 +3344,19 @@ async function createAppointment(input, actionContext = {}) {
       // rolls the transaction back before the insert, so nothing is booked
       // and the post-commit confirmation text below never runs. A pinned
       // "overlap existed", or no pin at all, keeps the advisory warning.
-      if (overlap.length && input._booking_overlap === false) {
+      // A card that named the overlapping visits pinned what it showed about
+      // each (id, customer, service, date, window): a visit not in that set,
+      // or one whose shown facts changed, is NEW too. An overlap that
+      // disappeared is fine; a card with nothing pinned (older cards, or a
+      // name lookup that failed) keeps the boolean rule only.
+      const pinnedFacts = Array.isArray(input._booking_overlap_facts) && input._booking_overlap_facts.length
+        ? new Set(input._booking_overlap_facts.map(String)) : null;
+      let unseenOverlap = false;
+      if (overlap.length && input._booking_overlap === true && pinnedFacts) {
+        const liveFacts = await bookingOverlapFacts(trx, overlap, dateStr);
+        unseenOverlap = liveFacts.some((f) => !pinnedFacts.has(f.fact));
+      }
+      if (overlap.length && (input._booking_overlap === false || unseenOverlap)) {
         const err = new Error('booking_overlap_new');
         err.bookingOverlapNew = true;
         throw err;
@@ -4411,7 +4633,7 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho,
   // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.

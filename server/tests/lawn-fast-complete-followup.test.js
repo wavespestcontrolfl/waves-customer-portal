@@ -207,7 +207,7 @@ describe('planned products carry the treated area from the completion-defaults p
   test('the plan read fails: no items, so no area, and the reason and read failure are named', async () => {
     buildPlanForService.mockRejectedValue(readError());
     const result = await ctx({});
-    expect(result.plannedProducts).toEqual({ source: null, items: [] });
+    expect(result.plannedProducts).toEqual({ source: null, items: [], addOns: [] });
     expect(result.plannedProductsUnavailable).toBe('planned_products_lookup_failed');
     expect(result.readFailures).toContain('planned_products');
   });
@@ -222,9 +222,9 @@ describe('planned products carry the treated area from the completion-defaults p
 
   test('a non-recurring visit still starts blank (no area either)', async () => {
     planWith([{ product: { id: P_HERB, name: 'Test Weed Spray' }, mix: { treatedSqft: 5400 } }]);
-    const knex = world({ extra: { customers: { billing_mode: 'per_application' } } });
+    const knex = world({ extra: { customers: { billing_mode: 'one_time' } } });
     const result = await buildLawnFastContext(VISIT, { knex });
-    expect(result.plannedProducts).toEqual({ source: null, items: [] });
+    expect(result.plannedProducts).toEqual({ source: null, items: [], addOns: [] });
     expect(buildPlanForService).not.toHaveBeenCalled();
   });
 });

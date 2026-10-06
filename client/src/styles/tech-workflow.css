@@ -368,6 +368,8 @@
 .tech-lawn-sheet .tech-visit-body { padding: 8px 20px 96px; background: #fafafa; }
 .tech-lawn-sheet .tech-lawn-contact { margin-bottom: 20px; line-height: 1.5; }
 .tech-lawn-sheet .tech-lawn-contact a { display: block; margin-top: 2px; color: #111111; font-size: 14px; text-decoration: underline; }
+/* styledButton: no inline defaults, so this rule strips the native button chrome itself. */
+.tech-lawn-sheet .tech-lawn-contact .tech-lawn-call { display: block; margin: 2px 0 0; padding: 0; border: 0; background: transparent; font-family: inherit; line-height: inherit; text-align: left; cursor: pointer; color: #111111; font-size: 14px; text-decoration: underline; }
 .tech-lawn-sheet .tech-lawn-contact .tech-lawn-name { margin: 0 0 4px; color: #111111; font-size: 16px; font-weight: 500; }
 
 /* Section labels: the page's small uppercase grey label (at the 14px floor). */
@@ -384,6 +386,8 @@
 .tech-lawn-sheet .tech-product-editor { padding: 16px; border: 0.5px solid #e5e5e5; border-radius: 16px; background: #ffffff; }
 .tech-lawn-sheet .tech-product-editor-name { font-size: 16px; }
 .tech-lawn-sheet .tech-visit-card, .tech-lawn-sheet .tech-visit-light-card { border: 0.5px solid #e5e5e5; border-radius: 16px; background: #ffffff; }
+/* The amount row's unit box: wide enough for "fl oz" beside the 16px padding and the chevron. */
+.tech-lawn-sheet .tech-visit-amount-row { grid-template-columns: minmax(0, 1fr) 96px 104px; }
 /* Inputs: the page's mInput (48px, 12px radius, 1px hairline, 16px). */
 .tech-lawn-sheet .ui-control.tech-visit-control { min-height: 48px; padding: 0 16px; border: 1px solid #e5e5e5; border-radius: 12px; background: #ffffff; color: #111111; font-size: 16px; font-weight: 400; }
 .tech-lawn-sheet textarea.ui-control.tech-visit-control { padding: 14px; }
@@ -399,6 +403,22 @@
 .tech-lawn-sheet .ui-action.tech-visit-action { min-height: 44px; border: 1px solid #111111; border-radius: 999px; background: transparent; color: #111111; font-weight: 500; letter-spacing: 0.3px; text-transform: uppercase; }
 .tech-lawn-sheet .ui-action.tech-visit-action:hover:where(:not(:disabled)) { background: #f5f5f5; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-product-remove { color: #111111; }
+/* "Also in this month's protocol": the window's products as one hairline list. */
+.tech-lawn-sheet .tech-protocol-addons { border: 1px solid #e5e5e5; border-radius: 12px; background: #ffffff; overflow: hidden; }
+.tech-lawn-sheet .tech-protocol-addons-head { padding: 12px 14px 10px; border-bottom: 1px solid #e5e5e5; }
+.tech-lawn-sheet .tech-protocol-addons-title { margin: 0; font-size: 14px; font-weight: 600; }
+.tech-lawn-sheet .tech-protocol-addons-head .tech-visit-muted { margin: 2px 0 0; }
+.tech-lawn-sheet .tech-protocol-addon { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 56px; padding: 8px 14px; }
+.tech-lawn-sheet .tech-protocol-addon + .tech-protocol-addon { border-top: 1px solid #e5e5e5; }
+.tech-lawn-sheet .tech-protocol-addon-text { display: flex; flex-direction: column; min-width: 0; }
+.tech-lawn-sheet .tech-protocol-addon-name { font-size: 14px; font-weight: 500; line-height: 1.25; overflow-wrap: anywhere; }
+.tech-lawn-sheet .ui-action.tech-visit-action.tech-protocol-addon-add { flex-shrink: 0; min-height: 40px; padding: 0 16px; }
+.tech-lawn-sheet .ui-action.tech-visit-action.tech-protocol-addon-add:disabled { border-color: #e5e5e5; opacity: 1; }
+/* Catalog search results stay a plain list inside one hairline card: the pill
+   rule above would otherwise give each row its own ink pill and uppercase it. */
+.tech-lawn-sheet .tech-product-list { border: 1px solid #e5e5e5; border-radius: 12px; }
+.tech-lawn-sheet .ui-action.tech-visit-action.tech-product-option { min-height: 56px; border: 0; border-radius: 0; letter-spacing: 0; text-transform: none; }
+.tech-lawn-sheet .ui-action.tech-visit-action.tech-product-option + .tech-product-option { border-top: 1px solid #e5e5e5; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-visit-product[aria-pressed] { border-color: #e5e5e5; background: #ffffff; letter-spacing: 0; text-transform: none; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-visit-tip { border: 1px solid #e5e5e5; border-radius: 12px; background: #ffffff; letter-spacing: 0; text-transform: none; }
 .tech-lawn-sheet .ui-action.tech-visit-action.tech-visit-tip .tech-visit-tip-copy { text-transform: none; letter-spacing: 0; }

@@ -47,7 +47,7 @@ test('keeps neighbouring properties together and still arrives at the southern s
 test('does not require work to finish before the arrival window closes', () => {
   const optimizer = { HQ: { lat: 1, lng: 1 }, haversine: () => 0, fallbackLegMetrics: () => ({ minutes: 0 }) };
   const result = simulateArrivalRoute(optimizer, effectiveWindowRange, [stop('late-arrival', '10:00', 1)], { startMin: 11 * 60 + 59 });
-  expect(result.arrivals[0]).toEqual({ id: 'late-arrival', arrivalMin: 719, departureMin: 779 });
+  expect(result.arrivals[0]).toEqual({ id: 'late-arrival', arrivalMin: 719, departureMin: 779, driveMin: 0 });
   expect(simulateArrivalRoute(optimizer, effectiveWindowRange, [stop('missed', '10:00', 1)], { startMin: 12 * 60 + 1 })).toBeNull();
 });
 

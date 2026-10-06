@@ -285,4 +285,5 @@ class DataForSEO {
 
 module.exports = new DataForSEO();
 module.exports.DataForSEO = DataForSEO;
+module.exports.serpLocation = serpLocation;
 module.exports._test = { hasUrlBoundary, normalizeIndexedUrl };

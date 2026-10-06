@@ -278,6 +278,12 @@ app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'
 // other dark public routes use (codex P0 r1 on #5399). The route re-runs it.
 app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredTimePreParserGuard);
 
+// Staff two-step code step (GATE_ADMIN_MFA, dark): no-store/noindex headers
+// and the generic unknown-route 404 while the gate is off, mounted in the same
+// position — above cors(), the global `/api/` limiter, the login limiter and
+// the body parsers. The route re-runs it.
+app.use('/api/admin/auth/login/mfa', ...require('./middleware/staff-mfa-guard').loginMfaPreParserGuard);
+
 // Signed satellite image proxy (lead-form lookup, service report, portal
 // station map): serves Google imagery WITHOUT the server Maps key ever
 // reaching a customer. Mounted ABOVE the global cors() (which would otherwise
@@ -1014,6 +1020,7 @@ app.use('/api/webhooks/bouncie', require('./routes/webhooks-bouncie'));
 app.use('/api/tech/notifications', require('./routes/tech-notifications'));
 app.use('/api/tech/line', require('./routes/tech-line'));
 app.use('/api/tech/services', require('./routes/tech-track'));
+app.use('/api/tech/dictation', require('./routes/tech-dictation'));
 app.use('/api/admin/geofence', require('./routes/admin-geofence'));
 app.use('/api/admin', require('./routes/admin-billing-health'));
 
@@ -1600,11 +1607,19 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
     {
       const { runExclusive } = require('./utils/cron-lock');
       if (config.nodeEnv !== 'test') {
-        require('./utils/scheduled-cron').schedule('*/15 * * * *', async () => {
+        // Every minute, so GATE_SERIES_MOVE_TEXT_COALESCE can release a held
+        // staff series-move text when its 3-minute hold ends. Gate off: the
+        // job returns before its lock except on the quarter hour, so it runs
+        // exactly as the old */15 schedule did. Gate on: the quarter-hour tick
+        // also releases held texts; the ticks between release only those.
+        require('./utils/scheduled-cron').schedule('* * * * *', async () => {
           try {
+            const quarterHour = new Date().getMinutes() % 15 === 0;
+            const coalesce = require('./services/series-move-text-coalesce').enabled();
+            if (!quarterHour && !coalesce) return;
             await runExclusive('series-move-effects-reconcile', async () => {
               const { reconcileSeriesMoveEffects } = require('./routes/admin-dispatch');
-              const out = await reconcileSeriesMoveEffects();
+              const out = await reconcileSeriesMoveEffects(coalesce ? { heldTexts: quarterHour ? 'with' : 'only' } : {});
               if (out.candidates) logger.info(`[cron] series move effects reconcile: ${out.finished}/${out.candidates} finished`);
             });
           } catch (err) {

@@ -392,6 +392,7 @@ const PestPressureSettingsPage = lazyWithRetry(() => import('./pages/admin/PestP
 const RatePage = lazyWithRetry(() => import('./pages/RatePage'));
 const CareersInterviewPage = lazyWithRetry(() => import('./pages/CareersInterviewPage'));
 const CardPage = lazyWithRetry(() => import('./pages/CardPage'));
+const AdminTwoStepPage = lazyWithRetry(() => import('./pages/AdminTwoStepPage'));
 const AdminSocialMediaPage = lazyWithRetry(() => import('./pages/admin/SocialMediaPage'));
 const AdminTaxPage = lazyWithRetry(() => import('./pages/admin/TaxPage'));
 const AdminToolHealthPage = lazyWithRetry(() => import('./pages/admin/ToolHealthPage'));
@@ -709,6 +710,7 @@ export default function App() {
           <Route path="/book/:estimateToken" element={<BookEstimateRedirect />} />
           <Route path="/admin/login" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminLoginPage />} />
           <Route path="/admin/change-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminChangePasswordPage />} />
+          <Route path="/admin/two-step" element={isNativeApp() ? <Navigate to="/" replace /> : <Suspense fallback={<div style={{background:'#0f1923',minHeight:'100vh'}}/>}><AdminTwoStepPage /></Suspense>} />
           <Route path="/admin/forgot-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminForgotPasswordPage />} />
           <Route path="/admin/reset-password" element={isNativeApp() ? <Navigate to="/" replace /> : <AdminResetPasswordPage />} />
           {/* The standalone tech portal is retired: the field workspace lives at

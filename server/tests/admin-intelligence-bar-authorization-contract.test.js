@@ -737,7 +737,8 @@ describe('W0B booking is card-confirmable only when credit-free', () => {
       const { body } = await postQuery(baseUrl, { prompt: 'book it', context: 'schedule' });
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._inspection_credit_amount).toBe(0);
-      expect(stored.contract.effects.map((e) => e.label)).toContainEqual(expect.stringMatching(/^No inspection credit is redeemed by this booking/));
+      // Nothing about credit shows on the card when none applies.
+      expect(stored.contract.effects.map((e) => e.label).some((l) => /inspection credit|credit lock/i.test(l))).toBe(false);
       expect(body.pendingActions[0].params._inspection_credit_amount).toBeUndefined();
     });
     // Confirm: a credit appeared since the card → route refuses before the executor.

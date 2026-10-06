@@ -1394,7 +1394,12 @@ router.post('/property-lookup', async (req, res) => {
     // lookup, never ahead of it; resolves null while the gate is off and
     // never rejects.
     const addressStatusPromise = require('../services/property-lookup/address-status').resolveAddressStatus(address).catch(() => null);
-    const result = await performPropertyLookup(address, { refresh: refresh === true, prioritizeAccuracy: true, commercialSuiteSizing: wholeProperty !== true, ...occupancyOption(req.body?.occupancy) });
+    // Scope decision: lookup-callers.js (admin_estimate_tool opts in; a
+    // whole-property association job turns the suite leg off for this call).
+    const { lookupOptionsFor } = require('../services/property-lookup/lookup-callers');
+    const callerOptions = lookupOptionsFor('admin_estimate_tool', { refresh: refresh === true, prioritizeAccuracy: true, ...occupancyOption(req.body?.occupancy) });
+    if (wholeProperty === true) callerOptions.commercialSuiteSizing = false;
+    const result = await performPropertyLookup(address, callerOptions);
     result.meta.providerStatus ||= buildProviderStatus();
     const addressStatus = await addressStatusPromise;
     if (addressStatus) {

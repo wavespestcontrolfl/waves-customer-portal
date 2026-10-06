@@ -10,7 +10,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
-const { toE164 } = require('../../utils/phone');
+const { toE164, isValidNanpNumber } = require('../../utils/phone');
 const { cleanValidEmailOrNull } = require('../../utils/intake-normalize');
 const leadAttribution = require('../lead-attribution');
 const { scopeToProspects, unlessHandledSince } = require('../lead-statuses');
@@ -680,8 +680,8 @@ function normalizeLeadContactField(field, raw) {
     // Canonical E.164 (Codex r2 P2): a non-zero country code then 7–14 more
     // digits — not the looser isLikelyE164 helper, which both admits a
     // leading zero and rejects valid 8–9 digit international numbers.
-    // NANP (+1) numbers are exactly ten more digits with a [2-9] area code.
-    const canonical = e164 && (e164.startsWith('+1') ? /^\+1[2-9]\d{9}$/.test(e164) : /^\+[2-9]\d{7,14}$/.test(e164));
+    // NANP (+1) numbers are exactly ten more digits, area code and exchange both starting 2-9.
+    const canonical = e164 && (e164.startsWith('+1') ? isValidNanpNumber(e164) : /^\+[2-9]\d{7,14}$/.test(e164));
     if (!canonical) return { error: 'phone is not a valid phone number — give a 10-digit US number or full +country format.' };
     return { value: e164 };
   }
