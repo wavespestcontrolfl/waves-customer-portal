@@ -11,8 +11,10 @@ const path = require('path');
 const { CALLERS, TRIO_CALLERS, lookupOptionsFor } = require('../services/property-lookup/lookup-callers');
 
 const SERVER_ROOT = path.join(__dirname, '..');
-const SCAN_DIRS = ['services', 'routes', 'scripts'];
-const SKIP_DIRS = new Set(['node_modules', 'tests', '__tests__', 'migrations', 'coverage', 'dist']);
+// The whole production tree under server/ (not an allow-list of folders): a
+// caller added under middleware/, utils/, models/ or anywhere else is held
+// to the registry too.
+const SKIP_DIRS = new Set(['node_modules', 'tests', '__tests__', 'migrations', 'coverage', 'dist', 'fixtures']);
 
 function walk(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -21,7 +23,7 @@ function walk(dir, out = []) {
   }
   return out;
 }
-const files = SCAN_DIRS.flatMap((d) => walk(path.join(SERVER_ROOT, d)));
+const files = walk(SERVER_ROOT);
 const rel = (f) => path.relative(SERVER_ROOT, f).split(path.sep).join('/');
 
 // Lines that CALL the lookup (not the definition, not a comment, not a jest mock).
