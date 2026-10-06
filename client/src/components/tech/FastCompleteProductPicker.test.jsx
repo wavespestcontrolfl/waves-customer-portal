@@ -112,6 +112,12 @@ describe('inline search (the lawn sheet)', () => {
     expect(names(screen.getByRole('group', { name: 'Matching products' })).join('|')).toMatch(/Nufarm Cleary 3336F/);
   });
 
+  test('on the lawn line an untagged insecticide waits until Inventory tags it lawn', () => {
+    const box = mountInline();
+    fireEvent.change(box, { target: { value: 'bifen' } });
+    expect(screen.getByText('No products match.')).toBeTruthy();
+  });
+
   test('on the pest line it searches every listed product', () => {
     const box = mountInline({ line: 'pest' });
     fireEvent.change(box, { target: { value: 'bait' } });

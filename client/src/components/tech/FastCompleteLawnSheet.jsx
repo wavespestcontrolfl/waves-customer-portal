@@ -356,7 +356,10 @@ function productRow(product, { planned = null, added = false }) {
 // A figured amount's own rate comes first: a planned row the plan gave a rate
 // but no quantity for is figured from the catalog, and records THAT rate, never
 // the plan's beside an amount the plan did not give.
-const rateOf = (row) => row.derivedRate || (row.planned && !row.rateChanged ? row.planRate : null);
+// The plan's rate rides only a planned row on the plan's own method whose
+// amount nobody changed: a method changed and changed back is the plan's
+// method again (Codex #5993 r8).
+const rateOf = (row) => row.derivedRate || (onPlannedMethod(row) && !row.rateChanged ? row.planRate : null);
 
 // AmountRow shows a rate box only when it is given a rate unit; this sheet never does.
 const NO_RATE = { rate: '', rateUnit: '', max: null };
@@ -539,9 +542,6 @@ function useProductRows(ctx, catalog) {
         // An amount the tech changed is no longer the plan's, and the plan's
         // rate no longer describes the row.
         ...('totalAmount' in patch || 'amountUnit' in patch ? { fromPlan: false, rateChanged: true } : {}),
-        // The plan's per-1,000 rate was given at the plan's method: a row moved
-        // to another method records no rate (the amount the tech typed stays).
-        ...('method' in patch && patch.method !== row.method ? { rateChanged: true } : {}),
       };
     }));
   }, []);

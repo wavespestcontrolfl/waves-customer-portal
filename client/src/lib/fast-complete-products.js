@@ -64,14 +64,17 @@ export function productServiceLines(product) {
 /**
  * 'pest' (the primary list) | 'other' | 'hidden' for the lawn-aware picker.
  * A product tagged with its service lines is a lawn product only when "lawn"
- * is one of them; an untagged product is one by its category.
+ * is one of them; an untagged product is one by its category, except an
+ * insecticide: the category alone cannot tell a lawn insecticide from a roach
+ * one, so an untagged insecticide (one created after the seed) waits under
+ * "other" until Inventory tags it "lawn" (Codex #5993 r8).
  */
 export function lawnProductGroup(product) {
   const key = categoryKey(product);
   if (HIDDEN_CATEGORIES.has(key)) return "hidden";
   const lines = productServiceLines(product);
   if (lines) return lines.includes("lawn") ? "pest" : "other";
-  return LAWN_CATEGORIES.has(key) ? "pest" : "other";
+  return LAWN_CATEGORIES.has(key) && key !== "insecticide" ? "pest" : "other";
 }
 
 /** The category as the tech reads it: "Insecticide", "IGR", "Termite bait". */

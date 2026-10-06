@@ -30,7 +30,7 @@ const P_TALAK = 'aaaaaaaa-0000-4000-8000-000000000001';
 const P_IRON = 'aaaaaaaa-0000-4000-8000-000000000002';
 const P_GRANULE = 'aaaaaaaa-0000-4000-8000-000000000003';
 const CATALOG = [
-  { id: P_TALAK, name: 'Talak 7.9%', category: 'insecticide', formulation: 'SC' },
+  { id: P_TALAK, name: 'Talak 7.9%', category: 'insecticide', formulation: 'SC', service_lines: ['lawn', 'pest'] },
   { id: P_IRON, name: 'Iron Plus', category: 'micronutrient', formulation: 'SC' },
   { id: P_GRANULE, name: 'Green Granules', category: 'fertilizer', formulation: 'granular' },
 ];
@@ -1422,6 +1422,19 @@ describe('application rate on the product rows', () => {
   test('an untouched planned row sends the plan rate and unit exactly as given', async () => {
     await run(planned());
     expect(sentRow()).toMatchObject({ rate: 1.07, rateUnit: 'fl_oz', totalAmount: 2, amountUnit: 'fl_oz', areaValue: 6000 });
+  });
+
+  test('a planned row moved off the plan\'s method sends no rate', async () => {
+    await run(planned(), () => pickMethod(editorFor('Talak 7.9%'), 'Spot treatment'));
+    noRateKeys();
+  });
+
+  test('a planned row moved off the plan\'s method and back sends the plan rate again', async () => {
+    await run(planned(), () => {
+      pickMethod(editorFor('Talak 7.9%'), 'Spot treatment');
+      pickMethod(editorFor('Talak 7.9%'), 'Broadcast spray');
+    });
+    expect(sentRow()).toMatchObject({ applicationMethod: 'broadcast_spray', rate: 1.07, rateUnit: 'fl_oz', totalAmount: 2, amountUnit: 'fl_oz' });
   });
 
   test.each([
