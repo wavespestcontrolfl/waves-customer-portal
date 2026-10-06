@@ -189,6 +189,10 @@ describe('deterministic lines', () => {
     expect(textFor({ technicianNote: '', products: [{ name: 'Pet-safe Lawn Treatment' }] }, [])).toBe('');
     expect(textFor({ technicianNote: '', products: [{ name: 'Gate Code 4545 Blend' }] }, [])).toBe('');
     expect(textFor({ technicianNote: '', products: [{ name: 'Gate Combo 4545 Blend' }] }, [])).toBe('');
+    // Only the exact known catalog name is exempt (Codex r5).
+    for (const name of ['Security Combo 1234', 'Visitor Combo 4545', 'Combo 1234', 'LESCO High Manganese Combo 1234']) {
+      expect(textFor({ technicianNote: '', products: [{ name }] }, [])).toBe('');
+    }
     const slots = { observed: [], maybe: [], products: ['Pet-safe Lawn Treatment'] };
     expect(tech.readFrozenTechParagraph({ lawnTechParagraph: { 77: { v: tech.FREEZE_VERSION, assessmentId: '77', text: 'Today we applied Pet-safe Lawn Treatment.', slots } } }, 77)).toBeNull();
     // The other sentences survive a bad name.
