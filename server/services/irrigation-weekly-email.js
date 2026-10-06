@@ -29,6 +29,7 @@ const { isDeepStrictEqual } = require('node:util');
 const { dateOnlyString } = require('../utils/date-only');
 const db = require('../models/db');
 const logger = require('./logger');
+const { openMeteoForecastUrl } = require('./open-meteo-endpoint');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
 const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaimWithRetry, loadPriorWeekPlan, loadCurrentWeekPlan, planBindsToService, samePolicy } = require('./irrigation-week-plan');
@@ -271,7 +272,7 @@ async function fetchUpcomingWeekForecast({ latitude, longitude, horizonEnd = nul
   const cached = _forecastCache.get(key);
   if (cached && Date.now() - cached.at < FORECAST_TTL_MS) return cached.value;
 
-  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  const url = openMeteoForecastUrl();
   url.searchParams.set('latitude', String(lat));
   url.searchParams.set('longitude', String(lon));
   // Rain for the conditional-run copy; FAO ET₀ so the WEEK-AHEAD plan is

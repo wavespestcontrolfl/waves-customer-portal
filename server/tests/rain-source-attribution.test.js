@@ -35,7 +35,15 @@ describe('Open-Meteo service week — archive first, forecast as fallback', () =
   });
 
   let conditions;
+  // A caller's own key must survive this suite; the free-path tests run
+  // without one (Codex #6052 r1).
+  const ORIGINAL_KEY = process.env.OPEN_METEO_API_KEY;
+  afterAll(() => {
+    if (ORIGINAL_KEY === undefined) delete process.env.OPEN_METEO_API_KEY;
+    else process.env.OPEN_METEO_API_KEY = ORIGINAL_KEY;
+  });
   beforeEach(() => {
+    delete process.env.OPEN_METEO_API_KEY;
     jest.resetModules();
      
     conditions = require('../services/service-report/application-conditions');
@@ -52,6 +60,67 @@ describe('Open-Meteo service week — archive first, forecast as fallback', () =
     expect(urls[0]).toContain('archive-api.open-meteo.com');
     // The forecast endpoint must NOT be hit when the archive answered.
     expect(urls.some((u) => u.includes('api.open-meteo.com/v1/forecast'))).toBe(false);
+  });
+
+  test('with the paid key (Standard: no archive) a completed week goes to the customer forecast host', async () => {
+    process.env.OPEN_METEO_API_KEY = 'fixture-key';
+    try {
+      const urls = [];
+      global.fetch = jest.fn(async (url) => { urls.push(String(url)); return OK([0.1, 0, 0.2, 1.0, 0.05, 0.38, 0.66]); });
+      // A recent closed week, relative to today, so the 92-day reach never
+      // ages this test out (Codex #6052 r2).
+      const recent = new Date(Date.now() - 10 * 86400000).toISOString().slice(0, 10);
+      await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate: recent });
+      expect(urls.length).toBeGreaterThan(0);
+      expect(urls.every((u) => u.startsWith('https://customer-api.open-meteo.com/v1/forecast'))).toBe(true);
+      expect(urls.every((u) => u.includes('apikey=fixture-key'))).toBe(true);
+    } finally {
+      delete process.env.OPEN_METEO_API_KEY;
+    }
+  });
+
+  test('with the paid key a week older than 92 days asks Open-Meteo nothing', async () => {
+    process.env.OPEN_METEO_API_KEY = 'fixture-key';
+    const OLD_MRMS = process.env.GATE_RAIN_MRMS;
+    process.env.GATE_RAIN_MRMS = 'true';
+    try {
+      const urls = [];
+      const oldMs = Date.now() - 200 * 86400000;
+      const old = new Date(oldMs).toISOString().slice(0, 10);
+
+      // An empty week takes the ordinary unfrozen/retry path (no special
+      // "settled" state): a later MRMS backfill or gate change still fills it
+      // (Codex #6052 r2-r7).
+      global.fetch = jest.fn(async (url) => { urls.push(String(url)); return { ok: false, status: 503, json: async () => ({}) }; });
+      const out = await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate: old });
+      expect(urls.some((u) => u.includes('open-meteo.com'))).toBe(false);
+      expect(out).toMatchObject({ rainInches: null, et0Inches: null });
+      expect(out.noSource).toBeUndefined();
+    } finally {
+      delete process.env.OPEN_METEO_API_KEY;
+      if (OLD_MRMS === undefined) delete process.env.GATE_RAIN_MRMS; else process.env.GATE_RAIN_MRMS = OLD_MRMS;
+    }
+  });
+
+  test('MRMS shadow mode: a week past the paid reach uses MRMS rain, not a settled blank (Codex #6052 r3)', async () => {
+    process.env.OPEN_METEO_API_KEY = 'fixture-key';
+    const OLD_MRMS = process.env.GATE_RAIN_MRMS;
+    process.env.GATE_RAIN_MRMS = 'shadow';
+    try {
+      const serviceMs = Date.now() - 200 * 86400000;
+      const serviceDate = new Date(serviceMs).toISOString().slice(0, 10);
+      const data = [];
+      for (let i = -12; i <= 2; i += 1) data.push({ date: new Date(serviceMs + i * 86400000).toISOString().slice(0, 10), mrms_precip_in: 0.1 });
+      const urls = [];
+      global.fetch = jest.fn(async (url) => { urls.push(String(url)); return { ok: true, json: async () => ({ data }) }; });
+      const out = await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate });
+      expect(urls.some((u) => u.includes('open-meteo.com'))).toBe(false);
+      expect(out.rainInches).toBeGreaterThan(0);
+      expect(out.noSource).toBeUndefined();
+    } finally {
+      delete process.env.OPEN_METEO_API_KEY;
+      if (OLD_MRMS === undefined) delete process.env.GATE_RAIN_MRMS; else process.env.GATE_RAIN_MRMS = OLD_MRMS;
+    }
   });
 
   test('an unusable archive window falls back to the forecast endpoint, not to nothing', async () => {
