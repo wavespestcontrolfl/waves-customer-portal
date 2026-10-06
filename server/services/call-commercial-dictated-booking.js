@@ -206,7 +206,10 @@ function acceptedEntryFor(svc, quoted) {
   return entries.find((e) => e && e.accepted === true && e.amount_usd === quoted && !(e.amount_max_usd > e.amount_usd));
 }
 
-// Did a price come up on the call at all? Fail closed on EVERY view of the call:
+// Did a price come up on the call at all? The extraction JUDGES it over the whole call, both speakers
+// (service_request.price_discussed, schema 1.24.0; the price_is_final precedent, owner ruling
+// 2026-10-01) and the lane requires exactly false: true, null or missing sends the call to the priced
+// path. Everything below is an EXTRA fail-closed layer on top, never a replacement, for EVERY view:
 //  - the V2 service_request: the quoted total, a price entry with an amount or a range end,
 //    and ANY price judgement (a false one means price talk happened too: only null means none);
 //  - every V1 view the processor hands in (the merged record AND the one before V2 adoption):
@@ -257,7 +260,8 @@ function agentSaidNumber(v2, transcript) {
 
 function priceDiscussed(svc = {}, transcript = '', v1Views = [], v2 = null) {
   const entries = [svc.price, ...(Array.isArray(svc.prices) ? svc.prices : [])];
-  return svc.quoted_price_usd != null
+  return svc.price_discussed !== false // the extraction's whole-call judgement: exactly false, or it was discussed (null / missing included)
+    || svc.quoted_price_usd != null
     || [svc.price_offered_by_staff, svc.price_accepted_by_caller, svc.price_is_final].some((j) => j != null)
     // V2 quote signals: true counts (any value other than false / null / undefined fails closed)
     || [svc.quote_requested, svc.quote_promised].some((q) => q !== false && q != null)

@@ -51,6 +51,7 @@ const FIELD_GROUPS = {
     'price_offered_by_staff',
     'price_accepted_by_caller',
     'price_is_final',
+    'price_discussed',
     'staff_accepted_proposed_slot',
     'selected_day_words',
     // Whole-building occupancy (schema 1.23.0): decides whether a business
@@ -481,7 +482,7 @@ const FIELD_NORMALIZERS = {
 const BOOL_FIELDS = new Set([
   'appointment_confirmed', 'is_spam', 'is_voicemail', 'price_accepted', 'caller_id_disclaimed',
   'sms_declined', 'definite_commitment', 'relative_date_used', 'moved_appointment_relative_date_used',
-  'price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final', 'staff_accepted_proposed_slot',
+  'price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final', 'price_discussed', 'staff_accepted_proposed_slot',
 ]);
 // agent_committed_booking postdates every legacy extraction: absent/null
 // means "not committed", identical to false — collapse them so replays

@@ -182,6 +182,10 @@ function flatView(extraction) {
     price_offered_by_staff: typeof svc.price_offered_by_staff === 'boolean' ? svc.price_offered_by_staff : null,
     price_accepted_by_caller: typeof svc.price_accepted_by_caller === 'boolean' ? svc.price_accepted_by_caller : null,
     price_is_final: typeof svc.price_is_final === 'boolean' ? svc.price_is_final : null,
+    // Whole-call judgement that ANY price came up (schema 1.24.0): null when absent (every older
+    // row). The no-price assessment booking (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING) needs exactly
+    // false, so replay variance watches it.
+    price_discussed: typeof svc.price_discussed === 'boolean' ? svc.price_discussed : null,
     staff_accepted_proposed_slot: typeof sched.staff_accepted_proposed_slot === 'boolean' ? sched.staff_accepted_proposed_slot : null,
     selected_day_words: typeof sched.selected_day_words === 'string' ? sched.selected_day_words : null,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,

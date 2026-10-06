@@ -54,7 +54,7 @@ function extraction({ flags = ['commercial_requires_quote'], scheduling = {}, se
     },
     service_request: {
       specific_service_name: 'Waves Assessment', service_intent: 'inspection_only',
-      quoted_price_usd: null, prices: [], price: { amount_usd: null }, price_offered_by_staff: null, price_accepted_by_caller: null,
+      quoted_price_usd: null, prices: [], price: { amount_usd: null }, price_offered_by_staff: null, price_accepted_by_caller: null, price_discussed: false,
       ...service,
     },
     evidence,
@@ -200,8 +200,8 @@ describe('no price discussed: the assessment mode; any price: the priced path de
   const PRICED = (extra = {}) => extraction({ service: { quoted_price_usd: 150, price_offered_by_staff: true, price_accepted_by_caller: true, price_is_final: true, ...extra } });
 
   test('priceDiscussed reads the extracted amounts, the judgements and the transcript', () => {
-    expect(priceDiscussed({}, OUTBOUND)).toBe(false);
-    expect(priceDiscussed({ quoted_price_usd: null, prices: [], price: { amount_usd: null } }, OUTBOUND)).toBe(false);
+    expect(priceDiscussed({ price_discussed: false }, OUTBOUND)).toBe(false);
+    expect(priceDiscussed({ price_discussed: false, quoted_price_usd: null, prices: [], price: { amount_usd: null } }, OUTBOUND)).toBe(false);
     expect(priceDiscussed({ quoted_price_usd: 150 }, OUTBOUND)).toBe(true);
     expect(priceDiscussed({ quoted_price_usd: 0 }, OUTBOUND)).toBe(true);
     expect(priceDiscussed({ price: { amount_usd: 99 } }, OUTBOUND)).toBe(true);
@@ -212,12 +212,12 @@ describe('no price discussed: the assessment mode; any price: the priced path de
     for (const j of ['price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final']) {
       expect([j, priceDiscussed({ [j]: false }, OUTBOUND)]).toEqual([j, true]);
       expect([j, priceDiscussed({ [j]: true }, OUTBOUND)]).toEqual([j, true]);
-      expect([j, priceDiscussed({ [j]: null }, OUTBOUND)]).toEqual([j, false]);
-      expect([j, priceDiscussed({ [j]: undefined }, OUTBOUND)]).toEqual([j, false]);
+      expect([j, priceDiscussed({ price_discussed: false, [j]: null }, OUTBOUND)]).toEqual([j, false]);
+      expect([j, priceDiscussed({ price_discussed: false, [j]: undefined }, OUTBOUND)]).toEqual([j, false]);
       expect([j, grounded(extraction({ service: { [j]: false } }))]).toEqual([j, { ok: false, reason: 'price_discussed' }]);
       expect([j, route(extraction({ service: { [j]: false } })).allowed]).toEqual([j, false]);
     }
-    expect(priceDiscussed({}, `${OUTBOUND}\nAgent: It is $150.`)).toBe(true);
+    expect(priceDiscussed({ price_discussed: false }, `${OUTBOUND}\nAgent: It is $150.`)).toBe(true);
     expect(priceDiscussed({}, `${OUTBOUND}\nAgent: It is a hundred dollars.`)).toBe(true);
     expect(priceDiscussed({}, `${OUTBOUND}\nAgent: Forty bucks.`)).toBe(true);
   });
@@ -801,8 +801,8 @@ describe('codex #6046 round 4: the no-price decision fails closed on every view'
       }
     }
     expect(priceDiscussed({}, OUTBOUND, v1Price({ quoted_price: 149 }))).toBe(true);
-    expect(priceDiscussed({}, OUTBOUND, undefined)).toBe(false);
-    expect(priceDiscussed({}, OUTBOUND, 'nope')).toBe(false);
+    expect(priceDiscussed({ price_discussed: false }, OUTBOUND, undefined)).toBe(false);
+    expect(priceDiscussed({ price_discussed: false }, OUTBOUND, 'nope')).toBe(false);
     // through canAutoRoute, with the views the processor threads in
     expect(route(extraction(), { commercialAssessmentV1Views: v1Price({ quoted_price: 149 }) }).allowed).toBe(false);
     expect(route(extraction(), { commercialAssessmentV1Views: v1Price({ quote_promised: true }) }).allowed).toBe(false);
@@ -1091,7 +1091,7 @@ describe('codex #6046 round 7', () => {
     test('V2 quote_requested / quote_promised true counts; false, null and undefined do not', () => {
       for (const k of ['quote_requested', 'quote_promised']) {
         expect([k, priceDiscussed({ [k]: true }, OUTBOUND)]).toEqual([k, true]);
-        for (const quiet of [false, null, undefined]) expect([k, quiet, priceDiscussed({ [k]: quiet }, OUTBOUND)]).toEqual([k, quiet, false]);
+        for (const quiet of [false, null, undefined]) expect([k, quiet, priceDiscussed({ price_discussed: false, [k]: quiet }, OUTBOUND)]).toEqual([k, quiet, false]);
         expect([k, grounded(extraction({ service: { [k]: true } }))]).toEqual([k, { ok: false, reason: 'price_discussed' }]);
         expect([k, route(extraction({ service: { [k]: true } })).allowed]).toEqual([k, false]);
         expect([k, grounded(extraction({ service: { [k]: false } })).ok]).toEqual([k, true]);
@@ -1262,5 +1262,98 @@ describe('codex #6046 round 10: the appended schema agrees with the gated except
     for (const names of [undefined, ['Waves Assessment', 'Cockroach Control Service']]) {
       for (const aps of [false, true]) expect(extractionPromptVersion(names, { agentProposedSlotCommitment: aps }).length).toBeLessThanOrEqual(30);
     }
+  });
+});
+
+describe('codex #6046 round 11', () => {
+  test('agent-proposed mode: a proposal naming any other day or date does not ground (reschedule behavior untouched)', () => {
+    const slot = { words: { day: 'Thursday', hour: 'noon', period: null }, start: THURSDAY_NOON };
+    const tryProposal = (proposal) => {
+      const ex = extraction({ evidence: [quote('/scheduling/confirmed_start_at', 'agent', proposal), AGENT_PROPOSED_EVIDENCE[1], AGENT_PROPOSED_EVIDENCE[2]] });
+      return { ex, transcript: lines({ proposal: `Agent: ${proposal}` }) };
+    };
+    const ok = tryProposal('How does noon on Thursday sound?');
+    expect(grounded(ok.ex, ok.transcript)).toMatchObject({ ok: true, mode: 'agent_proposed' });
+    for (const bad of [
+      'How does noon on Thursday and Friday sound?', 'How does Thursday and Friday at noon sound?', 'How does noon on Thursday or the 9th sound?', 'How does noon tomorrow or Thursday sound?',
+      'How does noon on Thursday the 9th sound?', 'How does noon on Thursday sound? We are also open Sunday.', 'How does noon on Thursday, or next Monday, sound?',
+    ]) {
+      const t = tryProposal(bad);
+      expect([bad, groundNewBookingAgreement({ v2: t.ex, transcript: t.transcript, callStartedAt: CALL_STARTED_AT, allowAgentProposed: true }).ok]).toEqual([bad, false]);
+      expect([bad, grounded(t.ex, t.transcript).ok]).toEqual([bad, false]);
+    }
+    expect(slot.words.day).toBe('Thursday');
+    // without the opt-in nothing here changed: the same proposal never grounded as agent_proposed, and the other modes are untouched
+    expect(groundNewBookingAgreement({ v2: ok.ex, transcript: ok.transcript, callStartedAt: CALL_STARTED_AT }).ok).toBe(false);
+  });
+
+  describe('the extraction judges, the code verifies: service_request.price_discussed', () => {
+    const callerAmount = OUTBOUND.replace('Caller: Great, thank you.', 'Caller: Could you do one forty-nine?');
+
+    test('caller "Could you do one forty-nine?": judged true goes to the priced path; null or missing is held; false plus the real shape grounds', () => {
+      expect(grounded(extraction({ service: { price_discussed: true } }), callerAmount)).toEqual({ ok: false, reason: 'price_discussed' });
+      expect(route(extraction({ service: { price_discussed: true } }), { transcript: callerAmount }).allowed).toBe(false);
+      for (const missing of [null, undefined]) {
+        const ex = extraction({ service: { price_discussed: missing } });
+        expect([missing, grounded(ex, OUTBOUND)]).toEqual([missing, { ok: false, reason: 'price_discussed' }]);
+        expect([missing, route(ex).allowed]).toEqual([missing, false]);
+      }
+      const noField = extraction();
+      delete noField.service_request.price_discussed;
+      expect(grounded(noField, OUTBOUND)).toEqual({ ok: false, reason: 'price_discussed' });
+      expect(grounded(extraction({ service: { price_discussed: false } }), OUTBOUND).ok).toBe(true);
+      // a judged-false extraction does not override the screens: the layers stay
+      expect(grounded(extraction({ service: { price_discussed: false, quoted_price_usd: 149 } }), OUTBOUND)).toEqual({ ok: false, reason: 'price_discussed' });
+      expect(grounded(extraction({ service: { price_discussed: false } }), `${OUTBOUND}\nAgent: It will be one forty-nine.`)).toEqual({ ok: false, reason: 'price_discussed' });
+      expect(priceDiscussed({ price_discussed: false }, OUTBOUND, [{ quote_promised: true }])).toBe(true);
+      expect(priceDiscussed({ price_discussed: 'false' }, OUTBOUND)).toBe(true); // exactly the boolean false
+    });
+
+    test('the real shape (synthetic names) with price_discussed false still grounds', () => {
+      const real = [
+        'Agent: Hey Jordan, this is Alex with Waves. How are you?', 'Caller: Good, thanks.',
+        'Agent: What you got going on?', 'Caller: We have some critters in the break room at the office.',
+        "Agent: Do you think they're mice?", 'Caller: Probably, we hear scratching in the ceiling.',
+        'Agent: And where are you located?', 'Caller: It is 4120 Palm Lane in Bradenton.',
+        "Agent: What's the zip there, do you know?", 'Caller: 34202.',
+        'Agent: Let me just quickly check my schedule and see if we can get someone out there to do an assessment.', 'Caller: Sure.',
+        "Agent: Yep. Just give me a second, I'll just get to my—", 'Caller: No problem.',
+        'Agent: How does noon on Thursday sound?', 'Caller: Perfect.',
+        "Agent: Awesome. I'll book you for that, and we'll see you then.", 'Caller: Great.',
+        "Agent: Perfect. Yep, we'll get you notifications to your phone.", 'Caller: Thank you.',
+        'Agent: Thank you.', 'Caller: Bye-bye.', 'Agent: Bye-bye.',
+      ].join('\n');
+      const views = [{ requested_service: 'Waves Assessment', quoted_price: null, quote_requested: false, quote_promised: false }];
+      const ex = extraction({ service: { price_discussed: false } });
+      expect(grounded(ex, real, { assessmentBooking: assess({ outbound: true, v1Views: views }) })).toEqual({ ok: true, reason: 'assessment_booking_grounded', mode: 'agent_proposed', assessment: true });
+      expect(route(ex, { transcript: real, commercialAssessmentV1Views: views }).allowed).toBe(true);
+    });
+
+    test('schema field: optional nullable boolean in both schemas, version 1.24.0, mirrored flat, in the prompt and the replay watch lists', () => {
+      const { SCHEMA_VERSION } = require('../schemas/validate-extraction');
+      expect(SCHEMA_VERSION).toBe('1.24.0');
+      for (const f of ['model-output', 'persisted']) {
+        const schema = JSON.parse(fs.readFileSync(path.join(__dirname, `../schemas/call-extraction.${f}.schema.json`), 'utf8'));
+        const field = schema.properties.service_request.properties.price_discussed;
+        expect(field.type).toEqual(['boolean', 'null']);
+        expect(field.description).toContain('Could you do one forty-nine?');
+        expect(JSON.stringify(schema.properties.service_request.required || [])).not.toContain('price_discussed');
+        if (f === 'persisted') expect(schema.properties.meta.properties.schema_version.enum).toContain('1.24.0');
+      }
+      const { flatView } = require('../utils/extraction-compat');
+      expect(flatView({ meta: { schema_version: '1.24.0' }, service_request: { price_discussed: false } }).price_discussed).toBe(false);
+      expect(flatView({ meta: { schema_version: '1.24.0' }, service_request: { price_discussed: true } }).price_discussed).toBe(true);
+      expect(flatView({ meta: { schema_version: '1.24.0' }, service_request: {} }).price_discussed).toBeNull();
+      const { buildExtractionPrompt, APS_PROMPT_HASH, PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
+      for (const o of [{}, { agentProposedSlotCommitment: true }]) {
+        const prompt = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-09-23', o);
+        expect(prompt).toContain('- price_discussed: judge over the WHOLE call, both speakers');
+        expect(prompt).toContain('"Could you do one forty-nine?" -> true');
+        expect(prompt).toContain("It's a free assessment");
+      }
+      expect(APS_PROMPT_HASH).not.toBe(PROMPT_HASH);
+      const replay = fs.readFileSync(path.join(__dirname, '../scripts/replay-call-extraction-variance.js'), 'utf8');
+      expect(replay.match(/'price_discussed'/g).length).toBeGreaterThanOrEqual(2);
+    });
   });
 });

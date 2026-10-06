@@ -1071,6 +1071,9 @@ function groundAgentProposed(ctx) {
     && turnsHolding(turns, pin.quote, 'agent').every((proposalTurn) => {
       // The proposal is plainly said by staff (a question is the point of it).
       if (!plainlySaid(proposalTurn, pin.quote, { slot: true })) return false;
+      // The proposal names ONE day: any other weekday, date, "tomorrow" or ordinal in the turn
+      // ("Thursday and Friday at noon", "Thursday or the 9th") is no single agreed slot.
+      if (namesAnyDay(padded(proposalTurn.ns).replace(padded(normalize(words.day)), ' '))) return false;
       const at = turns.indexOf(proposalTurn);
       const acceptTurn = turns[at + 1];
       const commitTurn = turns[at + 2];
