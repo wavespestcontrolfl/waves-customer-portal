@@ -1,0 +1,57 @@
+#!/usr/bin/env node
+'use strict';
+
+/**
+ * Prints the exact prompt the service report's "Ask Waves" AI answer would
+ * send to the model (GATE_REPORT_ASK_AI), as JSON { system, user }. No server,
+ * no database, no model call: it reads a saved report payload and a question.
+ *
+ *   node scripts/dev/report-ask-prompt.js <report-data.json> "<question>"
+ *
+ * <report-data.json> is the body of GET /api/reports/:token/data (what
+ * buildServiceReportV1ResponseData returns), or { "data": {...},
+ * "nextAppointment": {...} }. A report payload's own camelCase
+ * `nextAppointment` is mapped the same way POST /:token/ask maps it.
+ *
+ * From Node:
+ *   const { buildReportAskPrompt } = require('./server/services/service-report/report-ask-ai');
+ *   buildReportAskPrompt({ question, data, nextAppointment }) // -> { system, user }
+ */
+
+const fs = require('node:fs');
+const path = require('node:path');
+
+// `source.nextAppointment` in the report payload's camelCase (as POST
+// /:token/ask maps it) or already in the route's snake_case.
+function nextAppointmentFor(source = {}) {
+  const next = source.nextAppointment;
+  return next
+    ? {
+      service_type: next.serviceType ?? next.service_type,
+      scheduled_date: next.scheduledDate ?? next.scheduled_date,
+      window_start: next.windowStart ?? next.window_start,
+    }
+    : null;
+}
+
+function main(argv) {
+  const [file, ...rest] = argv;
+  const question = rest.join(' ').trim();
+  if (!file || !question) {
+    process.stderr.write('Usage: node scripts/dev/report-ask-prompt.js <report-data.json> "<question>"\n');
+    return 2;
+  }
+  const parsed = JSON.parse(fs.readFileSync(path.resolve(file), 'utf8'));
+  const wrapped = parsed && typeof parsed === 'object' && parsed.data && typeof parsed.data === 'object'
+    && !parsed.reportVersion;
+  const data = wrapped ? parsed.data : parsed;
+  // Bare or wrapped, the same mapping; the wrapper's own appointment wins.
+  const nextAppointment = nextAppointmentFor(wrapped ? parsed : data) || (wrapped ? nextAppointmentFor(data) : null);
+  // Keep stdout pure JSON: the portal logger prints module-load warnings there.
+  process.env.LOG_LEVEL = 'error';
+  const { buildReportAskPrompt } = require('../../server/services/service-report/report-ask-ai');
+  process.stdout.write(`${JSON.stringify(buildReportAskPrompt({ question, data, nextAppointment }), null, 2)}\n`);
+  return 0;
+}
+
+process.exitCode = main(process.argv.slice(2));

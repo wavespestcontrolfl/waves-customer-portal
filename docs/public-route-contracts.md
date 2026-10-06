@@ -77,6 +77,20 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Ask Waves AI answers (owner 2026-10-05): `POST /api/reports/:token/ask` keeps
+its request (`{ question }`, 500 characters), its reply (`{ answer }`), its
+headers, its limiter and its recorded event (`report_question_asked` with
+`question_length` and `topic` only). `GATE_REPORT_ASK_AI` (dark, off unless
+exactly `true`, read at call time) changes only who writes `answer`: Claude
+Sonnet 5.5 from a fact sheet of the report (no rates, totals, EPA numbers or
+per-product target pests; the question and all free text scrubbed of phones,
+emails, codes and street addresses, but a customer name written in prose is
+not detectable), screened, with the fixed-rule answer as the reply on
+any model miss
+(`server/services/service-report/report-ask-ai.js`). The AI answers Pest reports only (`data.serviceLine === 'pest'`). Lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks). On pest reports the AI answers only the rule router's `applied`, `results`, `findings`, `summary`, `next_visit` and `unrouted` topics. The `reentry`, `watering` and `next_steps` topics keep the fixed-rule answer, which states recorded instructions word for word.
+
+Symptom and exposure questions (behavior change to the public route, owner review round 5, 2026-10-05): a question that reports a symptom or an exposure ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged.
+
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly
@@ -5610,8 +5624,9 @@ content. Optional body field `intent` — one of `findings` / `treatment` /
 `recommendations` / `next_visit`, sent by the shipped prompt chips — selects
 that answer directly; any other value is ignored and the question is
 keyword-routed as before, so older clients are unaffected. The service-report
-`/api/reports/:token/ask` (deterministic `report-assistant.js` answers, no
-LLM) writes one `service_report_events` row, `report_question_asked`, with
+`/api/reports/:token/ask` (deterministic `report-assistant.js` answers; with
+`GATE_REPORT_ASK_AI` on, a model-written answer for the topics and lines
+described under that gate, with the deterministic answer as fallback) writes one `service_report_events` row, `report_question_asked`, with
 metadata `{ question_length, topic }` — never the question text or the answer
 (owner ruling 2026-09-28: topic only). `topic` is the answer family the
 question was routed to, one of `REPORT_QUESTION_TOPICS` (`reentry`, `watering`,

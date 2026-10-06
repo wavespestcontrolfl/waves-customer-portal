@@ -97,6 +97,9 @@ const SELECTORS = [
   // 'vision' (Codex #5307 r1 finding 6) — the referee call sends the SAME
   // photos every other photo-model selector below sends, not text alone.
   { key: 'SMS_SCHEDULING_DECIDE', env: 'MODEL_SMS_SCHEDULING_DECIDE', description: 'SMS scheduling decide step (owner ruling 2026-10-02: one model, Sonnet 5.5; shadow behind GATE_SMS_SCHEDULING_DECIDE)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
+  // deep: true — its only call site (report-ask-ai.js, TEXT_POLICIES.reportAsk)
+  // goes through llm/call.js, same as NEWSLETTER above.
+  { key: 'REPORT_ASK', env: 'MODEL_REPORT_ASK', description: 'Service report Ask Waves answers (owner 2026-10-05: Sonnet 5.5; dark behind GATE_REPORT_ASK_AI)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'PLANT_ID_REFEREE', env: 'MODEL_PLANT_ID_REFEREE', description: 'Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28: Fable 5.1, effort high; dark behind GATE_PLANT_ID_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
   // deep: true, cap 'vision' — same rationale as PLANT_ID_REFEREE above: its
   // only call site (lawn-visit-referee.js, ROUTES.lawnAssessmentReferee) goes
@@ -161,6 +164,7 @@ const POLICY_SELECTOR = {
   highStakes: { primary: 'FLAGSHIP', fallback: 'OPENAI_REPORT_WRITER' },
   routineAnswer: { primary: 'ROUTINE', fallback: 'OPENAI_REPORT_WRITER' },
   adsAdvisor: { primary: 'ADS_ADVISOR', fallback: 'OPENAI_REPORT_WRITER' },
+  reportAsk: { primary: 'REPORT_ASK', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   askWaves: { primary: 'OPENAI_BALANCED', fallback: 'VOICE' },
@@ -495,6 +499,7 @@ const LANES = [
   // notice the route itself failing.
   L('sms_canary_default', 'SMS draft canary · routine route', 'sms-draft-canary.js', 'voice', R('smsDraftDefault'), null, { note: 'probe at boot + every 6h; alerts the owner when the route stops answering' }),
   L('sms_canary_save_sale', 'SMS draft canary · save-the-sale route', 'sms-draft-canary.js', 'voice', R('smsDraftSaveSale'), null, { note: 'probe at boot + every 6h; alerts the owner when the route stops answering' }),
+  L('report_ask', 'Service report Ask Waves answer', 'service-report/report-ask-ai.js', 'voice', P('reportAsk', 'primary'), P('reportAsk', 'fallback'), { inbound: true, note: 'GATE_REPORT_ASK_AI, dark; writes the answer from the report\'s own facts (owner 2026-10-05: Sonnet 5.5), a miss on both legs answers with the fixed-rule text' }),
   L('completion_recap', 'Completion recap (customer-facing)', 'completion-recap.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('lawn_visit_narratives', 'Lawn + visit-summary narratives', 'service-report/lawn-report-narrative.js, service-report/visit-summary-narrative.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
   L('social_copy', 'Social post copy', 'social-media.js', 'voice', P('customerCopy', 'primary'), P('customerCopy', 'fallback')),
