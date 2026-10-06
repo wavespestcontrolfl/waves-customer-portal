@@ -151,7 +151,19 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // be AT the property. The call pipeline uses them only to decide whether to
 // send that person the recipient opt-in ask; consent is their own YES. Older
 // payloads, which lack both, still validate and simply never qualify.
-const SCHEMA_VERSION = '1.22.0';
+// 1.23.0: additive — property.whole_building_occupancy and
+// property.whole_building_occupancy_final (optional nullable booleans in both
+// schemas, never `required`; _final is the extraction's judgement that the claim
+// stood unhedged, uncorrected and unshared for the whole call, like
+// service_request.price_is_final). Owner ruling 2026-10-06: a
+// business address with no unit is not held for the unit ask when the caller
+// owns, bought, leases or occupies the WHOLE building. The extraction judges
+// the language (owner ruling 2026-10-01) and pins the caller's sentence to
+// /property/whole_building_occupancy; the call pipeline only verifies the
+// quote and Address Validation's business verdict
+// (GATE_CALL_BUSINESS_WHOLE_BUILDING_NO_UNIT). Older payloads, which lack it,
+// still validate and simply never qualify.
+const SCHEMA_VERSION = '1.23.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

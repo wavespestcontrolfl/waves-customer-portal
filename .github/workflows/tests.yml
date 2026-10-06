@@ -167,6 +167,11 @@ jobs:
         env:
           RESCHEDULE_LINK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/reschedule-link-promises-postgres.test.js
+      - name: Office move approval trigger tests
+        working-directory: server
+        env:
+          DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/office-move-approval-postgres.test.js
       - name: Call booking-link text transaction tests
         working-directory: server
         env:

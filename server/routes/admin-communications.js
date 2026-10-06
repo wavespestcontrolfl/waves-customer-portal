@@ -2838,11 +2838,50 @@ async function firstNameForPhone(last10, customerIds) {
 // Composer inserts use the same SMS formatting as templates and sends.
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
 
+// Stamp the office's approval to move a visit online inside the self-serve
+// move notice window: the start instant of the snapshot the link lookup
+// refused, written only while the row still has that snapshot's date, start,
+// status and group (a concurrent move, cancel or grouping wins and gets no
+// approval — codex #6039 r1 P1, r2 P2, r4 P2). Only this column changes, so no reminder or
+// confirmation re-arms; a later move clears it (trigger in 20261006230100).
+// True when the row now carries the approval.
+async function approveOfficeMove(svc) {
+  const { visitStartInstant } = require('../services/scheduling/self-serve-notice');
+  const { etCalendarDayOf } = require('../utils/datetime-et');
+  const startsAt = visitStartInstant(svc);
+  if (!startsAt) return false;
+  const updated = await db('scheduled_services')
+    .where({ id: svc.id, window_start: svc.window_start, status: svc.status })
+    .whereRaw('scheduled_date = ?::date', [etCalendarDayOf(svc.scheduled_date)])
+    // Grouping changes only visit_id and the page refuses a grouped row
+    // (codex #6039 r4 P2).
+    .whereRaw('visit_id IS NOT DISTINCT FROM ?', [svc.visit_id ?? null])
+    .update({ office_move_approved_for: startsAt });
+  if (updated) logger.info(`[reschedule-link] office approved online move inside notice window for ${svc.id}`);
+  return updated > 0;
+}
+
+// The composer's reschedule link for `svc`. Inside the self-serve move
+// notice window the office is the one asking the customer to move
+// (rain-out, running late — owner 2026-10-06). The link is built first,
+// with every check but the notice window; only a usable link gets the
+// approval stamped, so no approval ever needs revoking (codex #6039 r2).
+// The page and its commit honor the approval until the visit moves
+// (self-serve-notice.js officeApprovedMove).
+async function officeRescheduleLink(svc) {
+  const first = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
+  if (!first.tooSoonToMove) return first;
+  const approved = await buildRescheduleLink(svc.id, { customerId: svc.customer_id, officeApproving: true });
+  if (!approved.url || !(await approveOfficeMove(svc))) return first;
+  return approved;
+}
+
 // POST /api/admin/communications/reschedule-link  { phone, customerId? }
 // Composer helper: resolve the recipient's next upcoming reschedulable visit
 // and return its self-serve /reschedule/:token short link for insertion into
 // the SMS body. Read-only apart from the short-url row buildRescheduleLink
-// mints. The reschedule token is a BEARER credential (AGENTS.md public-token
+// mints and, inside the move notice window, the office move approval
+// (approveOfficeMove). The reschedule token is a BEARER credential (AGENTS.md public-token
 // section), so this fails closed on every axis:
 //   - admin-only (requireAdmin): the comms composer is an admin surface, and
 //     the tech portal must not be able to mint arbitrary customers' links;
@@ -2913,12 +2952,10 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     const svc = await soonestUpcomingVisit(customerIds);
     if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
 
-    const { url, line, tooSoonToMove } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
-    // A dead-link-guard refusal (C3/C6) is not the same problem as a
-    // missing link: the visit is eligible, just too close to its own start
-    // to move online right now — a distinct 409 so the composer doesn't
-    // tell the operator this appointment has no reschedule link at all
-    // (independent-reviewer finding on PR #5308).
+    const { url, line, tooSoonToMove } = await officeRescheduleLink(svc);
+    // Still refused: the row moved between the read and the approval.
+    // Distinct 409 so the composer doesn't say the visit has no reschedule
+    // link at all (independent-reviewer finding on PR #5308).
     if (tooSoonToMove) {
       return res.status(409).json({
         error: 'This visit is too close to move online — ask them to reply or call.',
