@@ -752,13 +752,26 @@ function cityIsReal(city) {
   const text = String(city || '').trim();
   // At least two letters: a lone letter is a floor ("Fl B") or a directional.
   if ((text.match(/[A-Za-z]/g) || []).length < 2 || /^#?\d+[A-Za-z]?$/.test(text)) return false;
-  const first = text.split(/\s+/)[0].replace(/[.,#]/g, '').toLowerCase();
-  if (DIRECTIONAL_TOKENS.has(text.toLowerCase())) return false;
-  return !UNIT_DESIGNATORS.has(first);
+  const tokens = text.split(/\s+/).map(t => t.replace(/[.,#]/g, '').toLowerCase());
+  // A post-directional, alone or followed by a unit ("North", "N Apt 4"),
+  // is the tail of the street, not a city.
+  const rest = DIRECTIONAL_TOKENS.has(tokens[0]) ? tokens.slice(1) : tokens;
+  if (rest.length === 0) return false;
+  return !UNIT_DESIGNATORS.has(rest[0]);
 }
 
-// Does the stored line carry more than a street? A parsed state or a real
-// city says so, whether or not it matches the city column. A parsed ZIP counts
+// Does a parse carry a locality? A real city, or a state standing alone as
+// the tail ("12 Oak Ave, FL"). A state beside a unit-like token is floor
+// notation ("123 Main St, Fl 2": state FL, city "2") and reads as street
+// text. One rule for the requested value and for the stored line, so a
+// value saved as a street stays editable.
+function parsedCarriesLocality(parts) {
+  if (cityIsReal(parts.city)) return true;
+  return Boolean(parts.state) && String(parts.city || '').trim() === '';
+}
+
+// Does the stored line carry more than a street? A locality in the parse
+// (parsedCarriesLocality) says so, whether or not it matches the city column. A parsed ZIP counts
 // only when it equals the lead's zip column, ZIP+4 included (the parser reads any trailing
 // five digits as a ZIP, so "21 Oak Ave Apt 34236" with another zip column is
 // a bare street with a unit number). A comma segment equal to the city column
@@ -772,7 +785,7 @@ function storedIsOneLine(lead) {
   const stored = String(lead.address || '').trim();
   if (!stored) return false;
   const parts = parseRawAddress(stored);
-  if (parts.state || cityIsReal(parts.city)) return true;
+  if (parsedCarriesLocality(parts)) return true;
   if (parts.zip && zipMatchesColumn(parts.zip, lead.zip)) return true;
   const city = String(lead.city || '').trim().toLowerCase();
   return Boolean(city) && stored.split(',').slice(1).some(seg => seg.trim().toLowerCase() === city);
@@ -783,11 +796,7 @@ function storedIsOneLine(lead) {
 // contradict the city and zip columns, and the bar never splits it.
 function carriesLocality(text) {
   const parts = parseRawAddress(text);
-  if (/^\d{5}(-\d{4})?$/.test(String(parts.zip || '')) || cityIsReal(parts.city)) return true;
-  // A state is a locality when it stands alone as the tail ("12 Oak Ave, FL").
-  // Beside a unit-like token it is floor notation ("123 Main St, Fl 2"), which
-  // the parser reads as state FL with city "2": street text, stored as typed.
-  return Boolean(parts.state) && String(parts.city || '').trim() === '';
+  return /^\d{5}(-\d{4})?$/.test(String(parts.zip || '')) || parsedCarriesLocality(parts);
 }
 
 // Applies the rule above. Returns { requested } or { error }.

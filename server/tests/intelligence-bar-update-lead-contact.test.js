@@ -351,6 +351,17 @@ test('the guard matches a whitespace-only unchanged column exactly, not as NULL'
   expect(leads.where).toHaveBeenCalledWith('city', '   ');
 });
 
+test('saved floor notation and a saved directional-plus-unit street stay editable', async () => {
+  for (const address of ['123 Main St, Fl 2', '123 Main St Fl B', '123 Main St North Apt 4']) {
+    db.mockImplementation(() => chain({ first: { ...LEAD, address, city: 'Testville', zip: '34200' } }));
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' });
+    expect(res.changes).toEqual({ zip: { from: '34200', to: '34201' } });
+  }
+  // A state standing alone as the tail is still one line.
+  db.mockImplementation(() => chain({ first: { ...LEAD, address: '12 Oak Ave, FL', city: 'Testville', zip: '34200' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' })).error).toMatch(/stored as one line/);
+});
+
 test('confirmed phone change does not touch the address columns in the guard', async () => {
   const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
   const activities = chain({ insert: undefined });
@@ -426,7 +437,7 @@ test('a lead whose address is stored as one line refuses every address, city or 
 test('bare row: a plain street is written as typed, never parsed', async () => {
   const leads = chain({ first: ADDR_LEAD });
   db.mockReturnValue(leads);
-  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B', '123 Main St N', '123 Main St North', '12 Oak Avenue']) {
+  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B', '123 Main St N', '123 Main St North', '123 Main St North Apt 4', '123 Main St N Apt 4', '12 Oak Avenue']) {
     const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address });
     expect(res.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: address } });
   }
