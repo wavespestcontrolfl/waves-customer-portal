@@ -268,6 +268,29 @@ test('a malformed estimate_id is never queried', async () => {
   expect(db.mock.calls.map(([table]) => table)).not.toContain('estimates');
 });
 
+// The text-side callers that hold only a pin (GATE_MULTI_TECH_TEXT_TIMES, multi-tech
+// booking PR 4) share availabilityForExistingCustomer's tail: the same funnel
+// builder for one pin and one funnel service.
+describe('availabilityForPin — refusals before any build runs', () => {
+  const { availabilityForPin } = require('../routes/booking')._internals;
+
+  test('a service the funnel does not book, or a missing / non-numeric pin → null with no lookup at all', async () => {
+    for (const serviceKey of ['', null, 'rodent_bait', 'termite_bait', 'nonsense']) {
+      await expect(availabilityForPin({ lat: 27.3, lng: -82.5, serviceKey })).resolves.toBeNull();
+    }
+    for (const pin of [{}, { lat: null, lng: -82.5 }, { lat: 'x', lng: -82.5 }, { lat: 27.3, lng: undefined }]) {
+      await expect(availabilityForPin({ ...pin, serviceKey: 'pest_control' })).resolves.toBeNull();
+    }
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('/book off (the selfBooking gate) → null before the booking config is read', async () => {
+    jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation((gate) => gate !== 'selfBooking');
+    await expect(availabilityForPin({ lat: 27.3, lng: -82.5, serviceKey: 'pest_control' })).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+});
+
 // The texting AI's OPEN TIMES for a new visit (GATE_SMS_OFFERS_SCHEDULER):
 // what /book would offer this customer for one funnel service, or nothing
 // when /book has nothing to commit against.

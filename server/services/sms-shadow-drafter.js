@@ -27,7 +27,7 @@ const logger = require('./logger');
 const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-config');
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
-const { gateEnvValue } = require('../config/feature-gates');
+const { gateEnvValue, multiTechTextTimesLive } = require('../config/feature-gates');
 const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
@@ -650,6 +650,23 @@ async function fetchSchedulerOpenTimesData({ customerId, schedulerOffer }) {
   }
 }
 
+// GATE_MULTI_TECH_TEXT_TIMES (multi-tech booking PR 4): the city-based OPEN TIMES
+// fallback (no scheduler picker for the text) asks the website booking engine —
+// per technician, route-aware — instead of the old by-city zone finder. The
+// customer's own booking pin when there is one, else the middle of the city
+// (services/scheduling/text-offer-times.js). The /book funnel service is the
+// text's service through the same explicit table the scheduler path uses; a
+// named service /book does not book gets no times, a text that names none gets
+// general pest times (the zone finder's old default, owner ruling 2026-09-30).
+// Same day shape as the finder's (date, fullDate, slots[{ startTime24 }]), so
+// the recheck below reads it unchanged. null = nothing to offer.
+async function loadTextTimesDays({ city, customerId, estimateId, serviceType }) {
+  const serviceKey = String(serviceType || '').trim() ? await bookFunnelKeyFor({ serviceType }) : 'pest_control';
+  if (!serviceKey) return null;
+  const loaded = await require('./scheduling/text-offer-times').textOfferDays({ city, customerId, estimateId, serviceKey });
+  return loaded ? loaded.days : null;
+}
+
 // The read-only AvailabilityEngine call, ONE per draft generation — returns
 // both the rendered OPEN TIMES text (block, unchanged contract:
 // fetchOpenTimesBlock below is a thin wrapper over this that every existing
@@ -666,26 +683,36 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
   if (schedulerOffer) return fetchSchedulerOpenTimesData({ customerId, schedulerOffer });
   let timer = null;
   try {
-    const Availability = require('./availability');
+    const textTimes = multiTechTextTimesLive();
+    const Availability = textTimes ? null : require('./availability');
     const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+    // The website engine's route build is heavier than the zone finder the 3 s
+    // deadline was sized for: it gets the scheduler path's 10 s.
     const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('open-times timeout')), OPEN_TIMES_TIMEOUT_MS);
+      timer = setTimeout(() => reject(new Error('open-times timeout')), textTimes ? SCHEDULER_OPEN_TIMES_TIMEOUT_MS : OPEN_TIMES_TIMEOUT_MS);
     });
     // estimateId (pre-push audit P2, estimate-conversion-agent.js): the SAME
     // second argument check_availability itself passes — when the inbound
     // thread already resolved to a specific estimate, the offered slots
     // must reflect THAT estimate's service minutes, not a generic default.
-    const result = await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId, ...(serviceType ? { serviceType } : {}) }), timeout]);
+    const result = textTimes
+      ? { days: (await Promise.race([loadTextTimesDays({ city, customerId, estimateId, serviceType }), timeout])) || [] }
+      : await Promise.race([Availability.getAvailableSlots(city, estimateId, { customerId, ...(serviceType ? { serviceType } : {}) }), timeout]);
     const lines = [];
     const days = [];
     for (const d of (result?.days || [])) {
-      const windows = (d.slots || [])
-        .map((s) => {
-          const range = arrivalWindowRange(s.startTime24);
-          return range ? formatSmsTimeRange(range) : null;
-        })
-        .filter(Boolean)
-        .slice(0, OPEN_TIMES_MAX_SLOTS_PER_DAY);
+      // The website engine lists every feasible start (8:00, 8:15, 8:30 ...);
+      // quote non-overlapping windows, as the scheduler path does. The finder's
+      // few starts per day keep the plain first three.
+      const windows = textTimes
+        ? pickSchedulerOfferWindows(d.slots)
+        : (d.slots || [])
+          .map((s) => {
+            const range = arrivalWindowRange(s.startTime24);
+            return range ? formatSmsTimeRange(range) : null;
+          })
+          .filter(Boolean)
+          .slice(0, OPEN_TIMES_MAX_SLOTS_PER_DAY);
       if (!windows.length) continue; // no slot on this day survived arrival-window formatting
       const date = openTimesDayLabel(d);
       lines.push(`- ${date}: ${windows.join(', ')}`);
@@ -4174,6 +4201,11 @@ async function currentOfferedDays({ city, customerId, estimateId, serviceType, s
     const loaded = await loadSchedulerDays(schedulerOffer, customerId, { fresh: true });
     return loaded ? { days: loaded.days, labelOf: schedulerDayLabel, currentWindow: loaded.currentWindow } : null;
   }
+  // GATE_MULTI_TECH_TEXT_TIMES: a legacy (no source) snapshot is rechecked
+  // against the website engine's days too, once the gate is on.
+  if (multiTechTextTimesLive()) {
+    return { days: (await loadTextTimesDays({ city, customerId, estimateId, serviceType })) || [], labelOf: openTimesDayLabel };
+  }
   const Availability = require('./availability');
   const result = await Availability.getAvailableSlots(city, estimateId, { customerId, ...(serviceType ? { serviceType } : {}) });
   return { days: result?.days || [], labelOf: openTimesDayLabel };
@@ -4204,7 +4236,7 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, serv
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(
         () => reject(new Error('open-times recheck timeout')),
-        schedulerOffer ? SCHEDULER_OPEN_TIMES_TIMEOUT_MS : OPEN_TIMES_TIMEOUT_MS,
+        schedulerOffer || multiTechTextTimesLive() ? SCHEDULER_OPEN_TIMES_TIMEOUT_MS : OPEN_TIMES_TIMEOUT_MS,
       );
     });
     // A job the picker no longer offers times for reads as every quoted

@@ -2184,11 +2184,28 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
   if (customer && isEnabled('bookingCustomersOnly') && PRE_CUSTOMER_PIPELINE_STAGES.has(String(customer.pipeline_stage || ''))) return null;
   const location = customer ? await customerBookingLocation(customer) : null;
   if (!location) return null;
+  return availabilityForPin({ lat: location.lat, lng: location.lng, serviceKey: funnelKey });
+}
+
+// The /book funnel's default offer for one map pin and one funnel service: the
+// service's catalog duration, the default window, a full block of hourly
+// windows on an open route day. The one tail availabilityForExistingCustomer
+// (a customer's own pin) and the text-side callers that hold only a pin
+// (services/scheduling/text-offer-times.js, GATE_MULTI_TECH_TEXT_TIMES) share,
+// so a text-offered time and the website's come from one finder. Null when
+// /book is off, the service is no funnel service or the pin is missing.
+async function availabilityForPin({ lat, lng, serviceKey }) {
+  const funnelKey = normalizeBookingServiceKey(serviceKey);
+  // A SQL NULL / blank must not read as 0 (Number(null) is 0: the Gulf of Guinea).
+  const pin = [lat, lng].map((v) => (v == null || String(v).trim() === '' ? NaN : Number(v)));
+  if (!funnelKey || pin.some((v) => !Number.isFinite(v) || v === 0)) return null;
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('selfBooking')) return null;
   const config = await loadBookingConfig();
   const today = new Date();
   const { minDate, defaultTo } = bookingOfferWindow(config, today);
   return buildFunnelAvailability({
-    lat: location.lat, lng: location.lng, duration: resolveBookingDuration(null, config, funnelKey),
+    lat: pin[0], lng: pin[1], duration: resolveBookingDuration(null, config, funnelKey),
     rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
     // The /book page's own first request always sends expand=open
     // (PublicBookingPage.jsx), so an open route day offers its full block of
@@ -7173,6 +7190,7 @@ module.exports._internals = {
   customerBookingLocation,
   buildBookingAvailability,
   availabilityForExistingCustomer,
+  availabilityForPin,
   bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,

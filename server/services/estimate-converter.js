@@ -43,7 +43,7 @@ const { loadExistingQualifyingServiceKeys } = require('./waveguard-existing-serv
 // price the plan), and selectedTermiteAnnualPlanRows reads the accepted
 // program off the estimate's own stored data. Both dark by default, so this
 // import is inert everywhere the plan is not live.
-const { termiteAnnualPlanSelectionEnabled } = require('../config/feature-gates');
+const { termiteAnnualPlanSelectionEnabled, multiTechTextTimesLive } = require('../config/feature-gates');
 const { selectedTermiteAnnualPlanRows } = require('./estimate-termite-program-rows');
 // Codex P0: the LIVE gate alone is wrong for an already-DELIVERED annual
 // offer — estimate-offer-version.js's own annualPlanPublicReplayBlocked
@@ -154,11 +154,28 @@ const WAVEGUARD_SETUP_FEE = 99;
  *      can't resolve the customer's zone (empty city, new area) or when no
  *      tech is scheduled in that zone across the 14-day window.
  *
+ * With GATE_MULTI_TECH_TEXT_TIMES on, step 1 reads the website booking engine
+ * (per technician, route-aware) instead of the by-city engine; step 2 is unchanged.
+ *
  * Returns a YYYY-MM-DD string ready for scheduled_services.scheduled_date.
  */
 async function pickFirstServiceDate(customer, estimateId) {
   try {
-    if (customer.city) {
+    if (multiTechTextTimesLive()) {
+      // GATE_MULTI_TECH_TEXT_TIMES (multi-tech booking PR 4): the first day the
+      // website booking engine (per technician, route-aware) has a feasible
+      // start for this customer — their own pin, else the middle of their city.
+      // No usable pin or no open day falls to the + 7 days rule below, as an
+      // empty by-city lookup does.
+      const offered = (customer.id || customer.city)
+        ? await require('./scheduling/text-offer-times').textOfferDays({ customerId: customer.id || null, estimateId, city: customer.city || null })
+        : null;
+      const first = (offered?.days || []).find((d) => d.slots?.length)?.date;
+      if (first) {
+        logger.info(`[estimate-converter] Snapped first service to route day ${first} (website engine, pin: ${offered.pinSource})`);
+        return first;
+      }
+    } else if (customer.city) {
       const avail = await AvailabilityEngine.getAvailableSlots(customer.city, estimateId);
       const first = avail?.days?.[0]?.date;
       if (first) {
@@ -8902,3 +8919,4 @@ module.exports.perApplicationFeeUnresolvedBody = perApplicationFeeUnresolvedBody
 module.exports.acquireConverterInvoiceDepositLocks = acquireConverterInvoiceDepositLocks;
 module.exports.isTermiteAnnualSignBeforePayAccept = isTermiteAnnualSignBeforePayAccept;
 module.exports.frozenTermiteAnnualFinancialsFor = frozenTermiteAnnualFinancialsFor;
+module.exports.pickFirstServiceDate = pickFirstServiceDate;
