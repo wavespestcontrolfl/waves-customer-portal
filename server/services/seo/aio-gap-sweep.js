@@ -78,6 +78,9 @@ function locationForCity(city) {
 }
 
 const isWavesQuery = (q) => q.includes('waves');
+// Google search operators are not customer searches, and DataForSEO bills them
+// at 5x, past the per-call budget reservation.
+const OPERATOR_RE = /(^|\s)-?(site|inurl|allinurl|intitle|allintitle|intext|allintext|filetype|ext|related|cache|link|info|define|before|after|source|map):/i;
 
 // Sums a Search Console row into a candidate; position is impression-weighted.
 function addGscNumbers(c, r, impressions) {
@@ -101,7 +104,7 @@ function mergeCandidates({ gscRows = [], gapRows = [], managedRows = [], minImpr
   const byQuery = new Map();
   const touch = (query, source) => {
     const key = normQuery(query);
-    if (!key || isWavesQuery(key)) return null;
+    if (!key || isWavesQuery(key) || OPERATOR_RE.test(key)) return null;
     let c = byQuery.get(key);
     if (!c) {
       c = { query: key, sources: [], cityLabels: [], impressions_90d: null, clicks_90d: null, gsc_position: null, posWeight: 0 };

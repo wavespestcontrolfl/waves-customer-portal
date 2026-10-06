@@ -169,6 +169,15 @@ describe('mergeCandidates', () => {
     expect(out.map((c) => c.query)).toEqual(['high', 'gap only', 'managed only']);
   });
 
+  test('searches with a Google operator (5x DataForSEO price) are left out', () => {
+    const out = sweep.mergeCandidates({ gscRows: [
+      { query: 'site:example.test pest control', impressions: 90 },
+      { query: 'termite inurl:bait', impressions: 80 },
+      { query: 'termite bait stations', impressions: 70 },
+    ] });
+    expect(out.map((c) => c.query)).toEqual(['termite bait stations']);
+  });
+
   test('"palmetto bugs" is the pest, not the city of Palmetto', () => {
     const out = sweep.mergeCandidates({ gapRows: [{ query: 'palmetto bugs vs cockroaches' }, { query: 'pest control palmetto fl' }] });
     expect(out.find((c) => c.query.startsWith('palmetto bugs')).city).toBeNull();
