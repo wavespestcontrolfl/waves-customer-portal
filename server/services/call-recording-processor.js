@@ -167,6 +167,8 @@ function commercialDictatedBookingActive(call = {}, gates = {}) {
 // ONE predicate for both processor lanes AND buildFailOpenRoutingContext (the offline
 // audits), like commercialDictatedBookingActive (codex #5377 r6).
 function commercialAssessmentBookingActive(call = {}, gates = {}) {
+  // A pass that already read the predicate hands that one value back (gates.captured).
+  if (typeof gates.captured === 'boolean') return gates.captured;
   const enabled = gates.isEnabled || isEnabled;
   const live = gates.assessmentLive || (() => require('../config/feature-gates').callCommercialAssessmentBookingLive?.());
   // Inbound is always eligible; outbound only for the lead callback bridge (the
@@ -10200,7 +10202,12 @@ const CallRecordingProcessor = {
     const bookableServiceNames = bookableCallServices.map((s) => s.name).filter(Boolean);
     // Catalog-aware provenance: the catalog block is part of the rendered
     // V2 prompt, so every stamp for this call must carry its hash.
-    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: commercialAssessmentBookingActive(call) });
+    // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING, read ONCE for this pass (codex #6046 r2 P1): the
+    // V2 prompt block, the prompt-version stamps, the persisted metadata and both routing
+    // lanes all use this one value, so a flip mid-pass can never stamp a cohort the prompt
+    // did not render (or route on a block the prompt never carried).
+    const assessmentLaneActive = commercialAssessmentBookingActive(call);
+    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive });
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the
@@ -10290,7 +10297,7 @@ const CallRecordingProcessor = {
           callDirection: isOutboundCall(call) ? 'outbound' : 'inbound',
           // GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING (owner ruling 2026-10-06): read the
           // agent-proposed slot shape for the booking this lane can now clear.
-          ...(commercialAssessmentBookingActive(call) ? { agentProposedSlotCommitment: true } : {}),
+          ...(assessmentLaneActive ? { agentProposedSlotCommitment: true } : {}),
         });
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is
@@ -11386,7 +11393,7 @@ const CallRecordingProcessor = {
             // Assessment staff booked with no price discussed, outbound included. {} when off.
             ...commercialAssessmentRoutingOptions(call, () => commercialAssessmentBookableFor({
               extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
-            })),
+            }), { captured: assessmentLaneActive }),
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
             callStartedAt: callStartedAt(call) || call.created_at,
@@ -21817,7 +21824,7 @@ const CallRecordingProcessor = {
           // Mirrors the enforce lane (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING).
           ...commercialAssessmentRoutingOptions(call, () => commercialAssessmentBookableFor({
             extracted, preAdoptionExtracted, transcription, services: bookableCallServices,
-          })),
+          }), { captured: assessmentLaneActive }),
           callStartedAt: callStartedAt(call) || call.created_at,
           // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
           unclearServiceAssessment: unclearServiceAssessmentActive(),

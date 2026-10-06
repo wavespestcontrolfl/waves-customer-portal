@@ -256,6 +256,10 @@ const SCHEDULE_CHECKS = [
 // What the no-price assessment mode needs before it grounds the agreement, in order;
 // the first that fails is the reason. `t` carries { v2, transcript, assessmentBooking }.
 const ASSESSMENT_CHECKS = [
+  // A NEW visit only: an extraction that names an existing appointment being moved is a
+  // reschedule (call-reschedule-apply.js), never a commercial assessment booking.
+  ['moves_existing_visit', (t) => !!t.v2.scheduling.moved_appointment_date || !!t.v2.scheduling.moved_appointment_words
+    || t.v2.scheduling.moved_appointment_relative_date_used === true || t.v2.scheduling.status === 'reschedule_requested'],
   // Every service view must resolve to the Waves Assessment row (the caller's check).
   ['assessment_service_not_resolved', (t) => typeof t.assessmentBooking.bookable !== 'function' || t.assessmentBooking.bookable(t.v2) !== true],
   ['outbound_staff_identity_unproven', (t) => t.assessmentBooking.outbound === true && !outboundStaffIdentityProven(t.transcript)],

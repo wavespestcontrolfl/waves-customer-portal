@@ -489,7 +489,7 @@ describe('GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: the processor predicate, the 
 
   test('both live lanes and the audit builder derive it through that ONE predicate', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    expect(src.match(/\.\.\.commercialAssessmentRoutingOptions\(call, \(\) => commercialAssessmentBookableFor\(\{\s*extracted, preAdoptionExtracted, transcription, services: bookableCallServices,/g)).toHaveLength(2);
+    expect(src.match(/\.\.\.commercialAssessmentRoutingOptions\(call, \(\) => commercialAssessmentBookableFor\(\{\s*extracted, preAdoptionExtracted, transcription, services: bookableCallServices,\s*\}\), \{ captured: assessmentLaneActive \}\),/g)).toHaveLength(2);
     expect(src).toMatch(/\.\.\.\(commercialAssessmentBookingActive\(call, gates\) \? auditCommercialAssessmentOptions\(/);
     const at = src.indexOf('function commercialAssessmentBookingActive');
     const body = src.slice(at, src.indexOf('\n}\n', at));
@@ -497,7 +497,7 @@ describe('GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: the processor predicate, the 
     expect(body).toContain('callCommercialAssessmentBookingLive');
     expect(body).toContain('isLeadCallbackBridge(call)');
     // the extraction is asked for the agent-proposed shape under the same predicate
-    expect(src).toMatch(/\.\.\.\(commercialAssessmentBookingActive\(call\) \? \{ agentProposedSlotCommitment: true \} : \{\}\)/);
+    expect(src).toMatch(/\.\.\.\(assessmentLaneActive \? \{ agentProposedSlotCommitment: true \} : \{\}\)/);
   });
 
   test('the audit context carries the assessment lane for an outbound call, and never the priced switch', () => {
@@ -593,6 +593,83 @@ describe('the extraction prompt reads the agent-proposed shape only under the ga
     // both stamps (the extractor's and the processor's per-call one) pass the block's own switch
     const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     expect(src).toContain('promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true })');
-    expect(src).toContain('const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: commercialAssessmentBookingActive(call) });');
+    expect(src).toContain('const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive });');
+  });
+});
+
+describe('codex #6046 round 2', () => {
+  const Processor = require('../services/call-recording-processor');
+  const { commercialAssessmentBookingActive } = Processor._test;
+
+  test('promotion readiness counts the -aps cohort as current while the lane is live, and only then', () => {
+    const { currentPromptVersions } = require('../scripts/v2-promotion-readiness');
+    const { extractionPromptVersion, PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
+    const names = ['Waves Assessment', 'Cockroach Control Service'];
+    const off = currentPromptVersions(names);
+    expect(off).toEqual([PROMPT_HASH, extractionPromptVersion(names)]);
+    expect(off.some((v) => v.endsWith('-aps'))).toBe(false);
+    expect(currentPromptVersions(names, { assessmentLane: false })).toEqual(off);
+    const on = currentPromptVersions(names, { assessmentLane: true });
+    expect(on).toEqual(expect.arrayContaining([...off, `${PROMPT_HASH}-aps`, extractionPromptVersion(names, { agentProposedSlotCommitment: true })]));
+    expect(on).toContain(`${extractionPromptVersion(names)}-aps`);
+    // the exact versions the processor stamps for an eligible call are all counted
+    expect(on).toContain(extractionPromptVersion(names, { agentProposedSlotCommitment: true }));
+    expect(on).toContain(extractionPromptVersion([], { agentProposedSlotCommitment: true }));
+    // the script selects rows with that list, not a hand-built pair
+    const src = fs.readFileSync(path.join(__dirname, '../scripts/v2-promotion-readiness.js'), 'utf8');
+    expect(src).toContain(".whereIn('ai_extraction_prompt_version', currentVersions)");
+    expect(src).toContain("commercialAssessmentBookingActive({ direction: 'inbound' })");
+  });
+
+  test('ONE read of the lane per processing pass: the prompt, the stamps and both routing lanes share it', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    // the only direct reads inside processRecording's extraction pass: one const
+    expect(src.match(/const assessmentLaneActive = commercialAssessmentBookingActive\(call\);/g)).toHaveLength(1);
+    expect(src).not.toMatch(/agentProposedSlotCommitment: commercialAssessmentBookingActive\(call\)/);
+    expect(src).not.toMatch(/\.\.\.\(commercialAssessmentBookingActive\(call\) \? \{ agentProposedSlotCommitment/);
+    expect(src).toContain('extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive })');
+    expect(src).toContain('...(assessmentLaneActive ? { agentProposedSlotCommitment: true } : {}),');
+    expect(src.match(/\}\), \{ captured: assessmentLaneActive \}\),/g)).toHaveLength(2);
+    // every ai_extraction_prompt_version stamp in the pass uses the const's version
+    expect(src.match(/ai_extraction_prompt_version: v2PromptVersion,/g).length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('a captured value is handed back as is, whatever the gates say now', () => {
+    const flipped = { isEnabled: () => false, assessmentLive: () => false };
+    expect(commercialAssessmentBookingActive({ direction: 'inbound' }, { ...flipped, captured: true })).toBe(true);
+    expect(commercialAssessmentBookingActive({ direction: 'inbound' }, { isEnabled: () => true, assessmentLive: () => true, captured: false })).toBe(false);
+    const { commercialAssessmentRoutingOptions } = Processor._test;
+    const never = () => { throw new Error('built'); };
+    expect(commercialAssessmentRoutingOptions({ direction: 'inbound' }, never, { captured: false })).toEqual({});
+    expect(commercialAssessmentRoutingOptions({ direction: 'inbound' }, () => () => true, { captured: true })).toMatchObject({ commercialAssessmentBooking: true });
+  });
+
+  test('the agent-proposed block is for NEW bookings and leaves the reschedule rule standing', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const on = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-09-23', { agentProposedSlotCommitment: true });
+    const block = on.slice(on.indexOf('AGENT-PROPOSED SLOT'), on.indexOf('Transcript:'));
+    expect(block).toMatch(/NEW bookings only/);
+    expect(block).toMatch(/never applies to a move of an existing appointment/);
+    expect(block).toMatch(/RESCHEDULE RULE above stands/);
+    expect(block).toMatch(/reschedule_requested/);
+    expect(block).toMatch(/never overrides it/);
+    expect(on).toContain('reschedule_requested'); // the rule itself stays in the prompt
+  });
+
+  test('the lane refuses when the extraction names an existing appointment being moved', () => {
+    const moved = [
+      { moved_appointment_date: '2026-09-25' },
+      { moved_appointment_words: 'the 25th' },
+      { moved_appointment_relative_date_used: true },
+      { status: 'reschedule_requested' },
+    ];
+    for (const scheduling of moved) {
+      const ex = extraction({ scheduling });
+      expect([scheduling, grounded(ex).ok]).toEqual([scheduling, false]);
+      expect([scheduling, route(ex).allowed]).toEqual([scheduling, false]);
+    }
+    expect(grounded(extraction({ scheduling: { moved_appointment_date: '2026-09-25' } })).reason).toBe('moves_existing_visit');
+    // control: the same call with none of them books
+    expect(grounded(extraction({ scheduling: { moved_appointment_date: null, moved_appointment_words: null, moved_appointment_relative_date_used: false } })).ok).toBe(true);
   });
 });

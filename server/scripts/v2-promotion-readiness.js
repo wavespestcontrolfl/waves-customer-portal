@@ -43,9 +43,10 @@ const {
   buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict, applyUnclearServiceTranscriptVeto, resolveCallContactPhone,
   resolveKnownCallerCustomer,
 } = require('../services/call-recording-processor');
+const { commercialAssessmentBookingActive } = require('../services/call-recording-processor')._test;
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
-const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
+const { PROMPT_HASH, extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
 const MODELS = require('../config/models');
 
 const MIN_CALLS = 100;
@@ -104,6 +105,20 @@ function contactPhoneForCall(row) {
   return resolveCallContactPhone(row);
 }
 
+// The prompt versions that count as CURRENT: the bare hash and the live catalog's. While
+// GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING is live the processor ALSO stamps '-aps' on the
+// calls whose prompt carries the agent-proposed-slot block (see extractionPromptVersion),
+// and those rows are current-extractor rows too: without their versions here they would be
+// dropped as "older extractor". Gate off: the same two versions as before.
+function currentPromptVersions(liveCatalogNames, { assessmentLane = false } = {}) {
+  const versions = [CURRENT_PROMPT_VERSION, extractionPromptVersion(liveCatalogNames)];
+  if (assessmentLane === true) {
+    versions.push(extractionPromptVersion([], { agentProposedSlotCommitment: true }));
+    versions.push(extractionPromptVersion(liveCatalogNames, { agentProposedSlotCommitment: true }));
+  }
+  return [...new Set(versions)];
+}
+
 async function main() {
   const db = dbConn();
 
@@ -131,11 +146,10 @@ async function main() {
   const { loadBookableCallServices } = require('../services/call-booking-catalog');
   const bookableCallServices = await loadBookableCallServices(db);
   const liveCatalogNames = bookableCallServices.map((s) => s.name).filter(Boolean);
-  const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
-  const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
+  const currentVersions = currentPromptVersions(liveCatalogNames, { assessmentLane: commercialAssessmentBookingActive({ direction: 'inbound' }) });
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
-    .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
+    .whereIn('ai_extraction_prompt_version', currentVersions)
     // ai_extraction (the V1 legacy flat record) feeds demoteFailOpenOnV1AddressConflict,
     // exactly as the live path passes `extracted` to it.
     // metadata + source: resolveCallContactPhone needs both to resolve a
@@ -527,4 +541,4 @@ if (require.main === module) {
   main().catch((e) => { console.error(e); process.exit(1); });
 }
 
-module.exports = { contactPhoneForCall };
+module.exports = { contactPhoneForCall, currentPromptVersions };
