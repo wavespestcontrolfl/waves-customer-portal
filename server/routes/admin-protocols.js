@@ -19,10 +19,9 @@ const {
   planLineFields,
   v13SelectedGateWarnings,
   v13SelectionBlocks,
-  lawnVisitsPerYear,
-  v13Limits,
-  v13LineNotices,
-  toServiceDate,
+  visitForPlan,
+  loadVisitForPlan,
+  v13VisitLimits,
 } = require('../services/waveguard-plan-engine');
 const { matchServiceProtocol } = require('../services/protocol-matcher');
 const jobCard = require('../services/job-card');
@@ -39,7 +38,7 @@ const {
   protocolReferenceSyncIssues,
   lockDraftProtocol,
 } = require('../services/lawn-protocol-operating-layer');
-const { lawnProtocols, visitForCadence, unknownCadenceWarning } = require('../services/lawn-program');
+const { lawnProtocols } = require('../services/lawn-program');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -967,21 +966,12 @@ router.get('/lawn-mix', async (req, res, next) => {
     const month = monthAbbr(req.query.month);
     const recipeVisit = track.visits?.find((v) => v.month === month);
     if (!recipeVisit) return res.status(404).json({ error: 'Protocol visit not found for month' });
-    // A step that depends on the plan's applications a year (v13 April, 9x) follows the
-    // visit's own plan: the sheet resolves ?scheduledServiceId= through the plan's
-    // lawnVisitsPerYear (so a caller that sends its visit needs nothing more).
-    // ?visitsPerYear=9|12 is an explicit override. With neither (the reference tab,
-    // no visit) the sheet keeps the 12x step and warns.
-    let visitsPerYear = Number(req.query.visitsPerYear) > 0 ? Number(req.query.visitsPerYear) : null;
-    const visitId = String(req.query.scheduledServiceId || '');
-    // The visit the sheet is opened from: its plan picks the step, and its customer,
-    // property and date decide the application limits (no visit, no customer to check).
-    const scheduled = UUID_RE.test(visitId)
-      ? await db('scheduled_services').where({ id: visitId })
-        .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days')
-      : null;
-    if (visitsPerYear == null && recipeVisit.cadenceVariants && scheduled) visitsPerYear = await lawnVisitsPerYear(db, scheduled);
-    const { visit, unknownCadence } = visitForCadence(recipeVisit, visitsPerYear);
+    // The visit the sheet is opened from (?scheduledServiceId=): its plan picks a cadence-
+    // dependent step (v13 April, 9x; ?visitsPerYear= overrides it) and its customer,
+    // property and date decide the application limits. With no visit (the reference tab)
+    // the sheet keeps the 12x step, warns, and checks no limits.
+    const scheduled = await loadVisitForPlan(db, req.query.scheduledServiceId);
+    const { visit, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear);
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
@@ -1029,14 +1019,10 @@ router.get('/lawn-mix', async (req, res, next) => {
     // offers no combined mixing order (the plan does the same).
     const v13Active = lawnV13On();
     const blocks = v13SelectionBlocks(resolvedLines, (line) => v13Rows.get(String(line.product.id)), gateContext);
-    // The plan's own application-limit decision (v13Limits) for a sheet opened from a
-    // visit: a capped product gets no amount and its limit message, a warning-level limit
-    // a sheet warning. The limit blocks are reported beside the apply-alone ones but do not
-    // hold the rest of the mix. Without a visit there is no customer to check.
-    const limitCheck = v13Active && scheduled
-      ? await v13Limits(db, scheduled, toServiceDate(scheduled.scheduled_date), resolvedLines, { rows: v13Rows })
-      : { capped: new Map(), warnings: [] };
-    const limitBlocks = v13LineNotices([], limitCheck.capped, new Set()).blocks;
+    // The plan's own application-limit decision for a sheet opened from a visit: a capped
+    // product gets no amount and its limit message (a block beside the apply-alone ones, not
+    // holding the rest of the mix), a warning-level limit a sheet warning.
+    const limitCheck = await v13VisitLimits(db, scheduled, resolvedLines, v13Rows);
     const items = resolvedLines.map((line) => {
       const { product, selected } = line;
       // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get
@@ -1104,8 +1090,7 @@ router.get('/lawn-mix', async (req, res, next) => {
 
     // Required v13 gate notes on the selected items are warnings, as in the plan.
     warnings.push(...v13SelectedGateWarnings(selectedItems));
-    if (unknownCadence && v13Active) warnings.push(unknownCadenceWarning(unknownCadence));
-    warnings.push(...limitCheck.warnings);
+    warnings.push(...cadenceWarnings, ...limitCheck.warnings);
 
     const seesPricing = viewerSeesPricing(req);
     const payload = {
@@ -1141,9 +1126,9 @@ router.get('/lawn-mix', async (req, res, next) => {
       mixingOrder: blocks.length ? [] : buildMixOrder(selectedItems.map((item) => ({
         raw: item.raw,
         product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
-      }))),
+      })), limitCheck.capped),
       warnings,
-      blocks: [...blocks, ...limitBlocks],
+      blocks: [...blocks, ...limitCheck.blocks],
     };
     res.json(seesPricing ? payload : deepStripPriceTokens(payload));
   } catch (err) { next(err); }

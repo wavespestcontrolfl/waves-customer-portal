@@ -944,7 +944,9 @@ function summarizeInventoryStatus(items = []) {
   };
 }
 
-function buildMixOrder(items) {
+// `cappedIds`: products an application limit holds (v13 capped lines): they get no amount
+// and no place in the mix.
+function buildMixOrder(items, cappedIds = new Set()) {
   const order = [
     'water_conditioner',
     'dry_wg_wdg_wp_df',
@@ -956,7 +958,7 @@ function buildMixOrder(items) {
   ];
   const rank = new Map(order.map((key, index) => [key, index]));
   return items
-    .filter((item) => item.product)
+    .filter((item) => item.product && !cappedIds.has(String(item.product.id)))
     .slice()
     .sort((a, b) => {
       const ar = rank.has(a.product.mixing_order_category) ? rank.get(a.product.mixing_order_category) : 99;
@@ -1606,6 +1608,32 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
   return { capped, warnings };
 }
 
+// The lawn-visit step for a recipe visit and the visit's plan: `override` (applications a
+// year, when the caller states it) else the plan the booked visit resolves to. One path
+// for the plan, the tank sheet and everything else that reads a cadence-dependent step.
+async function visitForPlan(knex, recipeVisit, service, override = null) {
+  const stated = Number(override) > 0 ? Number(override) : null;
+  const perYear = stated ?? (recipeVisit?.cadenceVariants && service ? await lawnVisitsPerYear(knex, service) : null);
+  const found = visitForCadence(recipeVisit, perYear);
+  return { ...found, warnings: found.unknownCadence ? [unknownCadenceWarning(found.unknownCadence)] : [] };
+}
+
+// The booked visit a reader is opened from, by id (null for no id, a malformed id or an
+// unknown visit): the columns the cadence and the application limits read.
+async function loadVisitForPlan(knex, id) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''))) return null;
+  return (await knex('scheduled_services').where({ id })
+    .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days')) || null;
+}
+
+// v13Limits for a reader that has a booked visit (the tank sheet), plus the plan's own
+// block notices for what it capped. Gate off or no visit (no customer): nothing is checked.
+async function v13VisitLimits(knex, service, items, rows) {
+  if (!service || featureGates.lawnV13Live?.() !== true) return { capped: new Map(), warnings: [], blocks: [] };
+  const found = await v13Limits(knex, service, toServiceDate(service.scheduled_date), items, { rows });
+  return { ...found, blocks: v13LineNotices([], found.capped, new Set()).blocks };
+}
+
 // Plan notices for the v13 lines: a hard limit is a block per limit (the existing
 // message), an unlinked line and an ignored substitution are warnings.
 function v13LineNotices(planItems, capped, ignoredSubstitutionIds) {
@@ -1775,7 +1803,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // A visit whose step depends on the plan's cadence (v13 April: the 9x plan takes
   // Dimension 18-0-10 where every other plan takes 24-0-11) reads the cadence
   // from the booked service; unknown keeps the 12x step and warns.
-  const { visit, unknownCadence } = visitForCadence(recipeVisit, recipeVisit?.cadenceVariants ? await lawnVisitsPerYear(knex, service) : null);
+  const { visit, unknownCadence } = await visitForPlan(knex, recipeVisit, service);
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const exactName = track?.exact_catalog_names === true;
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
@@ -2119,7 +2147,7 @@ async function buildPlanForService(serviceId, options = {}) {
       assignedAt: service.lawn_protocol_assigned_at || null,
     },
     // An apply-alone conflict holds the mix: no combined order is offered.
-    mixingOrder: applyAloneBlocks.length ? [] : buildMixOrder(plannedItems),
+    mixingOrder: applyAloneBlocks.length ? [] : buildMixOrder(plannedItems, cappedProducts),
     closeout: {
       requiredPhotos: ['before', 'after'],
       captureActualProductAmounts: true,
@@ -2160,9 +2188,9 @@ module.exports = {
   v13SelectionBlocks,
   v13LineState,
   lawnVisitsPerYear,
-  v13Limits,
-  v13LineNotices,
-  toServiceDate,
+  visitForPlan,
+  loadVisitForPlan,
+  v13VisitLimits,
   calculateNutrientLedgerFromRows,
   calculateNutrients,
   summarizeAnnualN,

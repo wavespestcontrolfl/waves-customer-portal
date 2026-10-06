@@ -346,6 +346,15 @@ describeDb('v13 pre-flip fixes through PostgreSQL', () => {
       expect(result.status).toBe('blocked');
     });
 
+    test('a capped line is out of the plan\'s mixing order too (the Nutra-TECH-style companions stay)', async () => {
+      setGates();
+      const { scheduled, customerId } = await visit('2026-01-12');
+      await applied(customerId, WDG, '2026-01-05', 0.84, 'oz');
+      const result = await plan(scheduled);
+      expect(item(result, STW_4FL).unavailable.reason).toMatch(/application limit is reached/);
+      expect(result.mixingOrder.map((step) => step.productName)).not.toContain(STW_4FL);
+    });
+
     test('January 4FL plus October granular at the v13 rates stays under: the October plan computes 40.2 lb, with a warning at 95.7% of the cap and no block', async () => {
       setGates();
       const { scheduled, customerId } = await visit('2026-10-12');

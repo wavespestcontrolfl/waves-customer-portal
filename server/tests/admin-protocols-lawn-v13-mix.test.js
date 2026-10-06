@@ -150,6 +150,16 @@ describe('the sheet opened from a visit applies the plan\'s application limits (
       { proposed: { ratePer1000: 0.5, unit: 'fl oz' }, excludeScheduledServiceId: VISIT, propertyId: 'prop-A' });
   });
 
+  test('a capped product has no step in the mixing order; the rest of the mix keeps its steps', async () => {
+    visitRows = [visit];
+    mockCheckLimits.mockImplementation(async (customerId, productId) => (productId === 'stw' ? { allowed: false, blocks: [capBlock], warnings: [] } : { allowed: true, blocks: [], warnings: [] }));
+    const capped = await lawnMix({ month: '1', scheduledServiceId: VISIT });
+    expect(capped.mixingOrder.map((step) => step.productName)).toEqual([NUTRA]);
+    mockCheckLimits.mockResolvedValue({ allowed: true, blocks: [], warnings: [] });
+    const clear = await lawnMix({ month: '1', scheduledServiceId: VISIT });
+    expect(clear.mixingOrder.map((step) => step.productName).sort()).toEqual([NUTRA, STONEWALL].sort());
+  });
+
   test('a warning-level limit is a sheet warning and leaves the dose', async () => {
     visitRows = [visit];
     mockCheckLimits.mockImplementation(async (customerId, productId) => (productId === 'stw'

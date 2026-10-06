@@ -89,6 +89,15 @@ it('sends the visit id with the tank-sheet request so the server reads the visit
   await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/lawn-mix?') && url.includes('&scheduledServiceId=test-visit'))).toBe(true));
 });
 
+it('asks for the tank sheet of the appointment month, not today\'s', async () => {
+  const fetchMock = vi.fn(async (url) => ({ ok: true, json: async () => url.includes('turf-profile') ? { profile: { grass_type: 'zoysia', lawn_sqft: 5000 } } : {} }));
+  vi.stubGlobal('fetch', fetchMock);
+  render(<ProtocolPanel service={{ id: 'test-visit', customerId: 'test-property', serviceType: 'Lawn Care', lawnSqft: 5000, scheduledDate: '2026-04-14' }} onClose={() => {}} />);
+  await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => url.includes('/protocols/lawn-mix?'))).toBe(true));
+  const mixUrl = fetchMock.mock.calls.map(([url]) => url).find((url) => url.includes('/protocols/lawn-mix?'));
+  expect(mixUrl).toContain('&month=Apr&');
+});
+
 it('does not load a default protocol after a failed profile lookup', async () => {
   const fetchMock = vi.fn().mockRejectedValue(new Error('Profile unavailable'));
   vi.stubGlobal('fetch', fetchMock);
