@@ -142,6 +142,41 @@ postgres('payment_failed bells close when their invoice is paid', () => {
     expect(await state(alert)).toMatchObject({ done_by: 'payments' });
   });
 
+  test('the repair sweep takes over a row a person marked Done once its invoice is paid', async () => {
+    const { sweepSettledPaymentFailedAlerts } = require('../services/payment-failed-alert-close');
+    const alert = await insertAlert({ paymentIntentId: `pi_${randomUUID()}`, invoiceId: invoiceA });
+    await db('notifications').where({ id: alert }).update({ done_at: new Date(), done_by: randomUUID(), resolution: 'Will call' });
+    await db('invoices').where({ id: invoiceA }).update({ status: 'paid', paid_at: new Date() });
+    await db('system_settings').where({ key: 'payment_failed_alert_sweep_cursor' }).del();
+    await sweepSettledPaymentFailedAlerts({ conn: db });
+    expect(await state(alert)).toMatchObject({ done_by: 'payments' });
+  });
+
+  test('the repair sweep pages past rows that stay unpaid and reaches a settled one', async () => {
+    const { sweepSettledPaymentFailedAlerts } = require('../services/payment-failed-alert-close');
+    await db('system_settings').where({ key: 'payment_failed_alert_sweep_cursor' }).del();
+    const unpaid = [];
+    for (let i = 0; i < 3; i += 1) unpaid.push(await insertAlert({ paymentIntentId: `pi_${randomUUID()}`, invoiceId: invoiceB }));
+    const settled = await insertAlert({ paymentIntentId: `pi_${randomUUID()}`, invoiceId: invoiceA });
+    await db('invoices').where({ id: invoiceA }).update({ status: 'paid', paid_at: new Date() });
+    // Page size 1: rows from other tests and the 3 unpaid ones take pages first;
+    // the cursor moves on each run, so the settled row is reached and closed.
+    for (let run = 0; run < 200 && (await state(settled)).done_at == null; run += 1) {
+      await sweepSettledPaymentFailedAlerts({ conn: db, page: 1 });
+    }
+    expect(await state(settled)).toMatchObject({ done_by: 'payments' });
+    for (const id of unpaid) expect((await state(id)).done_at).toBeNull();
+  });
+
+  test('dispatch names the invoice from the PaymentIntent metadata when no ledger row exists', async () => {
+    const piId = `pi_${randomUUID()}`;
+    logPis.push(piId);
+    await Dispatch.enqueuePaymentFailureNotification({ id: piId, amount: 12039, latest_charge: `ch_${randomUUID()}`,
+      metadata: { waves_customer_id: customerId, waves_invoice_id: invoiceA } }, 'Your card was declined.', 'evt_x');
+    const job = await db('stripe_payment_notification_log').where({ payment_intent_id: piId }).first('pending_payload');
+    expect(job.pending_payload.invoiceId).toBe(invoiceA);
+  });
+
   test('a combined attempt stays open after one invoice is paid and closes after both', async () => {
     const piId = `pi_${randomUUID()}`;
     await failedLedgerRow(invoiceA, piId);

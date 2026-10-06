@@ -32,6 +32,7 @@ function compilingConn({ failWith = null, responses = {} } = {}) {
     return builder;
   };
   conn.raw = (...args) => knex.raw(...args);
+  conn.fn = knex.fn;
   conn.isTransaction = true;
   conn.transaction = async (fn) => fn(conn);
   return { conn, captured };

@@ -73,25 +73,32 @@ async function closePaymentFailedAlertsForPaidInvoice(invoiceId, conn = db) {
 // transaction's closer ran (dispatch read the invoice before that payment
 // committed), or two transactions settle the last invoices of one combined
 // attempt at once and each sees the other's invoice as unpaid. The sweep
-// re-judges open bells from COMMITTED state outside any payment transaction,
-// so both races settle within one tick. It also closes bells about invoices
+// re-judges bells from COMMITTED state outside any payment transaction, so
+// both races settle within a few ticks. It also closes bells about invoices
 // paid through a path that does not call the hook, and bells open from before
-// this change. Bounded (newest LIMIT bells from the last WINDOW_DAYS) and
-// best-effort: returns the number closed, 0 on failure.
-const SWEEP_LIMIT = 200;
-const SWEEP_WINDOW_DAYS = 90;
+// this change. Candidates use openToCloser like the hook (a row a person
+// marked Done is taken over, so their Reopen cannot bring it back). Each run
+// reads one bounded page in id order from a durable cursor and wraps at the
+// end, so every candidate is reached however many stay legitimately unpaid.
+// Best-effort: returns the number closed, 0 on failure.
+const SWEEP_PAGE = 200;
+const SWEEP_CURSOR_KEY = 'payment_failed_alert_sweep_cursor';
 
-async function sweepSettledPaymentFailedAlerts({ conn = db, limit = SWEEP_LIMIT, windowDays = SWEEP_WINDOW_DAYS } = {}) {
+async function sweepSettledPaymentFailedAlerts({ conn = db, page = SWEEP_PAGE } = {}) {
   try {
     const { doneColumns, openToCloser } = require('./notification-service')._private;
-    const candidates = await conn('notifications')
+    const cursorRow = await conn('system_settings').where({ key: SWEEP_CURSOR_KEY }).first('value');
+    const afterId = /^[0-9a-f-]{36}$/i.test(cursorRow?.value || '') ? cursorRow.value : null;
+    const candidates = await openToCloser(conn('notifications')
       .where({ recipient_type: 'admin', category: 'payment' })
-      .whereRaw("metadata->>'triggerKey' = 'payment_failed'")
-      .whereNull('done_at')
-      .whereRaw("created_at >= now() - (? * interval '1 day')", [windowDays])
-      .orderBy('created_at', 'desc')
-      .limit(limit)
+      .whereRaw("metadata->>'triggerKey' = 'payment_failed'"), 'payments')
+      .modify((q) => { if (afterId) q.where('id', '>', afterId); })
+      .orderBy('id', 'asc')
+      .limit(page)
       .select('id', 'metadata');
+    const nextCursor = (candidates || []).length === page ? candidates[candidates.length - 1].id : null;
+    await conn('system_settings').insert({ key: SWEEP_CURSOR_KEY, value: nextCursor, category: 'notifications' })
+      .onConflict('key').merge({ value: nextCursor, updated_at: conn.fn.now() });
     const closable = [];
     for (const row of candidates || []) {
       const payload = parseJson(row.metadata).payload || {};

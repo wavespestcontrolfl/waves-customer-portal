@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { triggerNotification } = require('./notification-triggers');
-const { ledgerInvoiceId, isFailedAllocationSettled } = require('./payment-failed-allocation');
+const { isUuid, ledgerInvoiceId, isFailedAllocationSettled } = require('./payment-failed-allocation');
 
 const TABLE = 'stripe_payment_notification_log';
 const SETTLED_STATUSES = ['paid', 'refunded', 'disputed'];
@@ -17,6 +17,11 @@ async function enqueuePaymentFailureNotification(paymentIntent, friendlyFailure,
     pending_payload: {
       amount: (paymentIntent.amount || 0) / 100,
       customerId: paymentIntent.metadata?.waves_customer_id || null,
+      // The invoice this PaymentIntent was created for. A pay-page attempt can
+      // fail before any payments row exists, and a retry rebinds the invoice
+      // to a NEW PaymentIntent before this job runs: then neither the invoice
+      // binding nor a ledger row names it, and only this metadata still does.
+      invoiceId: isUuid(String(paymentIntent.metadata?.waves_invoice_id || '')) ? String(paymentIntent.metadata.waves_invoice_id) : null,
       reason: friendlyFailure,
     },
   }).onConflict(['payment_intent_id', 'outcome', 'attempt_id']).ignore();
@@ -27,12 +32,16 @@ async function enqueuePaymentFailureNotification(paymentIntent, friendlyFailure,
 // the invoice), so the alert carries invoiceId and a later payment can close
 // it. A ledger id that is not a UUID is ignored (comparing it to invoices.id
 // would throw and the job would rotate forever).
-async function resolveAlertInvoiceId(trx, invoice, ledgerRow) {
+async function resolveAlertInvoiceId(trx, invoice, ledgerRow, queuedInvoiceId = null) {
   if (invoice.id) return invoice.id; // read from invoices, so already a valid id
-  const id = ledgerInvoiceId(ledgerRow);
-  if (!id) return null;
-  const row = await trx('invoices').where({ id }).first('id');
-  return row?.id || null;
+  // Then the PaymentIntent's own metadata (queued at failure time), then the
+  // failed attempt's ledger row; each must name an invoice that exists.
+  for (const id of [isUuid(String(queuedInvoiceId || '')) ? String(queuedInvoiceId) : null, ledgerInvoiceId(ledgerRow)]) {
+    if (!id) continue;
+    const row = await trx('invoices').where({ id }).first('id');
+    if (row?.id) return row.id;
+  }
+  return null;
 }
 
 async function dispatchPendingNotification(trx, key) {
@@ -47,7 +56,7 @@ async function dispatchPendingNotification(trx, key) {
   let alertInvoiceId = null;
   if (!settled) {
     invoice = await trx('invoices').where({ stripe_payment_intent_id: piId }).first() || {};
-    alertInvoiceId = await resolveAlertInvoiceId(trx, invoice, ledgerRow);
+    alertInvoiceId = await resolveAlertInvoiceId(trx, invoice, ledgerRow, job.pending_payload?.invoiceId);
     // The customer may have paid the whole allocation through a NEW
     // PaymentIntent before this job ran (the closer found no bell then): the
     // alert would be stale on arrival, so it is suppressed like a settled PI.

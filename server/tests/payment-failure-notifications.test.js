@@ -123,7 +123,7 @@ test('enqueue stores minimal payload, dedupes one attempt, and performs no notif
   await enqueuePaymentFailureNotification(intent, 'Repeated event', 'evt_duplicate');
   expect(rows).toHaveLength(1);
   expect(inserted[0]).toEqual({ payment_intent_id: 'pi_failure', outcome: 'failed', attempt_id: 'ch_attempt',
-    pending_payload: { amount: 85, customerId: 'cust_metadata', reason: 'Card declined' } });
+    pending_payload: { amount: 85, customerId: 'cust_metadata', invoiceId: null, reason: 'Card declined' } });
   expect(triggerNotification).not.toHaveBeenCalled();
   expect(db.transaction).not.toHaveBeenCalled();
   expect(db.mock.calls.every(([table]) => table === TABLE)).toBe(true);
