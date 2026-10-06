@@ -113,11 +113,22 @@ async function readOpenMeteoHours(latNum, lngNum, timeoutMs) {
   return hours.length ? hours : null;
 }
 
+function raceDeadline(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((resolve) => { timer = setTimeout(resolve, ms, null); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 function fetchOpenMeteoHours(latNum, lngNum, startedAt) {
   const remaining = TOTAL_BUDGET_MS - (Date.now() - startedAt);
   const key = cacheKey(latNum, lngNum);
   const pending = _backupInFlight.get(key);
-  if (pending) return pending;
+  // Joining a read another lookup started still keeps THIS lookup's budget:
+  // it waits at most its own remaining time, then gives up with null while
+  // the shared read finishes for the caller that started it.
+  if (pending) return remaining > 0 ? raceDeadline(pending, remaining) : Promise.resolve(null);
   if (remaining < BACKUP_MIN_MS) return Promise.resolve(null);
   const read = readOpenMeteoHours(latNum, lngNum, Math.min(remaining, FORECAST_BACKUP_MAX_MS))
     .catch(() => null)

@@ -107,6 +107,35 @@ describe('weather-forecast Open-Meteo backup', () => {
     expect(global.fetch.mock.calls.filter(([url]) => isOpenMeteo(url))).toHaveLength(0);
   });
 
+  test('joining a shared backup read still keeps the joiner\'s own budget', async () => {
+    let releaseOm;
+    let releaseSlowNws;
+    let nwsCalls = 0;
+    global.fetch.mockImplementation((url) => {
+      if (isOpenMeteo(url)) return new Promise((resolve) => { releaseOm = () => resolve(omOk([40])); });
+      nwsCalls += 1;
+      // B's NWS request (the first) hangs until released; A's fails at once.
+      if (nwsCalls === 1) return new Promise((resolve) => { releaseSlowNws = () => resolve({ ok: false }); });
+      return Promise.resolve({ ok: false });
+    });
+    const tick = () => new Promise((r) => setImmediate(r));
+    // B starts first (its budget clock starts now) and waits on a slow NWS.
+    const b = getDailyRainOutlook(27.46, -82.46);
+    await tick();
+    // A starts 4.7 s later with a full budget; NWS fails fast; A opens the shared read.
+    now += 4700;
+    const a = getHourlyRainOutlook(27.46, -82.46);
+    await tick(); await tick();
+    // B's NWS finally fails: B joins A's read with only 300 ms of its budget left.
+    releaseSlowNws();
+    // B gives up after its own ~300 ms (real timer); the shared read is still open.
+    expect(await b).toBeNull();
+    // A still gets the shared answer.
+    releaseOm();
+    expect((await a)[0].rainChance).toBe(40);
+    expect(global.fetch.mock.calls.filter(([url]) => isOpenMeteo(url))).toHaveLength(1);
+  });
+
   test('both down: null (fail-open)', async () => {
     global.fetch.mockRejectedValue(new Error('down'));
     expect(await getHourlyRainOutlook(27.43, -82.43)).toBeNull();
