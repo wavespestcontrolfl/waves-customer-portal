@@ -380,12 +380,17 @@ function maskSpokenPhones(text) {
   });
 }
 
+// An email in spoken or obfuscated form: "jane dot doe at gmail dot com",
+// "jane(at)gmail(dot)com" (Codex P1 #5964 r31).
+const SEP_DOT = '\\s*(?:[\\(\\[]\\s*)?(?:dot|\\.)(?:\\s*[\\)\\]])?\\s*';
+const SPOKEN_EMAIL = new RegExp(`\\b[a-z0-9._%+-]+(?:${SEP_DOT}[a-z0-9_-]+)*\\s*(?:[\\(\\[]\\s*)?(?:at|@)(?:\\s*[\\)\\]])?\\s*[a-z0-9-]+(?:${SEP_DOT}[a-z0-9-]+)*${SEP_DOT}(?:com|net|org|edu|gov|io|us|co|info|biz|me)\\b`, 'gi');
+
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text)).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
+  const masked = redactAccessCodes(redactContact(maskSpokenPhones(text).replace(SPOKEN_EMAIL, '[email]')).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, maskLockboxValue))
     .replace(/\d{3,}/g, '[number]');
   return clipText(masked, max);
 }
@@ -1160,6 +1165,8 @@ function statesLineAlone(sentences, line) {
 // moist", "run the hose") (Codex P1 #5964 r8).
 const WATERING_DIRECTIVE = /\b(?:keep\s+(?:the\s+|your\s+)?(?:soil|lawn|turf|grass|yard|beds?|plants?|roots?)\s+(?:\w+\s+)?(?:moist|wet|damp|watered|hydrated)|run\s+(?:the\s+|your\s+)?(?:hose|sprinklers?|irrigation|sprinkler\s+system|system)|(?:add|give)\s+(?:\w+\s+){0,2}(?:moisture|water|a\s+drink)|soak(?:s|ing)?\b|hose\s+(?:it\s+|them\s+)?(?:down|off|over)|hand[\s-]?water|sprinkle\s+(?:it|the|some)|moisten\w*|mist(?:s|ing)?\b|hydrat\w*|drench\w*|dampen\w*|wet\s+(?:the|your|it|them))/i;
 
+const CARE_INSTRUCTION_RE = /^(?:please\s+)?(?:mow|water|irrigate|apply|spread|fertiliz\w*|spray|stop|start|avoid|keep|cut|trim|prune|remove|rake|aerate|seed|sod|dethatch|treat|use|add|run|turn|set|skip|wait|don['’]?t|do\s+not|never|make\s+sure|be\s+sure|try)\b/i;
+const DRY_TIME_GUIDANCE = /\b(?:pets?|kids?|children|family|treated\s+(?:areas?|zones?))\b[^.?!]*\b(?:until|once|after)\b[^.?!]*\bdr(?:y|ied|ies)\b/i;
 const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;
 // A grant of permission with no condition: "can go out", "right away", "no
 // need to wait". "Once it is dry" and "until" keep the instruction's terms.
@@ -1179,6 +1186,9 @@ const SAYS_INSIDE = /\b(?:inside|indoors?|interior|in\s+the\s+(?:home|house)|kit
 const SAYS_OUTSIDE = /\b(?:outside|outdoors?|exterior|perimeter|around\s+the\s+(?:home|house|outside)|yard|lawn|garden|flower\s+beds?|landscape\s+beds?|lanai|patio|pool\s+(?:cage|deck|area)|fence(?:\s+line)?|driveway|eaves|soffits?|mulch|shrubs?|hedges?|trees?|palms?|turf)\b/i;
 const NEGATION_RE = /\b(?:no|not|never|none|nothing|without|wasn['’]?t|weren['’]?t|didn['’]?t|isn['’]?t|aren['’]?t)\b/i;
 // A claim that something was applied: "treated areas" and "went from 70" are not.
+// Treatment events in other words too: "We performed an exterior treatment",
+// "Treatment took place outside" (Codex P1 #5964 r31).
+const TREATMENT_EVENT = /\b(?:performed|completed|did|done|received|gave|provided|carried\s+out|took\s+place|happened|finished)\b[^.?!]*\btreat\w*|\btreat(?:ment|ments)?\b[^.?!]*\b(?:performed|completed|done|received|took\s+place|happened|applied|given|provided)\b/i;
 const APPLICATION_CLAIM = /\b(?:applied|sprayed|spread|put\s+down|baited|dusted|fogged|misted)\b|\b(?:we|they|i|technician|tech|[A-Z][a-z]+|was|were|been|got)\s+(?:\w+\s+)?(?:treated|used)\b/;
 const APPLICATION_VERB = /\b(?:applied|applying|used|using|sprayed|spraying|put\s+down|spread|treated|went|placed|baited)\b/i;
 const wrongPlace = (sentence, where) => (SAYS_INSIDE.test(sentence) && !/inside|garage|entry/.test(where))
@@ -1200,7 +1210,7 @@ function statesWrongScope(text, { facts }) {
     if (!facts) return false;
     // Negation is judged clause by clause (Codex P1 #5964 r28).
     return splitSentences(matchForm(text)).flatMap((sentence) => sentence.split(/[;,:]\s*|\s+(?:but|and|while|whereas|though|although)\s+/i))
-      .some((clause) => APPLICATION_CLAIM.test(clause) && !NEGATION_RE.test(clause));
+      .some((clause) => (APPLICATION_CLAIM.test(clause) || TREATMENT_EVENT.test(clause)) && !NEGATION_RE.test(clause));
   }
   return splitSentences(matchForm(text)).some((sentence) => {
     const named = products.filter((product) => mentions(sentence, product));
@@ -1348,6 +1358,10 @@ const ASK_CHECKS = [
   ['watering_during_hold', (text, { data, requiredLines }) => wateringRestricted(data)
     && splitSentences(matchForm(text)).some((sentence) => !requiredLines.some((line) => matchForm(line).includes(sentence.replace(/[.!?]$/, '')))
       && (isWateringRecommendation(sentence) || WATERING_DIRECTIVE.test(sentence)))],
+  // A care instruction the model writes itself ("Water every day", "Mow the
+  // lawn shorter") is not on the report; only required lines instruct
+  // (Codex P1 #5964 r31). The prompt's own dry-time guidance (rule 6) stays.
+  ['own_instruction', (text, { requiredLines }) => ownSentences(text, requiredLines).some((sentence) => CARE_INSTRUCTION_RE.test(sentence) && !DRY_TIME_GUIDANCE.test(sentence))],
 ];
 
 function firstFailure(checks, text, context) {
@@ -1554,15 +1568,17 @@ const GENERIC_PRODUCT_WORDS = new Set(('it this that anything something any some
 // Every product the question names is checked: "Roundup or Alpine" on an
 // Alpine-only report still names an unrecorded one (Codex P1 #5964 r19).
 // "Was Roundup applied?", "Did you have roundup sprayed?" (Codex P1 #5964 r23).
-const PASSIVE_PRODUCT_QUESTION_RE = /\b(?:was|were|is|are|has|have|had)\s+(?:any\s+|some\s+|the\s+)?([A-Za-z][\w-]*(?:\s+[A-Za-z][\w-]*){0,2}?)\s+(?:\w+\s+)?(?:applied|used|sprayed|put\s+down|spread|placed)\b/i;
+const PASSIVE_PRODUCT_QUESTION_RE = /\b(?:was|were|is|are|has|have|had)\s+(?:any\s+|some\s+|the\s+|both\s+)?([A-Za-z][\w-]*(?:\s+(?:and\s+|or\s+)?[A-Za-z][\w-]*){0,4}?)\s+(?:\w+\s+)?(?:applied|used|sprayed|put\s+down|spread|placed)\b/i;
 function asksAboutUnrecordedProduct(question, data = {}) {
   const text = String(question || '');
-  const passive = PASSIVE_PRODUCT_QUESTION_RE.exec(text);
-  if (passive) {
-    const products = asArray(data.applications).map(productFacts).filter(Boolean);
-    const first = passive[1].split(/\s+/)[0].toLowerCase();
-    if (!GENERIC_PRODUCT_WORDS.has(first) && !APPLIED_GENERIC_WORDS.has(first) && !productsNamedIn(passive[1], products).length) return true;
-  }
+  // Every passive mention and every product it lists ("Were Alpine WSG and
+  // Roundup applied?") (Codex P1 #5964 r31).
+  const recordedProducts = asArray(data.applications).map(productFacts).filter(Boolean);
+  const passiveNames = [...text.matchAll(new RegExp(PASSIVE_PRODUCT_QUESTION_RE.source, 'gi'))]
+    .flatMap((m) => m[1].split(/\s*(?:,|\band\b|\bor\b|\/)\s*/i))
+    .map((part) => part.trim())
+    .filter((part) => part && !GENERIC_PRODUCT_WORDS.has(part.split(/\s+/)[0].toLowerCase()) && !APPLIED_GENERIC_WORDS.has(part.split(/\s+/)[0].toLowerCase()));
+  if (passiveNames.some((part) => !productsNamedIn(part, recordedProducts).length)) return true;
   const m = PRODUCT_QUESTION_RE.exec(text);
   if (!m) return false;
   const products = asArray(data.applications).map(productFacts).filter(Boolean);
@@ -1589,6 +1605,9 @@ function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question 
   // answer states no date and the fact sheet carries no appointment (Codex
   // P1s on #6020, #5964 and #6016).
   if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
+  // "What should I do?": the report's own instructions are the answer, and
+  // the model has no grounding to add care steps (Codex P1 #5964 r31).
+  if (topic === 'next_steps') return 'next_steps';
   if (data.typedReport) return 'typed_report';
   if (asArray(data.companionReports).some((companion) => companion && companion.internalOnly !== true)) return 'companion_reports';
   if (asArray(requiredLines).some((line) => line?.source !== 'system')) return 'technician_line';

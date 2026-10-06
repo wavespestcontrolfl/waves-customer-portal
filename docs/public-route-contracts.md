@@ -97,7 +97,7 @@ pet precautions) go to the model as `required_lines` and must appear in the AI
 answer word for word, or the reply is the fixed-rule answer. A required line a
 technician typed (a recommendation, the next step, a finding's recommendation)
 never goes to the model: that question keeps the fixed-rule answer.
-Next-visit questions also keep the fixed-rule answer, and an AI answer may
+Next-visit and next-step questions also keep the fixed-rule answer (the model may not write care instructions of its own), and an AI answer may
 not state a calendar date, weekday, clock time, month or relative day of its
 own (required lines keep theirs; "today", the visit itself, and "this week"
 are allowed). An answer with required lines may not grant unconditional

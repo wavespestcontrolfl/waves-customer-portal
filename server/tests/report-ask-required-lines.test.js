@@ -1394,3 +1394,29 @@ describe('answer screen, Codex round 30', () => {
     expect(medicalExposureAnswer(question)).toBeTruthy();
   });
 });
+
+describe('answer screen, Codex round 31', () => {
+  test.each(['Were Alpine WSG and Roundup applied?', 'Was Alpine WSG applied? Was Roundup sprayed outside?'])('every passive product is checked: %s', (question) => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside' }] });
+    expect(ruleAnswerReason(data, [], 'applied', question)).toBe('unrecorded_product');
+  });
+
+  test.each(['We performed an exterior treatment.', 'Treatment took place outside.', 'The exterior received a treatment.'])('no recorded product: a treatment event is rejected: %s', (answer) => {
+    const data = pestData({ applications: [] });
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ question: 'q', data }) })).toBe('scope_claim');
+  });
+
+  test('spoken and obfuscated emails are masked', () => {
+    const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Email jane dot doe at gmail dot com or jane(at)gmail(dot)com. Look at the ants.' }) });
+    expect(facts.customer_concern).toBe('Email [email] or [email]. Look at the ants.');
+  });
+
+  test('next-step questions keep the rule answer', () => {
+    expect(ruleAnswerReason(lawnData({ reportV2: null }), [], 'next_steps', 'What should I do?')).toBe('next_steps');
+  });
+
+  test.each(['Mow the lawn shorter.', 'Water every day.', 'Apply fertilizer this week.'])('a care instruction of the model own is rejected: %s', (answer) => {
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('own_instruction');
+  });
+});
