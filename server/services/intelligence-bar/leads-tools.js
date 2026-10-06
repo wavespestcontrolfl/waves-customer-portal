@@ -730,8 +730,8 @@ function normalizeLeadContactField(field, raw) {
 // rule is closed (Codex r6, after five rounds of partial-rebuild grammar), and
 // it PRESERVES THE ROW'S REPRESENTATION (Codex r8: several consumers
 // concatenate address + city + zip, so a bare row must stay bare):
-//   BARE row (the stored line parses to no state, and to no ZIP equal to the
-//   lead's zip column, and does not name the lead's city): a plain street edit
+//   BARE row (the stored line parses to no state, no real city, and no ZIP
+//   equal to the lead's zip column, and no comma segment equals the city column): a plain street edit
 //   writes `address` as typed, city / zip edits write their columns, and a
 //   WHOLE address writes the parsed STREET to `address` and the parsed city /
 //   zip to their columns.
@@ -767,21 +767,21 @@ function parseWholeAddress(text) {
 }
 
 // Does the stored line carry more than a street? A parsed state always says
-// so; a parsed ZIP only when it equals the lead's zip column (the parser reads
-// any trailing five digits as a ZIP, so "21 Oak Ave Apt 34236" with another
-// zip column is a bare street with a unit number); so does a line that names
-// the lead's city.
+// so, and so does a parsed REAL city, whether or not it equals the city column
+// (Codex r11: a legacy "21 Oak Ave, Sarasota" with city Bradenton must not take
+// a city-only edit that leaves Sarasota in the line). A parsed ZIP counts only
+// when it equals the lead's zip column (the parser reads any trailing five
+// digits as a ZIP, so "21 Oak Ave Apt 34236" with another zip column is a bare
+// street with a unit number). A comma segment equal to the city column counts
+// as well.
 function storedIsOneLine(lead) {
   const stored = String(lead.address || '').trim();
   if (!stored) return false;
   const parts = parseRawAddress(stored);
-  if (parts.state) return true;
+  if (parts.state || cityIsReal(parts.city)) return true;
   if (parts.zip && parts.zip === String(lead.zip || '').trim()) return true;
   const city = String(lead.city || '').trim().toLowerCase();
-  return Boolean(city) && (
-    (parts.city || '').toLowerCase() === city
-    || stored.split(',').slice(1).some(seg => seg.trim().toLowerCase() === city)
-  );
+  return Boolean(city) && stored.split(',').slice(1).some(seg => seg.trim().toLowerCase() === city);
 }
 
 // Never a doubled segment ("12 Oak Ave, Sarasota, Sarasota, FL 34236").

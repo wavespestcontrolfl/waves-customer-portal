@@ -564,3 +564,25 @@ test('confirmed whole address: an asserted but unchanged column is guarded and w
   expect(stale.success).toBeUndefined();
   expect(activities.insert).not.toHaveBeenCalled();
 });
+
+test('a legacy line whose embedded city differs from the city column is one-line: partial edits refuse, a whole address replaces it', async () => {
+  const legacy = { ...ADDR_LEAD, address: '21 Oak Ave, Sarasota', city: 'Bradenton' };
+  const leads = chain({ first: legacy });
+  db.mockReturnValue(leads);
+  for (const input of [{ city: 'Venice' }, { zip: '34201' }, { address: '12 Oak Ave' }]) {
+    const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', ...input, confirmed: true });
+    expect(res.error).toBe(ONE_LINE_REFUSAL);
+  }
+  expect(leads.update).not.toHaveBeenCalled();
+  const whole = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address: '12 Pine Rd, Venice, FL 34285' });
+  expect(whole.changes).toEqual({
+    address: { from: '21 Oak Ave, Sarasota', to: '12 Pine Rd, Venice, FL 34285' },
+    city: { from: 'Bradenton', to: 'Venice' },
+    zip: { from: '34200', to: '34285' },
+  });
+  // Comma-free legacy form too; a unit segment is still bare.
+  db.mockReturnValue(chain({ first: { ...legacy, address: '21 Oak Ave Sarasota' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Venice' })).error).toBe(ONE_LINE_REFUSAL);
+  db.mockReturnValue(chain({ first: { ...ADDR_LEAD, address: '21 Oak Ave, Unit 4' } }));
+  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Venice' })).changes).toEqual({ city: { from: 'Testville', to: 'Venice' } });
+});
