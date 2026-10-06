@@ -3,17 +3,18 @@
 
 /**
  * Replay harness for the lawn "From your technician" paragraph
- * (server/services/service-report/lawn-tech-paragraph.js). NO MODEL CALL, ever:
- * it prints the exact prompt for a visit's inputs, and validates a pasted answer
- * with the same code the completion step runs. Candidate answers are written by
+ * (server/services/service-report/lawn-tech-paragraph.js, fixed sentences). NO
+ * MODEL CALL, ever: it prints the exact prompt for a visit's inputs, and runs a
+ * pasted extraction answer through the same code the completion step runs. Candidate answers are written by
  * a person or a subagent and pasted in.
  *
  *   node server/scripts/lawn-tech-paragraph-replay.js <inputs.json>
  *       prints the system prompt, the user message and the output schema
  *   node server/scripts/lawn-tech-paragraph-replay.js <inputs.json> --answer <answer.json | ->
- *       validates the answer ({ "paragraph": "...", "sources": [{ "sentence": "...", "from": ["note"] }] })
- *       and prints ACCEPTED (with the stored text) or REJECTED (with every reason);
- *       exit 0 accepted, 1 rejected, 2 bad usage
+ *       runs the answer ({ "observations": [{ "condition": "chinch_bugs", "place": "front_lawn",
+ *       "quote": "...", "seenToday": true }] }) and prints ACCEPTED (with the paragraph it
+ *       would freeze), NO PARAGRAPH (nothing to say) or REJECTED (with every reason);
+ *       exit 0 accepted, 1 rejected or no paragraph, 2 bad usage
  *
  * The inputs file is the normalized inputs shape (see server/scripts/fixtures/
  * lawn-tech-paragraph/chinch-bug-arena.json). Keys starting with "_" are ignored.
@@ -52,7 +53,13 @@ function main(argv) {
     console.log(JSON.stringify(prompt.jsonSchema, null, 2));
     return 0;
   }
-  const verdict = tech.validateParagraph(readJson(answerFile, 'answer'), inputs);
+  const verdict = tech.validateExtraction(readJson(answerFile, 'answer'), inputs);
+  // Same as production: a good answer with nothing to render is no paragraph (the
+  // completion step freezes a never-printed marker), not an acceptance.
+  if (verdict.ok && !verdict.paragraph) {
+    console.log('NO PARAGRAPH (nothing to say)');
+    return 1;
+  }
   if (verdict.ok) {
     console.log('ACCEPTED');
     console.log(verdict.paragraph);
