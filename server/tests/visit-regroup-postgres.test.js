@@ -44,7 +44,7 @@ postgres('same-stop regroup sweep', () => {
       password_hash: 'synthetic-not-a-login-hash', role: 'technician', active: true,
       employment_status: 'active', field_dispatchable: true,
     });
-    services = await mockPg('services').where({ groupable: true, group_family: 'recurring_property_service' })
+    services = await mockPg('services').where({ groupable: true, group_family: 'pest_stop' })
       .orderBy('id').limit(3).select('id', 'name');
     expect(services).toHaveLength(3);
   });
