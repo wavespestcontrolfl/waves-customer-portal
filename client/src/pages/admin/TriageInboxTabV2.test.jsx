@@ -416,6 +416,17 @@ describe('ConfirmEvidence — house-number conflict', () => {
 });
 
 describe('ConfirmEvidence — secondary contact', () => {
+  it('tells the office to ask again when the call guard dropped an impossible number', () => {
+    render(<ConfirmEvidence payload={{ flag: 'secondary_contact_captured', secondary_contact: null, secondary_phone_rejected: 'not_a_valid_us_number' }} />);
+    const row = screen.getByText('Number dropped:').parentElement;
+    expect(row).toHaveTextContent('ask for it again');
+  });
+
+  it('shows no dropped-number row on an ordinary second contact', () => {
+    render(<ConfirmEvidence payload={{ flag: 'secondary_contact_captured', secondary_contact: { name_full: 'Sample Person' } }} />);
+    expect(screen.queryByText('Number dropped:')).toBeNull();
+  });
+
   it('renders the V2 nested shape (name_full / phone_e164) from the deterministic-flags insert', () => {
     render(<ConfirmEvidence payload={{
       flag: 'secondary_contact_captured',

@@ -28,12 +28,17 @@ const v2 = (caller = {}, over = {}) => ({
 });
 
 describe('isImpossibleNanpPhone', () => {
-  test('an area code starting 0 or 1 is impossible; the exchange is not judged (isValidNanpNumber)', () => {
+  test('an area or exchange code starting 0 or 1 is impossible', () => {
     expect(isImpossibleNanpPhone('+11733038616')).toBe(true);
     expect(isImpossibleNanpPhone('173-303-8616')).toBe(true);
     expect(isImpossibleNanpPhone('1 073 555 0123')).toBe(true);
-    expect(isImpossibleNanpPhone('(941) 155-0123')).toBe(false);
-    expect(isImpossibleNanpPhone('+19410550123')).toBe(false);
+    expect(isImpossibleNanpPhone('(941) 155-0123')).toBe(true);
+    expect(isImpossibleNanpPhone('+19410550123')).toBe(true);
+  });
+
+  test('a +1 number with the wrong digit count is impossible', () => {
+    expect(isImpossibleNanpPhone('+1941555012')).toBe(true);
+    expect(isImpossibleNanpPhone('+194155501234')).toBe(true);
   });
 
   test('real NANP numbers, international numbers and fragments are not flagged', () => {
@@ -47,6 +52,12 @@ describe('isImpossibleNanpPhone', () => {
 });
 
 describe('impossible phones never reach a contact number', () => {
+  test('isDialablePhone accepts a short international E.164 callback (8-15 digits)', () => {
+    expect(isDialablePhone('+35312345678')).toBe(true);
+    expect(isDialablePhone('+3531234')).toBe(false);
+    expect(isDialablePhone('+1941555012')).toBe(false);
+  });
+
   test('isDialablePhone refuses an impossible number', () => {
     expect(isDialablePhone('+11733038616')).toBe(false);
     expect(isDialablePhone('+19415550123')).toBe(true);

@@ -13,13 +13,18 @@ const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte']);
 // blocked/unavailable caller ID as text ("anonymous", "unknown", "restricted",
 // "unavailable") rather than a dialable E.164, so "truthy" is not enough — we
 // require at least 10 digits before treating an ANI as a real callback number.
-// A NANP number whose area code starts with 0 or 1 (a spoken
-// "173-303-8616") has the digits but no line behind it: it is never dialable,
-// so a spoken callback like that never counts as a way to reach the caller.
+// An impossible NANP number (a spoken "173-303-8616") has the digits but no
+// line behind it: it is never dialable, so a spoken callback like that never
+// counts as a way to reach the caller. A non-NANP E.164 number ("+" and a
+// country code other than 1) follows E.164 length (8-15 digits) — some
+// international numbers are shorter than ten digits.
 function isDialablePhone(value) {
   if (!value) return false;
   if (isImpossibleNanpPhone(value)) return false;
-  return String(value).replace(/\D/g, '').length >= 10;
+  const text = String(value).trim();
+  const digits = text.replace(/\D/g, '');
+  if (text.startsWith('+') && digits[0] !== '1') return digits.length >= 8 && digits.length <= 15;
+  return digits.length >= 10;
 }
 
 // Pure predicate: did THIS caller disclaim the ANI as not their own with no
