@@ -4,6 +4,7 @@ import {
   appendDictatedText,
   buildPhotoRecoveryOutcome,
   splitTypedChipLineTails,
+  splitGluedChipLines,
   buildPhotoRetryFormBody,
   completionAutoCloseDelay,
   reportShapedNotes,
@@ -206,5 +207,26 @@ describe("splitTypedChipLineTails", () => {
 
   it("does nothing when no chip label is picked", () => {
     expect(splitTypedChipLineTails("[Protocol] Web sweep", "[Protocol] Web sweep done", []).notes).toBe("[Protocol] Web sweep done");
+  });
+});
+
+describe("splitGluedChipLines", () => {
+  const labels = ["Web sweep", "Ants"];
+
+  it("splits a saved glued chip line back into the chip line and a note", () => {
+    expect(splitGluedChipLines("Note.\n[Protocol] Web sweep treated the yard", labels)).toBe("Note.\n[Protocol] Web sweep\ntreated the yard");
+    expect(splitGluedChipLines("[protocol]web sweep   treated", labels)).toBe("[protocol]web sweep\ntreated");
+  });
+
+  it("leaves a typed marker line alone when its chip line is also present", () => {
+    const notes = "[Found] Ants\n[Found] Ants by the lanai";
+    expect(splitGluedChipLines(notes, labels)).toBe(notes);
+  });
+
+  it("leaves plain chip lines, other markers and unpicked labels alone", () => {
+    const notes = "[Protocol] Web sweep\n[Found] Roaches in garage\nAnts by the lanai";
+    expect(splitGluedChipLines(notes, labels)).toBe(notes);
+    expect(splitGluedChipLines("[Protocol] Web sweeps done", labels)).toBe("[Protocol] Web sweeps done");
+    expect(splitGluedChipLines("[Protocol] Web sweep done", [])).toBe("[Protocol] Web sweep done");
   });
 });

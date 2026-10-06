@@ -402,6 +402,32 @@ export function splitTypedChipLineTails(prevNotes, nextNotes, labels, caret = nu
   });
   return { notes: lines.join("\n"), caret: nextCaret };
 }
+// A draft saved before the split above can still hold a glued chip line
+// ("[Protocol] Web sweep treated the yard"). On restore, a marker line whose
+// text is a picked label plus more words splits back into the chip line and
+// a note line. It is left alone when the notes already hold that chip line
+// on its own, since the longer line is then the tech's own typed marker.
+export function splitGluedChipLines(notes, labels) {
+  const picked = [...new Set((labels || []).map((label) => String(label || "").trim()).filter(Boolean))]
+    .sort((a, b) => b.length - a.length);
+  const lines = String(notes || "").split("\n");
+  if (!picked.length) return String(notes || "");
+  const whole = new Set(lines.map((line) => line.trim().toLowerCase()));
+  return lines.map((line) => {
+    const entry = parseMarkerLine(line);
+    if (!entry) return line;
+    const label = picked.find((candidate) => (
+      entry.text.length > candidate.length
+      && entry.text.slice(0, candidate.length).toLowerCase() === candidate.toLowerCase()
+      && /^\s+\S/.test(entry.text.slice(candidate.length))
+    ));
+    if (!label) return line;
+    const head = line.slice(0, line.toLowerCase().indexOf(entry.text.toLowerCase()) + label.length).trimStart();
+    if (whole.has(head.toLowerCase())) return line;
+    const lead = line.slice(0, line.length - line.trimStart().length);
+    return `${lead}${head}\n${entry.text.slice(label.length).trim()}`;
+  }).join("\n");
+}
 function markerLines(notes) {
   return String(notes || "").split("\n").map(parseMarkerLine).filter(Boolean);
 }
@@ -15673,7 +15699,11 @@ export function CompletionPanel({
       ? Object.fromEntries(Object.entries(savedDraft.lawnRemovedDefaultNames).filter(([, name]) => typeof name === 'string' && name.trim()))
       : {};
     setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
-    setNotes(savedDraft.notes || "");
+    setNotes(splitGluedChipLines(savedDraft.notes || "", [
+      ...(Array.isArray(savedDraft.selectedProtocolActionLabels) ? savedDraft.selectedProtocolActionLabels : []),
+      ...(Array.isArray(savedDraft.selectedObservationLabels) ? savedDraft.selectedObservationLabels : []),
+      ...(Array.isArray(savedDraft.selectedRecommendationLabels) ? savedDraft.selectedRecommendationLabels : []),
+    ]));
     // A draft restored while the plan request has already failed carries the
     // suggestions saved under an earlier plan, and the reconcile effect stays
     // off during a plan error — withdraw them exactly as the failed request
