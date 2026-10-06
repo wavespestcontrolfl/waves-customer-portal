@@ -204,6 +204,13 @@ describe('reservice_self_booked bell (owner 2026-10-05)', () => {
     expect(() => why(built)).not.toThrow();
   });
 
+  test('the row carries the structured parts: Schedule, needs-you, the visit, a person reads it', () => {
+    expect(build({ customerId: 'c1', scheduledServiceId: 'v1', name: 'Albert Clark', request: 'ants' }).alert).toEqual({
+      area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: 'v1' }, doneWhen: 'request_read', who: 'person',
+    });
+    expect(build({ customerId: 'c1', name: 'Albert Clark' }).alert.subject).toEqual({ type: 'customer', id: 'c1' });
+  });
+
   test('a short name keeps the visit day in the headline', () => {
     const built = build({ customerId: 'c1', name: 'Al Day', when: 'Thu, Oct 9', request: 'ants' });
     expect(built.title).toBe("Schedule — read Al Day's re-service request for Thu, Oct 9");
@@ -222,6 +229,9 @@ describe('reservice_self_booked bell (owner 2026-10-05)', () => {
     const built = build({ customerId: 'c1', name: 'Albert Clark', request: 'Call 941-555-0123, ants at 123 Palm Avenue' });
     expect(built.detail).not.toMatch(/555-0123|123 Palm Avenue/);
     expect(built.body).not.toMatch(/555-0123|123 Palm Avenue/);
+    // The masked address reads "[address]", a bracket the rule refuses: the alert still
+    // rings with every structured part kept and the broken rule stamped.
+    expect(built.alert).toEqual(expect.objectContaining({ area: 'Schedule', severity: 'needs-you', who: 'person', ruleViolations: ['why_forbidden_token:bracket_tag'] }));
   });
 });
 

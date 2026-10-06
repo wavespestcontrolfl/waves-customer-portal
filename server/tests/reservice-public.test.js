@@ -709,9 +709,18 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
       expect(payload.when).toMatch(/^[A-Z][a-z]{2}, [A-Z][a-z]{2} \d{1,2}/);
     });
 
-    test('an idempotent replay of the same booking does not ring again', async () => {
+    test('source pin: createSelfBooking sends no internal text for a re-service (one alert, not two)', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
+      expect(src).toMatch(/const reserviceOwnBell = !!callbackVisit && !callbackVisit\.alertLabel;\s*if \(process\.env\.ADAM_PHONE && !reserviceOwnBell\)/);
+    });
+
+    test('keyed per booking, so a replay re-dispatches under the same key (a no-op once the first landed)', async () => {
+      await post({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' });
       await post({ date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' }, true);
-      expect(triggerNotification).not.toHaveBeenCalled();
+      expect(triggerNotification).toHaveBeenCalledTimes(2);
+      expect(triggerNotification.mock.calls.map((c) => c[2])).toEqual([
+        { dedupeKey: 'reservice-booked:booking-1' }, { dedupeKey: 'reservice-booked:booking-1' },
+      ]);
     });
   });
   // GATE_RESERVICE_DETAILS_REQUIRED (owner 2026-10-02: any text counts; a

@@ -300,22 +300,53 @@ const TRIGGER_REGISTRY = {
     category: 'schedule',
     priority: 'high',
     group: 'Communication',
+    // Composed through docs/admin-notifications.md: `alert` carries the
+    // structured parts (area, severity, subject, done-when, who) into the
+    // row's metadata. A customer's own words that trip a copy rule never
+    // cost the alert (the composer's own fallback shape, as raiseAdminAlert).
     build: (p) => {
       const names = require('./admin-alert-names');
+      const compose = require('./admin-alert-compose');
       const named = p.name || 'a customer';
       const when = p.when ? ` for ${p.when}` : '';
       const pests = p.pests ? `${p.pests}: ` : '';
       const words = p.request ? names.redactedWords(p.request) : '';
-      return {
-        title: `Schedule — ${names.fitAction('Schedule', named, [
+      const spec = {
+        area: 'Schedule',
+        action: names.fitAction('Schedule', named, [
           (n) => `read ${n}'s re-service request${when}`,
           (n) => `read ${n}'s re-service request`,
-        ])}`,
-        body: words
+        ]),
+        why: words
           ? names.whyWithQuote({ lead: pests, quote: words })
           : (p.pests ? `Picked ${p.pests.toLowerCase()} and typed no description.` : 'They typed no description of the problem.'),
-        ...(words ? { detail: [p.pests ? `Pests: ${p.pests}` : null, p.when ? `Visit: ${p.when}` : null, `Request: ${words}`].filter(Boolean).join('\n') } : {}),
+        severity: 'needs-you',
         link: p.customerId ? `/admin/customers?customerId=${encodeURIComponent(p.customerId)}` : '/admin/schedule',
+        subject: p.scheduledServiceId ? { type: 'visit', id: p.scheduledServiceId } : { type: 'customer', id: p.customerId },
+        doneWhen: 'request_read',
+        who: 'person',
+      };
+      const detail = words ? [p.pests ? `Pests: ${p.pests}` : null, p.when ? `Visit: ${p.when}` : null, `Request: ${words}`].filter(Boolean).join('\n') : null;
+      let composed;
+      try {
+        composed = compose.composeAdminAlert(spec);
+      } catch (err) {
+        // Even under test: only the customer's words can break a rule here
+        // (the copy tests prove our own text passes), so this is data, not a bug.
+        if (err.code !== 'ADMIN_ALERT_RULE') throw err;
+        composed = {
+          headline: compose.cutAtWord(`${spec.area} — ${spec.action}`, compose.MAX_HEADLINE_CHARS),
+          why: spec.why,
+          link: spec.link,
+          metadata: { ...compose.validStructuredFields(spec), ruleViolations: err.violations },
+        };
+      }
+      return {
+        title: composed.headline,
+        body: composed.why,
+        ...(detail ? { detail } : {}),
+        link: composed.link,
+        alert: composed.metadata,
       };
     },
   },
@@ -1157,6 +1188,8 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // only be a concurrent dispatch of the same (promise, ET day) that
     // already pushed. property_lookup_canary_failed: keyed per ET day, and a
     // hit is the deploy-kill retry of a run that already alerted.
+    // reservice_self_booked: keyed per booking, so a hit is the customer's
+    // idempotent replay of a booking whose bell already landed.
     let dedupedNoPush = false;
     let bellSuppressed = false;
     // ONE routing decision per event (owner ruling 2026-08-28 — "some are
@@ -1195,7 +1228,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             trigger.category,
             built.title,
             built.body,
-            { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
+            { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { ...(built.alert || {}), triggerKey, priority: trigger.priority, payload: safePayload },
               ...(dedupeKey ? { dedupeKey } : {}),
               // A standing thread row (sms_reply, one per customer) is rewritten
               // in place by each new message instead of inserting another row.
@@ -1226,7 +1259,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           if (created && !created.suppressed) bellWritten = true;
           // A refresh carries a NEW message onto the standing row: that is not
           // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed')) dedupedNoPush = true;
+          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked')) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

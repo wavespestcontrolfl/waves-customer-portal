@@ -55,8 +55,8 @@
  *
  * Post-commit (inside createSelfBooking, best-effort): the standard
  * appointment confirmation SMS/email — which carries the NEW visit's
- * /reschedule link, closing the loop with the rescheduler — plus the office
- * internal alert ("🔁 Free re-service self-booked"). This route additionally
+ * /reschedule link, closing the loop with the rescheduler. This route then
+ * rings the owner's reservice_self_booked bell (keyed per booking) and
  * returns the new visit's rescheduleUrl so the success card can offer
  * "need to move it?" immediately.
  */
@@ -703,22 +703,25 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       logger.warn(`[reservice-public] reschedule-link lookup failed for booking ${result.body?.booking?.id}: ${err.message}`);
     }
 
-    // Owner bell + push (owner 2026-10-05): the booking alert createSelfBooking
-    // sends is an internal text the bell policy silences, so a customer's
-    // re-service request reached nobody. Once per booking — never on a replay.
-    if (!result.body?.replayed) {
+    // Owner bell + push (owner 2026-10-05): a customer's re-service request
+    // used to reach nobody. Keyed per booking, so the customer's idempotent
+    // replay re-dispatches a bell the first request never wrote (worker died
+    // after commit) and is a no-op (no second row, no second push) otherwise.
+    const bookingId = result.body?.booking?.id;
+    if (bookingId) {
       const { triggerNotification } = require('../services/notification-triggers');
       const dayLabel = new Date(`${date}T12:00:00Z`).toLocaleDateString('en-US', {
         weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York',
       });
-      triggerNotification('reservice_self_booked', {
+      void triggerNotification('reservice_self_booked', {
         customerId: customer.id,
         scheduledServiceId: serviceRow?.id || null,
         name: [customer.first_name, customer.last_name].filter(Boolean).join(' ') || null,
         when: slot.start_label ? `${dayLabel} at ${slot.start_label}` : dayLabel,
         pests: requestedPestLabels.length ? requestedPestLabels.join(', ') : null,
         request: details || null,
-      }).catch((err) => logger.warn(`[reservice-public] re-service bell failed for customer ${customer.id}: ${err.message}`));
+      }, { dedupeKey: `reservice-booked:${bookingId}` })
+        .catch((err) => logger.warn(`[reservice-public] re-service bell failed for customer ${customer.id}: ${err.message}`));
     }
 
     return res.json({
