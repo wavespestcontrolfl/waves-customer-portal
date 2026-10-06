@@ -303,7 +303,41 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
   return rung;
 }
 
+// How far back an open missed-call bell is still retired when the caller
+// gets through later. Older bells are the office's to close by hand.
+const RETIRE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Retire open missed-call bells whose caller got through AFTER the bell rang
+ * (owner 2026-10-05): a later answered call, an alerted voicemail, or our
+ * dialed callback — the same CALLED_BACK_SQL that keeps a bell from ringing.
+ * Runs on the 2-minute call-alert cron; idempotent (a done bell is not
+ * selected again). Never re-opens: a retired bell stays done.
+ */
+async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
+  const rows = await db('notifications')
+    .join('call_log', db.raw("call_log.id::text = notifications.metadata->'payload'->>'callLogId'"))
+    .where({ 'notifications.recipient_type': 'admin', 'notifications.category': 'missed_call' })
+    .whereRaw("notifications.metadata->>'triggerKey' = 'customer_missed_call'")
+    .whereNull('notifications.done_at')
+    .where('notifications.created_at', '>', new Date(Date.now() - RETIRE_WINDOW_MS))
+    .whereRaw(`NOT ${CALLED_BACK_SQL}`)
+    .distinct('call_log.id')
+    .limit(limit);
+  if (!rows.length) return 0;
+  const NotificationService = require('./notification-service');
+  let retired = 0;
+  for (const { id } of rows) {
+    retired += Number(await NotificationService.supersedeMissedCallAdmin({
+      callLogId: id,
+      resolution: 'The caller got through on a later call',
+    })) || 0;
+  }
+  return retired;
+}
+
 module.exports = {
+  retireCalledBackMissedCalls,
   missedCallEligible,
   missedCallShapeEligible,
   isEmptyVoicemailRecording,
