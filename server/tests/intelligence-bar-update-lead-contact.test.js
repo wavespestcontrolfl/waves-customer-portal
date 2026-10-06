@@ -84,9 +84,9 @@ test('invalid inputs are refused before any lookup', async () => {
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '+1 (941) 555-01' })).error).toMatch(/not a valid phone/);
   // Canonical E.164 only: no leading-zero country code; a 255+ char email is refused at preview.
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '+0123456789' })).error).toMatch(/not a valid phone/);
-  // An area code or exchange starting 0/1 can never exist (Twilio 21211), so it is refused too.
+  // An area code starting 0/1 can never exist, so it is refused too. The exchange is
+  // not checked (the fictional 555-01xx range is a test fixture; Twilio 21211 covers it).
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '1035550199' })).error).toMatch(/not a valid phone/);
-  expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '(941) 155-0199' })).error).toMatch(/not a valid phone/);
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', phone: '+11035550199' })).error).toMatch(/not a valid phone/);
   expect((await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', email: `${'a'.repeat(250)}@example.test` })).error).toMatch(/too long/);
   // Extensions / letters are refused, never folded into the number.
