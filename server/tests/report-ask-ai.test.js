@@ -603,7 +603,7 @@ describe('schedule questions keep the rule answer', () => {
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
-  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'Where are the ants coming from?', 'How do roaches arrive in the house?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'What was applied at my last appointment?', "Which product did you use at today's appointment?", 'Where are the ants coming from?', 'How do roaches arrive in the house?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(false);
   });
 });
