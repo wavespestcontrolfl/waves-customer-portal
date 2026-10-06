@@ -838,3 +838,58 @@ describe('answer screen, Codex round 8', () => {
     expect(facts.customer_concern).toBe('Ants at [number] Dr Martin Luther King Junior Boulevard');
   });
 });
+
+describe('answer screen, Codex round 9', () => {
+  const data = lawnData({
+    reportV2: {
+      aftercare: {},
+      water: { rainInches: 1.23, status: 'balanced', scheduleOnFile: false },
+      mowing: { measuredHeightInches: 3.5, idealMinInches: 3.5, idealMaxInches: 4, status: 'ideal' },
+    },
+  });
+  const facts = buildReportAskFacts({ data });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'How is my lawn?', data, facts });
+
+  test.each([
+    'The report shows 3.5 inches of rain this week.',
+    'Your mowing height was 1.23 inches.',
+    'Your lawn health score is ninety-five out of 100.',
+    'The report shows four inches of rain this week.',
+  ])('rejects a value bound to the wrong measurement or spelled out: %s', (answer) => {
+    expect(ask(answer)).toBe('unstated_number');
+  });
+
+  test.each([
+    'Your mowing height was 3.5 inches.',
+    'The lawn got 1.23 inches of rain this week.',
+    'Your overall score is eighty-two out of 100.',
+  ])('passes a value that matches its measurement: %s', (answer) => {
+    expect(ask(answer)).toBeNull();
+  });
+
+  test.each(['Product X also treats thrips.', 'Product X also treats scale insects.', 'Product X also treats leafminers.', 'It also stops mealybugs.'])(
+    'a tree & shrub pest the facts never name is rejected: %s',
+    (answer) => {
+      const tsData = pestData({ serviceLine: 'tree_shrub', applications: [{ product: { name: 'Product X' }, targets: ['aphids'] }] });
+      const tsFacts = buildReportAskFacts({ question: 'What is Product X for?', data: tsData });
+      expect(screenAskAnswer(answer, { question: 'What is Product X for?', data: tsData, facts: tsFacts })).toBe('target_list');
+    },
+  );
+
+  test('tree & shrub facts carry the plant groups, the water card and the trends', () => {
+    const tsData = pestData({
+      serviceLine: 'tree_shrub',
+      reportV2: {
+        snapshot: { overallScore: 71 },
+        plantGroups: [{ label: 'Hedges', status: 'needs_attention', finding: 'Thin foliage on the north side.', wavesAction: 'Recheck next visit.' }],
+        water: { rainInches: 0.4, irrigationInches: 0.6, irrigationType: 'Drip', status: 'balanced', explanation: 'Beds look evenly watered.' },
+        trends: { overall: [{ label: 'Aug', value: 60 }, { label: 'Oct', value: 71 }] },
+      },
+    });
+    expect(buildReportAskFacts({ data: tsData }).tree_shrub_report).toMatchObject({
+      plant_groups: [{ group: 'Hedges', status: 'needs attention', finding: 'Thin foliage on the north side.', waves_action: 'Recheck next visit.' }],
+      water: { rain_this_week_inches: 0.4, irrigation_inches: 0.6, watering_type: 'Drip', status: 'balanced' },
+      trends: { overall_out_of_100: { from: { month: 'Aug', value: 60 }, to: { month: 'Oct', value: 71 } } },
+    });
+  });
+});

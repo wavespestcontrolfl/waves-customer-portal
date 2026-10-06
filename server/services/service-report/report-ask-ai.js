@@ -51,7 +51,6 @@ const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
 const { validateCustomerCopy } = require('./customer-copy-forbidden');
 const { isWateringRecommendation, wateringRestricted } = require('./report-assistant');
 const { writerRulesRejection } = require('./report-writer-rules');
-const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../../utils/sms-time-format');
 
 const PROMPT_VERSION = 'report-ask-v2';
 // Total wall-clock budget for the whole chain, and the cap on the first leg so
@@ -184,16 +183,6 @@ function pressureFact(data) {
   };
 }
 
-function nextVisitFact(appointment) {
-  if (!appointment?.scheduled_date) return null;
-  const arrival = spokenArrivalWindow(appointment.window_start);
-  return dropEmpty({
-    service: cleanText(appointment.service_type),
-    date: longDate(etDateIso(appointment.scheduled_date)),
-    arrival_window: arrival === UNKNOWN_ARRIVAL_WINDOW ? null : arrival,
-  });
-}
-
 // ── Re-entry readiness ──────────────────────────────────────────────────
 function reentryFacts(data = {}, now = new Date()) {
   const reentry = data.dynamicContext?.reentry;
@@ -303,7 +292,8 @@ function productsNamedIn(question, products) {
 // house number past two digits) is masked (Codex P1 r1 #5957). It cannot see a
 // customer's NAME in prose, or a street name without a number and a suffix: no
 // pattern tells those from ordinary words, so those pass through.
-// A house number before a street: a number, up to six words and any USPS
+// A house number before a street: a number, one to six street-name words
+// (at least one, so "2 is improving" is prose and "21 Palm Is" an address) and any USPS
 // street type (Publication 28, the table the address matcher reads, in any
 // case: "21 heron bluff", "18 Bay Pass"). Only the number is masked: a street
 // name without its number is not an address, and the table's everyday nouns
@@ -312,13 +302,10 @@ function productsNamedIn(question, products) {
 const { USPS_STREET_SUFFIXES } = require('../property-lookup/usps-street-suffixes');
 
 const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'trace', 'mews', 'landing', 'hollow', 'vista'];
-// "is" (ISLE) is an everyday verb: "index 2 is improving".
-const NOT_STREET_SUFFIXES = new Set(['is']);
 const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
-  .filter((suffix) => !NOT_STREET_SUFFIXES.has(suffix))
   .sort((x, y) => y.length - x.length)
   .join('|');
-const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}(?=\\s+(?:[a-z0-9'.-]+\\s+){0,6}(?:${STREET_SUFFIX})\\b)`, 'gi');
+const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}(?=\\s+(?:[a-z0-9'.-]+\\s+){1,6}(?:${STREET_SUFFIX})\\b)`, 'gi');
 
 // "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
 // directly by a short value with a digit in it is a credential even with no
@@ -341,7 +328,7 @@ function scrubFreeText(value, max = Infinity) {
 // serialized into the prompt, so a new field cannot skip it. Left as built:
 // the fixed company and contact lines, the calendar dates and arrival window
 // (a four digit year would read as a code), and each product's catalog name.
-const VERBATIM_FACTS = new Set(['company', 'contact', 'service_date', 'next_visit', 'asked_about_product']);
+const VERBATIM_FACTS = new Set(['company', 'contact', 'service_date', 'asked_about_product']);
 
 function scrubLeaves(value) {
   if (typeof value === 'string') return scrubFreeText(value);
@@ -467,8 +454,36 @@ function treeShrubFacts(data = {}, keep = () => true) {
       what_we_saw: text(card?.whatWeSaw, 240),
       customer_action: text(card?.customerAction, 240),
     })).filter((card) => Object.keys(card).length),
+    // The plant-group cards, the landscape water card and the trend chart the
+    // page renders (TreeShrubReportV2Section.jsx) (Codex P2 #5964 r9).
+    plant_groups: asArray(v2.plantGroups).slice(0, 6).map((group) => dropEmpty({
+      group: cleanText(group?.label),
+      status: underscoresToSpaces(group?.status),
+      finding: text(group?.finding, 240),
+      waves_action: text(group?.wavesAction, 240),
+    })).filter((group) => group.group),
+    water: treeShrubWaterFacts(objectOr(v2.water), text),
+    trends: orNull(dropEmpty(Object.fromEntries(TREE_SHRUB_TRENDS.map(([name, key]) => [name, trendEnds(objectOr(v2.trends)[key])])))),
   });
 }
+
+// The landscape water card renders only with an explanation, and shows rain,
+// irrigation and the watering type (LandscapeWaterContextCard).
+function treeShrubWaterFacts(water, text) {
+  if (!water.explanation) return null;
+  return orNull(dropEmpty({
+    rain_this_week_inches: inchesOf(water.rainInches),
+    irrigation_inches: inchesOf(water.irrigationInches),
+    watering_type: cleanText(water.irrigationType),
+    status: water.status === 'unknown' ? null : cleanText(water.status),
+    explanation: text(water.explanation, 300),
+  }));
+}
+
+const TREE_SHRUB_TRENDS = [
+  ['overall_out_of_100', 'overall'], ['foliage_out_of_100', 'foliage'], ['color_out_of_100', 'color'],
+  ['pest_out_of_100', 'pest'], ['water_stress_out_of_100', 'water'],
+];
 
 function lawnLeadFacts(v2, text) {
   const lead = objectOr(v2.lead);
@@ -578,7 +593,7 @@ function lawnV2Facts(data = {}, keep = () => true) {
 }
 
 function buildReportAskFacts({
-  question = '', data = {}, nextAppointment = null, requiredLines = [], now = new Date(),
+  question = '', data = {}, requiredLines = [], now = new Date(),
 } = {}) {
   const keep = keeperFor(data);
   const allProducts = asArray(data.applications).map(productFacts).filter(Boolean);
@@ -653,7 +668,6 @@ function buildReportAskFacts({
     // fixed-rule re-entry answer carries it, so the AI must see it too.
     pet_precaution_today: petPrecautionFact(data, requiredLines),
     required_lines: cleanLines(requiredLines),
-    next_visit: nextVisitFact(nextAppointment),
     contact: `text us or call ${WAVES_SUPPORT_PHONE_DISPLAY}`,
   }));
 }
@@ -785,7 +799,13 @@ const PEST_TERMS = [
   'yellow jacket', 'silverfish', 'earwig', 'centipede', 'millipede', 'cricket', 'beetle', 'scorpion', 'rodent', 'mice',
   'mouse', 'rat', 'bed bug', 'chinch bug', 'grub', 'armyworm', 'webworm', 'mole cricket', 'whitefly', 'whiteflies', 'aphid',
   'mealybug', 'mite', 'caterpillar', 'fly', 'flies', 'moth', 'snail', 'slug', 'weevil', 'gnat', 'midge', 'no-see-um',
+  // Tree, shrub and turf pests (tree-shrub-tech-paragraph.js, landscape-calendar.js).
+  'thrip', 'thrips', 'scale', 'leafminer', 'leaf miner', 'lace bug', 'spittlebug', 'borer', 'sawfly', 'psyllid', 'bagworm',
+  'katydid', 'grasshopper', 'lubber', 'stink bug', 'palmetto bug', 'billbug', 'ground pearl', 'nematode', 'springtail',
+  'booklice', 'termite swarmer', 'carpenter ant', 'carpenter bee', 'mud dauber', 'paper wasp', 'lovebug', 'love bug',
 ].map((term) => stemmedTerms(term));
+// Any "-bug", "-worm", "-fly", "-miner" or "-borer" compound is a pest name too.
+const PEST_SHAPE_RE = /\b[a-z]+(?:bugs?|worms?|fl(?:y|ies)|miners?|borers?)\b/gi;
 
 function leaksTargetList(text, {
   question, data, facts, requiredLines,
@@ -799,7 +819,8 @@ function leaksTargetList(text, {
     .map((part) => (typeof part === 'string' ? part : JSON.stringify(part)))
     .join(' '));
   const said = stemmedTerms(text);
-  return [...targetLabelsOf(data), ...PEST_TERMS].some((label) => said.includes(label) && !allowed.includes(label));
+  const shaped = (text.match(PEST_SHAPE_RE) || []).map((term) => stemmedTerms(term));
+  return [...targetLabelsOf(data), ...PEST_TERMS, ...shaped].some((label) => said.includes(label) && !allowed.includes(label));
 }
 
 const splitSentences = (text) => text.split(/(?<=[.!?])\s+/).filter(Boolean);
@@ -844,12 +865,16 @@ const CONTENT_CHECKS = [
 // required line keeps its own date or time ("until Thu 3 PM"): only the
 // model's own words are checked.
 const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec';
-const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?(?:${MONTHS})|noon|midnight|o['’]?clock|half\\s+past|quarter\\s+(?:past|to)|(?:mon|tues|wednes|thurs|fri|satur|sun)day|\\d{4}-\\d{2}-\\d{2}|(?:[01]?\\d|2[0-3]):[0-5]\\d)\\b`, 'i');
+const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?(?:${MONTHS})|noon|midnight|o['’]?clock|half\\s+past|quarter\\s+(?:past|to)|\\d{1,2}-\\d{1,2}-\\d{2,4}|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\\s*(?:a\\.?m\\.?|p\\.?m\\.?|in\\s+the\\s+(?:morning|afternoon|evening))|(?:mon|tues|wednes|thurs|fri|satur|sun)day|\\d{4}-\\d{2}-\\d{2}|(?:[01]?\\d|2[0-3]):[0-5]\\d)\\b`, 'i');
 // Abbreviated weekdays only capitalized: a lowercase "sun" or "sat" is a word.
-// A month alone ("in February"), a spelled ordinal ("on the fifth") or a
-// relative day ("tomorrow", "next week") also states a schedule (Codex P1
-// #5964 r8). "This week" stays: rain and watering facts speak of it.
-const RELATIVE_DATE = /\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|next\s+(?:week|month|visit\s+on|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|the\s+(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\s-](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\s-]first))\b/i;
+// A month name alone ("January the 5th", "January fifth", "in February"), a
+// spelled ordinal ("on the fifth") or a relative day ("tomorrow", "next
+// week") also states a schedule (Codex P1 #6016 r9, #5964 r8). "This week"
+// stays: rain and watering facts speak of it. "May" is left out (a verb).
+const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]first)';
+// A spelled ordinal is a date only with time context ("on the fifth", "the
+// fifth of January"); "the first application" is report content.
+const RELATIVE_DATE = new RegExp(`\\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|next\\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:on|by|until|before|after)\\s+the\\s+${ORDINAL_WORDS}|the\\s+${ORDINAL_WORDS}\\s+of\\s+(?:the\\s+)?(?:month|${MONTHS}))\\b`, 'i');
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 function statesADate(text, { requiredLines }) {
@@ -858,44 +883,71 @@ function statesADate(text, { requiredLines }) {
 }
 
 // Every number the model writes itself must be a number the fact sheet holds,
-// and of the same kind: a score ("out of 100") must be a score fact and an
-// inch figure an inch fact, so "82 inches of rain" or "1.23 out of 100"
-// fails even though both numbers are on the sheet (Codex P1 #5964 r7-r8).
-// Required lines keep their own numbers.
+// of the same kind and for the same measurement: a score ("out of 100") must
+// be a score fact, an inch figure an inch fact, and a sentence that names
+// rain, irrigation, mowing or a score area must match that fact ("3.5 inches
+// of rain" fails when 3.5 is the mowing height). A number word before a unit
+// or the score scale counts too ("ninety-five out of 100"); "one product" is prose (Codex P1 #5964 r7-r9). Required lines
+// keep their own numbers.
 const NUMBER_RE = /\d+(?:\.\d+)?/g;
 const NUMBER_KINDS = [
   ['score', /^\s*(?:out\s+of\s+100|points?\b|\/\s*100)/i, /out_of_100|score/],
   ['inches', /^\s*(?:inch(?:es)?\b|in\.(?!\w)|["”])/i, /inches/],
 ];
+// Words in the sentence that name one measurement, and the fact keys it may
+// match. A sentence that names none may match any fact of the kind.
+const MEASUREMENTS = [
+  [/\brain\w*/i, /rain/],
+  [/\birrigat\w*|\bsprinkler/i, /irrigation/],
+  [/\bmow\w*|\bheight\b|\bcut\b/i, /mowing|height/],
+  [/\btotal\b/i, /total/],
+  [/\btarget\b|\bgoal\b/i, /target/],
+  [/\bdensity\b|\bthick\w*|\bcoverage\b|\bfoliage\b|\bfull\w*/i, /density|foliage|coverage/],
+  [/\bweeds?\b/i, /weed/],
+  [/\bcolou?r\b/i, /color/],
+  [/\bstress\b|\bdamage\b/i, /stress|damage/],
+  [/\bpests?\b|\binsects?\b/i, /pest/],
+  [/\boverall\b|\bhealth\b/i, /overall|plant_health/],
+];
+const SMALL_NUMBERS = 'zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen'.split(' ');
+const TENS = 'twenty thirty forty fifty sixty seventy eighty ninety'.split(' ');
+const NUMBER_WORD_RE = new RegExp(`\\b(?:(${TENS.join('|')})(?:[\\s-](${SMALL_NUMBERS.slice(1, 10).join('|')}))?|(${SMALL_NUMBERS.join('|')})|(a\\s+hundred|one\\s+hundred))\\b(?=\\s*(?:inch|in\\.|["”]|out\\s+of\\s+100|points?\\b|\\/\\s*100))`, 'gi');
+function digitsForWords(text) {
+  return text.replace(NUMBER_WORD_RE, (_m, tens, unit, small, hundred) => {
+    if (hundred) return '100';
+    if (small) return String(SMALL_NUMBERS.indexOf(small.toLowerCase()));
+    return String((TENS.indexOf(tens.toLowerCase()) + 2) * 10 + (unit ? SMALL_NUMBERS.indexOf(unit.toLowerCase()) : 0));
+  });
+}
 
-function factNumbers(value, key = '', out = { any: new Set(), score: new Set(), inches: new Set() }) {
-  if (typeof value === 'number') {
-    out.any.add(value);
-    for (const [kind, , keyRe] of NUMBER_KINDS) if (keyRe.test(key)) out[kind].add(value);
-  } else if (typeof value === 'string') {
-    for (const n of value.match(NUMBER_RE) || []) out.any.add(Number(n));
-  } else if (Array.isArray(value)) {
-    value.forEach((item) => factNumbers(item, key, out));
-  } else if (value && typeof value === 'object') {
-    // A trend's from/to values belong to their series key.
-    Object.entries(value).forEach(([child, item]) => factNumbers(item, /^(?:from|to|value|days|inches)$/.test(child) ? `${key}.${child}` : child, out));
-  }
+// Every number leaf of the sheet with the key path it sits under.
+function factNumbers(value, key = '', out = []) {
+  if (typeof value === 'number') out.push({ value, key });
+  else if (typeof value === 'string') for (const n of value.match(NUMBER_RE) || []) out.push({ value: Number(n), key: '' });
+  else if (Array.isArray(value)) value.forEach((item) => factNumbers(item, key, out));
+  else if (value && typeof value === 'object') Object.entries(value).forEach(([child, item]) => factNumbers(item, `${key}.${child}`, out));
   return out;
 }
 
+function numberIsKnown(value, after, sentence, known) {
+  const kind = NUMBER_KINDS.find(([, unitRe]) => unitRe.test(after));
+  const named = MEASUREMENTS.filter(([wordRe]) => wordRe.test(sentence)).map(([, keyRe]) => keyRe);
+  return known.some((fact) => fact.value === value
+    && (!kind || kind[2].test(fact.key))
+    && (!kind || !named.length || named.some((keyRe) => keyRe.test(fact.key))));
+}
+
 function statesUnknownNumber(text, { facts, requiredLines }) {
-  const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text));
-  const said = [...own.matchAll(NUMBER_RE)];
-  if (!said.length) return false;
+  const own = digitsForWords(requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text)));
+  if (!NUMBER_RE.test(own)) return false;
+  NUMBER_RE.lastIndex = 0;
   const known = factNumbers([facts || {}, requiredLines]);
-  return said.some((m) => {
+  return splitSentences(own).some((sentence) => [...sentence.matchAll(NUMBER_RE)].some((m) => {
     const value = Number(m[0]);
-    const after = own.slice(m.index + m[0].length);
     // "out of 100" names the scale, not a value.
-    if (value === 100 && /out\s+of\s*$/i.test(own.slice(0, m.index))) return false;
-    const kind = NUMBER_KINDS.find(([, unitRe]) => unitRe.test(after));
-    return !(kind ? known[kind[0]] : known.any).has(value);
-  });
+    if (value === 100 && /out\s+of\s*$/i.test(sentence.slice(0, m.index))) return false;
+    return !numberIsKnown(value, sentence.slice(m.index + m[0].length), sentence, known);
+  }));
 }
 
 // A sentence just before a required line that takes it back. The answer must
@@ -1029,7 +1081,7 @@ const EXPOSURE_SAFETY_LINE = `If anyone or a pet was exposed or feels unwell, ca
 const SPRAY_WORD = /\bspray(?:ed|ing|s)?\b/i;
 const BODY_PARTS = '(?:eyes?|skin|mouth|face|hands?|fingers?|arms?|legs?|feet|foot|toes?|back|side|neck|head|hair|ears?|nose|lips?|throat|chest|stomach|belly|body|shoulders?|knees?|ankles?|wrists?|clothes|clothing|paws?|fur)';
 // "Me" and "us" after a request verb ("tell me", "text us") name no one exposed.
-const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|relatives?|cousins?|coworkers?|co-workers?|colleagues?|aunts?|uncles?|nanny|nannies|babysitters?|visitors?|workers?|landlords?|animals?|snakes?|reptiles?|rabbits?|bunny|bunnies|pigs?|cows?|horses?|livestock|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you)\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b|\\bsprayed\\s+(?:on\\s+|at\\s+)?(?:you|yourself)\\b`, 'i');
+const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}|myself|him|himself|her|herself|them|themselves|roommates?|partners?|tenants?|people|person|someone|anyone|everyone|kid|family|relatives?|cousins?|coworkers?|co-workers?|colleagues?|aunts?|uncles?|nanny|nannies|babysitters?|visitors?|workers?|landlords?|animals?|snakes?|reptiles?|rabbits?|bunny|bunnies|pigs?|cows?|horses?|livestock|hamsters?|guinea\\s+pigs?|parrots?|chickens?|goats?|ferrets?|turtles?|tortoises?|lizards?|fish)\\b|\\b(?:i|we|he|she|you)(?:['’](?:ve|s|re|m|d))?\\s+(?:\\w+\\s+)?(?:got|get|gets|was|were|been)\\s+(?:\\w+\\s+)?sprayed\\b|(?<!\\b(?:tell|show|let|give|send|text|call|email|remind|help|ask)\\s)\\b(?:me|us)\\b|\\bsprayed\\s+(?:on\\s+|at\\s+)?(?:you|yourself)\\b`, 'i');
 
 /**
  * The fixed answer when the question reports a symptom or an exposure, else
@@ -1046,6 +1098,8 @@ function medicalExposureAnswer(question) {
  */
 function exposureSafetyLine(question) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
+  // A symptom question gets the full fixed answer instead (medicalExposureAnswer).
+  if (MEDICAL_CUES.some((cue) => cue.test(text))) return null;
   return SPRAY_WORD.test(text) && EXPOSED_SOMEONE.test(text) ? EXPOSURE_SAFETY_LINE : null;
 }
 
@@ -1063,6 +1117,13 @@ function defaultCallModel(payload, options) {
 // companion sections) that the fact sheet does not reproduce, so the AI could
 // state something the page does not. Narrowed on purpose (owner/lead
 // 2026-10-05) until a line's facts are proven equal to what its page shows.
+// A schedule question the rule router left unrouted ("when are you coming
+// again?") keeps the rule answer too (Codex P1 #6016 r9).
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+function asksAboutSchedule(question) {
+  return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
+}
+
 const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 
 // The reason a question keeps the fixed-rule answer with no model call, or
@@ -1070,11 +1131,12 @@ const AI_SERVICE_LINES = new Set(['pest', 'lawn', 'tree_shrub']);
 // recommendation, the primary move, a finding's recommendation) must be
 // repeated word for word, and a customer's name in prose cannot be detected,
 // so it never reaches the model.
-function ruleAnswerReason(data = {}, requiredLines = [], topic = null) {
+function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question = '') {
   if (!AI_SERVICE_LINES.has(data.serviceLine)) return 'service_line';
   // The rule answer states the scheduled date and window exactly; an AI
-  // answer states no date (Codex P1s on #6020 and #5964).
-  if (topic === 'next_visit') return 'next_visit';
+  // answer states no date and the fact sheet carries no appointment (Codex
+  // P1s on #6020, #5964 and #6016).
+  if (topic === 'next_visit' || asksAboutSchedule(question)) return 'next_visit';
   if (data.typedReport) return 'typed_report';
   if (asArray(data.companionReports).some((companion) => companion && companion.internalOnly !== true)) return 'companion_reports';
   if (asArray(requiredLines).some((line) => line?.source !== 'system')) return 'technician_line';
@@ -1097,7 +1159,7 @@ async function answerReportQuestionWithAI({
   const urgent = medicalExposureAnswer(question);
   if (urgent) return { answer: urgent, provider: null, model: null };
   try {
-    const skipped = ruleAnswerReason(data, rawRequiredLines, topic);
+    const skipped = ruleAnswerReason(data, rawRequiredLines, topic, question);
     if (skipped) {
       logger.info(`[report-ask] fixed-rule answer (${skipped}); no model call`);
       return null;
@@ -1179,5 +1241,6 @@ module.exports = {
   EXPOSURE_SAFETY_LINE,
   placeOfApplication,
   ruleAnswerReason,
+  asksAboutSchedule,
   answerReportQuestionWithAI,
 };

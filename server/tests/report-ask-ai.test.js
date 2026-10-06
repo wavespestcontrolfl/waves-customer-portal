@@ -230,7 +230,8 @@ describe('buildReportAskFacts', () => {
     expect(facts.report_sections).toHaveLength(2);
     expect(facts.weather_during_visit).toBe('about 86°F, wind about 6 mph, no rain in the last 24 hours');
     expect(facts.pest_pressure).toEqual({ label: 'Low', trend: 'improving', score_out_of_5: null, what_it_means: null, trend_summary: null });
-    expect(facts.next_visit).toEqual({ service: 'Quarterly Pest Control', date: 'Tuesday, January 5, 2027', arrival_window: 'between 9:00 AM and 11:00 AM' });
+    // No appointment reaches the model: next-visit questions keep the rule answer.
+    expect(facts.next_visit).toBeUndefined();
     expect(facts.reentry).toEqual([{ area: 'outside', status: 'dry time has passed' }]);
   });
 
@@ -326,7 +327,7 @@ describe('buildReportAskPrompt', () => {
     expect(user).toContain('Waves Pest Control');
     expect(user).toContain(WAVES_SUPPORT_PHONE_DISPLAY);
     expect(user).toContain('Friday, October 2, 2026');
-    expect(user).toContain('Tuesday, January 5, 2027');
+    expect(user).not.toContain('January 5, 2027');
     expect(user).toContain('Alpine WSG');
   });
 
@@ -572,6 +573,20 @@ describe('GATE_REPORT_ASK_AI', () => {
   });
 });
 
+describe('schedule questions keep the rule answer', () => {
+  const { asksAboutSchedule } = require('../services/service-report/report-ask-ai');
+  test.each([
+    'When are you returning?', 'When will the technician return?', 'When are you coming again?',
+    'Can I reschedule?', 'When is my next appointment?',
+  
+  ])('schedule: %s', (question) => {
+    expect(asksAboutSchedule(question)).toBe(true);
+  });
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Will the ants return?', 'Will roaches return after treatment?', 'When can my dog go back outside?'])('not schedule: %s', (question) => {
+    expect(asksAboutSchedule(question)).toBe(false);
+  });
+});
+
 describe('symptoms and exposure never reach the model', () => {
   test.each([
     'The spray made me dizzy',
@@ -618,6 +633,16 @@ describe('symptoms and exposure never reach the model', () => {
     'You sprayed my arm and hand',
     'What was sprayed on the arm chair?',
     'Can my dog go out after the spray?',
+    'The technician sprayed her',
+    'She was sprayed',
+    'You got sprayed',
+    'The technician sprayed you',
+    'The technician sprayed my cousin',
+    'You sprayed my coworker',
+    'My snake was sprayed',
+    "I've been sprayed",
+    "We've been sprayed",
+    "She's been sprayed",
   ])('a safety line before the answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
     expect(exposureSafetyLine(question)).toBe(EXPOSURE_SAFETY_LINE);
@@ -757,13 +782,14 @@ describe('scripts/dev/report-ask-prompt.js', () => {
   test('a bare report and a wrapped one read the same camelCase nextAppointment', () => {
     const bare = run({ serviceLine: 'pest', applications: [], nextAppointment: camel });
     const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: camel });
-    expect(bare.user).toContain('Tuesday, January 5, 2027');
+    // The prompt carries no appointment (next-visit questions keep the rule answer).
+    expect(bare.user).not.toContain('January 5, 2027');
     expect(wrapped.user).toBe(bare.user);
   });
 
   test('a wrapped route-shaped (snake_case) appointment still works', () => {
     const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: { service_type: 'Quarterly Pest Control', scheduled_date: '2027-01-05', window_start: '09:00:00' } });
-    expect(wrapped.user).toContain('Tuesday, January 5, 2027');
+    expect(wrapped.user).not.toContain('January 5, 2027');
   });
 });
 
