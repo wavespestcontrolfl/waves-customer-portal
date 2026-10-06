@@ -185,6 +185,7 @@ class Cast {
     const cleanups = this.cleanups.slice().reverse();
     for (let i = 0; i < cleanups.length; i += 1) await step(`registered cleanup ${i + 1}`, () => cleanups[i](this.db, failed));
     if (this.customers.length) await step('billing rows', () => removeBillingRows(this.db, this.customers, failed));
+    if (this.customers.length) await step('held send rows', () => removeHeldSendRows(this.db, this.customers));
     if (this.customers.length) {
       // Bookings made during the case must not crowd the next case's calendar.
       await step('cancel bookings', () => this.db('scheduled_services').whereIn('customer_id', this.customers).whereNotIn('status', ['cancelled', 'completed']).update({ status: 'cancelled', cancelled_at: now }));
@@ -214,6 +215,14 @@ async function removeBillingRows(db, customerIds, failed = []) {
   await step(() => db('estimates').whereIn('customer_id', customerIds).del());
 }
 
+/**
+ * The reservation row the bar holds for a send whose provider outcome is unknown (W7-dev-05) blocks a repeat of the same text to the same
+ * number for 24 hours. Fixture phones are reused across runs, so it is removed outright with the cast that made it.
+ */
+async function removeHeldSendRows(db, customerIds) {
+  await db('sms_log').whereIn('customer_id', customerIds).whereRaw("metadata->>'manual_wrapper_reservation' = 'true'").del();
+}
+
 /** Stock products, their requests and movements, removed outright (the catalog is searched by name and is not filtered by active). */
 async function removeStockRows(db, productIds, failed = []) {
   const step = (fn) => Promise.resolve().then(fn).catch((err) => { failed.push({ step: 'stock row delete', error: String(err && err.message || err).split('\n')[0].slice(0, 160) }); });
@@ -232,6 +241,7 @@ async function sweepStale(db, keepTechnicianIds = []) {
   if (staleIds.length) await db('newsletter_subscribers').whereIn('customer_id', staleIds).del();
   await db('newsletter_subscribers').where({ email: 'murphy.test@example.invalid' }).del();
   if (staleIds.length) await removeBillingRows(db, staleIds);
+  if (staleIds.length) await removeHeldSendRows(db, staleIds);
   const staleProducts = (await db('products_catalog').where('sku', 'like', `${STOCK_SKU_PREFIX}%`).select('id')).map((r) => r.id);
   if (staleProducts.length) await removeStockRows(db, staleProducts);
   await db('scheduled_services').whereIn('customer_id', stale).whereNotIn('status', ['cancelled', 'completed']).update({ status: 'cancelled', cancelled_at: now });

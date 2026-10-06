@@ -96,6 +96,7 @@ jest.mock('../services/intelligence-bar/review-tools', () => ({
 jest.mock('../services/intelligence-bar/comms-tools', () => ({
   COMMS_TOOLS: [], COMMS_READ_TOOLS: [], executeCommsTool: jest.fn(),
   resolveCustomer: (...args) => mockResolveCommsCustomer(...args),
+  sendSmsProposalRefusal: jest.fn(async () => null),
 }));
 jest.mock('../services/intelligence-bar/tax-tools', () => ({ TAX_TOOLS: [], executeTaxTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/leads-tools', () => ({

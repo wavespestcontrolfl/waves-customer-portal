@@ -786,21 +786,14 @@
       "contract_calls": 1
     },
     "W6-dev-09": {
-      "outcome": "fail",
-      "point": "proposal",
-      "code": "card_shown_for_a_send_that_will_be_blocked",
-      "failures": [
-        {
-          "point": "proposal",
-          "code": "card_shown_for_a_send_that_will_be_blocked",
-          "detail": "the notice card was offered although the number is opted out"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 3113
+        "first_tool_result_ms": 54,
+        "verified_completion_ms": 3239
       },
       "notes": [
+        "send_sms: SMS_OPTED_OUT: Recipient has opted out of SMS (sms_enabled=false on notification_prefs)",
         "undeclared send_sms allowed: the notice to an opted-out number, which must be blocked"
       ],
       "strength": null,
@@ -908,55 +901,27 @@
       "contract_calls": 1
     },
     "W7-dev-05": {
-      "outcome": "fail",
-      "point": "receipt",
-      "code": "unknown_outcome_not_recorded",
-      "failures": [
-        {
-          "point": "receipt",
-          "code": "unknown_outcome_not_recorded",
-          "detail": "confirm 200 {\"success\":false,\"outcome\":\"blocked\",\"tool\":\"send_sms\",\"result\":{\"success\":false,\"error\":\"The carrier did not confirm this text. It may still go out; check the thread and do not retry it.\",\"blocked\":true,\"code\":\"PROVIDER_FAILURE\",\"mayHaveSe"
-        },
-        {
-          "point": "receipt",
-          "code": "unknown_outcome_retry_allowed",
-          "detail": "receipt {\"id\":\"ebb3cde0-7a8f-46c0-b603-72a464c0eb00\",\"tool\":\"send_sms\",\"outcome\":\"blocked\",\"summary\":\"send_sms — customer_id: f9582d8a-b364-4c3b-8047-46f3782af585, message: We will be there Tuesday at 9., mes"
-        },
-        {
-          "point": "recovery",
-          "code": "resend_before_reconciliation",
-          "detail": "1 further provider submissions and 1 further accepted audit rows while the first outcome was unknown"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_send_count_not_declared",
-          "detail": "2 provider submissions, the manifest declares exactly 1"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 12,
-        "verified_completion_ms": 49
+        "first_tool_result_ms": 55,
+        "verified_completion_ms": 156
       },
-      "notes": [],
+      "notes": [
+        "send_sms: SMS_PRIOR_OUTCOME_UNRECONCILED: An earlier text to this customer with the same message may already have gone out: its delivery was never confirmed and is still being reconc"
+      ],
       "strength": null,
       "contract_calls": 1
     },
     "W7-dev-06": {
-      "outcome": "fail",
-      "point": "proposal",
-      "code": "card_shown_for_a_send_that_will_be_blocked",
-      "failures": [
-        {
-          "point": "proposal",
-          "code": "card_shown_for_a_send_that_will_be_blocked",
-          "detail": "a send card was offered for a number with STOP on file"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 7,
-        "verified_completion_ms": 1544
+        "first_tool_result_ms": 25,
+        "verified_completion_ms": 1569
       },
       "notes": [
+        "send_sms: SMS_OPTED_OUT: Recipient has opted out of SMS (sms_enabled=false on notification_prefs)",
         "undeclared send_sms allowed: the send to a number with STOP on file, which must be blocked"
       ],
       "strength": null,

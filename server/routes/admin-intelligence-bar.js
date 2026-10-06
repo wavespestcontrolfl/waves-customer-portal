@@ -33,7 +33,7 @@ const { PROCUREMENT_TOOLS, executeProcurementTool } = require('../services/intel
 const { REVENUE_TOOLS, executeRevenueTool } = require('../services/intelligence-bar/revenue-tools');
 const { TECH_TOOLS, executeTechTool } = require('../services/intelligence-bar/tech-tools');
 const { REVIEW_TOOLS, executeReviewTool } = require('../services/intelligence-bar/review-tools');
-const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer } = require('../services/intelligence-bar/comms-tools');
+const { COMMS_TOOLS, COMMS_READ_TOOLS = [], executeCommsTool, resolveCustomer: resolveCommsCustomer, sendSmsProposalRefusal } = require('../services/intelligence-bar/comms-tools');
 const { TAX_TOOLS, executeTaxTool } = require('../services/intelligence-bar/tax-tools');
 const { LEADS_TOOLS, executeLeadsTool, resolveLeadForUpdate, previewBulkLeadUpdate, BULK_LEAD_UPDATE_CAP = 500 } = require('../services/intelligence-bar/leads-tools');
 const { EMAIL_TOOLS, EMAIL_SHARED_TOOLS = [], executeEmailTool } = require('../services/intelligence-bar/email-tools');
@@ -1171,6 +1171,12 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
           phone_last4: (customer.phone || '').replace(/\D/g, '').slice(-4) || null,
         },
       };
+      // No card for a text that cannot go out: an opted-out or suppressed number,
+      // or a repeat of a text whose provider outcome is still unknown. The
+      // refusal carries the send tool's own wording; the execution-time check
+      // stays (a customer can opt out between the card and the confirm).
+      const sendRefusal = await sendSmsProposalRefusal(params);
+      if (sendRefusal) return { failed: true, modelResult: sendRefusal };
     }
     if (toolUse.name === 'create_appointment' && (params.technician_id || params.technician_name)) {
       // Pin the technician like send_sms pins the recipient: resolution

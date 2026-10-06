@@ -33,6 +33,9 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 // own cancel uses, so this tool can never bypass it with a bare status flip).
 const { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE, SIMPLE_SMS_META_KEYS } = require('../scheduled-sms-cancel');
 const { isDeferredReplayEntryPoint } = require('../messaging/deferred-replay-registry');
+// An unknown provider outcome is held on a durable row so a repeat of the same
+// text is refused until it is reconciled (sms-outcome-guard.js).
+const { findUnreconciledSend, recordUnreconciledSend, unreconciledRefusal } = require('./sms-outcome-guard');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -313,12 +316,20 @@ async function executeCommsTool(toolName, input, actionContext = {}) {
   }
 }
 
+// This send's provider outcome is UNKNOWN: report it as unknown (outcome_unknown
+// is what executionOutcome reads), never as a blocked send, and forbid a retry.
+// The one exception is the wrapper's own interlock refusing THIS attempt because
+// an earlier text on the thread is unresolved: that is a refusal (blocked), the
+// unknown outcome belongs to the earlier text.
+const INTERLOCK_REFUSAL_CODE = 'MANUAL_REPLY_OUTCOME_UNRESOLVED';
+
 function uncertainManualSmsResponse(outcome) {
+  const code = outcome?.code || 'SMS_DELIVERY_UNCERTAIN';
   return {
     success: false,
     error: 'The carrier did not confirm this text. It may still go out; check the thread and do not retry it.',
-    blocked: true,
-    code: outcome?.code || 'SMS_DELIVERY_UNCERTAIN',
+    ...(code === INTERLOCK_REFUSAL_CODE ? { blocked: true } : { outcome_unknown: true }),
+    code,
     mayHaveSent: true,
     retry: false,
     retryable: false,
@@ -1313,10 +1324,19 @@ async function sendSms(input) {
 
   if (!phone) return { error: 'No phone number' };
 
+  // An earlier text with these exact words whose provider outcome was never
+  // confirmed may already be on the customer's phone: refuse a repeat until it
+  // is reconciled. Checked here as well as at the proposal because a second card
+  // can be pending, or the first outcome can turn unknown after the card.
+  if (await findUnreconciledSend({ phone, body: message })) {
+    return unreconciledRefusal({ sent_to: phone, customer: customerName });
+  }
+
   // Routed through the customer-message middleware. This is Virginia's
   // daily-driver send path, so the validators apply consistently:
   // suppression list, sms_enabled, no customer-emoji, segment metadata.
   // Operator messages still need to follow the customer voice rules.
+  const holdUnknownOutcome = () => recordUnreconciledSend({ phone, customerId: custId || null, body: message });
   const result = await sendManualCustomerSms({
     to: phone,
     body: message,
@@ -1342,9 +1362,15 @@ async function sendSms(input) {
       original_message_type: message_type,
       adminUserId: 'intelligence_bar',
     },
+  }).catch(async (err) => {
+    // A thrown unknown outcome is held like a returned one; executeCommsTool
+    // turns the throw into the same unknown response.
+    if (isUncertainManualSmsOutcome(err) && err?.code !== INTERLOCK_REFUSAL_CODE) await holdUnknownOutcome();
+    throw err;
   });
 
   if (isUncertainManualSmsOutcome(result)) {
+    if (result?.code !== INTERLOCK_REFUSAL_CODE) await holdUnknownOutcome();
     return uncertainManualSmsResponse(result);
   }
 
@@ -1371,11 +1397,17 @@ async function sendSms(input) {
   // failure) and /execute success is `!result.error`. Without an explicit
   // error field, blocked sends would be reported as successful tool
   // executions at the API layer.
-  // CHANNEL_EMAIL_ONLY on a billing reminder is a REDIRECT, not a dead end:
-  // the operator is the email fallback on this manual path (DECISIONS
-  // round-4 ruling) — spell out the next step so the model relays it as an
-  // instruction rather than a generic failure.
-  const actionableError = result.code === 'CHANNEL_EMAIL_ONLY' && message_type === 'billing_reminder'
+  return blockedSmsResponse(result, { messageType: message_type, phone, customerName });
+}
+
+// The refusal a blocked send returns. Shared by the execution-time block and the
+// proposal-time refusal, so the operator reads the same words at both points.
+// CHANNEL_EMAIL_ONLY on a billing reminder is a REDIRECT, not a dead end:
+// the operator is the email fallback on this manual path (DECISIONS
+// round-4 ruling) — spell out the next step so the model relays it as an
+// instruction rather than a generic failure.
+function blockedSmsResponse(result, { messageType, phone, customerName }) {
+  const actionableError = result.code === 'CHANNEL_EMAIL_ONLY' && messageType === 'billing_reminder'
     ? 'This customer has Billing Reminder Delivery set to EMAIL — the text was not sent. Send this reminder to their billing/account email instead.'
     : null;
   return {
@@ -1387,6 +1419,63 @@ async function sendSms(input) {
     sent_to: phone,
     customer: customerName,
   };
+}
+
+// Lookup failures are transient, not a refusal: the card may still be offered and
+// the execution-time check decides.
+const TRANSIENT_CONSENT_CODES = new Set(['CONSENT_LOOKUP_FAILED', 'SUPPRESSION_LOOKUP_FAILED']);
+
+/**
+ * Would the send path refuse this text for consent or suppression (opted out,
+ * STOP or wrong-number on file, do-not-contact)? Asks the validators the send
+ * pipeline asks, on the input sendSms builds, and sends nothing. Null = not
+ * refused (or could not tell: the execution-time check still stands).
+ */
+async function smsConsentVerdict({ customerId, phone, message, messageType }) {
+  try {
+    const { loadContactState, checkConsentForPurpose } = require('../messaging/validators/consent');
+    const { loadSuppressionState, checkSuppression } = require('../messaging/validators/suppression');
+    const { resolvePolicy } = require('../messaging/policy');
+    const purpose = mapCommsMessageTypeToPurpose(messageType);
+    const input = {
+      audience: 'customer', channel: 'sms', purpose, customerId, to: phone, body: message,
+      hasEmailLeg: messageType === 'billing_reminder' ? true : undefined,
+      metadata: { original_message_type: messageType, adminUserId: 'intelligence_bar' },
+    };
+    const policy = resolvePolicy('customer', purpose);
+    let state = await loadContactState(input);
+    state = await loadSuppressionState(input, state);
+    for (const check of [checkSuppression, checkConsentForPurpose]) {
+      const verdict = await check(input, policy, state);
+      if (!verdict.ok) return TRANSIENT_CONSENT_CODES.has(verdict.code) ? null : { ...verdict, blocked: true };
+    }
+    return null;
+  } catch (err) {
+    logger.warn(`[intelligence-bar:comms] proposal consent check unavailable (code=${err.code || 'unknown'})`);
+    return null;
+  }
+}
+
+/**
+ * Proposal-time refusal for send_sms, so no card is offered for a text that
+ * cannot go out: an opted-out or suppressed number (the same wording the
+ * execution-time block uses) or a repeat of a text whose outcome is still
+ * unknown. Takes the pinned proposal params (customer_id and phone set by the
+ * route). Null = the card may be offered. A phone-only send has no customer to
+ * read consent for here and is left to the execution-time block.
+ */
+async function sendSmsProposalRefusal(params = {}) {
+  const customerId = params.customer_id;
+  const phone = params.phone;
+  const messageType = params.message_type || 'manual';
+  if (!customerId || !phone || !params.message) return null;
+  const verdict = await smsConsentVerdict({ customerId, phone, message: params.message, messageType });
+  const customerName = params.customer_name || null;
+  if (verdict) return blockedSmsResponse(verdict, { messageType, phone, customerName });
+  if (await findUnreconciledSend({ phone, body: params.message })) {
+    return unreconciledRefusal({ sent_to: phone, customer: customerName });
+  }
+  return null;
 }
 
 
@@ -1798,4 +1887,4 @@ async function getPartnerCallHistory(input = {}) {
   };
 }
 
-module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool, resolveCustomer };
+module.exports = { COMMS_TOOLS, COMMS_READ_TOOLS, executeCommsTool, resolveCustomer, sendSmsProposalRefusal };

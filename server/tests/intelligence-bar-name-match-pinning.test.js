@@ -159,12 +159,14 @@ describe('resolveCustomer (comms)', () => {
 
     expect(result).toMatchObject({
       success: false,
-      blocked: true,
+      outcome_unknown: true,
       code: 'PROVIDER_OUTCOME_UNCERTAIN',
       mayHaveSent: true,
       retry: false,
       retryable: false,
     });
+    // Unknown, not blocked: the text may have gone out.
+    expect(result.blocked).toBeUndefined();
     expect(result.error).toMatch(/do not retry/i);
   });
 
@@ -181,12 +183,14 @@ describe('resolveCustomer (comms)', () => {
 
     expect(result).toMatchObject({
       success: false,
-      blocked: true,
+      outcome_unknown: true,
       code: 'SMS_DELIVERY_UNCERTAIN',
       mayHaveSent: true,
       retry: false,
       retryable: false,
     });
+    // Unknown, not blocked: the text may have gone out.
+    expect(result.blocked).toBeUndefined();
     expect(result.error).toMatch(/do not retry/i);
   });
 
