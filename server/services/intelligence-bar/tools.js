@@ -2299,9 +2299,10 @@ async function updatePropertyAccess(input) {
         throw err;
       }
       if (Object.keys(plan.updates).length) {
-        // Stamped after both locks (the advisory lock and the row lock in the
-        // plan): readers compare it with their own snapshot time.
-        const now = new Date();
+        // Stamped by the database clock as the row is written (after any lock
+        // or insert-conflict wait): readers compare it with their own
+        // snapshot time.
+        const now = trx.raw('clock_timestamp()');
         await trx('property_preferences')
           .insert({ customer_id: customerId, ...plan.updates, updated_at: now })
           .onConflict('customer_id')

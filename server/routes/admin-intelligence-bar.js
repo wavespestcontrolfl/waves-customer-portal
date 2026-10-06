@@ -895,6 +895,16 @@ const VERIFIED_VERSION_PARAMS = {
 };
 
 function confirmationDisplayParams(toolName, params, preview) {
+  // The card shows what the plan will save (a note as the line it adds; a
+  // property code that is the community code is left out) and what it will
+  // not, never the raw request.
+  if (toolName === 'update_property_access' && preview?.preview === true) {
+    return {
+      customer: preview.customer_name || params.customer_id,
+      ...(preview.would_update || {}),
+      ...(preview.kept?.length ? { not_saved_or_changed: preview.kept.join('; ') } : {}),
+    };
+  }
   if (toolName === 'cancel_plan' && preview?.preview === true) {
     // The card must show everything the commit will do: who, what scope,
     // the visits coming off, the money, the effective date, whether the
