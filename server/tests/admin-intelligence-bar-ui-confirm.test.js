@@ -1195,9 +1195,9 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
   test('create_appointment on a taken time names the visit that holds it; the _booking_overlap pin stays a plain boolean', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
     mockIbBookingOverlapProposal.mockResolvedValueOnce(true);
-    mockIbBookingOverlapWho.mockResolvedValueOnce([{ id: 'visit-beta', customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM' }]);
+    mockIbBookingOverlapWho.mockResolvedValueOnce([{ id: 'visit-beta', customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM', fact: 'visit-beta|Testa Beta|Lawn Care|2099-01-05|10:00 AM-11:00 AM' }]);
     scriptModelTurns([
-      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM', _booking_overlap_ids: ['forged'] } }],
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM', _booking_overlap_facts: ['forged'] } }],
       [{ type: 'text', text: 'Proposed.' }],
     ]);
 
@@ -1205,8 +1205,8 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       const { body } = await postQuery(baseUrl, { prompt: 'book pest at 10', context: 'schedule' });
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._booking_overlap).toBe(true);
-      // The visit the card names is pinned by id; a model-supplied pin never survives.
-      expect(stored.params._booking_overlap_ids).toEqual(['visit-beta']);
+      // What the card shows about the visit is pinned; a model-supplied pin never survives.
+      expect(stored.params._booking_overlap_facts).toEqual(['visit-beta|Testa Beta|Lawn Care|2099-01-05|10:00 AM-11:00 AM']);
       expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
       const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
       expect(labels).toContain('Another visit is at this time: Testa Beta, Lawn Care, 10:00 AM-11:00 AM. Both stay on the calendar.');

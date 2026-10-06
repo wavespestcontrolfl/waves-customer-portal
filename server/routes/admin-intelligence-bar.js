@@ -895,6 +895,17 @@ const VERIFIED_VERSION_PARAMS = {
   resend_receipt: '_verified_receipt_version',
 };
 
+// The overlapping visits a booking card names, or [] when the lookup fails
+// (the plain line shows and only the boolean pin applies).
+async function bookingOverlapWithBestEffort(params) {
+  try {
+    return await ibBookingOverlapWho(params.scheduled_date, params.time_window);
+  } catch (err) {
+    logger.warn(`[intelligence-bar] booking overlap names unavailable: ${err.message}`);
+    return [];
+  }
+}
+
 // "Thursday, Oct 9, morning" for the booking card (display only). A date or
 // window that does not parse shows as typed, never dropped.
 function bookingWhenLabel(scheduledDate, timeWindow) {
@@ -1404,30 +1415,21 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       }
       if (overlapNow == null) delete params._booking_overlap;
       else params._booking_overlap = overlapNow;
-      // The visits the card names are pinned by id (set below); a
-      // model-supplied value can never stand in for it.
-      delete params._booking_overlap_ids;
+      // What the card shows about each overlapping visit is pinned (set
+      // below); a model-supplied value can never stand in for it.
+      delete params._booking_overlap_facts;
       // Who the overlapping visit is, for the card line only. Best effort:
       // a lookup that fails leaves the plain line; the _booking_overlap pin
       // above is the boolean the executor compares and is never changed here.
-      let overlapWith = [];
-      if (overlapNow) {
-        try {
-          overlapWith = await ibBookingOverlapWho(params.scheduled_date, params.time_window);
-          // Pin the ids the card names: the executor refuses an overlapping
-          // visit outside this set as a new overlap (fresh card). No ids (a
-          // failed lookup or an overlap gone by now) keeps the boolean pin.
-          const overlapIds = overlapWith.map((v) => v.id).filter(Boolean).sort();
-          if (overlapIds.length) params._booking_overlap_ids = overlapIds;
-          overlapWith = overlapWith.map(({ id: _id, ...shownVisit }) => shownVisit);
-        } catch (err) {
-          logger.warn(`[intelligence-bar] booking overlap names unavailable: ${err.message}`);
-          overlapWith = [];
-        }
-      }
+      const overlapWith = overlapNow ? await bookingOverlapWithBestEffort(params) : [];
+      // Pin the facts the card names: the executor refuses an overlapping
+      // visit outside this set, or one whose shown facts changed, as a new
+      // overlap (fresh card). Nothing pinned (a failed lookup or an overlap
+      // gone by now) keeps the boolean pin.
+      if (overlapWith.length) params._booking_overlap_facts = overlapWith.map((v) => v.fact).sort();
       preview = {
         ...preview,
-        ...(overlapNow ? { slot_overlap: { already_overlaps: true, ...(overlapWith.length ? { with: overlapWith } : {}) } } : {}),
+        ...(overlapNow ? { slot_overlap: { already_overlaps: true, ...(overlapWith.length ? { with: overlapWith.map(({ id: _id, fact: _fact, ...shownVisit }) => shownVisit) } : {}) } } : {}),
         pinned_price: {
           amount: booking.price,
           source: booking.source,

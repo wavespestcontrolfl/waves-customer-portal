@@ -3009,32 +3009,39 @@ function clockLabel(hhmmss) {
   return `${h % 12 || 12}:${m[2]} ${h >= 12 ? 'PM' : 'AM'}`;
 }
 
-// Who the overlapping visit(s) are, for the booking card's one line: customer
-// name, service and window, plus the visit id so the route can pin exactly the
-// visits the card names (the executor refuses a NEW overlapping visit that is
-// not in that set). Every overlapping visit is returned; [] when there is no
-// overlap or no timed window.
-async function ibBookingOverlapWho(scheduledDate, timeWindow) {
-  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow);
-  if (!rows || !rows.length) return [];
-  const ids = rows.map((r) => r.id).filter(Boolean);
+// The facts the booking card shows about each overlapping visit: customer
+// name, service, date and window, with the visit id. ONE function builds them
+// for both the proposal (the card line and the pin) and the executor (the
+// commit-time comparison), so the pin and the check can never drift apart.
+// `fact` is the single string that is pinned and compared.
+async function bookingOverlapFacts(conn, rows, dateStr) {
+  const ids = (rows || []).map((r) => r.id).filter(Boolean);
   const names = ids.length
-    ? await db('scheduled_services')
+    ? await conn('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .whereIn('scheduled_services.id', ids)
       .select('scheduled_services.id', 'customers.first_name', 'customers.last_name')
     : [];
   const nameById = new Map((Array.isArray(names) ? names : []).map((n) => [String(n.id), `${n.first_name || ''} ${n.last_name || ''}`.trim()]));
-  return rows.map((r) => {
+  return (rows || []).map((r) => {
     const start = clockLabel(r.window_start);
     const end = clockLabel(r.window_end);
-    return {
-      id: r.id ? String(r.id) : null,
-      customer: nameById.get(String(r.id)) || null,
-      service: r.service_type || null,
-      window: start && end ? `${start}-${end}` : (start || null),
-    };
+    const id = r.id ? String(r.id) : null;
+    const customer = nameById.get(String(r.id)) || null;
+    const service = r.service_type || null;
+    const window = start && end ? `${start}-${end}` : (start || null);
+    return { id, customer, service, window, fact: [id, customer, service, dateStr, window].map((v) => v ?? '').join('|') };
   });
+}
+
+// Who the overlapping visit(s) are, for the booking card's line, plus the
+// pinned `fact` of each (the executor refuses an overlapping visit whose fact
+// is not in the pinned set). Every overlapping visit is returned; [] when
+// there is no overlap or no timed window.
+async function ibBookingOverlapWho(scheduledDate, timeWindow) {
+  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  if (!rows || !rows.length) return [];
+  return bookingOverlapFacts(db, rows, validScheduleDate(scheduledDate));
 }
 
 // Proposal-time window verdict for create_appointment (W5-dev-03): the SAME
@@ -3204,14 +3211,18 @@ async function createAppointment(input, actionContext = {}) {
       // rolls the transaction back before the insert, so nothing is booked
       // and the post-commit confirmation text below never runs. A pinned
       // "overlap existed", or no pin at all, keeps the advisory warning.
-      // A card that named the overlapping visits pinned their ids: a visit
-      // outside that set (A cancelled, B took its place) is NEW too. An
-      // overlap that disappeared is fine; a card with no ids pinned (older
-      // cards, or a name lookup that failed) keeps the boolean rule only.
-      const pinnedOverlapIds = Array.isArray(input._booking_overlap_ids) && input._booking_overlap_ids.length
-        ? new Set(input._booking_overlap_ids.map(String)) : null;
-      const unseenOverlap = input._booking_overlap === true && pinnedOverlapIds
-        && overlap.some((row) => !pinnedOverlapIds.has(String(row.id)));
+      // A card that named the overlapping visits pinned what it showed about
+      // each (id, customer, service, date, window): a visit not in that set,
+      // or one whose shown facts changed, is NEW too. An overlap that
+      // disappeared is fine; a card with nothing pinned (older cards, or a
+      // name lookup that failed) keeps the boolean rule only.
+      const pinnedFacts = Array.isArray(input._booking_overlap_facts) && input._booking_overlap_facts.length
+        ? new Set(input._booking_overlap_facts.map(String)) : null;
+      let unseenOverlap = false;
+      if (overlap.length && input._booking_overlap === true && pinnedFacts) {
+        const liveFacts = await bookingOverlapFacts(trx, overlap, dateStr);
+        unseenOverlap = liveFacts.some((f) => !pinnedFacts.has(f.fact));
+      }
       if (overlap.length && (input._booking_overlap === false || unseenOverlap)) {
         const err = new Error('booking_overlap_new');
         err.bookingOverlapNew = true;

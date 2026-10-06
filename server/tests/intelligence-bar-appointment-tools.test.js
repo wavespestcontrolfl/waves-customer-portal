@@ -675,26 +675,54 @@ describe('create_appointment — an overlap that is NEW since the card gets a fr
     expect(insertChain.insert).toHaveBeenCalled();
   });
 
-  test('the card named visit A and A is still the only overlap: books with the warning', async () => {
-    const insertChain = wireClash();
-    const result = await bookAt({ _booking_overlap: true, _booking_overlap_ids: ['other'] });
+  // The commit-time check compares exactly what the card showed about each
+  // overlapping visit (id, customer, service, date, window), built by the same
+  // function as the pin: bookingOverlapFacts.
+  const OTHER_FACT = 'other|Testa Beta||2099-01-15|10:00 AM-11:00 AM';
+  const wireClashWithNames = (names = [{ id: 'other', first_name: 'Testa', last_name: 'Beta' }]) => {
+    const insertChain = chain();
+    wireDb({
+      customers: [adaCustomer(), adaCustomer()],
+      scheduled_services: [clash(), chain({ select: jest.fn().mockResolvedValue(names) }), insertChain],
+    });
+    return insertChain;
+  };
+
+  test('the card named visit A with the same facts and A is still the only overlap: books with the warning', async () => {
+    const insertChain = wireClashWithNames();
+    const result = await bookAt({ _booking_overlap: true, _booking_overlap_facts: [OTHER_FACT] });
     expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
+    expect(result.warning).toMatch(/2099-01-15/);
     expect(insertChain.insert).toHaveBeenCalled();
   });
 
   test('the card named visit A but a DIFFERENT visit holds the slot now: preview_changed, nothing inserted', async () => {
-    const insertChain = wireClash();
-    const result = await bookAt({ _booking_overlap: true, _booking_overlap_ids: ['visit-a-cancelled'] });
+    const insertChain = wireClashWithNames();
+    const result = await bookAt({ _booking_overlap: true, _booking_overlap_facts: ['visit-a-cancelled|Testa Beta||2099-01-15|10:00 AM-11:00 AM'] });
     expect(result).toMatchObject({ preview_changed: true, error: expect.stringMatching(/^Another visit now overlaps this time\./) });
     expect(insertChain.insert).not.toHaveBeenCalled();
     await new Promise((resolve) => setImmediate(resolve));
     expect(AppointmentReminders.sendConfirmation).not.toHaveBeenCalled();
   });
 
+  test('the same visit id but a changed customer, service or window is refused: the card must show what is there now', async () => {
+    for (const stale of [
+      'other|Testa Alpha||2099-01-15|10:00 AM-11:00 AM',
+      'other|Testa Beta|Lawn Care|2099-01-15|10:00 AM-11:00 AM',
+      'other|Testa Beta||2099-01-15|9:00 AM-10:00 AM',
+    ]) {
+      jest.clearAllMocks();
+      const insertChain = wireClashWithNames();
+      const result = await bookAt({ _booking_overlap: true, _booking_overlap_facts: [stale] });
+      expect(result).toMatchObject({ preview_changed: true });
+      expect(insertChain.insert).not.toHaveBeenCalled();
+    }
+  });
+
   test('the visit the card named is gone and nothing overlaps now: books with no warning', async () => {
     const insertChain = chain();
     wireDb({ customers: [adaCustomer(), adaCustomer()], scheduled_services: [chain(), insertChain] });
-    const result = await bookAt({ _booking_overlap: true, _booking_overlap_ids: ['visit-a-cancelled'] });
+    const result = await bookAt({ _booking_overlap: true, _booking_overlap_facts: ['visit-a-cancelled|Testa Beta||2099-01-15|10:00 AM-11:00 AM'] });
     expect(result).toMatchObject({ success: true, appointment_id: 'appt-1' });
     expect(result.warning).toBeUndefined();
   });
@@ -737,7 +765,7 @@ describe('create_appointment — an overlap that is NEW since the card gets a fr
       ],
     });
     await expect(ibBookingOverlapWho('2099-01-15', '10:00 AM')).resolves.toEqual([
-      { id: 'other', customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM' },
+      { id: 'other', customer: 'Testa Beta', service: 'Lawn Care', window: '10:00 AM-11:00 AM', fact: 'other|Testa Beta|Lawn Care|2099-01-15|10:00 AM-11:00 AM' },
     ]);
     await expect(ibBookingOverlapWho('2099-01-15', '10:00 AM')).resolves.toEqual([]);
     await expect(ibBookingOverlapWho('2099-01-15', undefined)).resolves.toEqual([]);

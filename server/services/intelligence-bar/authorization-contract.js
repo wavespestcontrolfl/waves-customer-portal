@@ -537,8 +537,8 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // registers a non-delivering placeholder: its confirmation is marked
     // handled, so setting a time later re-arms only the 72h/24h reminders.
     push('operational', params?.time_window
-      ? 'Reminders are set for 3 days and 1 day before. They skip if the customer turned reminders off, and the 3-day one skips when the visit is sooner.'
-      : 'No booking confirmation is sent, because there is no time yet. Reminders (3 days and 1 day before) are set once a time is added. They skip if the customer turned reminders off.');
+      ? 'Sets reminders for 3 days and 1 day before. They skip if the customer turned reminders off, and the 3-day one skips when the visit is sooner. If setup fails, you see a warning.'
+      : 'No booking confirmation is sent, because there is no time yet. Reminders (3 days and 1 day before) are set up once a time is added. They skip if the customer turned reminders off. If setup fails, you see a warning.');
   }
   if (toolName === 'bulk_update_customers') {
     push('customer', 'Applies to each listed customer that still resolves at commit — any skipped customer is reported as a warning on this card, never a silent Done');
