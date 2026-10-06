@@ -65,12 +65,12 @@ describe('evidence matches the promise kind', () => {
     expect(names('callback')).toEqual([]);
   });
 
-  test('an "other" promise reads its channel and its words: sms or a text to send takes a text, call takes a call placed, anything else only an estimate', () => {
-    expect(names('other', { channel: 'sms' })).toEqual(['estimate', 'text_sent']);
-    expect(names('other', { channel: 'call' })).toEqual(['estimate', 'call_placed']);
+  test('an "other" promise reads its channel and its words: a text or call promise takes only that text or call, anything else takes an estimate', () => {
+    expect(names('other', { channel: 'sms' })).toEqual(['text_sent']);
+    expect(names('other', { channel: 'call' })).toEqual(['call_placed']);
     expect(names('other', { channel: 'email', description: 'Text and email the quote' })).toEqual(['estimate']);
-    expect(names('other', { channel: null, description: 'Text appointment options' })).toEqual(['estimate', 'text_sent']);
-    expect(names('other', { channel: 'unknown', description: 'Send the SMS link' })).toEqual(['estimate', 'text_sent']);
+    expect(names('other', { channel: null, description: 'Text appointment options' })).toEqual(['text_sent']);
+    expect(names('other', { channel: 'unknown', description: 'Send the SMS link' })).toEqual(['text_sent']);
     expect(names('other', { channel: null, description: 'Link the customer into the irrigation email' })).toEqual(['estimate']);
     expect(names('other', { channel: null, description: 'The context line' })).toEqual(['estimate']);
   });
@@ -171,7 +171,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   const sms = (w, message_type, extra = {}) => addSms(db('sms_log').insert({
     direction: 'outbound', from_phone: OUR_NUMBER, to_phone: w.phone, customer_id: w.customerId, message_type, status: 'sent', created_at: later(), ...extra }));
   // A text a person wrote in the composer: 'manual' plus the human_authored stamp.
-  const staffText = (w, extra = {}) => sms(w, 'manual', { metadata: JSON.stringify({ human_authored: true }), ...extra });
+  const staffText = (w, extra = {}) => sms(w, 'manual', { status: 'delivered', metadata: JSON.stringify({ human_authored: true }), ...extra });
   const visit = (w, extra = {}) => addVisit(db('scheduled_services').insert({
     scheduled_date: '2026-12-01', service_type: 'General Pest Control', status: 'pending', customer_id: w.customerId, created_at: later(), ...extra }));
   const estimate = async (w) => {
@@ -196,7 +196,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   const CASES = [
     ['other', null, 'an estimate sent to the customer', (w) => estimate(w), 'estimate_sent_to_same_customer_within_14_days', 'estimate_sent'],
     ['other', 'sms', 'a text a person sent to the caller', (w) => staffText(w), 'text_sent_to_caller_within_14_days', 'sms_sent'],
-    ['other', 'sms', 'the booking lane\'s link text to the caller', (w) => sms(w, 'call_booking_link_text'), 'text_sent_to_caller_within_14_days', 'sms_sent'],
+    ['other', 'sms', 'the booking lane\'s link text to the caller (logged with no customer id)', (w) => sms(w, 'call_booking_link_text', { customer_id: null }), 'text_sent_to_caller_within_14_days', 'sms_sent'],
     ['other', 'call', 'a call a person placed to the caller', (w) => outboundCall(w), 'outbound_call_to_caller_within_14_days', 'outbound_call'],
     ['schedule_visit', null, 'a visit completed for the customer', (w) => visit(w, { status: 'completed', completed_at: later(), created_at: new Date(Date.now() - 20 * DAY) }), 'visit_completed_for_same_customer_within_14_days', 'visit_completed'],
     ['send_report', null, 'a service report text to the caller', (w) => sms(w, 'service_report'), 'service_report_text_to_caller_within_14_days', 'sms_sent'],
@@ -331,6 +331,12 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await stayOpen((w) => staffText(w, { created_at: new Date(Date.now() - 3 * DAY - 60 * 1000) }));
     await stayOpen((w) => staffText(w, { created_at: new Date(Date.now() - 3 * DAY + 15 * DAY) }));
     await stayOpen((w) => staffText(w, { status: 'failed' }));
+    // Handed to the provider is not delivered: a person's text counts only once delivered.
+    await stayOpen((w) => staffText(w, { status: 'sent' }));
+    // An unrelated estimate sent meanwhile keeps neither a text nor a call promise.
+    await stayOpen((w) => estimate(w));
+    await stayOpen((w) => estimate(w), { channel: 'call' });
+    await stayOpen((w) => estimate(w), { description: 'Text the customer appointment options' });
     await stayOpen((w) => staffText(w, { status: 'scheduled' }));
     await stayOpen(async (w) => {
       const [member] = await db('customers').insert({ first_name: `Member${w.n}`, phone: w.phone }).returning('id');
@@ -369,6 +375,19 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { kind: 'outbound_call', record_id: back.id, strength: 'direct' } });
   });
 
+  test('a promise to call from an unlinked caller is kept by a staff call to that number; a booking-link text with no customer id keeps a linked caller\'s text promise', async () => {
+    const w = await world({ kind: 'other', channel: 'call', customer: false });
+    const back = await outboundCall(w);
+    expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1, failed: 0 });
+    expect(await row(w.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { kind: 'outbound_call', record_id: back.id } });
+    // The scan leaves an unlinked call proof alone (no flapping).
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(w.call.id);
+    const linked = await world({ kind: 'other', channel: 'sms' });
+    const link = await sms(linked, 'call_booking_link_text', { customer_id: null });
+    expect(await cc.refreshFulfillment(db, linked.call.id)).toMatchObject({ fulfilled: 1, failed: 0 });
+    expect(await row(linked.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { record_id: link.id } });
+  });
+
   test('closes an earlier version wrote on the wrong kind of evidence are listed by the lapse scan and reopen: a visit for an estimate, text or callback; the customer phoning in for a callback', async () => {
     const stale = async (kind, proofFor) => {
       const w = await world({ kind });
@@ -379,12 +398,23 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     const visitProof = async (w) => ({ kind: 'appointment_booked', record_type: 'scheduled_service', record_id: (await visit(w)).id, basis: 'visit_booked_for_same_customer_within_14_days' });
     const bad = [];
     for (const kind of ['send_estimate', 'other', 'callback']) bad.push(await stale(kind, visitProof));
+    const estimateProof = async (w) => ({ kind: 'estimate_sent', record_type: 'estimate', record_id: (await estimate(w)).id, basis: 'estimate_sent_to_same_customer_within_14_days' });
+    bad.push(await stale('callback', estimateProof));
+    for (const [channel, description] of [['sms', 'Text options'], ['call', 'Call them'], [null, 'Text the customer the options']]) {
+      const w = await world({ kind: 'other', channel, description });
+      const closed = { strength: 'association', closed_by: 'promise_evidence', judged_customer_id: w.customerId, closed_at: new Date().toISOString(), matched_at: later().toISOString(), ...(await estimateProof(w)) };
+      await db('call_commitments').where({ id: w.commitment.id }).update({ status: 'fulfilled', fulfillment: JSON.stringify(closed), fulfilled_at: later() });
+      bad.push(w);
+    }
+    // An estimate keeping an estimate promise, or a plain "other", is the right kind.
+    const keepEstimate = await stale('send_estimate', estimateProof);
     bad.push(await stale('callback', async (w) => ({ kind: 'inbound_call', record_type: 'call_log', record_id: (await inbound(w)).id, basis: 'caller_called_in_and_talked_with_staff_within_14_days' })));
     // A schedule_visit close on a booking is the right kind and stays.
     const keep = await stale('schedule_visit', visitProof);
     const listed = await cc.listLapsedEvidenceClosedCallIds(db);
     for (const w of bad) expect(listed).toContain(w.call.id);
     expect(listed).not.toContain(keep.call.id);
+    expect(listed).not.toContain(keepEstimate.call.id);
     for (const w of bad) {
       expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ reopened: 1, failed: 0 });
       expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null, fulfilled_at: null });
@@ -426,13 +456,11 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
   });
 
   test('the stored proof is the EARLIEST follow-up across evidence types, not the first type looked up', async () => {
-    const w = await world({ kind: 'other', channel: 'sms' });
-    const quote = await estimate(w); // the quote 30 minutes after the call (looked up first)
-    const text = await staffText(w, { created_at: later(10) }); // the text that went out 10 minutes after the call
-    await sms(w, 'manual', { metadata: JSON.stringify({ human_authored: true }), created_at: later(2 * 24 * 60) }); // and one two days on
+    const w = await world({ kind: 'send_report' });
+    const mail = await reportEmail(w, { sent_at: later(10) }); // the report email 10 minutes after the call (looked up second)
+    await sms(w, 'service_report', { created_at: later(2 * 60) }); // the report text two hours on (looked up first)
     await cc.refreshFulfillment(db, w.call.id);
-    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ kind: 'sms_sent', record_id: text.id });
-    expect(quote.id).toBeTruthy();
+    expect((await row(w.commitment.id)).fulfillment).toMatchObject({ kind: 'email_sent', record_id: mail.id });
   });
 
   test('a relink to another customer reopens a promise the old customer\'s evidence closed, and a customer-left dismissal', async () => {
