@@ -4,10 +4,20 @@
  * commercial-suite scope decision (opt-in or not) is declared ONCE, in
  * lookup-callers.js, and a new caller cannot slip in with an undeclared
  * decision. Direct callers of lookupPropertyFromAITrio are held to the same
- * registry (TRIO_CALLERS). Filesystem only, no DB.
+ * registry (TRIO_CALLERS).
+ *
+ * The scan walks each file's syntax tree (acorn, already a dependency), not
+ * its source lines: a call is a CallExpression whose callee resolves to the
+ * lookup by any route (a local alias, a destructured rename, a module object
+ * member in dot or bracket form, an optional call, a `(0, m.fn)()` sequence,
+ * `.call/.apply/.bind`), wherever its parenthesis falls. Passing the lookup
+ * around as a value is refused outright (it could be called anywhere), as is
+ * a file acorn cannot parse. Filesystem only, no DB.
  */
 const fs = require('fs');
 const path = require('path');
+const acorn = require('acorn');
+const walk = require('acorn-walk');
 const { CALLERS, TRIO_CALLERS, lookupOptionsFor } = require('../services/property-lookup/lookup-callers');
 
 const SERVER_ROOT = path.join(__dirname, '..');
@@ -16,153 +26,317 @@ const SERVER_ROOT = path.join(__dirname, '..');
 // to the registry too.
 const SKIP_DIRS = new Set(['node_modules', 'tests', '__tests__', 'migrations', 'coverage', 'dist', 'fixtures']);
 
-function walk(dir, out = []) {
+function walkDir(dir, out = []) {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (entry.isDirectory()) { if (!SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name), out); continue; }
+    if (entry.isDirectory()) { if (!SKIP_DIRS.has(entry.name)) walkDir(path.join(dir, entry.name), out); continue; }
     if (/\.(js|cjs|mjs)$/.test(entry.name)) out.push(path.join(dir, entry.name));
   }
   return out;
 }
-const files = walk(SERVER_ROOT);
+const files = walkDir(SERVER_ROOT);
 const rel = (f) => path.relative(SERVER_ROOT, f).split(path.sep).join('/');
 
-// Every local name a file gives a function: the name itself plus any alias
-// bound from it (`const performLookup = lookup || require(...).performPropertyLookup`,
-// `const { performPropertyLookup: lookupFn } = ...`, `const x = performPropertyLookup`).
-function aliasesOf(src, name) {
-  const names = new Set([name]);
-  for (const m of src.matchAll(new RegExp('(?:const|let|var)\\s+([A-Za-z_$][\\w$]*)\\s*=[^;\\n]*\\b' + name + '\\b', 'g'))) names.add(m[1]);
-  for (const m of src.matchAll(new RegExp(name + '\\s*:\\s*([A-Za-z_$][\\w$]*)', 'g'))) if (m[1] !== 'jest') names.add(m[1]);
-  return [...names];
-}
-const lookupAliases = (src) => aliasesOf(src, 'performPropertyLookup');
+const LOOKUP = 'performPropertyLookup';
+const TRIO = 'lookupPropertyFromAITrio';
+const HELPER = 'lookupOptionsFor';
+const OPTION = 'commercialSuiteSizing';
 
 // The one sanctioned place the scope decision is changed after the registry
 // answered: the admin route turning the leg OFF for a whole-property job.
-const SANCTIONED_OVERRIDE = { file: 'routes/property-lookup-v2.js', line: /^\s*if \(wholeProperty === true\) callerOptions\.commercialSuiteSizing = false;\s*$/ };
-
-// Lines that CALL the lookup (not the definition, not a comment, not a jest mock).
-// One record per line that calls `name`, with `count` = how many calls that
-// line makes (two lookups inside one Promise.all([...]) count as two). A
-// member-expression call (`propertyLookup.performPropertyLookup(...)`, or
-// `require('...').performPropertyLookup(...)` inline) is a call like any
-// other: the lookbehind refuses only a longer identifier, not a `.`.
-function callLines(src, name) {
-  const re = new RegExp('(?<!\\w)' + name + '\\(', 'g');
-  const def = new RegExp('function\\s+' + name + '\\(');
-  const mock = new RegExp(name + ':\\s*jest');
-  return src.split('\n').map((line, i) => ({ line, n: i + 1, count: (line.match(re) || []).length }))
-    .filter(({ line, count }) => count > 0 && !/^\s*(\/\/|\*)/.test(line) && !def.test(line) && !mock.test(line));
-}
+const SANCTIONED_OVERRIDE = { file: 'routes/property-lookup-v2.js', object: 'callerOptions', guard: 'wholeProperty' };
 
 // The modules that define or read `commercialSuiteSizing`. A new file under
 // services/property-lookup/ is NOT one of them until it is listed here.
 const OPTION_OWNERS = new Set([
-  'routes/property-lookup-v2.js', // the sanctioned whole-property switch-off (checked line by line below)
+  'routes/property-lookup-v2.js', // defines the lookup; the sanctioned switch-off (checked node by node below)
   'services/property-lookup/lookup-callers.js', // the registry sets it
   'services/property-lookup/ai-property-lookup.js', // the lookup reads it
   'config/feature-gates.js', // the gate reader's doc comment
 ]);
 
+// ---------------------------------------------------------------------------
+// Parsing
+
+function parse(src, file) {
+  const comments = [];
+  const base = { ecmaVersion: 'latest', locations: true, allowHashBang: true, allowReturnOutsideFunction: true, onComment: comments };
+  const order = file.endsWith('.mjs') ? ['module', 'script'] : ['script', 'module'];
+  let lastErr;
+  for (const sourceType of order) {
+    comments.length = 0;
+    try { return { ast: acorn.parse(src, { ...base, sourceType }), comments }; } catch (e) { lastErr = e; }
+  }
+  throw lastErr;
+}
+
+// Source text with every comment blanked (same length, so line numbers hold).
+function withoutComments(src, comments) {
+  let out = src;
+  for (const c of comments) out = out.slice(0, c.start) + out.slice(c.start, c.end).replace(/[^\n]/g, ' ') + out.slice(c.end);
+  return out;
+}
+
+// The static name a member access reads: `.name`, `['name']`, `[`name`]`.
+function memberName(node) {
+  if (node.type !== 'MemberExpression') return null;
+  if (!node.computed) return node.property.type === 'Identifier' ? node.property.name : null;
+  const p = node.property;
+  if (p.type === 'Literal' && typeof p.value === 'string') return p.value;
+  if (p.type === 'TemplateLiteral' && p.expressions.length === 0) return p.quasis[0].value.cooked;
+  return null;
+}
+
+// Does this expression evaluate to `target` (by name) — directly, through a
+// local alias, a member read, `a || b`, `c ? a : b`, `(0, a)`, `a?.b`?
+function refersTo(node, target, aliases) {
+  if (!node) return false;
+  switch (node.type) {
+    case 'Identifier': return aliases.has(node.name);
+    case 'MemberExpression': return memberName(node) === target;
+    case 'ChainExpression': return refersTo(node.expression, target, aliases);
+    case 'LogicalExpression': return refersTo(node.left, target, aliases) || refersTo(node.right, target, aliases);
+    case 'ConditionalExpression': return refersTo(node.consequent, target, aliases) || refersTo(node.alternate, target, aliases);
+    case 'SequenceExpression': return refersTo(node.expressions[node.expressions.length - 1], target, aliases);
+    case 'AwaitExpression': return refersTo(node.argument, target, aliases);
+    default: return false;
+  }
+}
+
+// Every local binding that may hold `target`: the name itself, `const x =
+// <expr that refers to it>`, `const { target: x } = ...`, `import { target as x }`.
+// Iterated to a fixpoint so an alias of an alias is found too.
+function aliasesOf(ast, target) {
+  const aliases = new Set([target]);
+  for (let pass = 0; pass < 4; pass++) {
+    const before = aliases.size;
+    walk.simple(ast, {
+      VariableDeclarator(node) {
+        if (node.id.type === 'Identifier' && refersTo(node.init, target, aliases)) aliases.add(node.id.name);
+        if (node.id.type === 'ObjectPattern') {
+          for (const prop of node.id.properties) {
+            if (prop.type !== 'Property') continue;
+            const key = prop.computed ? (prop.key.type === 'Literal' ? prop.key.value : null) : prop.key.name;
+            if (key !== target) continue;
+            const v = prop.value.type === 'AssignmentPattern' ? prop.value.left : prop.value;
+            if (v.type === 'Identifier') aliases.add(v.name);
+          }
+        }
+      },
+      AssignmentExpression(node) {
+        if (node.left.type === 'Identifier' && refersTo(node.right, target, aliases)) aliases.add(node.left.name);
+      },
+      ImportDeclaration(node) {
+        for (const s of node.specifiers) {
+          if (s.type === 'ImportSpecifier' && (s.imported.name || s.imported.value) === target) aliases.add(s.local.name);
+        }
+      },
+    });
+    if (aliases.size === before) break;
+  }
+  return aliases;
+}
+
+const isExportContext = (ancestors) => ancestors.some((a) => a.type === 'AssignmentExpression'
+  && /^(module\.)?exports\b/.test(sourceOf(a.left)));
+let currentSrc = '';
+const sourceOf = (node) => currentSrc.slice(node.start, node.end);
+
+/**
+ * Everything the guards need from one file, from its syntax tree:
+ *   calls[target]   every invocation of the lookup / trio: line, how it was
+ *                   invoked, and (for the lookup) its options argument node
+ *   valueRefs       the lookup / trio used as a value (not called, not an
+ *                   alias binding, not exported) — refused outright
+ *   helperCalls     every lookupOptionsFor(...) call with its first argument
+ *   helperRefs      lookupOptionsFor used as a value (aliased / passed)
+ *   optionVars      identifiers bound to a lookupOptionsFor(...) call
+ *   overrides       assignments to a member named commercialSuiteSizing
+ *   mentions        lines (comments blanked) that spell commercialSuiteSizing
+ *   policyWrites    assignments to a registry policy field
+ */
+function analyze(file) {
+  const r = rel(file);
+  const src = fs.readFileSync(file, 'utf8');
+  const { ast, comments } = parse(src, r);
+  currentSrc = src;
+  const aliases = { [LOOKUP]: aliasesOf(ast, LOOKUP), [TRIO]: aliasesOf(ast, TRIO) };
+  const out = { file: r, calls: { [LOOKUP]: [], [TRIO]: [] }, valueRefs: [], helperCalls: [], helperRefs: [], optionVars: new Set(), overrides: [], mentions: [], policyWrites: [] };
+
+  // Pass 1: identifiers bound to lookupOptionsFor(...).
+  walk.simple(ast, {
+    VariableDeclarator(node) {
+      if (node.id.type === 'Identifier' && node.init && node.init.type === 'CallExpression' && isHelperCallee(node.init.callee)) out.optionVars.add(node.id.name);
+    },
+  });
+
+  function isHelperCallee(callee) {
+    return (callee.type === 'Identifier' && callee.name === HELPER) || memberName(callee) === HELPER;
+  }
+  function targetOfCallee(callee) {
+    for (const t of [LOOKUP, TRIO]) {
+      if (refersTo(callee, t, aliases[t])) return { target: t, via: 'direct' };
+      // fn.call(thisArg, ...) / fn.apply(...) / fn.bind(...)
+      if (callee.type === 'MemberExpression' && ['call', 'apply', 'bind'].includes(memberName(callee)) && refersTo(callee.object, t, aliases[t])) return { target: t, via: memberName(callee) };
+    }
+    return null;
+  }
+
+  // Pass 2: calls, value references, helper uses, overrides.
+  walk.ancestor(ast, {
+    CallExpression(node, _st, ancestors) {
+      const hit = targetOfCallee(node.callee);
+      if (hit) {
+        const args = node.arguments;
+        const optionsArg = hit.via === 'direct' ? args[1] : hit.via === 'call' ? args[2] : null;
+        out.calls[hit.target].push({ line: node.loc.start.line, via: hit.via, optionsArg, spreadBeforeOptions: args.slice(0, 2).some((a) => a.type === 'SpreadElement') });
+      }
+      if (isHelperCallee(node.callee)) out.helperCalls.push({ line: node.loc.start.line, arg: node.arguments[0] });
+      void ancestors;
+    },
+    Identifier(node, _st, ancestors) {
+      const parent = ancestors[ancestors.length - 2];
+      if (!parent) return;
+      const inCalleePosition = parent.type === 'CallExpression' && parent.callee === node;
+      const memberCallee = parent.type === 'MemberExpression' && parent.object === node && ancestors[ancestors.length - 3]
+        && ancestors[ancestors.length - 3].type === 'CallExpression' && ancestors[ancestors.length - 3].callee === parent;
+      const aliasBinding = (parent.type === 'VariableDeclarator' && parent.init && parent.id.type === 'Identifier')
+        || (parent.type === 'AssignmentExpression' && parent.left.type === 'Identifier' && parent.right === node);
+      for (const t of [LOOKUP, TRIO]) {
+        if (!aliases[t].has(node.name)) continue;
+        if (inCalleePosition || memberCallee) continue; // the call itself (counted above)
+        if (aliasBinding && refersTo(parent.init || parent.right, t, aliases[t])) continue; // an alias binding
+        if (isExportContext(ancestors)) continue; // module.exports = { performPropertyLookup } / exports.x = ...
+        out.valueRefs.push({ target: t, line: node.loc.start.line, text: sourceOf(parent).split('\n')[0].trim() });
+      }
+      if (node.name === HELPER && !inCalleePosition && !isExportContext(ancestors) && !(parent.type === 'Property' && parent.key === node && !parent.computed)) {
+        out.helperRefs.push({ line: node.loc.start.line, text: sourceOf(parent).split('\n')[0].trim() });
+      }
+    },
+    AssignmentExpression(node, _st, ancestors) {
+      if (node.left.type !== 'MemberExpression') return;
+      const name = memberName(node.left);
+      if (name === OPTION) {
+        const stmt = ancestors[ancestors.length - 2];
+        const ifNode = ancestors[ancestors.length - 3];
+        out.overrides.push({
+          line: node.loc.start.line,
+          object: node.left.object.type === 'Identifier' ? node.left.object.name : sourceOf(node.left.object),
+          operator: node.operator,
+          right: node.right.type === 'Literal' ? node.right.value : sourceOf(node.right),
+          guardedBy: stmt && stmt.type === 'ExpressionStatement' && ifNode && ifNode.type === 'IfStatement' && ifNode.consequent === stmt ? sourceOf(ifNode.test) : null,
+        });
+      }
+      if (['suiteSizing', 'surface', 'file', 'why', 'calls'].includes(name) && (name === 'suiteSizing' || /\bCALLERS\b/.test(sourceOf(node.left.object)))) {
+        out.policyWrites.push({ line: node.loc.start.line, text: sourceOf(node).split('\n')[0].trim() });
+      }
+    },
+  }, undefined, {});
+
+  // Any spelling of the option outside a comment, in whatever syntactic form
+  // (dot or bracket write, string key, Object.assign / defineProperty, a
+  // spread of an object that names it). The gate reader
+  // commercialSuiteSizingLive() is a different name and is allowed.
+  withoutComments(src, comments).split('\n').forEach((line, i) => {
+    if (new RegExp(`${OPTION}(?!Live\\b)`).test(line)) out.mentions.push({ line: i + 1, text: line.trim() });
+  });
+  return out;
+}
+
+const analyses = new Map();
+const parseErrors = [];
+for (const file of files) {
+  try { analyses.set(file, analyze(file)); } catch (e) { parseErrors.push(`${rel(file)}: ${e.message}`); }
+}
+const all = [...analyses.values()];
+
+// The options argument of a lookup call: lookupOptionsFor(...) inline, or an
+// identifier bound to lookupOptionsFor(...) somewhere in the same file.
+// Nothing else — no spread, no object literal around it, no missing argument.
+function optionsDeclared(call, a) {
+  const arg = call.optionsArg;
+  if (!arg || call.spreadBeforeOptions || call.via !== 'direct') return false;
+  if (arg.type === 'CallExpression') return (arg.callee.type === 'Identifier' && arg.callee.name === HELPER) || memberName(arg.callee) === HELPER;
+  if (arg.type === 'Identifier') return a.optionVars.has(arg.name);
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+
 describe('property-lookup callers declare their scope decision', () => {
+  test('every production file parses (a file the guard cannot read cannot hide a caller)', () => {
+    expect(parseErrors).toEqual([]);
+    expect(all.length).toBeGreaterThan(100);
+  });
+
   test('the registry and every entry are frozen; no file reassigns a policy field', () => {
-    const { CALLERS, TRIO_CALLERS } = require('../services/property-lookup/lookup-callers');
     expect(Object.isFrozen(CALLERS)).toBe(true);
     expect(Object.isFrozen(TRIO_CALLERS)).toBe(true);
     for (const [id, entry] of Object.entries(CALLERS)) {
       expect(Object.isFrozen(entry)).toBe(true);
       expect(() => { 'use strict'; entry.suiteSizing = !entry.suiteSizing; }).toThrow();
-      expect(['staff', 'automation', 'customer', 'public']).toContain(entry.surface);
-      expect(typeof entry.suiteSizing).toBe('boolean');
-      expect(typeof entry.file).toBe('string');
       expect(id).toMatch(/^[a-z_]+$/);
     }
-    // ...and no production line even tries: an assignment to a policy field
-    // (`.suiteSizing =`, `.surface =`, `.file =` on a CALLERS entry) outside
-    // the registry file is an offender regardless of the freeze.
-    const offenders = [];
-    for (const file of files) {
-      const r = rel(file);
-      if (r === 'services/property-lookup/lookup-callers.js') continue;
-      fs.readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
-        if (/^\s*(\/\/|\*)/.test(line)) return;
-        if (/CALLERS\b[^\n]*\.(suiteSizing|surface|file|why)\s*=[^=]/.test(line) || /\.suiteSizing\s*=[^=]/.test(line)) {
-          offenders.push(`${r}:${i + 1}: ${line.trim()}`);
-        }
-      });
-    }
+    // ...and no production statement even tries: an assignment to a policy
+    // field on a CALLERS entry (or to any `.suiteSizing`) outside the
+    // registry file is an offender regardless of the freeze.
+    const offenders = all.filter((a) => a.file !== 'services/property-lookup/lookup-callers.js')
+      .flatMap((a) => a.policyWrites.map((w) => `${a.file}:${w.line}: ${w.text}`));
     expect(offenders).toEqual([]);
   });
 
-
-  test('every performPropertyLookup call site passes lookupOptionsFor(...)', () => {
+  test('every performPropertyLookup call site passes lookupOptionsFor(...), and the lookup is never passed around as a value', () => {
     const offenders = [];
-    // Actual lookup INVOCATIONS per file, counted independently of the
-    // lookupOptionsFor(...) occurrences the id test counts: one callerOptions
-    // reused for a second lookup in the same file is a second purpose too.
     const invocations = {};
-    for (const file of files) {
-      const r = rel(file);
-      const src = fs.readFileSync(file, 'utf8');
-      for (const name of lookupAliases(src)) for (const { line, n, count } of callLines(src, name)) {
-        // The alias binding itself ("= lookup || require(...).performPropertyLookup") is not a call.
-        if (new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line)) continue;
-        invocations[r] = (invocations[r] || 0) + count;
-        // The options argument is lookupOptionsFor(...) on the line, or a
-        // `callerOptions` variable built from it just above.
-        const above = src.split('\n').slice(Math.max(0, n - 8), n).join('\n');
-        if (!/lookupOptionsFor\(/.test(line) && !(/callerOptions/.test(line) && /callerOptions = lookupOptionsFor\(/.test(above))) {
-          offenders.push(`${r}:${n}: ${line.trim()}`);
-        }
-        // No override of the decision at the call: the options argument may
-        // not mention commercialSuiteSizing ("{ ...lookupOptionsFor('x'), commercialSuiteSizing: true }").
-        if (/commercialSuiteSizing/.test(line)) offenders.push(`${r}:${n}: overrides the registry's scope decision`);
+    for (const a of all) {
+      for (const call of a.calls[LOOKUP]) {
+        invocations[a.file] = (invocations[a.file] || 0) + 1;
+        if (call.via !== 'direct') offenders.push(`${a.file}:${call.line}: invoked through .${call.via}()`);
+        else if (!optionsDeclared(call, a)) offenders.push(`${a.file}:${call.line}: options are not lookupOptionsFor(...) / a variable bound to it`);
       }
-      // ...and a caller never SETS the option anywhere else in its file
-      // either, except the one sanctioned whole-property switch-off in the
-      // admin route. Only the modules that define or read the option are
-      // exempt, named one by one: any other file, the lookup directory
-      // included, is a caller. A caller has no reason to spell the option
-      // at all, so ANY non-comment mention is an offender: dot or bracket
-      // assignment, a string key, Object.assign / defineProperty, a spread
-      // of an object that names it, whatever the form.
-      if (!OPTION_OWNERS.has(r)) {
-        src.split('\n').forEach((line, i) => {
-          if (/^\s*(\/\/|\*)/.test(line) || !/commercialSuiteSizing(?!Live\b)/.test(line)) return;
-          offenders.push(`${r}:${i + 1}: names commercialSuiteSizing outside the registry`);
-        });
-      } else if (r === SANCTIONED_OVERRIDE.file) {
-        src.split('\n').forEach((line, i) => {
-          if (/^\s*(\/\/|\*)/.test(line) || !/callerOptions\s*(\.|\[)\s*['"`]?commercialSuiteSizing/.test(line)) return;
-          if (!SANCTIONED_OVERRIDE.line.test(line)) offenders.push(`${r}:${i + 1}: unsanctioned override of callerOptions`);
-        });
+      for (const v of a.valueRefs.filter((v) => v.target === LOOKUP)) offenders.push(`${a.file}:${v.line}: performPropertyLookup used as a value: ${v.text}`);
+      // A caller never spells the option, anywhere in its file, in any form.
+      // Only the modules that define or read it are exempt, named one by one.
+      if (!OPTION_OWNERS.has(a.file)) {
+        for (const m of a.mentions) offenders.push(`${a.file}:${m.line}: names ${OPTION} outside the registry: ${m.text}`);
       }
+    }
+    // The one sanctioned override, checked as syntax: in the admin route,
+    // exactly one assignment to a member named commercialSuiteSizing, on
+    // `callerOptions`, operator `=`, value `false`, as the consequent of an
+    // `if` whose test is the whole-property switch.
+    const route = all.find((a) => a.file === SANCTIONED_OVERRIDE.file);
+    expect(route.overrides).toHaveLength(1);
+    const [ov] = route.overrides;
+    expect(ov).toMatchObject({ object: SANCTIONED_OVERRIDE.object, operator: '=', right: false });
+    expect(ov.guardedBy).toMatch(new RegExp(`^${SANCTIONED_OVERRIDE.guard} === true$`));
+    for (const a of all) {
+      if (a.file === SANCTIONED_OVERRIDE.file) continue;
+      for (const o of a.overrides) offenders.push(`${a.file}:${o.line}: assigns ${OPTION}`);
     }
     expect(offenders).toEqual([]);
     // Each file's lookup invocations equal the `calls` its registry entries
     // declare for it, so a second performPropertyLookup in a declared file
-    // fails here even when it reuses the first call's callerOptions.
+    // fails here even when it reuses the first call's options variable.
     const declaredByFile = {};
     for (const c of Object.values(CALLERS)) declaredByFile[c.file] = (declaredByFile[c.file] || 0) + c.calls;
     expect(invocations).toEqual(declaredByFile);
   });
 
-  test('every direct lookupPropertyFromAITrio caller (by any alias) is a declared bypass', () => {
+  test('every direct lookupPropertyFromAITrio caller (by any alias or member form) is a declared bypass', () => {
     // The lookup's own internal use is pinned, not exempted: the defining
-    // module makes no call (its `function` line and export are not calls),
-    // and the lookup route composes the trio into a profile exactly once.
-    // A second call in either file is a second purpose and fails here like
-    // an undeclared caller does.
+    // module makes no call (its declaration and export are not calls), and
+    // the lookup route composes the trio into a profile exactly once. A
+    // second call in either file is a second purpose and fails here like an
+    // undeclared caller does.
     const INTERNAL = { 'routes/property-lookup-v2.js': 1 };
     const found = {};
-    for (const file of files) {
-      const r = rel(file);
-      const src = fs.readFileSync(file, 'utf8');
-      const calls = aliasesOf(src, 'lookupPropertyFromAITrio').flatMap((name) => callLines(src, name)
-        .filter(({ line }) => !new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line)));
-      const n = calls.reduce((sum, c) => sum + c.count, 0);
-      if (n) found[r] = n;
+    const offenders = [];
+    for (const a of all) {
+      if (a.calls[TRIO].length) found[a.file] = a.calls[TRIO].length;
+      for (const call of a.calls[TRIO]) if (call.via !== 'direct') offenders.push(`${a.file}:${call.line}: trio invoked through .${call.via}()`);
+      for (const v of a.valueRefs.filter((v) => v.target === TRIO)) offenders.push(`${a.file}:${v.line}: lookupPropertyFromAITrio used as a value: ${v.text}`);
     }
+    expect(offenders).toEqual([]);
     // Both directions, with the call count: a direct caller the registry
     // does not name is a new, unreviewed bypass; a registry entry with no
     // direct call left is stale; and a second call in a declared file is a
@@ -171,28 +345,24 @@ describe('property-lookup callers declare their scope decision', () => {
     expect(found).toEqual(declared);
   });
 
-  test('every caller id is used in exactly the one file the registry binds it to, always as a single-quoted literal', () => {
+  test('every caller id is used in exactly the one file the registry binds it to, exactly `calls` times, always as a single-quoted literal', () => {
     const uses = {};
     const nonCanonical = [];
-    for (const file of files) {
-      const src = fs.readFileSync(file, 'utf8');
-      if (rel(file) === 'services/property-lookup/lookup-callers.js') continue;
-      // Every call of lookupOptionsFor, however its first argument is written:
-      // only a single-quoted literal id is accepted. A double-quoted string,
-      // a template, a variable or an expression cannot be bound to a file
-      // and is refused outright.
-      for (const m of src.matchAll(/lookupOptionsFor\(\s*([^,)]*)/g)) {
-        const arg = m[1].trim();
-        const lit = arg.match(/^'([a-z_]+)'$/);
-        if (lit) (uses[lit[1]] ||= []).push(rel(file));
-        else nonCanonical.push(`${rel(file)}: lookupOptionsFor(${arg}`);
+    for (const a of all) {
+      if (a.file === 'services/property-lookup/lookup-callers.js') continue;
+      // lookupOptionsFor may only be CALLED, with a single-quoted literal id:
+      // a double-quoted string, a template, a variable or an expression
+      // cannot be bound to a file and is refused; so is aliasing or passing
+      // the helper itself, which would hide the id from this scan.
+      for (const h of a.helperCalls) {
+        const arg = h.arg;
+        const raw = arg ? currentSrcFor(a.file).slice(arg.start, arg.end) : '';
+        if (arg && arg.type === 'Literal' && typeof arg.value === 'string' && /^'[a-z_]+'$/.test(raw)) (uses[arg.value] ||= []).push(a.file);
+        else nonCanonical.push(`${a.file}:${h.line}: lookupOptionsFor(${raw}`);
       }
+      for (const ref of a.helperRefs) nonCanonical.push(`${a.file}:${ref.line}: lookupOptionsFor used as a value: ${ref.text}`);
     }
     expect(nonCanonical).toEqual([]);
-    // Each id appears in its own file only, exactly `calls` times: a second
-    // lookup purpose added to the same file is a new caller that must
-    // declare its own policy (or a reviewed count bump), not a free reuse of
-    // this one's suite-sizing decision.
     const expected = Object.fromEntries(Object.entries(CALLERS).map(([id, c]) => [id, { files: [c.file], calls: c.calls }]));
     const actual = Object.fromEntries(Object.entries(uses).map(([id, fs_]) => [id, { files: [...new Set(fs_)], calls: fs_.length }]));
     expect(actual).toEqual(expected);
@@ -205,24 +375,20 @@ describe('property-lookup callers declare their scope decision', () => {
     expect(lookupOptionsFor('report_cross_sell')).toEqual({});
     expect(() => lookupOptionsFor('nope')).toThrow(/unknown property-lookup caller/);
     // Pinned INDEPENDENTLY of the registry (which this test otherwise reads):
-    // the only two ids that may opt in, and the files that are customer- or
-    // public-facing no matter how their entry is labelled. Reclassifying a
-    // public route as staff, or adding a third opt-in, fails here.
+    // the only two ids that may opt in, each bound to its one approved file,
+    // and the files that are customer- or public-facing no matter how their
+    // entry is labelled. Reclassifying a public route as staff, adding a
+    // third opt-in, or moving an opt-in to another module fails here.
     const MAY_OPT_IN = { admin_estimate_tool: 'routes/property-lookup-v2.js', estimator_engine: 'services/estimator-engine/index.js' };
     const PROTECTED_FILES = [
       'routes/public-property-lookup.js', 'routes/public-quote.js',
       'services/customer-pricing-ai.js', 'services/service-report/cross-sell.js',
     ];
-    // The opt-in ids AND the one file each is bound to are pinned here, so
-    // moving the privilege to another module (or borrowing the id there)
-    // needs an explicit edit to this guard, not only to the registry.
     expect(Object.fromEntries(Object.entries(CALLERS).filter(([, c]) => c.suiteSizing).map(([id, c]) => [id, c.file]))).toEqual(MAY_OPT_IN);
     for (const f of PROTECTED_FILES) {
       const entry = Object.values(CALLERS).find((c) => c.file === f);
       expect(entry && ['public', 'customer'].includes(entry.surface) && entry.suiteSizing === false).toBe(true);
     }
-    // ...and a file whose path says it is public or portal-facing may not be
-    // classified staff / automation, whatever the entry says.
     for (const c of Object.values(CALLERS)) {
       if (/^routes\/public-|\/customer-|\/portal|\/service-report\//.test(c.file) && !/prewarm/.test(c.file)) {
         expect(['public', 'customer']).toContain(c.surface);
@@ -239,3 +405,9 @@ describe('property-lookup callers declare their scope decision', () => {
     }
   });
 });
+
+const srcCache = new Map();
+function currentSrcFor(r) {
+  if (!srcCache.has(r)) srcCache.set(r, fs.readFileSync(path.join(SERVER_ROOT, r), 'utf8'));
+  return srcCache.get(r);
+}
