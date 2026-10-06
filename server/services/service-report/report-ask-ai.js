@@ -1571,16 +1571,51 @@ function deniesRecordedApplication(text, facts) {
   const products = asArray(facts?.products);
   if (!products.length) return false;
   return clausesOf(text).some((clause) => {
-    if (!NO_PRODUCT_RE.test(clause) || SAYS_INSIDE.test(clause) || SAYS_OUTSIDE.test(clause)) return false;
+    if (!NO_PRODUCT_RE.test(clause)) return false;
     const named = products.filter((product) => mentions(clause, product));
+    // A place-qualified denial fails when the place is where the product went:
+    // "Alpine WSG was not applied outside" on an outside report (Codex P1 #5964 r46).
+    if (SAYS_INSIDE.test(clause) || SAYS_OUTSIDE.test(clause)) {
+      return (named.length ? named : products).some((product) => {
+        const where = String(product.applied_where || '');
+        return (SAYS_OUTSIDE.test(clause) && /outside|entry/.test(where)) || (SAYS_INSIDE.test(clause) && /inside|garage|entry/.test(where));
+      });
+    }
     // A named product, or no name at all ("Nothing was applied").
     return named.length > 0 || !/\b[A-Z][\w-]*\s+(?:[A-Z][\w-]*\s+)*(?:was|were)\b/.test(clause.replace(/^\s*\w+/, ''));
+  });
+}
+
+// A trend claim must run the way the report's trend runs: "improved from 50
+// to 80" on an 80 -> 50 trend fails (Codex P1 #5964 r46).
+const TREND_UP = /\b(?:improv\w*|increas\w*|ros(?:e|en)|rising|climb\w*|grew|grow(?:ing|n|s)?|went\s+up|gone\s+up|up\b|higher|better|gain\w*)\b/i;
+const TREND_DOWN = /\b(?:declin\w*|decreas\w*|dropp?\w*|fell|fall(?:en|ing|s)?|went\s+down|gone\s+down|down\b|lower|worse|slipp?\w*|los[st]\w*)\b/i;
+const TREND_KEYS = [[/\b(?:mow\w*|height)\b/i, 'mowing_height_inches'], [/\b(?:density|thick\w*)\b/i, 'density_out_of_100'], [/\bcolou?r\b/i, 'color_out_of_100'], [/\bweeds?\b/i, 'weed_cleanliness_out_of_100']];
+function contradictsTrend(text, facts) {
+  const trends = facts?.lawn_report?.trends;
+  if (!trends || typeof trends !== 'object') return false;
+  return clausesOf(text).some((clause) => {
+    if (NOT_CONFIRMED_RE.test(clause)) return false;
+    const key = (TREND_KEYS.find(([re]) => re.test(clause)) || [])[1]
+      || (/\b(?:lawn|overall|health|score|grass|turf)\b/i.test(clause) ? 'overall_out_of_100' : null);
+    const trend = key && trends[key];
+    const from = Number(trend?.from?.value);
+    const to = Number(trend?.to?.value);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return false;
+    // Endpoints in the wrong order: "from 50 to 80" on 80 -> 50.
+    const span = /\bfrom\s+(?:about\s+|around\s+)?(\d+(?:\.\d+)?)\b[^.?!]*?\bto\s+(?:about\s+|around\s+)?(\d+(?:\.\d+)?)\b/i.exec(clause);
+    if (span && Number(span[1]) === to && Number(span[2]) === from && from !== to) return true;
+    const up = TREND_UP.test(clause);
+    const down = TREND_DOWN.test(clause);
+    if (up === down) return false;
+    return up ? !(to > from) : !(to < from);
   });
 }
 
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['trend_claim', (text, { facts }) => contradictsTrend(text, facts)],
   ['denies_application', (text, { facts }) => deniesRecordedApplication(text, facts)],
   ['grass_type', (text, { facts }) => namesWrongGrass(text, facts)],
   ['unrecorded_work', (text, { facts }) => claimsUnrecordedWork(text, facts)],

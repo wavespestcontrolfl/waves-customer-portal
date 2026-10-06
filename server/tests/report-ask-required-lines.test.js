@@ -1770,3 +1770,20 @@ describe('answer screen, Codex round 45', () => {
     expect(ask('Alpine WSG was applied outside.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 46', () => {
+  test.each(['Alpine WSG was not applied outside.', 'No Alpine WSG was applied to the exterior.'])('a denial of the recorded place is rejected: %s', (answer) => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside' }] });
+    const question = 'Where was it applied?';
+    expect(screenAskAnswer(answer, { question, data, facts: buildReportAskFacts({ question, data }) })).toBe('denies_application');
+  });
+
+  test('a trend claim must run the recorded way', () => {
+    const data = lawnData({ reportV2: { aftercare: {}, trends: { overall: [{ label: 'Aug', value: 80 }, { label: 'Oct', value: 50 }] } } });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'Is my lawn improving?', data, facts });
+    expect(ask('Your overall score improved from 50 out of 100 to 80 out of 100.')).toBe('trend_claim');
+    expect(ask('Your lawn is improving.')).toBe('trend_claim');
+    expect(ask('Your overall score dropped from 80 out of 100 to 50 out of 100.')).toBeNull();
+  });
+});
