@@ -1309,3 +1309,33 @@ describe('answer screen, Codex round 27', () => {
     expect(ask('Alpine WSG uses dinotefuran.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 28', () => {
+  const data = pestData({ applications: [{ product: { name: 'Alpine WSG', active_ingredient: 'Dinotefuran 40%' }, applicationArea: 'Outside', method: 'spray', methodLabel: 'Perimeter spray' }] });
+  const facts = buildReportAskFacts({ question: 'How was Alpine WSG applied?', data });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'How was Alpine WSG applied?', data, facts });
+
+  test.each(['Alpine WSG contains acetamiprid.', 'It contains arsenic.', 'Its active ingredient is acetamiprid.'])('an ingredient claim must name the recorded one: %s', (answer) => {
+    expect(ask(answer)).toBe('ingredient_claim');
+  });
+
+  test('the recorded ingredient passes', () => {
+    expect(ask('Alpine WSG contains dinotefuran.')).toBeNull();
+  });
+
+  test.each(['It was injected outside.', 'The product was drilled into the soil outside.'])('a pronoun method claim must fit the record: %s', (answer) => {
+    expect(ask(answer)).toBe('method_claim');
+  });
+
+  test.each(["We didn't apply inside; we sprayed outside.", 'No product was used inside, but the perimeter was sprayed.'])(
+    'no recorded product: negation counts clause by clause: %s',
+    (answer) => {
+      const none = pestData({ applications: [] });
+      expect(screenAskAnswer(answer, { question: 'q', data: none, facts: buildReportAskFacts({ question: 'q', data: none }) })).toBe('scope_claim');
+    },
+  );
+
+  test.each(['Was there a little bit of bait left?', 'Mosquitoes bit me after the treatment'])('a bite needs a product object: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+  });
+});

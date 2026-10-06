@@ -1165,7 +1165,9 @@ function statesWrongScope(text, { facts }) {
   // sprayed the outside") unless it says none did (Codex P1 #5964 r24).
   if (!products.length) {
     if (!facts) return false;
-    return splitSentences(matchForm(text)).some((sentence) => APPLICATION_CLAIM.test(sentence) && !NEGATION_RE.test(sentence));
+    // Negation is judged clause by clause (Codex P1 #5964 r28).
+    return splitSentences(matchForm(text)).flatMap((sentence) => sentence.split(/[;,:]\s*|\s+(?:but|and|while|whereas|though|although)\s+/i))
+      .some((clause) => APPLICATION_CLAIM.test(clause) && !NEGATION_RE.test(clause));
   }
   return splitSentences(matchForm(text)).some((sentence) => {
     const named = products.filter((product) => mentions(sentence, product));
@@ -1179,14 +1181,38 @@ function statesWrongScope(text, { facts }) {
 }
 
 const METHOD_STEMS = ['inject', 'drill', 'trench', 'bait', 'dust', 'foam', 'broadcast', 'granul', 'spray', 'fog', 'mist', 'gel', 'spot', 'drench', 'paint', 'wipe'];
+const METHOD_VERB_STEMS = ['inject', 'drill', 'trench', 'dust', 'foam', 'broadcast', 'fogg', 'mist', 'spray', 'drench', 'paint', 'wip'];
 function statesWrongMethod(text, { facts }) {
   const products = asArray(facts?.products).filter((product) => product?.name);
-  return splitSentences(matchForm(text)).some((sentence) => products.some((product) => {
+  return splitSentences(matchForm(text)).some((sentence) => {
+    // No product named ("It was injected outside"): the method must fit some
+    // recorded product (Codex P1 #5964 r28).
+    if (!products.some((product) => mentions(sentence, product))) {
+      if (!products.length) return false;
+      const said = normalizeKey(sentence);
+      const recorded = products.map((product) => normalizeKey(product.how_applied || ''));
+      // Verb forms only ("injected", "drilled"): "the ants took the bait" is no
+      // method claim.
+      return METHOD_VERB_STEMS.some((stem) => new RegExp(`\\b${stem}(?:ed|ing|s)?\\b`).test(said) && !recorded.some((how) => how.includes(stem)));
+    }
+    return products.some((product) => {
     if (!mentions(sentence, product)) return false;
     const said = normalizeKey(sentence.replace(new RegExp(product.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' '));
     const recorded = normalizeKey(product.how_applied || '');
     return METHOD_STEMS.some((stem) => new RegExp(`\\b${stem}`).test(said) && !recorded.includes(stem));
-  }));
+    });
+  });
+}
+
+// "Contains X", "its active ingredient is X", "made with X": X must be a word
+// of a recorded active ingredient (Codex P1 #5964 r28).
+const INGREDIENT_CLAIM_RE = /\b(?:contains?|containing|active\s+ingredients?\s+(?:is|are|was|were|include|includes)|ingredients?\s+(?:is|are|was)|made\s+(?:with|from)|based\s+on)\s+(?:the\s+|an?\s+|some\s+)?([a-z][\w-]*)/gi;
+const INGREDIENT_FILLER = new Set('water no none nothing only an a the same that this which pets kids'.split(' '));
+function statesUnknownIngredient(text, { facts }) {
+  const recorded = new Set(asArray(facts?.products).flatMap((product) => normalizeKey(product.active_ingredient || '').split(' ')).filter(Boolean));
+  return [...matchForm(text).matchAll(INGREDIENT_CLAIM_RE)]
+    .map((m) => m[1].toLowerCase())
+    .some((word) => !INGREDIENT_FILLER.has(word) && !recorded.has(normalizeKey(word)));
 }
 
 // A capitalized name in a sentence about applying or using something must be
@@ -1253,6 +1279,7 @@ const ASK_CHECKS = [
   // A method claimed for a named product must match its recorded how_applied
   // ("Alpine WSG was injected" when it was sprayed) (Codex P1 #5964 r27).
   ['method_claim', statesWrongMethod],
+  ['ingredient_claim', statesUnknownIngredient],
   ['unrecorded_product', namesUnrecordedProduct],
   ['unstated_number', statesUnknownNumber],
   // While the aftercare holds watering, no sentence of the model's own may
@@ -1389,7 +1416,9 @@ const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_P
 // bait", "the bait was swallowed by John"): an eating verb and an exposure
 // word in one sentence, unless a pest is the one eating ("the ants ate the
 // bait") (Codex P1 #6016 r32). No subject list can name every person.
-const INGESTION_VERB = /\b(?:bit|bites?|bitten|biting|mouthful|took\s+a\s+(?:bite|mouthful|sip|taste)|swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
+// A bite counts only on a product ("bit the bait"); "a little bit of bait" and
+// "mosquitoes bit me" do not (Codex P1 #6038 r1).
+const INGESTION_VERB = /\b(?:bit(?!\s+of\b)\s+(?:into\s+|on\s+)?(?:the\s+|some\s+|a\s+|an\s+|that\s+|this\s+)?(?:\w+\s+)?(?:bait|poison|pellets?|blocks?|granules?|gel|products?|pesticides?|stations?|chemicals?)|took\s+a\s+(?:bite|mouthful|sip|taste)\s+(?:of|out\s+of|from)|swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
 const EXPOSURE_WORD = /\b(?:bait\w*|spray\w*|pesticides?|chemicals?|granules?|granular|poison\w*|insecticides?|herbicides?|fungicides?|rodenticides?|products?|gel|pellets?|powder|dust|treatment|fertilizer)\b/i;
 // The pest is the eater only as the subject of the eating verb ("the ants ate
 // the bait", "eaten by the roaches"); a pest word right before a product word
@@ -1406,7 +1435,7 @@ const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\
 const NOT_A_NAME = '(?:was|were|is|are|did|does|do|has|have|had|be|been|got|what|why|how|when|where|which|who|will|can|could|should|the|this|that|these|those|some|any|it|its|a|an|and|or|but|then|also|just|bait\\w*|spray\\w*|products?|pesticides?|chemicals?|granules?|poison\\w*|gel|pellets?|powder|dust|treatment|insecticides?|herbicides?|fertilizer|nothing|everything|something|anything|ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)';
 const NAME = `(?!${NOT_A_NAME}\\b)[a-z][a-z'’-]+`;
 const PERSON = `(?:i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
-const INGEST = '(?:bit|bites?|biting|took\\s+a\\s+(?:bite|mouthful|sip|taste)|swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
+const INGEST = '(?:bit(?!\\s+of\\b)\\s+(?:into\\s+|on\\s+)?(?:the\\s+|some\\s+|a\\s+|an\\s+|that\\s+|this\\s+)?(?:\\w+\\s+)?(?:bait|poison|pellets?|blocks?|granules?|gel|products?|pesticides?|stations?|chemicals?)|took\\s+a\\s+(?:bite|mouthful|sip|taste)\\s+(?:of|out\\s+of|from)|swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
 const EATER_ACTS = new RegExp(`(?:^|[^\\w])(?:${PERSON}\\s+(?:\\w+\\s+){0,2}?|${NAME}\\s+)${INGEST}\\b|\\bby\\s+(?:${PERSON}|${NAME})\\b`, 'i');
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence)
