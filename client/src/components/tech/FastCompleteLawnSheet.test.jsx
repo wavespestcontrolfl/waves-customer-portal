@@ -1984,3 +1984,47 @@ describe('time on-site card look', () => {
     expect(rule('.tech-lawn-sheet .tech-visit-section-title')).toMatch(/letter-spacing: 0\.3px; text-transform: uppercase/);
   });
 });
+
+describe('"Also in this month\'s protocol": the plan\'s opt-in products', () => {
+  const ADD_ONS = [
+    {
+      productId: P_GRANULE, name: 'Green Granules', applicationMethod: 'granular_broadcast', amount: 20, amountUnit: 'lb', treatedSqft: 5000, areaUnit: 'sqft',
+      ratePer1000: 4, rateUnit: 'lb', line: 'If thin turf: Green Granules', substituteFor: 'Old Feed', gateNotes: ['Granular product: apply on a spreader visit, not from the hose pass.'],
+      approvedForReport: true, wateringRule: null, wateringSummary: 'Water in', mowHoldDays: null,
+    },
+    // On the sheet already (a planned row): read as such.
+    { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'spot_treatment', amount: null, amountUnit: 'fl_oz', line: null, substituteFor: null, gateNotes: [] },
+    // Not in the sheet's catalog (inactive): cannot be built into a row, so not offered.
+    { productId: 'aaaaaaaa-0000-4000-8000-000000000099', name: 'Ghost', applicationMethod: 'spot_treatment', amount: null, amountUnit: 'oz', line: null, substituteFor: null, gateNotes: [] },
+  ];
+  const withAddOns = () => context({ plannedProducts: { source: 'plan', items: [PLANNED[0]], addOns: ADD_ONS, month: 10 } });
+  const addons = () => screen.getByRole('group', { name: 'Also in October’s protocol' });
+
+  test('each offered product reads the plan\'s own words: substitute, protocol line, gate notes, method and rate', async () => {
+    await openSheet({ request: makeRequest({ ctx: withAddOns() }) });
+    const row = addons();
+    expect(within(row).getByText('In place of Old Feed · If thin turf: Green Granules · Granular product: apply on a spreader visit, not from the hose pass. · Granular broadcast · 4 lb per 1,000 sq ft')).toBeTruthy();
+    expect(within(row).getByRole('button', { name: 'Talak 7.9% is on the sheet' }).disabled).toBe(true);
+    expect(within(row).queryByText('Ghost')).toBeNull();
+  });
+
+  test('a tapped add-on opens with the plan\'s amount and method, marked from the protocol, sends the plan rate, and is never a skipped plan product', async () => {
+    await openSheet({ request: makeRequest({ ctx: withAddOns() }) });
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add Green Granules' }));
+    const granules = editorFor('Green Granules');
+    expect(within(granules).getByText(/from the protocol/)).toBeTruthy();
+    expect(pressedMethod(granules)).toBe('Granular broadcast');
+    expect(within(granules).getByLabelText('Green Granules').value).toBe('20');
+    expect(within(addons()).getByRole('button', { name: 'Green Granules is on the sheet' }).disabled).toBe(true);
+    await analyze();
+    await submit();
+    const body = completeCalls()[0].body;
+    expect(body.products.find((p) => p.productId === P_GRANULE)).toMatchObject({ applicationMethod: 'granular_broadcast', totalAmount: 20, amountUnit: 'lb', rate: 4, rateUnit: 'lb', areaValue: 5000 });
+    expect(body.lawnProtocolCompletion).toBeUndefined();
+  });
+
+  test('no add-ons, no row', async () => {
+    await openSheet();
+    expect(screen.queryByRole('group', { name: /protocol$/ })).toBeNull();
+  });
+});
