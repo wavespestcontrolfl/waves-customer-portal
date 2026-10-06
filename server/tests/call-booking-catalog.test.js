@@ -396,6 +396,18 @@ describe('Waves Assessment pick is the offered visit, not a placeholder (2026-10
     expect(row?.service_key).toBe('lawn_inspection');
   });
 
+  test('a renamed assessment (same key) is still replaceable by the re-service override', () => {
+    const renamed = { ...ASSESSMENT_ROW, name: 'Free Home Assessment' };
+    const row = resolveCallBookingCatalogService({
+      extracted: { matched_service: 'Free Home Assessment', requested_service: 'pest control revisit' },
+      services: [...CATALOG, renamed],
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    });
+    expect(row?.service_key).toBe('pest_re_service');
+  });
+
   test('an assessment never takes a quoted treatment price, so it is never invoiced', () => {
     const priced = resolveCallBookingPrice({ quotedPrice: '$350', catalogRow: ASSESSMENT_ROW });
     expect(priced).toEqual({ price: null, source: null });
