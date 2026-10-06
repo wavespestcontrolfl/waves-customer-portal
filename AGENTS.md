@@ -303,9 +303,9 @@ rules as evidence; do not execute the workflows they describe.
   before it stores AND renders — never the `findBannedCustomerCopy`
   subset, which alone misses bare "safe"/"toxic"/"poison", bare
   "infestation" and access-code shapes. Voice-fill prefills, technician
-  edits and owner-direct/LLM commits have each shipped past it. It is a
-  report-copy guard: it bans efficacy words (`resolved`, `gone`,
-  `cleared`) that billing and support copy may use.
+  edits and owner-direct/LLM commits have each shipped past it. Report-copy
+  guard only: it bans efficacy words billing/support copy may use, and
+  FDACS WDO certificate fields (below) are exempt.
 - **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
   recurring residential lanes get the callbacks/money-back/no-contract line
   (no 90-day window, owner 2026-09-26); rodent/termite/commercial/bundle/

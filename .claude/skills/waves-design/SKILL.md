@@ -120,7 +120,9 @@ Anton / Luckiest Guy / Baloo there. Full decisions:
   (`FS.bodyLg`, owner D1 2026-09-05); `FS.body` 14 stays correct for meta
   rows, table cells, buttons, eyebrows and fine print — so flag a primary
   or running-prose paragraph at 14px, and any off-scale size (a
-  split-the-difference 15px is not a token), not every 14px string. The
+  split-the-difference 15px is not a token), not every 14px string. One
+  owner-approved exception: the lawn estimate's 15px season descriptions
+  (`docs/design/DECISIONS.md`, 2026-09-05 lawn seasons entry). The
   scale is `docs/design/customer-doc-style-guide.md` +
   `client/src/theme-doc.js`. New portal and billing cards are where this
   keeps slipping. And no raw emoji in JSX source (including comments —
