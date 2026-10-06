@@ -10142,7 +10142,16 @@ const CallRecordingProcessor = {
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
-    let spokenPhoneGuard = null;
+    // A spoken phone no NANP line can have (area or exchange code starting 0 or
+    // 1) is dropped from the V1 record BEFORE the optional V2 branch: V2 may be
+    // off or fail, and the V1 secondary contact still reaches a notification
+    // slot. Fail-open; the V2 extraction is sanitized after it succeeds below.
+    let spokenPhoneGuard = { rejectedSecondary: 0, rejectedCaller: false };
+    try {
+      spokenPhoneGuard = rejectImpossibleSpokenPhones({ extracted });
+    } catch (guardErr) {
+      logger.warn(`[call-proc] spoken-phone guard skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
+    }
     let v2AddressValidation = null;
     // The caller's own V2 service address, frozen BEFORE address validation and the
     // routing-path normalization rewrite v2Result.extraction (and `extracted`) with
@@ -10167,16 +10176,17 @@ const CallRecordingProcessor = {
           // the prompt's greeting rule needs it (codex #4618 r1 P1).
           callDirection: isOutboundCall(call) ? 'outbound' : 'inbound',
         });
-        // A spoken phone no NANP line can have (area or exchange code starting 0
-        // or 1) is dropped here, before ai_extraction_enriched is serialized
-        // below: the booking-link sweep reads that persisted blob. Fail-open.
+        // The V2 extraction gets the same impossible-phone rejection as the V1
+        // record above, before ai_extraction_enriched is serialized below: the
+        // booking-link sweep reads that persisted blob. Fail-open.
         try {
-          spokenPhoneGuard = rejectImpossibleSpokenPhones({
-            extracted,
+          const v2Guard = rejectImpossibleSpokenPhones({
             v2Extraction: v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction) ? v2Result.extraction : null,
           });
+          spokenPhoneGuard.rejectedSecondary += v2Guard.rejectedSecondary;
+          spokenPhoneGuard.rejectedCaller = spokenPhoneGuard.rejectedCaller || v2Guard.rejectedCaller;
         } catch (guardErr) {
-          logger.warn(`[call-proc] spoken-phone guard skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
+          logger.warn(`[call-proc] spoken-phone guard (V2) skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
         }
         // Address validation runs in shadow on every valid extraction (no-ops
         // instantly when ADDRESS_VALIDATION_ENABLED is off), so the verdict is

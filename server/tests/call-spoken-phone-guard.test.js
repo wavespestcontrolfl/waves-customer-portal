@@ -109,12 +109,43 @@ describe('impossible phones never reach a contact number', () => {
   });
 });
 
-describe('the processor drops the number before the V2 blob is serialized', () => {
-  test('the guard call precedes the ai_extraction_enriched write', () => {
-    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    const guard = src.indexOf('rejectImpossibleSpokenPhones({');
+describe('the guard runs on each record independently', () => {
+  test('V1 only (V2 off or failed): the V1 secondary phone is nulled and counted', () => {
+    const extracted = { first_name: 'Joyce', secondary_contact: { first_name: 'Quentrell', phone: '+11733038616' } };
+    const result = rejectImpossibleSpokenPhones({ extracted });
+    expect(extracted.secondary_contact.phone).toBeNull();
+    expect(result.rejectedSecondary).toBe(1);
+  });
+
+  test('V2 only (no V1 record): the V2 caller and secondary phones are nulled', () => {
+    const v2Extraction = v2({ phone_e164: '+11733038616', phone_source: 'spoken' }, {
+      secondary_contact: { first_name: 'Quentrell', phone_e164: '+11733038616' },
+    });
+    const result = rejectImpossibleSpokenPhones({ v2Extraction });
+    expect(v2Extraction.caller.phone_e164).toBeNull();
+    expect(v2Extraction.secondary_contact.phone_e164).toBeNull();
+    expect(result).toEqual({ rejectedSecondary: 1, rejectedCaller: true });
+  });
+
+  test('nothing to reject is a clean no-op', () => {
+    expect(rejectImpossibleSpokenPhones({})).toEqual({ rejectedSecondary: 0, rejectedCaller: false });
+  });
+});
+
+describe('processor wiring order', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+
+  test('the V1 guard runs before the optional V2 branch', () => {
+    const v1Guard = src.indexOf('rejectImpossibleSpokenPhones({ extracted })');
+    const v2Branch = src.indexOf('if (CALL_EXTRACTION_V2_ENABLED) {', v1Guard);
+    expect(v1Guard).toBeGreaterThan(-1);
+    expect(v2Branch).toBeGreaterThan(v1Guard);
+  });
+
+  test('the V2 guard runs before the ai_extraction_enriched write', () => {
+    const v2Guard = src.indexOf('rejectImpossibleSpokenPhones({\n            v2Extraction');
     const write = src.indexOf('ai_extraction_enriched: v2Result.extraction ? JSON.stringify');
-    expect(guard).toBeGreaterThan(-1);
-    expect(write).toBeGreaterThan(guard);
+    expect(v2Guard).toBeGreaterThan(-1);
+    expect(write).toBeGreaterThan(v2Guard);
   });
 });
