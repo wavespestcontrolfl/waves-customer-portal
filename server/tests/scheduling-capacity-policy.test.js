@@ -67,15 +67,15 @@ test('blocked travel preserves stored work, late diagnostics and the return dead
 });
 
 
-test('conversion allowances follow service identity when the pest anchor comes before a lawn-first estimate: the lawn group keeps the picked hour', () => {
+test('conversion allowances follow service identity when the pest anchor comes before a lawn-first estimate: the pest group keeps the picked hour', () => {
   const anchor = { window_start: '09:00', reservation_service_mix: capacityForServices(
     [{ service: 'lawn_care' }, { service: 'pest_control' }], [40, 30]),
   };
   expect(windowForCapacityService(anchor, 0, 'pest_general_quarterly')).toEqual({
-    window_start: '10:00', window_end: '10:30', estimated_duration_minutes: 30,
+    window_start: '09:00', window_end: '09:30', estimated_duration_minutes: 30,
   });
   expect(windowForCapacityService(anchor, 1, 'lawn_care_recurring')).toEqual({
-    window_start: '09:00', window_end: '09:40', estimated_duration_minutes: 40,
+    window_start: '10:00', window_end: '10:40', estimated_duration_minutes: 40,
   });
   expect(() => windowForCapacityService(anchor, 1, 'mosquito_monthly')).toThrow();
 });
@@ -89,4 +89,19 @@ test('the reserved anchor group keeps the picked hour, whatever the member order
     expect(windowForCapacityService(anchor, 1, 'lawn_care_recurring').window_start).toBe('10:00');
     expect(windowForCapacityService(anchor, 2, 'tree_shrub_6week').window_start).toBe('10:00');
   }
+});
+
+test('the hold covers the anchor group, then the other group from its whole-hour start', () => {
+  // Lawn-anchored (no pest): lawn 60, mosquito at +60 for 15 = 75, not the worst order.
+  expect(capacityForServices([{ service: 'lawn_care' }, { service: 'mosquito' }], [60, 15]).durationMinutes).toBe(75);
+  // Pest-anchored whatever the order: 30 pest -> lawn at +60 for 40 = 100.
+  expect(capacityForServices([{ service: 'lawn_care' }, { service: 'pest_control' }], [40, 30]).durationMinutes).toBe(100);
+});
+
+test('allocated members are ordered anchor group first, each group contiguous', () => {
+  const { orderMembersByStopGroup } = require('../services/combined-visit-capacity');
+  const row = (id, key) => ({ id, service_key_snapshot: key });
+  const anchor = row('a', 'lawn_care_recurring');
+  const members = [anchor, row('m', 'mosquito_monthly'), row('t', 'tree_shrub_6week')];
+  expect(orderMembersByStopGroup(anchor, members).map((r) => r.id)).toEqual(['a', 't', 'm']);
 });

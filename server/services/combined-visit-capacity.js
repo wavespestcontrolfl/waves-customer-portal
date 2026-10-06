@@ -28,14 +28,28 @@ function groupMinutes(services, durations, group) {
     ? sum + (durations ? durations[i] : SERVICE_MINUTES) : sum), 0);
 }
 
-// Minutes from the picked hour to the end of the second group's work, in
-// whichever order the groups land: the second group's whole-hour start adds
-// idle time the route must hold (a 30-minute pest stop, then lawn at +60).
+// The reserved anchor is the pest control service when the mix has one,
+// otherwise the first service; its group keeps the picked hour.
+function defaultAnchorGroup(services) {
+  return services.includes('pest_control') ? 'pest' : stopGroupOf(services[0]);
+}
+
+// Minutes from the picked hour to the end of the second group's work: the
+// second group's whole-hour start adds idle time the route must hold (a
+// 30-minute pest stop, then lawn at +60).
 function stopGroupSpanMinutes(services, durations) {
-  const pest = groupMinutes(services, durations, 'pest');
-  const lawn = groupMinutes(services, durations, 'lawn');
-  if (!pest || !lawn) return pest + lawn;
-  return Math.max(Math.ceil(pest / 60) * 60 + lawn, Math.ceil(lawn / 60) * 60 + pest);
+  const first = defaultAnchorGroup(services);
+  const firstMinutes = groupMinutes(services, durations, first);
+  const otherMinutes = groupMinutes(services, durations, first === 'pest' ? 'lawn' : 'pest');
+  return otherMinutes ? Math.ceil(firstMinutes / 60) * 60 + otherMinutes : firstMinutes;
+}
+
+// Allocated members in route order: the anchor's group first, then the other
+// group, each contiguous (the route evaluator refuses an A-B-A stop order).
+function orderMembersByStopGroup(anchor, members) {
+  const groupOfRow = (row) => stopGroupOf(serviceKeyFor({ service_key: row.service_key_snapshot }));
+  const first = groupOfRow(anchor);
+  return [...members.filter((row) => groupOfRow(row) === first), ...members.filter((row) => groupOfRow(row) !== first)];
 }
 
 // The member's group comes from its own catalog key (a version-1 index is the
@@ -44,8 +58,8 @@ function stopGroupSpanMinutes(services, durations) {
 function stopGroupOffsetMinutes(capacity, anchor, allowanceIndex, catalogServiceKey) {
   const known = (key) => (capacity.services.includes(key) ? key : null);
   const memberKey = known(serviceKeyFor({ service_key: catalogServiceKey })) || capacity.services[allowanceIndex];
-  const anchorKey = known(serviceKeyFor({ service_key: anchor.service_key_snapshot })) || capacity.services[0];
-  const firstGroup = stopGroupOf(anchorKey);
+  const anchorKey = known(serviceKeyFor({ service_key: anchor.service_key_snapshot }));
+  const firstGroup = anchorKey ? stopGroupOf(anchorKey) : defaultAnchorGroup(capacity.services);
   if (stopGroupOf(memberKey) === firstGroup) return 0;
   const durations = capacity.version === 2 ? capacity.durations : null;
   return Math.ceil(groupMinutes(capacity.services, durations, firstGroup) / 60) * 60;
@@ -108,5 +122,5 @@ function assertCapacityServices(anchor, members) {
 
 module.exports = {
   capacityForServices, capacityFromReservation, windowForCapacityService,
-  assertCapacityServices, capacityUnavailable,
+  assertCapacityServices, capacityUnavailable, orderMembersByStopGroup,
 };

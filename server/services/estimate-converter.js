@@ -6831,7 +6831,7 @@ const EstimateConverter = {
             // window_start is its arrival (reservation_arrival_start and
             // flex-tier destinationArrival fall back to it). Older stamps
             // keep their shared arrival.
-            allocatedServiceIds: capacityMembers.map((row) => row.id),
+            allocatedServiceIds: VisitCapacity.orderMembersByStopGroup(reservedStart, capacityMembers).map((row) => row.id),
           },
         };
         await database('scheduled_services').whereIn('id', allocation.reservation_service_mix.allocatedServiceIds)
