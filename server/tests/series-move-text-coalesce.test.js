@@ -150,6 +150,13 @@ describe('decideSeriesTextRelease', () => {
       });
       expect(out).toEqual({ action: 'send' });
     });
+
+    test('the cap counts from the post-commit start: a move blocked 40 minutes before commit is still held', async () => {
+      const out = await coalesce.decideSeriesTextRelease({
+        seriesMoveId: 'm1', markers: marker({ created_at: new Date(NOW - 40 * MIN) }), holdStartedMs: NOW - 10 * 1000, now: NOW, conn,
+      });
+      expect(out.action).toBe('hold');
+    });
   });
 
   test('the hold counts from the post-commit start, not created_at (a move that waited on locks)', async () => {

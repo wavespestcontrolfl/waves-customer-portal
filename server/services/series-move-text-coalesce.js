@@ -94,8 +94,9 @@ async function decideSeriesTextRelease({ seriesMoveId, markers, holdStartedMs = 
     logger.warn(`[series-text-coalesce] newer-move read failed for ${seriesMoveId}: ${err.message}`);
   }
   if (newer) return { action: 'drop', supersededBy: String(newer.id) };
-  const releaseAt = (Number.isFinite(holdStartedMs) ? holdStartedMs : createdMs) + SERIES_TEXT_HOLD_MS;
-  const held = lookupFailed ? now - createdMs < SERIES_TEXT_HELD_WINDOW_MS : now < releaseAt;
+  const startMs = Number.isFinite(holdStartedMs) ? holdStartedMs : createdMs;
+  const releaseAt = startMs + SERIES_TEXT_HOLD_MS;
+  const held = lookupFailed ? now - startMs < SERIES_TEXT_HELD_WINDOW_MS : now < releaseAt;
   return held ? { action: 'hold', releaseAt: new Date(releaseAt) } : { action: 'send' };
 }
 
