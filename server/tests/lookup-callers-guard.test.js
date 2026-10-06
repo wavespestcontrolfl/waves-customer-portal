@@ -129,14 +129,15 @@ describe('property-lookup callers declare their scope decision', () => {
   });
 
   test('every direct lookupPropertyFromAITrio caller (by any alias) is a declared bypass', () => {
-    // Only the defining module and the lookup that composes the trio into a
-    // profile are exempt; a helper anywhere else, the lookup directory
-    // included, must declare itself.
-    const EXEMPT = new Set(['routes/property-lookup-v2.js', 'services/property-lookup/ai-property-lookup.js']);
+    // The lookup's own internal use is pinned, not exempted: the defining
+    // module makes no call (its `function` line and export are not calls),
+    // and the lookup route composes the trio into a profile exactly once.
+    // A second call in either file is a second purpose and fails here like
+    // an undeclared caller does.
+    const INTERNAL = { 'routes/property-lookup-v2.js': 1 };
     const found = {};
     for (const file of files) {
       const r = rel(file);
-      if (EXEMPT.has(r)) continue;
       const src = fs.readFileSync(file, 'utf8');
       const calls = aliasesOf(src, 'lookupPropertyFromAITrio').flatMap((name) => callLines(src, name)
         .filter(({ line }) => !new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line)));
@@ -146,7 +147,7 @@ describe('property-lookup callers declare their scope decision', () => {
     // does not name is a new, unreviewed bypass; a registry entry with no
     // direct call left is stale; and a second call in a declared file is a
     // second purpose the one-line declaration does not cover.
-    const declared = Object.fromEntries(Object.entries(TRIO_CALLERS).map(([f, d]) => [f, d.calls]));
+    const declared = { ...INTERNAL, ...Object.fromEntries(Object.entries(TRIO_CALLERS).map(([f, d]) => [f, d.calls])) };
     expect(found).toEqual(declared);
   });
 
