@@ -118,15 +118,37 @@ function earliestSelfServeMoveStart(now = new Date()) {
 // SELF_SERVE_MOVE_NOTICE_HOURS instead of SELF_SERVE_NOTICE_HOURS. The
 // DESTINATION slot of a move is never checked with this helper — it stays
 // on visitInsideNoticeWindow / violatesSelfServeNotice (the book window).
+//
+// Office approval (owner 2026-10-06): when the office texts the reschedule
+// link for a visit inside the window (rain-out, tech running late), the
+// admin composer stamps office_move_approved_for with the visit's current
+// start. While the row still starts at that instant the visit is NOT
+// treated as inside the window, so the link, the page and its commit all
+// allow the move. Any move changes the start and ends the approval. A
+// caller whose row select lacks the column keeps the plain notice rule.
 function visitInsideMoveNoticeWindow(row, now = new Date()) {
-  if (!row) return true;
-  const hhmm = windowStartHHMM(row.window_start);
-  if (!hhmm) return true;
-  const date = etCalendarDayOf(row.scheduled_date);
-  if (!date) return true;
-  const startsAt = parseETDateTime(`${date}T${hhmm}`);
-  if (Number.isNaN(startsAt.getTime())) return true;
+  const startsAt = visitStartInstant(row);
+  if (!startsAt) return true;
+  if (officeApprovedMove(row, startsAt)) return false;
   return startsAt.getTime() < earliestSelfServeMoveStart(now).getTime();
+}
+
+// The ET instant a scheduled_services row starts (scheduled_date +
+// window_start), or null when either part is missing or unparsable.
+function visitStartInstant(row) {
+  if (!row) return null;
+  const hhmm = windowStartHHMM(row.window_start);
+  if (!hhmm) return null;
+  const date = etCalendarDayOf(row.scheduled_date);
+  if (!date) return null;
+  const startsAt = parseETDateTime(`${date}T${hhmm}`);
+  return Number.isNaN(startsAt.getTime()) ? null : startsAt;
+}
+
+function officeApprovedMove(row, startsAt = visitStartInstant(row)) {
+  if (!row?.office_move_approved_for || !startsAt) return false;
+  const approved = new Date(row.office_move_approved_for);
+  return !Number.isNaN(approved.getTime()) && approved.getTime() === startsAt.getTime();
 }
 
 module.exports = {
@@ -139,4 +161,6 @@ module.exports = {
   violatesSelfServeNotice,
   visitInsideNoticeWindow,
   visitInsideMoveNoticeWindow,
+  visitStartInstant,
+  officeApprovedMove,
 };

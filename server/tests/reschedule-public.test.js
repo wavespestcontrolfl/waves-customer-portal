@@ -1116,6 +1116,12 @@ describe('pageEligibility — the ONE verdict the GET page, find-slots and the t
     expect(await pageEligibility({ ...ok, scheduled_date: '2026-07-01', window_start: '18:00:00' }, NOW)).toEqual({ ok: false, reason: 'self_serve_notice' });
   });
 
+  test('the same visit with the office move approval for its current start → ok (owner 2026-10-06)', async () => {
+    const soon = { ...ok, scheduled_date: '2026-07-01', window_start: '18:00:00' };
+    // 2026-07-01 18:00 EDT.
+    expect(await pageEligibility({ ...soon, office_move_approved_for: new Date('2026-07-01T22:00:00Z') }, NOW)).toEqual({ ok: true });
+  });
+
   test('an ordinary future visit → ok', async () => {
     expect(await pageEligibility(ok, NOW)).toEqual({ ok: true });
   });

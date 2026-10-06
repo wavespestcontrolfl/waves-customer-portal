@@ -131,6 +131,11 @@ function makeServicesBuilder(pages = [[]]) {
   b.limit = jest.fn(() => b);
   b.offset = jest.fn((v) => { b.calls.offset.push(v); return b; });
   b.select = jest.fn(() => Promise.resolve(queue.length ? queue.shift() : []));
+  // The office move approval (approveOfficeMove): first() re-reads the row,
+  // update() stamps it; updateCount 0 = the row moved in between.
+  b.whereRaw = jest.fn((...a) => { b.calls.whereRaw = [...(b.calls.whereRaw || []), a]; return b; });
+  b.first = jest.fn(() => Promise.resolve(b.firstRow || null));
+  b.update = jest.fn((patch) => { b.calls.update = patch; return Promise.resolve(b.updateCount ?? 0); });
   return b;
 }
 
@@ -638,19 +643,45 @@ describe('POST /admin/communications/reschedule-link', () => {
   // (C3/C6 — the visit itself starts inside the move-notice window) is a
   // DIFFERENT problem than "no reschedule link at all", and must not be
   // reported as one to the office.
-  test('409 (not 404) when the visit is eligible but too soon to move online — a distinct reason from "no link"', async () => {
+  const SOON_VISIT = {
+    id: 'svc-soon',
+    customer_id: CUSTOMER_UUID,
+    scheduled_date: '2099-08-04',
+    window_start: '13:00:00',
+    window_end: '14:00:00',
+    service_type: 'pest control',
+    status: 'confirmed',
+  };
+  const TOO_SOON = { url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true };
+
+  // Owner 2026-10-06: a 1 PM visit rained out at 2 PM and the composer
+  // refused the link. The office sending the link IS the approval to move.
+  test('inside the move notice window: stamps the office approval for the current start, then returns the link', async () => {
     const customers = soloCustomer();
-    const services = makeServicesBuilder([[{
-      id: 'svc-soon',
-      customer_id: CUSTOMER_UUID,
-      scheduled_date: '2099-08-04',
-      window_start: '09:00:00',
-      window_end: '10:00:00',
-      service_type: 'pest control',
-      status: 'confirmed',
-    }]]);
+    const services = makeServicesBuilder([[SOON_VISIT]]);
+    services.firstRow = { id: 'svc-soon', scheduled_date: '2099-08-04', window_start: '13:00:00' };
+    services.updateCount = 1;
     wireDb({ customers, services });
-    buildRescheduleLink.mockResolvedValue({ url: null, line: 'Need a change? Reply here or call.\n\n', tooSoonToMove: true });
+    buildRescheduleLink.mockResolvedValueOnce(TOO_SOON).mockResolvedValueOnce(GOOD_LINK);
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234' });
+      expect(res.status).toBe(200);
+      expect((await res.json()).appointment.id).toBe('svc-soon');
+    });
+    // 1 PM ET on 2099-08-04 (EDT) — the visit's own start, nothing else.
+    expect(services.calls.update).toEqual({ office_move_approved_for: new Date('2099-08-04T17:00:00.000Z') });
+    expect(services.calls.where).toContainEqual([{ id: 'svc-soon', window_start: '13:00:00' }]);
+    expect(services.calls.whereRaw).toContainEqual(['scheduled_date = ?::date', ['2099-08-04']]);
+    expect(buildRescheduleLink).toHaveBeenCalledTimes(2);
+  });
+
+  test('409 (not 404) when the visit moved before the approval landed — a distinct reason from "no link"', async () => {
+    const customers = soloCustomer();
+    const services = makeServicesBuilder([[SOON_VISIT]]);
+    services.firstRow = { id: 'svc-soon', scheduled_date: '2099-08-04', window_start: '13:00:00' };
+    services.updateCount = 0;
+    wireDb({ customers, services });
+    buildRescheduleLink.mockResolvedValue(TOO_SOON);
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(409);

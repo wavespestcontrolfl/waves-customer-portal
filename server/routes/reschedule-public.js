@@ -292,6 +292,9 @@ function selectSvc(column, value, database = db) {
       's.recurring_pattern',
       's.recurring_parent_id',
       's.self_booking_id',
+      // Office approval to move inside the notice window (owner 2026-10-06);
+      // visitInsideMoveNoticeWindow reads it.
+      's.office_move_approved_for',
       'c.first_name as cust_first_name',
       'c.last_name as cust_last_name',
       // Availability must be computed around the BOOKED property, not the
