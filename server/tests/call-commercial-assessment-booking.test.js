@@ -605,30 +605,37 @@ describe('codex #6046 round 2', () => {
   const Processor = require('../services/call-recording-processor');
   const { commercialAssessmentBookingActive } = Processor._test;
 
-  test('promotion readiness: the main cohort stays on the unsuffixed versions; -aps rows are scored in their own section', async () => {
+  test('promotion readiness: the main cohort stays on the unsuffixed versions; the -aps cohort runs the same checks on its own rows', async () => {
     const mod = require('../scripts/v2-promotion-readiness');
     expect(mod.currentPromptVersions).toBeUndefined();
+    expect(mod.evaluateApsCohort).toBeUndefined(); // no separate, weaker scoring any more
     const src = fs.readFileSync(path.join(__dirname, '../scripts/v2-promotion-readiness.js'), 'utf8');
-    // main()'s computation is origin/main's: the bare hash and the live catalog's version only
-    expect(src).toContain(".whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])");
-    expect(src).not.toContain('currentVersions');
-    expect(src).not.toMatch(/main\(\)[\s\S]{0,40}commercialAssessmentBookingActive/);
-    // the separate section: only -aps rows, same thresholds, its own counts
-    const { evaluateApsCohort, apsCohortReport } = mod;
-    const rows = (valid, bad) => [...Array(valid).fill({ v2_extraction_status: 'valid' }), ...Array(bad).fill({ v2_extraction_status: 'schema_failed' })];
-    expect(evaluateApsCohort([])).toMatchObject({ attempts: 0, enough: false, schemaOk: false });
-    expect(evaluateApsCohort(rows(95, 5))).toMatchObject({ attempts: 100, valid: 95, enough: true, schemaOk: true });
-    expect(evaluateApsCohort(rows(94, 6))).toMatchObject({ enough: true, schemaOk: false });
-    expect(evaluateApsCohort(rows(10, 0))).toMatchObject({ enough: false, schemaOk: true });
-    expect(src).not.toContain('${APS_PROMPT_HASH}%');
-    expect(src).toContain(".where('ai_extraction_prompt_version', apsCohortVersion(liveCatalogNames))");
-    expect(src).toContain('.then(() => apsCohortReport())');
-    // gate off: no section, no database read, no output (output identical to main)
-    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
-    expect(await apsCohortReport({})).toBeNull();
-    expect(await apsCohortReport({ GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: 'TRUE' })).toBeNull();
-    expect(log).not.toHaveBeenCalled();
-    log.mockRestore();
+    // main()'s default query is origin/main's: the bare hash and the live catalog's version only
+    expect(src).toContain("[...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])]");
+    expect(src).toContain('aps ? [apsCohortVersion(liveCatalogNames)]');
+    expect(src).not.toMatch(/like.*APS_PROMPT_HASH/);
+    // gate off: exactly one main() run with no arguments (output identical to main)
+    const calls = [];
+    const fake = (verdicts) => async (arg) => { calls.push(arg); return verdicts.shift(); };
+    expect(await mod.runReadiness(fake([true]), {})).toBe(true);
+    expect(await mod.runReadiness(fake([true]), { GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: 'TRUE' })).toBe(true);
+    expect(calls).toEqual([undefined, undefined]);
+    // gate on: the -aps cohort runs FIRST through main, and its verdict goes to the main cohort's run
+    calls.length = 0;
+    const on = { GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: 'true' };
+    await mod.runReadiness(fake([true, true]), on);
+    expect(calls).toEqual([{ aps: true }, { apsPass: true }]);
+    calls.length = 0;
+    await mod.runReadiness(fake([false, false]), on);
+    expect(calls).toEqual([{ aps: true }, { apsPass: false }]);
+    calls.length = 0;
+    await mod.runReadiness(fake([undefined, false]), on);
+    expect(calls[1]).toEqual({ apsPass: false }); // a cohort that returned nothing is not a pass
+    // main()'s verdict requires the -aps cohort to pass, and the -aps run uses the same pipeline
+    expect(src).toContain('const allPass = cohortPass && apsPass !== false;');
+    expect(src).toContain('async function main({ aps = false, apsPass = null } = {})');
+    expect(src).toContain('return allPass;');
+    expect(src).not.toContain('evaluateApsCohort');
   });
 
   test('ONE read of the lane per processing pass: the prompt, the stamps and both routing lanes share it', () => {
@@ -863,7 +870,7 @@ describe('the real shape still grounds after round 4 (outbound lead_auto_bridge)
 
 describe('codex #6046 round 5', () => {
   const PV = require('../services/prompts/call-extraction-v1');
-  const { extractionPromptVersion, PROMPT_VERSION, PROMPT_HASH, APS_PROMPT_HASH } = PV;
+  const { extractionPromptVersion, PROMPT_VERSION, APS_PROMPT_HASH } = PV;
   const HASH = '0123456789ab';
   const NAMES = ['Waves Assessment', 'Cockroach Control Service'];
 
@@ -1122,5 +1129,87 @@ describe('codex #6046 round 7', () => {
     expect(grounded(ex, real, { assessmentBooking: assess({ outbound: true, v1Views: views }) })).toEqual({ ok: true, reason: 'assessment_booking_grounded', mode: 'agent_proposed', assessment: true });
     expect(route(ex, { transcript: real, commercialAssessmentV1Views: views }).allowed).toBe(true);
     expect(grounded(extraction(), real, { assessmentBooking: assess({ outbound: true, v1Views: views }) }).ok).toBe(true);
+  });
+});
+
+describe('codex #6046 round 8', () => {
+  test('staff intro: punctuation does not matter, tag questions and hedges are rejected', () => {
+    const proven = (line) => outboundStaffIdentityProven(`Agent: ${line}\nCaller: ok\nAgent: How does noon on Thursday sound?`);
+    for (const ok of [
+      'Hey Jordan, this is Alex with Waves. How are you?', 'this is Alex with Waves how are you?', 'this is Alex with Waves, how are you doing today',
+      'Hi this is Alex with Waves Pest Control I am calling about your request', "Hello, this is Alex from Waves, I'm calling to follow up on your form", 'this is Alex with Waves',
+    ]) expect([ok, proven(ok)]).toEqual([ok, true]);
+    for (const bad of [
+      'this is Alex with Waves right', 'this is Alex with Waves, right?', 'this is Alex with Waves correct', 'this is Alex with Waves yes', 'this is Alex with Waves yeah',
+      'this is Alex with Waves huh', "this is Alex with Waves isn't it", 'this is Alex with Waves isnt it', "this is Alex with Waves aren't you", 'this is Alex with Waves is it',
+      'this is Alex with Waves is that right', 'this is Alex with Waves I think', 'this is Alex with Waves maybe', 'this is Alex with Waves I guess',
+      'this is Alex with Waves you said', 'this is Alex with Waves you told me', 'this is Alex right with Waves', 'this is Alex with Waves?',
+      'this is Alex with Waves, calling to see if that is right', 'this is Alex with Waves not sure',
+    ]) expect([bad, proven(bad)]).toEqual([bad, false]);
+  });
+
+  describe('the gated block cannot change routing outside the assessment lane', () => {
+    const { hasAgentCommittedEvidence } = require('../services/call-triage-flags');
+    const SHAPE = lines();
+    // A residential call with the 3-turn shape, extracted WITH the block (agent_committed true, the bare third-turn quote)...
+    const residential = (over = {}) => ({ ...extraction({ flags: [], ...over }), property: { property_type: 'single_family' }, caller: { relationship_to_property: 'tenant', on_site_authorization: false } });
+    // ...and the same call extracted WITHOUT it (the old rule leaves agent_committed_booking null and pins no commitment quote)
+    const blockOff = (over = {}) => residential({ scheduling: { agent_committed_booking: null }, evidence: AGENT_PROPOSED_EVIDENCE.slice(0, 2), ...over });
+    const gateOpts = { agentCommitFailOpen: true, transcriptLabelsTrusted: true, transcript: SHAPE, callStartedAt: CALL_STARTED_AT, addressValidation: AV_CLEAN, failOpen: true, callerAni: '+19415550100' };
+    const verdict = (ex, extra = {}) => { const r = canAutoRoute(ex, { ...gateOpts, ...extra }); return { allowed: r.allowed, reason: r.reason, blocking: r.appointmentBlockingFlags, failedOpen: r.failedOpenFlags, demoted: r.gateDemotedFlags }; };
+
+    test('the bare agent-proposed commitment never passes the strict evidence check (every non-assessment consumer uses it)', () => {
+      const ex = residential();
+      expect(hasAgentCommittedEvidence(ex, SHAPE, CALL_STARTED_AT)).toBe(false); // the quote states no weekday or hour: it cannot bind the slot
+      // nor can the slot-bearing PROPOSAL, a question, stand in for it
+      const proposalPinned = residential({ evidence: [quote('/scheduling/agent_committed_booking', 'agent', PROPOSAL), ...AGENT_PROPOSED_EVIDENCE.slice(0, 2)] });
+      expect(hasAgentCommittedEvidence(proposalPinned, SHAPE, CALL_STARTED_AT)).toBe(false);
+      // control: a staff-stated commitment, the old shape, still passes
+      const stated = 'We will see you Thursday at noon.';
+      const t = lines({ proposal: `Agent: ${stated}`, accept: 'Caller: Perfect.', commit: 'Agent: Great.' });
+      const old = residential({ evidence: [quote('/scheduling/agent_committed_booking', 'agent', stated)] });
+      expect(hasAgentCommittedEvidence(old, t, CALL_STARTED_AT)).toBe(true);
+    });
+
+    test('canAutoRoute: a residential / non-assessment call routes exactly as it does with the block off', () => {
+      // an unauthorized caller (the agent-commit demotion's target), and a plain residential booking
+      for (const flags of [['caller_not_authorized'], []]) {
+        expect([flags, verdict(residential({ flags }))]).toEqual([flags, verdict(blockOff({ flags }))]);
+      }
+      expect(verdict(residential({ flags: ['caller_not_authorized'] })).allowed).toBe(false); // an unauthorized caller is still held for the office, block on or off
+      // control: the OLD staff-stated shape is what the demotion clears (it is unchanged)
+      const stated = 'We will see you Thursday at noon.';
+      const oldShape = residential({ flags: ['caller_not_authorized'], evidence: [quote('/scheduling/agent_committed_booking', 'agent', stated)] });
+      const oldT = lines({ proposal: `Agent: ${stated}`, accept: 'Caller: Perfect.', commit: 'Agent: Great.' });
+      expect(verdict(oldShape, { transcript: oldT }).allowed).toBe(true);
+      // a commercial call that does NOT pass the assessment lane (service elsewhere): held on the quote hold, same as off
+      const commercial = (ex) => ({ ...ex, property: { property_type: 'commercial' }, triage_flags: ['commercial_requires_quote'] });
+      const lane = { commercialAssessmentBooking: true, commercialOutbound: false, commercialAssessmentBookable: () => false, commercialAssessmentV1Views: [] };
+      const withBlock = verdict(commercial(residential()), lane);
+      expect(withBlock).toEqual(verdict(commercial(blockOff())));
+      expect(withBlock.allowed).toBe(false);
+      expect(withBlock.blocking).toContain('commercial_requires_quote');
+    });
+
+    test('no consumer outside canAutoRoute trusts the flag without the strict check', () => {
+      const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+      // canAutoRoute's demotion and the no-show detector both pair the flag with hasAgentCommittedEvidence
+      expect(read('../services/call-triage-flags.js')).toMatch(/agent_committed_booking === true\s*&& hasAgentCommittedEvidence\(/);
+      expect(read('../services/no-show-detector.js')).toMatch(/hasAgentCommittedEvidence\(v2, call\.transcription, call\.created_at\)/);
+      // the reschedule applier only acts on reschedule_requested + a grounded moved date, and its grounding
+      // (groundRescheduleAgreement) needs a commitment quote that states the slot
+      expect(read('../services/call-reschedule-apply.js')).toMatch(/groundRescheduleAgreement\(/);
+    });
+
+    test('the block changes only the commitment flag and its quotes: status and the other fields keep their own rules', () => {
+      const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+      const on = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-09-23', { agentProposedSlotCommitment: true });
+      const block = on.slice(on.indexOf('AGENT-PROPOSED SLOT'), on.indexOf('Transcript:'));
+      expect(block).toContain('then ALSO set agent_committed_booking true');
+      expect(block).toContain('changes that ONE flag and its evidence quotes only');
+      expect(block).toContain('keep their own rules above');
+      expect(block).not.toMatch(/set agent_committed_booking true, confirmed_start_at/);
+      expect(block).not.toMatch(/status "confirmed"/);
+    });
   });
 });

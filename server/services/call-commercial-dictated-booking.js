@@ -276,19 +276,31 @@ function priceDiscussed(svc = {}, transcript = '', v1Views = [], v2 = null) {
 // ("this is not Adam with Waves"), not reported speech ("you told me this is Adam
 // with Waves": the turn does not start with it).
 const NAME_WORD = "(?!(?:not|never|no)\\b)[a-z][a-z'.-]*";
-const STAFF_INTRO = new RegExp(
+const STAFF_INTRO_HEAD = new RegExp(
   "^\\s*(?:(?:hi|hello|hey|good\\s+(?:morning|afternoon|evening))\\b[\\s,.!-]*(?:(?!this\\b)[a-z][a-z'.-]*[\\s,.!-]*)?)?"
-  + `this\\s+is\\s+${NAME_WORD}(?:\\s+${NAME_WORD}){0,2}\\s*,?\\s+(?:with|from|at)\\s+waves\\b[^.!?]*([.!?]|$)`,
+  + `this\\s+is\\s+${NAME_WORD}(?:\\s+${NAME_WORD}){0,2}\\s*,?\\s+(?:with|from|at)\\s+waves\\b(?:\\s+pest\\s+control\\b)?`,
   'i',
 );
+// What may follow "Waves" in the SAME sentence, whatever the punctuation: nothing, or a greeting
+// or question about the customer ("how are you", "I'm calling about ..."). Anything else is a
+// hedge or a tag question ("... with Waves right", "isn't it").
+const STAFF_INTRO_TAIL = /^(?:(?:and\s+)?how\s+(?:are\s+you|is\s+your\s+day|are\s+things|(?:'s|is)\s+it\s+going)(?:\s+(?:doing|today|this\s+(?:morning|afternoon|evening)))*|(?:(?:i(?:'m|\s+am)|we(?:'re|\s+are))\s+)?calling\s+(?:about|to|regarding|in\s+reference\s+to|because)\b.*)$/i;
+// Tag-question and hedge words are rejected anywhere in that sentence, punctuation or not.
+const STAFF_INTRO_HEDGE = /\b(?:right|correct|yes|yeah|yep|huh|isn['’]?t\s+it|aren['’]?t\s+you|is\s+it|is\s+that|i\s+think|maybe|i\s+guess|you\s+said|you\s+told)\b/i;
+function staffIntroAsserted(raw) {
+  const text = String(raw || '');
+  const head = STAFF_INTRO_HEAD.exec(text);
+  if (!head) return false;
+  const after = /^([^.!?]*)([.!?]|$)/.exec(text.slice(head[0].length));
+  const tail = after[1].replace(/^[\s,;:-]+|[\s,;:-]+$/g, '');
+  if (STAFF_INTRO_HEDGE.test(head[0] + ' ' + after[1])) return false;
+  return tail ? STAFF_INTRO_TAIL.test(tail) : after[2] !== '?';
+}
 const ANY_STAFF_INTRO = /\bthis is\s+[a-z][a-z'.-]*(?:\s+[a-z][a-z'.-]*){0,2}\s*,?\s+(?:with|from|at)\s+waves\b/i;
 function outboundStaffIdentityProven(transcript) {
   const turns = parseTurns(transcript);
   if (!turns) return false;
-  const introduces = (turn) => {
-    const m = STAFF_INTRO.exec(String(turn.raw || ''));
-    return !!m && m[1] !== '?';
-  };
+  const introduces = (turn) => staffIntroAsserted(turn.raw);
   // The exclusion is the LOOSE reading: a Caller turn that says it anywhere ("... this is
   // Jordan with Waves too") already puts the labels in doubt, so it fails closed.
   return turns.some((t) => t.agent && introduces(t)) && !turns.some((t) => !t.agent && ANY_STAFF_INTRO.test(String(t.raw || '')));
