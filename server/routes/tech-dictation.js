@@ -31,28 +31,18 @@
  * any audio is buffered, and every mic keeps the browser's behavior.
  */
 const express = require('express');
-const rateLimit = require('express-rate-limit');
 
 const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
-const { rateLimitKey } = require('../middleware/rate-limit-key');
-const { dictationAudioUpload, dictationClipType } = require('../services/dictation-upload');
+const { dictationAudioUpload, dictationClipType, dictationLimiter } = require('../services/dictation-upload');
 const featureGates = require('../config/feature-gates');
 const logger = require('../services/logger');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
-// Paid transcription: cap clips per staff bucket (the same key as every other
-// paid-LLM limiter) so a stuck retry loop cannot bill unbounded. 40 clips in
-// 15 minutes is far above one person's honest cadence.
-const dictationLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 40,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: rateLimitKey,
-  message: { error: 'Too many dictation clips. Type for now.' },
-});
+// The paid-transcription limiter is ONE budget shared with the visit upload
+// route (tech-track.js), so the two routes cannot each spend 40 clips.
+
 
 const { UUID_RE } = require('../services/dictation-word-list');
 const uuidOrNull = (value) => (UUID_RE.test(String(value || '')) ? String(value) : null);
