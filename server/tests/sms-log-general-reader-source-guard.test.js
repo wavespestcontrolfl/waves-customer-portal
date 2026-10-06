@@ -63,13 +63,18 @@ const WINDOW_SPAN = 15;
 const ALLOWLIST = [
   {
     file: 'services/access-code-capture.js',
-    snippet: "const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'message_body');",
+    snippet: "const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'from_phone', 'message_body');",
     reason: 'sourceStillCurrent: re-locks the ONE inbound text this sweep pass already read, by id, to compare its owner and words; inbound texts are never send reservations.',
   },
   {
     file: 'services/access-code-capture.js',
     snippet: "const candidates = await conn('sms_log as s')",
     reason: 'runAccessCodeNet candidate page: inbound texts only (direction inbound), which a send reservation never is.',
+  },
+  {
+    file: 'services/access-code-capture.js',
+    snippet: "const owner = await trx('sms_log').where({ id: row.source_id }).first('customer_id');",
+    reason: 'link: reads the one source text of an unlinked found row, by id, to see whether it has a customer now; a send reservation is never an inbound source.',
   },
   {
     file: 'services/access-code-capture.js',
