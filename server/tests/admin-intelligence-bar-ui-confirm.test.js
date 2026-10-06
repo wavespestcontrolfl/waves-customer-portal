@@ -1210,21 +1210,55 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
-  test('create_appointment with a stated price that differs from the catalog shows both (owner 2026-10-06)', async () => {
+  test('create_appointment with a stated price that differs from the catalog is read back once: refused with price_read_back until price_confirmed, then the card shows both prices (owner 2026-10-06)', async () => {
     mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({ price: 60.33, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service', catalogPrice: 61.33 });
     mockIbBookingProposal.mockResolvedValueOnce({ price: 60.33, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service', catalogPrice: 61.33 });
     scriptModelTurns([
       [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Monthly Lawn Care Service', price: 60.33 } }],
+      [{ type: 'text', text: 'Which price?' }],
+      [{ type: 'tool_use', id: 'tu_2', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Monthly Lawn Care Service', price: 60.33, price_confirmed: true } }],
       [{ type: 'text', text: 'Proposed.' }],
     ]);
 
     await withServer(async (baseUrl) => {
-      const { body } = await postQuery(baseUrl, { prompt: 'book lawn at 60.33', context: 'schedule' });
+      await postQuery(baseUrl, { prompt: 'book lawn at 60.33', context: 'schedule' });
+      // First proposal: no card, a coded read-back question naming both prices.
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      const firstResult = JSON.parse(mockMessagesCreate.mock.calls[1][0].messages.slice(-1)[0].content[0].content);
+      expect(firstResult.code).toBe('price_read_back');
+      expect(firstResult.error).toBe('You gave $60.33, but the catalog price is $61.33. Ask the user which price to use. If they confirm $60.33, propose again with price_confirmed: true. Nothing was booked.');
+    });
+    // Confirmed: the card shows both prices; the flag is never stored, shown or pinned.
+    mockCreatePendingAction.mockClear();
+    mockMessagesCreate.mockClear();
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'yes, 60.33', context: 'schedule' });
       expect(body.pendingActions[0].params.price).toBe('$60.33 (price you gave) — catalog price is $61.33. Invoiced when the visit is completed');
       const stored = mockCreatePendingAction.mock.calls[0][0];
-      // Display only: the pinned price is still the stated one.
+      // The pinned price is still the stated one; price_confirmed is not stored or shown.
       expect(stored.params._booking_price).toBe(60.33);
+      expect(stored.params.price_confirmed).toBeUndefined();
+      expect(body.pendingActions[0].params.price_confirmed).toBeUndefined();
+      expect(JSON.stringify(body.pendingActions[0].contract)).not.toMatch(/price confirmed/i);
     });
+  });
+
+  test('create_appointment price read-back: an equal catalog price or no catalog price goes straight to a card', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    for (const catalogPrice of [null, undefined]) {
+      mockCreatePendingAction.mockClear();
+      mockIbBookingProposal.mockResolvedValueOnce({ price: 61.33, source: 'stated', serviceId: 'svc-lawn', serviceName: 'Monthly Lawn Care Service', catalogPrice });
+      scriptModelTurns([
+        [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Monthly Lawn Care Service', price: 61.33 } }],
+        [{ type: 'text', text: 'Proposed.' }],
+      ]);
+      await withServer(async (baseUrl) => {
+        const { body } = await postQuery(baseUrl, { prompt: 'book lawn at 61.33', context: 'schedule' });
+        expect(body.pendingActions).toHaveLength(1);
+        expect(body.pendingActions[0].params.price).toBe('$61.33 (price you gave) — invoiced when the visit is completed');
+      });
+    }
   });
 
   test('create_appointment with no timed window: no overlap pin, and a model-supplied one is dropped', async () => {

@@ -988,7 +988,8 @@ function confirmationDisplayParams(toolName, params, preview) {
     const pinnedPrice = preview?.pinned_price;
     const {
       price, customer_id: customerId, scheduled_date: scheduledDate, time_window: timeWindow,
-      service_type: serviceType, technician_id: technicianId, technician_name: technicianName, ...others
+      service_type: serviceType, technician_id: technicianId, technician_name: technicianName,
+      price_confirmed: _priceConfirmed, ...others
     } = params;
     const money = (n) => `$${Number(n).toFixed(2)}`;
     // A member discount names itself and the list price it came off (owner
@@ -1329,6 +1330,24 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       if (!booking) return { failed: true, modelResult: { error: 'No customer matches that id — nothing was proposed.' } };
       // A refusal may carry a stable code (window_not_on_the_hour, W5-dev-03); the model sees it, and no card is made.
       if (booking.error) return { failed: true, modelResult: { error: booking.error, ...(booking.code ? { code: booking.code } : {}) } };
+      // One-time price read-back: a STATED price that differs from the
+      // catalog price for this customer is asked about once before a card.
+      // Not a hard refusal (custom quotes and owner rulings differ on
+      // purpose): the model sets price_confirmed after the user confirms.
+      // Display-only input, never stored or pinned; the execution pins
+      // (_booking_price etc.) are unchanged. No catalog price: no guard.
+      const priceConfirmed = params.price_confirmed === true;
+      delete params.price_confirmed;
+      if (booking.source === 'stated' && booking.catalogPrice != null && !priceConfirmed) {
+        const money = (n) => `$${Number(n).toFixed(2)}`;
+        return {
+          failed: true,
+          modelResult: {
+            error: `You gave ${money(booking.price)}, but the catalog price is ${money(booking.catalogPrice)}. Ask the user which price to use. If they confirm ${money(booking.price)}, propose again with price_confirmed: true. Nothing was booked.`,
+            code: 'price_read_back',
+          },
+        };
+      }
       // Server pins, set unconditionally so a model-supplied value can never
       // stand in for them. The discount identity/terms (Codex r2 on #5093,
       // P1) ride alongside the net price and service id: the card shows the

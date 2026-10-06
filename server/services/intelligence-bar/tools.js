@@ -319,6 +319,7 @@ price: the visit price in dollars when the user states one. A stated price needs
         notes: { type: 'string' },
         customer_request: { type: 'string', description: 'Re-service visits only ("Pest Control Re-Service" / "Lawn Care Re-Service"): why the customer asked for it, as the user told you (e.g. "ants back in the kitchen since the weekend"). The technician sees it on the job card as why the visit was booked. Put the reason HERE, not in notes. Omit when the user gave no reason; never invent one.' },
         price: { type: 'number', exclusiveMinimum: 0, maximum: 100000, description: 'Visit price in dollars, only when the user states one' },
+        price_confirmed: { type: 'boolean', description: 'Set true ONLY after the user explicitly confirmed the stated price in reply to a price_read_back question (the stated price differed from the catalog price). Never set it on the first proposal.' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
     },
