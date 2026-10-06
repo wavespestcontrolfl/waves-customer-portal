@@ -1756,3 +1756,17 @@ describe('answer screen, Codex round 44', () => {
     expect(screenAskAnswer('Your plants are healthy.', { question: 'How are my plants?', data, facts })).toBe('health_claim');
   });
 });
+
+describe('answer screen, Codex round 45', () => {
+  const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside' }] });
+  const facts = buildReportAskFacts({ question: 'What was applied?', data });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'What was applied?', data, facts });
+
+  test.each(['No, Alpine WSG was not applied.', 'Alpine WSG was not used today.', 'Nothing was applied today.'])('a recorded application may not be denied: %s', (answer) => {
+    expect(ask(answer)).toBe('denies_application');
+  });
+
+  test('the recorded application passes', () => {
+    expect(ask('Alpine WSG was applied outside.')).toBeNull();
+  });
+});

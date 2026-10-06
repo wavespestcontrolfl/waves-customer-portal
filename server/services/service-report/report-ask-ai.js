@@ -1563,9 +1563,25 @@ function claimsUnrecordedWork(text, facts) {
   });
 }
 
+// A recorded application may not be denied: "No, Alpine WSG was not applied"
+// (Codex P1 #5964 r45). A negation tied to a place ("not applied inside") is
+// left to the scope check.
+const NO_PRODUCT_RE = /\b(?:no|nothing|none)\b[^.?!]*\b(?:applied|used|sprayed|put\s+down|spread|treated|applications?|products?)\b|\b(?:didn['’]?t|did\s+not|wasn['’]?t|weren['’]?t|was\s+not|were\s+not|never)\s+(?:\w+\s+){0,2}?(?:appl(?:y|ied)|use[ds]?|spray(?:ed)?|treat(?:ed)?|put\s+down|spread)\b/i;
+function deniesRecordedApplication(text, facts) {
+  const products = asArray(facts?.products);
+  if (!products.length) return false;
+  return clausesOf(text).some((clause) => {
+    if (!NO_PRODUCT_RE.test(clause) || SAYS_INSIDE.test(clause) || SAYS_OUTSIDE.test(clause)) return false;
+    const named = products.filter((product) => mentions(clause, product));
+    // A named product, or no name at all ("Nothing was applied").
+    return named.length > 0 || !/\b[A-Z][\w-]*\s+(?:[A-Z][\w-]*\s+)*(?:was|were)\b/.test(clause.replace(/^\s*\w+/, ''));
+  });
+}
+
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['denies_application', (text, { facts }) => deniesRecordedApplication(text, facts)],
   ['grass_type', (text, { facts }) => namesWrongGrass(text, facts)],
   ['unrecorded_work', (text, { facts }) => claimsUnrecordedWork(text, facts)],
   ['health_claim', (text, { facts }) => contradictsHealth(text, facts)],
