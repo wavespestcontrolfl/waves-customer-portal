@@ -8,7 +8,7 @@ const {
   staffWorkDateSql,
   validateWorkDate,
 } = require('../utils/staff-time-work-date');
-const { isAutoClockInJobEligible, isLiveVisit } = require('./geofence-auto-clock-in');
+const { isAutoClockInJobEligible, isFreshEvent, isLiveVisit } = require('./geofence-auto-clock-in');
 const {
   ACTIVE_WRITE_GENERATION,
   WEEKLY_OT_THRESHOLD_MINUTES,
@@ -246,14 +246,18 @@ async function assertAutoClockInVisit(trx, technicianId, jobId) {
 }
 
 // Opens the auto-clock-in shift (the visit was already re-checked). Refused when
-// the tech has any shift today: auto clock-in is for the first stop only.
+// the tech has any shift today (auto clock-in is for the first stop only) and when
+// the ENTER is no longer fresh: the handler's freshness check ran BEFORE this
+// transaction waited on the technician/shift/visit locks, and the shift is stamped
+// with the time of the insert, so it is checked again here, last, with the same
+// isFreshEvent.
 async function openAutoClockInShift(trx, technicianId, { autoClockIn, lat, lng }) {
   const worked = await trx('time_entries')
     .where({ technician_id: technicianId, entry_type: 'shift' })
     .where('status', '!=', 'voided')
     .whereRaw(`${STAFF_WORK_DATE_SQL} = ?::date`, [staffWorkDate(new Date())])
     .first('id');
-  if (worked) {
+  if (worked || !isFreshEvent(autoClockIn.eventTime)) {
     throw Object.assign(new Error('Must be clocked in to start a job.'), { code: 'auto_clock_in_ineligible' });
   }
   return insertShift(trx, technicianId, { lat, lng, ...autoClockIn });

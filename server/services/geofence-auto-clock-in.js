@@ -57,7 +57,8 @@ async function requestAutoClockIn({ tech, job, eventTime }) {
   if (!tech || !isAutoClockInJobEligible(job, tech.id) || !isFreshEvent(eventTime)) return null;
   const state = await matcher.getShiftStateToday(tech.id, new Date());
   if (!state || state.active || state.anyToday) return null;
-  return { source: SOURCE, notes: NOTES };
+  // eventTime rides along so startJob re-checks freshness inside the locked transaction.
+  return { source: SOURCE, notes: NOTES, eventTime };
 }
 
 /**

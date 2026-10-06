@@ -24,7 +24,7 @@ const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
 const timeTracking = require('../services/time-tracking');
 
-const AUTO = { source: 'geofence_auto', notes: 'Auto clock-in on arrival at first stop' };
+const AUTO = { source: 'geofence_auto', notes: 'Auto clock-in on arrival at first stop', eventTime: new Date() };
 let state;
 let mutex;
 
@@ -216,6 +216,44 @@ describe('startJob with autoClockIn', () => {
     expect(b.id).toBe(a.id);
     // the winner's job entry was not completed/replaced
     expect(state.activeJob.id).toBe(a.id);
+  });
+});
+
+describe('freshness is re-checked inside the locked transaction', () => {
+  test('fresh at the pre-check, stale by the time the locks are won -> no shift, no timer', async () => {
+    const { requestAutoClockIn } = require('../services/geofence-auto-clock-in');
+    const matcher = require('../services/geofence-matcher');
+    jest.spyOn(matcher, 'getShiftStateToday').mockResolvedValue({ active: false, anyToday: false });
+    const start = Date.parse('2026-10-06T15:00:00Z');
+    const nowSpy = jest.spyOn(Date, 'now').mockReturnValue(start);
+    const eventTime = new Date(start - 60 * 1000); // 1 min old at the pre-check
+
+    const request = await requestAutoClockIn({ tech: { id: 'tech-1' }, job: { ...state.job }, eventTime });
+    expect(request).toMatchObject({ source: 'geofence_auto', eventTime });
+
+    // The transaction waits on a lock for 15 minutes; the event is now 16 min old.
+    nowSpy.mockReturnValue(start + 15 * 60 * 1000);
+    await expect(timeTracking.startJob('tech-1', 'job-1', { geofenceArrival: true, autoClockIn: request }))
+      .rejects.toMatchObject({ code: 'auto_clock_in_ineligible' });
+    expect(state.inserted).toHaveLength(0);
+    expect(require('../services/track-transitions').markOnProperty).not.toHaveBeenCalled();
+    nowSpy.mockRestore();
+  });
+
+  test('still fresh inside the lock -> clocks in', async () => {
+    const entry = await timeTracking.startJob('tech-1', 'job-1', {
+      geofenceArrival: true, autoClockIn: { ...AUTO, eventTime: new Date(Date.now() - 60 * 1000) },
+    });
+    expect(entry.clocked_in_shift_id).toBeDefined();
+  });
+
+  test('an already clocked-in tech is not blocked by a stale event (no clock-in happens)', async () => {
+    state.activeShift = { id: 'shift-manual', technician_id: 'tech-1' };
+    const entry = await timeTracking.startJob('tech-1', 'job-1', {
+      geofenceArrival: true, autoClockIn: { ...AUTO, eventTime: new Date(Date.now() - 60 * 60 * 1000) },
+    });
+    expect(shifts()).toHaveLength(0);
+    expect(entry.id).toBe(jobs()[0].id);
   });
 });
 

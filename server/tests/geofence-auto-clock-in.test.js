@@ -77,7 +77,7 @@ beforeEach(() => {
 
 afterAll(() => { delete process.env[GATE]; });
 
-const AUTO = { source: 'geofence_auto', notes: 'Auto clock-in on arrival at first stop' };
+const AUTO = { source: 'geofence_auto', notes: 'Auto clock-in on arrival at first stop', eventTime: expect.any(Date) };
 const startOpts = () => timeTracking.startJob.mock.calls[0][2];
 const NOT_CLOCKED = () => new Error('Must be clocked in to start a job.');
 
