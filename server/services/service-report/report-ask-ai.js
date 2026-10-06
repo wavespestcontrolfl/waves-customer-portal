@@ -216,7 +216,7 @@ const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'unr
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|booked|book(?:ing)?\s+(?:a|an|the|my|our)?\s*(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|(?:am|are|is)\s+(?:i|we|it|my\s+\w+)\s+booked|booked\s+(?:for|on)\s+(?:tomorrow|tonight|today|next|this|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|book(?:ing)?\s+(?:a|an|another|my|our)\s+(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)(?!\s+of\s+(?:the\s+)?(?:year|day|season))|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }
@@ -361,14 +361,9 @@ function buildReportAskFacts({ question, data = {}, now } = {}) {
     .map((finding) => ({
       title: clip(finding.title, 120),
       detail: clip(finding.detail, 240),
-      recommendation: clip(finding.recommendation, 240),
     }))
     .filter((finding) => finding.title || finding.detail);
 
-  const recommendations = asArray(data.recommendations)
-    .slice(0, 3)
-    .map((rec) => clip(typeof rec === 'string' ? rec : rec?.text || rec?.title, 240))
-    .filter(Boolean);
   const aiSummary = data.summary ? {} : dropEmpty({
     headline: clip(data.dynamicContext?.aiSummary?.headline, 200),
     body: clip(data.dynamicContext?.aiSummary?.body, 700),
@@ -384,8 +379,8 @@ function buildReportAskFacts({ question, data = {}, now } = {}) {
     // The visit summary is only needed when the reviewed sections are absent.
     visit_summary: sections.length ? null : clip(data.summary, 700),
     findings,
-    // A report with no findings rows can still carry its recommendations.
-    recommendations,
+    // Technician recommendations (top level and per finding) never reach the
+    // model: typed text can hold a customer's name (Codex P1 #5964 r20).
     // The Waves summary the rule router answers a no-rule question with.
     waves_summary: Object.keys(aiSummary).length ? aiSummary : null,
     weather_during_visit: weatherFact(data.conditions || {}),
@@ -511,7 +506,7 @@ function targetLabelsOf(data = {}) {
 // wording (what_it_does, labeled_for) did not already name is a leaked list.
 function leaksTargetList(text, { question, data, facts }) {
   const approvedWording = asArray(facts?.products).map((product) => [product.what_it_does, product.labeled_for]);
-  const allowed = stemmedTerms([question, data.customerConcern, facts?.report_sections, facts?.findings, facts?.recommendations, facts?.waves_summary, facts?.visit_summary, approvedWording]
+  const allowed = stemmedTerms([question, data.customerConcern, facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary, approvedWording]
     .map((part) => (typeof part === 'string' ? part : JSON.stringify(part)))
     .join(' '));
   const said = stemmedTerms(text);
@@ -624,7 +619,7 @@ const MEDICAL_CUES = [
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b)\b/i,
   // Passive: "the bait was eaten by my dog" (Codex P1 #5964 r19).
-  new RegExp(`\\b(?:was|were|got|been|has\\s+been|have\\s+been)\\s+(?:\\w+\\s+)?(?:eaten|swallowed|ingested|consumed|licked|chewed|drunk|sucked|lapped(?:\\s+up)?|mouthed|nibbled|gnawed)\\s+(?:on\\s+)?by\\s+(?:my|our|his|her|their|the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS}\\b`, 'i'),
+  new RegExp(`\\b(?:was|were|got|been|has\\s+been|have\\s+been)\\s+(?:\\w+\\s+)?(?:eaten|swallowed|ingested|consumed|licked|chewed|drunk|sucked|lapped(?:\\s+up)?|mouthed|nibbled|gnawed)\\s+(?:on\\s+)?by\\s+(?:${PATIENT}|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})\\b`, 'i'),
   // A sentence that opens on the verb has an understood "I": "Accidentally
   // swallowed some bait" (Codex P1 #6016 r21).
   /(?:^|[.!?]\s+)(?:(?:accidentally|just|i\s+think\s+(?:i\s+)?|i\s+)\s*)*(?:swallow(?:ed)?|ingest(?:ed)?|consumed|ate|drank|inhaled|licked)\b/i,

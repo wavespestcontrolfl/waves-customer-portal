@@ -156,10 +156,14 @@ describe('buildReportAskFacts', () => {
     expect(facts.customer_concern).toMatch(/roaches in kitchen/);
   });
 
-  test('a report with no findings rows still carries its recommendations', () => {
-    const out = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], recommendations: ['Trim the shrubs back from the wall.', 'Keep the pantry sealed.'] } });
-    expect(out.recommendations).toEqual(['Trim the shrubs back from the wall.', 'Keep the pantry sealed.']);
-    expect(buildReportAskFacts({ data: { serviceLine: 'pest', applications: [] } }).recommendations).toBeUndefined();
+  test('technician recommendations never reach the model (they can hold a customer name)', () => {
+    const data = {
+      serviceLine: 'pest', applications: [], recommendations: ['Ask Mrs. Example to trim the shrubs.'],
+      findings: [{ title: 'Ants by the door', detail: 'Light trail.', recommendation: 'Tell Mrs. Example to seal the door.' }],
+    };
+    const out = buildReportAskFacts({ data });
+    expect(out.recommendations).toBeUndefined();
+    expect(JSON.stringify(out)).not.toMatch(/Mrs\. Example/);
   });
 
   test('the Waves summary headline and body are carried when the report has no summary text', () => {
@@ -622,11 +626,11 @@ describe('schedule questions keep the rule answer', () => {
     'When are you returning?', 'When will the technician return?', 'When are you coming again?',
     'Can I reschedule?', 'When is my next appointment?',
     'What time will you be here?', 'What day are you coming?',
-    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', 'Is somebody coming tomorrow?', 'Is anyone coming tomorrow?', 'Will somebody be here tomorrow?', 'Can you make it tomorrow?', 'Will you make it tomorrow?', 'When is the follow-up?', 'Are we booked for tomorrow?', 'Are we confirmed for tomorrow?', 'Are we set for tomorrow?', 'Am I booked tomorrow?', 'Are we still on for tomorrow?', 'When can I expect you?', "When's my service?", 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
+    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', 'Am I booked for tomorrow?', 'Is somebody coming tomorrow?', 'Is anyone coming tomorrow?', 'Will somebody be here tomorrow?', 'Can you make it tomorrow?', 'Will you make it tomorrow?', 'When is the follow-up?', 'Are we booked for tomorrow?', 'Are we confirmed for tomorrow?', 'Are we set for tomorrow?', 'Am I booked tomorrow?', 'Are we still on for tomorrow?', 'When can I expect you?', "When's my service?", 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
-  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'Could ants be here because of the rain?', 'Why would roaches be here?', 'Could the pests be back next week?', 'Why are you treating the lawn?', 'The service was completed as scheduled. What was applied?', 'What was applied during the scheduled service?', 'What was applied at my last appointment?', "Which product did you use at today's appointment?", 'Where are the ants coming from?', 'How do roaches arrive in the house?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'What time of year are ants most active?', 'I booked this service for ants. What was applied?', 'Could ants be here because of the rain?', 'Why would roaches be here?', 'Could the pests be back next week?', 'Why are you treating the lawn?', 'The service was completed as scheduled. What was applied?', 'What was applied during the scheduled service?', 'What was applied at my last appointment?', "Which product did you use at today's appointment?", 'Where are the ants coming from?', 'How do roaches arrive in the house?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(false);
   });
 });
@@ -664,6 +668,8 @@ describe('symptoms and exposure never reach the model', () => {
     'My cousin ate some granules',
     'My coworker drank pesticide',
     'The bait was eaten by my dog',
+    'The bait was swallowed by my partner',
+    'The granules were eaten by my cousin',
     'The baby sucked on the bait',
     'My dog lapped up the pesticide',
     'Accidentally swallowed some bait',
