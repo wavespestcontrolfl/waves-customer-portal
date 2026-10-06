@@ -24,7 +24,10 @@
 // `file`: the ONE production file that may use this id (relative to server/).
 // The guard test fails when an id is used anywhere else, so a new surface
 // cannot borrow another caller's decision.
-const CALLERS = Object.freeze({
+// Each entry is frozen too (`freezeEntries` below): a consumer that loads
+// first cannot flip `CALLERS.public_quote.suiteSizing` and opt a customer
+// surface in for every later caller.
+const CALLERS = freezeEntries({
   // Staff, can answer: the admin estimate tool's own lookup route (occupancy
   // buttons on the panel; wholeProperty for an association job).
   admin_estimate_tool: { surface: 'staff', suiteSizing: true, file: 'routes/property-lookup-v2.js', why: 'the panel asks and answers the scope question' },
@@ -51,6 +54,11 @@ const CALLERS = Object.freeze({
   report_cross_sell: { surface: 'customer', suiteSizing: false, file: 'services/service-report/cross-sell.js', why: 'customer report, cache-only' },
   report_cross_sell_prewarm: { surface: 'automation', suiteSizing: false, file: 'services/service-report/evidence-prewarm.js', why: 'warms the cross-sell cache for a customer report' },
 });
+
+function freezeEntries(registry) {
+  for (const entry of Object.values(registry)) Object.freeze(entry);
+  return Object.freeze(registry);
+}
 
 // Direct callers of lookupPropertyFromAITrio (the raw record trio, no
 // enriched profile, no suite leg): WDO intelligence prompts that read home

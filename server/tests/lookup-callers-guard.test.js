@@ -51,13 +51,42 @@ function callLines(src, name) {
 }
 
 describe('property-lookup callers declare their scope decision', () => {
+  test('the registry and every entry are frozen; no file reassigns a policy field', () => {
+    const { CALLERS, TRIO_CALLERS } = require('../services/property-lookup/lookup-callers');
+    expect(Object.isFrozen(CALLERS)).toBe(true);
+    expect(Object.isFrozen(TRIO_CALLERS)).toBe(true);
+    for (const [id, entry] of Object.entries(CALLERS)) {
+      expect(Object.isFrozen(entry)).toBe(true);
+      expect(() => { 'use strict'; entry.suiteSizing = !entry.suiteSizing; }).toThrow();
+      expect(['staff', 'automation', 'customer', 'public']).toContain(entry.surface);
+      expect(typeof entry.suiteSizing).toBe('boolean');
+      expect(typeof entry.file).toBe('string');
+      expect(id).toMatch(/^[a-z_]+$/);
+    }
+    // ...and no production line even tries: an assignment to a policy field
+    // (`.suiteSizing =`, `.surface =`, `.file =` on a CALLERS entry) outside
+    // the registry file is an offender regardless of the freeze.
+    const offenders = [];
+    for (const file of files) {
+      const r = rel(file);
+      if (r === 'services/property-lookup/lookup-callers.js') continue;
+      fs.readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+        if (/^\s*(\/\/|\*)/.test(line)) return;
+        if (/CALLERS\b[^\n]*\.(suiteSizing|surface|file|why)\s*=[^=]/.test(line) || /\.suiteSizing\s*=[^=]/.test(line)) {
+          offenders.push(`${r}:${i + 1}: ${line.trim()}`);
+        }
+      });
+    }
+    expect(offenders).toEqual([]);
+  });
+
+
   test('every performPropertyLookup call site passes lookupOptionsFor(...)', () => {
     const offenders = [];
     for (const file of files) {
       const r = rel(file);
       const src = fs.readFileSync(file, 'utf8');
       for (const name of lookupAliases(src)) for (const { line, n } of callLines(src, name)) {
-        if (/module\.exports/.test(line)) continue;
         // The alias binding itself ("= lookup || require(...).performPropertyLookup") is not a call.
         if (new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line)) continue;
         // The options argument is lookupOptionsFor(...) on the line, or a
