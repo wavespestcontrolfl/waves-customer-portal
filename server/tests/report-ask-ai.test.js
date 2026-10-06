@@ -391,7 +391,7 @@ describe('screenAskAnswer', () => {
   });
 
   test('number words: prose passes, an invented duration does not', () => {
-    expect(screen('A few days after this you may still see one roach.')).toBeNull();
+    expect(screen('A few days after this you may still see a roach.')).toBeNull();
     expect(screen('Half the kitchen was done first.')).toBeNull();
     // A spelled duration the report never states is a claim like its digits (Codex P1 #5964 r14).
     expect(screen('Expect it to take two or three days.')).toBe('unstated_number');
@@ -581,7 +581,7 @@ describe('schedule questions keep the rule answer', () => {
     'When are you returning?', 'When will the technician return?', 'When are you coming again?',
     'Can I reschedule?', 'When is my next appointment?',
     'What time will you be here?', 'What day are you coming?',
-    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
+    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', "When's my service?", 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
@@ -615,6 +615,12 @@ describe('symptoms and exposure never reach the model', () => {
     'The pesticide splashed my eyes',
     'The pesticide splashed me in the eyes',
     'The chemical hit me in the eye',
+    'The pesticide hit me in both eyes',
+    'The chemical got into my left eye',
+    'It splashed into her right eye',
+    'My dog consumed the bait',
+    'Accidentally swallowed some bait',
+    'Ingested some spray',
     'The product touched my skin',
     'My eyes were sprayed',
     'My skin was sprayed',
@@ -695,6 +701,8 @@ describe('symptoms and exposure never reach the model', () => {
     'Are there bee hives near my shed?',
     'How many numbers are on the pressure scale?',
     'What was sprayed on the face of the house?',
+    'Were the ants poisoned by the bait?',
+    'Was the rat poisoned?',
     'What was sprayed on my lawn?',
     'What was sprayed on the fence?',
     'Was anything sprayed on my patio?',

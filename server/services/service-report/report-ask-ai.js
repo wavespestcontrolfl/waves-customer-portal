@@ -926,7 +926,7 @@ const HOUR_RANGE = new RegExp(`\\b(?:between|from)\\s+${HOUR_WORDS}\\s+(?:and|to
 // A relative offset: "in two days", "in a few weeks", "later this month",
 // "end of the week" (Codex P1 #6016 r19). "This week" alone stays.
 const RELATIVE_OFFSET = /\b(?:in\s+(?:a\s+(?:few|couple(?:\s+of)?)\s+|\d+\s+|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+|a\s+)(?:days?|weeks?|months?)|later\s+(?:this|next)\s+(?:week|month)|this\s+month|(?:end|beginning|start|middle)\s+of\s+(?:the|this|next)\s+(?:week|month))\b/i;
-const MONTH_MAY = /\b(?:in|on|by|until|since|next|early|late|mid)[\s-]+May\b|\bMay\s+\d/;
+const MONTH_MAY = /\b(?<!\d\s)(?:in|on|by|until|since|next|early|late|mid)[\s-]+(?:May|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\b\.?|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 function statesADate(text, { requiredLines }) {
@@ -973,7 +973,9 @@ const NUMBER_WORD_RE = new RegExp(`\\b(?:(${TENS.join('|')})(?:[\\s-](${SMALL_NU
 // Number words count wherever digits would ("ninety days", "twelve palms")
 // (Codex P1 #5964 r14); "zero" and "one" only before a unit or the score
 // scale, since "one product" and "no one" are prose.
-const UNIT_AHEAD_RE = /^\s*(?:inch|in\.|["”]|out\s+of\s+100|points?\b|\/\s*100)/i;
+// "zero" and "one" count before a unit, a time word or a count noun ("one week",
+// "one affected palm") (Codex P1 #5964 r16).
+const UNIT_AHEAD_RE = /^\s*(?:inch|in\.|["”]|out\s+of\s+(?:100|5)|points?\b|\/\s*(?:100|5)|(?:days?|weeks?|months?|years?|hours?|minutes?|visits?|treatments?|applications?)\b|(?:\w+\s+)?(?:palms?|plants?|trees?|shrubs?|areas?|spots?|stations?|nests?|mounds?|colonies|colony|rooms?|beds?|zones?|roach(?:es)?|ants?|rodents?|rats?|mice|insects?|pests?)\b)/i;
 function digitsForWords(text) {
   return text.replace(NUMBER_WORD_RE, (match, tens, unit, small, hundred, offset, whole) => {
     if (hundred) return '100';
@@ -1174,18 +1176,21 @@ const MEDICAL_CUES = [
   /\b(?:feel|feeling|felt)\s+(?:\w+\s+){0,2}?(?:sick|ill|unwell|weak|woozy|off|strange)\b/i,
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b)\b/i,
+  // A sentence that opens on the verb has an understood "I": "Accidentally
+  // swallowed some bait" (Codex P1 #6016 r21).
+  /(?:^|[.!?]\s+)(?:(?:accidentally|just|i\s+think\s+(?:i\s+)?|i\s+)\s*)*(?:swallow(?:ed)?|ingest(?:ed)?|consumed|ate|drank|inhaled|licked)\b/i,
   // Swallowing, eating and poisoning need a person or pet as the one: "were
   // the ants poisoned by the bait?" is a report question (Codex P1 #5964 r15).
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?|consum(?:e|ed|es|ing)|poisoned|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   // Contact verbs: "splashed my eyes", "touched my skin", "dripped on her face" (Codex P1 #5964 r13).
-  /\b(?:splash\w*|touch\w*|dripp?\w*|spill\w*|landed|blew|drift\w*|soaked|hit)\s+(?:(?:me|him|her|us|them|you)\s+)?(?:(?:on|in|into|onto)\s+(?:(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+)?|(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+)(?:eyes?|skin|face|mouth|nose|lips?)\b(?!\s+of\b)/i,
+  /\b(?:splash\w*|touch\w*|dripp?\w*|spill\w*|landed|blew|drift\w*|soaked|hit|got|went|came)\s+(?:(?:me|him|her|us|them|you)\s+)?(?:(?:on|in|into|onto)\s+(?:(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+)?|(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+)(?:(?:both|left|right|one|either)\s+)?(?:eyes?|skin|face|mouth|nose|lips?)\b(?!\s+of\b)/i,
   // Body part first: "my eyes were sprayed", "the dog's skin got sprayed" (Codex P1 #6016 r14).
-  /\b(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+(?:eyes?|skin|face|mouth|nose)\s+(?:was|were|got|get|gets|is|are|been|has\s+been|have\s+been)\s+(?:\w+\s+)?sprayed\b/i,
+  /\b(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+(?:(?:both|left|right|one|either)\s+)?(?:eyes?|skin|face|mouth|nose)\s+(?:was|were|got|get|gets|is|are|been|has\s+been|have\s+been)\s+(?:\w+\s+)?sprayed\b/i,
   // "On my skin", "in the baby's eyes", "on the cat's skin" (Codex P1 #5964 r10).
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our|(?:the|a|my|our|his|her|their|your)\s+[\w-]+['’]s)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?|paws?|fur)\b/i,
   // Sprayed in the eyes, on the skin, in the face, with or without a possessive;
   // never "the face of the house".
-  /\bspray\w*\s+(?:\w+\s+){0,3}?(?:(?:in|into|on|onto|at)\s+(?:the\s+|my\s+|his\s+|her\s+|their\s+|our\s+|your\s+|[\w-]+['’]s\s+)?|(?:my|his|her|their|our|your|[\w-]+['’]s)\s+)(?:eyes?|skin|face|mouth|nose)\b(?!\s+of\b)/i,
+  /\bspray\w*\s+(?:\w+\s+){0,3}?(?:(?:in|into|on|onto|at)\s+(?:the\s+|my\s+|his\s+|her\s+|their\s+|our\s+|your\s+|[\w-]+['’]s\s+)?|(?:my|his|her|their|our|your|[\w-]+['’]s)\s+)(?:(?:both|left|right|one|either)\s+)?(?:eyes?|skin|face|mouth|nose)\b(?!\s+of\b)/i,
 ];
 
 // ── A question that sounds like a spray exposure: a safety line first ──
@@ -1239,7 +1244,7 @@ function defaultCallModel(payload, options) {
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }

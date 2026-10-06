@@ -1046,3 +1046,18 @@ describe('answer screen, Codex round 15', () => {
     expect(ask('The pressure score is 4 out of 5.')).toBe('unstated_number');
   });
 });
+
+describe('answer screen, Codex round 16', () => {
+  test.each(['It may take one week to improve.', 'It may take zero days to improve.', 'We found one affected palm.'])(
+    'a singular spelled duration or count the report never states is rejected: %s',
+    (answer) => {
+      const data = lawnData({ reportV2: null });
+      expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).not.toBeNull();
+    },
+  );
+
+  test('"one" as prose still passes', () => {
+    const data = pestData();
+    expect(screenAskAnswer('No one needs to stay home for this.', { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBeNull();
+  });
+});
