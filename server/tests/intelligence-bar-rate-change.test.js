@@ -74,3 +74,13 @@ test('a first rate on a customer with no bill needs no service name', async () =
   expect(r.family).toBe('whole_bill');
   expect(r.display.total_after).toBe(55);
 });
+
+test('a service on hold (zero ledger row) blocks its own line and a whole-bill reset', async () => {
+  mockComponents.mockResolvedValue([
+    { family_key: 'pest_control', monthly_rate: '41.33' },
+    { family_key: 'mosquito', monthly_rate: '0' },
+  ]);
+  expect((await rateChangeProposal(CUSTOMER, 70, 'mosquito')).code).toBe('rate_family_on_hold');
+  expect((await rateChangeProposal(CUSTOMER, 70, 'whole_bill')).code).toBe('rate_family_on_hold');
+  expect((await rateChangeProposal(CUSTOMER, 102.66, 'lawn')).family).toBe('lawn_care');
+});

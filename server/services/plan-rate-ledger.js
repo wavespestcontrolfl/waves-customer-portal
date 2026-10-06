@@ -607,6 +607,7 @@ async function recordManualRateAudit(database, customerId, rate, source) {
 // Returns { lines: [{ family, before, after }], totalBefore, totalAfter } or
 // { error, code } when the edit cannot be split onto the lines.
 const WHOLE_BILL = 'whole_bill';
+const LINE_EDIT_REFUSALS = new Set(['rate_below_other_lines', 'rate_family_required', 'rate_family_on_hold']);
 
 // The bill's current lines as a Map family → amount. An empty ledger under a
 // positive rate is a legacy rate the ledger never split: one line, the same
@@ -663,29 +664,37 @@ async function setLineForScalarWrite(database, customerId, { familyKey, previous
     await database.transaction(async (sp) => {
       if (!database.isTransaction) await lockCustomerComms(sp, customerId); // rung 6 — see LOCKING above
       if (!(await ledgerTableExists(sp))) return;
-      const components = await loadComponents(sp, customerId);
-      const change = planRateChange({ components, previousScalar, newScalar, familyKey });
+      const rows = await sp('customer_plan_rates').where({ customer_id: customerId }).select('family_key', 'monthly_rate', 'source');
+      const key = boundedFamilyKey(familyKey);
+      // A zero row is a kept marker (a paused service's plan_hold row the
+      // hold-resume job restores from): editing that line would erase it.
+      if (rows.some((r) => r.family_key === key && roundMoney(r.monthly_rate) === 0)) {
+        const err = new Error('That service is on hold, so its price cannot be changed here.');
+        err.code = 'rate_family_on_hold';
+        throw err;
+      }
+      const change = planRateChange({ components: rows, previousScalar, newScalar, familyKey });
       if (change.error) {
         const err = new Error(change.error);
         err.code = change.code;
         throw err;
       }
-      await sp('customer_plan_rates').where({ customer_id: customerId }).del();
-      for (const { family, after } of change.lines) {
-        if (after > 0) {
-          await sp('customer_plan_rates').insert({
-            customer_id: customerId,
-            family_key: family,
-            monthly_rate: after,
-            source,
-            effective_at: new Date(),
-            updated_at: new Date(),
-          });
-        }
+      // Only the named line is written; every other row — zero-valued hold
+      // markers and their provenance included — stays exactly as it is
+      // (Codex #6085 r1). A legacy rate the ledger never split becomes its
+      // 'unattributed' row first, as billLines already counts it.
+      if (rows.length === 0 && roundMoney(previousScalar) > 0) {
+        await upsertComponent(sp, { customerId, familyKey: UNATTRIBUTED, monthlyRate: previousScalar, source });
+      }
+      const line = change.lines.find((l) => l.family === key);
+      if (line && line.after > 0) {
+        await upsertComponent(sp, { customerId, familyKey: key, monthlyRate: line.after, source });
+      } else {
+        await sp('customer_plan_rates').where({ customer_id: customerId, family_key: key }).del();
       }
     });
   } catch (lineErr) {
-    if (lineErr.code === 'rate_below_other_lines' || lineErr.code === 'rate_family_required' || planRateLedgerEnabled()) {
+    if (LINE_EDIT_REFUSALS.has(lineErr.code) || planRateLedgerEnabled()) {
       if (!lineErr.code) logger.error(`[plan-rate-ledger] authoritative line write failed for customer ${customerId} (${source}) — failing the write: ${lineErr.message}`);
       throw lineErr;
     }

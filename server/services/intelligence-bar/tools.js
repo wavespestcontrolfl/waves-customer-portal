@@ -1510,23 +1510,28 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
       if (addressSubmitted) {
         await trx('customers').where('id', customerId).update({ latitude: null, longitude: null });
       }
+      // The card named the one bill line that changes (rate-change.js, owner
+      // 2026-10-06): the bill must still be what the card was built from.
+      // Checked on every pinned rate edit, before the equality shortcut below:
+      // another writer can land the same total by changing a different line
+      // (Codex #6085 r1), and that is not the edit the card showed.
+      const PlanRateLedger = require('../plan-rate-ledger');
+      if (ratePin && clean.monthly_rate !== undefined) {
+        const { ledgerPin } = require('./rate-change');
+        const components = await PlanRateLedger.loadComponents(trx, customerId);
+        if (ledgerPin(components, lockedBefore?.monthly_rate) !== ratePin.ledgerPin) {
+          const err = new Error("This customer's monthly bill changed since the card was shown — nothing was updated. Ask again for a fresh card.");
+          err.previewChanged = true;
+          throw err;
+        }
+      }
       if (clean.monthly_rate !== undefined
         && Math.round((Number(lockedBefore?.monthly_rate) || 0) * 100)
           !== Math.round((Number(clean.monthly_rate) || 0) * 100)) {
         // Only an ACTUAL rate change touches per-family attribution
-        // (codex #3245 r2/r6). The card named the one line that changes
-        // (rate-change.js, owner 2026-10-06): the bill must still be what the
-        // card was built from, then only that line moves. Gate-aware error
-        // policy lives in the ledger helpers.
-        const PlanRateLedger = require('../plan-rate-ledger');
+        // (codex #3245 r2/r6); then only the named line moves. Gate-aware
+        // error policy lives in the ledger helpers.
         if (ratePin) {
-          const { ledgerPin } = require('./rate-change');
-          const components = await PlanRateLedger.loadComponents(trx, customerId);
-          if (ledgerPin(components, lockedBefore?.monthly_rate) !== ratePin.ledgerPin) {
-            const err = new Error("This customer's monthly bill changed since the card was shown — nothing was updated. Ask again for a fresh card.");
-            err.previewChanged = true;
-            throw err;
-          }
           if (ratePin.family === PlanRateLedger.WHOLE_BILL) {
             await PlanRateLedger.syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_update' });
           } else {
@@ -1816,6 +1821,18 @@ async function bulkUpdateCustomers(customerIds, updates) {
         .filter((cid) => !liveIds.has(String(cid)))
         .map((cid) => ({ customer_id: String(cid) }));
       let targetIds = [...liveIds];
+      // A bulk rate is a first rate only (owner 2026-10-06): a customer who
+      // has a monthly bill by commit time is skipped and reported, never
+      // overwritten — the bill would lose every service line. Decided BEFORE
+      // the churn guard below, so a skipped row never has its billing wound
+      // down by a write that then does not update it (Codex #6085 r1).
+      if (clean.monthly_rate !== undefined) {
+        const billedIds = new Set(liveRows.filter((r) => bulkRateWouldReplaceBill(r, clean.monthly_rate)).map((r) => String(r.id)));
+        if (billedIds.size) {
+          targetIds = targetIds.filter((id) => !billedIds.has(String(id)));
+          skipped.push(...[...billedIds].map((cid) => ({ customer_id: cid, error: BULK_RATE_BILLED_ERROR, rate_blocked: true })));
+        }
+      }
       // ADMIN-BUG-R10 (round 3): a bulk stage move into Churned used to
       // CASE-stamp only churned_at/churn_reason for every targeted row,
       // leaving active/autopay/next_charge_date live — the same money leak
@@ -1866,16 +1883,6 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // this write, only the independent saved-method rails.
       const railsRepairedCount = clean.pipeline_stage === 'churned' ? railsRepairedOnlyIds.length : 0;
       const churnWoundDownCount = clean.pipeline_stage === 'churned' ? targetIds.length - railsRepairedCount : 0;
-      // A bulk rate is a first rate only (owner 2026-10-06): a customer who
-      // has a monthly bill by commit time is skipped and reported, never
-      // overwritten — the bill would lose every service line.
-      if (clean.monthly_rate !== undefined) {
-        const billedIds = new Set(liveRows.filter((r) => bulkRateWouldReplaceBill(r, clean.monthly_rate)).map((r) => String(r.id)));
-        if (billedIds.size) {
-          targetIds = targetIds.filter((id) => !billedIds.has(String(id)));
-          skipped.push(...[...billedIds].map((cid) => ({ customer_id: cid, error: BULK_RATE_BILLED_ERROR, rate_blocked: true })));
-        }
-      }
       if (!targetIds.length) return { count: 0, laneStampIds: [], skippedRows: skipped, churnWoundDownCount, railsRepairedCount };
       if (laneStampRelevant) {
         const beforeRows = await trx('customers')
@@ -2177,9 +2184,11 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // card hides `message` whenever `warning` is also present.
       warning: (() => {
         const churnBlocked = errors.filter((e) => e.churn_blocked);
-        const other = errors.length - churnBlocked.length;
+        const rateBlocked = errors.filter((e) => e.rate_blocked);
+        const other = errors.length - churnBlocked.length - rateBlocked.length;
         const parts = [];
         if (churnBlocked.length) parts.push(`${churnBlocked.length} refused (${churnBlocked.map((e) => e.error).join('; ')})`);
+        if (rateBlocked.length) parts.push(`${rateBlocked.length} ${BULK_RATE_BILLED_ERROR}`);
         if (other) parts.push(`${other} no longer resolved at commit`);
         return `${errors.length} of ${count + errors.length} customers were NOT updated — ${parts.join('; ')}; ${count} updated.${woundDownMessage ? ` ${woundDownMessage}` : ''}`;
       })(),

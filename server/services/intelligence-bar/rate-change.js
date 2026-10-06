@@ -92,6 +92,16 @@ async function rateChangeProposal(customerId, newRate, rateService) {
     family = WHOLE_BILL;
   }
 
+  // A zero row is a paused service's kept marker (plan_hold): the hold-resume
+  // job restores from it, so neither its own line nor a whole-bill reset may
+  // erase it while the hold lasts.
+  const heldFamilies = components.filter((r) => Number(r.monthly_rate) === 0).map((r) => r.family_key);
+  if (heldFamilies.length && (family === WHOLE_BILL || heldFamilies.includes(family))) {
+    return {
+      error: `${family === WHOLE_BILL ? 'A service on this bill is on hold' : `${lineLabel(family)} is on hold`}, so ${family === WHOLE_BILL ? 'the whole bill cannot be replaced' : 'its price cannot be changed here'}. Change one active service with rate_service, or end the hold first. Nothing was proposed.`,
+      code: 'rate_family_on_hold',
+    };
+  }
   const change = PlanRateLedger.planRateChange({ components, previousScalar, newScalar, familyKey: family });
   if (change.error) {
     return {

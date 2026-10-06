@@ -17,6 +17,11 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+const mockChurnGuard = jest.fn(async () => ({ blocked: false }));
+jest.mock('../services/customer-lifecycle-guard', () => ({
+  churnGuardOrRepair: (...a) => mockChurnGuard(...a),
+  describeLiveVisit: jest.fn(() => 'a visit'),
+}));
 const mockLoadComponents = jest.fn();
 const mockSetLine = jest.fn(async () => undefined);
 const mockSyncScalar = jest.fn(async () => undefined);
@@ -92,4 +97,28 @@ test('bulk rate: a customer who has a bill by commit time is skipped and reporte
   const lists = db.__qb.whereIn.mock.calls.map(([, ids]) => ids);
   expect(lists[0]).toEqual([A, B]);
   for (const ids of lists.slice(1)) expect(ids).toEqual([B]);
+});
+
+test('a pinned edit whose total already matches still refuses when another line changed (Codex #6085 r1)', async () => {
+  db.__qb.first.mockResolvedValue({ ...row, monthly_rate: '102.66' });
+  mockLoadComponents.mockResolvedValue([{ family_key: 'pest_control', monthly_rate: '102.66' }]);
+  const result = await executeTool('update_customer', {
+    customer_id: CUSTOMER_ID, updates: { monthly_rate: 102.66 },
+    _rate_family: 'lawn_care', _rate_ledger_pin: ledgerPin(pest, '41.33'),
+  });
+  expect(result.preview_changed).toBe(true);
+  expect(mockSetLine).not.toHaveBeenCalled();
+});
+
+test('bulk churn + rate: a billed row is skipped BEFORE the churn guard, so its billing is never wound down (Codex #6085 r1)', async () => {
+  const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  db.__qb.select.mockResolvedValue([
+    { id: A, first_name: 'Ann', last_name: 'Sample', monthly_rate: '41.33', pipeline_stage: 'active_customer' },
+    { id: B, first_name: 'Bo', last_name: 'Sample', monthly_rate: '0', pipeline_stage: 'active_customer' },
+  ]);
+  await executeTool('bulk_update_customers', { customer_ids: [A, B], updates: { monthly_rate: 0.5, pipeline_stage: 'churned' } });
+  const guarded = mockChurnGuard.mock.calls.map((c) => String(c[1]));
+  expect(guarded).not.toContain(A);
+  expect(guarded).toContain(B);
 });

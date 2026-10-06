@@ -1129,3 +1129,27 @@ describe('planRateChange / setLineForScalarWrite (one-line rate edits)', () => {
     expect(db.store).toHaveLength(1);
   });
 });
+
+describe('setLineForScalarWrite keeps every other row (Codex #6085 r1)', () => {
+  const { setLineForScalarWrite } = require('../services/plan-rate-ledger');
+
+  test('a paused service\'s zero plan_hold row survives an edit to another line', async () => {
+    const db = makeLedgerDb([
+      { customer_id: 'cust-1', family_key: 'pest_control', monthly_rate: 41.33, source: 'estimate_accept' },
+      { customer_id: 'cust-1', family_key: 'mosquito', monthly_rate: 0, source: 'plan_hold' },
+    ]);
+    db.transaction = async (fn) => fn(db);
+    await setLineForScalarWrite(db, 'cust-1', { familyKey: 'lawn_care', previousScalar: 41.33, newScalar: 102.66 }, { source: 'ib_update' });
+    const byFamily = Object.fromEntries(db.store.map((r) => [r.family_key, r]));
+    expect(byFamily.mosquito).toMatchObject({ monthly_rate: 0, source: 'plan_hold' });
+    expect(byFamily.pest_control).toMatchObject({ monthly_rate: 41.33, source: 'estimate_accept' });
+    expect(Number(byFamily.lawn_care.monthly_rate)).toBe(61.33);
+  });
+
+  test('the held service itself cannot be edited', async () => {
+    const db = makeLedgerDb([{ customer_id: 'cust-1', family_key: 'mosquito', monthly_rate: 0, source: 'plan_hold' }]);
+    db.transaction = async (fn) => fn(db);
+    await expect(setLineForScalarWrite(db, 'cust-1', { familyKey: 'mosquito', previousScalar: 0, newScalar: 30 }, { source: 'ib_update' }))
+      .rejects.toMatchObject({ code: 'rate_family_on_hold' });
+  });
+});
