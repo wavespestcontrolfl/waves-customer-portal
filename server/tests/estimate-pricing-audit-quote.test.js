@@ -99,6 +99,15 @@ beforeEach(() => {
   mockState.hasTable = false; // inventory tables absent → COGS degrades, audit still builds
 });
 
+// Runs `fn` with GATE_LAWN_BERMUDA_REMOVAL set to `value` (undefined = unset), then restores it.
+async function withRemovalGate(value, fn) {
+  const saved = process.env.GATE_LAWN_BERMUDA_REMOVAL;
+  if (value === undefined) delete process.env.GATE_LAWN_BERMUDA_REMOVAL; else process.env.GATE_LAWN_BERMUDA_REMOVAL = value;
+  try { return await fn(); } finally {
+    if (saved === undefined) delete process.env.GATE_LAWN_BERMUDA_REMOVAL; else process.env.GATE_LAWN_BERMUDA_REMOVAL = saved;
+  }
+}
+
 describe('buildEstimatePricingAudit v2 quote provenance', () => {
   test('the quote block freezes discount, setup, property, and margin-warning provenance', async () => {
     const audit = await buildEstimatePricingAudit(fixtureEstimate());
@@ -183,19 +192,34 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
   });
 
   test('the bermuda removal cost is read from the raw engine lawn line when the mapped lawnMeta is absent', async () => {
-    const wizard = (lawnLine) => ({
-      id: 'est-bermuda', status: 'sent', source: 'quote_wizard',
-      monthly_total: '55.00', annual_total: '660.00', onetime_total: null,
-      estimate_data: { engineResult: { lineItems: [lawnLine] } },
+    await withRemovalGate('true', async () => {
+      const wizard = (lawnLine) => ({
+        id: 'est-bermuda', status: 'sent', source: 'quote_wizard',
+        monthly_total: '55.00', annual_total: '660.00', onetime_total: null,
+        estimate_data: { engineResult: { lineItems: [lawnLine] } },
+      });
+      const lawn = { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9 };
+      const withCost = await buildEstimatePricingAudit(wizard({ ...lawn, costs: { annualBermudaRemoval: 71.25 } }));
+      const line = withCost.lines.find((l) => l.serviceKey === 'lawn_care');
+      expect(line.cogs.bermudaRemovalCost).toBe(71.25);
+      expect(line.cogs.estimatedCost).toBeGreaterThanOrEqual(71.25);
+      // No cost on the raw line (and no lawnMeta): nothing is added.
+      const without = await buildEstimatePricingAudit(wizard(lawn));
+      expect(without.lines.find((l) => l.serviceKey === 'lawn_care').cogs).not.toHaveProperty('bermudaRemovalCost');
     });
-    const lawn = { service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9 };
-    const withCost = await buildEstimatePricingAudit(wizard({ ...lawn, costs: { annualBermudaRemoval: 71.25 } }));
-    const line = withCost.lines.find((l) => l.serviceKey === 'lawn_care');
-    expect(line.cogs.bermudaRemovalCost).toBe(71.25);
-    expect(line.cogs.estimatedCost).toBeGreaterThanOrEqual(71.25);
-    // No cost on the raw line (and no lawnMeta): nothing is added.
-    const without = await buildEstimatePricingAudit(wizard(lawn));
-    expect(without.lines.find((l) => l.serviceKey === 'lawn_care').cogs).not.toHaveProperty('bermudaRemovalCost');
+  });
+
+  test('gate off: the whole bermuda cost lookup is 0 whatever is stored; an enabled authored proposal takes none from the retained result', async () => {
+    const lawnService = { service: 'lawn_care', name: 'Lawn Care', mo: 55, monthly: 55, tier: 'enhanced', cadence: 'every_6_weeks', visitsPerYear: 9 };
+    const stored = { recurring: { services: [lawnService] }, results: { lawnMeta: { bermudaSuppression: { perApp: 25 }, costs: { annualBermudaRemoval: 71.25 } } } };
+    const audit = (extra = {}) => buildEstimatePricingAudit({ id: 'est-gate', status: 'sent', source: 'manual', monthly_total: '55.00', annual_total: '660.00', onetime_total: null, estimate_data: { engineInput: { measuredTurfSf: 5000 }, result: stored, ...extra } });
+    const lawnCogs = (built) => built.lines.find((l) => l.serviceKey === 'lawn_care').cogs;
+    expect(await withRemovalGate(undefined, async () => lawnCogs(await audit()))).not.toHaveProperty('bermudaRemovalCost');
+    expect((await withRemovalGate('true', async () => lawnCogs(await audit()))).bermudaRemovalCost).toBe(71.25);
+    // The derived path is gated by the same switch.
+    const legacy = () => buildEstimatePricingAudit({ id: 'est-gate2', status: 'sent', source: 'manual', monthly_total: '55.00', annual_total: '660.00', onetime_total: null, estimate_data: { engineInput: { measuredTurfSf: 5000 }, result: { recurring: { services: [lawnService] }, results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } } } });
+    expect(await withRemovalGate(undefined, async () => lawnCogs(await legacy()))).not.toHaveProperty('bermudaRemovalCost');
+    expect((await withRemovalGate('true', async () => lawnCogs(await legacy()))).bermudaRemovalCost).toBe(71.25);
   });
 
   test('a legacy estimate with the suppression marker and no stored removal cost gets the engine\'s own cost from the lawn area (gate on); gate off or no marker adds nothing', async () => {
@@ -227,32 +251,36 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
   });
 
   test('a current result is authoritative for the bermuda removal cost: a stale engineResult left by a revision is never read', async () => {
-    const lawnService = { service: 'lawn_care', name: 'Lawn Care', mo: 55, monthly: 55, tier: 'enhanced', cadence: 'every_6_weeks', visitsPerYear: 9, perTreatment: 64 };
-    const staleEngine = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, costs: { annualBermudaRemoval: 99 } }] };
-    const audit = (data) => buildEstimatePricingAudit({ id: 'est-rev', status: 'sent', source: 'manual', monthly_total: '55.00', annual_total: '660.00', onetime_total: null, estimate_data: data });
-    const lawnCogs = (built) => built.lines.find((l) => l.serviceKey === 'lawn_care').cogs;
-    // Current result without the add-on + stale engineResult carrying a cost: no cost added.
-    expect(lawnCogs(await audit({ result: { recurring: { services: [lawnService] } }, engineResult: staleEngine }))).not.toHaveProperty('bermudaRemovalCost');
-    // Current result with a newer cost in its lawnMeta: that one is used.
-    expect(lawnCogs(await audit({ result: { recurring: { services: [lawnService] }, results: { lawnMeta: { costs: { annualBermudaRemoval: 71.25 } } } }, engineResult: staleEngine })).bermudaRemovalCost).toBe(71.25);
-    // Current result carrying the raw lawn line with a newer cost: that one, not the stale engineResult's.
-    expect(lawnCogs(await audit({ result: { recurring: { services: [lawnService] }, lineItems: [{ service: 'lawn_care', costs: { annualBermudaRemoval: 10 } }] }, engineResult: staleEngine })).bermudaRemovalCost).toBe(10);
+    await withRemovalGate('true', async () => {
+      const lawnService = { service: 'lawn_care', name: 'Lawn Care', mo: 55, monthly: 55, tier: 'enhanced', cadence: 'every_6_weeks', visitsPerYear: 9, perTreatment: 64 };
+      const staleEngine = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, costs: { annualBermudaRemoval: 99 } }] };
+      const audit = (data) => buildEstimatePricingAudit({ id: 'est-rev', status: 'sent', source: 'manual', monthly_total: '55.00', annual_total: '660.00', onetime_total: null, estimate_data: data });
+      const lawnCogs = (built) => built.lines.find((l) => l.serviceKey === 'lawn_care').cogs;
+      // Current result without the add-on + stale engineResult carrying a cost: no cost added.
+      expect(lawnCogs(await audit({ result: { recurring: { services: [lawnService] } }, engineResult: staleEngine }))).not.toHaveProperty('bermudaRemovalCost');
+      // Current result with a newer cost in its lawnMeta: that one is used.
+      expect(lawnCogs(await audit({ result: { recurring: { services: [lawnService] }, results: { lawnMeta: { costs: { annualBermudaRemoval: 71.25 } } } }, engineResult: staleEngine })).bermudaRemovalCost).toBe(71.25);
+      // Current result carrying the raw lawn line with a newer cost: that one, not the stale engineResult's.
+      expect(lawnCogs(await audit({ result: { recurring: { services: [lawnService] }, lineItems: [{ service: 'lawn_care', costs: { annualBermudaRemoval: 10 } }] }, engineResult: staleEngine })).bermudaRemovalCost).toBe(10);
+    });
   });
 
   test('the audit and the bermuda evidence pick the same container: an unpriced ancillary result yields to a priced engineResult; a SERVER reprice keeps its result', async () => {
-    const pricedEngine = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, costs: { annualBermudaRemoval: 71.25 } }] };
-    const pest = { service: 'pest_control', name: 'Pest Control', mo: 40, monthly: 40 };
-    const audit = (extra) => buildEstimatePricingAudit({ id: 'est-pick', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: null, ...extra });
-    const lawnLine = (built) => built.lines.find((l) => l.serviceKey === 'lawn_care');
-    // An ancillary result with no priced lines + a priced engine lawn line: the engine one is THE result, cost counted.
-    const ancillary = await audit({ source: 'quote_wizard', estimate_data: { result: { results: {} }, engineResult: pricedEngine } });
-    expect(lawnLine(ancillary).cogs.bermudaRemovalCost).toBe(71.25);
-    // A SERVER reprice (current result priced pest only, a stale engine lawn line left behind): no lawn line, no cost.
-    const repriced = await audit({ source: 'manual', pricing_authority: 'SERVER', estimate_data: { result: { recurring: { services: [pest] } }, engineResult: pricedEngine } });
-    expect(lawnLine(repriced)).toBeUndefined();
-    // A SERVER reprice whose current result prices nothing stays empty: the stale engine line is not costed.
-    const emptied = await audit({ source: 'manual', pricing_authority: 'SERVER', estimate_data: { result: { results: {} }, engineResult: pricedEngine } });
-    expect(lawnLine(emptied)).toBeUndefined();
+    await withRemovalGate('true', async () => {
+      const pricedEngine = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, costs: { annualBermudaRemoval: 71.25 } }] };
+      const pest = { service: 'pest_control', name: 'Pest Control', mo: 40, monthly: 40 };
+      const audit = (extra) => buildEstimatePricingAudit({ id: 'est-pick', status: 'sent', monthly_total: '55.00', annual_total: '660.00', onetime_total: null, ...extra });
+      const lawnLine = (built) => built.lines.find((l) => l.serviceKey === 'lawn_care');
+      // An ancillary result with no priced lines + a priced engine lawn line: the engine one is THE result, cost counted.
+      const ancillary = await audit({ source: 'quote_wizard', estimate_data: { result: { results: {} }, engineResult: pricedEngine } });
+      expect(lawnLine(ancillary).cogs.bermudaRemovalCost).toBe(71.25);
+      // A SERVER reprice (current result priced pest only, a stale engine lawn line left behind): no lawn line, no cost.
+      const repriced = await audit({ source: 'manual', pricing_authority: 'SERVER', estimate_data: { result: { recurring: { services: [pest] } }, engineResult: pricedEngine } });
+      expect(lawnLine(repriced)).toBeUndefined();
+      // A SERVER reprice whose current result prices nothing stays empty: the stale engine line is not costed.
+      const emptied = await audit({ source: 'manual', pricing_authority: 'SERVER', estimate_data: { result: { results: {} }, engineResult: pricedEngine } });
+      expect(lawnLine(emptied)).toBeUndefined();
+    });
   });
 
   test('wizard rows with ONLY engineResult.lineItems still produce audit lines', async () => {

@@ -579,7 +579,11 @@ async function openPlanStep(knex, { enabled, service, profile, calendarTrackKey,
           const projected = active && v13Active
             ? await projectBermudaStep(items, { knex, rows, probeLimits, testPatch: cultivar === 'test_patch' })
             : { items, blocks: [], warnings: [] };
-          return { ...projected, warnings: [...excludedWarnings, ...projected.warnings] };
+          // The probe's warning-level results (the label-rate warning) join the plan's warnings under a
+          // bermuda code the completion drawer forwards. A selected step is already covered by the
+          // planner's own limit warnings for its selected lines, so they are not repeated.
+          const probeWarnings = items.some((item) => isStepLine(item) && item.selected) ? [] : (projected.limitWarnings || []).map((warning) => ({ ...warning, code: 'lawn_bermuda_limit_warning' }));
+          return { ...projected, warnings: [...excludedWarnings, ...projected.warnings, ...probeWarnings] };
         },
         field: active ? { bermudaRemoval: { active: true, source: wanted.source, mix: addOn.summary } } : {},
         mixOrderField,

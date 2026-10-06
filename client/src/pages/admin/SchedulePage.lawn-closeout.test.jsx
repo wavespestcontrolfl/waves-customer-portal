@@ -1566,11 +1566,13 @@ it('with the appointment plan in use, the plan\'s bermuda warnings show beside t
   const reason = 'Bermuda removal is not offered on this visit: Recognition, Fusilade II and the surfactant go together, and one of them is blocked or has no planned row.';
   planWarnings = [
     { code: 'lawn_bermuda_step_unavailable', severity: 'warning', message: reason },
+    { code: 'lawn_bermuda_limit_warning', severity: 'warning', message: 'Recognition: cumulative 0.150 oz/1000sf/year approaching/exceeding max 0.1437.' },
     { code: 'lawn_v13_limit_warning', severity: 'warning', message: 'An unrelated plan warning that stays out of this line.' },
   ];
   mount();
   await waitFor(() => expect(totals()).toHaveLength(2));
   expect(await screen.findByText(reason)).toBeTruthy();
+  expect(screen.getByText(/cumulative 0\.150/)).toBeTruthy();
   expect(screen.queryByText(/unrelated plan warning/)).toBeNull();
   // The actions list is not fetched on this path: the line came from the plan.
   expect(fetch.mock.calls.some(([url]) => /completion-actions/.test(url))).toBe(false);

@@ -1926,7 +1926,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // linked, products active, no limit capped, then settled (warning or product-scoped
   // blocks) with the cultivar's test-patch note.
   const bermudaProjection = await step.project(planItems, {
-    enabled: v13Active, rows: v13Rows, probeLimits: (probe) => v13Limits(knex, service, serviceDate, probe, { strict }),
+    enabled: v13Active, rows: v13Rows, probeLimits: (probe, stagedRows) => v13Limits(knex, service, serviceDate, probe, { strict, rows: stagedRows }),
   });
   planItems = bermudaProjection.items;
   const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems);

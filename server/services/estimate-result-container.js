@@ -121,4 +121,9 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
   return { result, rawLines };
 }
 
-module.exports = { authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything };
+// An AUTHORED proposal is the accepted quote when it is enabled (estimate-public.js accept, which
+// skips the retained engine rows for the same reason): its itemization, not result or engineResult,
+// is what the customer agreed to. One test for every reader that must not look behind it.
+const proposalIsAuthoritative = (data) => data?.proposal?.enabled === true;
+
+module.exports = { proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything };

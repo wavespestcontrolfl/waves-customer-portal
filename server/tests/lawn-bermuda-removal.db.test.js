@@ -204,6 +204,11 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify({ result: { results: {} }, engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, bermudaSuppression: { perApp: 25 } }] } }) });
       expect((await plan(plain.visit)).bermudaRemoval).toMatchObject({ active: true, source: 'estimate' });
       await knex('estimates').where({ customer_id: plain.customerId }).del();
+      // An enabled authored proposal is the accepted quote: a proposal without the add-on over an engine
+      // result that carries it gives no step.
+      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify({ proposal: { enabled: true, buildings: [{ lineItems: [{ name: 'Lawn Care', frequency: 'monthly' }] }] }, result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }, engineResult: { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, bermudaSuppression: { perApp: 25 } }] } }) });
+      expect((await plan(plain.visit)).bermudaRemoval).toBeUndefined();
+      await knex('estimates').where({ customer_id: plain.customerId }).del();
       // The raw engine lawn line alone (no mapped result) counts as the current result.
       await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify({ engineResult: { lineItems: [{ service: 'lawn_care', bermudaSuppression: { perApp: 25 } }] } }) });
       expect((await plan(plain.visit)).bermudaRemoval).toMatchObject({ active: true, source: 'estimate' });
@@ -303,6 +308,24 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(codes(result)).not.toContain('lawn_v13_annual_limit');
       expect(result.propertyGate.warnings.map((w) => w.code)).not.toContain('lawn_bermuda_step_unavailable');
       expect(names(result.mixCalculator.items)).toEqual(expect.arrayContaining([REC, FUS]));
+    });
+
+    test('the plan carries the probe\'s label-rate warning as lawn_bermuda_limit_warning when the step is offered unselected; a selected step is not repeated', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await knex('property_application_history').insert(['2026-03-01', '2026-04-20'].map((application_date) => ({
+        customer_id: f.customerId, product_id: rec.id, application_date, application_rate: 0.06, rate_unit: 'oz',
+      })));
+      // 0.12 recorded is under the 95 percent mark alone; the planned 0.03 brings it past.
+      const offered = await plan(f.visit);
+      const found = offered.propertyGate.warnings.filter((w) => w.code === 'lawn_bermuda_limit_warning');
+      expect(found).toHaveLength(1);
+      expect(found[0].message).toMatch(/cumulative 0\.150/);
+      expect(offered.propertyGate.blocks).toEqual([]);
+      // Selected: the planner's own limit warning carries it, and the bermuda code is not added a second time.
+      const selected = await plan(f.visit, { selectedConditionalProductIds: [rec.id] });
+      expect(selected.propertyGate.warnings.filter((w) => w.code === 'lawn_bermuda_limit_warning')).toEqual([]);
+      expect(selected.propertyGate.warnings.filter((w) => w.code === 'lawn_v13_limit_warning' && /cumulative 0\.150/.test(w.message)).length).toBeGreaterThan(0);
     });
 
     test('the plan uses the appointment\'s own ET month: an April-window visit rescheduled into May has no step', async () => {

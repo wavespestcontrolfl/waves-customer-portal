@@ -12,7 +12,7 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
-const { authoritativeEstimateResult } = require('../estimate-result-container');
+const { authoritativeEstimateResult, proposalIsAuthoritative } = require('../estimate-result-container');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
@@ -1496,6 +1496,16 @@ function estimateDataCarriesBermudaSuppression(estimateDataRaw) {
 // counts (the authoritative container, estimate-result-container.js): the mapped
 // lawnMeta, a lawn tier's provenance, or the raw engine lawn line. An
 // estimate with no lawn line in its result (pest only) never carries it.
+// A proposal line (building line item, program or corrective work) carries the add-on only by an
+// explicit marker; no authoring path sets one today, so a proposal normally carries none.
+function proposalCarriesBermudaSuppression(proposal) {
+  const lines = [
+    ...(proposal.buildings || []).flatMap((building) => building?.lineItems || []),
+    ...(proposal.programs || []), ...(proposal.correctiveWork || []),
+  ];
+  return lines.some((line) => line?.bermudaSuppression === true);
+}
+
 function estimateResultCarriesBermudaSuppression(estimateDataRaw, { pricingAuthority = null } = {}) {
   let d = estimateDataRaw;
   if (typeof d === 'string') {
@@ -1503,6 +1513,10 @@ function estimateResultCarriesBermudaSuppression(estimateDataRaw, { pricingAutho
   }
   if (!d || typeof d !== 'object') return false;
   const positive = (value) => Number(value) > 0;
+  // An enabled authored proposal is the accepted quote: the evidence comes only from the proposal,
+  // and only when one of its lines explicitly carries the suppression add-on. Nothing in
+  // result or engineResult (retained engine rows, not the accepted quote) is read.
+  if (proposalIsAuthoritative(d)) return proposalCarriesBermudaSuppression(d.proposal);
   // The current result only: when `result` exists it is authoritative and a stale engineResult
   // left behind by a revision is never read (see estimate-result-container.js).
   // The pick is the audit's own, with the audit's own "prices something" detector (required

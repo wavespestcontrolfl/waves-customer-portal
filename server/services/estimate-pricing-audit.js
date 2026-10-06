@@ -714,12 +714,21 @@ function rawLawnBermudaCost(result) {
 
 // A legacy estimate whose result carries the bermuda suppression marker but no stored removal
 // cost (it was priced before the cost existed): the cost the engine would state, from the
-// marker and the lawn area in that result, by the engine's own calculation. Gate off: nothing
-// (the audit is the old one); no marker or no area: nothing.
+// marker and the lawn area in that result, by the engine's own calculation. No marker or no
+// area: nothing (the caller has already applied the gate).
 function derivedBermudaCost(result, lawnSqFt) {
-  if (require('../config/feature-gates').lawnBermudaRemovalLive?.() !== true) return undefined;
   if (!(Number(lawnSqFt) > 0) || !require('./pricing-engine/v1-legacy-mapper').estimateResultCarriesBermudaSuppression({ result })) return undefined;
   return require('./pricing-engine/service-pricing').calcBermudaRemovalAnnualCost(Number(lawnSqFt));
+}
+
+// The bermuda removal cost the audit adds to a lawn line: stored on the result, on its raw lawn
+// line, or derived from the marker and the lawn area. The WHOLE lookup is gated on
+// GATE_LAWN_BERMUDA_REMOVAL (off = 0 whatever is stored), and an authored proposal, which is the
+// accepted quote, takes none from the retained result.
+function bermudaRemovalCostOf(result, dimensions, proposalAuthoritative) {
+  if (proposalAuthoritative || require('../config/feature-gates').lawnBermudaRemovalLive?.() !== true) return 0;
+  return Number(result?.results?.lawnMeta?.costs?.annualBermudaRemoval ?? result?.lawnMeta?.costs?.annualBermudaRemoval
+    ?? rawLawnBermudaCost(result) ?? derivedBermudaCost(result, dimensions.lawnSqFt)) || 0;
 }
 
 function visitsFor(line, result) {
@@ -1148,10 +1157,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     // Bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL): its two yearly sprays are
     // not in the lawn inventory registry, so the quote's own cost line joins the
     // lawn COGS. Absent (gate off, no add-on) = 0.
-    const bermudaRemovalCost = raw.serviceKey === 'lawn_care'
-      ? Number(result?.results?.lawnMeta?.costs?.annualBermudaRemoval ?? result?.lawnMeta?.costs?.annualBermudaRemoval
-        ?? rawLawnBermudaCost(result) ?? derivedBermudaCost(result, dimensions.lawnSqFt)) || 0
-      : 0;
+    const bermudaRemovalCost = raw.serviceKey === 'lawn_care' ? bermudaRemovalCostOf(result, dimensions, proposalLines.length > 0) : 0;
     const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0) + bermudaRemovalCost);
     const grossProfit = money(raw.price - estimatedCost);
     const margin = raw.price > 0 ? Math.round((grossProfit / raw.price) * 1000) / 1000 : null;
