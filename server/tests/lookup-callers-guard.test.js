@@ -77,12 +77,24 @@ describe('property-lookup callers declare their scope decision', () => {
     expect(offenders).toEqual([]);
   });
 
-  test('every caller id is used in exactly the one file the registry binds it to', () => {
+  test('every caller id is used in exactly the one file the registry binds it to, always as a single-quoted literal', () => {
     const uses = {};
+    const nonCanonical = [];
     for (const file of files) {
       const src = fs.readFileSync(file, 'utf8');
-      for (const m of src.matchAll(/lookupOptionsFor\('([a-z_]+)'/g)) (uses[m[1]] ||= []).push(rel(file));
+      if (rel(file) === 'services/property-lookup/lookup-callers.js') continue;
+      // Every call of lookupOptionsFor, however its first argument is written:
+      // only a single-quoted literal id is accepted. A double-quoted string,
+      // a template, a variable or an expression cannot be bound to a file
+      // and is refused outright.
+      for (const m of src.matchAll(/lookupOptionsFor\(\s*([^,)]*)/g)) {
+        const arg = m[1].trim();
+        const lit = arg.match(/^'([a-z_]+)'$/);
+        if (lit) (uses[lit[1]] ||= []).push(rel(file));
+        else nonCanonical.push(`${rel(file)}: lookupOptionsFor(${arg}`);
+      }
     }
+    expect(nonCanonical).toEqual([]);
     const expected = Object.fromEntries(Object.entries(CALLERS).map(([id, c]) => [id, [c.file]]));
     // Each id appears in its own file only (a file may call it more than once).
     const actual = Object.fromEntries(Object.entries(uses).map(([id, fs_]) => [id, [...new Set(fs_)]]));
