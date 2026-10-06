@@ -923,6 +923,16 @@ function bookingWhenLabel(scheduledDate, timeWindow) {
 }
 
 function confirmationDisplayParams(toolName, params, preview) {
+  // The card shows what the plan will save (a note as the line it adds; a
+  // property code that is the community code is left out) and what it will
+  // not, never the raw request.
+  if (toolName === 'update_property_access' && preview?.preview === true) {
+    return {
+      customer: preview.customer_name || params.customer_id,
+      ...(preview.would_update || {}),
+      ...(preview.kept?.length ? { not_saved_or_changed: preview.kept.join('; ') } : {}),
+    };
+  }
   if (toolName === 'cancel_plan' && preview?.preview === true) {
     // The card must show everything the commit will do: who, what scope,
     // the visits coming off, the money, the effective date, whether the
@@ -1864,6 +1874,11 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
   // acts on exactly those, and task-context validates the invoice by id.
   if (toolUse.name === 'remove_saved_payment_method' && preview?.method?.id) {
     params.payment_method_id = String(preview.method.id);
+  }
+  // The property access write pins the plan the card showed; the confirmed
+  // run refuses when its plan under the lock differs.
+  if (toolUse.name === 'update_property_access' && preview?.plan_hash) {
+    params._ib_property_plan_hash = String(preview.plan_hash);
   }
   if (toolUse.name === 'correct_invoice_address' && preview?.invoice_id) {
     params.invoice_id = String(preview.invoice_id);
