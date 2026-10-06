@@ -470,6 +470,39 @@ describe('screenAskAnswer', () => {
     expect(screen('We will return in a fortnight.')).toBe('states_a_date');
     expect(screen('The technician will come back in the spring.')).toBe('states_a_date');
     expect(screen('We will be back soon.')).toBe('states_a_date');
+    expect(screen('Your next service is in the spring.')).toBe('states_a_date');
+    expect(screen('Expect another visit soon.')).toBe('states_a_date');
+    expect(screen('Your follow-up is soon.')).toBe('states_a_date');
+    expect(screen('A technician will return soon.')).toBe('states_a_date');
+    expect(screen('Your technician will return soon.')).toBe('states_a_date');
+    // Past or negative facts about a follow-up are no promise.
+    expect(screen('Your follow-up was completed today.')).toBeNull();
+    expect(screen('A follow-up was not recorded on this report.')).toBeNull();
+    // No-harm assurances in other words.
+    expect(screen('The treatment poses no risk to pets.')).toBe('safety claim');
+    expect(screen('It will not harm your children.')).toBe('safety claim');
+    expect(screen('It is gentle around pets.')).toBe('safety claim');
+    expect(screen('The treatment does not pose any risk to pets.')).toBe('safety claim');
+    expect(screen('The treatment is unlikely to harm pets.')).toBe('safety claim');
+    expect(screen('The treatment will never harm pets.')).toBe('safety claim');
+    expect(screen("It shouldn't hurt children.")).toBe('safety claim');
+    expect(screen("It shouldn't affect children.")).toBe('safety claim');
+    expect(screen("It can't pose any risk to pets.")).toBe('safety claim');
+    expect(screen('The technician is scheduled to return.')).toBe('states_a_date');
+    expect(screen("We'll return soon.")).toBe('states_a_date');
+    expect(screen("We'll arrive soon.")).toBe('states_a_date');
+    expect(screen('The technician was scheduled for today and treated the outside.')).toBeNull();
+    expect(screen('We are coming soon.')).toBe('states_a_date');
+    expect(screen("We're on our way.")).toBe('states_a_date');
+    expect(screen('A technician will arrive soon.')).toBe('states_a_date');
+    expect(screen('Your technician is coming soon.')).toBe('states_a_date');
+    expect(screen('We will send someone out soon.')).toBe('states_a_date');
+    expect(screen('The technician arrived and treated the outside.')).toBeNull();
+    // Past or negative facts are no visit promise.
+    expect(screen('A technician did return today.')).toBeNull();
+    expect(screen('The next visit is not scheduled.')).toBeNull();
+    expect(screen('Your next appointment was scheduled last week.')).toBeNull();
+    expect(screen('The gate code is BLUE.')).toBe('banned_copy');
     expect(screen('We will return two days from now.')).toBe('states_a_date');
     expect(screen('Your next visit is three weeks from now.')).toBe('states_a_date');
     expect(screen('Your window is 2-4.')).toBe('states_a_date');
@@ -676,6 +709,22 @@ describe('symptoms and exposure never reach the model', () => {
     'JOHN swallowed some bait',
     'the bait was swallowed by john',
     'The ant bait was swallowed by John',
+    'My dog bit the bait.',
+    'My dog is biting the bait',
+    'My dog bites the bait',
+    'The bait was bitten by my dog',
+    'My dog took two bites of bait',
+    'My dog took 4 bites of bait',
+    'My child took 1 sip of pesticide',
+    'My dog took another bite of bait',
+    'My dog has taken a bite of bait',
+    'My dog is taking a bite of bait',
+    'My dog takes a bite of bait',
+    'My dog took a bite of rodenticide',
+    'My dog took more than two bites of bait',
+    'My dog had a bite of bait',
+    'My dog took a bite of Advion Ant Bait Gel',
+    'My child took a mouthful of pesticide.',
     'The rat poison was eaten by John',
     'Ants were nearby when John ate the bait',
     'Roaches were there and John swallowed the bait',
@@ -789,6 +838,10 @@ describe('symptoms and exposure never reach the model', () => {
     'The ants ate the bait. Is that good?',
     'Was the bait eaten by the roaches?',
     'Was the bait eaten?',
+    'Was there a little bit of bait left?',
+    'Mosquitoes bit me after the treatment',
+    'My child took a bite of lunch while I checked the bait',
+    'I had a bite of lunch near the bait',
     'Was the rodent bait eaten?',
     'Was any bait consumed?',
     'Was the rat poisoned?',
@@ -1116,6 +1169,23 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at 12 U S 41.', 'Ants at [number] U S 41.'],
     ['Ants at Twelve Main Street.', 'Ants at [number] Main Street.'],
     ['Ants at One Hundred Bay Drive.', 'Ants at [number] Bay Drive.'],
+    ['Ants at Twelve U S 41.', 'Ants at [number] U S 41.'],
+    ['Call me at nine four one five five five one two three four.', 'Call me at [phone].'],
+    ['Call nine forty-one, two ninety-seven, fifty-seven forty-nine.', 'Call [phone].'],
+    ['Call nine four one, triple five, triple one, two.', 'Call [phone].'],
+    ['Call triple two, double five, double nine.', 'Call [phone].'],
+    ['Call nine four one 55 five one two three four.', 'Call [phone].'],
+    ['Call nine hundred and forty-one, five hundred and fifty-five, twelve thirty-four.', 'Call [phone].'],
+    ['I saw two and three ants.', 'I saw two and three ants.'],
+    ['We saw 2 ants and three spiders.', 'We saw 2 ants and three spiders.'],
+    ['Ants at One Hundred F L 70.', 'Ants at [number] F L 70.'],
+    ['Ants at One Hundred U S Forty One.', 'Ants at [number] U S Forty One.'],
+    ['Ants at One Hundred Florida 70.', 'Ants at [number] Florida 70.'],
+    ['Ants at One Oh Five U S 41.', 'Ants at [number] U S 41.'],
+    ['We saw twenty five ants.', 'We saw twenty five ants.'],
+    ['I saw two or three ants.', 'I saw two or three ants.'],
+    ['Ants at Twelve U.S. 41.', 'Ants at [number] U.S. 41.'],
+    ['Ants at One Hundred SR 70.', 'Ants at [number] SR 70.'],
     ['Ants at 12 S.R. 70.', 'Ants at [number] S.R. 70.'],
     ['Ants at 12/14 SR 70.', 'Ants at [number] SR 70.'],
     ['Ants at 12 1/2 FL-70.', 'Ants at [number] FL-70.'],

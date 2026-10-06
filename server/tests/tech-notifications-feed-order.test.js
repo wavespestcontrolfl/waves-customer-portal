@@ -19,10 +19,10 @@ function getHandler() {
   return layer.route.stack[layer.route.stack.length - 1].handle;
 }
 
-test('buckets: tracking (0) → fresh prompts (1) → fresh storms (2) → visit notices AND stale rows on recency (3)', async () => {
+test('buckets: tracking (0) → arrival prompts (1) → fresh others (2) → fresh storms (3) → visit notices AND stale rows on recency (4)', async () => {
   const calls = { orderByRaw: [], orderBy: [], limit: [] };
   const chain = {};
-  for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orWhereExists', 'select', 'from', 'whereRaw', 'whereNotIn', 'join']) {
+  for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orWhereExists', 'select', 'from', 'whereRaw', 'whereNotIn', 'orWhere', 'join']) {
     chain[m] = jest.fn(function (arg) { if (typeof arg === 'function') arg.call(chain, chain); return chain; });
   }
   chain.orderByRaw = jest.fn((sql) => { calls.orderByRaw.push(sql); return chain; });
@@ -36,9 +36,7 @@ test('buckets: tracking (0) → fresh prompts (1) → fresh storms (2) → visit
 
   expect(calls.orderByRaw).toHaveLength(2);
   const sql = calls.orderByRaw[0];
-  // visit rows + tech-line texts → 2; storms → 1; fresh other prompts → 0;
-  // stale others → 2 (stale legacy rows compete with visits on recency,
-  // never ahead of them).
+  // Stale legacy rows compete with visits on recency, never ahead of them.
   // Missing-tracking notices lead the window at ANY age, in their OWN bucket:
   // they exist only while the visit is still overdue with no arrival evidence
   // (the sweep dismisses them as soon as that stops being true), so one that
@@ -47,9 +45,17 @@ test('buckets: tracking (0) → fresh prompts (1) → fresh storms (2) → visit
   // with them allowed (codex P2, PR #4403 rounds 8 and 17).
   expect(sql).toMatch(/WHEN type = 'follow_through_tracking' THEN 0/);
   expect(sql.indexOf("follow_through_tracking")).toBeLessThan(sql.indexOf("interval '6 hours'"));
-  expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type IN \('tech_line_sms', 'customer_visit_photos'\) THEN 3/);
-  expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 2/);
-  expect(sql).toMatch(/interval '6 hours' THEN 1 ELSE 3 END/);
+  // Actionable arrival prompts (reminder, select) are held until seen, so they
+  // lead the fresh rows in their own bucket 1 and a burst of started/stopped
+  // cards (two per automatic stop) cannot push an unseen prompt out of the
+  // window; fresh others → 2; storms → 3; visit rows, texts and stale → 4.
+  expect(sql).toMatch(/WHEN type = 'follow_through_tracking' THEN 0 WHEN type IN \('geofence_arrival_reminder', 'geofence_arrival_select'\) THEN 1 /);
+  // The started card is day-capped in the filter but keeps its old sort
+  // position (fresh others, bucket 2): it must not crowd out an unseen prompt.
+  expect(sql).not.toMatch(/geofence_timer_started/);
+  expect(sql).toMatch(/WHEN type LIKE 'visit\\_%' OR type IN \('tech_line_sms', 'customer_visit_photos'\) THEN 4/);
+  expect(sql).toMatch(/WHEN type = 'storm_watch_alert' THEN 3/);
+  expect(sql).toMatch(/interval '6 hours' THEN 2 ELSE 4 END/);
   // Stage 2 before stage 1 inside the tracking bucket, before the limit
   // truncates — the client's stage-first sort cannot rescue a row the 20-row
   // window never returned (round-20 P2).
@@ -68,7 +74,7 @@ test('tracking notices are served only while GATE_NOSHOW_DETECTOR is on', async 
   const run = async () => {
     const notCalls = [];
     const chain = {};
-    for (const m of ['where', 'whereNull', 'orWhereRaw']) {
+    for (const m of ['where', 'whereNull', 'orWhereRaw', 'whereNotIn', 'orWhere']) {
       chain[m] = jest.fn(function (arg) { if (typeof arg === 'function') arg.call(chain, chain); return chain; });
     }
     chain.whereNot = jest.fn((arg) => { notCalls.push(arg); return chain; });
@@ -93,7 +99,7 @@ test('tracking notices are served only while GATE_NOSHOW_DETECTOR is on', async 
 describe('customer_visit_photos cards follow the visit-prep gates at request time', () => {
   function run() {
     const chain = {};
-    for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orWhereExists', 'select', 'from', 'whereRaw', 'whereNotIn', 'join', 'whereIn', 'orderByRaw', 'orderBy', 'limit']) {
+    for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orWhereExists', 'select', 'from', 'whereRaw', 'whereNotIn', 'orWhere', 'join', 'whereIn', 'orderByRaw', 'orderBy', 'limit']) {
       chain[m] = jest.fn(function (arg) { if (typeof arg === 'function') arg.call(chain, chain); return chain; });
     }
     chain.then = (res, rej) => Promise.resolve([]).then(res, rej);
@@ -133,5 +139,70 @@ describe('customer_visit_photos cards follow the visit-prep gates at request tim
     expect(chain.where).toHaveBeenCalledWith('t.employment_status', 'active');
     // …inside the canonical technician access window.
     expect(chain.where).toHaveBeenCalledWith('s.scheduled_date', '>=', require('../services/technician-visit-scope').techAccessCutoff());
+  });
+});
+
+// Owner 2026-10-06, "keep notices": actionable arrival prompts are not aged
+// out by the clock. The client marks one read only after the tech has seen
+// it, so the feed keeps serving the unread row until the end of its ET day
+// (the hard cap). Storm nudges keep their 6-hour cap (a stale storm warning
+// misleads); started and stopped cards keep their earlier age rules.
+describe('arrival prompts stay until the end of their ET day', () => {
+  async function run() {
+    const chain = {};
+    const calls = { whereNotIn: [], orWhere: [] };
+    for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orWhereExists', 'select', 'from', 'whereRaw', 'join', 'whereIn', 'orderByRaw', 'orderBy', 'limit']) {
+      chain[m] = jest.fn(function (arg) { if (typeof arg === 'function') arg.call(chain, chain); return chain; });
+    }
+    chain.whereNotIn = jest.fn((...args) => { calls.whereNotIn.push(args); return chain; });
+    chain.orWhere = jest.fn((...args) => { calls.orWhere.push(args); return chain; });
+    chain.then = (res, rej) => Promise.resolve([]).then(res, rej);
+    db.mockImplementation(() => chain);
+    db.raw = jest.fn((sql) => sql);
+    const res = { json: jest.fn(), status: jest.fn().mockReturnThis() };
+    await getHandler()({ technicianId: 't-1', query: {} }, res, jest.fn());
+    return calls;
+  }
+
+  afterEach(() => { jest.useRealTimers(); });
+
+  test('the day cap covers the arrival prompts and the auto-start card, and nothing else', async () => {
+    const { whereNotIn } = await run();
+    expect(whereNotIn).toHaveLength(1);
+    expect(whereNotIn[0][0]).toBe('type');
+    expect(whereNotIn[0][1].slice().sort()).toEqual(['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started']);
+  });
+
+  test('a stop notice is served only inside its 30-minute Undo window (undo-stop answers 410 after it)', async () => {
+    await run();
+    const chain = db.mock.results[db.mock.results.length - 1].value;
+    expect(chain.whereNot).toHaveBeenCalledWith({ type: 'geofence_timer_stopped' });
+    expect(chain.orWhereRaw).toHaveBeenCalledWith("created_at >= now() - interval '30 minutes'");
+  });
+
+  test('storm nudges keep their 6-hour cap', async () => {
+    await run();
+    expect(db.mock.results.length).toBeGreaterThan(0);
+    const chain = db.mock.results[db.mock.results.length - 1].value;
+    expect(chain.whereNot).toHaveBeenCalledWith({ type: 'storm_watch_alert' });
+    expect(chain.orWhereRaw).toHaveBeenCalledWith("created_at >= now() - interval '6 hours'");
+  });
+
+  test('a capped notice is served while it was raised since 00:00 ET today (EDT)', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-06T20:30:00Z')); // 4:30 PM EDT
+    const { orWhere } = await run();
+    expect(orWhere).toEqual([['created_at', '>=', new Date('2026-10-06T04:00:00Z')]]);
+  });
+
+  test('the cap day follows ET, not UTC: 9 PM EDT is already the next UTC day', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-07T01:00:00Z')); // 9 PM EDT on Oct 6
+    const { orWhere } = await run();
+    expect(orWhere).toEqual([['created_at', '>=', new Date('2026-10-06T04:00:00Z')]]);
+  });
+
+  test('standard time: midnight ET is 05:00 UTC', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-12-15T15:00:00Z'));
+    const { orWhere } = await run();
+    expect(orWhere).toEqual([['created_at', '>=', new Date('2026-12-15T05:00:00Z')]]);
   });
 });

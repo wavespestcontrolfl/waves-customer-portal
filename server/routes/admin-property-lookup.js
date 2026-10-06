@@ -3,6 +3,7 @@ const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { performPropertyLookup } = require('./property-lookup-v2');
+const { lookupOptionsFor } = require('../services/property-lookup/lookup-callers');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -12,7 +13,8 @@ router.get('/property', async (req, res, next) => {
     const { address } = req.query;
     if (!address) return res.status(400).json({ error: 'Address required' });
 
-    const lookup = await performPropertyLookup(address);
+    // Scope decision: lookup-callers.js (admin_lookup_get: no answer surface).
+    const lookup = await performPropertyLookup(address, lookupOptionsFor('admin_lookup_get'));
 
     res.json({
       property: lookup.propertyRecord || lookup.rentcast || null,

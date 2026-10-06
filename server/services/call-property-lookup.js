@@ -187,7 +187,9 @@ async function enrichPropertyById(propertyId) {
   // Lazy require: the route module is heavy and circular-prone at load time,
   // and tests mock it per-case.
   const { performPropertyLookup } = require('../routes/property-lookup-v2');
-  const result = await performPropertyLookup(address);
+  // Scope decision: lookup-callers.js (call_cache_warm: the engine opts in itself).
+  const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
+  const result = await performPropertyLookup(address, lookupOptionsFor('call_cache_warm'));
   const enriched = result?.enriched;
   if (!enriched) {
     logger.info('[call-property-lookup] no profile', { propertyId, elapsedMs: Date.now() - t0 });

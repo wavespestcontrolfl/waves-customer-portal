@@ -45,7 +45,7 @@ const {
 } = require('../services/call-recording-processor');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
-const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
+const { PROMPT_HASH, extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
 const MODELS = require('../config/models');
 
 const MIN_CALLS = 100;
@@ -104,8 +104,9 @@ function contactPhoneForCall(row) {
   return resolveCallContactPhone(row);
 }
 
-async function main() {
+async function main({ aps = false, apsPass = null } = {}) {
   const db = dbConn();
+  if (aps) console.log('\n=== -aps cohort (agent-proposed-slot prompt; same checks, only its own rows) ===');
 
   // Key off v2_extraction_status (set on EVERY shadow-processed call) — not
   // ai_extraction_enriched, which is null on parse/schema failures. Otherwise
@@ -135,7 +136,7 @@ async function main() {
   const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames);
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
-    .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
+    .whereIn('ai_extraction_prompt_version', aps ? [apsCohortVersion(liveCatalogNames)] : [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
     // ai_extraction (the V1 legacy flat record) feeds demoteFailOpenOnV1AddressConflict,
     // exactly as the live path passes `extracted` to it.
     // metadata + source: resolveCallContactPhone needs both to resolve a
@@ -265,7 +266,7 @@ async function main() {
     console.log(`\nNo shadow extractions from the current extractor yet (${totalAttempted} total from older versions).`);
     console.log('Confirm CALL_EXTRACTION_V2_ENABLED=true and wait for inbound calls on the deployed extractor.');
     await db.destroy();
-    return;
+    return false;
   }
 
   // Which calls did the legacy v1 pipeline actually create an appointment for?
@@ -517,14 +518,44 @@ async function main() {
     && fbValidCount / fbAttempts >= SCHEMA_PASS_THRESHOLD;
   console.log(`6. Fallback leg assessed (≥ ${MIN_FALLBACK_ROWS} attempts @ ≥ ${SCHEMA_PASS_THRESHOLD * 100}% valid): ${pass(fallbackAssessed)}  (${fbValidCount}/${fbAttempts}${failedFallbackAttempts ? ` incl. ${failedFallbackAttempts} failed attempt(s)` : ''})`);
 
-  const allPass = primaryAttempts >= MIN_CALLS && schemaPassRate >= SCHEMA_PASS_THRESHOLD &&
+  // apsPass is null unless the -aps cohort ran (gate on): then its verdict is required too.
+  const cohortPass = primaryAttempts >= MIN_CALLS && schemaPassRate >= SCHEMA_PASS_THRESHOLD &&
     agreementRate >= AGREEMENT_THRESHOLD && smsWithoutConsent === 0 && phantomRisks.length === 0 &&
     fallbackAssessed;
-  console.log(`\n${allPass ? '✅ ALL CRITERIA PASS — safe to flip CALL_EXTRACTION_V2_DRIVES_ROUTING=true (after reviewing disagreements).' : '⛔ NOT READY — criteria above still failing.'}\n`);
+  const allPass = cohortPass && apsPass !== false;
+  if (aps) {
+    console.log(`\n${allPass ? '✅ -aps cohort: ALL CRITERIA PASS.' : '⛔ -aps cohort NOT READY — criteria above still failing.'}\n`);
+    return allPass;
+  }
+  console.log(`\n${allPass ? '✅ ALL CRITERIA PASS — safe to flip CALL_EXTRACTION_V2_DRIVES_ROUTING=true (after reviewing disagreements).' : '⛔ NOT READY — criteria above still failing.'}${cohortPass && !allPass ? ' (the -aps cohort above did not pass)' : ''}\n`);
+  return allPass;
+}
+
+// The "-aps" cohort (GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING): calls whose extraction prompt
+// carried the agent-proposed-slot block are stamped with the 'a' cohort version token
+// (`v22a-<hash>...`, extractionPromptVersion). They are a DIFFERENT prompt, so they are never
+// merged into the main cohort. While the gate is on they run the SAME pipeline as the main
+// cohort (main({ aps: true }): schema pass rate, routing agreement, consent, phantom routes,
+// fallback leg) on ONLY their own rows, and main()'s final verdict requires that run to pass
+// too (codex #6046 r8). Gate off: no extra run, output identical to origin/main.
+//
+// The EXACT version the processor stamps on a gate-on call under the live catalog (the same
+// computation as LIVE_PROMPT_VERSION, with the cohort mark): with an empty catalog that is
+// the bare APS version. No prefix match, so a stale catalog's cohort never folds in.
+function apsCohortVersion(liveCatalogNames) {
+  return extractionPromptVersion(liveCatalogNames, { agentProposedSlotCommitment: true });
+}
+
+// The whole run: with the gate on, the -aps cohort is evaluated first (its own full report) and
+// its verdict is handed to the main cohort's final verdict; gate off, exactly one main() run.
+async function runReadiness(mainFn = main, env = process.env) {
+  if (env.GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING !== 'true') return mainFn();
+  const apsPass = await mainFn({ aps: true });
+  return mainFn({ apsPass: apsPass === true });
 }
 
 if (require.main === module) {
-  main().catch((e) => { console.error(e); process.exit(1); });
+  runReadiness().catch((e) => { console.error(e); process.exit(1); });
 }
 
-module.exports = { contactPhoneForCall };
+module.exports = { contactPhoneForCall, apsCohortVersion, runReadiness };

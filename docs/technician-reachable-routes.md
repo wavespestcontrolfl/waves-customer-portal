@@ -19,6 +19,11 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/admin/access-codes/visits/:visitId` | admin-access-codes |
 | POST | `/api/admin/auth/change-password` | admin-auth |
 | GET | `/api/admin/auth/me` | admin-auth |
+| GET | `/api/admin/auth/mfa` | admin-auth |
+| POST | `/api/admin/auth/mfa/disable` | admin-auth |
+| POST | `/api/admin/auth/mfa/recovery-codes` | admin-auth |
+| POST | `/api/admin/auth/mfa/totp/confirm` | admin-auth |
+| POST | `/api/admin/auth/mfa/totp/setup` | admin-auth |
 | GET | `/api/admin/call-recordings/blocked` | admin-call-recordings |
 | POST | `/api/admin/call-recordings/calls/:id/commitments` | admin-call-recordings |
 | PATCH | `/api/admin/call-recordings/commitments/:id` | admin-call-recordings |
@@ -267,6 +272,8 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 | GET | `/api/knowledge/article` | knowledge |
 | GET | `/api/service/records/:id/validate-photo-chain` | service-records |
 | POST | `/api/stripe/terminal/handoff` | stripe-terminal |
+| POST | `/api/tech/dictation` | tech-dictation |
+| GET | `/api/tech/dictation/availability` | tech-dictation |
 | POST | `/api/tech/field-lead` | tech-field-lead |
 | GET | `/api/tech/knowledge/lookup` | tech-knowledge |
 | POST | `/api/tech/knowledge/query` | tech-knowledge |

@@ -12,6 +12,12 @@
 //      inside the write path (under the trx the rebooker/apply already
 //      hold) — never reused from an earlier snapshot — so a newly
 //      inserted/edited occurrence blocks a crossing move.
+// The person-placed check reads reschedule_log ⋈ series_moves, which this
+// suite's fake trx does not model; it has its own suite (eligibility test).
+jest.mock('../services/auto-dispatch/eligibility', () => ({
+  ...jest.requireActual('../services/auto-dispatch/eligibility'),
+  isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
+}));
 jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
   loadReminderFreeze: jest.fn(),

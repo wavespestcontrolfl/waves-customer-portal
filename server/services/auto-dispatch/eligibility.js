@@ -143,4 +143,83 @@ async function isRecurringPlanActive(service, db) {
   return { active: true, reason_code: null, reason_description: null };
 }
 
-module.exports = { isEligibleForAutoDispatch, isRecurringPlanActive, VALID_STATUSES };
+/**
+ * Did a person put this visit on its current date? The series-move text says
+ * "visits already on your calendar won't change unless we talk with you
+ * first", and auto-dispatch never sends a text (apply.js), so moving such a
+ * visit breaks that promise silently (prod 10-06: a customer picked Sun 9 AM
+ * at 8:49 PM; the 4:10 AM run moved it to Mon 3 PM; nobody told them).
+ *
+ * Protection is the DEFAULT for a moved visit; only a known automatic mover
+ * leaves it optimizable. Two kinds of evidence, newest wins:
+ *   - the newest reschedule_log PLACEMENT row (new_date set; audit-only rows
+ *     such as a no-show record never shadow a move). Every rebooker move
+ *     writes one per visit it moves, grouped partners included. Unless every
+ *     row of that move is AUTOMATIC_INITIATORS, a placement on the current
+ *     date protects the visit — so staff, the customer page, SMS and call
+ *     flows, and any mover added later are protected without a list here;
+ *   - the visit's own date-exception stamp (date_exception + _at + _source),
+ *     which staff direct date edits write without a reschedule_log row. The
+ *     rebooker stamps the mover's initiator as the source; only a human
+ *     source counts (HUMAN_EXCEPTION_SOURCES — backfills and generated
+ *     replacements such as cancel_reseed are not a person).
+ * A row that kept both the date and the window (a technician-only
+ * reassignment, e.g. tech_out_auto_move) chose no date and is ignored.
+ * A visit never moved since it was generated has neither, and stays
+ * optimizable. A windowless recurring due visit is never protected: it has
+ * no promised time yet, and the run exists to place it.
+ *
+ * Fails CLOSED and DEGRADED: a read error skips the visit for this run and
+ * marks the result degraded so the run does not report as healthy.
+ */
+const AUTOMATIC_INITIATORS = new Set(['auto_dispatch', 'system', 'machine', 'weather_auto']);
+const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai', 'ai_call_pipeline']);
+const HUMAN_EXCEPTION_SOURCES = new Set([...CUSTOMER_INITIATORS,
+  'admin', 'admin_ib', 'admin_bulk', 'operator', 'tech', 'rider_onetime_move']);
+// A row records a chosen slot only when the date or the window changed.
+const SLOT_CHANGED_SQL = '(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)';
+
+function whoPlaced(initiator) {
+  return CUSTOMER_INITIATORS.has(initiator) ? 'the customer' : 'staff';
+}
+
+function personExceptionAt(service) {
+  if (service.date_exception !== true || !service.date_exception_at) return null;
+  if (!HUMAN_EXCEPTION_SOURCES.has(String(service.date_exception_source || ''))) return null;
+  const at = new Date(service.date_exception_at);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+async function isPersonPlacedVisit(service, db) {
+  const dateStr = toDateStr(service.scheduled_date);
+  if (!service.id || !dateStr) return { placed: false };
+  if (service.recurring_dispatch_due_date && !service.window_start) return { placed: false };
+  try {
+    // The newest placement's rows, chosen entirely in SQL: created_at has
+    // microsecond precision and a JS Date keeps only milliseconds, so the
+    // timestamp must never round-trip through JS as a key (Codex #6055 r5).
+    const newestRows = await db('reschedule_log')
+      .where('scheduled_service_id', service.id)
+      .whereNotNull('new_date')
+      .whereRaw(SLOT_CHANGED_SQL)
+      .whereRaw(`created_at = (SELECT max(r2.created_at) FROM reschedule_log r2
+        WHERE r2.scheduled_service_id = reschedule_log.scheduled_service_id
+          AND r2.new_date IS NOT NULL
+          AND (r2.original_date IS DISTINCT FROM r2.new_date OR r2.original_window IS DISTINCT FROM r2.new_window))`)
+      .select('created_at', 'new_date', 'initiated_by', 'series_move_id');
+    const newestAt = newestRows.length ? new Date(newestRows[0].created_at) : null;
+    const exceptionAt = personExceptionAt(service);
+    if (exceptionAt && (!newestAt || exceptionAt > newestAt)) {
+      return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${whoPlaced(service.date_exception_source)} (date edit)` };
+    }
+    // Rows one move writes share its transaction's created_at.
+    const placement = newestRows.find((r) => toDateStr(r.new_date) === dateStr && !AUTOMATIC_INITIATORS.has(r.initiated_by));
+    if (!placement) return { placed: false };
+    const how = placement.series_move_id ? `series move ${placement.series_move_id}` : `move by ${placement.initiated_by || 'unknown'}`;
+    return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${whoPlaced(placement.initiated_by)} (${how})` };
+  } catch (err) {
+    return { placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: `Could not read the move history: ${err.message}` };
+  }
+}
+
+module.exports = { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit, VALID_STATUSES };
