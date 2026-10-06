@@ -972,38 +972,40 @@ function obligationWords(row, message) {
 // The words the bell's headline quotes. One message can hold several
 // obligations, each with the same evidence quote (prod 2026-10-06: two promises
 // in one staff text rang two bells with the same first sentence). When the
-// obligation's own description appears in the quote as whole words, quote that
-// slice of the quote itself, so each bell names its own promise and every word
-// shown is the sender's. Otherwise the quote's first sentence, as before.
+// obligation's own description appears in the ORIGINAL quote as whole words,
+// that slice of the quote is redacted and quoted, so each bell names its own
+// promise and every word shown is the sender's. Matching runs before
+// redaction, so two promises that differ only in a contact detail still find
+// their own slices. Anything the slice cannot carry alone (sentence
+// punctuation, any token the alert composer forbids) keeps today's headline:
+// the quote's first sentence.
 // Unicode-aware (any script; combining marks belong to their word). Scripts
-// written without spaces (Han, kana, Thai, ...) have no word edges, so an
-// edge whose base letter is from one of them needs no boundary there.
+// written without spaces between words (Han, kana, Hangul stems + endings,
+// Thai, ...) get no edge check. Script_Extensions, not Script: shared marks
+// such as the kana prolonged-sound mark ー are Common by Script.
 const LETTER = /[\p{L}\p{N}\p{M}]/u;
-// Script_Extensions, not Script: shared marks such as the kana prolonged-sound
-// mark ー are Common by Script but kana by extension.
-const UNSPACED = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Thai}\p{scx=Lao}\p{scx=Khmer}\p{scx=Myanmar}]/u;
+const UNSPACED = /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\p{scx=Thai}\p{scx=Lao}\p{scx=Khmer}\p{scx=Myanmar}]/u;
 // The edge's base character: the first one, or the last one before any
 // trailing combining marks.
 function needsEdge(chars) {
   const base = chars.find((ch) => !/\p{M}/u.test(ch));
   return base !== undefined && LETTER.test(base) && !UNSPACED.test(base);
 }
-function headlineWords(quote, description, redact) {
+function matchedSlice(rawQuote, description) {
+  const part = typeof description === 'string' ? description.trim().replace(/[.!?。！？]+$/u, '') : '';
+  if (!LETTER.test(part)) return null;
+  const escaped = part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  const chars = [...part];
+  const lead = needsEdge(chars) ? '(?<![\\p{L}\\p{N}\\p{M}_])' : '';
+  const tail = needsEdge([...chars].reverse()) ? '(?![\\p{L}\\p{N}\\p{M}_])' : '';
+  const found = new RegExp(`${lead}${escaped}${tail}`, 'iu').exec(rawQuote);
+  return found ? found[0] : null;
+}
+function headlineWords(quote, rawQuote, description, redact) {
   const compose = require('./admin-alert-compose');
-  const part = typeof description === 'string' ? redact(description.trim()).replace(/[.!?。！？]+$/u, '') : '';
-  if (LETTER.test(part)) {
-    const escaped = part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-    const chars = [...part];
-    const lead = needsEdge(chars) ? '(?<![\\p{L}\\p{N}\\p{M}_])' : '';
-    const tail = needsEdge([...chars].reverse()) ? '(?![\\p{L}\\p{N}\\p{M}_])' : '';
-    const found = new RegExp(`${lead}${escaped}${tail}`, 'iu').exec(quote);
-    // The headline is one plain sentence (admin-alert-compose rejects
-    // exclamations and multi-sentence text). A slice with any sentence
-    // punctuation inside keeps today's headline instead, so this branch can
-    // only ever narrow plain words.
-    const slice = found && found[0].replace(/[.!?。！？]+$/u, '');
-    if (slice && !/[.!?。！？]/u.test(slice)) return slice;
-  }
+  const raw = matchedSlice(rawQuote, description);
+  const slice = raw && redact(raw).replace(/\s+/g, ' ').trim();
+  if (slice && !/[.!?。！？]/u.test(slice) && !compose.breaksAlertRules(slice)) return slice;
   return compose.firstSentence(quote).replace(/[.!?]+$/, '');
 }
 
@@ -1026,7 +1028,8 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord }) {
   const state = verdict.late ? 'late' : verdict.verdict;
   const alert = KIND_ALERT[row.kind] || KIND_ALERT.other;
   const promised = row.sms_context?.basis === 'promise';
-  const quote = names.redactedWords(obligationWords(row, message));
+  const rawQuote = obligationWords(row, message);
+  const quote = names.redactedWords(rawQuote);
   const status = state === 'late' ? 'done only after the promised time'
     : (state === 'uncertain' ? "can't tell if it was done" : alert.open);
   const day = names.shortDateET(message.created_at);
@@ -1040,7 +1043,7 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord }) {
     spec: {
       area: alert.area,
       action: names.fitAction(alert.area, customerName || 'the customer', [alert.action]),
-      why: names.whyWithQuote({ lead: promised ? 'We said ' : '', quote: quote && headlineWords(quote, row.description, names.redactedWords),
+      why: names.whyWithQuote({ lead: promised ? 'We said ' : '', quote: quote && headlineWords(quote, rawQuote, row.description, names.redactedWords),
         tail: `${day ? ` (${day})` : ''} — ${status}.` }),
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,

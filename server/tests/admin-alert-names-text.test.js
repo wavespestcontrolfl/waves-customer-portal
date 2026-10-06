@@ -165,6 +165,30 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
   });
 
+  test('a slice the alert rules reject (a redacted address tag) keeps the first-sentence headline', async () => {
+    await ring({ row: { kind: 'other', description: 'service 123 Main St tomorrow', evidence: [{ quote: 'Okay. I will service 123 Main St tomorrow' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Okay” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('promises that differ only in a contact detail each find their own slice before redaction', async () => {
+    const quote = 'I will email alice@example.test and then email amy@example.test';
+    const bodies = [];
+    for (const description of ['email alice@example.test', 'email amy@example.test']) {
+      await ring({ row: { kind: 'other', description, evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+      bodies.push(lastCall()[2]);
+    }
+    for (const b of bodies) expect(b).not.toContain('alice@example.test');
+    for (const b of bodies) expect(b).not.toContain('amy@example.test');
+  });
+
+  test('Korean noun stems with attached endings are matched without a word edge', async () => {
+    const quote = '네 전화드리고 환불하겠습니다';
+    await ring({ row: { kind: 'other', description: '전화', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “전화” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: '환불', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “환불” (Sep 29) — nothing on record shows it done.');
+  });
+
   test('a description that is not in the quote keeps the first sentence', async () => {
     await ring({ row: { kind: 'other', description: 'reschedule the visit', evidence: [{ quote: 'Gonna knock out your quarterly spray tomorrow. Thanks!' }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “Gonna knock out your quarterly spray tomorrow” (Sep 29) — nothing on record shows it done.');
