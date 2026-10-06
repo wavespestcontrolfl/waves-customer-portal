@@ -1362,8 +1362,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
         if (rate) {
           params._rate_family = rate.family;
           params._rate_ledger_pin = rate.pin;
-          preview = { ...preview, rate_change: rate.display };
         }
+        if (rate?.display) preview = { ...preview, rate_change: rate.display };
       }
     }
     if (toolUse.name === 'create_appointment' && params.customer_id) {
@@ -1821,7 +1821,8 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // would replace every service line. Only first rates go in bulk; an
       // existing bill is edited one customer at a time, naming the service.
       if (params.updates && params.updates.monthly_rate !== undefined) {
-        const billed = rows.filter((r) => Number(r.monthly_rate) > 0);
+        const billedIds = await require('../services/intelligence-bar/rate-change').customersWithBill(db, rows);
+        const billed = rows.filter((r) => billedIds.has(String(r.id)));
         if (billed.length) {
           const names = billed.slice(0, 5).map((r) => `${r.first_name || ''} ${r.last_name || ''}`.trim() || r.id).join(', ');
           return { failed: true, modelResult: { error: `${billed.length} of these customers already have a monthly bill (${names}${billed.length > 5 ? ', …' : ''}). A bulk rate would replace their whole bill. Change each one with update_customer and rate_service, or leave them out. Nothing was proposed.`, code: 'bulk_rate_over_existing_bill' } };

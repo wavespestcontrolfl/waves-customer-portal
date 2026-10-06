@@ -16,6 +16,8 @@ const db = require('../../models/db');
 const PlanRateLedger = require('../plan-rate-ledger');
 
 const { WHOLE_BILL, UNATTRIBUTED } = PlanRateLedger;
+// The rate the card was built on is the rate submitted: pinned, no line moves.
+const UNCHANGED = 'unchanged';
 
 function money(n) {
   return `$${Number(n || 0).toFixed(2)}`;
@@ -48,17 +50,33 @@ function resolveFamily(rateService, components) {
   const existing = (components || []).find((r) => String(r.family_key).toLowerCase() === lowered);
   if (existing) return existing.family_key;
   // The classifier keeps an unknown name as its own slug ("banana" → banana);
-  // only a WaveGuard service family may become a new line on a bill.
+  // only a WaveGuard family that bills MONTHLY may become a new line. Rodent
+  // bait bills per application (its plan's monthlyRate is 0), so a rodent
+  // line would add a monthly dues charge that service never had.
   const { serviceFamilyKeyForAdoption } = require('../../routes/estimate-public');
   const { WAVEGUARD_SERVICE_FAMILIES } = require('../self-booking-plan-sync');
   const key = serviceFamilyKeyForAdoption({ service: raw });
-  return key && WAVEGUARD_SERVICE_FAMILIES.includes(key) ? key : null;
+  return key && key !== 'rodent_bait' && WAVEGUARD_SERVICE_FAMILIES.includes(key) ? key : null;
 }
 
 function describeBill(components, previousScalar) {
   return [...PlanRateLedger.billLines(components, previousScalar)]
     .map(([family, amount]) => `${lineLabel(family)} ${money(amount)}`)
     .join(' + ') || money(0);
+}
+
+// Customers whose bill a bulk rate would replace: a positive monthly rate, or
+// ANY plan-rate ledger row — a paused service keeps a zero 'plan_hold' row
+// beside a zero rate, and the hold-resume job restores from it (Codex #6085
+// r2). Returns a Set of id strings. `conn` is db or the caller's transaction.
+async function customersWithBill(conn, rows) {
+  const billed = new Set(rows.filter((r) => Number(r.monthly_rate) > 0).map((r) => String(r.id)));
+  const ids = rows.map((r) => String(r.id)).filter((id) => !billed.has(id));
+  if (ids.length && (await conn.schema.hasTable('customer_plan_rates'))) {
+    const ledgered = await conn('customer_plan_rates').whereIn('customer_id', ids).distinct('customer_id');
+    for (const r of ledgered) billed.add(String(r.customer_id));
+  }
+  return billed;
 }
 
 /**
@@ -71,8 +89,13 @@ async function rateChangeProposal(customerId, newRate, rateService) {
   if (!customer) return { error: 'Customer no longer exists' };
   const previousScalar = Number(customer.monthly_rate) || 0;
   const newScalar = Number(newRate) || 0;
-  if (Math.round(previousScalar * 100) === Math.round(newScalar * 100)) return null;
   const components = await PlanRateLedger.loadComponents(db, customerId);
+  // An unchanged rate is still pinned (Codex #6085 r2): if another writer
+  // changes the bill before Confirm, the stale value would otherwise commit
+  // as a real change through the unpinned reset. Nothing to show on the card.
+  if (Math.round(previousScalar * 100) === Math.round(newScalar * 100)) {
+    return { family: UNCHANGED, pin: ledgerPin(components, previousScalar), display: null };
+  }
   const hasBill = previousScalar > 0 || components.some((r) => Number(r.monthly_rate) !== 0);
 
   let family = resolveFamily(rateService, components);
@@ -122,4 +145,4 @@ async function rateChangeProposal(customerId, newRate, rateService) {
   };
 }
 
-module.exports = { rateChangeProposal, ledgerPin, lineLabel, money };
+module.exports = { rateChangeProposal, ledgerPin, lineLabel, money, UNCHANGED, customersWithBill };

@@ -1531,7 +1531,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
         // Only an ACTUAL rate change touches per-family attribution
         // (codex #3245 r2/r6); then only the named line moves. Gate-aware
         // error policy lives in the ledger helpers.
-        if (ratePin) {
+        if (ratePin && ratePin.family === require('./rate-change').UNCHANGED) {
+          // Unreachable while the pin holds (the pinned scalar equals the
+          // submitted one); kept so an UNCHANGED card can never reset lines.
+          const err = new Error("This customer's monthly bill changed since the card was shown — nothing was updated. Ask again for a fresh card.");
+          err.previewChanged = true;
+          throw err;
+        } else if (ratePin) {
           if (ratePin.family === PlanRateLedger.WHOLE_BILL) {
             await PlanRateLedger.syncScalarWriteToLedger(trx, customerId, clean.monthly_rate, { source: 'ib_update' });
           } else {
@@ -1697,12 +1703,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
 
 
 // A bulk monthly_rate is one number written as each customer's WHOLE monthly
-// bill; on a customer who already has a different bill it would replace every
-// service line (owner 2026-10-06). Such rows are skipped and reported.
+// bill; on a customer who already has a bill (a positive rate or any ledger
+// row, a paused service's plan_hold marker included — rate-change.js
+// customersWithBill) it would replace every service line (owner 2026-10-06).
+// Such rows are skipped and reported.
 const BULK_RATE_BILLED_ERROR = 'already had a monthly bill, so the bulk rate was not applied (change it with update_customer and rate_service)';
-function bulkRateWouldReplaceBill(row, newRate) {
-  const before = Number(row?.monthly_rate) || 0;
-  return before > 0 && Math.round(before * 100) !== Math.round((Number(newRate) || 0) * 100);
+function bulkRateChanges(row, newRate) {
+  return Math.round((Number(row?.monthly_rate) || 0) * 100) !== Math.round((Number(newRate) || 0) * 100);
 }
 
 async function bulkUpdateCustomers(customerIds, updates) {
@@ -1827,7 +1834,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
       // the churn guard below, so a skipped row never has its billing wound
       // down by a write that then does not update it (Codex #6085 r1).
       if (clean.monthly_rate !== undefined) {
-        const billedIds = new Set(liveRows.filter((r) => bulkRateWouldReplaceBill(r, clean.monthly_rate)).map((r) => String(r.id)));
+        const withBill = await require('./rate-change').customersWithBill(trx, liveRows);
+        const billedIds = new Set(liveRows.filter((r) => withBill.has(String(r.id)) && bulkRateChanges(r, clean.monthly_rate)).map((r) => String(r.id)));
         if (billedIds.size) {
           targetIds = targetIds.filter((id) => !billedIds.has(String(id)));
           skipped.push(...[...billedIds].map((cid) => ({ customer_id: cid, error: BULK_RATE_BILLED_ERROR, rate_blocked: true })));
@@ -1915,7 +1923,13 @@ async function bulkUpdateCustomers(customerIds, updates) {
     logger.info(`[intelligence-bar] Bulk updated ${count} customers:`, logUpdates);
     notifyBulkLaneStamps(laneStampIds);
     if (!count && skippedRows.length) {
-      return { error: 'None of the approved customers could be updated (deleted/merged since the card was pending, or still billing/scheduled for a churn move) — nothing was updated.', skipped_customers: skippedRows };
+      const rateBlocked = skippedRows.filter((r) => r.rate_blocked).length;
+      return {
+        error: rateBlocked === skippedRows.length
+          ? `None of the approved customers were updated: every one ${BULK_RATE_BILLED_ERROR}.`
+          : `None of the approved customers could be updated (deleted/merged since the card was pending, still billing/scheduled for a churn move${rateBlocked ? `, or ${rateBlocked} ${BULK_RATE_BILLED_ERROR}` : ''}) — nothing was updated.`,
+        skipped_customers: skippedRows,
+      };
     }
     // Codex #4715 r1 P2: the completed card renders `message`. Codex #4715
     // r2 P2: on a PARTIAL update the card renders `warning` FIRST and hides
@@ -2032,7 +2046,8 @@ async function bulkUpdateCustomers(customerIds, updates) {
           err.customerNoLongerLive = true;
           throw err;
         }
-        if (clean.monthly_rate !== undefined && bulkRateWouldReplaceBill(lockedBefore, clean.monthly_rate)) {
+        if (clean.monthly_rate !== undefined && bulkRateChanges(lockedBefore, clean.monthly_rate)
+          && (await require('./rate-change').customersWithBill(trx, [lockedBefore])).size) {
           const err = new Error(BULK_RATE_BILLED_ERROR);
           err.rateBlocked = true;
           throw err;

@@ -10,7 +10,10 @@ jest.mock('../models/db', () => {
   qb.first = jest.fn();
   qb.select = jest.fn(() => Promise.resolve([]));
   qb.update = jest.fn(() => Promise.resolve(1));
+  // Ledger rows of the bulk targets (customersWithBill).
+  qb.distinct = jest.fn(() => Promise.resolve(mockLedgered()));
   const db = jest.fn(() => qb);
+  db.schema = { hasTable: jest.fn(async () => true) };
   db.transaction = jest.fn(async (cb) => cb(db));
   db.raw = jest.fn(() => Promise.resolve());
   db.__qb = qb;
@@ -23,6 +26,7 @@ jest.mock('../services/customer-lifecycle-guard', () => ({
   describeLiveVisit: jest.fn(() => 'a visit'),
 }));
 const mockLoadComponents = jest.fn();
+const mockLedgered = jest.fn(() => []);
 const mockSetLine = jest.fn(async () => undefined);
 const mockSyncScalar = jest.fn(async () => undefined);
 jest.mock('../services/plan-rate-ledger', () => {
@@ -48,6 +52,7 @@ beforeEach(() => {
   db.transaction.mockImplementation(async (cb) => cb(db));
   db.__qb.first.mockResolvedValue({ ...row });
   mockLoadComponents.mockResolvedValue(pest);
+  mockLedgered.mockReturnValue([]);
 });
 
 test('an unchanged bill moves only the named line', async () => {
@@ -121,4 +126,15 @@ test('bulk churn + rate: a billed row is skipped BEFORE the churn guard, so its 
   const guarded = mockChurnGuard.mock.calls.map((c) => String(c[1]));
   expect(guarded).not.toContain(A);
   expect(guarded).toContain(B);
+});
+
+test('bulk rate: a paused customer (zero rate, plan_hold ledger row) counts as billed and is skipped (Codex #6085 r2)', async () => {
+  const A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  db.__qb.select.mockResolvedValue([{ id: A, first_name: 'Ann', last_name: 'Sample', monthly_rate: '0' }]);
+  mockLedgered.mockReturnValue([{ customer_id: A }]);
+  const result = await executeTool('bulk_update_customers', { customer_ids: [A], updates: { monthly_rate: 50 } });
+  // Every target skipped: the refusal says why, not "deleted or merged".
+  expect(result.error).toMatch(/every one already had a monthly bill/);
+  expect(result.skipped_customers).toEqual([expect.objectContaining({ customer_id: A, rate_blocked: true })]);
+  expect(mockSyncScalar).not.toHaveBeenCalled();
 });

@@ -46,7 +46,7 @@ test('"lawn" adds a lawn line beside pest; the card gets both lines and the pin'
   });
 });
 
-test('Judy case: a lawn price as the whole total is refused as below the pest line', async () => {
+test('a lawn price given as the whole total is refused as below the pest line', async () => {
   const r = await rateChangeProposal(CUSTOMER, 30, 'lawn');
   expect(r.code).toBe('rate_below_other_lines');
   expect(r.error).toContain('Pest control $41.33');
@@ -62,9 +62,12 @@ test('an existing line key is accepted as-is; whole_bill shows the line that dro
   ]);
 });
 
-test('an unknown service name is refused; an unchanged rate needs nothing', async () => {
+test('an unknown or per-application service is refused; an unchanged rate is pinned with nothing to show', async () => {
   expect((await rateChangeProposal(CUSTOMER, 50, 'xyz unknown thing')).code).toBe('rate_family_unknown');
-  expect(await rateChangeProposal(CUSTOMER, 41.33, undefined)).toBeNull();
+  expect((await rateChangeProposal(CUSTOMER, 60, 'rodent bait')).code).toBe('rate_family_unknown');
+  expect(await rateChangeProposal(CUSTOMER, 41.33, undefined)).toEqual({
+    family: 'unchanged', pin: ledgerPin([{ family_key: 'pest_control', monthly_rate: '41.33' }], '41.33'), display: null,
+  });
 });
 
 test('a first rate on a customer with no bill needs no service name', async () => {
