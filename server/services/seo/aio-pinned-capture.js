@@ -42,9 +42,12 @@ function parseSerp(items) {
     .map((q) => q?.title)
     .filter(Boolean);
 
+  // A local_pack item is a wrapper; its businesses are in .items (see
+  // extractLocalPack in serp-profiler.js).
   const localPack = list
     .filter((i) => i?.type === 'local_pack')
-    .map((i) => ({ title: i.title || null, domain: i.domain || null, rating: i.rating?.value ?? null, rank_group: i.rank_group ?? null }));
+    .flatMap((i) => arr(i.items))
+    .map((b) => ({ title: b?.title || null, domain: b?.domain || null, rating: b?.rating?.value ?? null, review_count: b?.rating?.votes_count ?? null, rank_group: b?.rank_group ?? null }));
 
   if (!aio) return { aio: null, organicTop, paa, localPack };
 
@@ -59,8 +62,10 @@ function parseSerp(items) {
     url: r?.url || null, title: r?.title || null, domain: r?.domain || null, text: r?.text || r?.snippet || null,
   }));
   const markdown = aio.markdown || arr(aio.items).map((e) => e?.text || '').filter(Boolean).join('\n');
-  const wavesCited = [...elements.flatMap((e) => e.urls), ...references.map((r) => r.url)]
-    .some((u) => u && isOwnedUrl(u));
+  // Only URLs attached to an answer element prove a citation; top-level
+  // references are pages Google MAY have used (same contract as
+  // googleAnswerProbe in llm-mention-prober.js).
+  const wavesCited = elements.flatMap((e) => e.urls).some((u) => u && isOwnedUrl(u));
 
   return { aio, organicTop, paa, localPack, elements, references, markdown, wavesCited };
 }
@@ -121,8 +126,19 @@ async function runPinnedCaptures({ pass = 'am' } = {}) {
   summary.pinned = queries.length;
   if (!queries.length) return summary;
 
+  // When more pins exist than one pass can take, rotate the starting pin by
+  // pass number so every pin is captured over time instead of the oldest
+  // pins taking every pass.
+  const perPass = Math.floor(MAX_PINNED_CALLS_PER_PASS / DEVICES.length);
+  let ordered = queries;
+  if (queries.length > perPass) {
+    const passNumber = Math.floor(Date.parse(`${today}T00:00:00Z`) / 86400000) * 2 + (pass === 'pm' ? 1 : 0);
+    const start = (passNumber * perPass) % queries.length;
+    ordered = [...queries.slice(start), ...queries.slice(0, start)];
+  }
+
   outer:
-  for (const queryRow of queries) {
+  for (const queryRow of ordered) {
     for (const device of DEVICES) {
       if (summary.attempted >= MAX_PINNED_CALLS_PER_PASS) {
         logger.warn(`[aio-capture] hit the ${MAX_PINNED_CALLS_PER_PASS}-call cap on the ${pass} pass; remaining pinned queries skipped`);

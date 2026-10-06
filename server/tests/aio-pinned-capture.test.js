@@ -93,7 +93,10 @@ test('a SERP with no ai_overview stores none, still keeping organic_top (10), pa
   dataforseo.request.mockResolvedValue(serp([
     ...organic,
     { type: 'people_also_ask', items: [{ type: 'people_also_ask_element', title: 'How much is pest control?' }] },
-    { type: 'local_pack', title: 'Example Pest Co', domain: 'example.test', rating: { value: 4.8 }, rank_group: 1 },
+    { type: 'local_pack', title: 'Places', items: [
+      { type: 'local_pack_element', title: 'Example Pest Co', domain: 'example.test', rating: { value: 4.8, votes_count: 120 }, rank_group: 1 },
+      { type: 'local_pack_element', title: 'Sample Bug Co', domain: 'sample.test', rating: { value: 4.5, votes_count: 30 }, rank_group: 2 },
+    ] },
   ]));
   const summary = await runPinnedCaptures({ pass: 'pm' });
   const row = mockInserts[0];
@@ -101,7 +104,10 @@ test('a SERP with no ai_overview stores none, still keeping organic_top (10), pa
   expect(JSON.parse(row.organic_top)).toHaveLength(10);
   expect(JSON.parse(row.organic_top)[0]).toEqual({ rank_absolute: 1, rank_group: 1, url: 'https://rival0.example/', domain: 'rival0.example', title: 'Rival 0' });
   expect(JSON.parse(row.paa)).toEqual(['How much is pest control?']);
-  expect(JSON.parse(row.local_pack)).toEqual([{ title: 'Example Pest Co', domain: 'example.test', rating: 4.8, rank_group: 1 }]);
+  expect(JSON.parse(row.local_pack)).toEqual([
+    { title: 'Example Pest Co', domain: 'example.test', rating: 4.8, review_count: 120, rank_group: 1 },
+    { title: 'Sample Bug Co', domain: 'sample.test', rating: 4.5, review_count: 30, rank_group: 2 },
+  ]);
   expect(summary).toMatchObject({ none: 2, shown: 0, errors: 0 });
 });
 
@@ -139,6 +145,13 @@ test('waves_cited is false when no cited url is a Waves domain', async () => {
   expect(mockInserts[0]).toMatchObject({ status: 'shown', waves_cited: false });
 });
 
+test('a Waves URL only in the top-level references is not a citation', async () => {
+  mockQueries = [q()];
+  dataforseo.request.mockResolvedValue(serp([{ type: 'ai_overview', markdown: 'x', items: [{ type: 'ai_overview_element', text: 'x', references: [{ url: 'https://rival0.example/a' }] }], references: [{ url: 'https://www.wavespestcontrol.com/lawn-care/' }] }]));
+  await runPinnedCaptures({ pass: 'am' });
+  expect(mockInserts[0]).toMatchObject({ status: 'shown', waves_cited: false });
+});
+
 test('one thrown request does not stop the rest of the pass', async () => {
   mockQueries = [q({ id: 'q1' }), q({ id: 'q2', query: 'second query' })];
   dataforseo.request.mockRejectedValueOnce(new Error('boom')).mockResolvedValue(serp([]));
@@ -155,6 +168,19 @@ test(`the pass stops at ${MAX_PINNED_CALLS_PER_PASS} calls`, async () => {
   expect(dataforseo.request).toHaveBeenCalledTimes(12);
   expect(mockInserts).toHaveLength(12);
   expect(summary).toMatchObject({ pinned: 10, attempted: 12 });
+});
+
+test('with more pins than one pass takes, the am and pm passes start at different pins and cover them all', async () => {
+  mockQueries = Array.from({ length: 10 }, (_, i) => q({ id: `q${i}`, query: `query ${i}` }));
+  dataforseo.request.mockResolvedValue(serp([]));
+  await runPinnedCaptures({ pass: 'am' });
+  const am = new Set(mockInserts.map((r) => r.query_id));
+  mockInserts.length = 0;
+  await runPinnedCaptures({ pass: 'pm' });
+  const pm = new Set(mockInserts.map((r) => r.query_id));
+  expect(am.size).toBe(6);
+  expect(pm.size).toBe(6);
+  expect(new Set([...am, ...pm]).size).toBe(10);
 });
 
 test('an unknown pass is refused before any query', async () => {
