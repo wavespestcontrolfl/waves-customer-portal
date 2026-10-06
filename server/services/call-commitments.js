@@ -2786,6 +2786,13 @@ async function listLapsedEvidenceClosedCallIds(conn) {
           -- ... and, for an "other" promise a reprocess has since reworded or
           -- moved to another channel (otherPromiseMedia's SQL twin): a text
           -- that keeps only a text promise, a call that keeps only a call one.
+          -- A model-judged person-contact close (the contact check) rests on a text
+          -- or a call; a promise now naming only the OTHER medium (or one the
+          -- close was never allowed on) is reopened, the same medium rule.
+          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'sms_log'
+              AND ${promiseMediumSql('call')} AND NOT ${promiseMediumSql('text')})
+          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'call_log'
+              AND ${promiseMediumSql('text')} AND NOT ${promiseMediumSql('call')})
           OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'sms_sent' AND (cc.fulfillment ->> 'basis') LIKE 'text\\_sent\\_to\\_caller%' AND NOT ${promiseMediumSql('text')})
           OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'outbound_call' AND (cc.fulfillment ->> 'basis') LIKE 'outbound\\_call\\_to\\_caller%' AND NOT ${promiseMediumSql('call')})
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
@@ -3715,6 +3722,8 @@ module.exports = {
   normalizeRow,
   resolveFulfillment,
   evidenceNamesFor,
+  otherPromiseMedia,
+  promiseMediumSql,
   refreshFulfillment,
   listSlotKeptCallIds,
   listLapsedEvidenceClosedCallIds,

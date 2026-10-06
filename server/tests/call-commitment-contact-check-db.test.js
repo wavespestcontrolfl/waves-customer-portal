@@ -591,6 +591,63 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       expect((await row(w.commitment.id)).status).toBe('open');
     });
 
+    test('the medium rule: a promise channelled call takes only call witnesses, one channelled sms only text witnesses, and a promise naming neither takes both', async () => {
+      const byCall = await world({ commitmentExtra: { channel: 'call' } });
+      await addSms(byCall);
+      expect(await run()).toBeTruthy();
+      expect(asked(byCall)).toHaveLength(0); // a text is no witness for a call promise
+      const callWitness = await addCall(byCall);
+      say(byCall, fulfilledBy(`call:${callWitness}`, 'it covers the retreatment'));
+      await run();
+      expect((await row(byCall.commitment.id)).status).toBe('fulfilled');
+
+      const byText = await world({ commitmentExtra: { channel: 'sms' } });
+      await addCall(byText);
+      await run();
+      expect(asked(byText)).toHaveLength(0); // a call is no witness for a text promise
+      const textWitness = await addSms(byText);
+      say(byText, fulfilledBy(`sms:${textWitness}`, 'the warranty covers the retreatment'));
+      await run();
+      expect((await row(byText.commitment.id)).status).toBe('fulfilled');
+
+      // Wording decides when the channel is unknown, as the resolver reads it.
+      const worded = await world({ commitmentExtra: { channel: 'unknown', description: `Call the customer back with the answer ${Date.now()}` } });
+      await addSms(worded);
+      await run();
+      expect(asked(worded)).toHaveLength(0);
+
+      const both = await world();
+      await addSms(both);
+      await addCall(both);
+      await run();
+      expect(asked(both)).toHaveLength(1);
+      expect(JSON.stringify(asked(both)[0][1].text)).toMatch(/\\"records\\"/);
+    });
+
+    test.each([
+      ['an sms close on a promise now channelled call', 'sms', { channel: 'call' }],
+      ['a call close on a promise now channelled sms', 'call', { channel: 'sms' }],
+      ['an sms close on a promise reworded to a call', 'sms', { channel: 'unknown', description: 'Phone the customer with the answer' }],
+      ['a call close on a promise reworded to a text', 'call', { channel: null, description: 'Text the customer the answer' }],
+    ])('%s: the lapse scan lists it and the re-judge reopens the promise', async (_name, kind, patch) => {
+      const w = await closedBy(kind);
+      expect(await lapsed()).not.toContain(w.call.id);
+      await db('call_commitments').where({ id: w.commitment.id }).update(patch);
+      expect(await lapsed()).toContain(w.call.id);
+      expect((await cc.refreshFulfillment(db, w.call.id)).reopened).toBe(1);
+      expect((await row(w.commitment.id)).status).toBe('open');
+    });
+
+    test('a close on the medium the promise names (or on either, when it names both) stays', async () => {
+      const text = await closedBy('sms');
+      await db('call_commitments').where({ id: text.commitment.id }).update({ channel: 'sms' });
+      const both = await closedBy('call');
+      await db('call_commitments').where({ id: both.commitment.id }).update({ channel: 'unknown', description: 'Call or text the customer the answer' });
+      const ids = await lapsed();
+      expect(ids).not.toContain(text.call.id);
+      expect(ids).not.toContain(both.call.id);
+    });
+
     test('a close another writer stored (a report text) is not taken for a model-judged one by the lapse scan', async () => {
       const w = await world();
       const text = await addSms(w, { metadata: null, message_type: 'service_report', message_body: 'Your service report is ready.' });
