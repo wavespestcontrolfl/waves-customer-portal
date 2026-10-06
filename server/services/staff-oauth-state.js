@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { sessionMfaBlock } = require('./staff-mfa');
 const db = require('../models/db');
 
 const OAUTH_STATE_RE = /^[A-Za-z0-9_-]{43}$/;
@@ -51,6 +52,9 @@ function assertInitiatingAdmin(technician) {
 async function createStaffOAuthState({
   prefix,
   technician,
+  // The initiating access token's two-step proof (GATE_ADMIN_MFA); the claim
+  // re-applies the current two-step policy to it.
+  staffToken = null,
   ttlMs,
   metadata = {},
   description = 'Staff OAuth one-time state',
@@ -77,6 +81,7 @@ async function createStaffOAuthState({
       state,
       technicianId: technician.id,
       tokenVersion,
+      staffMfa: staffToken?.mfa === true,
       expiresAt: expiresAt.toISOString(),
     }),
     category: 'integrations',
@@ -134,13 +139,16 @@ async function withClaimedStaffOAuthState({
       const technician = await trx('technicians')
         .where({ id: payload.technicianId })
         .forUpdate()
-        .first('id', 'active', 'role', 'auth_token_version', 'must_change_password');
+        .first('id', 'active', 'role', 'auth_token_version', 'must_change_password', 'mfa_enabled_at');
       if (
         !technician
         || !technician.active
         || technician.role !== 'admin'
         || technician.must_change_password
         || integerTokenVersion(technician.auth_token_version) !== tokenVersion
+        // Same two-step rule as adminAuthenticate, judged now: a state started
+        // by a session without the code cannot finish while the gate is on.
+        || sessionMfaBlock({ mfa: payload.staffMfa === true }, technician)
       ) {
         throw invalidStateError();
       }

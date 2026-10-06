@@ -10,7 +10,7 @@ jest.mock('../middleware/admin-auth', () => ({
   // /capture mounts with requireAdmin; the router needs it defined to load.
   requireAdmin: (_req, _res, next) => next(),
 }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(), adminMfaLive: () => false, adminMfaEnforceLive: () => false }));
 jest.mock('../services/audit-log', () => ({
   auditTerminalHandoffMint: jest.fn(), auditTerminalHandoffRateLimited: jest.fn(),
   auditTerminalHandoffValidate: jest.fn(), ipFromReq: jest.fn(), uaFromReq: jest.fn(),
