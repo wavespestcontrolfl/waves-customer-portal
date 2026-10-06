@@ -1,6 +1,6 @@
 // AI Overview gap sweep: candidate merge, run lifecycle, one mobile call per row,
 // every outcome stored, budget stop, gap ranking. Synthetic data only.
-const mockState = { runs: [], results: [], gsc: [], gap: [], managed: [], queries: [], ids: 0, insertError: null };
+const mockState = { runs: [], results: [], gsc: [], gap: [], managed: [], queries: [], ids: 0, insertError: null, failResultUpdates: 0 };
 
 function mockMatches(row, wheres) {
   return wheres.every((w) => Object.entries(w).every(([k, v]) => row[k] === v));
@@ -35,6 +35,10 @@ function mockExec(q) {
   }
   let hit = rows.filter((r) => mockMatches(r, q.wheres) && q.whereIns.every(([c, vals]) => vals.includes(r[c])));
   if (q.update) {
+    if (q.table === 'seo_aio_sweep_results' && mockState.failResultUpdates > 0) {
+      mockState.failResultUpdates -= 1;
+      throw new Error('write failed');
+    }
     hit.forEach((r) => mockApplyUpdate(r, q.update));
     return q.returning ? hit : hit.length;
   }
@@ -116,7 +120,7 @@ const rowOf = (query) => mockState.results.find((r) => r.query === query);
 
 beforeEach(() => {
   jest.clearAllMocks();
-  Object.assign(mockState, { runs: [], results: [], gsc: [], gap: [], managed: [], queries: [], ids: 0, insertError: null });
+  Object.assign(mockState, { runs: [], results: [], gsc: [], gap: [], managed: [], queries: [], ids: 0, insertError: null, failResultUpdates: 0 });
 });
 
 describe('mergeCandidates', () => {
@@ -163,6 +167,15 @@ describe('mergeCandidates', () => {
     });
     // cap 3: the two mandatory rows stay, one GSC row (the highest) fills the rest.
     expect(out.map((c) => c.query)).toEqual(['high', 'gap only', 'managed only']);
+  });
+
+  test('a city followed by punctuation is found, and a managed row keeps its stored city', () => {
+    const out = sweep.mergeCandidates({
+      gscRows: [{ query: 'best pest control company in Bradenton, Florida', impressions: 50 }],
+      managedRows: [{ query: 'who sprays near the ranch?', city: 'Parrish' }],
+    });
+    expect(out.find((c) => c.query.startsWith('best')).city).toBe('Bradenton');
+    expect(out.find((c) => c.query.startsWith('who')).city).toBe('Parrish');
   });
 
   test('cap drops the lowest-impression GSC rows first', () => {
@@ -344,6 +357,36 @@ describe('processSweepChunk', () => {
     const out = await sweep.processSweepChunk();
     expect(run.status).toBe('cancelled');
     expect(out.status).toBe('open');
+  });
+
+  test('a cancel mid-chunk stops new paid calls; only the call in flight finishes', async () => {
+    const run = openRun();
+    for (let i = 0; i < 10; i += 1) pendingRow(`q${i}`, { impressions_90d: 100 - i });
+    dataforseo.request.mockImplementation(async () => { run.status = 'cancelled'; return serp([]); });
+    await sweep.processSweepChunk({ chunkSize: 10 });
+    expect(dataforseo.request.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(mockState.results.filter((r) => r.status === 'pending').length).toBeGreaterThanOrEqual(6);
+  });
+
+  test('a failed result write still takes the row out of pending and books its cost', async () => {
+    openRun();
+    pendingRow('q');
+    mockState.failResultUpdates = 1;
+    dataforseo.request.mockResolvedValue(serp([]));
+    await sweep.processSweepChunk();
+    expect(rowOf('q')).toMatchObject({ status: 'request_error', error: 'result could not be stored' });
+    expect(mockState.runs[0]).toMatchObject({ attempted: 1, cost_usd: 0.004 });
+  });
+
+  test('a failure log names the row id, never the search text', async () => {
+    const logger = require('../services/logger');
+    openRun();
+    pendingRow('call 941 555 0100 about ants', { id: 'res-x' });
+    dataforseo.request.mockRejectedValue(new Error('boom'));
+    await sweep.processSweepChunk();
+    const logged = logger.error.mock.calls.map((c) => c.join(' ')).join('\n');
+    expect(logged).toContain('res-x');
+    expect(logged).not.toContain('941 555 0100');
   });
 });
 

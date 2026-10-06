@@ -61,7 +61,8 @@ function cityFromLabel(raw) {
 }
 
 function cityFromQuery(query) {
-  const q = ` ${normQuery(query)} `;
+  // Punctuation counts as a word break ("in Bradenton, Florida").
+  const q = ` ${normQuery(query).replace(/[^a-z0-9]+/g, ' ')} `;
   return CITY_NAMES.find((c) => q.includes(` ${c.toLowerCase()} `)) || null;
 }
 
@@ -115,7 +116,10 @@ function mergeCandidates({ gscRows = [], gapRows = [], managedRows = [], minImpr
     const c = touch(r.query, 'competitor_gap');
     if (c) c.cityLabels.push(r.city);
   }
-  for (const r of arr(managedRows)) touch(r.query, 'managed');
+  for (const r of arr(managedRows)) {
+    const c = touch(r.query, 'managed');
+    if (c) c.cityLabels.push(r.city);
+  }
 
   const all = [...byQuery.values()].map((c) => {
     const city = c.cityLabels.map(cityFromLabel).find(Boolean) || cityFromQuery(c.query) || null;
@@ -162,7 +166,7 @@ async function buildCandidates({ minImpressions = DEFAULT_MIN_IMPRESSIONS, max =
     .whereNotNull('query')
     .select('query', 'city');
 
-  const managedRows = await db('seo_llm_mention_queries').where({ active: true }).select('query');
+  const managedRows = await db('seo_llm_mention_queries').where({ active: true }).select('query', 'city');
 
   return mergeCandidates({ gscRows, gapRows, managedRows, minImpressions, max });
 }
@@ -280,6 +284,20 @@ async function sweepOne(row) {
 
 // Closes the run only while it is still open (an admin cancel wins a race).
 // Returns the number of runs closed.
+async function runStillOpen(runId) {
+  return Boolean(await db('seo_aio_sweep_runs').where({ id: runId, status: 'open' }).first());
+}
+
+async function storeResult(runId, rowId, patch, cost) {
+  await db.transaction(async (trx) => {
+    await trx('seo_aio_sweep_results').where({ id: rowId }).update(patch);
+    await trx('seo_aio_sweep_runs').where({ id: runId }).update({
+      attempted: trx.raw('attempted + 1'),
+      cost_usd: trx.raw('cost_usd + ?', [cost]),
+    });
+  });
+}
+
 async function finishRun(runId, status) {
   return db('seo_aio_sweep_runs').where({ id: runId, status: 'open' }).update({ status, finished_at: db.fn.now() });
 }
@@ -315,11 +333,15 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
     while (next < rows.length && runCost < maxCost) {
       const row = rows[next];
       next += 1;
+      // A cancel (or a budget stop) mid-chunk must stop new paid calls; the
+      // row is claimed first so concurrent workers never share an index.
+      if (!(await runStillOpen(run.id))) break;
       let update;
       try {
         update = await sweepOne(row);
       } catch (err) {
-        logger.error(`[aio-sweep] "${row.query}" failed: ${err.message}`);
+        // Log the row id only: a Search Console query can hold a name or a phone number.
+        logger.error(`[aio-sweep] result ${row.id} failed: ${err.message}`);
         update = { status: 'request_error', error: String(err.message || err).slice(0, 500), aio_shown: null };
       }
       const cost = Number(update.cost_usd) || 0;
@@ -329,14 +351,18 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
       if (update.status === 'shown') summary.shown += 1;
       else if (update.status === 'none') summary.none += 1;
       else summary.errors += 1;
+      // The result and the run's cost move together. If the full write fails,
+      // a minimal one still takes the row out of 'pending' and books the cost,
+      // so the row is never paid for twice and the cap stays true.
       try {
-        await db('seo_aio_sweep_results').where({ id: row.id }).update({ ...update, captured_at: db.fn.now() });
-        await db('seo_aio_sweep_runs').where({ id: run.id }).update({
-          attempted: db.raw('attempted + 1'),
-          cost_usd: db.raw('cost_usd + ?', [cost]),
-        });
+        await storeResult(run.id, row.id, { ...update, captured_at: db.fn.now() }, cost);
       } catch (err) {
-        logger.error(`[aio-sweep] could not store "${row.query}": ${err.message}`);
+        logger.error(`[aio-sweep] could not store result ${row.id}: ${err.message}`);
+        try {
+          await storeResult(run.id, row.id, { status: 'request_error', error: 'result could not be stored', captured_at: db.fn.now() }, cost);
+        } catch (err2) {
+          logger.error(`[aio-sweep] could not mark result ${row.id}: ${err2.message}`);
+        }
       }
     }
   };
@@ -376,7 +402,8 @@ async function listRuns({ limit = 20 } = {}) {
 }
 
 const GAP_COLUMNS = ['id', 'query', 'sources', 'city', 'location', 'impressions_90d', 'clicks_90d', 'gsc_position',
-  'citation_kind', 'waves_in_references', 'waves_named', 'waves_organic_rank', 'answer_markdown', 'organic_top', 'check_url', 'captured_at'];
+  'citation_kind', 'waves_in_references', 'waves_named', 'waves_organic_rank', 'answer_markdown', 'elements', 'aio_references',
+  'organic_top', 'check_url', 'captured_at'];
 
 /** Shown overviews that do not cite Waves: web citations first, then impressions. */
 async function rankGaps(runId, { limit = 200 } = {}) {
