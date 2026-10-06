@@ -1,3 +1,4 @@
+const { openMeteoForecastUrl, openMeteoArchiveAvailable } = require('../open-meteo-endpoint');
 const logger = require('../logger');
 const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
@@ -249,7 +250,7 @@ function planForecastFetch(nowMs, fromMs, toMs) {
 }
 
 function propertyForecastUrl({ keyLat, keyLon, standard, startDate, endDate }) {
-  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  const url = openMeteoForecastUrl();
   url.searchParams.set('latitude', String(keyLat));
   url.searchParams.set('longitude', String(keyLon));
   url.searchParams.set('current', 'temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,precipitation_probability,weather_code');
@@ -416,7 +417,7 @@ async function fetchPropertyRainQuarterHours({
     if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || toMs <= fromMs || toMs - fromMs > QUARTER_MAX_WINDOW_MS) {
       return forecastUnavailable('bad_window');
     }
-    const url = new URL('https://api.open-meteo.com/v1/forecast');
+    const url = openMeteoForecastUrl();
     url.searchParams.set('latitude', String(Number(lat.toFixed(FORECAST_KEY_DECIMALS))));
     url.searchParams.set('longitude', String(Number(lon.toFixed(FORECAST_KEY_DECIMALS))));
     url.searchParams.set('minutely_15', 'precipitation');
@@ -843,7 +844,7 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
 // if the archive ever fails or returns an untrusted window we degrade to
 // exactly the previous behaviour rather than to nothing.
 const OPEN_METEO_ARCHIVE = 'https://archive-api.open-meteo.com/v1/archive';
-const OPEN_METEO_FORECAST = 'https://api.open-meteo.com/v1/forecast';
+
 
 function openMeteoWeekUrl(base, grid, range) {
   const url = new URL(base);
@@ -867,14 +868,17 @@ async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
   // reason mergeMrmsIntoWeek refuses to let an MRMS "so far" total cap the
   // model on the unclosed day. Same rule here: a window ending today keeps the
   // forecast endpoint, which carries a full-day model value (codex #3153 P1).
-  const windowClosed = range.end < etTodayYmd();
+  // The paid Standard plan (OPEN_METEO_API_KEY) has no archive API: the
+  // forecast endpoint answers every window; MRMS already supplies closed-day
+  // rain first (mergeMrmsIntoWeek).
+  const windowClosed = range.end < etTodayYmd() && openMeteoArchiveAvailable();
   const attempts = windowClosed
     ? [
       { endpoint: 'archive', url: openMeteoWeekUrl(OPEN_METEO_ARCHIVE, grid, range) },
-      { endpoint: 'forecast', url: openMeteoWeekUrl(OPEN_METEO_FORECAST, grid, range) },
+      { endpoint: 'forecast', url: openMeteoWeekUrl(openMeteoForecastUrl(), grid, range) },
     ]
     : [
-      { endpoint: 'forecast', url: openMeteoWeekUrl(OPEN_METEO_FORECAST, grid, range) },
+      { endpoint: 'forecast', url: openMeteoWeekUrl(openMeteoForecastUrl(), grid, range) },
     ];
 
   for (let i = 0; i < attempts.length; i += 1) {
@@ -975,7 +979,7 @@ async function fetchRecentMinTempF({ latitude, longitude, pastDays = 7 } = {}) {
   const cached = _rainCache.get(key);
   if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value;
 
-  const url = new URL('https://api.open-meteo.com/v1/forecast');
+  const url = openMeteoForecastUrl();
   url.searchParams.set('latitude', String(lat));
   url.searchParams.set('longitude', String(lon));
   url.searchParams.set('daily', 'temperature_2m_min');

@@ -54,6 +54,20 @@ describe('Open-Meteo service week — archive first, forecast as fallback', () =
     expect(urls.some((u) => u.includes('api.open-meteo.com/v1/forecast'))).toBe(false);
   });
 
+  test('with the paid key (Standard: no archive) a completed week goes to the customer forecast host', async () => {
+    process.env.OPEN_METEO_API_KEY = 'fixture-key';
+    try {
+      const urls = [];
+      global.fetch = jest.fn(async (url) => { urls.push(String(url)); return OK([0.1, 0, 0.2, 1.0, 0.05, 0.38, 0.66]); });
+      await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate: '2026-07-30' });
+      expect(urls.length).toBeGreaterThan(0);
+      expect(urls.every((u) => u.startsWith('https://customer-api.open-meteo.com/v1/forecast'))).toBe(true);
+      expect(urls.every((u) => u.includes('apikey=fixture-key'))).toBe(true);
+    } finally {
+      delete process.env.OPEN_METEO_API_KEY;
+    }
+  });
+
   test('an unusable archive window falls back to the forecast endpoint, not to nothing', async () => {
     const urls = [];
     global.fetch = jest.fn(async (url) => {
