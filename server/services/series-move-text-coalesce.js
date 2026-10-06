@@ -12,10 +12,9 @@
 // lease make that idempotent. This module only adds the decision the pass
 // asks right before it sends:
 //
-//   drop  - a NEWER committed, notify-requested staff move exists on the same
-//           series (same anchor, or same recurring parent) for the same
-//           customer. The older move's text quotes a date that is no longer
-//           the plan, so it is not sent. The pass concludes it as a
+//   drop  - a NEWER committed, notify-requested staff move exists for the same
+//           customer that supersedes this move's anchor (see findNewerSeriesMove).
+//           The older move's text quotes a date that is no longer the plan, so it is not sent. The pass concludes it as a
 //           definitive non-send and records who superseded it.
 //   hold  - the move is younger than the hold. The pass keeps every other
 //           effect (reminders, cards, broadcasts), skips the text, leaves
@@ -46,9 +45,13 @@ function enabled() {
   return require('../config/feature-gates').seriesMoveTextCoalesceLive();
 }
 
-// A newer committed move, text requested, same customer, on the same series.
-// "Same series" = the same anchor visit, or the same recurring parent when
-// the move records one (a different service line has its own parent).
+// A newer committed move, text requested, same customer, that SUPERSEDES this
+// move's anchor: it moved that same anchor visit, or its recorded shifted set
+// (result.rescheduledOccurrences, which rescheduleSeries persists) includes
+// it. Sharing a recurring parent proves nothing: a series move shifts only
+// the visit staff picked and the LATER ones, so moving a later occurrence
+// leaves an earlier move's slot valid and its text still owed. A result that
+// cannot prove inclusion falls back to the same anchor only (toward sending).
 async function findNewerSeriesMove({ seriesMoveId, markers, conn = db }) {
   if (!markers.customer_id || !markers.created_at) return null;
   const query = conn('series_moves')
@@ -56,10 +59,8 @@ async function findNewerSeriesMove({ seriesMoveId, markers, conn = db }) {
     .whereIn('source_surface', COALESCE_SURFACES)
     .where('created_at', '>', markers.created_at)
     .whereNot({ id: seriesMoveId })
-    .where((q) => {
-      q.where('anchor_service_id', markers.anchor_service_id);
-      if (markers.parent_service_id) q.orWhere('parent_service_id', markers.parent_service_id);
-    });
+    .where((q) => q.where('anchor_service_id', markers.anchor_service_id)
+      .orWhereRaw("COALESCE(result->'rescheduledOccurrences', '[]'::jsonb) @> ?::jsonb", [JSON.stringify([{ id: String(markers.anchor_service_id) }])]));
   return (await query.orderBy('created_at', 'desc').first('id', 'created_at', 'new_date')) || null;
 }
 

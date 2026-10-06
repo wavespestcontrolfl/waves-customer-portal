@@ -9,6 +9,8 @@ jest.mock('../services/appointment-reminders', () => ({
   safeSendAppointment: jest.fn(),
   visitPrefsRow: jest.fn(async () => ({})),
   markRescheduleNoticeSent: jest.fn(async () => ({})),
+  reminder72hStillReachable: () => true,
+  reminder24hStillReachable: () => true,
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
@@ -36,8 +38,12 @@ const marker = (over = {}) => ({
 // A knex-shaped chain that records every where-clause and answers first().
 function seriesMovesChain({ newer = null, calls = [] } = {}) {
   const q = {};
-  for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'orWhere', 'orderBy']) {
-    q[m] = jest.fn((...args) => { calls.push([m, ...args]); return q; });
+  for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'orWhere', 'orWhereRaw', 'orderBy']) {
+    q[m] = jest.fn((...args) => {
+      calls.push([m, ...args]);
+      if (typeof args[0] === 'function') args[0](q);
+      return q;
+    });
   }
   q.first = jest.fn(async () => newer);
   return q;
@@ -68,7 +74,7 @@ describe('decideSeriesTextRelease', () => {
     expect(out).toEqual({ action: 'send' });
   });
 
-  test('a newer staff move on the same series drops the older text, even inside the hold', async () => {
+  test('a newer staff move that covers this anchor drops the older text, even inside the hold', async () => {
     process.env[GATE] = 'true';
     const calls = [];
     const conn = jest.fn(() => seriesMovesChain({ newer: { id: 'm2' }, calls }));
@@ -83,6 +89,31 @@ describe('decideSeriesTextRelease', () => {
     expect(flat).toContain('edit_modal');
     expect(calls).toContainEqual(['whereNot', { id: 'm1' }]);
     expect(calls.some((c) => c[0] === 'where' && c[1] === 'created_at' && c[2] === '>')).toBe(true);
+    // Supersession = same anchor, or the newer move's recorded shifted set
+    // includes this anchor. A shared recurring parent is NOT enough.
+    expect(calls).toContainEqual(['where', 'anchor_service_id', 'visit-1']);
+    expect(calls.find((c) => c[0] === 'orWhereRaw')[2]).toEqual([JSON.stringify([{ id: 'visit-1' }])]);
+    expect(flat).not.toContain('parent_service_id');
+  });
+
+  // The compiled query, real knex/pg dialect. Behavior against real rows was
+  // checked on a scratch Postgres: a later-occurrence move (shifts only that
+  // visit and later ones) does NOT drop the earlier text; the same anchor
+  // drops; a newer move whose shifted set includes the older anchor drops;
+  // a newer move with no recorded result on another anchor does not.
+  test('compiles to: same anchor OR shifted set contains the anchor, never the parent', async () => {
+    const knex = require('knex')({ client: 'pg' });
+    let sql = null;
+    const conn = (table) => {
+      const qb = knex(table);
+      qb.first = (...cols) => { sql = qb.select(...cols).toString(); return Promise.resolve(null); };
+      return qb;
+    };
+    await coalesce.findNewerSeriesMove({ seriesMoveId: 'm1', markers: marker(), conn });
+    expect(sql).toContain(`("anchor_service_id" = 'visit-1' or COALESCE(result->'rescheduledOccurrences', '[]'::jsonb) @> '[{"id":"visit-1"}]'::jsonb)`);
+    expect(sql).toContain(`"source_surface" in ('dispatch_board', 'edit_modal')`);
+    expect(sql).not.toContain('parent_service_id');
+    await knex.destroy();
   });
 
   test.each(['quick_move', 'customer_web', 'sms_reply', 'call_reschedule', 'unspecified'])(
@@ -111,6 +142,8 @@ describe('decideSeriesTextRelease', () => {
 describe('applySeriesMoveEffects with the gate', () => {
   const stamps = [];
   const sends = [];
+  const reminderUpdates = [];
+  let guardReadFails;
   let markers;
   let newerMove;
 
@@ -118,6 +151,8 @@ describe('applySeriesMoveEffects with the gate', () => {
     jest.clearAllMocks();
     stamps.length = 0;
     sends.length = 0;
+    reminderUpdates.length = 0;
+    guardReadFails = false;
     newerMove = null;
     db.fn = { now: () => 'now()' };
     db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
@@ -141,8 +176,14 @@ describe('applySeriesMoveEffects with the gate', () => {
         return q;
       }
       if (table === 'appointment_reminders') {
-        // No reminder row for the occurrence: nothing to guard, close or re-arm.
-        const q = { whereIn: jest.fn(() => q), where: jest.fn(() => q), select: jest.fn(async () => []), update: jest.fn(async () => 0) };
+        // No reminder row for the occurrence unless a test makes the guard
+        // read fail (the re-arm then runs on its unguarded fallback).
+        const q = {
+          whereIn: jest.fn(() => q),
+          where: jest.fn(() => q),
+          select: jest.fn(async () => { if (guardReadFails) throw new Error('guard read failed'); return []; }),
+          update: jest.fn(async (values) => { reminderUpdates.push(values); return 1; }),
+        };
         return q;
       }
       throw new Error(`Unexpected table ${table}`);
@@ -159,7 +200,7 @@ describe('applySeriesMoveEffects with the gate', () => {
   const baseMarkers = (over) => ({
     status: 'committed', conflict_card_at: new Date(), reminders_synced_at: new Date(), notified_at: null,
     customer_notified: false, source_surface: 'dispatch_board', customer_id: 'cust-1',
-    anchor_service_id: 'visit-1', parent_service_id: 'parent-1', created_at: new Date(), ...over,
+    anchor_service_id: 'visit-1', created_at: new Date(), ...over,
   });
   const notifiedStamps = () => stamps.filter((s) => Object.hasOwn(s, 'notified_at'));
 
@@ -174,11 +215,38 @@ describe('applySeriesMoveEffects with the gate', () => {
   test('gate on, young move: text held, notified_at left NULL, no failure reported', async () => {
     process.env[GATE] = 'true';
     markers = baseMarkers({ created_at: new Date(Date.now() - 10 * 1000) });
+    // A re-arm would take its unguarded fallback and write: make that visible.
+    guardReadFails = true;
     const out = await run();
     expect(sends).toHaveLength(0);
     // null, not false: a staff screen shows "text failed" only for false.
     expect(out).toMatchObject({ notificationSent: null, notificationError: null });
     expect(notifiedStamps()).toHaveLength(0);
+    // The sync covered the due reminder windows for this text: a deliberate
+    // hold leaves them covered (no re-arm), so the reminder cron cannot send
+    // a reminder ahead of the held confirmation.
+    expect(reminderUpdates).toHaveLength(0);
+  });
+
+  test('gate off, send blocked: the covered reminder windows are re-armed and the non-send concluded (unchanged)', async () => {
+    markers = baseMarkers();
+    guardReadFails = true;
+    AppointmentReminders.safeSendAppointment.mockImplementation(async () => false);
+    const out = await run();
+    expect(out.notificationSent).toBe(false);
+    expect(reminderUpdates).toHaveLength(1);
+    expect(reminderUpdates[0]).toMatchObject({ reminder_24h_sent: false, reminder_24h_sent_at: null });
+    expect(stamps).toContainEqual(expect.objectContaining({ notified_at: 'now()', customer_notified: false }));
+  });
+
+  test('gate on, hold over, send blocked: same re-arm as a gate-off failure', async () => {
+    process.env[GATE] = 'true';
+    markers = baseMarkers({ created_at: new Date(Date.now() - 4 * MIN) });
+    guardReadFails = true;
+    AppointmentReminders.safeSendAppointment.mockImplementation(async () => false);
+    const out = await run();
+    expect(out.notificationSent).toBe(false);
+    expect(reminderUpdates).toHaveLength(1);
   });
 
   test('gate on, reminder sync incomplete (reminders_synced_at NULL): still held, and the sync is left for the retry', async () => {
@@ -204,12 +272,18 @@ describe('applySeriesMoveEffects with the gate', () => {
     process.env[GATE] = 'true';
     markers = baseMarkers({ created_at: new Date(Date.now() - 4 * MIN) });
     newerMove = { id: 'm2' };
+    guardReadFails = true;
     const out = await run();
     expect(sends).toHaveLength(0);
     expect(out.notificationSent).toBeNull();
     // Concluded (never retried) and said so: customer_notified stays false.
     expect(stamps).toContainEqual(expect.objectContaining({ notified_at: 'now()', customer_notified: false }));
     // The row names the move that replaced it.
+    // A superseded pass never re-arms: the newer move re-stamped these reminder
+    // rows at its own time and owns their windows (a guarded re-arm of this
+    // move's time would match no row, and an unguarded one would clear flags
+    // the newer move owns).
+    expect(reminderUpdates).toHaveLength(0);
     const named = stamps.find((s) => s.result !== undefined);
     expect(named.result.sql).toContain('textSupersededBy');
     expect(named.result.bindings).toEqual(['m2']);

@@ -5149,7 +5149,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       if (Number(leased) === 0) {
         return { notificationSent: false, notificationError: 'effects_in_progress', conflicts, seriesMoveId, inProgress: true };
       }
-      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified', 'status', 'source_surface', 'created_at', 'customer_id', 'anchor_service_id', 'parent_service_id')) || markers;
+      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified', 'status', 'source_surface', 'created_at', 'customer_id', 'anchor_service_id')) || markers;
     } catch (err) {
       // Without a held lease no marker write can land (they are fenced on
       // the owner), so effects run here would be unrecorded and repeated by
