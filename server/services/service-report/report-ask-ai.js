@@ -553,6 +553,10 @@ const YEAR = /\b(?:19|20)\d{2}\b/;
 // and a compact 24-hour time (Codex P1 #6016 r23).
 const VISIT_TIME_NUMBER = /\b(?:window|arriv\w*|be\s+(?:there|here)|(?:come|stop|swing|drop)\s+by|show\s+up|get\s+there)\b[^.?!]{0,20}\d/i;
 const COMPACT_24H = /\b(?:at|around|about|by|after|before|until)\s+(?:[01]\d|2[0-3])[0-5]\d\b/i;
+// A promised visit with no date ("We will be back soon", "the technician will
+// come back in the spring"): the model has no appointment to promise (Codex
+// P1 #5964 r25).
+const VISIT_PROMISE = /\b(?:we|we['’]ll|the\s+(?:tech|technician|team)|waves|someone|our\s+(?:team|technician|tech))\s+(?:will|['’]ll|are\s+going\s+to|is\s+going\s+to|plans?\s+to|can)?\s*(?:\w+\s+)?(?:return|come\s+back|be\s+back|revisit|visit\s+again|stop\s+by|come\s+out|check\s+back|follow\s+up|schedule)\b|\bin\s+a\s+fortnight\b/i;
 const MONTH_MAY = /\b(?<!\d\s)(?:in|on|by|until|since|next|early|late|mid)[\s-]+(?:May|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\b\.?|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
@@ -571,7 +575,7 @@ const ASK_CHECKS = [
   ['banned_copy', (text) => require('./activity-indicators').findBannedCustomerCopy(text).length > 0],
   ['compliance', (text) => require('../social-media').complianceLanguageIssues(text, { impliedTreatmentContext: true }).length > 0],
   ['target_list', leaksTargetList],
-  ['states_a_date', (text) => [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, RELATIVE_OFFSET, MONTH_MAY, YEAR, VISIT_TIME_NUMBER, COMPACT_24H].some((re) => re.test(text))],
+  ['states_a_date', (text) => [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, RELATIVE_OFFSET, MONTH_MAY, YEAR, VISIT_TIME_NUMBER, COMPACT_24H, VISIT_PROMISE].some((re) => re.test(text))],
 ];
 
 /**
@@ -614,7 +618,7 @@ const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${P
 const LISTED_PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS})`;
 const MEDICAL_CUES = [
   // Symptoms, said with or without a subject.
-  /\b(?:dizz(?:y|iness)|light[\s-]?headed|nause(?:a|ous|ated)|vomit\w*|throw(?:ing|n)?\s+up|threw\s+up|diarrh?ea|faint(?:ed|ing)?|passed\s+out|pass(?:ing)?\s+out|seizures?|convuls\w*|numb(?:ness)?|tingl\w*|wheez\w*|rash(?:es)?|blisters?|swell(?:ing|en)|swollen|headaches?|migraines?|drool\w*|lethargic|disoriented|short(?:ness)?\s+of\s+breath|chest\s+(?:pain|tight\w*))\b/i,
+  /\b(?:dizz(?:y|iness)|light[\s-]?headed|nause(?:a|ous|ated)|vomit\w*|throw(?:ing|n)?\s+up|threw\s+up|diarrh?ea|faint(?:ed|ing)?|passed\s+out|pass(?:ing)?\s+out|seizures?|convuls\w*|numb(?:ness)?|tingl\w*|wheez\w*|rash(?:es)?|blisters?|swell(?:ing|en)|swollen|headaches?|migraines?|drool\w*|lethargic|disoriented|cough\w*|shak(?:e|es|ing|y)|trembl\w*|shiver\w*|twitch\w*|sneez\w*|(?:in|has|have|got|getting)\s+hives|itch(?:y|ing)|sore\s+throat|watery\s+eyes|red\s+eyes|foaming|panting|limp|collapsed?|unresponsive|confused|short(?:ness)?\s+of\s+breath|chest\s+(?:pain|tight\w*))\b/i,
   /\b(?:can['’]?t|cannot|can\s+not|couldn['’]?t|unable\s+to|trouble|difficulty|hard\s+to|struggling\s+to)\s+(?:to\s+)?breath\w*/i,
   /\b(?:allergic\s+reaction|reaction\s+to\s+(?:the|today['’]?s|your)\s+(?:spray|treatment|product|bait))\b/i,
   /\bburn(?:s|ed|ing)\b[^.?!]{0,30}\b(?:eyes?|skin|throat|lungs?|nose|mouth|hands?|face)\b|\b(?:eyes?|skin|throat|lungs?|nose|mouth|hands?|face)\b[^.?!]{0,30}\b(?:burn(?:s|ed|ing)|sting(?:s|ing)|itch\w*|irritat\w*|red\b)/i,
@@ -673,11 +677,21 @@ const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_P
 // bait") (Codex P1 #6016 r32). No subject list can name every person.
 const INGESTION_VERB = /\b(?:swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
 const EXPOSURE_WORD = /\b(?:bait\w*|spray\w*|pesticides?|chemicals?|granules?|granular|poison\w*|insecticides?|herbicides?|fungicides?|rodenticides?|products?|gel|pellets?|powder|dust|treatment|fertilizer)\b/i;
-// A pest word right before a product word names the product ("ant bait",
-// "rat poison"), not the eater (Codex P1 #6016 r33).
-const PEST_EATING = /\b(?:ants?|roach(?:es)?|cockroach(?:es)?|rats?|mice|mouse|rodents?|pests?|bugs?|insects?|termites?|squirrels?|raccoons?|fleas?|ticks?|spiders?|snails?|slugs?|wildlife|colony|colonies)\b(?!\s+(?:bait\w*|poison\w*|gel|killer|spray\w*|traps?|stations?|granules?|control|treatment|products?|pellets?|blocks?|dust|powder))[^.?!]{0,25}\b(?:ate|eaten|eating|eats|swallow\w*|consum\w*|lick\w*|chew\w*|nibbl\w*|took|taking|takes|feed\w*|carr\w*)\b|\b(?:eaten|consumed|taken)\s+by\s+(?:the\s+)?(?:ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)\b/i;
+// The pest is the eater only as the subject of the eating verb ("the ants ate
+// the bait", "eaten by the roaches"); a pest word right before a product word
+// names the product ("ant bait") (Codex P1 #6016 r33-r34).
+const PEST_WORDS = '(?:ants?|roach(?:es)?|cockroach(?:es)?|rats?|mice|mouse|rodents?|pests?|bugs?|insects?|termites?|squirrels?|raccoons?|fleas?|ticks?|spiders?|snails?|slugs?|wildlife|colony|colonies)';
+const PRODUCT_AFTER_PEST = '(?!\\s+(?:bait\\w*|poison\\w*|gel|killer|spray\\w*|traps?|stations?|granules?|control|treatment|products?|pellets?|blocks?|dust|powder))';
+const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\\w+\\s+)?(?:ate|eats|eating|swallow\\w*|consum\\w*|lick\\w*|chew\\w*|nibbl\\w*|took|takes|taking|feed\\w*|carr\\w*)\\b|\\b(?:eaten|consumed|taken)\\s+by\\s+(?:the\\s+)?${PEST_WORDS}\\b`, 'i');
+// Someone must be the eater: a name, a pronoun, a possessive person or a
+// listed person or pet, before the verb or after "by". "Was the bait
+// eaten?" names no one (Codex P1 #6016 r34).
+const QUESTION_WORDS = '(?!(?:Was|Were|Is|Are|Did|Does|Do|Has|Have|What|Why|How|When|Where|Which|Who|Will|Can|Could|Should|The|This|That|Some|Any)\\b)';
+const EATER = `(?:${QUESTION_WORDS}[A-Z][a-z]+|i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
+const EATER_ACTS = new RegExp(`(?:^|[^\\w])${EATER}\\s+(?:\\w+\\s+){0,2}?(?:swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\\b|\\bby\\s+${EATER}`);
 function ingestsProduct(text) {
-  return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence) && !PEST_EATING.test(sentence));
+  return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence)
+    && EATER_ACTS.test(sentence) && !PEST_EATING.test(sentence));
 }
 
 function medicalExposureAnswer(question) {

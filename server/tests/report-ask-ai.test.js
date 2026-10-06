@@ -467,6 +467,9 @@ describe('screenAskAnswer', () => {
     expect(screen('We will return later this month.')).toBe('states_a_date');
     expect(screen('We will return in Sept.')).toBe('states_a_date');
     expect(screen('We will return in 2027.')).toBe('states_a_date');
+    expect(screen('We will return in a fortnight.')).toBe('states_a_date');
+    expect(screen('The technician will come back in the spring.')).toBe('states_a_date');
+    expect(screen('We will be back soon.')).toBe('states_a_date');
     expect(screen('We will return two days from now.')).toBe('states_a_date');
     expect(screen('Your next visit is three weeks from now.')).toBe('states_a_date');
     expect(screen('Your window is 2-4.')).toBe('states_a_date');
@@ -651,6 +654,8 @@ describe('symptoms and exposure never reach the model', () => {
     'I am having trouble breathing',
     'I feel lightheaded since this morning',
     'He passed out in the kitchen',
+    'My child is coughing after the pesticide treatment',
+    'My dog is shaking after the treatment',
     'It sprayed on my face',
     'I was sprayed in the eyes',
     'He was sprayed on the skin',
@@ -669,6 +674,8 @@ describe('symptoms and exposure never reach the model', () => {
     'The bait was swallowed by John',
     'The ant bait was swallowed by John',
     'The rat poison was eaten by John',
+    'Ants were nearby when John ate the bait',
+    'Roaches were there and John swallowed the bait',
     'My partner is sick after the spray',
     'My cousin ate some granules',
     'My coworker drank pesticide',
@@ -778,6 +785,9 @@ describe('symptoms and exposure never reach the model', () => {
     'Were the ants poisoned by the bait?',
     'The ants ate the bait. Is that good?',
     'Was the bait eaten by the roaches?',
+    'Was the bait eaten?',
+    'Was the rodent bait eaten?',
+    'Was any bait consumed?',
     'Was the rat poisoned?',
     'What was sprayed on my lawn?',
     'What was sprayed on the fence?',
