@@ -60,6 +60,11 @@ describe('POST /aio-sweep', () => {
     expect(mockSweep.startSweep).toHaveBeenCalledWith({ trigger: 'manual', maxCostUsd: 25, minImpressions: 10, max: 5000 });
   });
 
+  test('a two-decimal cap such as 19.99 is accepted', async () => {
+    const res = await call('POST', '/aio-sweep', { maxCostUsd: 19.99 });
+    expect(res.status).toBe(201);
+  });
+
   test.each([
     [{ maxCostUsd: 25.01 }],
     [{ maxCostUsd: 0 }],
@@ -70,6 +75,7 @@ describe('POST /aio-sweep', () => {
     [{ minImpressions: 0 }],
     [{ maxCostUsd: 0.006 }],
     [{ maxCostUsd: 2.345 }],
+    [{ maxCostUsd: '1e1' }],
     [{ minImpressions: 1.5 }],
     [{ minImpressions: 'x' }],
     [{ max: 5001 }],

@@ -169,6 +169,28 @@ describe('mergeCandidates', () => {
     expect(out.map((c) => c.query)).toEqual(['high', 'gap only', 'managed only']);
   });
 
+  test('a search holding a customer or lead first and last name is never a candidate', () => {
+    const out = sweep.mergeCandidates({
+      gscRows: [
+        { query: 'jordan exampleton pest control', impressions: 90 },
+        { query: 'exampleton termite treatment', impressions: 80 },
+        { query: 'brown patch lawn fungus', impressions: 70 },
+      ],
+      people: [{ first_name: 'Jordan', last_name: 'Exampleton' }, { first_name: 'Casey', last_name: 'Brown' }],
+    });
+    expect(out.map((c) => c.query)).toEqual(['exampleton termite treatment', 'brown patch lawn fungus']);
+  });
+
+  test('a Search Console Palmetto label is ignored for the palmetto bug', () => {
+    const out = sweep.mergeCandidates({ gscRows: [{ query: 'palmetto bugs vs cockroaches', impressions: 90, city_target: 'palmetto' }] });
+    expect(out[0].city).toBeNull();
+  });
+
+  test('the cap counts only rows that pass the screens', () => {
+    const out = sweep.mergeCandidates({ max: 1, gscRows: [{ query: 'site:rival.example pests', impressions: 90 }, { query: 'ant control', impressions: 80 }] });
+    expect(out.map((c) => c.query)).toEqual(['ant control']);
+  });
+
   test('searches that look like contact details are never candidates', () => {
     const out = sweep.mergeCandidates({ gscRows: [
       { query: 'pest control call 941 555 0100', impressions: 90 },
@@ -270,6 +292,14 @@ describe('processSweepChunk', () => {
     const out = await sweep.processSweepChunk();
     expect(out.runId).toBeNull();
     expect(dataforseo.request).not.toHaveBeenCalled();
+  });
+
+  test('each sweep call is a single attempt (a retry can be a second billed task)', async () => {
+    openRun();
+    pendingRow('q');
+    dataforseo.request.mockResolvedValue(serp([]));
+    await sweep.processSweepChunk();
+    expect(dataforseo.request.mock.calls[0][2]).toBe(1);
   });
 
   test('one mobile call per row with the row location; every status is stored; run closes as done', async () => {

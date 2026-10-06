@@ -48,6 +48,8 @@ const CITY_COORDS = {
   'Punta Gorda': '26.9298,-82.0454',
 };
 const DEFAULT_CITY = 'Lakewood Ranch';
+const PALMETTO_PEST_RE = /\bpalmetto\s+(bug|roach|cockroach)/;
+const PALMETTO_PEST_RE_G = /\bpalmetto\s+(bug|roach|cockroach)/g;
 // Budget reserved for each call in flight, so concurrent workers cannot all
 // launch past the cap before any cost comes back. Above the usual live
 // advanced SERP + async AI Overview price.
@@ -69,7 +71,7 @@ function cityFromQuery(query) {
   // Punctuation counts as a word break ("in Bradenton, Florida"). "Palmetto
   // bug/roach" is the pest, not Palmetto the city (same rule as geoBucket in
   // competitor-gap-miner.js).
-  const q = ` ${normQuery(query).replace(/[^a-z0-9]+/g, ' ').replace(/\bpalmetto\s+(bug|roach|cockroach)/g, '$1')} `;
+  const q = ` ${normQuery(query).replace(/[^a-z0-9]+/g, ' ').replace(PALMETTO_PEST_RE_G, '$1')} `;
   return CITY_NAMES.find((c) => q.includes(` ${c.toLowerCase()} `)) || null;
 }
 
@@ -90,6 +92,33 @@ const PERSONAL_RE = [
   /\b\d{2,6}\s+(?:[a-z]+\s+){0,3}(?:st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|ln|lane|ct|court|cir|circle|way|pl|place|ter|terrace|trl|trail|pkwy|parkway|hwy|highway)\b/i,
 ];
 const looksPersonal = (q) => PERSONAL_RE.some((re) => re.test(q));
+
+const tokensOf = (q) => normQuery(q).split(/[^a-z0-9']+/).filter(Boolean);
+/**
+ * Customer and lead names, as last name -> set of first names. Built from our
+ * own tables; nothing here leaves the database. A search holding both the first
+ * and the last name of one person is never sent to DataForSEO.
+ */
+function buildNameIndex(people) {
+  const index = new Map();
+  for (const p of arr(people)) {
+    const first = tokensOf(p.first_name)[0];
+    const last = tokensOf(p.last_name).slice(-1)[0];
+    if (!first || !last || first.length < 2 || last.length < 2) continue;
+    if (!index.has(last)) index.set(last, new Set());
+    index.get(last).add(first);
+  }
+  return index;
+}
+function namesAPerson(query, nameIndex) {
+  if (!nameIndex || !nameIndex.size) return false;
+  const tokens = new Set(tokensOf(query));
+  for (const t of tokens) {
+    const firsts = nameIndex.get(t);
+    if (firsts) for (const f of firsts) if (f !== t && tokens.has(f)) return true;
+  }
+  return false;
+}
 const OPERATOR_RE = /(^|[^a-z0-9])-?(site|inurl|allinurl|intitle|allintitle|intext|allintext|filetype|ext|related|cache|link|info|define|before|after|source|map):/i;
 
 // Sums a Search Console row into a candidate; position is impression-weighted.
@@ -110,11 +139,12 @@ function addGscNumbers(c, r, impressions) {
  * A gap or managed row is always included (it sorts after the GSC rows when
  * it has no impressions); the cap drops the lowest-impression GSC-only rows.
  */
-function mergeCandidates({ gscRows = [], gapRows = [], managedRows = [], minImpressions = DEFAULT_MIN_IMPRESSIONS, max = DEFAULT_MAX_CANDIDATES } = {}) {
+function mergeCandidates({ gscRows = [], gapRows = [], managedRows = [], people = [], minImpressions = DEFAULT_MIN_IMPRESSIONS, max = DEFAULT_MAX_CANDIDATES } = {}) {
+  const nameIndex = buildNameIndex(people);
   const byQuery = new Map();
   const touch = (query, source) => {
     const key = normQuery(query);
-    if (!key || isWavesQuery(key) || OPERATOR_RE.test(key) || looksPersonal(key)) return null;
+    if (!key || isWavesQuery(key) || OPERATOR_RE.test(key) || looksPersonal(key) || namesAPerson(key, nameIndex)) return null;
     let c = byQuery.get(key);
     if (!c) {
       c = { query: key, sources: [], cityLabels: [], impressions_90d: null, clicks_90d: null, gsc_position: null, posWeight: 0 };
@@ -144,7 +174,11 @@ function mergeCandidates({ gscRows = [], gapRows = [], managedRows = [], minImpr
   }
 
   const all = [...byQuery.values()].map((c) => {
-    const city = c.cityLabels.map(cityFromLabel).find(Boolean) || cityFromQuery(c.query) || null;
+    // Search Console labels any "palmetto" query as the city; for the pest
+    // ("palmetto bug/roach") that label is wrong, so it is ignored.
+    const pestPalmetto = PALMETTO_PEST_RE.test(c.query);
+    const city = c.cityLabels.map(cityFromLabel).filter((l) => !(pestPalmetto && l === 'Palmetto')).find(Boolean)
+      || cityFromQuery(c.query) || null;
     return {
       query: c.query,
       sources: c.sources,
@@ -179,8 +213,9 @@ async function buildCandidates({ minImpressions = DEFAULT_MIN_IMPRESSIONS, max =
     .groupByRaw('lower(trim(query))')
     .havingRaw('sum(impressions) >= ?', [minImpressions])
     .havingRaw('not bool_or(coalesce(is_branded, false))')
-    .orderByRaw('sum(impressions) desc')
-    .limit(max);
+    .orderByRaw('sum(impressions) desc');
+  // No SQL limit: the cap applies in mergeCandidates after the operator,
+  // contact-detail and name screens, so a screened row never takes a slot.
 
   const gapRows = await db('opportunity_queue')
     .where({ bucket: 'competitor_gap' })
@@ -190,7 +225,12 @@ async function buildCandidates({ minImpressions = DEFAULT_MIN_IMPRESSIONS, max =
 
   const managedRows = await db('seo_llm_mention_queries').where({ active: true }).select('query', 'city', 'service');
 
-  return mergeCandidates({ gscRows, gapRows, managedRows, minImpressions, max });
+  const people = [
+    ...await db('customers').whereNotNull('first_name').whereNotNull('last_name').select('first_name', 'last_name'),
+    ...await db('leads').whereNotNull('first_name').whereNotNull('last_name').select('first_name', 'last_name'),
+  ];
+
+  return mergeCandidates({ gscRows, gapRows, managedRows, people, minImpressions, max });
 }
 
 function sourceCounts(candidates) {
@@ -262,6 +302,7 @@ function citationKindOf(elements) {
 }
 
 async function sweepOne(row) {
+  // One attempt: a retry after a dropped connection can be a second billed task.
   const data = await dataforseo.request(SERP_PATH, [{
     keyword: row.query,
     ...dataforseo.serpLocation(row.location || locationForCity(DEFAULT_CITY)),
@@ -269,7 +310,7 @@ async function sweepOne(row) {
     device: 'mobile',
     os: 'iOS',
     load_async_ai_overview: true,
-  }]);
+  }], 1);
   if (data == null) return { status: 'request_error', error: 'DataForSEO request failed', aio_shown: null };
 
   const task = data.tasks?.[0];

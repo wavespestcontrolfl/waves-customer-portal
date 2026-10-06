@@ -805,7 +805,7 @@ router.post('/aio-sweep', requireAdmin, async (req, res, next) => {
     if (body.maxCostUsd !== undefined) {
       const n = Number(body.maxCostUsd);
       // Whole cents, at least $1: max_cost_usd is stored to the cent.
-      if (typeof body.maxCostUsd === 'boolean' || !Number.isFinite(n) || n < 1 || n > AIO_SWEEP_MAX_COST_USD || Math.round(n * 100) !== n * 100) return res.status(400).json({ error: `maxCostUsd must be whole cents from 1 to ${AIO_SWEEP_MAX_COST_USD}` });
+      if (typeof body.maxCostUsd === 'boolean' || !Number.isFinite(n) || n < 1 || n > AIO_SWEEP_MAX_COST_USD || !/^\d+(\.\d{1,2})?$/.test(String(body.maxCostUsd).trim())) return res.status(400).json({ error: `maxCostUsd must be whole cents from 1 to ${AIO_SWEEP_MAX_COST_USD}` });
       opts.maxCostUsd = n;
     }
     if (body.minImpressions !== undefined) {
