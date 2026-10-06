@@ -98,6 +98,10 @@ describe('gatherTechParagraphInputs', () => {
     expect(await gatherTechParagraphInputs({ record: RECORD, data: degraded, knex: knex() })).toBeNull();
     expect(await gatherTechParagraphInputs({ record: RECORD, data: { reportV2: REPORT().reportV2 }, knex: knex() })).toBeNull();
     expect(await gatherTechParagraphInputs({ record: RECORD, data: null, knex: knex() })).toBeNull();
+    // A failed product read, flagged by the report build whatever the copy-v6 gate (Codex r4).
+    const noProducts = REPORT();
+    Object.defineProperty(noProducts.lawnAssessment, 'productsReadFailed', { value: true, enumerable: false });
+    expect(await gatherTechParagraphInputs({ record: RECORD, data: noProducts, knex: knex() })).toBeNull();
   });
 
   test('fail closed: a failed findings read propagates (the step stores no paragraph)', async () => {

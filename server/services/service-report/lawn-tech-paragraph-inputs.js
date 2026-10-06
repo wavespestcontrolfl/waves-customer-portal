@@ -71,8 +71,10 @@ async function gatherTechParagraphInputs({ record, data, knex }) {
   const assessmentId = lawnAssessment && lawnAssessment.assessmentId;
   if (!reportV2 || assessmentId == null || !record) return null;
   // A report build that could not read its inputs cleanly froze nothing; the
-  // paragraph is not written from a degraded read either.
-  if (lawnAssessment.lawnCopyV6Unfrozen === true) return null;
+  // paragraph is not written from a degraded read either. A failed product read is
+  // checked on its own: it must not freeze a paragraph without the products, with
+  // or without the copy-v6 gate (Codex r4).
+  if (lawnAssessment.lawnCopyV6Unfrozen === true || lawnAssessment.productsReadFailed === true) return null;
 
   const products = appliedFromProducts(reportV2.treatment && reportV2.treatment.products);
   const findings = (await readKeptFindings(knex, assessmentId))

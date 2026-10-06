@@ -645,6 +645,16 @@ describe('GATE_LAWN_TECH_PARAGRAPH on the report payload', () => {
     expect(JSON.parse(JSON.stringify(reconciled(frozen.data)))).toEqual(JSON.parse(JSON.stringify(reconciled(bare.data))));
   });
 
+  test('a failed service_products read flags the build for the paragraph step, with the copy-v6 gate off, and changes no payload key (Codex r4)', async () => {
+    live(); // GATE_LAWN_REPORT_COPY_V6 stays off
+    const { knex } = withRecords({ ...fixtures(), service_products: FAIL }, recordsWith(null));
+    const data = await buildReportV1Data(service(recordsWith(null)['svc-cur'].structured_notes), 'token-tp', knex, {});
+    expect(data.lawnAssessment.productsReadFailed).toBe(true);
+    expect(Object.keys(data.lawnAssessment)).not.toContain('productsReadFailed');
+    const ok = await render(recordsWith(null));
+    expect(ok.data.lawnAssessment.productsReadFailed).toBeUndefined();
+  });
+
   test('gate on: the lead carries the frozen text and nothing else carries it; no model call', async () => {
     live();
     const { data, log } = await render(recordsWith(TEXT));
