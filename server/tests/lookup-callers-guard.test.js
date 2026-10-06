@@ -26,6 +26,16 @@ function walk(dir, out = []) {
 const files = walk(SERVER_ROOT);
 const rel = (f) => path.relative(SERVER_ROOT, f).split(path.sep).join('/');
 
+// Every local name the file gives the lookup: the function itself plus any
+// alias bound from it (`const performLookup = lookup || require(...).performPropertyLookup`,
+// `const { performPropertyLookup: lookupFn } = ...`, `const x = performPropertyLookup`).
+function lookupAliases(src) {
+  const names = new Set(['performPropertyLookup']);
+  for (const m of src.matchAll(/(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;\n]*\bperformPropertyLookup\b/g)) names.add(m[1]);
+  for (const m of src.matchAll(/performPropertyLookup\s*:\s*([A-Za-z_$][\w$]*)/g)) if (m[1] !== 'jest') names.add(m[1]);
+  return [...names];
+}
+
 // Lines that CALL the lookup (not the definition, not a comment, not a jest mock).
 function callLines(src, name) {
   const re = new RegExp('(?<![\\w.])' + name + '\\(');
@@ -41,8 +51,10 @@ describe('property-lookup callers declare their scope decision', () => {
     for (const file of files) {
       const r = rel(file);
       const src = fs.readFileSync(file, 'utf8');
-      for (const { line, n } of callLines(src, 'performPropertyLookup')) {
+      for (const name of lookupAliases(src)) for (const { line, n } of callLines(src, name)) {
         if (/module\.exports/.test(line)) continue;
+        // The alias binding itself ("= lookup || require(...).performPropertyLookup") is not a call.
+        if (new RegExp(`(const|let|var)\\s+${name}\\s*=`).test(line)) continue;
         // The options argument is lookupOptionsFor(...) on the line, or a
         // `callerOptions` variable built from it just above.
         const above = src.split('\n').slice(Math.max(0, n - 8), n).join('\n');
@@ -65,13 +77,16 @@ describe('property-lookup callers declare their scope decision', () => {
     expect(offenders).toEqual([]);
   });
 
-  test('the registry names every caller id the code uses, and only those', () => {
-    const used = new Set();
+  test('every caller id is used in exactly the one file the registry binds it to', () => {
+    const uses = {};
     for (const file of files) {
       const src = fs.readFileSync(file, 'utf8');
-      for (const m of src.matchAll(/lookupOptionsFor\('([a-z_]+)'/g)) used.add(m[1]);
+      for (const m of src.matchAll(/lookupOptionsFor\('([a-z_]+)'/g)) (uses[m[1]] ||= []).push(rel(file));
     }
-    expect([...used].sort()).toEqual(Object.keys(CALLERS).sort());
+    const expected = Object.fromEntries(Object.entries(CALLERS).map(([id, c]) => [id, [c.file]]));
+    // Each id appears in its own file only (a file may call it more than once).
+    const actual = Object.fromEntries(Object.entries(uses).map(([id, fs_]) => [id, [...new Set(fs_)]]));
+    expect(actual).toEqual(expected);
   });
 
   test('lookupOptionsFor: opt-in only for declared callers, never from the call site', () => {
@@ -84,6 +99,7 @@ describe('property-lookup callers declare their scope decision', () => {
       expect(['staff', 'automation', 'public', 'customer']).toContain(c.surface);
       expect(typeof c.suiteSizing).toBe('boolean');
       expect(c.why.length).toBeGreaterThan(8);
+      expect(fs.existsSync(path.join(SERVER_ROOT, c.file))).toBe(true);
       if (c.surface === 'public' || c.surface === 'customer') expect(c.suiteSizing).toBe(false);
       expect(id).toMatch(/^[a-z_]+$/);
     }
