@@ -75,6 +75,7 @@ const ActivityIndicators = require('../services/service-report/activity-indicato
 const { gateEnvValue, tsFastCompleteLive } = require('../config/feature-gates');
 const { lawnReserviceFastCompleteLive, lawnFastCompleteLive } = require('../config/feature-gates');
 const { addressKey } = require('../services/customer-properties');
+const { decideSeriesTextRelease, recordSupersededText, COALESCE_SURFACES: SERIES_TEXT_COALESCE_SURFACES } = require('../services/series-move-text-coalesce');
 
 // The follow-up override chain (German knockdown windows, two-treatment
 // package rules, species gating) lives in ONE place — the obligation module
@@ -5148,7 +5149,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       if (Number(leased) === 0) {
         return { notificationSent: false, notificationError: 'effects_in_progress', conflicts, seriesMoveId, inProgress: true };
       }
-      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified', 'status', 'source_surface')) || markers;
+      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified', 'status', 'source_surface', 'created_at', 'customer_id', 'anchor_service_id', 'parent_service_id')) || markers;
     } catch (err) {
       // Without a held lease no marker write can land (they are fenced on
       // the owner), so effects run here would be unrecorded and repeated by
@@ -5458,13 +5459,33 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       notificationSent = true;
       await closeSeriesReminders();
     } else if (notify) {
+      // GATE_SERIES_MOVE_TEXT_COALESCE (owner 2026-10-06): a staff move's text
+      // waits a few minutes so a second move of the same series sends only
+      // the newest date (services/series-move-text-coalesce.js). Off = send.
+      const release = await decideSeriesTextRelease({ seriesMoveId, markers });
+      if (release.action === 'hold') {
+        // Not a failure and not a concluded non-send: notified_at stays NULL
+        // so the held-text sweep (or the 15-minute reconciler) re-runs the
+        // pass once the hold ends. The reminder windows the sync covered stay
+        // covered; no re-arm while the text is pending. `notificationSent`
+        // is null (not false) so a staff screen shows no failure notice.
+        return {
+          notificationSent: null, notificationError: null, notificationHeld: true,
+          notificationSendAfter: release.releaseAt.toISOString(), conflicts, seriesMoveId,
+        };
+      }
+      if (release.action === 'drop') {
+        notificationError = 'superseded_by_newer_move';
+        definitiveNonSend = true;
+        await recordSupersededText(() => ownedRow(db('series_moves')), release.supersededBy, seriesMoveId);
+      }
       // Recipient routing, opt-in/opt-out and service-contact delivery come
       // from the shared appointment sender (AppointmentReminders.
       // safeSendAppointment — the same path sendRescheduleNoticeForVisit
       // uses), never a direct customers.phone text: a primary who opted out,
       // has no phone, or routes appointment texts to an authorized service
       // contact gets exactly what the single-visit notice would do.
-      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start', 'visit_id');
+      const svc = release.action === 'drop' ? null : await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start', 'visit_id');
       const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
       // The text quotes the slot the series move RECORDED for the anchor —
       // date and arrival window. A replayed/retried pass whose anchor was
@@ -5485,7 +5506,9 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         const visit = await db('service_visits').where({ id: row.visit_id }).first('window_start');
         return !!visit && hm(visit.window_start) === hm(anchorOcc.visitWindowStart);
       };
-      if (!customer) {
+      if (release.action === 'drop') {
+        // Concluded above: the newer move's own text covers the customer.
+      } else if (!customer) {
         notificationError = 'Customer not found';
         definitiveNonSend = true;
       } else if (!anchorStillOnRecordedSlot(svc) || !(await stopStillOnRecordedStart(svc))) {
@@ -5634,7 +5657,21 @@ const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply', 'custom
 // Surfaces whose series text is an authenticated staff action (quiet-hours
 // exempt); every customer-driven surface stays inside the send window.
 const STAFF_SERIES_SURFACES = new Set(['dispatch_board', 'edit_modal', 'quick_move']);
-async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit = 25 } = {}) {
+// Which series_moves rows a reconcile pass may select. The default sweep covers
+// every surface with an effects path. The held-text sweep
+// (GATE_SERIES_MOVE_TEXT_COALESCE) covers only staff moves whose live pass
+// finished and whose text still waits, under 30 minutes old and retried at
+// most once per lease horizon; older rows belong to the 15-minute sweep.
+function scopeReconcileSurfaces(q, heldTextsOnly) {
+  if (!heldTextsOnly) return q.whereIn('source_surface', RECONCILE_SURFACES);
+  return q.whereIn('source_surface', SERIES_TEXT_COALESCE_SURFACES)
+    .where({ status: 'committed', notify_requested: true })
+    .whereNull('notified_at')
+    .whereNotNull('reminders_synced_at')
+    .where('created_at', '>', new Date(Date.now() - 30 * 60 * 1000))
+    .where((r) => r.whereNull('effects_attempted_at').orWhere('effects_attempted_at', '<', new Date(Date.now() - SERIES_EFFECTS_LEASE_MS)));
+}
+async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit = 25, heldTextsOnly = false } = {}) {
   // Committed rows with any unfinished effect, plus SUPERSEDED rows that
   // still owe their conflict card (applySeriesMoveEffects runs card-only
   // for those). Ordered by the LAST ATTEMPT (effects_attempted_at, else
@@ -5642,7 +5679,7 @@ async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit 
   // failing retryably (a destination Twilio keeps 5xx-ing) rotates to the
   // back and can never monopolize the fixed batch (codex r10 P2).
   const rows = await db('series_moves')
-    .whereIn('source_surface', RECONCILE_SURFACES)
+    .modify(scopeReconcileSurfaces, heldTextsOnly)
     .where('created_at', '<', new Date(Date.now() - olderThanMs))
     .where((q) => q
       .where((c) => c.where({ status: 'committed' }).where((u) => u

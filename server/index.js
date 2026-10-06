@@ -1614,6 +1614,31 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
       }
     }
 
+    // GATE_SERIES_MOVE_TEXT_COALESCE: a staff series move's customer text is
+    // held a few minutes so a second move of the same series sends only the
+    // newest date. The held text rides the series_moves deferral (notified_at
+    // stays NULL); this once-a-minute sweep releases it when its hold ends.
+    // Recovery like the sweep above, so it ignores GATE_CRON_JOBS; it does
+    // nothing (one env read) with the coalesce gate off.
+    {
+      const { runExclusive } = require('./utils/cron-lock');
+      if (config.nodeEnv !== 'test') {
+        require('./utils/scheduled-cron').schedule('* * * * *', async () => {
+          try {
+            const coalesce = require('./services/series-move-text-coalesce');
+            if (!coalesce.enabled()) return;
+            await runExclusive('series-move-held-text-release', async () => {
+              const { reconcileSeriesMoveEffects } = require('./routes/admin-dispatch');
+              const out = await reconcileSeriesMoveEffects({ olderThanMs: coalesce.SERIES_TEXT_HOLD_MS, heldTextsOnly: true });
+              if (out.candidates) logger.info(`[cron] series move held text release: ${out.finished}/${out.candidates} finished`);
+            });
+          } catch (err) {
+            logger.error(`[cron] series move held text release failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
+      }
+    }
+
     // Finish request-path lawn delivery after a process exit, even with the
     // lawn visit gate off: persisted runs and renewable ownership select the
     // work and the service verifies each step's own completion state. It rides
