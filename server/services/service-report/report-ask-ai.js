@@ -863,6 +863,14 @@ const PEST_TERMS = [
   // The canonical treatment-target vocabulary (pest, lawn and ornamental
   // target suggestions), each name and its last word ("Large patch", "patch").
   ...canonicalTargetTerms(),
+  // Active ingredients: one the facts do not hold is a false product claim
+  // ("Alpine WSG contains fipronil") (Codex P1 #5964 r27).
+  'dinotefuran', 'fipronil', 'bifenthrin', 'imidacloprid', 'indoxacarb', 'abamectin', 'hydramethylnon', 'cyhalothrin',
+  'lambda-cyhalothrin', 'cyfluthrin', 'deltamethrin', 'permethrin', 'cypermethrin', 'chlorantraniliprole', 'acephate',
+  'boric acid', 'borate', 'pyrethrin', 'pyriproxyfen', 'methoprene', 'novaluron', 'hydroprene', 'thiamethoxam',
+  'clothianidin', 'emamectin', 'spinosad', 'glyphosate', 'dicamba', 'mecoprop', 'prodiamine', 'dithiopyr', 'atrazine',
+  'metsulfuron', 'sulfentrazone', 'quinclorac', 'azoxystrobin', 'propiconazole', 'myclobutanil', 'chlorothalonil',
+  'mancozeb', 'brodifacoum', 'bromadiolone', 'difethialone', 'cholecalciferol', 'bromethalin', 'diatomaceous earth',
 ].map((term) => stemmedTerms(term));
 // Any "-bug", "-worm", "-fly", "-miner" or "-borer" compound is a pest name too.
 const PEST_SHAPE_RE = /\b[a-z]+(?:bugs?|worms?|fl(?:y|ies)|miners?|borers?)\b/gi;
@@ -870,7 +878,7 @@ const PEST_SHAPE_RE = /\b[a-z]+(?:bugs?|worms?|fl(?:y|ies)|miners?|borers?)\b/gi
 function leaksTargetList(text, {
   question, data, facts, requiredLines,
 }) {
-  const approvedWording = asArray(facts?.products).map((product) => [product.what_it_does, product.labeled_for]);
+  const approvedWording = asArray(facts?.products).map((product) => [product.what_it_does, product.labeled_for, product.active_ingredient]);
   const allowed = stemmedTerms([
     question, data.customerConcern, facts?.report_sections, facts?.findings,
     facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report,
@@ -913,7 +921,9 @@ const CONTENT_CHECKS = [
   ...ASK_EXTRA_BANNED.map(([rx, reason]) => [reason, (text) => rx.test(text)]),
   ['phone', (text) => otherPhoneNumbers(text).length > 0],
   ['forbidden_copy', (text) => !validateCustomerCopy(text)],
-  ['banned_copy', (text) => require('./activity-indicators').findBannedCustomerCopy(text).length > 0],
+  // The full report-copy screen (credential shapes included), not a subset
+  // (Codex P1 #5964 r27).
+  ['banned_copy', (text) => require('./technician-report-copy').customerCopyViolations(text).length > 0],
   ['compliance', (text) => require('../social-media').complianceLanguageIssues(text, { impliedTreatmentContext: true }).length > 0],
   ['target_list', leaksTargetList],
 ];
@@ -1168,6 +1178,17 @@ function statesWrongScope(text, { facts }) {
   });
 }
 
+const METHOD_STEMS = ['inject', 'drill', 'trench', 'bait', 'dust', 'foam', 'broadcast', 'granul', 'spray', 'fog', 'mist', 'gel', 'spot', 'drench', 'paint', 'wipe'];
+function statesWrongMethod(text, { facts }) {
+  const products = asArray(facts?.products).filter((product) => product?.name);
+  return splitSentences(matchForm(text)).some((sentence) => products.some((product) => {
+    if (!mentions(sentence, product)) return false;
+    const said = normalizeKey(sentence.replace(new RegExp(product.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' '));
+    const recorded = normalizeKey(product.how_applied || '');
+    return METHOD_STEMS.some((stem) => new RegExp(`\\b${stem}`).test(said) && !recorded.includes(stem));
+  }));
+}
+
 // A capitalized name in a sentence about applying or using something must be
 // a recorded product ("Roundup was applied outside" on an Alpine-only report)
 // (Codex P1 #5964 r21).
@@ -1229,6 +1250,9 @@ const ASK_CHECKS = [
   // An inside or outside claim about a product must match its recorded
   // applied_where (Codex P1 #5964 r20).
   ['scope_claim', statesWrongScope],
+  // A method claimed for a named product must match its recorded how_applied
+  // ("Alpine WSG was injected" when it was sprayed) (Codex P1 #5964 r27).
+  ['method_claim', statesWrongMethod],
   ['unrecorded_product', namesUnrecordedProduct],
   ['unstated_number', statesUnknownNumber],
   // While the aftercare holds watering, no sentence of the model's own may
@@ -1365,7 +1389,7 @@ const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_P
 // bait", "the bait was swallowed by John"): an eating verb and an exposure
 // word in one sentence, unless a pest is the one eating ("the ants ate the
 // bait") (Codex P1 #6016 r32). No subject list can name every person.
-const INGESTION_VERB = /\b(?:bit\s+into|bite[sd]?\s+(?:into|of|on)|took\s+a\s+bite|swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
+const INGESTION_VERB = /\b(?:bit|bites?|bitten|biting|mouthful|took\s+a\s+(?:bite|mouthful|sip|taste)|swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
 const EXPOSURE_WORD = /\b(?:bait\w*|spray\w*|pesticides?|chemicals?|granules?|granular|poison\w*|insecticides?|herbicides?|fungicides?|rodenticides?|products?|gel|pellets?|powder|dust|treatment|fertilizer)\b/i;
 // The pest is the eater only as the subject of the eating verb ("the ants ate
 // the bait", "eaten by the roaches"); a pest word right before a product word
@@ -1382,7 +1406,7 @@ const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\
 const NOT_A_NAME = '(?:was|were|is|are|did|does|do|has|have|had|be|been|got|what|why|how|when|where|which|who|will|can|could|should|the|this|that|these|those|some|any|it|its|a|an|and|or|but|then|also|just|bait\\w*|spray\\w*|products?|pesticides?|chemicals?|granules?|poison\\w*|gel|pellets?|powder|dust|treatment|insecticides?|herbicides?|fertilizer|nothing|everything|something|anything|ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)';
 const NAME = `(?!${NOT_A_NAME}\\b)[a-z][a-z'’-]+`;
 const PERSON = `(?:i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
-const INGEST = '(?:bit\\s+into|bite[sd]?\\s+(?:into|of|on)|took\\s+a\\s+bite|swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
+const INGEST = '(?:bit|bites?|biting|took\\s+a\\s+(?:bite|mouthful|sip|taste)|swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
 const EATER_ACTS = new RegExp(`(?:^|[^\\w])(?:${PERSON}\\s+(?:\\w+\\s+){0,2}?|${NAME}\\s+)${INGEST}\\b|\\bby\\s+(?:${PERSON}|${NAME})\\b`, 'i');
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence)

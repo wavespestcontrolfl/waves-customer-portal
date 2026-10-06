@@ -1288,3 +1288,24 @@ describe('answer screen, Codex round 26', () => {
     expect(facts.customer_concern).toBe('Use lockbox [redacted] by the door. lockbox [redacted].');
   });
 });
+
+describe('answer screen, Codex round 27', () => {
+  const data = pestData({ applications: [{ product: { name: 'Alpine WSG', active_ingredient: 'Dinotefuran 40%' }, applicationArea: 'Outside', method: 'spray', methodLabel: 'Perimeter spray' }] });
+  const facts = buildReportAskFacts({ question: 'What was applied?', data });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'What was applied?', data, facts });
+
+  test.each(['My dog bit the bait.', 'My child took a mouthful of pesticide.'])('a bite or mouthful gets the full answer: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+
+  test.each(['The gate code is BLUE.', 'The lockbox combination is BLUE.'])('the full report-copy screen runs: %s', (answer) => {
+    expect(ask(answer)).toBe('banned_copy');
+  });
+
+  test('a method and an active ingredient must match the record', () => {
+    expect(ask('Alpine WSG was injected outside.')).toBe('method_claim');
+    expect(ask('Alpine WSG contains fipronil.')).toBe('target_list');
+    expect(ask('Alpine WSG was sprayed outside.')).toBeNull();
+    expect(ask('Alpine WSG uses dinotefuran.')).toBeNull();
+  });
+});
