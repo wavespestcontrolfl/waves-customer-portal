@@ -48,6 +48,10 @@ const CITY_COORDS = {
   'Punta Gorda': '26.9298,-82.0454',
 };
 const DEFAULT_CITY = 'Lakewood Ranch';
+// Budget reserved for each call in flight, so concurrent workers cannot all
+// launch past the cap before any cost comes back. Above the usual live
+// advanced SERP + async AI Overview price.
+const EST_CALL_COST_USD = 0.006;
 const CITY_NAMES = Object.keys(CITY_COORDS);
 
 const arr = (v) => (Array.isArray(v) ? v : []);
@@ -62,8 +66,10 @@ function cityFromLabel(raw) {
 }
 
 function cityFromQuery(query) {
-  // Punctuation counts as a word break ("in Bradenton, Florida").
-  const q = ` ${normQuery(query).replace(/[^a-z0-9]+/g, ' ')} `;
+  // Punctuation counts as a word break ("in Bradenton, Florida"). "Palmetto
+  // bug/roach" is the pest, not Palmetto the city (same rule as geoBucket in
+  // competitor-gap-miner.js).
+  const q = ` ${normQuery(query).replace(/[^a-z0-9]+/g, ' ').replace(/\bpalmetto\s+(bug|roach|cockroach)/g, '$1')} `;
   return CITY_NAMES.find((c) => q.includes(` ${c.toLowerCase()} `)) || null;
 }
 
@@ -318,9 +324,9 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
 
   const maxCost = run.max_cost_usd == null ? Infinity : Number(run.max_cost_usd);
   let runCost = Number(run.cost_usd) || 0;
-  if (runCost >= maxCost) {
+  if (runCost + EST_CALL_COST_USD > maxCost) {
     if (await finishRun(run.id, 'stopped_budget')) {
-      logger.warn(`[aio-sweep] run ${run.id} stopped: $${runCost} reached the $${maxCost} cap`);
+      logger.warn(`[aio-sweep] run ${run.id} stopped: $${runCost} leaves no room for another call under the $${maxCost} cap`);
       summary.status = 'stopped_budget';
     }
     return summary;
@@ -333,13 +339,17 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
 
   let next = 0;
   let aborted = false;
+  let inFlight = 0;
   const worker = async () => {
-    while (!aborted && next < rows.length && runCost < maxCost) {
+    // Reserve this call's estimated cost before taking a row: the run's booked
+    // cost plus every call in flight plus this one must stay under the cap.
+    while (!aborted && next < rows.length && runCost + (inFlight + 1) * EST_CALL_COST_USD <= maxCost) {
       const row = rows[next];
       next += 1;
+      inFlight += 1;
       // A cancel (or a budget stop) mid-chunk must stop new paid calls; the
       // row is claimed first so concurrent workers never share an index.
-      if (!(await runStillOpen(run.id))) break;
+      if (!(await runStillOpen(run.id))) { inFlight -= 1; break; }
       let update;
       try {
         update = await sweepOne(row);
@@ -350,6 +360,7 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
       }
       const cost = Number(update.cost_usd) || 0;
       runCost += cost;
+      inFlight -= 1;
       summary.costUsd += cost;
       summary.processed += 1;
       if (update.status === 'shown') summary.shown += 1;
@@ -378,9 +389,9 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
   const remaining = await db('seo_aio_sweep_results').where({ run_id: run.id, status: 'pending' }).count({ n: '*' }).first();
   if (!Number(remaining?.n)) {
     if (await finishRun(run.id, 'done')) summary.status = 'done';
-  } else if (runCost >= maxCost) {
+  } else if (runCost + EST_CALL_COST_USD > maxCost) {
     if (await finishRun(run.id, 'stopped_budget')) {
-      logger.warn(`[aio-sweep] run ${run.id} stopped: $${runCost.toFixed(4)} reached the $${maxCost} cap with ${remaining.n} rows pending`);
+      logger.warn(`[aio-sweep] run ${run.id} stopped: $${runCost.toFixed(4)} leaves no room under the $${maxCost} cap; ${remaining.n} rows pending`);
       summary.status = 'stopped_budget';
     }
   }

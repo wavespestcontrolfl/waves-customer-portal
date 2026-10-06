@@ -169,6 +169,12 @@ describe('mergeCandidates', () => {
     expect(out.map((c) => c.query)).toEqual(['high', 'gap only', 'managed only']);
   });
 
+  test('"palmetto bugs" is the pest, not the city of Palmetto', () => {
+    const out = sweep.mergeCandidates({ gapRows: [{ query: 'palmetto bugs vs cockroaches' }, { query: 'pest control palmetto fl' }] });
+    expect(out.find((c) => c.query.startsWith('palmetto bugs')).city).toBeNull();
+    expect(out.find((c) => c.query.startsWith('pest control')).city).toBe('Palmetto');
+  });
+
   test('managed brand rows (the entity cohort) are left out', () => {
     const out = sweep.mergeCandidates({ managedRows: [{ query: 'owner name pest control exampleville', service: 'brand' }, { query: 'ant control exampleville', service: 'pest control' }] });
     expect(out.map((c) => c.query)).toEqual(['ant control exampleville']);
@@ -352,6 +358,8 @@ describe('processSweepChunk', () => {
     dataforseo.request.mockResolvedValue(serp([], { cost: 0.006 }));
     const out = await sweep.processSweepChunk({ chunkSize: 12 });
     expect(out.processed).toBeLessThan(12);
+    // Concurrent workers reserve a call's cost before launching, so the booked cost stays under the cap.
+    expect(mockState.runs[0].cost_usd).toBeLessThanOrEqual(0.01);
     expect(out.status).toBe('stopped_budget');
     expect(mockState.runs[0].status).toBe('stopped_budget');
     expect(mockState.results.filter((r) => r.status === 'pending').length).toBeGreaterThan(0);
