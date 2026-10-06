@@ -2,6 +2,7 @@
  * Postgres twin of payment-failed-alert-close.test.js: real rows, real SQL.
  * Skips without DATABASE_URL (the CI `server` job runs it migrated).
  */
+jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({ bellWritten: true })) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const SKIP = !process.env.DATABASE_URL;
@@ -9,13 +10,15 @@ const postgres = SKIP ? describe.skip : describe;
 const { randomUUID } = require('node:crypto');
 
 postgres('payment_failed bells close when their invoice is paid', () => {
-  let db; let PaymentPlans; let customerId; let invoiceA; let invoiceB; const notificationIds = [];
+  let db; let PaymentPlans; let Dispatch; let triggerNotification; let customerId; let invoiceA; let invoiceB; const notificationIds = []; const logPis = [];
 
   beforeAll(() => {
     const url = new URL(process.env.DATABASE_URL);
     if (!['localhost', '127.0.0.1'].includes(url.hostname)) throw new Error('Use a disposable local/CI database');
     db = require('../models/db');
     PaymentPlans = require('../services/payment-plans');
+    Dispatch = require('../services/payment-failure-notifications');
+    ({ triggerNotification } = require('../services/notification-triggers'));
   });
   afterAll(async () => { await db.destroy(); });
 
@@ -50,6 +53,8 @@ postgres('payment_failed bells close when their invoice is paid', () => {
   });
   afterEach(async () => {
     await db('notifications').whereIn('id', notificationIds.splice(0)).del();
+    await db('stripe_payment_notification_log').whereIn('payment_intent_id', logPis.splice(0)).del();
+    triggerNotification.mockClear();
     await db('payments').where({ customer_id: customerId }).del();
     await db('invoices').where({ customer_id: customerId }).del();
     await db('customers').where({ id: customerId }).del();
@@ -112,5 +117,52 @@ postgres('payment_failed bells close when their invoice is paid', () => {
     expect(after.resolution).toBe('Called the customer');
     expect(after.done_by).toBe('payments');
     expect(await state(system)).toMatchObject({ done_by: 'relevance', resolution: 'Moved on' });
+  });
+
+  test('a combined attempt stays open after one invoice is paid and closes after both', async () => {
+    const piId = `pi_${randomUUID()}`;
+    await failedLedgerRow(invoiceA, piId);
+    await failedLedgerRow(invoiceB, piId);
+    const alert = await insertAlert({ paymentIntentId: piId, invoiceId: invoiceA });
+    await pay(invoiceA);
+    expect((await state(alert)).done_at).toBeNull();
+    await pay(invoiceB);
+    expect(await state(alert)).toMatchObject({ done_by: 'payments', resolution: 'The invoice was paid' });
+  });
+
+  test('a legacy non-UUID invoice id on the failed ledger row never throws and is ignored', async () => {
+    const piId = `pi_${randomUUID()}`;
+    await failedLedgerRow('legacy-123', piId);
+    const alert = await insertAlert({ paymentIntentId: piId, invoiceId: invoiceA });
+    await expect(pay(invoiceA)).resolves.toBeDefined();
+    expect(await state(alert)).toMatchObject({ done_by: 'payments' });
+  });
+
+  async function queueFailureJob(piId) {
+    logPis.push(piId);
+    await db('stripe_payment_notification_log').insert({
+      payment_intent_id: piId, outcome: 'failed', attempt_id: 'ch_x',
+      pending_payload: JSON.stringify({ amount: 120.39, customerId, reason: 'Card declined' }),
+    });
+  }
+
+  test('dispatch with a legacy non-UUID ledger id still raises the alert, with a null invoiceId', async () => {
+    const piId = `pi_${randomUUID()}`;
+    await failedLedgerRow('legacy-123', piId);
+    await queueFailureJob(piId);
+    await Dispatch.processPendingPaymentFailureNotifications({ limit: 50 });
+    const call = triggerNotification.mock.calls.find(([, payload]) => payload.paymentIntentId === piId);
+    expect(call[1]).toMatchObject({ invoiceId: null });
+  });
+
+  test('dispatch after the whole allocation was paid through another PaymentIntent raises nothing', async () => {
+    const piId = `pi_${randomUUID()}`;
+    await failedLedgerRow(invoiceA, piId);
+    await queueFailureJob(piId);
+    await db('invoices').where({ id: invoiceA }).update({ status: 'paid', paid_at: new Date() });
+    await Dispatch.processPendingPaymentFailureNotifications({ limit: 50 });
+    expect(triggerNotification.mock.calls.some(([, payload]) => payload.paymentIntentId === piId)).toBe(false);
+    const job = await db('stripe_payment_notification_log').where({ payment_intent_id: piId }).first('pending_payload');
+    expect(job.pending_payload).toBeNull();
   });
 });

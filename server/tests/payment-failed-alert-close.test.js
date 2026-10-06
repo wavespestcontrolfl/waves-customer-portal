@@ -12,14 +12,22 @@ const logger = require('../services/logger');
 const { closePaymentFailedAlertsForPaidInvoice, RESOLUTION } = require('../services/payment-failed-alert-close');
 const PaymentPlans = require('../services/payment-plans');
 
-// A connection whose queries are compiled, never executed.
-function compilingConn({ failWith = null } = {}) {
+const INV_A = '11111111-1111-4111-8111-111111111111';
+const INV_B = '22222222-2222-4222-8222-222222222222';
+const bell = (id, payload) => ({ id, metadata: { triggerKey: 'payment_failed', payload } });
+
+// A connection whose queries are compiled, never executed. `responses[table]`
+// is a queue of results for the awaited queries on that table, in order.
+function compilingConn({ failWith = null, responses = {} } = {}) {
   const captured = [];
+  const queues = Object.fromEntries(Object.entries(responses).map(([t, r]) => [t, [...r]]));
   const conn = (table) => {
     const builder = knex(table);
     builder.then = (resolve, reject) => {
-      captured.push(builder.toSQL().toNative());
-      return (failWith ? Promise.reject(failWith) : Promise.resolve(1)).then(resolve, reject);
+      captured.push({ table, ...builder.toSQL().toNative() });
+      const queue = queues[table];
+      const result = queue && queue.length ? queue.shift() : 1;
+      return (failWith ? Promise.reject(failWith) : Promise.resolve(result)).then(resolve, reject);
     };
     return builder;
   };
@@ -29,25 +37,66 @@ function compilingConn({ failWith = null } = {}) {
   return { conn, captured };
 }
 
-test('closes by invoice id OR by the failed attempt ledger row, as the payments closer', async () => {
-  const { conn, captured } = compilingConn();
-  expect(await closePaymentFailedAlertsForPaidInvoice('inv-1', conn)).toBe(1);
-  const { sql, bindings } = captured[0];
-  expect(sql).toMatch(/^update "notifications" set /);
-  expect(sql).toContain("metadata->>'triggerKey' = 'payment_failed'");
-  expect(sql).toContain('"recipient_type" = $');
-  expect(sql).toContain("metadata->'payload'->>'invoiceId' = $");
-  expect(sql).toContain("metadata->'payload'->>'paymentIntentId' IN (");
-  expect(sql).toContain("p.metadata->>'invoice_id' = $");
-  // done columns: latest closer is 'payments', existing done_at/resolution/read_at kept
-  expect(sql).toContain('"done_by" = $');
-  expect(sql).toContain('COALESCE(done_at');
-  expect(sql).toContain('COALESCE(resolution');
-  expect(bindings).toEqual(expect.arrayContaining(['admin', 'payment', 'inv-1', 'payments', RESOLUTION]));
-  // both matching keys are bound to THIS invoice only
-  expect(bindings.filter((b) => b === 'inv-1')).toHaveLength(2);
+// One bell about INV_A whose failed attempt covered only INV_A, INV_A paid.
+const settledSingle = () => ({
+  notifications: [[bell(7, { paymentIntentId: 'pi_x', invoiceId: null })], 1],
+  payments: [[{ metadata: { invoice_id: INV_A } }]],
+  invoices: [[{ id: INV_A }]],
+});
+
+test('selects bells by invoice id OR by the failed attempt ledger row, then closes as the payments closer', async () => {
+  const { conn, captured } = compilingConn({ responses: settledSingle() });
+  expect(await closePaymentFailedAlertsForPaidInvoice(INV_A, conn)).toBe(1);
+  const select = captured.find((q) => q.table === 'notifications' && q.sql.startsWith('select'));
+  expect(select.sql).toContain("metadata->>'triggerKey' = 'payment_failed'");
+  expect(select.sql).toContain('"recipient_type" = $');
+  expect(select.sql).toContain("metadata->'payload'->>'invoiceId' = $");
+  expect(select.sql).toContain("metadata->'payload'->>'paymentIntentId' IN (");
+  expect(select.sql).toContain("p.metadata->>'invoice_id' = $");
+  // text comparisons only: a malformed stored id cannot throw a uuid cast error
+  expect(select.sql).not.toMatch(/::uuid/i);
   // a row already closed by a system component is left alone (openToCloser)
-  expect(sql).toMatch(/"done_at" is null or COALESCE\(/);
+  expect(select.sql).toMatch(/"done_at" is null or COALESCE\(/);
+  expect(select.bindings.filter((b) => b === INV_A)).toHaveLength(2);
+  const update = captured.find((q) => q.sql.startsWith('update'));
+  expect(update.sql).toContain('"done_by" = $');
+  expect(update.sql).toContain('COALESCE(done_at');
+  expect(update.sql).toContain('COALESCE(resolution');
+  expect(update.sql).toContain('"id" in (');
+  expect(update.bindings).toEqual(expect.arrayContaining([7, 'payments', RESOLUTION]));
+});
+
+test('a combined attempt stays open while another invoice in its allocation is unpaid, and closes once all are paid', async () => {
+  const allocation = { payments: [[{ metadata: { invoice_id: INV_A } }, { metadata: JSON.stringify({ invoice_id: INV_B }) }]] };
+  // INV_A just paid, INV_B not: the invoices read finds one of two
+  const one = compilingConn({ responses: { ...allocation, notifications: [[bell(7, { paymentIntentId: 'pi_x' })]], invoices: [[{ id: INV_A }]] } });
+  expect(await closePaymentFailedAlertsForPaidInvoice(INV_A, one.conn)).toBe(0);
+  expect(one.captured.some((q) => q.sql.startsWith('update'))).toBe(false);
+  // both paid
+  const both = compilingConn({ responses: { ...allocation, notifications: [[bell(7, { paymentIntentId: 'pi_x' })], 1], invoices: [[{ id: INV_A }, { id: INV_B }]] } });
+  expect(await closePaymentFailedAlertsForPaidInvoice(INV_B, both.conn)).toBe(1);
+  const invoiceRead = both.captured.find((q) => q.table === 'invoices');
+  expect(invoiceRead.bindings).toEqual(expect.arrayContaining([INV_A, INV_B, 'paid', 'prepaid']));
+});
+
+test('closes only the bells whose own allocation is settled; a stamped invoiceId joins the allocation', async () => {
+  const { conn, captured } = compilingConn({ responses: {
+    notifications: [[bell(1, { paymentIntentId: 'pi_a' }), bell(2, { paymentIntentId: 'pi_b', invoiceId: INV_B })], 1],
+    payments: [[{ metadata: { invoice_id: INV_A } }], [{ metadata: { invoice_id: INV_A } }]],
+    invoices: [[{ id: INV_A }], [{ id: INV_A }]],
+  } });
+  expect(await closePaymentFailedAlertsForPaidInvoice(INV_A, conn)).toBe(1);
+  expect(captured.find((q) => q.sql.startsWith('update')).bindings).toEqual(expect.arrayContaining([1]));
+  expect(captured.find((q) => q.sql.startsWith('update')).bindings).not.toContain(2);
+});
+
+test('a non-UUID ledger invoice id is ignored, never compared to invoices.id', async () => {
+  const { conn, captured } = compilingConn({ responses: {
+    notifications: [[bell(7, { paymentIntentId: 'pi_x' })]],
+    payments: [[{ metadata: { invoice_id: 'legacy-123' } }]],
+  } });
+  expect(await closePaymentFailedAlertsForPaidInvoice(INV_A, conn)).toBe(0);
+  expect(captured.some((q) => q.table === 'invoices')).toBe(false);
 });
 
 test('a missing invoice id writes nothing', async () => {
@@ -58,16 +107,16 @@ test('a missing invoice id writes nothing', async () => {
 
 test('a failure in the closer is logged and returns 0, never thrown', async () => {
   const { conn } = compilingConn({ failWith: new Error('boom') });
-  await expect(closePaymentFailedAlertsForPaidInvoice('inv-1', conn)).resolves.toBe(0);
+  await expect(closePaymentFailedAlertsForPaidInvoice(INV_A, conn)).resolves.toBe(0);
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('boom'));
 });
 
 describe('payment path (completeActivePlansForInvoice)', () => {
   // The paid check and plan writes are a minimal stand-in; the notification
-  // update is the real compiled closer, optionally failing.
+  // select is the real compiled closer query (no open bells), optionally failing.
   function paymentConn({ status, failClose = false }) {
     const writes = [];
-    const closer = compilingConn({ failWith: failClose ? new Error('closer down') : null });
+    const closer = compilingConn({ failWith: failClose ? new Error('closer down') : null, responses: { notifications: [[]] } });
     const conn = (table) => {
       if (table === 'notifications') return closer.conn(table);
       const chain = {

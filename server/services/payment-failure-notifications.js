@@ -1,14 +1,10 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { triggerNotification } = require('./notification-triggers');
+const { ledgerInvoiceId, isFailedAllocationSettled } = require('./payment-failed-allocation');
 
 const TABLE = 'stripe_payment_notification_log';
 const SETTLED_STATUSES = ['paid', 'refunded', 'disputed'];
-
-function parseJson(value) {
-  if (value && typeof value === 'object') return value;
-  try { return value ? JSON.parse(value) || {} : {}; } catch { return {}; }
-}
 
 async function enqueuePaymentFailureNotification(paymentIntent, friendlyFailure, eventId) {
   const charge = paymentIntent.latest_charge;
@@ -26,6 +22,19 @@ async function enqueuePaymentFailureNotification(paymentIntent, friendlyFailure,
   }).onConflict(['payment_intent_id', 'outcome', 'attempt_id']).ignore();
 }
 
+// The invoice the alert is about: the one bound to the failed PaymentIntent, else
+// the one the failed attempt's ledger row names (a retry on a new card rebinds
+// the invoice), so the alert carries invoiceId and a later payment can close
+// it. A ledger id that is not a UUID is ignored (comparing it to invoices.id
+// would throw and the job would rotate forever).
+async function resolveAlertInvoiceId(trx, invoice, ledgerRow) {
+  if (invoice.id) return invoice.id; // read from invoices, so already a valid id
+  const id = ledgerInvoiceId(ledgerRow);
+  if (!id) return null;
+  const row = await trx('invoices').where({ id }).first('id');
+  return row?.id || null;
+}
+
 async function dispatchPendingNotification(trx, key) {
   const job = await trx(TABLE).where(key).whereNotNull('pending_payload')
     .forUpdate().skipLocked().first();
@@ -34,21 +43,19 @@ async function dispatchPendingNotification(trx, key) {
   const piId = job.payment_intent_id;
   const ledgerRow = await trx('payments').where({ stripe_payment_intent_id: piId }).first() || {};
   let settled = SETTLED_STATUSES.includes(ledgerRow.status);
+  let invoice = {};
+  let alertInvoiceId = null;
+  if (!settled) {
+    invoice = await trx('invoices').where({ stripe_payment_intent_id: piId }).first() || {};
+    alertInvoiceId = await resolveAlertInvoiceId(trx, invoice, ledgerRow);
+    // The customer may have paid the whole allocation through a NEW
+    // PaymentIntent before this job ran (the closer found no bell then): the
+    // alert would be stale on arrival, so it is suppressed like a settled PI.
+    settled = await isFailedAllocationSettled(trx, { paymentIntentId: piId, invoiceId: alertInvoiceId });
+  }
   if (!settled) {
     const payload = job.pending_payload;
     const deliveredSubscriptionIds = payload.deliveredSubscriptionIds || [];
-    const invoice = await trx('invoices').where({ stripe_payment_intent_id: piId }).first() || {};
-    // The failed attempt's ledger row names its invoice when the invoice is
-    // not bound to this PaymentIntent (a retry on a new card rebinds it), so
-    // the alert still carries invoiceId and a later payment can close it.
-    let alertInvoiceId = invoice.id || null;
-    if (!alertInvoiceId) {
-      const ledgerMeta = parseJson(ledgerRow.metadata);
-      const ledgerInvoiceId = ledgerMeta.invoice_id ? String(ledgerMeta.invoice_id) : null;
-      const ledgerInvoice = ledgerInvoiceId
-        ? await trx('invoices').where({ id: ledgerInvoiceId }).first('id') : null;
-      alertInvoiceId = ledgerInvoice?.id || null;
-    }
     const customerId = [invoice.customer_id, ledgerRow.customer_id, payload.customerId].find(Boolean) || null;
     const customer = (customerId ? await trx('customers').where({ id: customerId }).first() : null) || {};
     const customerName = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim()
@@ -59,7 +66,8 @@ async function dispatchPendingNotification(trx, key) {
         // READ COMMITTED sees success/refund/dispute committed during fan-out.
         const settledRow = await trx('payments').where({ stripe_payment_intent_id: piId })
           .whereIn('status', SETTLED_STATUSES).first('id');
-        settled = settled || Boolean(settledRow);
+        settled = settled || Boolean(settledRow)
+          || await isFailedAllocationSettled(trx, { paymentIntentId: piId, invoiceId: alertInvoiceId });
         return !settled && !recheckError;
       } catch (error) {
         // The trigger's beforePush error fallback is fail-open; return false

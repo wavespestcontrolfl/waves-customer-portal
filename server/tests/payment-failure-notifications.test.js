@@ -13,6 +13,8 @@ let ledger;
 let invoice;
 let customer;
 let readPayment;
+let ledgerRows;
+let paidInvoices;
 let inserted;
 let locked;
 let lockRequests;
@@ -30,6 +32,7 @@ function query(table, session = null) {
   let settledOnly = false;
   let locking = false;
   let batchLimit = Infinity;
+  let idList = [];
   let insertRow;
   let ignoringConflict = false;
   const matches = (row) => Object.entries(filters).every(([key, value]) => row[key] === value)
@@ -37,7 +40,7 @@ function query(table, session = null) {
   const chain = {
     where: (value) => { filters = { ...filters, ...value }; return chain; },
     whereNotNull: () => { pendingOnly = true; return chain; },
-    whereIn: () => { settledOnly = true; return chain; },
+    whereIn: (column, values) => { settledOnly = true; if (column === 'id') idList = values; return chain; },
     orderBy: () => chain,
     limit: (value) => { batchLimit = value; return chain; },
     forUpdate: () => { locking = true; return chain; },
@@ -59,8 +62,10 @@ function query(table, session = null) {
       if (table === 'customers') return customer;
       throw new Error(`Unexpected table ${table}`);
     },
-    select: async () => rows.filter(matches).sort((a, b) => a.notified_at - b.notified_at)
-      .slice(0, batchLimit).map(({ payment_intent_id, outcome, attempt_id }) => ({ payment_intent_id, outcome, attempt_id })),
+    select: async () => (table === 'payments' ? (ledgerRows ?? (ledger ? [ledger] : []))
+      : table === 'invoices' ? idList.filter((id) => paidInvoices.has(id)).map((id) => ({ id }))
+        : rows.filter(matches).sort((a, b) => a.notified_at - b.notified_at)
+      .slice(0, batchLimit).map(({ payment_intent_id, outcome, attempt_id }) => ({ payment_intent_id, outcome, attempt_id }))),
     update: async (patch) => {
       const updates = rows.filter(matches).map((row) => ({ row, patch }));
       if (session) session.updates.push(...updates);
@@ -85,6 +90,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   rows = [];
   ledger = null;
+  ledgerRows = undefined;
+  paidInvoices = new Set();
   invoice = { id: 'inv_failure', customer_id: 'cust_invoice' };
   customer = { first_name: 'Synthetic', last_name: 'Customer' };
   inserted = [];
@@ -187,21 +194,76 @@ test('metadata customer fallback reaches the existing test-account suppression g
   expect(rows[0].pending_payload).toBeNull();
 });
 
+const INV_A = '11111111-1111-4111-8111-111111111111';
+const INV_B = '22222222-2222-4222-8222-222222222222';
+const ledgerFor = (invoiceId) => ({ id: `pmt_${invoiceId}`, status: 'failed', customer_id: 'cust_ledger',
+  metadata: JSON.stringify({ invoice_id: invoiceId }) });
+
 test('the alert carries the invoice named by the failed ledger row when the PI is not bound to it', async () => {
   rows = [job()];
-  ledger = { id: 'pmt_failed', status: 'failed', customer_id: 'cust_ledger',
-    metadata: JSON.stringify({ invoice_id: 'inv_retried' }) };
-  invoice = (filters) => (filters.id === 'inv_retried' ? { id: 'inv_retried', customer_id: 'cust_ledger' } : undefined);
+  ledger = ledgerFor(INV_A);
+  invoice = (filters) => (filters.id === INV_A ? { id: INV_A, customer_id: 'cust_ledger' } : undefined);
   await processPendingPaymentFailureNotifications();
-  expect(triggerNotification.mock.calls[0][1]).toMatchObject({ invoiceId: 'inv_retried', customerId: 'cust_ledger', paymentIntentId: 'pi_failure' });
+  expect(triggerNotification.mock.calls[0][1]).toMatchObject({ invoiceId: INV_A, customerId: 'cust_ledger', paymentIntentId: 'pi_failure' });
 });
 
 test('the ledger invoice fallback accepts object metadata and stays null without an invoice row', async () => {
   rows = [job()];
-  ledger = { id: 'pmt_failed', status: 'failed', metadata: { invoice_id: 'inv_gone' } };
+  ledger = { id: 'pmt_failed', status: 'failed', metadata: { invoice_id: INV_B } };
   invoice = () => undefined;
   await processPendingPaymentFailureNotifications();
   expect(triggerNotification.mock.calls[0][1]).toMatchObject({ invoiceId: null });
+});
+
+test('a non-UUID ledger invoice id never reaches a uuid comparison: no throw, alert delivered, invoiceId null', async () => {
+  rows = [job()];
+  ledger = ledgerFor('legacy-123');
+  invoice = (filters) => {
+    if ('id' in filters) throw new Error('invalid input syntax for type uuid');
+    return undefined;
+  };
+  expect(await processPendingPaymentFailureNotifications()).toEqual({ processed: 1, failed: 0, skipped: 0 });
+  expect(triggerNotification.mock.calls[0][1]).toMatchObject({ invoiceId: null, paymentIntentId: 'pi_failure' });
+  expect(rows[0].pending_payload).toBeNull();
+});
+
+test('paying the whole allocation through a new PaymentIntent before dispatch suppresses the alert', async () => {
+  rows = [job()];
+  ledger = ledgerFor(INV_A);
+  invoice = (filters) => (filters.id === INV_A ? { id: INV_A, customer_id: 'cust_ledger' } : undefined);
+  paidInvoices = new Set([INV_A]);
+  expect(await processPendingPaymentFailureNotifications()).toEqual({ processed: 1, failed: 0, skipped: 0 });
+  expect(triggerNotification).not.toHaveBeenCalled();
+  expect(rows[0].pending_payload).toBeNull();
+});
+
+test('a combined allocation is suppressed only when every invoice in it is paid', async () => {
+  ledgerRows = [ledgerFor(INV_A), ledgerFor(INV_B)];
+  ledger = ledgerRows[0];
+  invoice = (filters) => (filters.id === INV_A ? { id: INV_A, customer_id: 'cust_ledger' } : undefined);
+  paidInvoices = new Set([INV_A]);
+  rows = [job()];
+  await processPendingPaymentFailureNotifications();
+  expect(triggerNotification).toHaveBeenCalledTimes(1);
+  paidInvoices = new Set([INV_A, INV_B]);
+  triggerNotification.mockClear();
+  rows = [job()];
+  await processPendingPaymentFailureNotifications();
+  expect(triggerNotification).not.toHaveBeenCalled();
+});
+
+test('the allocation settling during fan-out stops the bell and the push', async () => {
+  rows = [job()];
+  ledger = ledgerFor(INV_A);
+  invoice = (filters) => (filters.id === INV_A ? { id: INV_A, customer_id: 'cust_ledger' } : undefined);
+  triggerNotification.mockImplementation(async (_key, _payload, { shouldContinue, beforePush }) => {
+    expect(await shouldContinue()).toBe(true);
+    paidInvoices = new Set([INV_A]);
+    expect(await beforePush()).toBe(false);
+    return { suppressed: true };
+  });
+  expect((await processPendingPaymentFailureNotifications()).processed).toBe(1);
+  expect(rows[0].pending_payload).toBeNull();
 });
 
 test('undelivered jobs survive and retry with the same bell dedupe key', async () => {
