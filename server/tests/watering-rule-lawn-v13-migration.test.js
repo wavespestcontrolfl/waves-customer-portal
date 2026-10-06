@@ -30,7 +30,8 @@ describe('the v13 watering rules', () => {
     for (const track of Object.values(JSON.parse(fs.readFileSync(recipe, 'utf8')))) {
       for (const visit of track.visits || []) {
         // A visit's own lines and every plan-length variant of it (cadenceVariants["9"] ...).
-        for (const source of [visit, ...Object.values(visit.cadenceVariants || {})]) {
+        // ... and every add-on step (addOns.bermudaRemoval, PR #6035).
+        for (const source of [visit, ...Object.values(visit.cadenceVariants || {}), ...Object.values(visit.addOns || {})]) {
           for (const field of ['primary', 'secondary']) {
             for (const line of String(source[field] || '').split('\n')) {
               const name = line.split(' — ')[0].trim();
@@ -45,7 +46,8 @@ describe('the v13 watering rules', () => {
     // Blindside (the v13 fallback weed spot) has its own migration.
     const blindside = require('../models/migrations/20261006090000_watering_rule_blindside');
     const dimensionGranular = require('../models/migrations/20261006120000_watering_rule_dimension_18_0_10');
-    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME]);
+    const bermuda = require('../models/migrations/20261006200000_watering_rule_bermuda_removal');
+    const covered = new Set([...ALL.map((item) => item.name), ...storedOnMain, ...migration.FAIL_CLOSED.map((item) => item.name), blindside.NAME, dimensionGranular.NAME, ...bermuda.ITEMS.map((item) => item.name)]);
     expect([...names].filter((name) => !covered.has(name))).toEqual([]);
   });
 
@@ -96,6 +98,16 @@ describe('the v13 watering rules', () => {
     const checked = validateRule(blindside.RULE);
     expect(checked.errors).toEqual([]);
     expect(checked.rule).toMatchObject({ mode: 'hold', hold_hours: 24, source: 'label' });
+  });
+
+  test('bermuda removal (Recognition + Fusilade II) is a 3-hour hold with no water-in', () => {
+    const bermuda = require('../models/migrations/20261006200000_watering_rule_bermuda_removal');
+    expect(bermuda.ITEMS.map((item) => item.name)).toEqual(['Recognition Post Emergent Herbicide', 'Fusilade II Post Emergent Liquid Herbicide']);
+    for (const item of bermuda.ITEMS) {
+      const checked = validateRule(item.rule);
+      expect(checked.errors).toEqual([]);
+      expect(checked.rule).toMatchObject({ mode: 'hold', hold_hours: 3, source: 'owner' });
+    }
   });
 
   test('no 48-hour runoff advisory is turned into a hold', () => {
