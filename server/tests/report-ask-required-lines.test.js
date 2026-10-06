@@ -1546,3 +1546,15 @@ describe('answer screen, Codex round 37', () => {
     expect(screenAskAnswer('The report does not say whether this is root rot.', { question, data, facts })).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 38', () => {
+  test.each(['jane at example dot dev', 'jane(at)example(dot)app', 'jane at example dot ca', 'jane.doe@example.ca'])('a spoken email with any ending is masked: %s', (email) => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: `Email ${email} about the ants` } });
+    expect(facts.customer_concern).toBe('Email [email] about the ants');
+  });
+
+  test('prose with "at" and a spaced period is not masked', () => {
+    const facts = buildReportAskFacts({ data: { serviceLine: 'pest', applications: [], customerConcern: 'We were at home. Then ants came' } });
+    expect(facts.customer_concern).toBe('We were at home. Then ants came');
+  });
+});

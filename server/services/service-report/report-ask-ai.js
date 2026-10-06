@@ -388,7 +388,12 @@ function maskSpokenPhones(text) {
 // An email in spoken or obfuscated form: "jane dot doe at gmail dot com",
 // "jane(at)gmail(dot)com" (Codex P1 #5964 r31).
 const SEP_DOT = '\\s*(?:[\\(\\[]\\s*)?(?:dot|\\.)(?:\\s*[\\)\\]])?\\s*';
-const SPOKEN_EMAIL = new RegExp(`\\b[a-z0-9._%+-]+(?:${SEP_DOT}[a-z0-9_-]+)*\\s*(?:[\\(\\[]\\s*)?(?:at|@)(?:\\s*[\\)\\]])?\\s*[a-z0-9-]+(?:${SEP_DOT}[a-z0-9-]+)*${SEP_DOT}(?:com|net|org|edu|gov|io|us|co|info|biz|me)\\b`, 'gi');
+const SPOKEN_DOT = '\\s*(?:[\\(\\[]\\s*)?dot(?:\\s*[\\)\\]])?\\s*';
+const SPOKEN_EMAIL = new RegExp(`\\b[a-z0-9._%+-]+(?:${SEP_DOT}[a-z0-9_-]+)*\\s*(?:[\\(\\[]\\s*)?(?:at|@)(?:\\s*[\\)\\]])?\\s*[a-z0-9-]+(?:${SEP_DOT}[a-z0-9-]+)*${SEP_DOT}(?:com|net|org|edu|gov|io|us|co|info|biz|me)\\b`
+  // Any ending after a spoken or tight dot: "jane at example dot dev",
+  // "jane(at)example(dot)app" (Codex P1 #5964 r38). A spaced "." stays on the
+  // list above, so prose ("at home. Then") is never masked.
+  + `|\\b[a-z0-9._%+-]+(?:${SEP_DOT}[a-z0-9_-]+)*\\s*(?:[\\(\\[]\\s*)?(?:at|@)(?:\\s*[\\)\\]])?\\s*[a-z0-9-]+(?:${SEP_DOT}[a-z0-9-]+)*(?:${SPOKEN_DOT}|\\.)[a-z]{2,24}\\b`, 'gi');
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
