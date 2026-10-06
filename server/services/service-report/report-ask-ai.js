@@ -216,7 +216,7 @@ const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'unr
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }
@@ -307,7 +307,7 @@ const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suf
 const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:[-/]\\d{1,6}[a-z]?)?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
 // A numbered route has no suffix word: "12 SR 70", "12 FL-70", "12 US 41",
 // "12 State Road 64" (Codex P1 #6016 r15).
-const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?=\s+(?:fl|sr|us|cr|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
+const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?:[-/]\d{1,6}[a-z]?)?(?:\s+\d\/\d)?(?=\s+(?:fl|sr|us|cr|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
@@ -534,7 +534,13 @@ const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th
 const ORDINAL_WORDS = '(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|twenty[\\s-](?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|thirtieth|thirty[\\s-]first)';
 // A spelled ordinal is a date only with time context ("on the fifth", "the
 // fifth of January"); "the first application" is report content.
-const RELATIVE_DATE = new RegExp(`\\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|(?:this|next|the)\\s+weekend|(?:in|on|by|until|since|this|next|early|late|mid)[\\s-]+may|may\\s+\\d|the\\s+\\d{1,2}(?:st|nd|rd|th)|next\\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:on|by|until|before|after)\\s+the\\s+${ORDINAL_WORDS}|the\\s+${ORDINAL_WORDS}\\s+of\\s+(?:the\\s+)?(?:month|${MONTHS}))\\b`, 'i');
+const RELATIVE_DATE = new RegExp(`\\b(?:january|february|march|april|june|july|august|september|october|november|december|tomorrow|tonight|yesterday|(?:this|next|the)\\s+weekend|the\\s+\\d{1,2}(?:st|nd|rd|th)|next\\s+(?:week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|(?:on|by|until|before|after)\\s+the\\s+${ORDINAL_WORDS}|the\\s+${ORDINAL_WORDS}\\s+of\\s+(?:the\\s+)?(?:month|${MONTHS}))\\b`, 'i');
+// A bare hour after a time word: "at 2", "around five", "by 3" (Codex P1
+// #6016 r17); "at 2 spots", "after 2 hours" are counts and waits.
+const BARE_HOUR = /\b(?:at|around|about|by|after|before|until)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b(?![.,]?\d|\s*(?:%|inch|in\b|out\s+of|points?|days?|weeks?|months?|hours?|hrs?|minutes?|mins?|products?|areas?|spots?|stations?|times?|feet|ft|yards?|of|or|to|and|-))/i;
+// The month May, capitalized and with a date word ("in May", "May 5"); a
+// lowercase "may" or "This may take" is the verb (Codex P2 #6016 r17).
+const MONTH_MAY = /\b(?:in|on|by|until|since|next|early|late|mid)[\s-]+May\b|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 // The output screen, in order: the first check that fails names the rejection.
@@ -552,7 +558,7 @@ const ASK_CHECKS = [
   ['banned_copy', (text) => require('./activity-indicators').findBannedCustomerCopy(text).length > 0],
   ['compliance', (text) => require('../social-media').complianceLanguageIssues(text, { impliedTreatmentContext: true }).length > 0],
   ['target_list', leaksTargetList],
-  ['states_a_date', (text) => DATE_TOKEN.test(text) || WEEKDAY_ABBR.test(text) || RELATIVE_DATE.test(text)],
+  ['states_a_date', (text) => [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, MONTH_MAY].some((re) => re.test(text))],
 ];
 
 /**
@@ -597,6 +603,8 @@ const MEDICAL_CUES = [
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
+  // Contact verbs: "splashed my eyes", "touched my skin", "dripped on her face" (Codex P1 #5964 r13).
+  /\b(?:splash\w*|touch\w*|dripp?\w*|spill\w*|landed|blew|drift\w*|soaked|hit)\s+(?:on\s+|in\s+|into\s+|onto\s+)?(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+(?:eyes?|skin|face|mouth|nose|lips?)\b(?!\s+of\b)/i,
   // Body part first: "my eyes were sprayed", "the dog's skin got sprayed" (Codex P1 #6016 r14).
   /\b(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+(?:eyes?|skin|face|mouth|nose)\s+(?:was|were|got|get|gets|is|are|been|has\s+been|have\s+been)\s+(?:\w+\s+)?sprayed\b/i,
   // "On my skin", "in the baby's eyes", "on the cat's skin" (Codex P1 #5964 r10).

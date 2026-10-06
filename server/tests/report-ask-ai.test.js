@@ -452,6 +452,12 @@ describe('screenAskAnswer', () => {
     expect(screen('Your visit is next weekend.')).toBe('states_a_date');
     expect(screen('We treated the outside today.')).toBeNull();
     expect(screen('The ants may move after the treatment.')).toBeNull();
+    expect(screen('We will be there at 2.')).toBe('states_a_date');
+    expect(screen('Your visit is at five.')).toBe('states_a_date');
+    expect(screen('We will arrive around 2.')).toBe('states_a_date');
+    expect(screen('This may take a few days.')).toBeNull();
+    expect(screen('This may help with the ants.')).toBeNull();
+    expect(screen('Activity often settles after 2 weeks.')).toBeNull();
     expect(screen('The technician arrives on the fifth.')).toBe('states_a_date');
     expect(screen('The technician arrives the fifth of January.')).toBe('states_a_date');
     expect(screen('The first application went around the exterior.')).toBeNull();
@@ -599,11 +605,11 @@ describe('schedule questions keep the rule answer', () => {
     'When are you returning?', 'When will the technician return?', 'When are you coming again?',
     'Can I reschedule?', 'When is my next appointment?',
     'What time will you be here?', 'What day are you coming?',
-    'Will the technician visit tomorrow?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
+    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
-  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'What was applied at my last appointment?', "Which product did you use at today's appointment?", 'Where are the ants coming from?', 'How do roaches arrive in the house?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'The service was completed as scheduled. What was applied?', 'What was applied during the scheduled service?', 'What was applied at my last appointment?', "Which product did you use at today's appointment?", 'Where are the ants coming from?', 'How do roaches arrive in the house?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(false);
   });
 });
@@ -630,6 +636,8 @@ describe('symptoms and exposure never reach the model', () => {
     'The technician sprayed me in the face',
     'The technician sprayed my eyes',
     'You sprayed my skin',
+    'The pesticide splashed my eyes',
+    'The product touched my skin',
     'My eyes were sprayed',
     'My skin was sprayed',
     "The dog's eyes were sprayed",
@@ -1033,6 +1041,9 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at 12 SR 70.', 'Ants at [number] SR 70.'],
     ['Ants at 12 FL-70.', 'Ants at [number] FL-70.'],
     ['Ants at 12 US 41.', 'Ants at [number] US 41.'],
+    ['Ants at 12-14 US 41.', 'Ants at [number] US 41.'],
+    ['Ants at 12/14 SR 70.', 'Ants at [number] SR 70.'],
+    ['Ants at 12 1/2 FL-70.', 'Ants at [number] FL-70.'],
     ['Ants at 12 José Lane.', 'Ants at [number] José Lane.'],
     ['Ants at 12 O’Neil Street.', 'Ants at [number] O’Neil Street.'],
     ['Ants at 18 North Martin Luther King Boulevard.', 'Ants at [number] North Martin Luther King Boulevard.'],
