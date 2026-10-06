@@ -1339,3 +1339,27 @@ describe('answer screen, Codex round 28', () => {
     expect(medicalExposureAnswer(question)).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 29', () => {
+  test.each(['Pets can go out once the treatment settles.', 'Pets can return after it absorbs.'])('a different condition beside the dry line is rejected: %s', (sentence) => {
+    const line = 'Keep pets off treated zones until fully dry.';
+    const data = pestData();
+    const facts = buildReportAskFacts({ data, requiredLines: [line] });
+    expect(screenAskAnswer(`${line} ${sentence}`, { question: 'q', data, facts, requiredLines: [line] })).toBe('second_instruction');
+  });
+
+  test.each(['Alpine WSG contains dinotefuran and arsenic.', 'Its active ingredients are dinotefuran and acetamiprid.'])('every listed ingredient is checked: %s', (answer) => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG', active_ingredient: 'Dinotefuran 40%' }, applicationArea: 'Outside', method: 'spray' }] });
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ question: 'q', data }) })).toBe('ingredient_claim');
+  });
+
+  test('a phone number in words is masked', () => {
+    const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Call me at nine four one five five five one two three four.' }) });
+    expect(facts.customer_concern).toBe('Call me at [phone].');
+  });
+
+  test.each(['The treatment poses no risk to pets.', 'It will not harm your children.', 'It is gentle around pets.'])('a no-harm assurance is rejected: %s', (answer) => {
+    const data = pestData();
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('safety claim');
+  });
+});
