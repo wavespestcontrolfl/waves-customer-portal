@@ -124,13 +124,20 @@ function estimateBody(input, context) {
 }
 
 // "Sent" = the quote is with the customer: status sent or viewed, or a send or
-// view stamp on a row that is not closed (accepted, declined, expired and
-// sending keep the estimate editor's own, more specific refusal).
-const CLOSED_ESTIMATE_STATUSES = ['accepted', 'declined', 'expired', 'sending'];
+// view stamp on a row that is not closed (accepted, declined and sending keep
+// the estimate editor's own, more specific refusal). An EXPIRED quote that
+// carries a send or view stamp is still a quote the customer has, so it is
+// honored too: the editor deliberately lets an expired legacy/fallback-priced
+// row through when expiredRowRecoverableUnderGate holds, and that recovery
+// must not revise a delivered quote in place from the bar (Codex r3 on
+// #6023, P2). An expired row with no stamp keeps the editor's refusal.
+const CLOSED_ESTIMATE_STATUSES = ['accepted', 'declined', 'sending'];
 function estimateWasSentToCustomer(estimate) {
   const status = String(estimate?.status || '');
   if (CLOSED_ESTIMATE_STATUSES.includes(status)) return false;
-  return status === 'sent' || status === 'viewed' || !!(estimate?.sent_at || estimate?.viewed_at);
+  const stamped = !!(estimate?.sent_at || estimate?.viewed_at);
+  if (status === 'expired') return stamped;
+  return status === 'sent' || status === 'viewed' || stamped;
 }
 
 async function estimatePreview(input, database = db, context = null) {

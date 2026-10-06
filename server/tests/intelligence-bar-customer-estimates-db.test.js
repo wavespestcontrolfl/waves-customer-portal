@@ -320,6 +320,9 @@ suite('existing-customer estimates from another workspace', () => {
   test.each([
     ['sent', { status: 'sent', sent_at: new Date() }],
     ['viewed', { status: 'viewed', sent_at: new Date(), viewed_at: new Date() }],
+    // An expired quote the customer received stays honored even where the
+    // editor's expired-row recovery would allow a revision (Codex r3 on #6023).
+    ['expired-but-delivered', { status: 'expired', sent_at: new Date(Date.now() - 40 * 86400000), expires_at: new Date(Date.now() - 86400000) }],
   ])('a %s quote is honored: the revision is refused at proposal with estimate_already_sent, no card, no write (W8-dev-07)', async (_label, stamp) => {
     const fixture = await customerFixture();
     const created = await confirm(await propose(fixture));
