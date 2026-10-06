@@ -327,6 +327,30 @@ test('confirmed zip change re-asserts the unchanged street and city too (a one-l
   expect(Object.keys(leads.update.mock.calls[0][0]).sort()).toEqual(['updated_at', 'zip']);
 });
 
+test('a stored "street zip" line with a ZIP+4 column is one line: zip edits are refused', async () => {
+  db.mockImplementation(() => chain({ first: { ...LEAD, address: '21 Oak Ave 34200', city: 'Testville', zip: '34200-1234' } }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', zip: '34201' });
+  expect(res.error).toMatch(/stored as one line/);
+});
+
+test('a stored street with a spelled-out post-directional is a bare street: city edits go through', async () => {
+  db.mockImplementation(() => chain({ first: { ...LEAD, address: '123 Main St North', city: 'Testville', zip: '34200' } }));
+  const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', city: 'Bradenton' });
+  expect(res.changes).toEqual({ city: { from: 'Testville', to: 'Bradenton' } });
+});
+
+test('the guard matches a whitespace-only unchanged column exactly, not as NULL', async () => {
+  const leads = chain({ first: { ...ADDR_LEAD, city: '   ' }, update: [{ id: 'lead-1' }] });
+  const activities = chain({ insert: undefined });
+  db.mockImplementation((table) => (table === 'leads' ? leads : activities));
+  const res = await executeLeadsTool('update_lead_contact', {
+    lead_id: 'lead-1', zip: '34201', confirmed: true,
+    _approved_changes: { zip: { from: '34200', to: '34201' } },
+  });
+  expect(res.success).toBe(true);
+  expect(leads.where).toHaveBeenCalledWith('city', '   ');
+});
+
 test('confirmed phone change does not touch the address columns in the guard', async () => {
   const leads = chain({ first: ADDR_LEAD, update: [{ id: 'lead-1' }] });
   const activities = chain({ insert: undefined });
@@ -402,7 +426,7 @@ test('a lead whose address is stored as one line refuses every address, city or 
 test('bare row: a plain street is written as typed, never parsed', async () => {
   const leads = chain({ first: ADDR_LEAD });
   db.mockReturnValue(leads);
-  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B', '123 Main St N', '12 Oak Avenue']) {
+  for (const address of ['21 Oak Ave, Unit 4', '21 Oak Ave Unit 4', '1200 Main St 2B', '123 Main St N', '123 Main St North', '12 Oak Avenue']) {
     const res = await executeLeadsTool('update_lead_contact', { lead_id: 'lead-1', address });
     expect(res.changes).toEqual({ address: { from: '21 Synthetic Oak Ave', to: address } });
   }

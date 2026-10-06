@@ -744,7 +744,10 @@ const LOCALITY_REFUSAL = 'Give the street alone; put the city and ZIP in their o
 // A city the parse can be trusted on: at least one letter, not a unit or
 // floor designator ("Fl", "Unit", "Apt B"), not a unit value like "2B", and
 // not a post-directional ("123 Main St N" parses to city "N").
-const DIRECTIONAL_TOKENS = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw']);
+const DIRECTIONAL_TOKENS = new Set([
+  'n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw',
+  'north', 'south', 'east', 'west', 'northeast', 'northwest', 'southeast', 'southwest',
+]);
 function cityIsReal(city) {
   const text = String(city || '').trim();
   // At least two letters: a lone letter is a floor ("Fl B") or a directional.
@@ -756,16 +759,21 @@ function cityIsReal(city) {
 
 // Does the stored line carry more than a street? A parsed state or a real
 // city says so, whether or not it matches the city column. A parsed ZIP counts
-// only when it equals the lead's zip column (the parser reads any trailing
+// only when it equals the lead's zip column, ZIP+4 included (the parser reads any trailing
 // five digits as a ZIP, so "21 Oak Ave Apt 34236" with another zip column is
 // a bare street with a unit number). A comma segment equal to the city column
 // counts as well.
+// "34200" in the line matches a zip column of "34200" or "34200-1234".
+function zipMatchesColumn(parsed, column) {
+  const col = String(column || '').trim();
+  return parsed === col || col.startsWith(`${parsed}-`);
+}
 function storedIsOneLine(lead) {
   const stored = String(lead.address || '').trim();
   if (!stored) return false;
   const parts = parseRawAddress(stored);
   if (parts.state || cityIsReal(parts.city)) return true;
-  if (parts.zip && parts.zip === String(lead.zip || '').trim()) return true;
+  if (parts.zip && zipMatchesColumn(parts.zip, lead.zip)) return true;
   const city = String(lead.city || '').trim().toLowerCase();
   return Boolean(city) && stored.split(',').slice(1).some(seg => seg.trim().toLowerCase() === city);
 }
@@ -909,9 +917,11 @@ async function updateLeadContact(input) {
     if (ADDRESS_FIELDS.some(f => f in changes)) {
       for (const field of ADDRESS_FIELDS) {
         if (field in changes) continue;
-        const seen = (lead[field] ?? '').toString().trim();
-        if (seen === '') q = q.where(function () { this.whereNull(field).orWhere(field, ''); });
-        else q = q.where(field, lead[field]);
+        const seen = lead[field];
+        // The exact stored value, with NULL and '' read as the same blank;
+        // a whitespace-only legacy value matches itself.
+        if (seen === null || seen === undefined || seen === '') q = q.where(function () { this.whereNull(field).orWhere(field, ''); });
+        else q = q.where(field, seen);
       }
     }
     const rows = await q.update(updates, ['id']);
