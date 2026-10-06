@@ -22,7 +22,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const featureGates = require('../config/feature-gates');
-const { BERMUDA_REMOVAL_TRACKS, cultivarState } = require('../services/lawn-bermuda-removal');
+const { BERMUDA_REMOVAL_TRACKS, cultivarState, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
 const { technicianServicesCustomer } = require('../services/technician-visit-scope');
 const logger = require('../services/logger');
 const { COUNTY_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
@@ -307,10 +307,15 @@ router.put('/:customerId/turf-profile/bermuda-removal', adminOnly, async (req, r
         return res.status(400).json({ error: 'This St. Augustine cultivar (ProVista, Captiva or Seville) never gets bermuda removal' });
       }
     }
-    // Turning it on re-checks the active profile and the eligible grass inside the
+    // Turning it on re-checks the active profile, the eligible grass and the cultivar inside the
     // UPDATE itself, so a profile edit that lands between the read and the write wins.
     const query = db('customer_turf_profiles').where({ customer_id: customerId });
-    if (enabled) query.where({ active: true }).whereIn('grass_type', BERMUDA_REMOVAL_TRACKS);
+    if (enabled) {
+      // The excluded-cultivar rule rides the UPDATE too, so a cultivar changed to an excluded
+      // one after the read above makes the update hit no row (409), never a switched-on lawn.
+      const cultivarRule = excludedCultivarSql();
+      query.where({ active: true }).whereIn('grass_type', BERMUDA_REMOVAL_TRACKS).whereRaw(cultivarRule.sql, cultivarRule.bindings);
+    }
     const [saved] = await query
       .update({
         bermuda_removal: enabled,

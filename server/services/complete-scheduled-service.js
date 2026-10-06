@@ -4536,14 +4536,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // validations around it: a committed completion's retry or resume is judged by
       // the account as it was then, never by today's flag. Any other visit, and gate
       // off: no refusal.
-      const bermudaPairMessage = await require('./lawn-bermuda-removal').bermudaPairViolation(db, products, { serviceId: completionInput.serviceId });
+      let bermudaPairMessage;
+      let bermudaLimitMessage;
+      try {
+        // Strict reads: an error reading the account or its properties fails this attempt
+        // (marked failed, nothing committed), never reads as "not requested".
+        bermudaPairMessage = await require('./lawn-bermuda-removal').bermudaPairViolation(db, products, { serviceId: completionInput.serviceId });
+        if (!bermudaPairMessage) bermudaLimitMessage = await require('./lawn-bermuda-removal').bermudaLimitViolation(db, products, { serviceId: completionInput.serviceId });
+      } catch (err) {
+        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+        throw err;
+      }
       if (bermudaPairMessage) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_pair_required'), db);
         return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
       }
       // The step's own limits (a 3rd spray this calendar year, or fewer than 42 days after
       // the last one at that property), judged the way the plan judges them.
-      const bermudaLimitMessage = await require('./lawn-bermuda-removal').bermudaLimitViolation(db, products, { serviceId: completionInput.serviceId });
       if (bermudaLimitMessage) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_limit_reached'), db);
         return { status: 400, body: { error: bermudaLimitMessage, code: 'lawn_bermuda_limit_reached' } };

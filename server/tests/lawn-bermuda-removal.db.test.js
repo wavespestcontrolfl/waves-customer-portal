@@ -13,7 +13,7 @@ const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const rowsMigration = require('../models/migrations/20261006190100_lawn_bermuda_removal_rows');
 const programMigration = require('../models/migrations/20261006190300_lawn_bermuda_removal_limit_program');
 const auditMigration = require('../models/migrations/20261006190200_lawn_bermuda_removal_audit');
-const { bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction } = require('../services/lawn-bermuda-removal');
+const { bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, accountWantsBermudaRemoval, excludedCultivarSql } = require('../services/lawn-bermuda-removal');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
@@ -247,6 +247,22 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       const noStep = await plan((await lawn({ date: '2026-06-16' })).visit);
       expect(capped.mixingOrder).toEqual(noStep.mixingOrder);
       expect(clean.mixingOrder.length).toBeGreaterThanOrEqual(capped.mixingOrder.length);
+    });
+
+    test('a propertyless visit is judged for the sole active property: an old inactive property\'s sprays do not consume the quota (plan and sheet probe)', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      const [old] = await knex('customer_properties').insert({ customer_id: f.customerId, address_line1: '9 Old Street', city: 'Fixture City', zip: '34201', is_primary: false, active: false }).returning('*');
+      for (const date of ['2026-03-01', '2026-04-20']) {
+        const [visit] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: old.id, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+        const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+        await knex('property_application_history').insert({ customer_id: f.customerId, product_id: rec.id, application_date: date, service_record_id: record.id });
+      }
+      const [propertyless] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: null, scheduled_date: '2026-06-20', service_type: 'Lawn fixture' }).returning('*');
+      const result = await plan(propertyless, { selectedConditionalProductIds: [rec.id] });
+      expect(codes(result)).not.toContain('lawn_v13_annual_limit');
+      expect(result.propertyGate.warnings.map((w) => w.code)).not.toContain('lawn_bermuda_step_unavailable');
+      expect(names(result.mixCalculator.items)).toEqual(expect.arrayContaining([REC, FUS]));
     });
 
     test('the April base visit stays computable beside an unavailable optional step', async () => {
@@ -542,6 +558,76 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
       setGates({ v13: false });
       expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
+    });
+  });
+
+  describe('step products are identified by catalog id, and the completion checks read strictly', () => {
+    const submitted = (...items) => items.map((item) => ({ productId: item.id }));
+    const renamed = async (run) => {
+      await knex('products_catalog').where({ id: rec.id }).update({ name: 'Office renamed A' });
+      await knex('products_catalog').where({ id: fus.id }).update({ name: 'Office renamed B' });
+      try { await run(); } finally {
+        await knex('products_catalog').where({ id: rec.id }).update({ name: REC });
+        await knex('products_catalog').where({ id: fus.id }).update({ name: FUS });
+      }
+    };
+    const spray = async (f, date) => {
+      const [visit] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: f.property.id, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+      const [record] = await knex('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+      await knex('property_application_history').insert({ customer_id: f.customerId, product_id: rec.id, application_date: date, service_record_id: record.id });
+    };
+
+    test('both products renamed: the pair check, the preflight limit check and the in-transaction check still hold', async () => {
+      setGates();
+      await renamed(async () => {
+        const f = await lawn({ date: '2026-06-20', bermuda: true });
+        expect(await bermudaPairViolation(knex, submitted(rec), { serviceId: f.visit.id })).toMatch(/Recognition goes on with Fusilade II/);
+        expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: f.visit.id })).toMatch(/without Recognition/);
+        expect(await bermudaPairViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
+        await spray(f, '2026-03-01');
+        await spray(f, '2026-04-20');
+        expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toMatch(/LIMIT REACHED/);
+        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id })))
+          .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
+      });
+    });
+
+    test('the program\'s tagged rows missing: a step product on a step visit is refused with a clear message (fail closed); other visits are untouched', async () => {
+      setGates();
+      const saved = await knex('product_limits').where({ match_value: 'bermuda_removal' });
+      await knex('product_limits').where({ match_value: 'bermuda_removal' }).del();
+      try {
+        const f = await lawn({ date: '2026-06-20', bermuda: true });
+        expect(await bermudaPairViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toMatch(/limits are not loaded/);
+        expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toMatch(/limits are not loaded/);
+        const plain = await lawn({ date: '2026-06-20' });
+        expect(await bermudaPairViolation(knex, submitted(rec, fus), { serviceId: plain.visit.id })).toBeNull();
+        expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: plain.visit.id })).toBeNull();
+        expect(await bermudaPairViolation(knex, submitted(nis), { serviceId: f.visit.id })).toBeNull();
+      } finally {
+        await knex('product_limits').insert(saved.map(({ id, ...row }) => row));
+      }
+    });
+
+    test('the staff switch\'s SQL cultivar rule mirrors the policy: excluded names (any spelling) never match, everything else does', async () => {
+      const rule = excludedCultivarSql();
+      const eligible = async (grass, cultivar) => {
+        const f = await lawn({ grass, cultivar });
+        return Boolean(await knex('customer_turf_profiles').where({ customer_id: f.customerId }).whereRaw(rule.sql, rule.bindings).first('id'));
+      };
+      for (const cultivar of ['ProVista', 'Pro Vista', 'captiva', 'SEVILLE dwarf', 'Seville']) expect(await eligible('st_augustine', cultivar)).toBe(false);
+      for (const cultivar of ['Floratam', 'CitraBlue', 'Palmetto', null]) expect(await eligible('st_augustine', cultivar)).toBe(true);
+      expect(await eligible('zoysia', 'ProVista')).toBe(true); // no cultivar rule on Zoysia
+    });
+
+    test('strict mode: an error reading the account or its properties propagates; the plan-side reader stays fail-soft', async () => {
+      setGates();
+      const f = await lawn({ bermuda: true });
+      const profile = await knex('customer_turf_profiles').where({ customer_id: f.customerId }).first();
+      const failing = new Proxy(knex, { apply: (target, thisArg, args) => { if (args[0] === 'customer_properties') throw new Error('properties read failed'); return target(...args); } });
+      const args = { customerId: f.customerId, profile, trackKey: 'st_augustine', propertyId: f.property.id };
+      await expect(accountWantsBermudaRemoval(failing, { ...args, strict: true })).rejects.toThrow('properties read failed');
+      await expect(accountWantsBermudaRemoval(failing, args)).resolves.toEqual({ requested: false, source: null });
     });
   });
 

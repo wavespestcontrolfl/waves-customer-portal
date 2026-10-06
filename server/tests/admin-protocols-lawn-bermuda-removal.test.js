@@ -50,6 +50,8 @@ const freshAccount = () => ({
   properties: [{ id: 'prop-1', is_primary: true }],
   visitProperty: 'prop-1',
   visitDate: '2026-04-14',
+  // The program's tagged product_limits rows: Recognition holds the label-rate row, Fusilade II the others.
+  tagged: [{ product_id: 'rec', limit_type: 'annual_max_apps' }, { product_id: 'rec', limit_type: 'annual_max_rate' }, { product_id: 'fus', limit_type: 'annual_max_apps' }],
 });
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
@@ -95,6 +97,7 @@ beforeEach(() => {
     if (table === 'customer_turf_profiles') return readQuery(account.profile ? [account.profile] : []);
     if (table === 'estimates') return readQuery(account.estimates);
     if (table === 'customer_properties') return readQuery(account.properties);
+    if (table === 'product_limits') return readQuery(account.tagged);
     throw new Error(`Unexpected table: ${table}`);
   });
 });
@@ -319,6 +322,14 @@ describe('the account decides, on the server', () => {
     const plain = await lawnMix({ scheduledServiceId: SERVICE_ID });
     expect(capped.mixingOrder).toEqual(plain.mixingOrder);
     applicationLimits.checkLimits.mockImplementation(async () => ({ blocks: [], warnings: [] }));
+  });
+
+  test('the program\'s tagged limit rows missing: the step is unavailable (never judged on names), with the warning', async () => {
+    account.tagged = [];
+    const body = await lawnMix({ scheduledServiceId: SERVICE_ID });
+    expect(stepNames(body)).toEqual([]);
+    expect(body.warnings.map((w) => w.code)).toContain('lawn_bermuda_step_unavailable');
+    expect(body.blocks).toEqual([]);
   });
 
   test('a malformed visit id reads nothing and shows no step', async () => {

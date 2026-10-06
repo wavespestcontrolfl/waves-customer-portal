@@ -597,6 +597,19 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
     expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalled();
   });
 
+  test.each(['pair', 'limit'])('an error reading the account in the %s check fails the attempt (marked failed, nothing committed), never "not requested"', async (which) => {
+    const completionAttempt = { id: 'fixture-attempt' };
+    attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+    const boom = new Error('properties read failed');
+    const limit = jest.spyOn(removal, 'bermudaLimitViolation').mockResolvedValue(null);
+    pair.mockResolvedValue(null);
+    (which === 'pair' ? pair : limit).mockRejectedValue(boom);
+    try {
+      await expect(complete({ products: [] })).rejects.toBe(boom);
+      expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, boom, expect.anything());
+    } finally { limit.mockRestore(); }
+  });
+
   describe('the step limits (a 3rd spray this year, or fewer than 42 days after the last)', () => {
     let limit;
     beforeEach(() => {

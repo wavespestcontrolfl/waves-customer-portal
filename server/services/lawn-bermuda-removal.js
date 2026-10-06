@@ -51,6 +51,12 @@ function stepAddOn(trackKey, month) {
 // St. Augustine cultivar policy (estimate-service-details.js: "our policy, stricter
 // than the label").
 const EXCLUDED_CULTIVARS = ['provista', 'captiva', 'seville'];
+// The SQL twin of the excluded-cultivar test (same normalization: lower-case, letters and
+// digits only), for the staff switch's atomic UPDATE.
+const excludedCultivarSql = () => ({
+  sql: `(grass_type <> 'st_augustine' OR cultivar IS NULL OR (${EXCLUDED_CULTIVARS.map(() => "regexp_replace(lower(cultivar), '[^a-z0-9]+', '', 'g') NOT LIKE ?").join(' AND ')}))`,
+  bindings: EXCLUDED_CULTIVARS.map((name) => `%${name}%`),
+});
 const ELIGIBLE_CULTIVARS = ['floratam', 'palmetto', 'raleigh', 'sunclipse'];
 const TEST_PATCH_NOTE = 'Test patch first: spray a 3 x 3 ft patch and watch it for 3 to 4 weeks before the full spot. The cultivar is CitraBlue or not confirmed.';
 
@@ -163,14 +169,14 @@ async function accountWantsBermudaRemoval(knex, { customerId, profile, trackKey,
 // the plan uses (staff switch or accepted estimate), then the cultivar policy.
 // Returns { active, excluded, source, cultivar, addOn }. Gate off, another track or
 // month, or no visit reads as inactive with no read at all.
-async function stepForVisit(knex, visit, { trackKey, month }) {
+async function stepForVisit(knex, visit, { trackKey, month, strict = false }) {
   const off = { active: false, excluded: false, source: null, cultivar: null, addOn: null };
   if (!bermudaRemovalVisit({ trackKey, month }) || !visit?.customer_id) return off;
   // The month is the VISIT's, never the request's: a request month that is not the
   // visit's own month opens nothing.
   if (visitMonthOf(visit) !== month) return off;
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
-  const wants = await accountWantsBermudaRemoval(knex, { customerId: visit.customer_id, profile, trackKey, propertyId: visit.property_id });
+  const wants = await accountWantsBermudaRemoval(knex, { customerId: visit.customer_id, profile, trackKey, propertyId: visit.property_id, strict });
   if (!wants.requested) return off;
   const cultivar = cultivarState(trackKey, profile?.cultivar);
   if (cultivar === 'excluded') return { ...off, excluded: true, source: wants.source, cultivar };
@@ -190,38 +196,68 @@ const BERMUDA_GROUP = 'bermuda_removal';
 // completes normally. `products` is the submitted completion product list; `serviceId`
 // the visit. Returns the refusal message, or null. Gate off: always null.
 // The visit when it carries the step (the checks above), else null.
-async function stepVisitOf(knex, serviceId) {
+async function stepVisitOf(knex, serviceId, { strict = false } = {}) {
   if (featureGates.lawnV13Live?.() !== true || !UUID_RE.test(String(serviceId || ''))) return null;
   const visit = await knex('scheduled_services').where({ id: serviceId }).first('id', 'customer_id', 'property_id', 'scheduled_date');
   if (!visit?.customer_id || !visit.scheduled_date) return null;
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type');
-  const step = await stepForVisit(knex, visit, { trackKey: profileTrack(profile), month: visitMonthOf(visit) });
+  const step = await stepForVisit(knex, visit, { trackKey: profileTrack(profile), month: visitMonthOf(visit), strict });
   if (!step.active) return null;
   // The property the step was proven for (the visit's own, or a one-property customer's
   // sole property when the visit names none): the limits count it and the completion
   // lock keys on it, so a propertyless visit and an explicit-property visit of the same
   // lawn are one lock and one history.
-  const scope = await profilePropertyScope(knex, visit.customer_id, visit.property_id, false);
+  const scope = await profilePropertyScope(knex, visit.customer_id, visit.property_id, strict);
   return { ...visit, effective_property_id: scope.effective || null };
 }
 
-// The catalog rows a completion submitted, by step product: { recognition, fusilade }
-// (each a { id, name } or null).
+// The property a visit's step is judged for (see stepVisitOf), for the plan's and the tank
+// sheet's limit probe: the visit's own property, else a one-property customer's sole one.
+async function effectivePropertyId(knex, visit) {
+  return (await profilePropertyScope(knex, visit.customer_id, visit.property_id, false)).effective || null;
+}
+
+// The step products' catalog ids, from the program's own tagged product_limits rows (never a
+// display name): Recognition is the product on the tagged annual_max_rate row (the label
+// rate is its alone), Fusilade II the other tagged product. `tagged` is false when the
+// program's rows are missing (then readers fall back to names; a completion check refuses).
+async function stepProductIds(knex) {
+  const rows = await knex('product_limits').where({ match_value: BERMUDA_GROUP }).select('product_id', 'limit_type');
+  const recognition = rows.find((row) => row.limit_type === 'annual_max_rate')?.product_id || null;
+  const fusilade = rows.map((row) => row.product_id).find((id) => id && id !== recognition) || null;
+  return { recognition: recognition ? String(recognition) : null, fusilade: fusilade ? String(fusilade) : null, tagged: rows.length > 0 && !!recognition && !!fusilade };
+}
+
+const NOT_CONFIGURED_MESSAGE = 'Bermuda removal cannot be recorded: its application limits are not loaded for Recognition and Fusilade II. Ask the office to load them before recording this mix.';
+
+// The step products a completion submitted: { recognition, fusilade } (each a { id, name }
+// or null), matched by catalog ID; `unconfigured` is true when the program's tagged rows
+// are missing yet a step product is present by name (a completion check then refuses).
 async function submittedStepProducts(knex, products) {
-  if (!Array.isArray(products)) return { recognition: null, fusilade: null };
-  const ids = [...new Set(products.map((p) => p?.productId).filter(Boolean).map(String))];
-  if (!ids.length) return { recognition: null, fusilade: null };
-  const rows = await knex('products_catalog').whereIn('id', ids).select('id', 'name');
-  const find = (key) => rows.find((row) => normalize(row.name) === key) || null;
-  return { recognition: find(RECOGNITION_KEY), fusilade: find(FUSILADE_KEY) };
+  const none = { recognition: null, fusilade: null, unconfigured: false };
+  if (!Array.isArray(products)) return none;
+  const submitted = [...new Set(products.map((p) => p?.productId).filter(Boolean).map(String))];
+  if (!submitted.length) return none;
+  const rows = await knex('products_catalog').whereIn('id', submitted).select('id', 'name');
+  const ids = await stepProductIds(knex);
+  if (ids.tagged) {
+    const byId = (id) => rows.find((row) => String(row.id) === id) || null;
+    return { recognition: byId(ids.recognition), fusilade: byId(ids.fusilade), unconfigured: false };
+  }
+  const byName = (key) => rows.find((row) => normalize(row.name) === key) || null;
+  const recognition = byName(RECOGNITION_KEY);
+  const fusilade = byName(FUSILADE_KEY);
+  return { recognition, fusilade, unconfigured: !!(recognition || fusilade) };
 }
 
 async function bermudaPairViolation(knex, products, { serviceId } = {}) {
   if (!bermudaRemovalLive()) return null;
-  const { recognition, fusilade } = await submittedStepProducts(knex, products);
-  if (Boolean(recognition) === Boolean(fusilade)) return null;
-  // One of the two alone: judged only when this visit carries the step.
-  if (!(await stepVisitOf(knex, serviceId))) return null;
+  const { recognition, fusilade, unconfigured } = await submittedStepProducts(knex, products);
+  if (!unconfigured && Boolean(recognition) === Boolean(fusilade)) return null;
+  // One of the two alone: judged only when this visit carries the step. A completion reads
+  // the account STRICTLY: a read error fails the completion, never "not requested".
+  if (!(await stepVisitOf(knex, serviceId, { strict: true }))) return null;
+  if (unconfigured) return NOT_CONFIGURED_MESSAGE;
   return recognition
     ? 'Recognition goes on with Fusilade II in the bermuda removal mix. Add Fusilade II too, or take Recognition off this visit.'
     : 'Fusilade II is never applied without Recognition. Add Recognition too, or take Fusilade II off this visit.';
@@ -235,11 +271,12 @@ async function bermudaPairViolation(knex, products, { serviceId } = {}) {
 // visit or no step product submitted: always null.
 async function bermudaLimitViolation(knex, products, { serviceId } = {}) {
   if (!bermudaRemovalLive()) return null;
-  const { recognition, fusilade } = await submittedStepProducts(knex, products);
+  const { recognition, fusilade, unconfigured } = await submittedStepProducts(knex, products);
   const sprayed = [recognition, fusilade].filter(Boolean);
   if (!sprayed.length) return null;
-  const visit = await stepVisitOf(knex, serviceId);
+  const visit = await stepVisitOf(knex, serviceId, { strict: true });
   if (!visit) return null;
+  if (unconfigured) return NOT_CONFIGURED_MESSAGE;
   const limits = require('./application-limits');
   for (const product of sprayed) {
     const result = await limits.checkLimits(visit.customer_id, product.id, visit.scheduled_date, knex, {
@@ -266,7 +303,7 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   if (!bermudaRemovalLive()) return;
   const { recognition, fusilade } = await submittedStepProducts(trx, products);
   if (!recognition && !fusilade) return;
-  const visit = await stepVisitOf(trx, serviceId);
+  const visit = await stepVisitOf(trx, serviceId, { strict: true });
   if (!visit) return;
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     [LOCK_NAMESPACE, visit.effective_property_id ? `property:${visit.effective_property_id}` : `customer:${visit.customer_id}`]);
@@ -278,8 +315,6 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
 // decision reads the mark, never a product name.
 const markStepLines = (lines) => lines.map((line) => ({ ...line, bermudaStep: true }));
 const isStepLine = (item) => item?.bermudaStep === true;
-const isRecognitionLine = (item) => normalize(item?.product?.name || item?.raw).includes(RECOGNITION_KEY);
-const isFusiladeLine = (item) => normalize(item?.product?.name || item?.raw).includes(FUSILADE_KEY);
 
 // One selection: when any step line is selected, all of them are. Applied to the
 // resolved candidate lines before limits are read.
@@ -345,13 +380,18 @@ const addTestPatchNote = (items) => items.map((item) => (isStepLine(item)
 // staged row and neither limited product is capped or too soon. Then it settles (a
 // warning and no lines when nothing of it was selected, product-scoped blocks and
 // unavailable lines when some was). Returns { items, blocks, warnings }.
-async function projectBermudaStep(items, { rows, probeLimits, testPatch = false }) {
+async function projectBermudaStep(items, { knex, rows, probeLimits, testPatch = false }) {
   const members = items.filter(isStepLine);
   if (!members.length) return { items, blocks: [], warnings: [] };
-  const probe = members.filter((m) => m.product?.id && (isRecognitionLine(m) || isFusiladeLine(m)))
+  // The limited products are Recognition and Fusilade II by catalog id (the surfactant has
+  // no limits; it is held to the step by the staged row, below). Program rows missing: the
+  // step is unavailable, never judged on names.
+  const ids = await stepProductIds(knex);
+  const limited = new Set([ids.recognition, ids.fusilade].filter(Boolean));
+  const probe = members.filter((m) => m.product?.id && limited.has(String(m.product.id)))
     .map((m) => ({ selected: true, bermudaStep: true, product: { id: m.product.id, name: m.product.name } }));
-  const limited = probe.length ? (await probeLimits(probe)).capped.size > 0 : false;
-  const usable = !limited && members.every((m) => m.product && m.product.active !== false && rows.get(String(m.product.id)));
+  const capped = probe.length ? (await probeLimits(probe)).capped.size > 0 : false;
+  const usable = ids.tagged && !capped && members.every((m) => m.product && m.product.active !== false && rows.get(String(m.product.id)));
   const settled = settleStep(items, usable);
   return { ...settled, items: testPatch ? addTestPatchNote(settled.items) : settled.items };
 }
@@ -389,7 +429,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
       if (!active) return { items, blocks: [], warnings: stepWarnings, warningFields: stepWarnings.length ? { warnings: stepWarnings } : {} };
       let staged = rows;
       if (!staged) staged = await loadRows(rowOptions).catch((err) => { if (err.code === 'lawn_v13_protocol_missing') return new Map(); throw err; });
-      const settled = await projectBermudaStep(items, { rows: staged, probeLimits });
+      const settled = await projectBermudaStep(items, { knex, rows: staged, probeLimits });
       state.blocks = settled.blocks;
       state.mark = step.cultivar === 'test_patch';
       // `warningFields`: a response that carries warnings only when there are some.
@@ -415,7 +455,7 @@ module.exports = {
   RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
-  markStepLines, isStepLine, isRecognitionLine, isFusiladeLine,
-  selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, inMixingOrder, optionNotes, EXCLUDED_CULTIVAR_WARNING,
-  stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction,
+  markStepLines, isStepLine,
+  selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, effectivePropertyId, stepProductIds, inMixingOrder, optionNotes, EXCLUDED_CULTIVAR_WARNING,
+  excludedCultivarSql, stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction,
 };

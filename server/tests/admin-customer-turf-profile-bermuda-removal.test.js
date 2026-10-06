@@ -23,6 +23,7 @@ function fakeDb({ customer = { id: 'c1' }, profile = null, row = null, updated =
     q.wheres = [];
     q.where = jest.fn((arg) => { q.wheres.push(arg); return q; });
     q.whereIn = jest.fn((col, values) => { q.wheres.push({ [col]: values }); return q; });
+    q.whereRaw = jest.fn((sql, bindings) => { q.wheres.push({ raw: sql, bindings }); return q; });
     q.first = jest.fn(async () => (table === 'customers' ? customer : table === 'customer_turf_profiles' ? (row || profile) : { irrigation_home_changed_at: null }));
     q.update = jest.fn((fields) => { updates.push({ table, fields, wheres: q.wheres }); return { returning: async () => (updated ? [{ id: 'p1', customer_id: 'c1', ...fields }] : []) }; });
     return q;
@@ -119,6 +120,15 @@ describe('PUT bermuda-removal', () => {
     const updates = fakeDb({ profile: { id: 'p1', grass_type: 'zoysia', active: true }, updated: false });
     const res = await put({ enabled: true });
     expect(updates[0].wheres).toEqual(expect.arrayContaining([{ active: true }, { grass_type: ['st_augustine', 'zoysia'] }]));
+    expect(res.status).toHaveBeenCalledWith(409);
+  });
+
+  test('turning it on carries the excluded-cultivar rule in the UPDATE, so a cultivar changed after the read makes it hit no row (409)', async () => {
+    const updates = fakeDb({ profile: { id: 'p1', grass_type: 'st_augustine', cultivar: 'Floratam', active: true }, updated: false });
+    const res = await put({ enabled: true });
+    const raw = updates[0].wheres.find((w) => w.raw);
+    expect(raw.raw).toMatch(/regexp_replace\(lower\(cultivar\)/);
+    expect(raw.bindings).toEqual(['%provista%', '%captiva%', '%seville%']);
     expect(res.status).toHaveBeenCalledWith(409);
   });
 

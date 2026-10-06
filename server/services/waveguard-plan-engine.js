@@ -1605,7 +1605,10 @@ async function v13Limits(knex, service, serviceDate, items, { strict = false, ro
     checked.add(id);
     const row = rows.get(id);
     const proposed = Number(row?.ratePer1000) > 0 ? { ratePer1000: Number(row.ratePer1000), unit: row.rateUnit } : null;
-    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: service.property_id || null, ...(item.bermudaStep ? { program: 'bermuda_removal' } : {}) }))
+    // A step line is judged for the property the step was proven for (the visit's own, or a
+    // one-property customer's sole one), the same as the completion check.
+    const stepProperty = item.bermudaStep ? await bermudaRemoval.effectivePropertyId(knex, service) : (service.property_id || null);
+    const result = await savepointRead(knex, (k) => limits.checkLimits(service.customer_id, item.product.id, serviceDate, k, { proposed, excludeScheduledServiceId: service.id, propertyId: stepProperty, ...(item.bermudaStep ? { program: 'bermuda_removal' } : {}) }))
       .catch((err) => {
         if (strict) throw err;
         return { blocks: [{ message: `${item.product.name}: application limits could not be read.` }], warnings: [] };
@@ -1928,7 +1931,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // blocks) with the cultivar's test-patch note.
   const bermudaProjection = bermudaActive && v13Active
     ? await bermudaRemoval.projectBermudaStep(planItems, {
-      rows: v13Rows, probeLimits: (probe) => v13Limits(knex, service, serviceDate, probe, { strict }), testPatch: bermudaCultivar === 'test_patch',
+      knex, rows: v13Rows, probeLimits: (probe) => v13Limits(knex, service, serviceDate, probe, { strict }), testPatch: bermudaCultivar === 'test_patch',
     })
     : { items: planItems, blocks: [], warnings: [] };
   planItems = bermudaProjection.items;
