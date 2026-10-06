@@ -472,6 +472,8 @@ function lawnAssessmentFacts(data = {}, keep = () => true) {
       .slice(0, 2)
       .map((item) => text(item, 200))
       .filter(Boolean),
+    // The recorded turf, so a grass identity answer has ground (Codex P1 #5964 r42).
+    grass_type: cleanText([underscoresToSpaces(lawn.turfProfile?.grassType || ''), cleanText(lawn.turfProfile?.cultivar || '')].filter(Boolean).join(' ')) || null,
     overall_out_of_100: out100(scores.overallScore),
     density_out_of_100: out100(scores.turfDensity),
     weed_cleanliness_out_of_100: out100(scores.weedSuppression),
@@ -1432,10 +1434,12 @@ function contradictsPressure(text, facts) {
   const fact = facts?.pest_pressure;
   const label = String(fact?.label || '').toLowerCase();
   const trendText = `${fact?.trend || ''} ${fact?.trend_summary || ''}`.toLowerCase();
-  return splitSentences(matchForm(text)).some((sentence) => {
+  return clausesOf(text).some((sentence) => {
     const lower = sentence.toLowerCase();
     // "Activity may stay up for a few days" is the normal flush, not the gauge.
-    if (!/\bpressure\b|\bactivity\s+(?:level|score|rating)\b/.test(lower) || NOT_CONFIRMED_RE.test(lower)) return false;
+    if (NOT_CONFIRMED_RE.test(lower)) return false;
+    // A later clause ("it was high") carries the subject of the first.
+    if (!/\bpressure\b|\bactivity\s+(?:level|score|rating)\b/.test(lower) && !/\bpressure\b|\bactivity\s+(?:level|score|rating)\b/i.test(text)) return false;
     if (!fact) return PRESSURE_LEVELS.some(([, re]) => re.test(lower)) || PRESSURE_UP.test(lower) || PRESSURE_DOWN.test(lower);
     const levels = PRESSURE_LEVELS.filter(([, re]) => re.test(lower)).map(([name]) => name);
     if (levels.length && !levels.includes(label)) return true;
@@ -1467,24 +1471,74 @@ const TECH_NAME_STOP = new Set('we it they he she you i your our the this that o
 // health is poor" on a 92 report (Codex P1 #5964 r41). A word the report's own
 // text uses is grounded; otherwise the overall score must agree.
 const HEALTH_SUBJECT = /\b(?:lawn|grass|turf|yard|health|density|coverage|colou?r|plants?|shrubs?|trees?|hedges?|palms?|beds?|landscape)\b/i;
+const HEALTH_DIMENSIONS = [
+  [/\b(?:density|dense|coverage|thick\w*|thin\w*|sparse|bare|patchy|fill\w*)\b/, 'density_out_of_100'],
+  [/\b(?:colou?r|green\w*|yellow\w*|brown\w*|pale)\b/, 'color_out_of_100'],
+  [/\bweeds?\b/, 'weed_cleanliness_out_of_100'],
+  [/\b(?:stress\w*|damage\w*)\b/, 'stress_damage_out_of_100'],
+];
+// Clauses: a "not low; it was high" sentence is judged clause by clause
+// (Codex P1 #5964 r42).
+const clausesOf = (text) => splitSentences(matchForm(text))
+  .flatMap((sentence) => sentence.split(/[;,:]\s*|\s+(?:but|and|while|whereas|though|although|yet)\s+|\s+[—–-]\s+/i)).filter(Boolean);
 const HEALTH_BAD = ['poor', 'unhealthy', 'bad', 'struggling', 'stressed', 'declining', 'thin', 'thinning', 'sparse', 'weak', 'sick', 'dying', 'dead', 'patchy', 'bare', 'damaged', 'diseased', 'worse', 'worsening', 'failing', 'suffering'];
 const HEALTH_GOOD = ['healthy', 'good', 'great', 'excellent', 'thriving', 'lush', 'strong', 'thick', 'dense', 'vibrant', 'perfect'];
 function contradictsHealth(text, facts) {
   const sheet = JSON.stringify([facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report, facts?.findings, facts?.report_sections, facts?.waves_summary, facts?.visit_summary]).toLowerCase();
-  const score = Number(facts?.lawn_assessment?.overall_out_of_100);
-  const hasScore = Number.isFinite(score) && facts?.lawn_assessment?.overall_out_of_100 != null;
   const has = (word) => new RegExp(`\\b${word}`).test(sheet);
-  return splitSentences(matchForm(text)).some((sentence) => {
-    const lower = sentence.toLowerCase();
+  return clausesOf(text).some((clause) => {
+    const lower = clause.toLowerCase();
     if (!HEALTH_SUBJECT.test(lower) || NOT_CONFIRMED_RE.test(lower)) return false;
+    // Each dimension is judged on its own score: "Density is excellent" on a
+    // density of 20 fails even when the overall is 72 (Codex P1 #5964 r42).
+    const scores = HEALTH_DIMENSIONS.filter(([re]) => re.test(lower)).map(([, key]) => facts?.lawn_assessment?.[key]);
+    const pool = scores.length ? scores : [facts?.lawn_assessment?.overall_out_of_100];
+    const known = pool.filter((value) => value != null && Number.isFinite(Number(value))).map(Number);
     const said = (words) => words.filter((word) => new RegExp(`\\b${word}\\b`).test(lower) && !has(word));
-    return said(HEALTH_BAD).some(() => !hasScore || score >= 60) || said(HEALTH_GOOD).some(() => !hasScore || score < 70);
+    return said(HEALTH_BAD).some(() => !known.length || known.some((n) => n >= 60))
+      || said(HEALTH_GOOD).some(() => !known.length || known.some((n) => n < 70));
+  });
+}
+
+// A grass named as the lawn's type must be the recorded one (Codex P1 #5964 r42).
+const GRASS_NAMES = ['st\\.?\\s*augustine', 'floratam', 'bermuda', 'zoysia', 'bahia', 'centipede', 'paspalum', 'fescue', 'rye\\s*grass', 'ryegrass', 'kikuyu', 'buffalo\\s*grass', 'carpet\\s*grass', 'empire', 'palmetto', 'celebration', 'argentine'];
+function namesWrongGrass(text, facts) {
+  const recorded = String(facts?.lawn_assessment?.grass_type || '').toLowerCase();
+  return clausesOf(text).some((clause) => {
+    const lower = clause.toLowerCase();
+    if (NOT_CONFIRMED_RE.test(lower)) return false;
+    return GRASS_NAMES.some((name) => new RegExp(`\\b${name}\\b`).test(lower) && !new RegExp(`\\b${name}\\b`).test(recorded));
+  });
+}
+
+// Work the visit did besides applying: inspecting, sealing, removing. A
+// past-tense claim needs the report to name that work (Codex P1 #5964 r42).
+const WORK_CLAIMS = [
+  ['inspect', /\b(?:inspect(?:ed|ing)?|check(?:ed)?|look(?:ed)?\s+(?:at|in|under|over|around|for)|examin\w*|survey\w*|went\s+(?:through|over|into))\b/],
+  ['seal', /\b(?:seal(?:ed|ing)?|caulk\w*|plugg?(?:ed|ing)|patch(?:ed|ing)|block(?:ed|ing)\s+(?:off|up)|exclu\w*|screen(?:ed|ing))\b/],
+  ['remov', /\b(?:remov\w*|took\s+(?:out|away|down)|knock(?:ed)?\s+down|clear(?:ed)?\s+(?:out|away)|clean(?:ed)?\s+(?:out|up)|vacuum\w*|haul\w*)\b/],
+  ['repair', /\b(?:repair\w*|fix(?:ed)?|replac\w*|install\w*|set\s+(?:up\s+)?traps?|trapp?(?:ed|ing)|cut\s+back|trimm?(?:ed|ing)|prun(?:ed|ing))\b/],
+];
+const WORK_FACT_WORDS = {
+  inspect: /inspect|check|look|exam|survey|found|noted|observ|saw|finding/, seal: /seal|caulk|plug|patch|exclu|screen|block/,
+  remov: /remov|took|knock|clear|clean|vacuum|haul/, repair: /repair|fix|replac|install|trap|cut back|trim|prun/,
+};
+const WORK_ACTOR = /\b(?:we|i|our|tech\w*|technician|crew|team|[A-Z][a-z]+)\b|\b(?:was|were|has\s+been|have\s+been|got)\s+\w+ed\b|^\s*(?:yes|yep|correct)\b/;
+function claimsUnrecordedWork(text, facts) {
+  const sheet = JSON.stringify([facts?.findings, facts?.report_sections, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment, facts?.lawn_report, facts?.tree_shrub_report, facts?.products, facts?.areas_serviced]).toLowerCase();
+  return clausesOf(text).some((clause) => {
+    if (NOT_CONFIRMED_RE.test(clause) || !WORK_ACTOR.test(clause)) return false;
+    const lower = clause.toLowerCase();
+    if (/\b(?:will|would|can|could|should|may|might|next\s+visit|if)\b/.test(lower)) return false;
+    return WORK_CLAIMS.some(([kind, re]) => re.test(lower) && !WORK_FACT_WORDS[kind].test(sheet));
   });
 }
 
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
   ...CONTENT_CHECKS,
+  ['grass_type', (text, { facts }) => namesWrongGrass(text, facts)],
+  ['unrecorded_work', (text, { facts }) => claimsUnrecordedWork(text, facts)],
   ['health_claim', (text, { facts }) => contradictsHealth(text, facts)],
   ['pressure_claim', (text, { facts }) => contradictsPressure(text, facts)],
   ['technician_name', (text, { facts }) => namesWrongTechnician(text, facts)],

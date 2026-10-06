@@ -1664,3 +1664,37 @@ describe('answer screen, Codex round 41', () => {
     expect(ask(answer, 'How can I help my lawn?')).toBe('own_instruction');
   });
 });
+
+describe('answer screen, Codex round 42', () => {
+  test('each health dimension is judged on its own score', () => {
+    const data = lawnData({ lawnAssessment: { scores: { overallScore: 72, turfDensity: 20 } }, reportV2: { aftercare: {} } });
+    const facts = buildReportAskFacts({ data });
+    expect(screenAskAnswer('Density and coverage are excellent.', { question: 'How is the density?', data, facts })).toBe('health_claim');
+  });
+
+  test('a pressure claim after a negated clause is still judged', () => {
+    const data = pestData({ applications: [], pestPressure: { label: 'Low', trend: 'improving' } });
+    const facts = buildReportAskFacts({ data });
+    expect(screenAskAnswer('Pest pressure was not low; it was high.', { question: 'Was pressure high?', data, facts })).toBe('pressure_claim');
+  });
+
+  test('a grass type must be the recorded one', () => {
+    const data = lawnData({ lawnAssessment: { scores: { overallScore: 82 }, turfProfile: { grassType: 'st_augustine' } }, reportV2: { aftercare: {} } });
+    const facts = buildReportAskFacts({ data });
+    expect(facts.lawn_assessment.grass_type).toBe('st augustine');
+    const ask = (answer) => screenAskAnswer(answer, { question: 'Is this Bermuda grass?', data, facts });
+    expect(ask('Yes, your lawn is Bermuda grass.')).toBe('grass_type');
+    expect(ask('Your lawn is St. Augustine grass.')).toBeNull();
+    expect(ask('Your lawn is not Bermuda grass.')).toBeNull();
+  });
+
+  test.each(['Yes, we inspected the attic.', 'We sealed the entry points.', 'Yes, the nest was removed.'])('work the report does not record is rejected: %s', (answer) => {
+    const data = pestData({ applications: [] });
+    expect(screenAskAnswer(answer, { question: 'Did you do that?', data, facts: buildReportAskFacts({ data }) })).toBe('unrecorded_work');
+  });
+
+  test('saying the report does not show the work passes', () => {
+    const data = pestData({ applications: [] });
+    expect(screenAskAnswer('The report does not say the attic was inspected.', { question: 'Did you inspect the attic?', data, facts: buildReportAskFacts({ data }) })).toBeNull();
+  });
+});
