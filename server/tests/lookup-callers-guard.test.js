@@ -41,6 +41,18 @@ const HELPER = 'lookupOptionsFor';
 const OPTION = 'commercialSuiteSizing';
 // Where each function is defined — the only module allowed to export it.
 const DEFINING = { [LOOKUP]: 'routes/property-lookup-v2.js', [TRIO]: 'services/property-lookup/ai-property-lookup.js' };
+// The one module whose lookupOptionsFor is the policy helper. A call to any
+// other function of that name (a local, a member of some other object) is
+// refused: the id it carries proves nothing.
+const REGISTRY = 'services/property-lookup/lookup-callers.js';
+const REGISTRY_ABS = path.join(SERVER_ROOT, REGISTRY).replace(/\.js$/, '');
+const requiredPath = (node, fromFile) => { // the module a require('<literal>') / import '<literal>' names, resolved
+  const lit = node && node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'require'
+    && node.arguments[0] && node.arguments[0].type === 'Literal' ? node.arguments[0].value
+    : node && node.type === 'Literal' ? node.value : null;
+  if (typeof lit !== 'string' || !lit.startsWith('.')) return null;
+  return path.resolve(path.dirname(fromFile), lit).replace(/\.(js|cjs|mjs)$/, '');
+};
 
 // Only a file that spells one of the names can call, alias, import,
 // re-export or override anything this guard tracks (a computed member built
@@ -138,6 +150,16 @@ function aliasesOf(ast, target) {
       },
       AssignmentExpression(node) {
         if (node.left.type === 'Identifier' && refersTo(node.right, target, aliases)) aliases.add(node.left.name);
+        // `({ performPropertyLookup: lookup } = require(...))`
+        if (node.left.type === 'ObjectPattern') {
+          for (const prop of node.left.properties) {
+            if (prop.type !== 'Property') continue;
+            const key = prop.computed ? (prop.key.type === 'Literal' ? prop.key.value : null) : prop.key.name;
+            if (key !== target) continue;
+            const v = prop.value.type === 'AssignmentPattern' ? prop.value.left : prop.value;
+            if (v.type === 'Identifier') aliases.add(v.name);
+          }
+        }
       },
       ImportDeclaration(node) {
         for (const s of node.specifiers) {
@@ -174,7 +196,7 @@ function analyze(file) {
   const { ast, comments } = parse(src, r);
   currentSrc = src;
   const aliases = { [LOOKUP]: aliasesOf(ast, LOOKUP), [TRIO]: aliasesOf(ast, TRIO) };
-  const out = { file: r, calls: { [LOOKUP]: [], [TRIO]: [] }, valueRefs: [], helperCalls: [], helperRefs: [], optionVars: new Set(), overrides: [], mentions: [], policyWrites: [] };
+  const out = { file: r, calls: { [LOOKUP]: [], [TRIO]: [] }, valueRefs: [], helperCalls: [], helperRefs: [], badHelper: [], optionVars: new Map(), optionVarMisuse: [], overrides: [], mentions: [], policyWrites: [] };
 
   // Pass 1: identifiers bound to lookupOptionsFor(...), and every binding
   // (declaration, parameter, pattern, import, catch, class, function) each
@@ -221,17 +243,63 @@ function analyze(file) {
     collect(pat);
     names.forEach((n) => assigned.add(n));
   }
+  // The canonical helper bindings in this file: `const { lookupOptionsFor
+  // [: x] } = require('<registry>')`, `import { lookupOptionsFor } from
+  // '<registry>'`, or a module object `const m = require('<registry>')`
+  // used as `m.lookupOptionsFor(...)`. Each must be a binding declared
+  // once and never assigned.
+  const helperLocals = new Set();
+  const helperModules = new Set();
+  walk.simple(ast, {
+    VariableDeclaration(node) {
+      for (const d of node.declarations) {
+        if (!d.init || requiredPath(d.init, file) !== REGISTRY_ABS || node.kind !== 'const') continue;
+        if (d.id.type === 'Identifier' && bindings[d.id.name] === 1 && !assigned.has(d.id.name)) helperModules.add(d.id.name);
+        if (d.id.type === 'ObjectPattern') {
+          for (const prop of d.id.properties) {
+            if (prop.type !== 'Property') continue;
+            const key = prop.computed ? (prop.key.type === 'Literal' ? prop.key.value : null) : prop.key.name;
+            const v = prop.value.type === 'AssignmentPattern' ? prop.value.left : prop.value;
+            if (key === HELPER && v.type === 'Identifier' && bindings[v.name] === 1 && !assigned.has(v.name)) helperLocals.add(v.name);
+          }
+        }
+      }
+    },
+    ImportDeclaration(node) {
+      if (requiredPath(node.source, file) !== REGISTRY_ABS) return;
+      for (const sp of node.specifiers) {
+        if (sp.type === 'ImportSpecifier' && (sp.imported.name || sp.imported.value) === HELPER && bindings[sp.local.name] === 1 && !assigned.has(sp.local.name)) helperLocals.add(sp.local.name);
+        if (sp.type === 'ImportNamespaceSpecifier' && bindings[sp.local.name] === 1 && !assigned.has(sp.local.name)) helperModules.add(sp.local.name);
+      }
+    },
+  });
+  // Is this callee the canonical helper? (Anything else NAMED like it is
+  // recorded as a bad helper and refused by the id test.)
+  function isHelperCallee(callee) {
+    if (callee.type === 'Identifier') return helperLocals.has(callee.name);
+    if (callee.type === 'MemberExpression' && memberName(callee) === HELPER) {
+      if (callee.object.type === 'Identifier') return helperModules.has(callee.object.name);
+      return requiredPath(callee.object, file) === REGISTRY_ABS; // require('<registry>').lookupOptionsFor(...)
+    }
+    return false;
+  }
+  const looksLikeHelper = (callee) => (callee.type === 'Identifier' && callee.name === HELPER) || memberName(callee) === HELPER;
+  // Trusted options variables: `const x = <canonical helper call>`, declared
+  // once, never assigned. Mapped to the helper call that produced them.
   walk.simple(ast, {
     VariableDeclaration(node) {
       for (const d of node.declarations) {
         if (d.id.type === 'Identifier' && d.init && d.init.type === 'CallExpression' && isHelperCallee(d.init.callee)
-          && node.kind === 'const' && bindings[d.id.name] === 1 && !assigned.has(d.id.name)) out.optionVars.add(d.id.name);
+          && node.kind === 'const' && bindings[d.id.name] === 1 && !assigned.has(d.id.name)) out.optionVars.set(d.id.name, d.init);
       }
     },
   });
-
-  function isHelperCallee(callee) {
-    return (callee.type === 'Identifier' && callee.name === HELPER) || memberName(callee) === HELPER;
+  // The registry id a helper call carries: its first argument, which must
+  // be a single-quoted literal (anything else cannot be bound to a file).
+  function helperId(callNode) {
+    const arg = callNode.arguments[0];
+    const raw = arg ? src.slice(arg.start, arg.end) : '';
+    return arg && arg.type === 'Literal' && typeof arg.value === 'string' && /^'[a-z_]+'$/.test(raw) ? arg.value : null;
   }
   function targetOfCallee(callee) {
     for (const t of [LOOKUP, TRIO]) {
@@ -249,9 +317,17 @@ function analyze(file) {
       if (hit) {
         const args = node.arguments;
         const optionsArg = hit.via === 'direct' ? args[1] : hit.via === 'call' ? args[2] : null;
-        out.calls[hit.target].push({ line: node.loc.start.line, via: hit.via, optionsArg, spreadBeforeOptions: args.slice(0, 2).some((a) => a.type === 'SpreadElement') });
+        // The helper call that supplies this invocation's options (inline, or
+        // through a trusted const), and the registry id it carries.
+        const helperCall = optionsArg && optionsArg.type === 'CallExpression' && isHelperCallee(optionsArg.callee) ? optionsArg
+          : optionsArg && optionsArg.type === 'Identifier' ? out.optionVars.get(optionsArg.name) : null;
+        out.calls[hit.target].push({
+          line: node.loc.start.line, via: hit.via, optionsArg, helperCall, id: helperCall ? helperId(helperCall) : null,
+          spreadBeforeOptions: args.slice(0, 2).some((a) => a.type === 'SpreadElement'),
+        });
       }
-      if (isHelperCallee(node.callee)) out.helperCalls.push({ line: node.loc.start.line, arg: node.arguments[0] });
+      if (isHelperCallee(node.callee)) out.helperCalls.push({ line: node.loc.start.line, node, id: helperId(node), raw: node.arguments[0] ? src.slice(node.arguments[0].start, node.arguments[0].end) : '' });
+      else if (looksLikeHelper(node.callee)) out.badHelper.push({ line: node.loc.start.line, text: sourceOf(node).split('\n')[0].trim() });
       void ancestors;
     },
     Identifier(node, _st, ancestors) {
@@ -272,8 +348,21 @@ function analyze(file) {
         if (isExportContext(ancestors) && r === DEFINING[t]) continue;
         out.valueRefs.push({ target: t, line: node.loc.start.line, text: sourceOf(parent).split('\n')[0].trim() });
       }
-      if (node.name === HELPER && !inCalleePosition && !isExportContext(ancestors) && !(parent.type === 'Property' && parent.key === node && !parent.computed)) {
+      if ((node.name === HELPER || helperLocals.has(node.name)) && !inCalleePosition && !isExportContext(ancestors) && !(parent.type === 'Property' && parent.key === node && !parent.computed)) {
         out.helperRefs.push({ line: node.loc.start.line, text: sourceOf(parent).split('\n')[0].trim() });
+      }
+      // A trusted options variable may appear in exactly two places: as the
+      // options argument of a lookup call, and (in the admin route only) as
+      // the object of the sanctioned switch-off. Any other use — a mutation
+      // (`Object.assign(opts, ...)`, `opts.x = ...`, `delete opts.x`), a
+      // copy, a pass to another function — is refused: the object that
+      // reaches the lookup must be exactly what the registry returned.
+      if (out.optionVars.has(node.name)) {
+        const asLookupOptions = parent.type === 'CallExpression' && parent.arguments[1] === node && !!targetOfCallee(parent.callee);
+        const grand = ancestors[ancestors.length - 3];
+        const asSanctionedObject = r === SANCTIONED_OVERRIDE.file && parent.type === 'MemberExpression' && parent.object === node
+          && memberName(parent) === OPTION && grand && grand.type === 'AssignmentExpression' && grand.left === parent;
+        if (!asLookupOptions && !asSanctionedObject) out.optionVarMisuse.push({ line: node.loc.start.line, text: sourceOf(parent).split('\n')[0].trim() });
       }
     },
     AssignmentExpression(node, _st, ancestors) {
@@ -319,12 +408,10 @@ const all = [...analyses.values()];
 // and never assigned or updated afterwards, so the binding that reaches the
 // call is the helper's result. Nothing else — no `let`, no spread, no object
 // literal around it, no missing argument.
-function optionsDeclared(call, a) {
+function optionsDeclared(call) {
   const arg = call.optionsArg;
   if (!arg || call.spreadBeforeOptions || call.via !== 'direct') return false;
-  if (arg.type === 'CallExpression') return (arg.callee.type === 'Identifier' && arg.callee.name === HELPER) || memberName(arg.callee) === HELPER;
-  if (arg.type === 'Identifier') return a.optionVars.has(arg.name);
-  return false;
+  return !!call.helperCall;
 }
 
 // ---------------------------------------------------------------------------
@@ -361,8 +448,9 @@ describe('property-lookup callers declare their scope decision', () => {
       for (const call of a.calls[LOOKUP]) {
         invocations[a.file] = (invocations[a.file] || 0) + 1;
         if (call.via !== 'direct') offenders.push(`${a.file}:${call.line}: invoked through .${call.via}()`);
-        else if (!optionsDeclared(call, a)) offenders.push(`${a.file}:${call.line}: options are not lookupOptionsFor(...) / a variable bound to it`);
+        else if (!optionsDeclared(call)) offenders.push(`${a.file}:${call.line}: options are not the canonical lookupOptionsFor(...) / a const bound to it`);
       }
+      for (const m of a.optionVarMisuse) offenders.push(`${a.file}:${m.line}: trusted options variable used outside the lookup call: ${m.text}`);
       for (const v of a.valueRefs.filter((v) => v.target === LOOKUP)) offenders.push(`${a.file}:${v.line}: performPropertyLookup used as a value: ${v.text}`);
       // A caller never spells the option, anywhere in its file, in any form.
       // Only the modules that define or read it are exempt, named one by one.
@@ -419,23 +507,30 @@ describe('property-lookup callers declare their scope decision', () => {
     const uses = {};
     const nonCanonical = [];
     for (const a of all) {
-      if (a.file === 'services/property-lookup/lookup-callers.js') continue;
-      // lookupOptionsFor may only be CALLED, with a single-quoted literal id:
-      // a double-quoted string, a template, a variable or an expression
-      // cannot be bound to a file and is refused; so is aliasing or passing
-      // the helper itself, which would hide the id from this scan.
-      for (const h of a.helperCalls) {
-        const arg = h.arg;
-        const raw = arg ? currentSrcFor(a.file).slice(arg.start, arg.end) : '';
-        if (arg && arg.type === 'Literal' && typeof arg.value === 'string' && /^'[a-z_]+'$/.test(raw)) (uses[arg.value] ||= []).push(a.file);
-        else nonCanonical.push(`${a.file}:${h.line}: lookupOptionsFor(${raw}`);
-      }
+      if (a.file === REGISTRY) continue;
+      // Only the canonical helper (imported from the registry module) may be
+      // called, only with a single-quoted literal id, and only to feed a
+      // lookup call: a call of anything else named lookupOptionsFor, a
+      // non-literal id, the helper passed around as a value, or a helper
+      // call no lookup consumes is refused.
+      for (const h of a.helperCalls) if (!h.id) nonCanonical.push(`${a.file}:${h.line}: lookupOptionsFor(${h.raw}`);
+      for (const b of a.badHelper) nonCanonical.push(`${a.file}:${b.line}: not the registry's lookupOptionsFor: ${b.text}`);
       for (const ref of a.helperRefs) nonCanonical.push(`${a.file}:${ref.line}: lookupOptionsFor used as a value: ${ref.text}`);
+      const consumed = new Set(a.calls[LOOKUP].map((c) => c.helperCall).filter(Boolean));
+      for (const h of a.helperCalls) if (!consumed.has(h.node)) nonCanonical.push(`${a.file}:${h.line}: lookupOptionsFor('${h.id}') feeds no lookup call`);
+      // The id is read from the INVOCATION's own options expression, so each
+      // lookup call is bound to the one registry entry it runs under.
+      for (const c of a.calls[LOOKUP]) if (c.id) (uses[c.id] ||= []).push(a.file);
     }
     expect(nonCanonical).toEqual([]);
     const expected = Object.fromEntries(Object.entries(CALLERS).map(([id, c]) => [id, { files: [c.file], calls: c.calls }]));
     const actual = Object.fromEntries(Object.entries(uses).map(([id, fs_]) => [id, { files: [...new Set(fs_)], calls: fs_.length }]));
     expect(actual).toEqual(expected);
+    // One caller id per file. A file with two lookup purposes gets a second
+    // file or a reviewed edit here; it cannot pick, per call, which of two
+    // entries' policies it runs under.
+    const registryFiles = Object.values(CALLERS).map((c) => c.file);
+    expect(new Set(registryFiles).size).toBe(registryFiles.length);
   });
 
   test('lookupOptionsFor: opt-in only for declared callers, never from the call site', () => {
@@ -475,9 +570,3 @@ describe('property-lookup callers declare their scope decision', () => {
     }
   });
 });
-
-const srcCache = new Map();
-function currentSrcFor(r) {
-  if (!srcCache.has(r)) srcCache.set(r, fs.readFileSync(path.join(SERVER_ROOT, r), 'utf8'));
-  return srcCache.get(r);
-}
