@@ -4255,6 +4255,9 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     height: 340,
   }, { allOrNothing: true });
   const zones = resolvedDbZones.length ? resolvedDbZones : defaultZones(areaLabels, serviceLine);
+  // No technician-marked zone rows: the zones are schematic defaults (stock
+  // rectangles named after the chipped areas), not places anyone marked.
+  const coverageZonesAreDefaults = !resolvedDbZones.length;
   const geometry = parseJsonObject(geometryRow?.geometry);
   const effectiveGeometry = Object.keys(geometry).length ? geometry : defaultGeometry();
 
@@ -5377,7 +5380,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     geometryGeoJson: normalizeGeometry(zone.geometry_geojson) || undefined,
     geometryImage: parseJsonObject(zone.geometry_image),
   }));
-  const serviceCoverage = normalizeServiceCoverage({
+  // GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES (owner 2026-10-06): a lawn visit with
+  // only schematic default zones shows no coverage section. The lawn is
+  // treated whole (the product card says "Your whole lawn").
+  const hideDefaultLawnCoverage = serviceLine === 'lawn' && coverageZonesAreDefaults
+    && typeof featureGates.lawnCoverageHideDefaultZonesLive === 'function' && featureGates.lawnCoverageHideDefaultZonesLive();
+  const serviceCoverage = hideDefaultLawnCoverage ? { enabled: false } : normalizeServiceCoverage({
     serviceReportId: service.id,
     serviceLine,
     serviceType: service.service_type,
