@@ -469,6 +469,22 @@ function neighborhoodResetOnMove(from, to) {
     : {};
 }
 
+/**
+ * After an admin edits customers.property_type, write the same value to the
+ * primary customer_properties row so the account and its primary property do
+ * not disagree. Admin-entered values only, customer → property: the reverse
+ * direction for a commercial type stays fenced (call-property-lookup.js). A
+ * blank is not propagated — the property keeps its own observed type.
+ */
+async function syncPrimaryPropertyType(customerId, propertyType, conn = db) {
+  const value = typeof propertyType === 'string' ? propertyType.trim() : '';
+  if (!customerId || !value) return 0;
+  return conn('customer_properties')
+    .where({ customer_id: customerId, is_primary: true, active: true })
+    .whereRaw("COALESCE(property_type, '') <> ?", [value])
+    .update({ property_type: value, updated_at: new Date() });
+}
+
 async function syncPrimaryAddress(customerOrId, conn = db, { explicitLine2 = false, preserveCoords = false } = {}) {
   const customer = typeof customerOrId === 'string'
     ? await conn('customers').where({ id: customerOrId }).first()
@@ -1159,6 +1175,7 @@ module.exports = {
   isResidenceProperty,
   completePrimaryFromCall,
   syncPrimaryAddress,
+  syncPrimaryPropertyType,
   syncPrimaryCoordsFromCustomer,
   listProperties,
   ensurePrimaryProperty,

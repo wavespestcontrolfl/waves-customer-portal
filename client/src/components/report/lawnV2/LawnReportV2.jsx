@@ -268,7 +268,7 @@ export function LawnSnapshotHero({ snapshot = {}, children }) {
           <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
             Overall Lawn Status
           </div>
-          <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
+          <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 20, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
             {statusHeadline || statusMeta(status).label}
           </h2>
           {scoreExplanation ? (
@@ -344,6 +344,8 @@ function shortDay(ymd) {
 // watering banner (rendered above the report) owns the watering task.
 // lead.sinceLast (GATE_LAWN_SINCE_LAST) is the "Since your last visit" block:
 // server-selected sentences printed as given, above what was applied today.
+// lead.techParagraph (GATE_LAWN_TECH_PARAGRAPH) is "From your technician": a
+// frozen paragraph printed as given, right under what was applied today.
 export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
   const status = snapshot.status || scoreStatus(snapshot.overallScore);
   const yourPart = Array.isArray(lead.yourPart) ? lead.yourPart.filter(Boolean) : [];
@@ -362,7 +364,7 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
             <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
               Overall Lawn Status
             </div>
-            <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
+            <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 20, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
               {lead.headline || statusMeta(status).label}
             </h2>
             {lead.why ? <p style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{lead.why}</p> : null}
@@ -384,6 +386,16 @@ export function LawnLeadCard({ lead = {}, snapshot = {}, style = null }) {
           <div style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
             <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>What we applied today</div>
             <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.applied}</div>
+          </div>
+        ) : null}
+
+        {/* GATE_LAWN_TECH_PARAGRAPH: the technician's paragraph, written once at
+            completion and frozen server-side; printed as given, right under the
+            fixed "what we applied" line. Absent key renders nothing. */}
+        {lead.techParagraph ? (
+          <div data-testid="lawn-lead-tech" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+            <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>From your technician</div>
+            <div style={{ fontSize: 16, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{lead.techParagraph}</div>
           </div>
         ) : null}
 
@@ -487,16 +499,94 @@ function SliderArrow({ dir, onClick, disabled }) {
   );
 }
 
-export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, lead = false }) {
+// GATE_LAWN_REPORT_PHOTO_SET (P23): the visit's photos as a labeled grid in
+// shot order, every photo on screen at once (the strip below shows one at a
+// time). The server sends the fixed customer label with each photo; nothing
+// here writes words about a photo. Tap a photo to open it full size.
+function LawnPhotoSetGrid({ set, print }) {
+  return (
+    <div data-testid="lawn-photo-set" style={{ display: 'grid', gridTemplateColumns: set.length === 1 ? '1fr' : '1fr 1fr', gap: 10 }}>
+      {set.map((p, i) => {
+        const img = (
+          <img
+            src={p.url}
+            alt={p.label || 'Lawn photo'}
+            style={{ width: '100%', height: 150, objectFit: 'cover', borderRadius: 10, border: `1px solid ${BORDER}`, display: 'block' }}
+          />
+        );
+        return (
+          <figure key={i} style={{ margin: 0 }}>
+            {print ? img : <a href={p.url} target="_blank" rel="noopener noreferrer" style={{ display: 'block' }}>{img}</a>}
+            {p.label ? <figcaption style={{ fontSize: 14, color: MUTED, marginTop: 5 }}>{p.label}</figcaption> : null}
+          </figure>
+        );
+      })}
+    </div>
+  );
+}
+
+// "What the photos showed" (P23b, GATE_LAWN_REPORT_PHOTO_SET): the technician-
+// reviewed findings with the thumbnail(s) each links to. Every word of a finding
+// is chosen by the server (an allowlisted condition label and, only where the
+// photos cannot settle a finding, one fixed "photo can confirm" sentence); this
+// component adds only the heading. A finding with no linked photo prints with no
+// thumbnail. A thumbnail opens full size on the web; print (PDF, ?mode=static and
+// the browser's own print of the live page) has no links.
+export function LawnPhotoFindings({ findings = [] }) {
+  const print = usePrint();
+  const printRequested = usePrintRequested();
+  const printOpen = print || printRequested;
+  const rows = (Array.isArray(findings) ? findings : []).filter((f) => f && typeof f.label === 'string' && f.label);
+  if (!rows.length) return null;
+  return (
+    <Card>
+      <CardTitle>What the photos showed</CardTitle>
+      <div data-testid="lawn-photo-findings" style={{ display: 'grid', gap: 14 }}>
+        {rows.map((finding, i) => {
+          const pics = (Array.isArray(finding.photos) ? finding.photos : []).filter((p) => p && p.url);
+          return (
+            <div key={i} className="lawn-photo-finding">
+              <div style={{ fontSize: 16, fontWeight: 700, color: TEXT }}>{finding.label}</div>
+              {pics.length ? (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 8 }}>
+                  {pics.map((p, j) => {
+                    const img = (
+                      <img
+                        src={p.url}
+                        alt={p.label ? `${finding.label}: ${p.label}` : finding.label}
+                        style={{ width: 96, height: 96, objectFit: 'cover', borderRadius: 8, border: `1px solid ${BORDER}`, display: 'block' }}
+                      />
+                    );
+                    return (
+                      <figure key={j} style={{ margin: 0, width: 96 }}>
+                        {printOpen ? img : <a href={p.url} target="_blank" rel="noopener noreferrer" style={{ display: 'block' }}>{img}</a>}
+                        {p.label ? <figcaption style={{ fontSize: 14, color: MUTED, marginTop: 4 }}>{p.label}</figcaption> : null}
+                      </figure>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {finding.confirm ? <p style={{ margin: '8px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{finding.confirm}</p> : null}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, lead = false, photoSet = null }) {
   const print = usePrint();
   // The browser print pass (Report Tools "Print", Cmd+P) over the live page
   // opens the expanders too, not only ?mode=pdf/static (codex P1 #5517 r1).
   const printRequested = usePrintRequested();
   const printOpen = print || printRequested;
-  const pics = (photos || []).filter((p) => p && p.url);
+  const set = (Array.isArray(photoSet) ? photoSet : []).filter((p) => p && p.url);
+  // A photo set replaces the strip; without one the strip below is unchanged.
+  const pics = set.length ? [] : (photos || []).filter((p) => p && p.url);
   const scroller = useRef(null);
   const [idx, setIdx] = useState(0);
-  if (!pics.length && !summary) return null;
+  if (!pics.length && !set.length && !summary) return null;
   const multi = pics.length > 1;
   const go = (d) => {
     const el = scroller.current;
@@ -511,6 +601,7 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, 
   return (
     <Frame>
       {!embedded && <CardTitle>Lawn photos</CardTitle>}
+      {set.length ? <LawnPhotoSetGrid set={set} print={printOpen} /> : null}
       {pics.length && print ? (
         /* Static grid for PDF/print — no slider/arrows. */
         <div style={{ display: 'grid', gridTemplateColumns: pics.length === 1 ? '1fr' : '1fr 1fr', gap: 10 }}>
@@ -533,7 +624,7 @@ export function LawnPhotoStrip({ photos = [], summary = null, embedded = false, 
               <figure key={i} style={{ margin: 0, flex: '0 0 100%', scrollSnapAlign: 'center' }}>
                 {/* Eager on purpose: these are presigned URLs, and lazy
                     deferred the fetch until after they expired — swiped-to
-                    slides rendered blank (owner-reported). ≤5 photos. */}
+                    slides rendered blank (owner-reported). ≤8 photos. */}
                 <img
                   src={p.url}
                   alt={p.label || 'Lawn photo'}
@@ -824,6 +915,16 @@ export function LawnWateringBanner({ banner, style = null }) {
   const ended = watering && !(print || printing) && Number.isFinite(expiresMs) && Date.now() > expiresMs;
   const hold = watering && BANNER_HOLD_STATES.includes(banner.state);
   const mowAsBody = watering && mowLine;
+  // GATE_LAWN_WATERING_FORECAST. Both lines are LIVE-VIEW additions the server
+  // only sends to the live payload (never for a hold); the client also keeps
+  // them off anything printed, off a banner whose note has ended, and off a
+  // hold. The measured-rain note sits UNDER the instruction (never replaces
+  // it: the customer may still need it) and, once it exists, supersedes the
+  // forecast sentence. lawn-report-lead.js leadWords() counts exactly one of
+  // the two with this same rule.
+  const live = watering && !ended && !(print || printing) && !hold;
+  const observedLine = live && typeof banner.observedRain?.line === 'string' && banner.observedRain.line ? banner.observedRain.line : null;
+  const forecastLine = live && !observedLine && typeof banner.forecastLine === 'string' && banner.forecastLine ? banner.forecastLine : null;
   return (
     <Card style={{ ...(hold ? { background: COLORS.sand } : {}), ...(style || {}) }}>
       <div data-testid="lawn-watering-banner" data-state={banner.state ?? 'mow'} data-ended={ended ? 'true' : 'false'}>
@@ -840,6 +941,12 @@ export function LawnWateringBanner({ banner, style = null }) {
             {rest.map((line) => (
               <p key={line} style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{line}</p>
             ))}
+            {observedLine && (
+              <p data-testid="lawn-watering-banner-observed" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{observedLine}</p>
+            )}
+            {forecastLine && (
+              <p data-testid="lawn-watering-banner-forecast" style={{ fontSize: 16, color: BODY, lineHeight: 1.5, margin: '8px 0 0' }}>{forecastLine}</p>
+            )}
           </>
         )}
         {mowAsBody && (

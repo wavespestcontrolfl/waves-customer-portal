@@ -68,7 +68,7 @@ postgres('series extension keeps riding the lawn', () => {
     Admin = require('../routes/admin-schedule');
     Reminders = require('../services/appointment-reminders');
     Renewals = require('../services/annual-prepay-renewals');
-    const catalog = await mockPg('services').whereIn('service_key', ['lawn_care_6week', 'pest_general_quarterly']).select('id', 'service_key');
+    const catalog = await mockPg('services').whereIn('service_key', ['lawn_care_6week', 'tree_shrub_quarterly']).select('id', 'service_key');
     ids = Object.fromEntries(catalog.map((r) => [r.service_key, r.id]));
   });
 
@@ -151,16 +151,16 @@ postgres('series extension keeps riding the lawn', () => {
       })).returning('*');
       lawnChildren.push(child);
     }
-    const [pestParent] = await trx('scheduled_services').insert({
+    const [riderParent] = await trx('scheduled_services').insert({
       customer_id: base.customerId, property_id: base.propertyId, technician_id: pestTech,
-      service_id: ids.pest_general_quarterly, service_type: 'Quarterly Pest Control Service',
-      service_key_snapshot: 'pest_general_quarterly', scheduled_date: d0, status: 'completed',
+      service_id: ids.tree_shrub_quarterly, service_type: 'Quarterly Tree & Shrub Care Service',
+      service_key_snapshot: 'tree_shrub_quarterly', scheduled_date: d0, status: 'completed',
       window_start: pestWindow[0], window_end: pestWindow[1], estimated_duration_minutes: 60,
       estimated_price: 120, recurring_pattern: 'quarterly', is_recurring: true, recurring_ongoing: true,
       create_invoice_on_complete: true, skip_weekends: pestSkipWeekends, rides_parent_id: rides ? lawnParent.id : null, ...pestExtra,
     }).returning('*');
     return {
-      ...base, d0, techLawn, lawnParent, lawnChildren, pestParent,
+      ...base, d0, techLawn, lawnParent, lawnChildren, riderParent,
     };
   }
 
@@ -199,9 +199,9 @@ postgres('series extension keeps riding the lawn', () => {
       await trx('scheduled_services').where({ id: target.id }).update({
         window_start: '10:00', window_end: '12:00', estimated_duration_minutes: 120, technician_id: moved,
       });
-      const spawned = await extend(trx, w.pestParent.id);
+      const spawned = await extend(trx, w.riderParent.id);
       expect(spawned).toBeTruthy();
-      const [row] = await extensionRows(trx, w.pestParent.id);
+      const [row] = await extensionRows(trx, w.riderParent.id);
       expect(dateOf(row.scheduled_date)).toBe(addDays(w.d0, 84));
       expect(hhmm(row.window_start)).toBe('10:00');
       expect(hhmm(row.window_end)).toBe('11:00'); // the pest's 60 minutes, not the lawn's 120
@@ -214,12 +214,58 @@ postgres('series extension keeps riding the lawn', () => {
     } finally { await trx.rollback(); }
   });
 
+  // Second batch (GATE_RIDER_PAIRS_MONTHLY_LAWN): a bi-monthly rider on a
+  // monthly lawn extends onto every 2nd lawn visit (its own 49-day minimum gap,
+  // not the quarterly 77), and only while that gate is on.
+  describe('a bi-monthly rider on a monthly lawn', () => {
+    const SECOND = 'GATE_RIDER_PAIRS_MONTHLY_LAWN';
+    let originalSecond;
+    beforeEach(() => { originalSecond = process.env[SECOND]; });
+    afterEach(() => {
+      if (originalSecond === undefined) delete process.env[SECOND];
+      else process.env[SECOND] = originalSecond;
+    });
+    const monthlyLawn = { recurring_pattern: 'monthly', service_key_snapshot: 'lawn_care_monthly', service_type: 'Monthly Lawn Care Service' };
+    const monthlyWorld = (trx) => world(trx, {
+      lawnDates: Array.from({ length: 12 }, (_, i) => addDays(weekdayBack(7), 28 * (i + 1))),
+      lawnParentExtra: monthlyLawn,
+      lawnChildExtra: monthlyLawn,
+      pestExtra: { recurring_pattern: 'bimonthly', service_key_snapshot: 'tree_shrub_program', service_type: 'Bi-Monthly Tree & Shrub Care Service' },
+    });
+
+    test('second gate on: the extension rides the 2nd lawn visit (D0 + 56) and shares its visit', async () => {
+      process.env[SECOND] = 'true';
+      const trx = await mockPg.transaction();
+      try {
+        const w = await monthlyWorld(trx);
+        expect(await extend(trx, w.riderParent.id)).toBeTruthy();
+        const [row] = await extensionRows(trx, w.riderParent.id);
+        expect(dateOf(row.scheduled_date)).toBe(addDays(w.d0, 56));
+        const host = await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).first();
+        expect(row.visit_id).not.toBeNull();
+        expect(row.visit_id).toBe(host.visit_id);
+      } finally { await trx.rollback(); }
+    });
+
+    test('second gate off: the pair is not enabled, so the bi-monthly cadence walk runs', async () => {
+      delete process.env[SECOND];
+      const trx = await mockPg.transaction();
+      try {
+        const w = await monthlyWorld(trx);
+        const walk = await cadenceDate(trx, w.riderParent.id);
+        expect(await extend(trx, w.riderParent.id)).toBeTruthy();
+        const [row] = await extensionRows(trx, w.riderParent.id);
+        expect(dateOf(row.scheduled_date)).toBe(walk);
+      } finally { await trx.rollback(); }
+    });
+  });
+
   test('an off-hour lawn start is floored to the hour for the rider and still shares the visit', async () => {
     const trx = await mockPg.transaction();
     try {
       const w = await world(trx, { lawnWindow: ['10:30', '11:30'] });
-      await extend(trx, w.pestParent.id);
-      const [row] = await extensionRows(trx, w.pestParent.id);
+      await extend(trx, w.riderParent.id);
+      const [row] = await extensionRows(trx, w.riderParent.id);
       expect(dateOf(row.scheduled_date)).toBe(addDays(w.d0, 84));
       expect([hhmm(row.window_start), hhmm(row.window_end)]).toEqual(['10:00', '11:00']);
       const host = await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).first();
@@ -237,11 +283,11 @@ postgres('series extension keeps riding the lawn', () => {
       const rideDate = addDays(w.d0, 84);
       const other = await customer(trx);
       await trx('scheduled_services').insert({
-        customer_id: other.customerId, property_id: other.propertyId, service_type: 'Quarterly Pest Control Service',
+        customer_id: other.customerId, property_id: other.propertyId, service_type: 'Quarterly Tree & Shrub Care Service',
         scheduled_date: rideDate, status: 'pending', window_start: '09:30', window_end: '10:30', estimated_duration_minutes: 60,
       });
-      await extend(trx, w.pestParent.id);
-      const rows = await extensionRows(trx, w.pestParent.id);
+      await extend(trx, w.riderParent.id);
+      const rows = await extensionRows(trx, w.riderParent.id);
       expect(rows).toHaveLength(1);
       expect(dateOf(rows[0].scheduled_date)).not.toBe(rideDate);
     } finally { await trx.rollback(); }
@@ -253,8 +299,8 @@ postgres('series extension keeps riding the lawn', () => {
       const w = await world(trx);
       const rideDate = addDays(w.d0, 84);
       await trx('technicians').where({ id: w.techLawn }).update({ field_dispatchable: false });
-      await extend(trx, w.pestParent.id);
-      const rows = await extensionRows(trx, w.pestParent.id);
+      await extend(trx, w.riderParent.id);
+      const rows = await extensionRows(trx, w.riderParent.id);
       expect(rows).toHaveLength(1);
       expect(dateOf(rows[0].scheduled_date)).not.toBe(rideDate);
       expect(rows[0].technician_id).not.toBe(w.techLawn);
@@ -266,9 +312,9 @@ postgres('series extension keeps riding the lawn', () => {
     try {
       const w = await world(trx);
       await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).update({ window_start: '20:00', window_end: '21:00' });
-      const expected = await cadenceDate(trx, w.pestParent.id);
-      await extend(trx, w.pestParent.id);
-      const rows = await extensionRows(trx, w.pestParent.id);
+      const expected = await cadenceDate(trx, w.riderParent.id);
+      await extend(trx, w.riderParent.id);
+      const rows = await extensionRows(trx, w.riderParent.id);
       expect(rows.map((r) => dateOf(r.scheduled_date))).toEqual([expected]);
       expect(expected).not.toBe(addDays(w.d0, 84));
     } finally { await trx.rollback(); }
@@ -278,16 +324,16 @@ postgres('series extension keeps riding the lawn', () => {
     const trx = await mockPg.transaction();
     try {
       const w = await world(trx, { autopay: true }); // visit groups refuse an autopay customer
-      const expected = await cadenceDate(trx, w.pestParent.id);
+      const expected = await cadenceDate(trx, w.riderParent.id);
       const before = await trx('scheduled_services').where({ customer_id: w.customerId }).count('* as n').first();
-      const spawned = await extend(trx, w.pestParent.id);
+      const spawned = await extend(trx, w.riderParent.id);
       expect(spawned && spawned.scheduledDate).toBe(expected);
-      const rows = await extensionRows(trx, w.pestParent.id);
+      const rows = await extensionRows(trx, w.riderParent.id);
       expect(rows.map((r) => dateOf(r.scheduled_date))).toEqual([expected]);
       expect(rows[0].visit_id).toBeNull();
       const after = await trx('scheduled_services').where({ customer_id: w.customerId }).count('* as n').first();
       expect(Number(after.n)).toBe(Number(before.n) + 1);
-      expect(await trx('scheduled_services').where({ customer_id: w.customerId, scheduled_date: addDays(w.d0, 84), service_id: ids.pest_general_quarterly }).first()).toBeUndefined();
+      expect(await trx('scheduled_services').where({ customer_id: w.customerId, scheduled_date: addDays(w.d0, 84), service_id: ids.tree_shrub_quarterly }).first()).toBeUndefined();
     } finally { await trx.rollback(); }
   });
 
@@ -295,10 +341,10 @@ postgres('series extension keeps riding the lawn', () => {
     const trx = await mockPg.transaction();
     try {
       const w = await world(trx);
-      const expected = await cadenceDate(trx, w.pestParent.id);
+      const expected = await cadenceDate(trx, w.riderParent.id);
       Object.assign(gates, { visitGroups: false });
-      await extend(trx, w.pestParent.id);
-      const rows = await extensionRows(trx, w.pestParent.id);
+      await extend(trx, w.riderParent.id);
+      const rows = await extensionRows(trx, w.riderParent.id);
       expect(rows.map((r) => dateOf(r.scheduled_date))).toEqual([expected]);
     } finally { await trx.rollback(); }
   });
@@ -309,8 +355,8 @@ postgres('series extension keeps riding the lawn', () => {
       const w = await world(trx);
       const day = addDays(w.d0, 84);
       await trx('schedule_blackout_dates').insert({ date: day, reason: 'synthetic closure' });
-      await extend(trx, w.pestParent.id);
-      const rows = await extensionRows(trx, w.pestParent.id);
+      await extend(trx, w.riderParent.id);
+      const rows = await extensionRows(trx, w.riderParent.id);
       expect(rows).toHaveLength(1);
       expect(dateOf(rows[0].scheduled_date)).not.toBe(day);
       expect(rows[0].visit_id).toBeNull();
@@ -327,8 +373,8 @@ postgres('series extension keeps riding the lawn', () => {
       let saturday = addDays(w.d0, 84);
       while (etParts(parseETDateTime(`${saturday}T12:00`)).dayOfWeek !== 6) saturday = addDays(saturday, 1);
       await trx('scheduled_services').where({ id: target.id }).update({ scheduled_date: saturday });
-      await extend(trx, w.pestParent.id);
-      const rows = await extensionRows(trx, w.pestParent.id);
+      await extend(trx, w.riderParent.id);
+      const rows = await extensionRows(trx, w.riderParent.id);
       expect(rows).toHaveLength(1);
       expect(dateOf(rows[0].scheduled_date)).not.toBe(saturday);
     } finally { await trx.rollback(); }
@@ -338,16 +384,16 @@ postgres('series extension keeps riding the lawn', () => {
     const trx = await mockPg.transaction();
     try {
       const unlinked = await world(trx, { rides: false });
-      const expectedUnlinked = await cadenceDate(trx, unlinked.pestParent.id);
-      await extend(trx, unlinked.pestParent.id);
-      expect((await extensionRows(trx, unlinked.pestParent.id)).map((r) => dateOf(r.scheduled_date))).toEqual([expectedUnlinked]);
+      const expectedUnlinked = await cadenceDate(trx, unlinked.riderParent.id);
+      await extend(trx, unlinked.riderParent.id);
+      expect((await extensionRows(trx, unlinked.riderParent.id)).map((r) => dateOf(r.scheduled_date))).toEqual([expectedUnlinked]);
       expect(expectedUnlinked).not.toBe(addDays(unlinked.d0, 84));
 
       const linked = await world(trx);
-      const expectedLinked = await cadenceDate(trx, linked.pestParent.id);
+      const expectedLinked = await cadenceDate(trx, linked.riderParent.id);
       process.env[GATE] = 'false';
-      await extend(trx, linked.pestParent.id);
-      expect((await extensionRows(trx, linked.pestParent.id)).map((r) => dateOf(r.scheduled_date))).toEqual([expectedLinked]);
+      await extend(trx, linked.riderParent.id);
+      expect((await extensionRows(trx, linked.riderParent.id)).map((r) => dateOf(r.scheduled_date))).toEqual([expectedLinked]);
       expect(expectedLinked).not.toBe(addDays(linked.d0, 84));
     } finally { await trx.rollback(); }
   });
@@ -356,8 +402,8 @@ postgres('series extension keeps riding the lawn', () => {
     const trx = await mockPg.transaction();
     try {
       const w = await world(trx);
-      await Admin.runRecurringSeriesMaintenance(trx, w.pestParent);
-      const [row] = await extensionRows(trx, w.pestParent.id);
+      await Admin.runRecurringSeriesMaintenance(trx, w.riderParent);
+      const [row] = await extensionRows(trx, w.riderParent.id);
       expect(dateOf(row.scheduled_date)).toBe(addDays(w.d0, 84));
       expect(Reminders.registerAppointment).toHaveBeenCalledTimes(1);
       expect(Reminders.registerAppointment.mock.calls[0][0]).toBe(row.id);
@@ -368,8 +414,8 @@ postgres('series extension keeps riding the lawn', () => {
     const trx = await mockPg.transaction();
     try {
       const w = await world(trx, { autopay: true });
-      await Admin.runRecurringSeriesMaintenance(trx, w.pestParent);
-      const rows = await extensionRows(trx, w.pestParent.id);
+      await Admin.runRecurringSeriesMaintenance(trx, w.riderParent);
+      const rows = await extensionRows(trx, w.riderParent.id);
       expect(rows).toHaveLength(1);
       expect(Reminders.registerAppointment).toHaveBeenCalledTimes(1);
       expect(Reminders.registerAppointment.mock.calls[0][0]).toBe(rows[0].id);
@@ -380,9 +426,9 @@ postgres('series extension keeps riding the lawn', () => {
     const trx = await mockPg.transaction();
     try {
       const w = await world(trx, { autopay: true });
-      const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.pestParent.id, { horizonDays: 120 });
+      const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.riderParent.id, { horizonDays: 120 });
       expect(result.skipped).toBeNull();
-      const rows = await extensionRows(trx, w.pestParent.id);
+      const rows = await extensionRows(trx, w.riderParent.id);
       expect(rows.length).toBeGreaterThan(0);
       expect(rows.map((r) => dateOf(r.scheduled_date))).not.toContain(addDays(w.d0, 84));
       expect(rows.every((r) => r.visit_id === null)).toBe(true);
@@ -393,10 +439,10 @@ postgres('series extension keeps riding the lawn', () => {
     const trx = await mockPg.transaction();
     try {
       const w = await world(trx);
-      const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.pestParent.id, { horizonDays: 300 });
+      const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.riderParent.id, { horizonDays: 300 });
       expect(result.skipped).toBeNull();
       expect(result.spawnedVisits.length).toBeGreaterThanOrEqual(2);
-      const rows = await extensionRows(trx, w.pestParent.id);
+      const rows = await extensionRows(trx, w.riderParent.id);
       expect(rows.map((r) => dateOf(r.scheduled_date)).slice(0, 2)).toEqual([addDays(w.d0, 84), addDays(w.d0, 168)]);
       for (const row of rows.slice(0, 2)) {
         const host = await trx('scheduled_services')
@@ -435,9 +481,9 @@ postgres('series extension keeps riding the lawn', () => {
           pestExtra: { recurring_template_overrides: overrides },
           base,
         });
-        const spawned = await extend(trx, w.pestParent.id);
+        const spawned = await extend(trx, w.riderParent.id);
         expect(spawned).toBeTruthy();
-        const [row] = await extensionRows(trx, w.pestParent.id);
+        const [row] = await extensionRows(trx, w.riderParent.id);
         expect(dateOf(row.scheduled_date)).toBe(addDays(w.d0, 84));
         expect(row.property_id).toBe(p2.id);
         const host = await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).first();
@@ -454,14 +500,14 @@ postgres('series extension keeps riding the lawn', () => {
         // preview would MOVE it to D84 and insert D168; the extension never
         // moves it, so D168 would be only 8 days after it.
         await trx('scheduled_services').insert({
-          customer_id: w.customerId, property_id: w.propertyId, service_id: ids.pest_general_quarterly,
-          service_type: 'Quarterly Pest Control Service', service_key_snapshot: 'pest_general_quarterly',
+          customer_id: w.customerId, property_id: w.propertyId, service_id: ids.tree_shrub_quarterly,
+          service_type: 'Quarterly Tree & Shrub Care Service', service_key_snapshot: 'tree_shrub_quarterly',
           scheduled_date: addDays(w.d0, 160), status: 'pending', window_start: '09:00', window_end: '10:00',
           estimated_duration_minutes: 60, recurring_pattern: 'quarterly', is_recurring: true, recurring_ongoing: true,
-          recurring_parent_id: w.pestParent.id,
+          recurring_parent_id: w.riderParent.id,
         });
-        await extend(trx, w.pestParent.id);
-        const dates = (await extensionRows(trx, w.pestParent.id)).map((r) => dateOf(r.scheduled_date)).sort();
+        await extend(trx, w.riderParent.id);
+        const dates = (await extensionRows(trx, w.riderParent.id)).map((r) => dateOf(r.scheduled_date)).sort();
         const added = dates.filter((d) => d !== addDays(w.d0, 160));
         expect(added).toHaveLength(1);
         expect(added[0]).not.toBe(addDays(w.d0, 168));
@@ -477,9 +523,9 @@ postgres('series extension keeps riding the lawn', () => {
         const first = weekdayAhead(14);
         const later = weekdayAhead(40);
         const w = await world(trx, { d0Back: 200, lawnDates: [protectedDate, first, later] });
-        const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.pestParent.id, { horizonDays: 120 });
+        const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.riderParent.id, { horizonDays: 120 });
         expect(result.skipped).toBeNull();
-        const rows = await extensionRows(trx, w.pestParent.id);
+        const rows = await extensionRows(trx, w.riderParent.id);
         expect(dateOf(rows[0].scheduled_date)).toBe(first);
         expect(rows.map((r) => dateOf(r.scheduled_date))).not.toContain(protectedDate);
         const host = await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).first();
@@ -491,15 +537,15 @@ postgres('series extension keeps riding the lawn', () => {
       const trx = await mockPg.transaction();
       try {
         const w = await world(trx);
-        const expected = await cadenceDate(trx, w.pestParent.id);
+        const expected = await cadenceDate(trx, w.riderParent.id);
         // "This and following" re-service: the +84 row now says pest (same
         // visit group family as lawn).
         await trx('scheduled_services').where({ id: w.lawnChildren[1].id }).update({
-          service_id: ids.pest_general_quarterly, service_type: 'Quarterly Pest Control Service',
-          service_key_snapshot: 'pest_general_quarterly',
+          service_id: ids.tree_shrub_quarterly, service_type: 'Quarterly Tree & Shrub Care Service',
+          service_key_snapshot: 'tree_shrub_quarterly',
         });
-        await extend(trx, w.pestParent.id);
-        const rows = await extensionRows(trx, w.pestParent.id);
+        await extend(trx, w.riderParent.id);
+        const rows = await extensionRows(trx, w.riderParent.id);
         expect(rows.map((r) => dateOf(r.scheduled_date))).toEqual([expected]);
         expect(dateOf(rows[0].scheduled_date)).not.toBe(addDays(w.d0, 84));
         expect(rows[0].visit_id).toBeNull();
@@ -514,14 +560,14 @@ postgres('series extension keeps riding the lawn', () => {
         const w = await world(trx, {
           lawnParentExtra: {
             recurring_template_overrides: JSON.stringify({
-              service_id: ids.pest_general_quarterly, service_type: 'Quarterly Pest Control Service',
-              service_key_snapshot: 'pest_general_quarterly',
+              service_id: ids.tree_shrub_quarterly, service_type: 'Quarterly Tree & Shrub Care Service',
+              service_key_snapshot: 'tree_shrub_quarterly',
             }),
           },
         });
-        const expected = await cadenceDate(trx, w.pestParent.id);
-        await extend(trx, w.pestParent.id);
-        const rows = await extensionRows(trx, w.pestParent.id);
+        const expected = await cadenceDate(trx, w.riderParent.id);
+        await extend(trx, w.riderParent.id);
+        const rows = await extensionRows(trx, w.riderParent.id);
         expect(rows.map((r) => dateOf(r.scheduled_date))).toEqual([expected]);
         expect(dateOf(rows[0].scheduled_date)).not.toBe(addDays(w.d0, 84));
       } finally { gates.editApptPriceServiceScope = savedScope; await trx.rollback(); }
@@ -531,7 +577,7 @@ postgres('series extension keeps riding the lawn', () => {
   describe('own lawn visit on the candidate date is not a clash (ungated)', () => {
     async function alignedPest(trx, opts = {}) {
       const w = await world(trx, { rides: false, ...opts });
-      const date = await cadenceDate(trx, w.pestParent.id);
+      const date = await cadenceDate(trx, w.riderParent.id);
       return { w, date };
     }
     const lawnVisit = (trx, w, date, extra = {}) => trx('scheduled_services').insert({
@@ -547,9 +593,9 @@ postgres('series extension keeps riding the lawn', () => {
       try {
         const { w, date } = await alignedPest(trx);
         const [lawn] = await lawnVisit(trx, w, date);
-        const spawned = await extend(trx, w.pestParent.id);
+        const spawned = await extend(trx, w.riderParent.id);
         expect(spawned && spawned.scheduledDate).toBe(date);
-        const [row] = await extensionRows(trx, w.pestParent.id);
+        const [row] = await extensionRows(trx, w.riderParent.id);
         expect(dateOf(row.scheduled_date)).toBe(date);
         const host = await trx('scheduled_services').where({ id: lawn.id }).first();
         expect(row.visit_id).not.toBeNull();
@@ -567,8 +613,8 @@ postgres('series extension keeps riding the lawn', () => {
           service_id: ids.lawn_care_6week, service_type: 'Every 6 Weeks Lawn Care Service',
           scheduled_date: date, status: 'pending', window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60,
         });
-        await extend(trx, w.pestParent.id);
-        const rows = await extensionRows(trx, w.pestParent.id);
+        await extend(trx, w.riderParent.id);
+        const rows = await extensionRows(trx, w.riderParent.id);
         expect(rows).toHaveLength(1);
         expect(dateOf(rows[0].scheduled_date)).not.toBe(date);
       } finally { await trx.rollback(); }
@@ -580,8 +626,8 @@ postgres('series extension keeps riding the lawn', () => {
         const pestTech = await technician(trx);
         const { w, date } = await alignedPest(trx, { pestTech });
         const [lawn] = await lawnVisit(trx, w, date); // lawn tech differs from the pest template's tech
-        await extend(trx, w.pestParent.id);
-        const [row] = await extensionRows(trx, w.pestParent.id);
+        await extend(trx, w.riderParent.id);
+        const [row] = await extensionRows(trx, w.riderParent.id);
         expect(dateOf(row.scheduled_date)).toBe(date);
         expect(String(row.technician_id)).toBe(String(lawn.technician_id));
         const host = await trx('scheduled_services').where({ id: lawn.id }).first();
@@ -598,11 +644,11 @@ postgres('series extension keeps riding the lawn', () => {
         await lawnVisit(trx, w, date);
         const otherTech = await technician(trx);
         await lawnVisit(trx, w, date, { technician_id: otherTech, window_start: '09:30', window_end: '10:30' });
-        await extend(trx, w.pestParent.id);
-        const rows = await extensionRows(trx, w.pestParent.id);
+        await extend(trx, w.riderParent.id);
+        const rows = await extensionRows(trx, w.riderParent.id);
         expect(rows).toHaveLength(1);
         expect(dateOf(rows[0].scheduled_date)).not.toBe(date);
-        expect(await trx('scheduled_services').where({ customer_id: w.customerId, scheduled_date: date, service_id: ids.pest_general_quarterly }).first()).toBeUndefined();
+        expect(await trx('scheduled_services').where({ customer_id: w.customerId, scheduled_date: date, service_id: ids.tree_shrub_quarterly }).first()).toBeUndefined();
       } finally { await trx.rollback(); }
     });
 
@@ -612,13 +658,13 @@ postgres('series extension keeps riding the lawn', () => {
         const { w, date } = await alignedPest(trx, { autopay: true });
         await lawnVisit(trx, w, date);
         const before = await trx('scheduled_services').where({ customer_id: w.customerId }).count('* as n').first();
-        await extend(trx, w.pestParent.id);
-        const rows = await extensionRows(trx, w.pestParent.id);
+        await extend(trx, w.riderParent.id);
+        const rows = await extensionRows(trx, w.riderParent.id);
         expect(rows).toHaveLength(1);
         expect(dateOf(rows[0].scheduled_date)).not.toBe(date);
         const after = await trx('scheduled_services').where({ customer_id: w.customerId }).count('* as n').first();
         expect(Number(after.n)).toBe(Number(before.n) + 1);
-        expect(await trx('scheduled_services').where({ customer_id: w.customerId, scheduled_date: date, service_id: ids.pest_general_quarterly }).first()).toBeUndefined();
+        expect(await trx('scheduled_services').where({ customer_id: w.customerId, scheduled_date: date, service_id: ids.tree_shrub_quarterly }).first()).toBeUndefined();
       } finally { await trx.rollback(); }
     });
 
@@ -631,8 +677,8 @@ postgres('series extension keeps riding the lawn', () => {
           customer_id: null, scheduled_date: date, status: 'pending', service_type: 'Hold',
           window_start: '09:00', window_end: '10:00', reservation_expires_at: new Date(Date.now() + 3600e3),
         });
-        await extend(trx, w.pestParent.id);
-        const rows = await extensionRows(trx, w.pestParent.id);
+        await extend(trx, w.riderParent.id);
+        const rows = await extensionRows(trx, w.riderParent.id);
         expect(rows).toHaveLength(1);
         expect(dateOf(rows[0].scheduled_date)).not.toBe(date);
       } finally { await trx.rollback(); }
@@ -643,9 +689,9 @@ postgres('series extension keeps riding the lawn', () => {
       try {
         const { w, date } = await alignedPest(trx);
         const [lawn] = await lawnVisit(trx, w, date);
-        const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.pestParent.id, { horizonDays: 120 });
+        const result = await Admin.topUpRecurringSeriesWithLocks(trx, w.riderParent.id, { horizonDays: 120 });
         expect(result.skipped).toBeNull();
-        const first = (await extensionRows(trx, w.pestParent.id))[0];
+        const first = (await extensionRows(trx, w.riderParent.id))[0];
         expect(dateOf(first.scheduled_date)).toBe(date);
         const host = await trx('scheduled_services').where({ id: lawn.id }).first();
         expect(first.visit_id).toBe(host.visit_id);
@@ -670,9 +716,9 @@ postgres('series extension keeps riding the lawn', () => {
       const [term] = await trx('annual_prepay_terms').insert({
         customer_id: w.customerId, plan_label: 'Synthetic Prepay', monthly_rate: 30, prepay_amount: 360,
         term_start: addDays(w.d0, -1), term_end: addDays(w.d0, 400), status: 'active',
-        coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4, coverage_cadence: 'quarterly',
+        coverage_service_type: 'Quarterly Tree & Shrub Care', coverage_visit_count: 4, coverage_cadence: 'quarterly',
       }).returning('*');
-      await trx('scheduled_services').where({ id: w.pestParent.id }).update({ annual_prepay_term_id: term.id });
+      await trx('scheduled_services').where({ id: w.riderParent.id }).update({ annual_prepay_term_id: term.id });
       return w;
     }
 
@@ -727,7 +773,7 @@ postgres('series extension keeps riding the lawn', () => {
       try {
         const w = await prepaidWorld(trx);
         const outer = controlledCommit(trx);
-        const spawned = await extend(trx, w.pestParent.id);
+        const spawned = await extend(trx, w.riderParent.id);
         expect(dateOf(spawned.scheduledDate)).toBe(addDays(w.d0, 84));
         expect(apply).toHaveBeenCalled();
         await settle();
@@ -749,7 +795,7 @@ postgres('series extension keeps riding the lawn', () => {
           scopes.push(scope);
           scope.executionPromise.then(() => fired.push(String(scopes.length)), () => {});
         });
-        await extend(trx, w.pestParent.id);
+        await extend(trx, w.riderParent.id);
         outer.commit();
         await settle();
         // Two coverage passes ran (the thrown-away ride attempt, then the
@@ -766,7 +812,7 @@ postgres('series extension keeps riding the lawn', () => {
         // Visit groups refuse an autopay customer, so the own-lawn attempt is thrown away.
         const w = await prepaidWorld(trx, { rides: false, autopay: true });
         process.env[GATE] = 'false';
-        const date = await cadenceDate(trx, w.pestParent.id);
+        const date = await cadenceDate(trx, w.riderParent.id);
         await trx('scheduled_services').insert({
           customer_id: w.customerId, property_id: w.propertyId, technician_id: w.techLawn,
           service_id: ids.lawn_care_6week, service_type: 'Every 6 Weeks Lawn Care Service',
@@ -778,7 +824,7 @@ postgres('series extension keeps riding the lawn', () => {
           scopes.push(scope);
           scope.executionPromise.then(() => fired.push(String(scopes.length)), () => {});
         });
-        const spawned = await extend(trx, w.pestParent.id);
+        const spawned = await extend(trx, w.riderParent.id);
         expect(spawned.scheduledDate).not.toBe(date);
         outer.commit();
         await settle();

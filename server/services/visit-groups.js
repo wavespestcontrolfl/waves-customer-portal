@@ -232,6 +232,18 @@ async function openMembers(t, visitId, { forUpdate = false } = {}) {
   return q.select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id', 'status');
 }
 
+/** The visit summary (visitSummariesForRows) for one service, read live. Null = ungrouped. */
+async function visitSummaryForService(conn, serviceId) {
+  const row = await conn('scheduled_services').where({ id: serviceId }).first('visit_id');
+  if (!row || !row.visit_id) return null;
+  const members = await conn('scheduled_services').where({ visit_id: row.visit_id })
+    .orderBy('id')
+    .select('id', 'visit_id', 'status', 'service_type', 'estimated_duration_minutes');
+  const rows = members.map((m) => ({ id: m.id, visitId: m.visit_id, status: m.status, serviceType: m.service_type, estimatedDuration: m.estimated_duration_minutes }));
+  visitSummariesForRows(rows);
+  return rows.length ? rows[0].visit : null;
+}
+
 /**
  * Assign a visit's technician onto one member through the canonical
  * assignment writer (codex #3590 r13 P1): assignDispatchJob clears the
@@ -330,7 +342,7 @@ async function assertRowMovableAlone(t, rowId, observedVisitId) {
   }
 }
 
-async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null, noticeActorId } = {}) {
+async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = false, expectTechnicianId, actorId = null, noticeActorId, noticePrevious } = {}) {
   const { assignDispatchJob } = require('./dispatch-assignment');
   // actorId: the staff row behind a unit move (dispatch_alerts.resolved_by
   // + the broadcast). noticeActorId: who the tech's card names when that is
@@ -341,6 +353,7 @@ async function alignMemberTechnician(t, rowId, technicianId, { skipVisitSeam = f
     jobId: rowId, technicianId, actorId, emit: true, trx: t, skipVisitSeam,
     ...(expectTechnicianId !== undefined ? { expectTechnicianId } : {}),
     ...(noticeActorId !== undefined ? { noticeActorId } : {}),
+    ...(noticePrevious ? { noticePrevious } : {}),
   });
 }
 
@@ -2020,6 +2033,7 @@ function visitSummariesForRows(rows, {
       estimatedDuration: members.reduce((acc, m) => acc + (Number(m[durationKey]) || 0), 0),
       serviceTypes: members.map((m) => m.serviceType || m.service_type).filter(Boolean),
       liveCount: live.length,
+      liveMemberIds: live.map((m) => m[memberIdKey]),
     };
     for (const m of members) m.visit = summary;
   }
@@ -2438,6 +2452,26 @@ function expectMatchesRow(row, expect) {
   return true;
 }
 
+// expectVisitMembership ({ id, memberIds, liveCount, liveMemberIds }): the
+// stop a caller's operator was shown. A live member they never saw, a
+// different live count, or another visit changes what the move would do, so
+// it is refused. With liveMemberIds the live set must match exactly (a member
+// that closed while a closed one reopened keeps the count). Checked
+// at every point before the first member write: the locked plan, the
+// reminder-hold claim, and inside the primary's own move transaction.
+function assertShownMembership(shown, visitId, liveMemberIds) {
+  if (!shown) return;
+  const seen = new Set(shown.memberIds.map(String));
+  const same = String(visitId) === String(shown.id)
+    && liveMemberIds.every((id) => seen.has(String(id)))
+    && (shown.liveCount == null || liveMemberIds.length === shown.liveCount)
+    && (!Array.isArray(shown.liveMemberIds) || (shown.liveMemberIds.length === liveMemberIds.length
+      && liveMemberIds.every((id) => shown.liveMemberIds.map(String).includes(String(id)))));
+  if (!same) {
+    throw Object.assign(new Error('This stop changed since it was opened: a service was added, separated or closed. Reload and try again. Nothing was moved.'), { statusCode: 409, code: 'VISIT_MEMBERSHIP_CHANGED', isOperational: true });
+  }
+}
+
 async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindow, reason, initiatedBy, options = {} }) {
   if (!rebooker || !service || !service.visit_id) return null;
   const logger = require('./logger');
@@ -2509,6 +2543,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
         if (liveClaim) {
           throw Object.assign(new Error('Cannot move this stop: a grouped service is being completed — try again after it finishes, or contact the office.'), { statusCode: 409, code: 'VISIT_FROZEN_MOVE_UNSUPPORTED', isOperational: true, reason: 'completion_in_flight', memberId: liveClaim.service_id });
         }
+        // The caller named the stop its operator was shown (Edit appointment's
+        // "move all of them together"): a member they never saw, or one that
+        // has since left or closed, changes what this move would do.
+        assertShownMembership(options.expectVisitMembership, visit.id, members.map((m) => m.id));
         // One live member is not a grouped stop: the rebooker's ordinary
         // single-row path moves it (its seam detaches an unfrozen visit).
         if (members.length < 2) return null;
@@ -2851,6 +2889,7 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       // fenced by the plan's own per-member checks.
       await lockStopForRow(t, serviceId);
       const membershipNow = (await openMembers(t, plan.visitId)).map((m) => String(m.id));
+      assertShownMembership(options.expectVisitMembership, plan.visitId, membershipNow);
       const holdMemberIds = [...new Set([...plan.memberIds.map(String), ...membershipNow])];
       reminderHoldMemberIds = holdMemberIds;
       // EVERY represented member's row is held — including members already
@@ -3007,6 +3046,24 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     // dispatch broadcast). The rebooker's occupancy probe therefore runs on
     // the row's CURRENT technician; staff surfaces are advisory anyway.
     const { technicianId: _primaryTech, ...primaryBase } = options;
+    // The shown membership is re-read inside the primary's own move
+    // transaction, under the stop lock (the position the rebooker's solo
+    // recheck takes it): the primary moves first, so a join or a leave up to
+    // its commit refuses the move with nothing written.
+    if (options.expectVisitMembership) {
+      const callerBeforeMove = options.beforeMove;
+      primaryBase.beforeMove = async (trx) => {
+        if (typeof callerBeforeMove === 'function') await callerBeforeMove(trx);
+        try {
+          await lockStopForRow(trx, serviceId);
+        } catch (lockErr) {
+          // The stop moved under us: the same stale-stop refusal.
+          if (lockErr && lockErr.code === 'VISIT_STOP_MOVED') assertShownMembership(options.expectVisitMembership, null, []);
+          throw lockErr;
+        }
+        assertShownMembership(options.expectVisitMembership, plan.visitId, (await openMembers(trx, plan.visitId)).map((m) => m.id));
+      };
+    }
     // A unit move that ALSO changes technician re-points every member
     // through assignDispatchJob right after — that writer sends the
     // moved-off / new-visit pair, so the member's own rebooker call must not
@@ -3014,13 +3071,22 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
     const unitTechChanges = Object.prototype.hasOwnProperty.call(options, 'technicianId')
       && (options.technicianId || null) !== (target.expect.technician_id || null);
     const noticeOpts = unitTechChanges ? { suppressTechNotice: true } : {};
+    // Second technician: a member's rebooker probe is scoped to the row's
+    // CURRENT technician when the move keeps it, but a unit move that names a
+    // technician strips it from the member calls and re-points the row after
+    // (alignMember, whose own destination probe is tech-blind). Scoping the
+    // member probe to the OLD technician there would let a move through that
+    // the re-point then refuses, stranding the member moved-but-unassigned —
+    // so a naming move keeps the member probe tech-blind, as today.
+    const techProbeOpts = Object.prototype.hasOwnProperty.call(options, 'technicianId')
+      ? { occupancyTechBlind: true } : {};
     const memberOpts = target.isPrimary
-      ? { ...primaryBase, ...noticeOpts, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
+      ? { ...primaryBase, ...noticeOpts, ...techProbeOpts, expect: primaryExpect, visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect }
       // A sibling is ALWAYS a single-row move (codex r4): the dispatch
       // surface previewed/acknowledged series scope for the tapped row
       // only, so a recurring sibling must never shift its own future
       // series undisclosed.
-      : { ...siblingBase, ...noticeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
+      : { ...siblingBase, ...noticeOpts, ...techProbeOpts, expect: { ...target.expect, ...optOutFence }, seriesPolicy: 'single', visitPolicy: 'single', skipVisitSeam: true, excludeServiceIds, excludeExpect };
     // Callers sync reminders for the tapped row only (r2): every moved
     // sibling gets its reminder row synced here, notice suppressed — the
     // visit's one reminder text is the primary's. A sibling's own series
@@ -3113,6 +3179,10 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
               // rebooker's initiatedBy label (a customer's online move reads
               // "by the customer online", as the moved-off card below does).
               noticeActorId: options.actorId || initiatedBy || null,
+              // The row already moved: its slot before this unit move is the
+              // cards' previous day (a move off today/tomorrow stays a
+              // today/tomorrow change; Codex #5786 P2).
+              noticePrevious: { date: target.expect.scheduled_date, windowStart: target.expect.window_start, windowEnd: target.expect.window_end },
             });
           });
           return;
@@ -3505,6 +3575,7 @@ module.exports = {
   renewNotificationLease,
   finalizeVisitNotification,
   visitSummariesForRows,
+  visitSummaryForService,
   _test: {
     shiftClock,
     expectMatchesRow,

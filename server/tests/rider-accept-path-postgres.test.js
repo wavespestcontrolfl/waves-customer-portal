@@ -3,9 +3,10 @@
  * rulings 2026-10-01). Real conversion against the
  * migrated schema, synthetic customers, every test rolled back.
  *
- * Proves: the accept seeds quarterly pest follow-ups on lawn dates and groups
- * them into the lawn visit; rides_parent_id links the two series; the gate off
- * and every other mix (bi-monthly pest) keep today's quarterly walk. Series
+ * Proves: the accept seeds quarterly tree & shrub follow-ups on lawn dates and
+ * groups them into the lawn visit; rides_parent_id links the two series; the
+ * gate off, any pest-group rider (owner 2026-10-05: pest and lawn never share
+ * one stop) and every other mix keep their own walk. Series
  * EXTENSION riding the lawn is proved in rider-extension-path-postgres.test.js.
  */
 jest.mock('../models/db', () => new Proxy((...args) => mockPg(...args), {
@@ -45,7 +46,7 @@ const LAWN_LINE = {
   service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 9, frequency: 'every_6_weeks', annual: 540, mo: 45, perTreatment: 60,
 };
 const PEST_QUARTERLY = {
-  service: 'pest_control', name: 'Quarterly Pest Control', visitsPerYear: 4, frequency: 'quarterly', annual: 480, mo: 40, perTreatment: 120,
+  service: 'pest_control', name: 'Quarterly Tree & Shrub', visitsPerYear: 4, frequency: 'quarterly', annual: 480, mo: 40, perTreatment: 120,
 };
 const LAWN_MONTHLY = {
   service: 'lawn_care', name: 'Lawn Care', visitsPerYear: 12, frequency: 'monthly', annual: 540, mo: 45, perTreatment: 45,
@@ -53,11 +54,19 @@ const LAWN_MONTHLY = {
 const TERMITE_BAIT_QUARTERLY = {
   service: 'termite_bait', name: 'Termite Bait Station Monitoring', visitsPerYear: 4, frequency: 'quarterly', annual: 480, mo: 40, perTreatment: 120,
 };
+// Since 2026-10-05 only tree & shrub rides a lawn (owner: pest and lawn never
+// share one stop); pest lines here prove they walk their own cadence.
+const TREE_SHRUB_QUARTERLY = {
+  service: 'tree_shrub', name: 'Quarterly Tree & Shrub', visitsPerYear: 4, frequency: 'quarterly', annual: 480, mo: 40, perTreatment: 120,
+};
+const TREE_SHRUB_BIMONTHLY = {
+  service: 'tree_shrub', name: 'Bi-Monthly Tree & Shrub', visitsPerYear: 6, frequency: 'bimonthly', annual: 480, mo: 40, perTreatment: 80,
+};
 const PEST_BIMONTHLY = {
   service: 'pest_control', name: 'Bi-Monthly Pest Control', visitsPerYear: 6, frequency: 'bimonthly', annual: 480, mo: 40, perTreatment: 80,
 };
 
-postgres('pest rides the lawn from accept', () => {
+postgres('tree & shrub rides the lawn from accept; pest never does', () => {
   let gates;
   let originalVisitGroups;
   let originalGate;
@@ -113,13 +122,12 @@ postgres('pest rides the lawn from accept', () => {
     return { customerId, technicianId, propertyId };
   }
 
-  // Slot-reserved accept: the first pest visit is already on the books, the lawn
+  // Slot-reserved accept: the first rider visit is already on the books, the lawn
   // line promotes as a same-trip standalone row.
-  async function reservedAccept(trx, services, { before } = {}) {
+  async function reservedAccept(trx, services, { before, date = weekdayAhead(21) } = {}) {
     const base = await customerFixture(trx);
     if (before) await before(base);
     const estimateId = randomUUID();
-    const date = weekdayAhead(21);
     await trx('estimates').insert({
       id: estimateId, customer_id: base.customerId, property_id: base.propertyId, status: 'accepted',
       token: randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''),
@@ -141,38 +149,38 @@ postgres('pest rides the lawn from accept', () => {
     const parents = rows.filter((r) => !r.recurring_parent_id);
     const family = (name) => parents.find((p) => new RegExp(name, 'i').test(p.service_type));
     const lawnParent = family('lawn');
-    const pestParent = family('pest');
+    const riderParent = family('tree') || family('pest');
     return {
       lawnParent,
-      pestParent,
+      riderParent,
       lawn: rows.filter((r) => r.id === lawnParent?.id || r.recurring_parent_id === lawnParent?.id),
-      pest: rows.filter((r) => r.id === pestParent?.id || r.recurring_parent_id === pestParent?.id),
+      rider: rows.filter((r) => r.id === riderParent?.id || r.recurring_parent_id === riderParent?.id),
     };
   }
 
-  test('gate on: quarterly pest follow-ups land on every other lawn date, grouped, and linked', async () => {
+  test('gate on: quarterly tree & shrub follow-ups land on every other lawn date, grouped, and linked', async () => {
     process.env[GATE] = 'true';
     const trx = await mockPg.transaction();
     try {
-      const f = await reservedAccept(trx, [PEST_QUARTERLY, LAWN_LINE]);
-      const { lawnParent, pestParent, lawn, pest } = await seriesRows(trx, f.estimateId);
+      const f = await reservedAccept(trx, [TREE_SHRUB_QUARTERLY, LAWN_LINE]);
+      const { lawnParent, riderParent, lawn, rider } = await seriesRows(trx, f.estimateId);
       expect(lawnParent).toBeDefined();
-      expect(pestParent.id).toBe(f.reserved.id);
+      expect(riderParent.id).toBe(f.reserved.id);
 
       const lawnDates = lawn.map((r) => dateOf(r.scheduled_date));
       expect(lawnDates.slice(0, 3)).toEqual([f.date, addDays(f.date, 42), addDays(f.date, 84)]);
-      expect(pest.map((r) => dateOf(r.scheduled_date))).toEqual([
+      expect(rider.map((r) => dateOf(r.scheduled_date))).toEqual([
         f.date, addDays(f.date, 84), addDays(f.date, 168), addDays(f.date, 252),
       ]);
 
-      expect(pestParent.rides_parent_id).toBe(lawnParent.id);
+      expect(riderParent.rides_parent_id).toBe(lawnParent.id);
       expect(lawnParent.rides_parent_id).toBeNull();
-      // Pest keeps its own identity and cadence.
-      expect(pest.every((r) => r.recurring_pattern === 'quarterly' || r.id === pestParent.id)).toBe(true);
-      expect(pest.every((r) => /pest/i.test(r.service_type))).toBe(true);
+      // The rider keeps its own identity and cadence.
+      expect(rider.every((r) => r.recurring_pattern === 'quarterly' || r.id === riderParent.id)).toBe(true);
+      expect(rider.every((r) => /tree/i.test(r.service_type))).toBe(true);
 
       // Same stop on the same day => one visit group.
-      for (const row of pest) {
+      for (const row of rider) {
         const host = lawn.find((l) => dateOf(l.scheduled_date) === dateOf(row.scheduled_date));
         expect(host).toBeDefined();
         expect(row.visit_id).not.toBeNull();
@@ -181,15 +189,29 @@ postgres('pest rides the lawn from accept', () => {
     } finally { await trx.rollback(); }
   });
 
-  test('gate on, monthly lawn host: the quarterly pest takes every third lawn date (77-105 day gaps)', async () => {
+  test('gate on: a quarterly pest with a lawn walks its own cadence, unlinked and never in a lawn visit', async () => {
     process.env[GATE] = 'true';
     const trx = await mockPg.transaction();
     try {
-      const f = await reservedAccept(trx, [PEST_QUARTERLY, LAWN_MONTHLY]);
-      const { lawnParent, pestParent, lawn, pest } = await seriesRows(trx, f.estimateId);
-      expect(pestParent.rides_parent_id).toBe(lawnParent.id);
+      const f = await reservedAccept(trx, [PEST_QUARTERLY, LAWN_LINE]);
+      const { riderParent, lawn, rider } = await seriesRows(trx, f.estimateId);
+      expect(/pest/i.test(riderParent.service_type)).toBe(true);
+      expect(riderParent.rides_parent_id).toBeNull();
+      expect(rider.map((r) => dateOf(r.scheduled_date))).not.toContain(addDays(f.date, 84));
+      const lawnVisits = new Set(lawn.map((r) => r.visit_id).filter(Boolean));
+      expect(rider.every((r) => !r.visit_id || !lawnVisits.has(r.visit_id))).toBe(true);
+    } finally { await trx.rollback(); }
+  });
+
+  test('gate on, monthly lawn host: the quarterly tree & shrub takes every third lawn date (77-105 day gaps)', async () => {
+    process.env[GATE] = 'true';
+    const trx = await mockPg.transaction();
+    try {
+      const f = await reservedAccept(trx, [TREE_SHRUB_QUARTERLY, LAWN_MONTHLY]);
+      const { lawnParent, riderParent, lawn, rider } = await seriesRows(trx, f.estimateId);
+      expect(riderParent.rides_parent_id).toBe(lawnParent.id);
       const lawnDates = new Set(lawn.map((r) => dateOf(r.scheduled_date)));
-      const pestDates = pest.map((r) => dateOf(r.scheduled_date));
+      const pestDates = rider.map((r) => dateOf(r.scheduled_date));
       expect(pestDates).toHaveLength(4);
       for (const d of pestDates) expect(lawnDates.has(d)).toBe(true);
       for (let i = 1; i < pestDates.length; i++) {
@@ -204,10 +226,10 @@ postgres('pest rides the lawn from accept', () => {
     delete process.env[GATE];
     const trx = await mockPg.transaction();
     try {
-      const f = await reservedAccept(trx, [PEST_QUARTERLY, LAWN_LINE]);
-      const { pestParent, pest } = await seriesRows(trx, f.estimateId);
-      expect(pestParent.rides_parent_id).toBeNull();
-      const dates = pest.map((r) => dateOf(r.scheduled_date));
+      const f = await reservedAccept(trx, [TREE_SHRUB_QUARTERLY, LAWN_LINE]);
+      const { riderParent, rider } = await seriesRows(trx, f.estimateId);
+      expect(riderParent.rides_parent_id).toBeNull();
+      const dates = rider.map((r) => dateOf(r.scheduled_date));
       expect(dates).toHaveLength(4);
       expect(dates).not.toContain(addDays(f.date, 84));
     } finally { await trx.rollback(); }
@@ -218,12 +240,96 @@ postgres('pest rides the lawn from accept', () => {
     const trx = await mockPg.transaction();
     try {
       const f = await reservedAccept(trx, [PEST_BIMONTHLY, LAWN_LINE]);
-      const { pestParent, pest } = await seriesRows(trx, f.estimateId);
-      expect(pestParent.rides_parent_id).toBeNull();
-      const dates = pest.map((r) => dateOf(r.scheduled_date));
+      const { riderParent, rider } = await seriesRows(trx, f.estimateId);
+      expect(riderParent.rides_parent_id).toBeNull();
+      const dates = rider.map((r) => dateOf(r.scheduled_date));
       expect(dates).toHaveLength(6);
       expect(dates).not.toContain(addDays(f.date, 84));
     } finally { await trx.rollback(); }
+  });
+
+  // Second batch (GATE_RIDER_PAIRS_MONTHLY_LAWN, owner ruling 2026-10-01): on a
+  // MONTHLY lawn a bi-monthly rider takes every 2nd lawn visit and a seasonal
+  // mosquito rider every Feb-Oct one. Each rider visit must be IN its lawn visit.
+  describe('second batch on a monthly lawn', () => {
+    const SECOND = 'GATE_RIDER_PAIRS_MONTHLY_LAWN';
+    const MOSQUITO_SEASONAL = {
+      service: 'mosquito', name: 'Seasonal Mosquito Program', program: 'seasonal9', visitsPerYear: 9, frequency: 'seasonal9', annual: 720, mo: 60, perTreatment: 80,
+    };
+    let originalSecond;
+    beforeEach(() => { originalSecond = process.env[SECOND]; process.env[GATE] = 'true'; });
+    afterEach(() => {
+      if (originalSecond === undefined) delete process.env[SECOND];
+      else process.env[SECOND] = originalSecond;
+    });
+
+    async function riderAndLawn(trx, estimateId, riderName) {
+      const rows = await trx('scheduled_services').where({ source_estimate_id: estimateId }).orderBy('scheduled_date');
+      const parentOf = (name) => rows.find((r) => !r.recurring_parent_id && new RegExp(name, 'i').test(r.service_type));
+      const series = (parent) => rows.filter((r) => r.id === parent.id || r.recurring_parent_id === parent.id);
+      const lawnParent = parentOf('lawn');
+      const riderParent = parentOf(riderName);
+      return { lawnParent, riderParent, lawn: series(lawnParent), rider: series(riderParent) };
+    }
+
+    function expectInLawnVisits(rider, lawn) {
+      for (const row of rider) {
+        const host = lawn.find((l) => dateOf(l.scheduled_date) === dateOf(row.scheduled_date));
+        expect(host).toBeDefined();
+        expect(row.visit_id).not.toBeNull();
+        expect(row.visit_id).toBe(host.visit_id);
+      }
+    }
+
+    test('second gate on: bi-monthly tree & shrub takes every 2nd monthly lawn visit, grouped and linked', async () => {
+      process.env[SECOND] = 'true';
+      const trx = await mockPg.transaction();
+      try {
+        const f = await reservedAccept(trx, [TREE_SHRUB_BIMONTHLY, LAWN_MONTHLY]);
+        const { lawnParent, riderParent, lawn, rider } = await riderAndLawn(trx, f.estimateId, 'tree');
+        expect(riderParent.rides_parent_id).toBe(lawnParent.id);
+        const lawnDates = lawn.map((r) => dateOf(r.scheduled_date));
+        expect(lawnDates).toHaveLength(12);
+        expect(rider.map((r) => dateOf(r.scheduled_date))).toEqual([0, 2, 4, 6, 8, 10].map((k) => lawnDates[k]));
+        expect(rider.every((r) => r.id === riderParent.id || r.recurring_pattern === 'bimonthly')).toBe(true);
+        expectInLawnVisits(rider, lawn);
+      } finally { await trx.rollback(); }
+    });
+
+    test('second gate off: the same accept seeds the bi-monthly walk and links nothing', async () => {
+      delete process.env[SECOND];
+      const trx = await mockPg.transaction();
+      try {
+        const f = await reservedAccept(trx, [TREE_SHRUB_BIMONTHLY, LAWN_MONTHLY]);
+        const { riderParent, rider } = await riderAndLawn(trx, f.estimateId, 'tree');
+        expect(riderParent.rides_parent_id).toBeNull();
+        expect(rider).toHaveLength(6);
+      } finally { await trx.rollback(); }
+    });
+
+    test('second gate on: seasonal mosquito (pest group) never rides a lawn', async () => {
+      process.env[SECOND] = 'true';
+      const trx = await mockPg.transaction();
+      try {
+        const month = (d) => Number(d.slice(5, 7));
+        const inSeason = (d) => month(d) >= 2 && month(d) <= 10;
+        // A seasonal accept refuses a Nov-Jan first visit, so in winter the
+        // synthetic first visit is the first weekday of the coming February.
+        let date = weekdayAhead(21);
+        if (!inSeason(date)) {
+          date = `${Number(date.slice(0, 4)) + (month(date) > 10 ? 1 : 0)}-02-01`;
+          while ([0, 6].includes(etParts(parseETDateTime(`${date}T12:00`)).dayOfWeek)) date = addDays(date, 1);
+        }
+        // The pest visit is the reserved one; lawn and mosquito promote beside it
+        // as same-trip rows with their catalog services (the lawn seeds first).
+        const f = await reservedAccept(trx, [PEST_QUARTERLY, MOSQUITO_SEASONAL, LAWN_MONTHLY], { date });
+        const { riderParent, lawn, rider } = await riderAndLawn(trx, f.estimateId, 'mosquito');
+        expect(riderParent.recurring_pattern).toBe('seasonal_feb_oct');
+        expect(riderParent.rides_parent_id).toBeNull();
+        const lawnVisits = new Set(lawn.map((r) => r.visit_id).filter(Boolean));
+        expect(rider.every((r) => !r.visit_id || !lawnVisits.has(r.visit_id))).toBe(true);
+      } finally { await trx.rollback(); }
+    });
   });
 
   // A reserved lawn visit seeds AFTER the promoted programs, so the quarterly
@@ -281,7 +387,7 @@ postgres('pest rides the lawn from accept', () => {
       const base = await customerFixture(trx);
       const first = weekdayAhead(10);
       const lawnId = (await trx('services').where({ service_key: 'lawn_care_6week' }).first('id')).id;
-      const pestId = (await trx('services').where({ service_key: 'pest_general_quarterly' }).first('id')).id;
+      const riderId = (await trx('services').where({ service_key: 'tree_shrub_quarterly' }).first('id')).id;
       const row = (over) => ({
         customer_id: base.customerId, property_id: base.propertyId, status: 'pending', is_recurring: true,
         window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, ...over,
@@ -293,11 +399,11 @@ postgres('pest rides the lawn from accept', () => {
       const overrideDates = [84, 168, 252].map((d) => addDays(first, d));
       const walkDates = [91, 182, 273].map((d) => addDays(first, d));
       // A seed that inserts the given dates (overrides) or the walk, grouping each row unless told not to.
-      const seedFor = (pestParent, { groupOverrides }) => async (conn, dates) => {
+      const seedFor = (riderParent, { groupOverrides }) => async (conn, dates) => {
         const insertedRows = [];
         for (const d of dates || walkDates) {
           const [c] = await conn('scheduled_services').insert(row({
-            service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: d, recurring_parent_id: pestParent.id,
+            service_type: 'Quarterly Tree & Shrub', service_id: riderId, scheduled_date: d, recurring_parent_id: riderParent.id,
           })).returning('*');
           if (!dates || groupOverrides) await VisitGroups.maybeGroupRow(c.id, { database: conn, createdBy: 'test' });
           insertedRows.push(c);
@@ -306,16 +412,16 @@ postgres('pest rides the lawn from accept', () => {
       };
       const savedDates = async (p) => (await trx('scheduled_services').where({ recurring_parent_id: p.id }).orderBy('scheduled_date'))
         .map((r) => dateOf(r.scheduled_date));
-      const newPest = async () => (await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: first })).returning('*'))[0];
+      const newRider = async () => (await trx('scheduled_services').insert(row({ service_type: 'Quarterly Tree & Shrub', service_id: riderId, scheduled_date: first })).returning('*'))[0];
 
       // Grouping fails for the lawn-date rows: rolled back, the quarterly walk is seeded instead.
-      const failed = await newPest();
+      const failed = await newRider();
       const r1 = await RiderAcceptSeeding.seedWithRide(trx, failed, { overrideDates, hostParentId: lawn.id }, seedFor(failed, { groupOverrides: false }));
       expect(r1.rides).toBe(false);
       expect(await savedDates(failed)).toEqual(walkDates);
 
       // Every lawn-date row joins its lawn visit: kept.
-      const ok = await newPest();
+      const ok = await newRider();
       const r2 = await RiderAcceptSeeding.seedWithRide(trx, ok, { overrideDates, hostParentId: lawn.id }, seedFor(ok, { groupOverrides: true }));
       expect(r2.rides).toBe(true);
       expect(await savedDates(ok)).toEqual(overrideDates);
@@ -332,25 +438,25 @@ postgres('pest rides the lawn from accept', () => {
       const base = await customerFixture(trx);
       const first = weekdayAhead(10);
       const lawnId = (await trx('services').where({ service_key: 'lawn_care_6week' }).first('id')).id;
-      const pestId = (await trx('services').where({ service_key: 'pest_general_quarterly' }).first('id')).id;
+      const riderId = (await trx('services').where({ service_key: 'tree_shrub_quarterly' }).first('id')).id;
       const row = (over) => ({
         customer_id: base.customerId, property_id: base.propertyId, status: 'pending', is_recurring: true,
         window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, ...over,
       });
       const [lawn] = await trx('scheduled_services').insert(row({ service_type: 'Lawn Care', service_id: lawnId, scheduled_date: first })).returning('*');
-      const [pest] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: first })).returning('*');
+      const [rider] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Tree & Shrub', service_id: riderId, scheduled_date: first })).returning('*');
       const ctx = { lawn: { parent: lawn, host: { service_key_snapshot: 'lawn_care', recurring_pattern: 'every_6_weeks' },
         seededDates: [1, 2, 3, 4, 5, 6, 7, 8].map((i) => addDays(first, 42 * i)) } };
-      const plan = { family: 'pest_control', pattern: 'quarterly', seedOpts: { pattern: 'quarterly', visitsPerYear: 4, skipWeekends: false } };
+      const plan = { family: 'tree_shrub', pattern: 'quarterly', seedOpts: { pattern: 'quarterly', visitsPerYear: 4, skipWeekends: false } };
       // Control: with no saved follow-ups the first visits group for real and it rides.
-      const rides = await RiderAcceptSeeding.beforeSeed(ctx, trx, pest, plan);
+      const rides = await RiderAcceptSeeding.beforeSeed(ctx, trx, rider, plan);
       expect(rides && rides.overrideDates[0]).toBe(addDays(first, 84));
       // A saved off-plan follow-up whose status is NULL must still block the overrides.
       await trx('scheduled_services').insert(row({
-        service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: addDays(first, 91),
-        recurring_parent_id: pest.id, status: null,
+        service_type: 'Quarterly Tree & Shrub', service_id: riderId, scheduled_date: addDays(first, 91),
+        recurring_parent_id: rider.id, status: null,
       }));
-      expect(await RiderAcceptSeeding.beforeSeed(ctx, trx, pest, plan)).toBeNull();
+      expect(await RiderAcceptSeeding.beforeSeed(ctx, trx, rider, plan)).toBeNull();
     } finally { await trx.rollback(); }
   });
 
@@ -363,7 +469,7 @@ postgres('pest rides the lawn from accept', () => {
       const base = await customerFixture(trx);
       const first = weekdayAhead(10);
       const lawnId = (await trx('services').where({ service_key: 'lawn_care_6week' }).first('id')).id;
-      const pestId = (await trx('services').where({ service_key: 'pest_general_quarterly' }).first('id')).id;
+      const riderId = (await trx('services').where({ service_key: 'tree_shrub_quarterly' }).first('id')).id;
       const row = (over) => ({
         customer_id: base.customerId, property_id: base.propertyId, status: 'pending', is_recurring: true,
         window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60, ...over,
@@ -376,8 +482,8 @@ postgres('pest rides the lawn from accept', () => {
         })).returning('*');
         lawnChildren.push(c);
       }
-      const [pest] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Pest Control', service_id: pestId, scheduled_date: first })).returning('*');
-      const plan = { family: 'pest_control', pattern: 'quarterly', seedOpts: { pattern: 'quarterly', visitsPerYear: 4, skipWeekends: false } };
+      const [rider] = await trx('scheduled_services').insert(row({ service_type: 'Quarterly Tree & Shrub', service_id: riderId, scheduled_date: first })).returning('*');
+      const plan = { family: 'tree_shrub', pattern: 'quarterly', seedOpts: { pattern: 'quarterly', visitsPerYear: 4, skipWeekends: false } };
       const lawnPlan = { family: 'lawn_care', pattern: 'every_6_weeks', seedOpts: { pattern: 'every_6_weeks', visitsPerYear: 9, skipWeekends: false } };
       const ctxFor = async () => {
         const ctx = RiderAcceptSeeding.createContext();
@@ -386,11 +492,11 @@ postgres('pest rides the lawn from accept', () => {
         return ctx;
       };
       // Control: every lawn row live -> the rider rides +84.
-      const rides = await RiderAcceptSeeding.beforeSeed(await ctxFor(), trx, pest, plan);
+      const rides = await RiderAcceptSeeding.beforeSeed(await ctxFor(), trx, rider, plan);
       expect(rides && rides.overrideDates[0]).toBe(addDays(first, 84));
       // The +84 lawn row's tracker says it is finished; its status sync lags.
       await trx('scheduled_services').where({ id: lawnChildren[1].id }).update({ track_state: TERMINAL_TRACK_STATES[0] });
-      const after = await RiderAcceptSeeding.beforeSeed(await ctxFor(), trx, pest, plan);
+      const after = await RiderAcceptSeeding.beforeSeed(await ctxFor(), trx, rider, plan);
       expect(after === null || !after.overrideDates.includes(addDays(first, 84))).toBe(true);
     } finally { await trx.rollback(); }
   });
@@ -408,10 +514,10 @@ postgres('pest rides the lawn from accept', () => {
       const [term] = await trx('annual_prepay_terms').insert({
         customer_id: base.customerId, plan_label: 'Synthetic Prepay', monthly_rate: 30, prepay_amount: 360,
         term_start: weekdayAhead(1), term_end: addDays(weekdayAhead(1), 365), status: 'active',
-        coverage_service_type: 'Quarterly Pest Control', coverage_visit_count: 4, coverage_cadence: 'quarterly',
+        coverage_service_type: 'Quarterly Tree & Shrub', coverage_visit_count: 4, coverage_cadence: 'quarterly',
       }).returning('*');
       const [parent] = await trx('scheduled_services').insert({
-        customer_id: base.customerId, property_id: base.propertyId, service_type: 'Quarterly Pest Control', status: 'pending',
+        customer_id: base.customerId, property_id: base.propertyId, service_type: 'Quarterly Tree & Shrub', status: 'pending',
         scheduled_date: weekdayAhead(10), is_recurring: true, recurring_pattern: 'quarterly', annual_prepay_term_id: term.id,
       }).returning('*');
       const cols = await trx('scheduled_services').columnInfo();
@@ -430,7 +536,7 @@ postgres('pest rides the lawn from accept', () => {
     try {
       const base = await customerFixture(trx);
       const [row] = await trx('scheduled_services').insert({
-        customer_id: base.customerId, property_id: base.propertyId, service_type: 'Quarterly Pest Control',
+        customer_id: base.customerId, property_id: base.propertyId, service_type: 'Quarterly Tree & Shrub',
         status: 'pending', scheduled_date: weekdayAhead(10), window_start: '09:00', window_end: '10:00',
       }).returning('*');
       // A host id that does not exist violates the self-FK inside the write.
@@ -440,7 +546,7 @@ postgres('pest rides the lawn from accept', () => {
     } finally { await trx.rollback(); }
   });
 
-  test('gate on, no reservation (auto-schedule): the unplaced first visits cannot group, so the pest walks its own cadence unlinked', async () => {
+  test('gate on, no reservation (auto-schedule): the unplaced first visits cannot group, so the tree & shrub walks its own cadence unlinked', async () => {
     process.env[GATE] = 'true';
     const trx = await mockPg.transaction();
     try {
@@ -450,17 +556,17 @@ postgres('pest rides the lawn from accept', () => {
         id: estimateId, customer_id: base.customerId, property_id: base.propertyId, status: 'accepted',
         token: randomUUID().replaceAll('-', '') + randomUUID().replaceAll('-', ''),
         category: 'RESIDENTIAL', monthly_total: 85, annual_total: 1020,
-        estimate_data: { result: { recurring: { services: [PEST_QUARTERLY, LAWN_LINE] } } },
+        estimate_data: { result: { recurring: { services: [TREE_SHRUB_QUARTERLY, LAWN_LINE] } } },
       });
       await converter.convertEstimate(estimateId, { ...options, database: trx });
-      const { lawnParent, pestParent, pest } = await seriesRows(trx, estimateId);
+      const { lawnParent, riderParent: riderParent, rider: rider } = await seriesRows(trx, estimateId);
       expect(lawnParent).toBeDefined();
       // Auto-scheduled parents carry no window, and visit groups never group a
       // windowless row — so this is not one stop, and nothing is linked.
       expect(lawnParent.window_start).toBeNull();
-      expect(pestParent.rides_parent_id).toBeNull();
-      const first = dateOf(pestParent.scheduled_date);
-      expect(pest.map((r) => dateOf(r.scheduled_date))).not.toContain(addDays(first, 84));
+      expect(riderParent.rides_parent_id).toBeNull();
+      const first = dateOf(riderParent.scheduled_date);
+      expect(rider.map((r) => dateOf(r.scheduled_date))).not.toContain(addDays(first, 84));
     } finally { await trx.rollback(); }
   });
 });

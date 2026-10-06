@@ -6,7 +6,7 @@
 // .post_application_watering and frozen into the completion product facts:
 //
 //   { mode: 'hold' | 'water_in' | 'none',
-//     hold_hours, water_in_inches, water_in_by_hours,
+//     hold_hours, water_in_inches, water_in_by_hours, water_in_same_day,
 //     source: 'label' | 'owner' | 'default',
 //     label_note, verified_at, verified_by }
 //
@@ -18,7 +18,7 @@
 const MODES = ['hold', 'water_in', 'none'];
 const SOURCES = ['label', 'owner', 'default'];
 const RULE_KEYS = [
-  'mode', 'hold_hours', 'hold_until', 'water_in_inches', 'water_in_by_hours',
+  'mode', 'hold_hours', 'hold_until', 'water_in_inches', 'water_in_by_hours', 'water_in_same_day',
   'source', 'label_note', 'verified_at', 'verified_by',
 ];
 
@@ -72,7 +72,12 @@ function validateWaterInFields(value, errors) {
   const byHours = value.water_in_by_hours == null ? DEFAULT_WATER_IN_BY_HOURS : positiveNumber(value.water_in_by_hours, MAX_HOURS);
   if (inches == null) errors.push(`water_in_inches must be a number greater than 0 and at most ${MAX_INCHES}`);
   if (byHours == null) errors.push(`water_in_by_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
-  return { water_in_inches: inches, water_in_by_hours: byHours };
+  // A label that says water in "the same day" (Dylox): the deadline is also
+  // capped at the end of the application's ET day. Present only when true.
+  if (value.water_in_same_day != null && typeof value.water_in_same_day !== 'boolean') {
+    errors.push('water_in_same_day must be true or false when present');
+  }
+  return { water_in_inches: inches, water_in_by_hours: byHours, ...(value.water_in_same_day === true ? { water_in_same_day: true } : {}) };
 }
 
 function validateVerifiedAt(value, errors) {

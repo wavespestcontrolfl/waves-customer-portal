@@ -15,7 +15,15 @@ const db = require('../models/db');
 const { classifyProviderFailure } = require('./messaging/providers/twilio-sms');
 const logger = require('./logger');
 
-async function placeBridgeCall({ to, bridgePhone, from, customer = null, source, adminUserId = null, metadata = null, leadName = '' }) {
+// `from` is the caller ID the CUSTOMER sees (call_log.from_phone, the
+// touchpoint endpoint, and the /outbound-connect <Dial callerId>). The staff
+// leg — the ring to `bridgePhone` — presents `bridgeFrom`, which defaults to
+// `from`. The admin bridge passes the main line there: under GATE_HOME_LINE
+// `from` is whichever office line the customer resolves to, and ringing a
+// staff cell from four rotating office lines it has never seen (instead of
+// the one main line it always had) is what the cell's unknown-caller
+// silencing / carrier spam screening eats — and then nobody can press 1.
+async function placeBridgeCall({ to, bridgePhone, from, bridgeFrom = from, customer = null, source, adminUserId = null, metadata = null, leadName = '' }) {
   const twilio = require('twilio');
   const config = require('../config');
   if (!config.twilio.accountSid || !config.twilio.authToken) {
@@ -56,7 +64,7 @@ async function placeBridgeCall({ to, bridgePhone, from, customer = null, source,
   try {
     call = await client.calls.create({
       to: bridgePhone,
-      from,
+      from: bridgeFrom,
       url: `https://${domain}/api/webhooks/twilio/outbound-admin-prompt?${promptParams.toString()}`,
       // The row id rides the status callback too: a parent leg that ends
       // busy / no-answer / canceled never requests the prompt URL, so the

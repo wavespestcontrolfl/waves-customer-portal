@@ -234,6 +234,76 @@ test('an absent / null / empty window is a date-only move and reaches the rebook
   expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(3);
 });
 
+test('expectVisit (Edit appointment, "move all of them together") pins the stop the operator was shown; a malformed one is 400 before the rebooker', async () => {
+  const shown = { id: 'visit-1', memberIds: ['00000000-0000-4000-8000-000000000001', 'sibling-1'], liveCount: 2 };
+  const { status } = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', expectVisit: shown });
+  expect(status).toBe(200);
+  const options = SmartRebooker.reschedule.mock.calls[0][5];
+  expect(options.expect).toMatchObject({ visit_id: 'visit-1' });
+  expect(options.expectGroupedVisit).toBe(true);
+  expect(options.expectVisitMembership).toEqual(shown);
+  for (const bad of ['visit-1', { id: 'visit-1' }, { id: 'visit-1', memberIds: [] }, { id: '', memberIds: ['a'] }, { id: 'visit-1', memberIds: ['a'], liveCount: 'two' }]) {
+    const refused = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', expectVisit: bad });
+    expect(refused.status).toBe(400);
+  }
+  expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  // No expectVisit: no membership pin (every other caller is unchanged).
+  await reschedule({ newDate: TARGET, newWindow: '09:00-10:00' });
+  expect(SmartRebooker.reschedule.mock.calls[1][5].expectVisitMembership).toBeUndefined();
+  expect(SmartRebooker.reschedule.mock.calls[1][5].expectGroupedVisit).toBeUndefined();
+});
+
+test('an expectVisit request that finds the stop already at the target texts nobody; other callers are unchanged', async () => {
+  const { sendRescheduleNoticeForVisit } = require('../routes/admin-schedule');
+  const AppointmentReminders = require('../services/appointment-reminders');
+  const shown = { id: 'visit-1', memberIds: ['00000000-0000-4000-8000-000000000001', 'sibling-1'], liveCount: 2 };
+  const noop = { success: true, visitMove: { visitId: 'visit-1', moved: [], failed: [], alreadyAtTarget: true, unchanged: shown.memberIds } };
+  SmartRebooker.reschedule.mockResolvedValue(noop);
+  const repeated = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', notifyCustomer: true, expectVisit: shown });
+  expect(repeated.status).toBe(200);
+  expect(repeated.body).toMatchObject({ notificationSent: false, notificationSkipped: 'already_at_target' });
+  expect(sendRescheduleNoticeForVisit).not.toHaveBeenCalled();
+  // The reminder sync is told no notice follows.
+  const syncOptions = AppointmentReminders.handleReschedule.mock.calls.map((c) => c[2] || {});
+  expect(syncOptions.every((o) => o.coverDueWindows !== true)).toBe(true);
+  // A first move through the same request shape still texts.
+  SmartRebooker.reschedule.mockResolvedValue({ success: true, visitMove: { visitId: 'visit-1', moved: shown.memberIds, failed: [], visitStart: '09:00' } });
+  const first = await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', notifyCustomer: true, expectVisit: shown });
+  expect(first.body.notificationSent).toBe(true);
+  expect(sendRescheduleNoticeForVisit).toHaveBeenCalledTimes(1);
+  // No expectVisit (the board, Quick Move): a no-op keeps its existing behavior.
+  SmartRebooker.reschedule.mockResolvedValue(noop);
+  await reschedule({ newDate: TARGET, newWindow: '09:00-10:00', notifyCustomer: true });
+  expect(sendRescheduleNoticeForVisit).toHaveBeenCalledTimes(2);
+  SmartRebooker.reschedule.mockResolvedValue({ success: true });
+});
+
+test('keepSlot (a technician-only change on a shared stop): the stored window is not re-validated, every service keeps its status, and the silent reminder sync still runs', async () => {
+  const { planVisitMoveForStaff, runPlannedVisitMove } = require('../routes/admin-dispatch');
+  const AppointmentReminders = require('../services/appointment-reminders');
+  // An existing off-hour stop: a date-only move through the route refuses it...
+  mockVisitRow = { id: 'svc-1', scheduled_date: TARGET, window_start: '06:30:00', window_end: '07:30:00', estimated_duration_minutes: 60, visit_id: 'visit-1', is_recurring: false, active: true };
+  expect((await reschedule({ newDate: TARGET })).status).toBe(422);
+  // ...but the reassignment keeps the slot as it is.
+  const actor = { techRole: 'admin', technicianId: 'staff-1' };
+  const planned = await planVisitMoveForStaff({ serviceId: 'svc-1', newDate: TARGET, notifyCustomer: false, body: { technicianId: 'tech-2' }, actor, sourceSurface: 'edit_modal', keepSlot: true });
+  expect(planned.plan).toMatchObject({ effectiveWindow: null });
+  expect(planned.plan.rescheduleOptions).toMatchObject({ adminWindowRules: false, keepStatus: true, allowLive: false, technicianId: 'tech-2', sourceSurface: 'edit_modal' });
+  SmartRebooker.reschedule.mockResolvedValue({ success: true, visitMove: { visitId: 'visit-1', moved: ['svc-1', 'svc-2'], failed: [] } });
+  AppointmentReminders.handleReschedule.mockClear();
+  const out = await runPlannedVisitMove({ plan: planned.plan, serviceId: 'svc-1', newDate: TARGET, notifyCustomer: false, actor });
+  expect(out.status).toBe(200);
+  // The sync releases the unit mover's reminder hold and, with no text
+  // going out, keeps a pending creation confirmation pending.
+  expect(AppointmentReminders.handleReschedule).toHaveBeenCalledTimes(1);
+  expect(AppointmentReminders.handleReschedule.mock.calls[0][2]).toMatchObject({ sendNotification: false, keepPendingConfirmation: true, coverDueWindows: false });
+  expect(AppointmentReminders.handleReschedule.mock.calls[0][2].preserveMoveHold).toBeUndefined();
+  // The ordinary route move does not carry keepStatus.
+  await reschedule({ newDate: TARGET, newWindow: '09:00-10:00' });
+  expect(SmartRebooker.reschedule.mock.calls.at(-1)[5].keepStatus).toBeUndefined();
+  SmartRebooker.reschedule.mockResolvedValue({ success: true });
+});
+
 describe('window resolved against the CURRENT visit row', () => {
   test("{ start } on a 2-hour visit derives and validates the REAL end: 19:00 → 19:00-21:00 is refused (never 19:00-11:00)", async () => {
     mockVisitRow = { window_start: '09:00:00', window_end: '11:00:00', estimated_duration_minutes: null };

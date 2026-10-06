@@ -102,6 +102,11 @@ function addProduct(name, amount, how = null) {
 
 async function generate(note = NOTE) {
   fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: note } });
+  // Generate holds (disabled, its reason in the footer) while the visit's
+  // photos and promises load, and a click before then does nothing: wait for
+  // it to be live (the CI flake of 2026-10-03, reproduced with a slow photos
+  // read).
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
   fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
   await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
 }
@@ -109,6 +114,15 @@ async function generate(note = NOTE) {
 const recordCard = () => screen.getByRole('region', { name: 'Bed bug record heard from you' });
 // A field's row on the card: its label, its value, the words heard.
 const fieldRow = (label) => within(recordCard()).getByText(label).closest('.tech-lane-row');
+
+// Owner 2026-10-05: the "Swept eaves and webs" box is a plain pest visit's.
+describe('the swept eaves and webs box on a lane visit', () => {
+  test('is not on the visit step', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    expect(screen.queryByRole('checkbox', { name: 'Swept eaves and webs' })).toBeNull();
+  });
+});
 
 describe('the lane record on the sheet', () => {
   test('reads the visit\'s own record from the note, shows each field with its words, and writes the report and the completion from it', async () => {

@@ -23,9 +23,10 @@
 // to the tech's cell, then the customer) and POST /api/tech/line/sms (an
 // inline compose). Without a line the tel:/sms: links stay as they were.
 //
-// Tech portal style rule (CLAUDE.md): inline styles + dark palette,
-// Montserrat headings per-element. No Tailwind, no components/ui.
+// Tech portal style rule (CLAUDE.md): inline styles, no Tailwind, no
+// components/ui.
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Camera, ClipboardCheck, FileText, Flag, Map, MessageSquare, Phone } from 'lucide-react';
 import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
@@ -43,25 +44,29 @@ import {
 } from './visitBrief';
 import { useVisitPrepPhotoUrls } from '../../hooks/useVisitPrepPhotoUrls';
 
+// Inside the field workspace (.tech-field, tech-field.css) these resolve to the
+// Waves Admin look; the fallbacks are the same light values, for a render
+// outside it.
 const DARK = {
-  bg: '#0f1923',
-  card: '#1e293b',
-  border: '#334155',
-  teal: '#0ea5e9',
-  amber: '#f59e0b',
-  red: '#ef4444',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
+  bg: 'var(--tfx-bg, #fafaf9)',
+  card: 'var(--tfx-card, #ffffff)',
+  border: 'var(--tfx-border, #d6d3d1)',
+  teal: 'var(--tfx-accent, #1c1917)',
+  amber: 'var(--tfx-amber, #854d0e)',
+  red: 'var(--tfx-red, #a32d2d)',
+  text: 'var(--tfx-text, #1c1917)',
+  muted: 'var(--tfx-muted, #57534e)',
+  onAccent: 'var(--tfx-on-accent, #ffffff)',
+  ok: 'var(--tfx-ok, #1c1917)',
 };
 
 const sectionLabelStyle = {
   fontSize: 14,
-  fontWeight: 700,
-  color: DARK.muted,
-  textTransform: 'uppercase',
-  letterSpacing: 1,
-  margin: '14px 0 6px',
-  fontFamily: "'Montserrat', sans-serif",
+  fontWeight: 500,
+  lineHeight: 1.4,
+  color: DARK.text,
+  margin: '16px 0 6px',
+  fontFamily: "var(--tfx-font, 'Roboto', system-ui, sans-serif)",
 };
 
 const factRowStyle = { fontSize: 14, color: DARK.text, margin: '3px 0 0' };
@@ -82,38 +87,25 @@ function MemberLabel({ service, show }) {
   );
 }
 
-// tel:/sms: anchors styled like ActionBtn — real links so iOS hands them
+// tel:/sms: anchors styled like the visit's .tf-button — real links so iOS hands them
 // to the dialer/Messages without a tap-through.
 function LinkBtn({ href, icon, label, onClick, disabled = false }) {
-  const base = {
-    flex: 1,
-    minHeight: 48,
-    padding: '10px 4px',
-    borderRadius: 8,
-    border: `1px solid ${DARK.border}`,
-    background: 'transparent',
-    color: DARK.text,
-    fontSize: 14,
-    fontWeight: 600,
-    textDecoration: 'none',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
-    cursor: 'pointer',
-  };
+  const style = { flex: 1 };
   if (href) {
-    return <a href={href} style={base}><span style={{ fontSize: 15 }}>{icon}</span> {label}</a>;
+    return <a className="tf-button" href={href} style={style}>{icon} {label}</a>;
   }
   return (
-    <button type="button" onClick={onClick} disabled={disabled} style={{ ...base, opacity: disabled ? 0.6 : 1 }}>
-      <span style={{ fontSize: 15 }}>{icon}</span> {label}
+    <button type="button" className="tf-button" onClick={onClick} disabled={disabled} style={style}>
+      {icon} {label}
     </button>
   );
 }
 
 // The exact code rows the day payload never carries (redacted there by
 // design) — only non-null codes render.
+// The access-code kind each profile code field is (for the dedupe below).
+const PROFILE_CODE_KIND = { neighborhoodGate: 'neighborhood_gate', propertyGate: 'property_gate', garage: 'garage', lockbox: 'lockbox' };
+
 const CODE_LABELS = [
   ['neighborhoodGate', 'Neighborhood gate'],
   ['propertyGate', 'Property gate'],
@@ -121,7 +113,111 @@ const CODE_LABELS = [
   ['lockbox', 'Lockbox'],
 ];
 
-function AccessSection({ alerts, access }) {
+const gateBtnStyle = {
+  minHeight: 36, padding: '4px 12px', borderRadius: 6, fontSize: 14, cursor: 'pointer',
+  border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.text,
+};
+
+// Neighborhood gate codes from the visit (GATE_NEIGHBORHOOD_TECH_ACTIONS).
+// `gate` ({ visitId, request, onChanged }) is set when this stop's
+// neighborhood can take them: a neighborhood code alert then offers "Wrong
+// code" (the office checks it; it is never removed here) and the section
+// offers "Add gate code" (live for every stop in the neighborhood).
+function useGateCodeActions(gate) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState(null);
+  const post = async (suffix, body, ok) => {
+    setBusy(true);
+    setNote(null);
+    try {
+      await gate.request(`/admin/neighborhood-access/visits/${gate.visitId}/entries${suffix}`, { method: 'POST', body: JSON.stringify(body) });
+      setNote({ ok });
+      gate.onChanged?.();
+      return true;
+    } catch (err) {
+      setNote({ error: err?.message || 'Could not save. Try again.' });
+      // The code changed under this screen: show the route's current one.
+      if (err?.code === 'entry_changed') gate.onChanged?.();
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  return {
+    busy,
+    note,
+    clearNote: () => setNote(null),
+    markWrong: (alert) => {
+      if (!window.confirm(`Report "${alert.text}" as not working? The office will check it.`)) return;
+      post(`/${alert.neighborhoodEntryId}/wrong`, { code: alert.neighborhoodEntryCode }, 'Reported. The office will check that code.');
+    },
+    add: (code) => post('', { code }, "Saved to this neighborhood's gate codes."),
+  };
+}
+
+function GateAlertControl({ alert, actions }) {
+  if (alert.reportedWrong) return <span style={{ color: DARK.muted, flexShrink: 0 }}>Reported wrong</span>;
+  return (
+    <button type="button" disabled={actions.busy} onClick={() => actions.markWrong(alert)} style={{ ...gateBtnStyle, flexShrink: 0, opacity: actions.busy ? 0.6 : 1 }}>
+      Wrong code
+    </button>
+  );
+}
+
+function GateAddCode({ actions }) {
+  const [adding, setAdding] = useState(false);
+  const [code, setCode] = useState('');
+  const typed = code.trim();
+  const close = () => { setAdding(false); setCode(''); };
+  const submit = async (e) => {
+    e.preventDefault();
+    if (typed && await actions.add(typed)) close();
+  };
+  return (
+    <>
+      {adding ? (
+        <form onSubmit={submit} style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+          <input
+            aria-label="Neighborhood gate code"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            inputMode="tel"
+            autoComplete="off"
+            maxLength={12}
+            placeholder="Gate code"
+            style={{ ...gateBtnStyle, cursor: 'text', flex: '1 1 120px', minWidth: 0 }}
+          />
+          <button type="submit" disabled={actions.busy || !typed} style={{ ...gateBtnStyle, opacity: actions.busy || !typed ? 0.6 : 1 }}>
+            {actions.busy ? 'Saving…' : 'Save'}
+          </button>
+          <button type="button" disabled={actions.busy} onClick={() => { close(); actions.clearNote(); }} style={gateBtnStyle}>Cancel</button>
+        </form>
+      ) : (
+        <div style={{ marginTop: 8 }}>
+          <button type="button" disabled={actions.busy} onClick={() => { setAdding(true); actions.clearNote(); }} style={gateBtnStyle}>Add gate code</button>
+        </div>
+      )}
+      {actions.note?.ok && <p role="status" style={factMutedStyle}>{actions.note.ok}</p>}
+      {actions.note?.error && <p role="alert" style={{ ...factMutedStyle, color: DARK.red }}>{actions.note.error}</p>}
+    </>
+  );
+}
+
+const alertRowStyle = (a, split) => {
+  const accent = a?.type === 'chemical' ? DARK.red : a?.type === 'no_card_on_file' ? DARK.amber : null;
+  return {
+    fontSize: 14,
+    color: accent || DARK.text,
+    fontWeight: a?.type === 'no_card_on_file' ? 500 : undefined,
+    marginBottom: 3,
+    paddingLeft: 8,
+    borderLeft: `2px solid ${accent || DARK.teal}`,
+    ...(split ? { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 } : {}),
+  };
+};
+
+function AccessSection({ alerts, access, gate = null }) {
+  const gateActions = useGateCodeActions(gate);
   const codeRows = access
     ? CODE_LABELS.map(([key, label]) => (access.codes?.[key] ? [label, access.codes[key]] : null)).filter(Boolean)
     : [];
@@ -135,36 +231,111 @@ function AccessSection({ alerts, access }) {
       access.specialInstructions ? ['Instructions', access.specialInstructions] : null,
     ].filter(Boolean)
     : [];
-  if (!alerts.length && !codeRows.length && !noteRows.length) return null;
+  if (!alerts.length && !codeRows.length && !noteRows.length && !gate) return null;
   return (
     <>
       <SectionLabel>Access</SectionLabel>
       {alerts.map((a, i) => {
         const text = typeof a === 'string' ? a : a?.text;
         if (!text) return null;
-        const accent = a?.type === 'chemical' ? DARK.red : a?.type === 'no_card_on_file' ? DARK.amber : null;
+        const canReport = !!gate && !!a?.neighborhoodEntryId;
         return (
-          <div key={i} style={{
-            fontSize: 14,
-            color: accent || DARK.text,
-            fontWeight: a?.type === 'no_card_on_file' ? 600 : undefined,
-            marginBottom: 3,
-            paddingLeft: 8,
-            borderLeft: `2px solid ${accent || DARK.teal}`,
-          }}>
-            {text}
+          <div key={i} style={alertRowStyle(a, canReport)}>
+            {canReport ? <span>{text}</span> : text}
+            {canReport && <GateAlertControl alert={a} actions={gateActions} />}
           </div>
         );
       })}
       {codeRows.map(([label, code]) => (
         <p key={label} style={factRowStyle}>
           <span style={{ color: DARK.muted }}>{label}: </span>
-          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 600 }}>{code}</span>
+          <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>{code}</span>
         </p>
       ))}
       {noteRows.map(([label, value]) => (
         <p key={label} style={factRowStyle}>
           <span style={{ color: DARK.muted }}>{label}: </span>{value}
+        </p>
+      ))}
+      {gate && <GateAddCode actions={gateActions} />}
+    </>
+  );
+}
+
+// Access codes the customer gave (access codes section, read only): the
+// active standing codes plus one-visit codes tied to a visit of this stop.
+// Read per visit (owner 2026-10-05: a technician sees the codes of a visit
+// assigned to them); a section that is off answers 404 and the block hides.
+const ACCESS_KIND_LABELS = {
+  neighborhood_gate: 'Neighborhood gate', property_gate: 'Property gate', door: 'Door or lock',
+  lockbox: 'Lockbox', garage: 'Garage', call_box: 'Call box', pass: 'Visitor pass', other: 'Access code',
+};
+
+function VisitAccessCodes({ request, customerId, visitIds, shownCodes }) {
+  // Rows are kept with the stop they were read for and shown only for that
+  // stop, so the first render of a new stop never shows the last stop's codes.
+  const [loaded, setLoaded] = useState({ key: '', rows: [] });
+  const [failed, setFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  const visitKey = visitIds.join(',');
+  const stopKey = `${customerId || ''}|${visitKey}`;
+  const rows = loaded.key === stopKey ? loaded.rows : [];
+  useEffect(() => {
+    if (!request || !customerId) return undefined;
+    let cancelled = false;
+    const ids = visitKey ? visitKey.split(',') : [];
+    setFailed(false);
+    // Off (404) or not this technician's visit (403) hides the block; any
+    // other failure says so, so a technician never takes "no codes" for an
+    // outage and can try again.
+    Promise.all(ids.map((id) => request(`/admin/access-codes/visits/${encodeURIComponent(id)}`)
+      .then((data) => (Array.isArray(data?.accessCodes) ? data.accessCodes : []))
+      .catch((err) => {
+        if (err && (err.status === 404 || err.status === 403)) return [];
+        throw err;
+      })))
+      .then((lists) => {
+        if (cancelled) return;
+        const seen = new Set();
+        setLoaded({ key: stopKey, rows: lists.flat().filter((r) => (seen.has(r.id) ? false : seen.add(r.id))) });
+      })
+      .catch(() => { if (!cancelled) setFailed(true); });
+    return () => { cancelled = true; };
+  }, [request, customerId, visitKey, stopKey, attempt]);
+  const ids = visitKey ? visitKey.split(',') : [];
+  // Already shown above for the SAME access point; equal values at different
+  // points (a gate and a door both 1234) are both shown.
+  // Codes compare as the server does: case and every space ignored ("# 4821" = "#4821").
+  const canon = (c) => String(c || '').replace(/\s+/g, '').toLowerCase();
+  const shown = new Set(shownCodes.map(([kind, c]) => `${kind}:${canon(c)}`));
+  // A one-home customer's gate, garage and lockbox rows come marked
+  // `profileBacked`. The brief's profile codes may be off, fail soft or come
+  // from a stale cached brief, so a row is hidden only when the card already
+  // shows that exact code for the same access point (the dedupe below); a row
+  // whose code differs is the current one and is always shown.
+  const mine = rows.filter((r) => (r.life === 'standing' || ids.includes(r.scheduledServiceId))
+    && !(r.code && !r.instructions && shown.has(`${r.kind}:${canon(r.code)}`)));
+  if (failed) {
+    return (
+      <>
+        <SectionLabel>Access codes</SectionLabel>
+        <p role="alert" style={factRowStyle}>
+          Could not load this stop's access codes.{' '}
+          <button type="button" onClick={() => setAttempt((n) => n + 1)}>Try again</button>
+        </p>
+      </>
+    );
+  }
+  if (!mine.length) return null;
+  return (
+    <>
+      <SectionLabel>Access codes</SectionLabel>
+      {mine.map((r) => (
+        <p key={r.id} style={factRowStyle}>
+          <span style={{ color: DARK.muted }}>{ACCESS_KIND_LABELS[r.kind] || 'Access code'}{r.life === 'visit' ? ' (this visit)' : ''}: </span>
+          {r.code && <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 500 }}>{r.code}</span>}
+          {r.code && r.instructions ? ' · ' : ''}
+          {r.instructions}
         </p>
       ))}
     </>
@@ -424,7 +595,7 @@ function QuotedSection({ estimate }) {
         return (
           <p key={i} style={factRowStyle}>
             {line.estimateLabel || line.name || 'Service'}
-            {label ? <span style={{ color: DARK.teal, fontWeight: 600 }}> — {label}</span> : null}
+            {label ? <span style={{ color: DARK.teal, fontWeight: 500 }}> — {label}</span> : null}
           </p>
         );
       })}
@@ -472,12 +643,12 @@ function MemberMoney({ service, estimate, showType }) {
     <>
       <MemberLabel service={service} show={showType} />
       {rows.map(([label, value, accent]) => (
-        <p key={label} style={{ ...factRowStyle, color: accent || DARK.text, fontWeight: accent ? 700 : undefined }}>
+        <p key={label} style={{ ...factRowStyle, color: accent || DARK.text, fontWeight: accent ? 500 : undefined }}>
           <span style={{ color: DARK.muted, fontWeight: 400 }}>{label}: </span>{value}
         </p>
       ))}
       {deposit?.payerBilled && (
-        <p style={{ ...factRowStyle, color: DARK.amber, fontWeight: 600 }}>
+        <p style={{ ...factRowStyle, color: DARK.amber, fontWeight: 500 }}>
           Bills to a payer — do not collect from the homeowner.
         </p>
       )}
@@ -490,7 +661,7 @@ function MemberMoney({ service, estimate, showType }) {
         <p style={factRowStyle}>
           Annual prepay plan
           {payment.annualPrepay.coversThisVisit === false ? (
-            <span style={{ color: DARK.amber, fontWeight: 600 }}> — does not cover this visit</span>
+            <span style={{ color: DARK.amber, fontWeight: 500 }}> — does not cover this visit</span>
           ) : null}
         </p>
       )}
@@ -552,7 +723,7 @@ function WdoBriefSection({ brief }) {
     <>
       <SectionLabel>WDO pre-inspection</SectionLabel>
       {brief.risk_score && (
-        <p style={{ ...factRowStyle, fontWeight: 700 }}>
+        <p style={{ ...factRowStyle, fontWeight: 500 }}>
           Risk: {brief.risk_score}
           {brief.risk_reason ? <span style={{ color: DARK.muted, fontWeight: 400 }}> — {brief.risk_reason}</span> : null}
         </p>
@@ -633,13 +804,13 @@ function BriefGuidanceSection({ brief, service, showType }) {
       {priorities.map((p, i) => <p key={`pr${i}`} style={factRowStyle}>• {p}</p>)}
       {watchItems.map((w, i) => <p key={`wi${i}`} style={{ ...factRowStyle, color: DARK.amber }}>• {w}</p>)}
       {lawnUnavailable && (
-        <p style={{ ...factRowStyle, color: DARK.amber, fontWeight: 600 }}>
+        <p style={{ ...factRowStyle, color: DARK.amber, fontWeight: 500 }}>
           ⚠ No protocol product guidance available
           {lawn.reason ? ` (${String(lawn.reason).replace(/_/g, ' ')})` : ''} — confirm the plan before applying products.
         </p>
       )}
       {lawn?.window && (
-        <p style={{ ...factRowStyle, fontWeight: 600 }}>
+        <p style={{ ...factRowStyle, fontWeight: 500 }}>
           {lawn.window.title || 'Protocol window'}
           {lawn.window.goal ? <span style={{ color: DARK.muted, fontWeight: 400 }}> — {lawn.window.goal}</span> : null}
         </p>
@@ -722,7 +893,7 @@ function LastVisitSection({ service, visitBrief, facts, showType }) {
 // completes, until a sale converts it to won.
 function ConsultationOutcomeAction({ service, onOutcome, style }) {
   if (!onOutcome || !canRecordConsultationOutcome(service)) return null;
-  return <button onClick={() => onOutcome(service)} style={style}>📝 Outcome</button>;
+  return <button className="tf-button" onClick={() => onOutcome(service)} style={style}><ClipboardCheck aria-hidden="true" />Outcome</button>;
 }
 
 // Per-service actions keep terminal reports read-only and preserve the
@@ -731,11 +902,7 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
   const closeoutAvailable = !!service.visitCloseoutPacket || recordlessVisitNeedsCloseout(service);
   const reportDisabled = !closeoutAvailable
     && (TERMINAL_STATUSES.has(service.status) || ['sent', 'closed'].includes(service.linkedProject?.status));
-  const btn = {
-    minHeight: 48, minWidth: 48, padding: '8px 10px', borderRadius: 6, fontSize: 14, fontWeight: 600,
-    border: `1px solid ${DARK.border}`, background: 'transparent',
-    color: DARK.teal, cursor: 'pointer',
-  };
+  const btn = { flex: '1 1 auto' };
   return (
     <div style={{ marginTop: 8 }}>
       {showType && (
@@ -749,30 +916,32 @@ function ServiceActions({ service, showType, onPhotos, onProject, onZone, onLead
           </span>
         </p>
       )}
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button
+          className="tf-button"
           disabled={reportDisabled}
           onClick={(event) => { event.currentTarget.focus(); onProject(service); }}
-          style={{ ...btn, fontSize: 14, ...(reportDisabled ? { color: DARK.muted, cursor: 'default' } : {}) }}
+          style={btn}
         >
+          <FileText aria-hidden="true" />
           {/* A visit with an existing linked report continues it (in-place
               editor) instead of creating a duplicate; a sent/closed report
               or completed visit is terminal (openProjectOrContinue no-ops). */}
           {closeoutAvailable ? 'Open closeout' : service.linkedProject?.status === 'sent'
-            ? '🗂️ Sent'
+            ? 'Sent'
             : service.linkedProject?.status === 'closed' || service.status === 'completed'
-              ? '🗂️ Completed'
-              : service.linkedProject?.id ? '🗂️ Continue' : '🗂️ Report'}
+              ? 'Completed'
+              : service.linkedProject?.id ? 'Continue' : 'Report'}
         </button>
-        <button onClick={(event) => { event.currentTarget.focus(); onPhotos(service); }} style={btn}>📷 Photos</button>
+        <button className="tf-button" onClick={(event) => { event.currentTarget.focus(); onPhotos(service); }} style={btn}><Camera aria-hidden="true" />Photos</button>
         {/* Hidden when the schedule feed marks the service trace-ineligible
             (GATE_TRACE_ELIGIBILITY): nothing is sprayed on bait/trapping/
             inspection stops. Absent flag keeps the button — the write route
             enforces the same registry either way. */}
         {service.traceEligible !== false && (
-          <button onClick={() => onZone(service)} aria-label="Trace treatment zone" style={btn}>🛰️ Zone</button>
+          <button className="tf-button" onClick={() => onZone(service)} aria-label="Trace treatment zone" style={btn}><Map aria-hidden="true" />Zone</button>
         )}
-        <button onClick={() => onLead(service)} aria-label="Flag opportunity" style={{ ...btn, color: DARK.amber }}>🚩</button>
+        <button className="tf-button" onClick={() => onLead(service)} style={btn}><Flag aria-hidden="true" />Flag opportunity</button>
         <ConsultationOutcomeAction service={service} onOutcome={onOutcome} style={btn} />
       </div>
     </div>
@@ -806,7 +975,7 @@ function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
     }
   }
   return (
-    <div data-testid="line-text-compose" style={{ marginTop: 8, padding: 10, borderRadius: 8, border: `1px solid ${DARK.border}`, background: DARK.bg }}>
+    <div data-testid="line-text-compose" style={{ marginTop: 8, padding: 10, borderRadius: 4, border: `1px solid ${DARK.border}`, background: DARK.bg }}>
       <div style={{ ...factMutedStyle, margin: '0 0 6px' }}>Text from your line {line.formatted}</div>
       <textarea
         value={body}
@@ -817,13 +986,13 @@ function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
         style={{ width: '100%', boxSizing: 'border-box', padding: 8, borderRadius: 6, border: `1px solid ${DARK.border}`, background: DARK.card, color: DARK.text, fontSize: 16, resize: 'vertical' }}
       />
       <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
-        <button type="button" onClick={send} disabled={state.busy || !body.trim()} style={{ minHeight: 48, padding: '8px 14px', borderRadius: 8, border: 'none', background: DARK.teal, color: '#0b1220', fontSize: 14, fontWeight: 700, cursor: 'pointer', opacity: state.busy || !body.trim() ? 0.6 : 1 }}>
+        <button type="button" onClick={send} disabled={state.busy || !body.trim()} style={{ minHeight: 48, padding: '8px 14px', borderRadius: 4, border: 'none', background: DARK.teal, color: DARK.onAccent, fontSize: 14, fontWeight: 500, cursor: 'pointer', opacity: state.busy || !body.trim() ? 0.6 : 1 }}>
           {state.busy ? 'Sending…' : 'Send'}
         </button>
-        <button type="button" onClick={onClose} disabled={state.busy} style={{ minHeight: 48, padding: '8px 12px', borderRadius: 8, border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted, fontSize: 14, cursor: 'pointer', opacity: state.busy ? 0.6 : 1 }}>Close</button>
+        <button type="button" onClick={onClose} disabled={state.busy} style={{ minHeight: 48, padding: '8px 12px', borderRadius: 4, border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted, fontSize: 14, cursor: 'pointer', opacity: state.busy ? 0.6 : 1 }}>Close</button>
         <span style={{ ...factMutedStyle, margin: 0, marginLeft: 'auto' }}>{body.length}/{LINE_TEXT_MAX}</span>
       </div>
-      {state.sent && <p role="status" style={{ ...factMutedStyle, color: '#10b981', marginTop: 6 }}>Sent.</p>}
+      {state.sent && <p role="status" style={{ ...factMutedStyle, color: DARK.ok, marginTop: 6 }}>Sent.</p>}
       {state.error && <p role="alert" style={{ ...factMutedStyle, color: DARK.red, marginTop: 6 }}>{state.error}</p>}
     </div>
   );
@@ -834,7 +1003,7 @@ function LineTextCompose({ line, onSend, onClose, onBusyChange }) {
 // second tap cannot originate a second bridge (codex #4072 r6 P2).
 const CALL_LOCK_MS = 45000;
 
-export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, techLine = null, request = null, onBusyChange = null }) {
+export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onProject, onZone, onLead, onOutcome = null, techLine = null, request = null, onBusyChange = null, onGateChanged = null }) {
   const service = stop.primary;
   const phone = service.customerPhone || service.customer_phone || null;
   // Own-line mode: Call bridges through the line, Text composes from it.
@@ -889,8 +1058,9 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       setCallState({ busy: false, note: '', error: String(err?.message || err).slice(0, 160) });
     }
   }
-  const address = service.address || null;
   const alerts = stopPropertyAlerts(stop);
+  // The day row marks a member whose neighborhood takes gate codes from the visit.
+  const gateVisit = request ? stop.services.find((m) => m.neighborhoodGateActions === true) : null;
   const grouped = stop.services.length > 1;
   const loading = detail?.status === 'loading';
   const failed = detail?.status === 'error';
@@ -939,22 +1109,15 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const sms = smsHref(phone);
 
   return (
-    <div data-testid="visit-brief-panel" style={{ borderTop: `1px solid ${DARK.border}`, marginTop: 10, paddingTop: 10 }}>
-      {(tel || sms || address) && (
+    <div data-testid="visit-brief-panel">
+      {(tel || sms) && (
         <div style={{ display: 'flex', gap: 8 }}>
           {tel && !lineUnknown && (line
-            ? (line.canCall && <LinkBtn icon="📞" label={callState.busy ? 'Calling…' : 'Call'} disabled={callState.busy} onClick={callFromLine} />)
-            : <LinkBtn href={tel} icon="📞" label="Call" />)}
+            ? (line.canCall && <LinkBtn icon={<Phone aria-hidden="true" />} label={callState.busy ? 'Calling…' : 'Call'} disabled={callState.busy} onClick={callFromLine} />)
+            : <LinkBtn href={tel} icon={<Phone aria-hidden="true" />} label="Call" />)}
           {sms && !lineUnknown && (line
-            ? <LinkBtn icon="💬" label="Text" disabled={textBusy} onClick={() => setComposeOpen((o) => !o)} />
-            : <LinkBtn href={sms} icon="💬" label="Text" />)}
-          {address && (
-            <LinkBtn
-              icon="🗺️"
-              label="Navigate"
-              onClick={() => window.open(`https://maps.google.com/?q=${encodeURIComponent(address)}`, '_blank')}
-            />
-          )}
+            ? <LinkBtn icon={<MessageSquare aria-hidden="true" />} label="Text" disabled={textBusy} onClick={() => setComposeOpen((o) => !o)} />
+            : <LinkBtn href={sms} icon={<MessageSquare aria-hidden="true" />} label="Text" />)}
         </div>
       )}
       {lineUnknown && (tel || sms) && (
@@ -970,9 +1133,13 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
           onBusyChange={setTextBusy}
         />
       )}
-      {address && <p style={{ ...factMutedStyle, marginTop: 8 }}>{address}</p>}
-
-      <AccessSection alerts={alerts} access={access} />
+      <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
+      <VisitAccessCodes
+        request={request}
+        customerId={service.customer_id || service.customerId || null}
+        visitIds={stop.services.map((m) => m.id).filter(Boolean)}
+        shownCodes={CODE_LABELS.map(([key]) => [PROFILE_CODE_KIND[key], access?.codes?.[key]]).filter(([, v]) => Boolean(v))}
+      />
 
       <CustomerFlaggedSection
         serviceId={customerFlaggedMember?.service?.id}
@@ -1036,7 +1203,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
             onClick={onRetry}
             style={{
               border: `1px solid ${DARK.border}`, background: 'transparent', color: DARK.muted,
-              borderRadius: 6, padding: '6px 10px', fontSize: 14, fontWeight: 600, cursor: 'pointer',
+              borderRadius: 6, padding: '6px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer',
             }}
           >
             Couldn't load estimate & access details — retry

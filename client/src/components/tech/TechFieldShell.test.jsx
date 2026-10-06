@@ -1,16 +1,13 @@
 // @vitest-environment jsdom
 import React, { useEffect } from 'react';
 import '@testing-library/jest-dom/vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { BrowserRouter, Link, MemoryRouter, Route, Routes, useOutletContext } from 'react-router-dom';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-const flag = vi.hoisted(() => ({ enabled: true, ready: true }));
-vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlagReady: () => flag }));
+import { afterEach, expect, it, vi } from 'vitest';
 vi.mock('./AddToHomeScreenHint', () => ({ default: () => <p>Install hint</p> }));
 import TechFieldShell from './TechFieldShell';
 import TechNavigationLock from './TechNavigationLock';
 const unmounted = vi.fn();
-beforeEach(() => { flag.enabled = true; flag.ready = true; });
 function Visit() {
   const { setNavigationBusy } = useOutletContext();
   useEffect(() => unmounted, []);
@@ -20,7 +17,7 @@ afterEach(() => { cleanup(); unmounted.mockClear(); window.history.replaceState(
 
 function renderShell(path = '/admin/today', documentsAvailable = false) {
   return render(<TechNavigationLock><MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={documentsAvailable}><div>Existing route</div></TechFieldShell>}>
+    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={documentsAvailable} />}>
       <Route index element={<div>Route content</div>} />
       <Route path="tools" element={<div>Tools content</div>} />
       <Route path="more" element={<div>More content</div>} />
@@ -29,25 +26,6 @@ function renderShell(path = '/admin/today', documentsAvailable = false) {
     </Route>
   </Routes></MemoryRouter></TechNavigationLock>);
 }
-
-it('uses the existing route when disabled and waits for an unresolved flag', () => {
-  flag.enabled = false;
-  const mounted = renderShell();
-  expect(screen.getByText('Existing route')).toBeInTheDocument();
-  expect(screen.queryByRole('navigation', { name: 'Field navigation' })).not.toBeInTheDocument();
-  mounted.unmount();
-  flag.ready = false;
-  renderShell();
-  expect(screen.getByRole('status')).toHaveTextContent('Loading field workspace');
-  expect(screen.queryByText('Route content')).not.toBeInTheDocument();
-});
-
-it('the flag-off view keeps the install hint the retired /tech shell showed (Codex #5573 r8)', () => {
-  flag.enabled = false;
-  renderShell();
-  expect(screen.getByText('Install hint')).toBeInTheDocument();
-  expect(screen.getByText('Existing route')).toBeInTheDocument();
-});
 
 it.each(['/admin/today/documents', '/admin/today/documents/', '/ADMIN/TODAY/DOCUMENTS/'])('keeps documents gated at %s', (path) => {
   const mounted = renderShell(path);
@@ -70,6 +48,36 @@ it.each([
   expect(screen.getByRole('link', { name: 'Today', exact: true })).toHaveAttribute('href', '/admin/today?visit=row%3Atwo');
   expect(screen.getByRole('link', { name: 'Tools' })).toHaveAttribute('href', '/admin/today/tools?visit=row%3Atwo');
   expect(screen.queryByText('Messages')).not.toBeInTheDocument();
+  expect(screen.getByRole('link', { name: 'More' })).toHaveAttribute('href', `/admin/today/more?visit=row%3Atwo`);
+});
+it('shows a Today, Tools, More tab row and no header or bottom bar of its own (owner 2026-10-05)', () => {
+  renderShell('/admin/today/tools');
+  const tabs = screen.getByRole('navigation', { name: 'Field sections' });
+  expect(within(tabs).getAllByRole('link').map((link) => link.textContent)).toEqual(['Today', 'Tools', 'More']);
+  expect(within(tabs).getAllByRole('link').map((link) => link.getAttribute('href'))).toEqual(['/admin/today', '/admin/today/tools', '/admin/today/more']);
+  expect(screen.queryByRole('navigation', { name: 'Field navigation' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: 'Menu' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('link', { name: 'Waves Tech Today' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('banner')).not.toBeInTheDocument();
+  // The admin shell owns the one <main>.
+  expect(screen.queryByRole('main')).not.toBeInTheDocument();
+});
+it('holds the tab links while a visit action is in flight and frees them after', () => {
+  render(<TechNavigationLock><MemoryRouter initialEntries={['/admin/today/tools']}><Routes>
+    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" />}>
+      <Route index element={<div>Route content</div>} />
+      <Route path="tools" element={<Visit />} />
+    </Route>
+  </Routes></MemoryRouter></TechNavigationLock>);
+  fireEvent.click(screen.getByRole('button', { name: 'Start contact' }));
+  const today = screen.getByRole('link', { name: 'Today' });
+  expect(today).toHaveAttribute('aria-disabled', 'true');
+  fireEvent.click(today);
+  expect(screen.queryByText('Route content')).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Settle contact' }));
+  expect(screen.getByRole('link', { name: 'Today' })).toHaveAttribute('aria-disabled', 'false');
+  fireEvent.click(screen.getByRole('link', { name: 'Today' }));
+  expect(screen.getByText('Route content')).toBeInTheDocument();
 });
 it('keeps a busy visit mounted on browser Back and permits Back after settlement', async () => {
   window.history.replaceState({ idx: 0 }, '', '/admin/today');
@@ -104,22 +112,17 @@ it('protects document departure without a router history index only while busy',
   expect(settledDeparture.defaultPrevented).toBe(false);
 });
 
-it('opening a visit (?visit= only) scrolls the field main back to the top (Codex #5573 r15)', async () => {
+it('opening a visit (?visit= only) scrolls the admin main back to the top (Codex #5573 r15)', async () => {
   const scrollTo = vi.fn();
   Object.defineProperty(HTMLElement.prototype, 'scrollTo', { configurable: true, value: scrollTo });
   function Go() { const { setNavigationBusy } = useOutletContext(); void setNavigationBusy; return <Link to="/admin/today?visit=row%3Aone">Open stop</Link>; }
-  render(<TechNavigationLock><MemoryRouter initialEntries={['/admin/today']}><Routes>
-    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={false}><div>Existing route</div></TechFieldShell>}>
+  // The page scrolls in the admin main area, which wraps the workspace.
+  render(<div className="admin-main"><TechNavigationLock><MemoryRouter initialEntries={['/admin/today']}><Routes>
+    <Route path="/admin/today" element={<TechFieldShell techName="Fixture Tech" documentsAvailable={false} />}>
       <Route index element={<Go />} />
     </Route>
-  </Routes></MemoryRouter></TechNavigationLock>);
+  </Routes></MemoryRouter></TechNavigationLock></div>);
   const before = scrollTo.mock.calls.length;
   fireEvent.click(screen.getByRole('link', { name: 'Open stop' }));
   await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(before));
-});
-
-it('the flag-off view sits in the font-exempt fallback root (Codex #5573 r18)', () => {
-  flag.enabled = false;
-  renderShell();
-  expect(screen.getByText('Existing route').closest('.tech-field-fallback')).not.toBeNull();
 });

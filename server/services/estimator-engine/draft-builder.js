@@ -36,6 +36,7 @@ const {
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
 const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS } = require('../pricing-engine/unit-band-pricing');
 const { sameStreetAddress } = require('./address-compare');
+const { scopeUnresolvedVerdict, businessReviewReasons } = require('./business-scope-engine');
 const {
   unitScopeGuardrailsEnabled,
   hasPrimaryStreetNumber,
@@ -158,7 +159,7 @@ function knownEnrichedValue(value) {
 
 // Trust predicate lives in one place — the customer-facing pricing
 // assistant applies the same rule (services/lookup-confidence.js).
-const { lookupBedAreaIsTrustworthy, hasGlobalVerifyFlag } = require('../lookup-confidence');
+const { lookupBedAreaIsTrustworthy, lookupPalmCountIsTrustworthy, hasGlobalVerifyFlag } = require('../lookup-confidence');
 
 function lookupFeatureModifiers(enriched) {
   if (!enriched) return null;
@@ -207,6 +208,45 @@ function storiesSourceForPricing(propertyFacts) {
   return 'lookup';
 }
 
+// Palm count for the Tree & Shrub service line (owner ruling 2026-10-05:
+// "lookup palms, tree & shrub only, never injections"). Returns a COPY of
+// the intent's services; the intent itself is never mutated.
+//  - the caller stated a count on the T&S line: untouched;
+//  - a trusted lookup count of 1..200 palms: becomes services.treeShrub
+//    .palmCount. It is deliberately NOT written to property.palmCount —
+//    resolvePalmCount reads that for palm-INJECTION lines and treats it as a
+//    green-lane fallback, so an AI count there would auto-price per-palm
+//    injections nobody measured;
+//  - a trusted 0: no palms, nothing set and no flag;
+//  - no lookup, a distrusted or an invalid count: palmCountUnverified, which
+//    the pricer turns into the palm_count_unverified review reason when it
+//    priced zero palms (count the palms on the aerial photo before sending).
+// The count rides the service line, so the pricer labels it palmCountSource
+// 'service_line': the same pricing path, the same review exemptions and the
+// same replay keep (treeShrubPalmProvenanceForReplay) as a caller-stated count.
+function servicesWithTreeShrubPalms(services, { isCommercial, lookupEnriched }) {
+  const ts = services.treeShrub;
+  if (isCommercial || !ts || typeof ts !== 'object') return services;
+  if (ts.palmCount !== undefined && ts.palmCount !== null && String(ts.palmCount).trim() !== '') return services;
+  const raw = lookupEnriched?.estimatedPalmCount;
+  const count = Number(raw);
+  const validWhole = raw !== null && raw !== undefined && String(raw).trim() !== ''
+    && Number.isInteger(count) && count >= 0 && count <= 200;
+  if (lookupEnriched && validWhole) {
+    // lookupPalmCountIsTrustworthy rejects a zero count outright (the lookup
+    // stores 0 as its "found no palms" sentinel), so a zero is judged by the
+    // same confidence and wrong-premise verdict applied to a placeholder
+    // positive count.
+    const trusted = lookupPalmCountIsTrustworthy(count === 0
+      ? { ...lookupEnriched, estimatedPalmCount: 1 }
+      : lookupEnriched);
+    if (trusted) {
+      return count === 0 ? services : { ...services, treeShrub: { ...ts, palmCount: count, palmCountFromLookup: true } };
+    }
+  }
+  return { ...services, treeShrub: { ...ts, palmCountUnverified: true } };
+}
+
 function buildEngineInput({
   intent, propertyFacts, context, priorQualifyingServices = [],
   profileDescribesQuotedProperty = false, profileMeasurementUnitExact = false,
@@ -237,7 +277,7 @@ function buildEngineInput({
   const lotSource = propertyFacts?.lot?.source || SQFT_SOURCES.NONE;
 
   return {
-    services: intent.services || {},
+    services: servicesWithTreeShrubPalms(intent.services || {}, { isCommercial, lookupEnriched }),
     isCommercial,
     category: intent.category || (isCommercial ? 'COMMERCIAL' : 'RESIDENTIAL'),
     // Freshly-resolved type (lookup/extraction) beats the profile's saved
@@ -315,8 +355,8 @@ function buildEngineInput({
       : {}),
     // Tree & Shrub measurement inputs from the lookup. Without these the
     // T&S pricer had no bed area at all on this path and fell back to its
-    // 2,000 sqft default (bedAreaSource 'fallback', LOW confidence, manual
-    // review) — the Aug-2026 audit found two of the three real T&S quotes
+    // fallback bed size (now 1,200 sqft; bedAreaSource 'fallback', LOW
+    // confidence, manual review) — the Aug-2026 audit found two of the three real T&S quotes
     // priced that way. estimatedBedAreaSf lands as bedAreaSource
     // 'estimated' / MEDIUM confidence, so the provenance stays truthful:
     // an AI-derived area is never labelled an operator measurement.
@@ -328,20 +368,18 @@ function buildEngineInput({
     // low-confidence draft into a green one-click lane. When the lookup
     // itself says the measurement needs verification, forwarding nothing is
     // the honest move: the pricer then falls back to the lot inference (or
-    // its 2,000 default), both of which carry their own review markers.
+    // its fallback bed size), both of which carry their own review markers.
     ...(!isCommercial && lookupBedAreaIsTrustworthy(lookupEnriched)
       ? { estimatedBedAreaSf: Number(lookupEnriched.estimatedBedAreaSf) }
       : {}),
-    // The lookup's estimatedPalmCount is deliberately NOT forwarded here.
-    // property.palmCount is read by BOTH the T&S reserve and
+    // The lookup's estimatedPalmCount is deliberately NOT forwarded as
+    // property.palmCount: that field is read by BOTH the T&S reserve and
     // resolvePalmCount, and the latter treats it as a valid green-lane
     // fallback for a palm-INJECTION line (requiresManualReview: false) — so
     // an AI-detected count would auto-price per-palm injections nobody
-    // measured. Routing it through the T&S service line instead is no
-    // better today: that source folds into the legacy tree terms while the
-    // reserve is unarmed, which would raise prices off an AI guess. It
-    // needs its own review-marked input, which belongs with the work that
-    // arms the reserve.
+    // measured. A trusted count goes onto the T&S service line only
+    // (servicesWithTreeShrubPalms above, owner ruling 2026-10-05); with no
+    // trusted count that line carries palmCountUnverified and goes to review.
     // Structural facts deriveModifiers() prices from: home age (pest $/app),
     // construction + foundation (termite/WDO), roof type (rodent). UNKNOWN
     // merges stay off the input so the engine's own defaults apply.
@@ -581,6 +619,29 @@ function verifyEvidenceQuotes(intent, context) {
   return { total: quotes.length, unverified: unverified.length };
 }
 
+// The red verdicts decided from facts stamped before pricing, in order: an
+// unconfirmed business scope (GATE_LOOKUP_BUSINESS_IDENTITY: no price until
+// staff confirm "just your space or the whole building"), then the category
+// conflict (read only with unit-scope guardrails on).
+function scopeRedVerdict(propertyFacts, guardrailsOn) {
+  const unresolved = scopeUnresolvedVerdict(propertyFacts);
+  if (unresolved) return { lane: LANES.RED, ...unresolved };
+  // The call positively typed the premises commercial while the draft
+  // stayed residential: reclassifying is the composer's job, so a
+  // conflict here means one of them is wrong — no automated price until
+  // an operator resolves which (owner ruling: category conflicts red).
+  // Read from the stamp index.js resolved with the re-gather in view —
+  // the raw primary-property extraction must not judge a re-gathered
+  // secondary property (codex r3 P1).
+  const conflictType = guardrailsOn ? (propertyFacts?.categoryConflict || null) : null;
+  if (!conflictType) return null;
+  return {
+    lane: LANES.RED,
+    reasons: [`call describes a commercial premises (${conflictType}) but the draft is residential — resolve the category before quoting`],
+    causes: ['category_conflict'],
+  };
+}
+
 // ── Lane classification ───────────────────────────────────────
 function classifyLane({ intent, propertyFacts, engineResult, engineInput = null, totals, comps, calibration, context }) {
   const reasons = [];
@@ -606,22 +667,9 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
         causes: ['incomplete_address'],
       };
     }
-    // The call positively typed the premises commercial while the draft
-    // stayed residential: reclassifying is the composer's job, so a
-    // conflict here means one of them is wrong — no automated price until
-    // an operator resolves which (owner ruling: category conflicts red).
-    // Read from the stamp index.js resolved with the re-gather in view —
-    // the raw primary-property extraction must not judge a re-gathered
-    // secondary property (codex r3 P1).
-    const conflictType = propertyFacts?.categoryConflict || null;
-    if (conflictType) {
-      return {
-        lane: LANES.RED,
-        reasons: [`call describes a commercial premises (${conflictType}) but the draft is residential — resolve the category before quoting`],
-        causes: ['category_conflict'],
-      };
-    }
   }
+  const scopeRed = scopeRedVerdict(propertyFacts, unitScopeGuardrailsEnabled());
+  if (scopeRed) return scopeRed;
 
   const lines = engineResult?.lineItems || [];
   const pricedLines = lines.filter((l) => !lineRequiresReview(l));
@@ -673,12 +721,16 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // in FALLBACK_SQFT_SOURCES), but it is still an INFERENCE, not a
   // measurement, so it parks yellow with a reason the operator can verify
   // on site.
+  reasons.push(...businessReviewReasons(propertyFacts));
   const suiteSize = propertyFacts?.commercialSuiteSize;
   if (usesHomeSqft && suiteSize
     && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS
+      || suiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT
       || suiteSize.source === SQFT_SOURCES.SUITE_TYPE_DEFAULT)) {
     const sizedSqft = Number(propertyFacts.home?.value) || suiteSize.value;
-    if (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
+    if (suiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT) {
+      reasons.push(`suite size read from a public listing: ${sizedSqft.toLocaleString()} sq ft${suiteSize.url ? ` (${suiteSize.url})` : ''} — confirm on site`);
+    } else if (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
       reasons.push(`suite size estimated from state restaurant license: ${suiteSize.seats ?? '?'} seats → ${sizedSqft.toLocaleString()} sq ft — confirm on site`);
     } else {
       // Label with the input that actually SELECTED the default (the

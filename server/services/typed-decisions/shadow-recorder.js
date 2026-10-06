@@ -31,7 +31,11 @@ const crypto = require('crypto');
 const { packageHash, DECISION_PROVIDERS } = require('./packages');
 
 const TABLE = 'decision_reviews';
-const SUBJECT_TYPES = ['call_log', 'sms_log'];
+// The subjects code records, mirrored by the table's CHECK (migrations
+// 20261003101000 and, for scheduled_services, 20261003101500). A type joins
+// both, by a new migration, together with the code that reads it back for the
+// reviewer (routes/admin-typed-decisions.js).
+const SUBJECT_TYPES = ['call_log', 'sms_log', 'social_post', 'scheduled_services'];
 // One row per provider per subject and question (migration 20261002010000):
 // a second provider answering the same case keeps its own row.
 const CONFLICT_KEY = ['capability', 'package_id', 'provider', 'subject_type', 'subject_id', 'question_id'];
@@ -225,4 +229,4 @@ async function recordDecisions({ capability, pkg, provider, subjectType, subject
   return { recorded: (written || []).length, passedOver: rows.length - (written || []).length, sampled };
 }
 
-module.exports = { recordDecisions, sampleFor, siblingDisagrees, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY, DRAW_KEY, TABLE };
+module.exports = { recordDecisions, SUBJECT_TYPES, sampleFor, siblingDisagrees, stableDraw, RANDOM_AUDIT_RATE, MERGE_COLUMNS, CONFLICT_KEY, DRAW_KEY, TABLE };

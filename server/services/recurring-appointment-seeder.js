@@ -1531,6 +1531,8 @@ module.exports = {
   schedulerPlacesPattern,
   FALLBACK_RECURRENCE_GAP_DAYS,
   SEASONAL_FEB_OCT,
+  SEASON_FIRST_MONTH,
+  SEASON_LAST_MONTH,
   seasonalFebOctDate,
   nextSeasonalFebOctDue,
   clampDateToSeason,

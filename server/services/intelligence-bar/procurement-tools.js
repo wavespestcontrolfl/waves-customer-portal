@@ -18,6 +18,7 @@ const MODELS = require('../../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('../llm/anthropic-wire');
 const inventory = require('../inventory-operations');
 const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
+const { analysesIn } = require('../../utils/fertilizer-analysis');
 
 const PROCUREMENT_TOOLS = [
   {
@@ -203,7 +204,7 @@ Use for: "we have 64 oz of Bifen on the shelf", "add the 2 gallons I bought toda
         movement_type: { type: 'string', enum: ['restock', 'correction', 'damaged_lost'], description: 'restock = stock purchased/added; correction = physical count fix (signed quantity or set_total); damaged_lost = write-off' },
         quantity: { type: 'number', description: 'Amount to add (restock), remove (damaged_lost), or signed delta (correction)' },
         set_total: { type: 'number', description: 'Correction only: set the absolute on-hand amount (what is physically on the shelf). Pass this OR quantity, not both.' },
-        unit: { type: 'string', description: 'Unit of the entered amount (fl_oz, gal, qt, oz, lb, g, kg...). Defaults to the product inventory unit; required for a first count.' },
+        unit: { type: 'string', description: 'Unit of the entered amount (fl_oz, gal, qt, oz, lb, g, kg...). Required: pass the unit the operator actually said and never invent or default one. If the operator gave an amount with no unit, ask them which unit before calling.' },
         lot_number: { type: 'string' },
         reason: { type: 'string', description: 'Why the physical stock count changed' },
         note: { type: 'string' },
@@ -1119,49 +1120,7 @@ function qualifiersPreceding(rawText, toIndex) {
 // a qualifier in any of them is part of the product's identity ("Velista
 // WDG" is a registered alias of "Velista").
 //
-// An N-P-K fertilizer analysis (three 1-2 digit numbers, each with an
-// optional one-decimal fraction, joined by -, –, —, or / with optional
-// spaces around the separators) is an identity qualifier exactly like a
-// concentration or formulation code — a seeded alias "K-Flow" mapping to
-// "LESCO K-Flow 0-0-25" must not ground "We bought K-Flow 0-0-20". Checked
-// over the WHOLE raw text, not just adjacent to a matched span, because the
-// analysis reads as the product's own identity wherever it sits in the
-// sentence ("K-Flow — we bought 0-0-20 of it" is still a mismatch).
-//
-// A REAL analysis uses the SAME separator twice ("0-0-25", "0/0/20") — a
-// mixed number like "1-1/2" (gallons) uses TWO DIFFERENT separators ("-"
-// then "/") and must never read as one (Codex round-13 P2: "We bought
-// Taurus SC, 1-1/2 gallons" misread "1-1/2" as an analysis and refused a
-// product with no analysis in its identity at all). \1 backreferences the
-// first separator so the second must match it exactly. –/— are normalized
-// to a plain "-" first (each is one code unit, same as "-", so match
-// indices against the original text are unaffected) so "0–0—25" still
-// reads as one analysis with the separator repeated, rather than as two
-// different separators that would now fail the backreference.
-const ANALYSIS_RE = /\b\d{1,2}(?:\.\d)?\s*([-/])\s*\d{1,2}(?:\.\d)?\s*\1\s*\d{1,2}(?:\.\d)?\b/g;
-function normalizeAnalysis(raw) {
-  return String(raw).replace(/\s+/g, '').replace(/[–—/]/g, '-');
-}
-// A deadline date is not an analysis (Codex round-12 P2: "Please buy two
-// bottles of Taurus SC by 9/27/26" refused as an 9-27-26 mismatch). A triple
-// counts as a date only when a date word introduces it AND it reads as a
-// real month/day — "10-10-10" is a common fertilizer grade, so a bare
-// date-shaped triple ("Lesco, the 10-10-10") stays an identity qualifier.
-const DATE_CUE_BEFORE_RE = /\b(?:by|on|for|before|after|until|till|due|from|since|dated)\s+$/i;
-function isCuedDate(text, match) {
-  const [month, day] = match[0].split(/\s*[-–—/]\s*/).map(Number);
-  const realMonthDay = Number.isInteger(month) && Number.isInteger(day) && month >= 1 && month <= 12 && day >= 1 && day <= 31;
-  return realMonthDay && DATE_CUE_BEFORE_RE.test(text.slice(0, match.index));
-}
-function analysesIn(text) {
-  const raw = String(text);
-  // Normalize –/— to a plain "-" (same code-unit length, so match.index
-  // still lines up with `raw` for isCuedDate's look-back) before matching,
-  // so the backreference reads a triple that mixes dash STYLES ("0–0—25")
-  // as one repeated separator rather than two different ones.
-  const normalized = raw.replace(/[–—]/g, '-');
-  return [...normalized.matchAll(ANALYSIS_RE)].filter((m) => !isCuedDate(raw, m)).map((m) => normalizeAnalysis(m[0]));
-}
+// N-P-K analysis parsing (separators, mixed dashes, cued dates) lives in utils/fertilizer-analysis.js.
 function qualifierConflict(rawText, phrases, identityNames) {
   const { normalizeForMatch } = require('../purchase-receipts/product-matcher');
   const nameTokens = new Set(identityNames.flatMap((name) => normalizeForMatch(name).split(' ')));
@@ -1790,7 +1749,7 @@ async function getStockMovements(input) {
 async function getRestockQueue(input, actionContext) {
   const status = input.status || 'active';
   const { requests } = await require('../inventory-restock-queue').listRestockRequests({
-    status, limit: input.limit || 50, showSpend: actionContext.isAdmin === true, requestId: input.request_id,
+    status, limit: input.limit || 50, showSpend: actionContext.isAdmin === true, officeDetail: actionContext.isAdmin === true, requestId: input.request_id,
   });
   return { requests: requests.map(row => ({
     id: row.id, product_id: row.productId, product: row.productName, category: row.productCategory,
@@ -1814,6 +1773,22 @@ function inventoryWriteOptions(input, actionContext, source) {
 async function adjustStock(input, actionContext) {
   const resolved = await resolveProduct(input);
   if (resolved.error) return resolved;
+  // A quantity with no stated unit never changes stock: the writer would read it in the product's own inventory unit
+  // (fl oz), so "2 jugs" became 2 fl oz. Refused at the preview too, so no card and no owner-direct write is ever built
+  // on an assumed unit; the model asks the operator one short question and calls again with the unit they said.
+  if (!String(input.unit ?? '').trim()) {
+    const { name, inventory_unit: inventoryUnit, container_size: containerSize } = resolved.product;
+    const unitFact = inventoryUnit
+      ? ` ${name} is counted in ${inventoryUnit}${containerSize ? ` (container size ${containerSize})` : ''}.`
+      : containerSize ? ` ${name} has a container size of ${containerSize}.` : '';
+    // A call missing the amount as well asks for both in one refusal, so the operator is not asked twice.
+    if (input.quantity == null && input.set_total == null) {
+      return { success: false, code: 'unit_and_amount_required',
+        error: `The amount and the unit are missing, so no stock was changed.${unitFact} Ask the operator one short question for both the amount and its unit (for example "how much, and in what unit: gallons, fl oz?"), then call again with what they say. Never guess either.` };
+    }
+    return { success: false, code: 'unit_required',
+      error: `The unit is missing, so no stock was changed.${unitFact} Ask the operator one short question about the unit of the amount (for example "2 what: gallons, fl oz?"), then call again with the unit they say. Never guess the unit.` };
+  }
   const fields = { movementType: input.movement_type, quantity: input.quantity, setTotal: input.set_total,
     unit: input.unit, lotNumber: input.lot_number, reason: input.reason, note: input.note };
   if (!actionContext.confirmed) return inventory.previewStockAdjustment(resolved.product.id, fields);
@@ -1847,6 +1822,23 @@ async function createRestockRequest(input, actionContext) {
 }
 
 async function updateRestockRequest(input, actionContext) {
+  // A received amount with no stated unit never changes stock: the writer would read it in the request's saved unit
+  // (or the product's inventory unit), so "received 3" became 3 of whatever the request said. Refused at the preview too,
+  // so no card and no owner-direct write is built on an assumed unit; the model asks the operator one short question and
+  // calls again with the unit they said. Receive with NO amount stays as it is: it takes the ordered or requested amount
+  // in the request's own unit, which is the recorded fact and not a guess.
+  if (input.action === 'receive' && input.quantity != null && !String(input.unit ?? '').trim()) {
+    const request = await db('product_restock_requests').where({ id: input.request_id }).first('requested_quantity', 'unit');
+    // No request found: let the writer report the normal request_not_found error.
+    if (request) {
+      const requested = toNumber(request.requested_quantity);
+      const requestFact = requested != null && requested > 0
+        ? ` The request is for ${requested}${request.unit ? ` ${request.unit}` : ''}.`
+        : request.unit ? ` The request is in ${request.unit}.` : '';
+      return { success: false, code: 'unit_required',
+        error: `The unit is missing, so no stock was changed.${requestFact} Ask the operator one short question about the unit of the amount received (for example "received 2 what: gallons, fl oz?"), then call again with the unit they say. Never guess the unit.` };
+    }
+  }
   const fields = { action: input.action, quantity: input.quantity, unit: input.unit, note: input.note };
   if (!actionContext.confirmed) return inventory.previewRestockAction(input.request_id, fields);
   const result = await inventory.updateRestockRequest(input.request_id, fields,

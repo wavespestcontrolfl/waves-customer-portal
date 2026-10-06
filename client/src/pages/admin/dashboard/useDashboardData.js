@@ -23,6 +23,7 @@ const REQUESTS = [
   ["channelMix", "/admin/dashboard/channel-mix", "growth", true],
   ["leadFunnel", "/admin/dashboard/lead-funnel", "growth", true],
   ["channelRoi", "/admin/dashboard/channel-roi", "growth", true],
+  ["serviceLines", "/admin/dashboard/service-lines", "growth", true],
   ["mix", "/admin/dashboard/service-mix", "profit"],
   ["ebitda", "/admin/dashboard/ebitda-bridge", "profit"],
   ["revenueOverview", "/admin/revenue/overview?period=month", "profit"],

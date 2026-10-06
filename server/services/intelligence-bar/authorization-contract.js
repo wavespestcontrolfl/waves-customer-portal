@@ -86,7 +86,14 @@ const IRREVERSIBLE_TOOL_NAMES = new Set([
   // No un-cancel tool exists — once cancelled, that queued attempt is gone
   // for good (the original sender would need to queue a fresh one).
   'cancel_queued_message',
+  // The Stripe detach cannot be undone, and an Auto Pay-off the customer
+  // is emailed about is only reversible by the customer's own consent.
+  'remove_saved_payment_method',
 ]);
+
+// Tools whose card lines are curated below from their own preview, not the
+// generic one-line-per-preview-key dump.
+const CURATED_PREVIEW_TOOL_NAMES = new Set(['repair_closeout', 'remove_saved_payment_method', 'correct_invoice_address']);
 
 // Tools whose commit itself sends a customer a message. Bookings, schedule
 // moves and cancellations are deliberately NOT here: their executors
@@ -103,6 +110,8 @@ const CUSTOMER_CONTACT_TOOL_NAMES = new Set([
   'send_sms',
   'reply_via_sms',
   'trigger_review_request',
+  // The confirmed run emails and/or texts the customer their paid receipt.
+  'resend_receipt',
 ]);
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
@@ -161,6 +170,7 @@ const ACTION_LABELS = {
   bulk_update_leads: 'Change status on multiple leads',
   submit_review_reply: 'Post a public review reply',
   trigger_review_request: 'Send a review request',
+  resend_receipt: 'Re-send a paid receipt',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -192,6 +202,8 @@ const ACTION_LABELS = {
   submit_gsc_sitemap: 'Submit a sitemap to Search Console',
   set_railway_gate: 'Change a Railway feature gate',
   set_growthbook_feature_environment: 'Enable or disable a GrowthBook feature in one environment',
+  remove_saved_payment_method: 'Remove a saved payment method',
+  correct_invoice_address: 'Correct the address printed on an invoice',
 };
 
 // A preview whose combined-payment disclosure cancels a PaymentIntent in
@@ -465,6 +477,16 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('operational', 'Clears stale tracker evidence on this visit (tracker state released, cleanup run; no status change)');
     }
   }
+  // A stock write always shows what it records and where the count lands (owner 2026-10-05): the product, the amount and unit
+  // the operator entered, and the on-hand count before and after in the product's own inventory unit.
+  if ((toolName === 'adjust_stock' || (toolName === 'update_restock_request' && params?.action === 'receive'))
+    && preview && preview.stock_before != null && preview.stock_after != null) {
+    const what = toolName === 'adjust_stock' ? `${String(preview.movement_type || '').replace(/_/g, ' ')}` : 'receive';
+    const entered = preview.entered_quantity != null ? ` ${preview.entered_quantity} ${preview.entered_unit || ''}`.trimEnd() : '';
+    push('operational', `${preview.product?.name || 'Product'}: ${what}${entered}; on hand ${preview.stock_before} → ${preview.stock_after} ${preview.unit || ''}`.trimEnd(), {
+      before: `${preview.stock_before} ${preview.unit || ''}`.trimEnd(), after: `${preview.stock_after} ${preview.unit || ''}`.trimEnd(),
+    });
+  }
   if (toolName === 'bulk_update_leads') {
     push('customer', `${(params?.lead_ids || []).length} leads: ${params?.current_status} → ${params?.new_status}`, {
       before: params?.current_status, after: params?.new_status,
@@ -498,6 +520,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // booking is always approved as credit-free and the executor verifies
     // that inside the booking transaction.
     if (preview?.inspection_credit) push('billing', 'No inspection credit is redeemed by this booking (no open credit; re-verified at commit under the credit lock offer creation shares)');
+    // Another visit already overlaps this time (pinned at proposal, owner
+    // 2026-10-05): the booking still goes through, as a warning. An overlap
+    // that appears AFTER this card refuses the confirm and shows a new card.
+    if (preview?.slot_overlap?.already_overlaps) push('operational', 'Another visit already overlaps this time. Both stay on the calendar and Confirm warns, as on the Schedule screen');
     // A booking with a time texts the booking confirmation exactly as a
     // Schedule-screen booking does (owner 2026-09-27); a windowless one
     // registers a non-delivering placeholder: its confirmation is marked
@@ -718,7 +744,26 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       push('operational', `Not touched (${preview.manual.length}): ${preview.manual.map((m) => m.fact).join(', ')}`);
     }
   }
-  if (toolName !== 'repair_closeout' && !propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
+  // remove_saved_payment_method: the ordered steps ("Step n of m" — the card
+  // sorts lines by kind then label, so the numbering keeps them in order),
+  // then the removal notes and the Auto Pay note; the notice emails ride the
+  // customer-contact line below.
+  if (toolName === 'remove_saved_payment_method' && Array.isArray(preview?.steps)) {
+    for (const st of preview.steps) push('billing', String(st.effect || st.step));
+    const notes = preview.disclosures || {};
+    if (notes.bank_note) push('billing', notes.bank_note);
+    if (notes.holds_appointment?.text) push('billing', notes.holds_appointment.text);
+    if (notes.hold_lookup_failed) push('billing', "Couldn't check whether this card holds an upcoming appointment");
+    if (preview.autopay_note) push('billing', preview.autopay_note);
+    if (preview.customer_emails?.summary) push('comms', String(preview.customer_emails.summary));
+  }
+  // correct_invoice_address: what the rewrite does and does not touch.
+  if (toolName === 'correct_invoice_address' && preview?.does) {
+    push('billing', String(preview.does));
+    push('operational', String(preview.does_not));
+    push('operational', 'A critical before/after audit row is written with the change');
+  }
+  if (!CURATED_PREVIEW_TOOL_NAMES.has(toolName) && !propertyAction && !customerEstimateAction && WRITE_TWO_STEP_TOOL_NAMES.has(toolName) && preview && typeof preview === 'object') {
     let shown = 0;
     for (const [k, v] of Object.entries(preview)) {
       if (PREVIEW_NOISE_KEYS.has(k) || String(k).startsWith('_') || VOLATILE_KEY_RE.test(k)) continue;
@@ -885,6 +930,9 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
       // A repair plan that queues a report email or receipt contacts the
       // customer through the delivery workers.
       || (toolName === 'repair_closeout' && preview?.notifies_customer === true)
+      // The portal's own Auto Pay-off / payment-method-removed notices, only
+      // when their gate is on and an email is on file (the plan says which).
+      || (toolName === 'remove_saved_payment_method' && preview?.notifies_customer === true)
       || cancelCustomerNotice !== 'none');
   // "Will" only for tools whose whole point is the send; the conditional
   // double-opt-in path says "may" (GH r12 P2) — notifies_customer and the
@@ -893,6 +941,7 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     let contactLabel = CUSTOMER_CONTACT_TOOL_NAMES.has(toolName) || emailReplyToCustomer || toolName === 'move_stops_to_day' || toolName === 'repair_closeout'
       ? 'Customer will be contacted'
       : 'Customer may be contacted (conditional double-opt-in re-send only)';
+    if (toolName === 'remove_saved_payment_method') contactLabel = String(preview?.customer_emails?.summary || contactLabel);
     if (toolName === 'cancel_appointment' && cancelCustomerNotice !== 'none') {
       // Evidence-independent wording (Codex round-3 P1, fixing a round-3
       // push finding: the FIRST draft of this line asserted precise,

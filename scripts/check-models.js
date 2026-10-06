@@ -83,6 +83,7 @@ function fetchModels() {
   // Anthropic and intentionally NOT excluded — it validates like a tier.
   const NON_TIER_KEYS = new Set([
     'DEFAULT', 'PROVIDER', 'ROUTES', 'TEXT_POLICIES',
+    'ROUTINE_EFFORT', // an effort level ('low'), not a model id
     'OPENAI_BEST', 'OPENAI_BALANCED', 'OPENAI_FAST', 'OPENAI_REPORT_WRITER', 'OPENAI_SMS_DRAFT',
     'GEMINI_VISION_BEST', 'GEMINI_IMAGE_BEST', 'GEMINI_IMAGE_STABLE',
     'GEMINI_VIDEO_FAST', 'GEMINI_VIDEO_QUALITY',

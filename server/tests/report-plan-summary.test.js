@@ -210,7 +210,7 @@ test('gate on: counts PERFORMED visits in the current ET calendar year, and whic
     ],
   });
   const data = await build(BASE_SERVICE, 'token-plan-counts', knex, LIVE_PAGE);
-  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 10, reservicesThisYear: 3 });
+  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 10, reservicesThisYear: 3, tier: null });
 });
 
 test('one booking with several completion records (detailed form + recap rail) is one visit', async () => {
@@ -228,7 +228,16 @@ test('one booking with several completion records (detailed form + recap rail) i
     ],
   });
   const data = await build(BASE_SERVICE, 'token-plan-siblings', knex, LIVE_PAGE);
-  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 2, reservicesThisYear: 1 });
+  expect(data.planSummary).toEqual({ year: YEAR, visitsThisYear: 2, reservicesThisYear: 1, tier: null });
+
+  // Codex P2 #5888: the card names the member's CURRENT tier (the customers
+  // row, joined onto the service), not the tier frozen on this visit; a
+  // non-membership value is no tier.
+  const moved = await build({ ...BASE_SERVICE, service_tier: 'Bronze', waveguard_tier: 'Gold' }, 'token-plan-tier', knex, LIVE_PAGE);
+  expect(moved.waveGuardTier).toBe('Bronze');
+  expect(moved.planSummary.tier).toBe('Gold');
+  const oneTime = await build({ ...BASE_SERVICE, waveguard_tier: 'One-Time' }, 'token-plan-one-time', knex, LIVE_PAGE);
+  expect(oneTime.planSummary.tier).toBeNull();
 });
 
 test('only the frozen record decides a re-service; a booking repointed after closeout never does', async () => {
@@ -239,13 +248,13 @@ test('only the frozen record decides a re-service; a booking repointed after clo
   };
   // Frozen callback flag, booking since flipped to a regular visit: counts.
   expect(await countFor(record('record-frozen-flag', { service_type: 'Pest Control Service', record_is_callback: true, service_key_snapshot: 'pest_general_quarterly', scheduled_is_callback: false })))
-    .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 1 });
+    .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 1, tier: null });
   // Frozen re-service key alone (flag never stamped, e.g. the recap rail): counts.
   expect(await countFor(record('record-frozen-key', { service_type: 'Pest Control Service', service_data: frozen('lawn_re_service') })))
-    .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 1 });
+    .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 1, tier: null });
   // Frozen regular visit, booking since repointed to a re-service: does not.
   expect(await countFor(record('record-frozen-regular', { service_type: 'Pest Re-Service', service_data: frozen('pest_general_quarterly'), service_key_snapshot: 'pest_re_service', scheduled_is_callback: true })))
-    .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 0 });
+    .toEqual({ year: YEAR, visitsThisYear: 1, reservicesThisYear: 0, tier: null });
 });
 
 test('a non-member gets no planSummary, even with completed visits and visits coming up', async () => {

@@ -115,12 +115,15 @@ function anthropicAcceptsEffort(model, level) {
 // that omits `thinking` (5.5, Fable and Mythos cannot turn it off), and
 // thinking spends from max_tokens ahead of the text block — a cap sized for
 // a no-thinking reply ends the turn with no text. Sonnet 5 also thinks by
-// default, but its lanes' caps were already tuned against it in production
-// (previsit brief 1000 → 2000 → 3000), so it is left out and this stays
-// inert for today's traffic. Sonnet 5.5 and later cannot turn thinking off
+// default; it was left out once because its lanes' caps had been tuned by
+// hand (previsit brief 1000 → 2000 → 3000), but the hand tuning did not hold:
+// with the global MODEL_ANTHROPIC_EFFORT=high, 40 Sonnet 5 calls in 10 days
+// (2026-10-04 audit: SMS pathology 400/500, event normalizer 500, SMS drafts
+// 2000, estimate follow-ups) ended with no text and fell to the backup
+// provider. So bare Sonnet 5 takes the floor too. Sonnet 5.5 and later cannot turn thinking off
 // (even `between_tools` returns progress-update thinking blocks), so they
 // take the floor like Opus 5.5.
-const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
+const ANTHROPIC_THINKING_FLOOR_RE = /^claude-opus-[5-9](?![0-9])|^claude-sonnet-5(?![0-9])|^claude-sonnet-5-[0-9]|^claude-sonnet-[6-9](?![0-9])|^claude-(fable|mythos)-/;
 
 // NARROWER than the floor above on purpose: bare Opus 5 (`claude-opus-5`)
 // thinks by default (ANTHROPIC_THINKING_FLOOR_RE) but still ACCEPTS
@@ -144,6 +147,16 @@ function anthropicThinkingAlwaysOn(model) {
 const DEFAULTS = Object.freeze({
   FLAGSHIP: 'claude-opus-4-8',
   WORKHORSE: 'claude-sonnet-5',
+  // Routine internal lanes that used to ride the flagship (owner 2026-10-04):
+  // staff wiki Q&A, vendor invoice PDFs, lead synopsis. Expense categories
+  // stay on the flagship (2026-10-04 bake-off: Sonnet 5.5 filed equipment as
+  // Depreciation where the books use Supplies).
+  // Hero alt text is published on the site, so it stays on VISION. Sonnet 5.5, not Sonnet 5: same list price, and it is in the
+  // thinking floor below, so these lanes' short caps (200 to 2000 tokens)
+  // are not spent on thinking. Roll back with MODEL_ROUTINE=claude-opus-4-8.
+  // Not for Fable / Mythos: the two direct sites treat a refusal as a failed
+  // read, with no second provider.
+  ROUTINE: 'claude-sonnet-5-5',
   FAST: 'claude-sonnet-5',
   VOICE: 'claude-sonnet-5',
   VISION: 'claude-opus-4-8',
@@ -190,6 +203,18 @@ const DEFAULTS = Object.freeze({
   // MODEL_CATALOG; dispatched through services/llm/call.js, which floors
   // max_tokens for always-thinking models and reads past thinking blocks.
   ADS_ADVISOR: 'claude-fable-5-1',
+  // SMS scheduling decide step (owner ruling 2026-10-02, "try one agent for
+  // now"): Claude Sonnet 5.5 reads the customer's reply to a recorded offer
+  // and names the slot they accepted, if any. Bake-off 09-29: Sonnet 5.5
+  // alone 10/13 right, 1 wrong; Opus 5.5 alone 10/13, 2 wrong. A route so a
+  // second model can be added later. Shadow only behind GATE_SMS_SCHEDULING_DECIDE.
+  SMS_SCHEDULING_DECIDE: 'claude-sonnet-5-5',
+  // Service report "Ask Waves" answer writer (owner 2026-10-05, "use sonnet
+  // 5.5"): writes the answer to a customer's typed question from the report's
+  // own facts. Customer-facing generated text, so it rides the two-provider
+  // TEXT_POLICIES.reportAsk (this model first, OpenAI backup). Dark behind
+  // GATE_REPORT_ASK_AI; override with MODEL_REPORT_ASK.
+  REPORT_ASK: 'claude-sonnet-5-5',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
   // App lawn + tree/shrub/palm Photo ID (owner 2026-10-02, "same as pest"):
   // the model for photoIdPlantV2's one Gemini read; set from the 27-photo eval.
@@ -219,6 +244,15 @@ const DEFAULTS = Object.freeze({
 
 const FLAGSHIP  = process.env.MODEL_FLAGSHIP  || DEFAULTS.FLAGSHIP;
 const WORKHORSE = process.env.MODEL_WORKHORSE || DEFAULTS.WORKHORSE;
+// Fable / Mythos are refused here, in the registry: two ROUTINE call sites use
+// the SDK directly and have no second provider for a refusal, so a hand-set
+// MODEL_ROUTINE naming one of them falls back to the default.
+const ROUTINE_EXCLUDED_RE = /^claude-(fable|mythos)/;
+const ROUTINE   = (!ROUTINE_EXCLUDED_RE.test(process.env.MODEL_ROUTINE || '') && process.env.MODEL_ROUTINE) || DEFAULTS.ROUTINE;
+// Low effort only while ROUTINE is an always-thinking model (the Sonnet 5.5
+// default). A rollback to MODEL_ROUTINE=claude-opus-4-8 sends no per-lane
+// effort, so those lanes get back the model AND the reasoning they had.
+const ROUTINE_EFFORT = anthropicThinkingAlwaysOn(ROUTINE) ? 'low' : undefined;
 const FAST      = process.env.MODEL_FAST      || DEFAULTS.FAST;
 const VOICE     = process.env.MODEL_VOICE     || DEFAULTS.VOICE;
 // Owner 2026-07-21 (T&S report dry-run): photo scoring drives customer-facing
@@ -317,6 +351,10 @@ const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEF
 // Daily ads advisor (owner ruling 2026-10-01) — its own selector so the
 // advisor moves independently of FLAGSHIP / the highStakes policy.
 const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
+// SMS scheduling decide step (owner ruling 2026-10-02) — its own selector.
+const SMS_SCHEDULING_DECIDE = process.env.MODEL_SMS_SCHEDULING_DECIDE || DEFAULTS.SMS_SCHEDULING_DECIDE;
+// Service report Ask Waves answer writer (owner 2026-10-05) — its own selector.
+const REPORT_ASK           = process.env.MODEL_REPORT_ASK          || DEFAULTS.REPORT_ASK;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 const GEMINI_PHOTO_ID_PLANT = process.env.MODEL_GEMINI_PHOTO_ID_PLANT || DEFAULTS.GEMINI_PHOTO_ID_PLANT;
 const GEMINI_PHOTO_ID_PEST = process.env.MODEL_GEMINI_PHOTO_ID_PEST || DEFAULTS.GEMINI_PHOTO_ID_PEST;
@@ -466,6 +504,10 @@ const ROUTES = Object.freeze({
   // than trying a third provider. `effort: 'high'` reaches only the
   // Anthropic leg (services/llm/call.js#dispatch).
   plantIdReferee:    Object.freeze({ provider: PROVIDER.ANTHROPIC, model: PLANT_ID_REFEREE, effort: 'high' }),
+  // SMS scheduling decide step (owner ruling 2026-10-02, sms-scheduling-decide.js):
+  // single leg, no automatic fallback — a miss records an error row and the
+  // text stays with staff, exactly as today. Shadow behind GATE_SMS_SCHEDULING_DECIDE.
+  smsSchedulingDecide: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SCHEDULING_DECIDE, effort: 'high' }),
   // Lawn visit assessment name referee (owner ruling 2026-09-29,
   // lawn-visit-referee.js): single-leg, no automatic fallback — a referee
   // miss leaves Gemini's read exactly as it was.
@@ -506,6 +548,29 @@ const TEXT_POLICIES = Object.freeze({
   highStakes: Object.freeze({
     name: 'highStakes',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: FLAGSHIP }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
+  // highStakes with the ROUTINE tier on the Anthropic leg and the same
+  // OpenAI backup: internal, low-risk lanes only
+  // (owner 2026-10-04). Nothing customer-facing belongs here: wiki Q&A uses
+  // routineAnswer for staff sources only (wiki-qa.js) and keeps highStakes
+  // for every customer-facing caller. ROUTINE_EFFORT (low on the Sonnet 5.5
+  // default): staff wiki Q&A is interactive and the rest are short lookups,
+  // so the always-thinking default must not think at the global
+  // MODEL_ANTHROPIC_EFFORT.
+  routineAnswer: Object.freeze({
+    name: 'routineAnswer',
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, ...(ROUTINE_EFFORT ? { effort: ROUTINE_EFFORT } : {}) }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
+  // Service report "Ask Waves" answers (owner 2026-10-05, "use sonnet 5.5";
+  // report-ask-ai.js, GATE_REPORT_ASK_AI): Claude Sonnet 5.5 on the Anthropic
+  // leg at low effort (a one-to-four sentence answer on a page the customer is
+  // waiting on), the report-writer OpenAI model as the backup. A miss on both
+  // legs falls to the report's fixed-rule answer, never to an empty reply.
+  reportAsk: Object.freeze({
+    name: 'reportAsk',
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: REPORT_ASK, effort: 'low' }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
   adsAdvisor: Object.freeze({
@@ -573,6 +638,19 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
   }),
+  lawnPairedRecheck: Object.freeze({
+    name: 'lawnPairedRecheck',
+    // The paired-photo recheck (services/lawn-paired-recheck.js,
+    // GATE_LAWN_PAIRED_RECHECK, lawn report rebuild P19b; owner ruling
+    // 2026-09-29 round 3b): one multimodal call per visit reads last visit's and
+    // today's same-spot overview photos as pairs and returns a closed
+    // better / same / worse / cannot_tell verdict. Same two legs as
+    // lawnVisitAssessment (the lawn photo lane's models; no Claude leg, no
+    // parallel providers): Gemini answers, OpenAI stands in only when it
+    // returns nothing usable.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
+  }),
   photoIdVision: Object.freeze({
     name: 'photoIdVision',
     // Photo ID (pest-identification.js: website funnel, SMS photo triage,
@@ -602,6 +680,17 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
   }),
+  treeShrubWatchSignals: Object.freeze({
+    name: 'treeShrubWatchSignals',
+    // The Tree & Shrub Fast Complete watch-signal read (tree-shrub-assessment.js
+    // readWatchSignals, GATE_TS_WATCH_LIST): one small Gemini read of one photo
+    // that returns only watch-list keys, tech-facing, never customer copy. The
+    // same legs as photoIdPlantV2 (the nearest one-read plant photo lane, the
+    // cheapest vision models already named here): Gemini answers; OpenAI stands
+    // in only when Gemini returns nothing usable. No Claude leg.
+    primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_PHOTO_ID_PLANT }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
+  }),
   plantIdVision: Object.freeze({
     name: 'plantIdVision',
     // Lawn/tree/shrub/palm photo ID (plant-engine.js). Owner ruling
@@ -615,15 +704,6 @@ const TEXT_POLICIES = Object.freeze({
     // behind GATE_PLANT_ID_REFEREE — not part of this two-provider policy.
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: process.env.GEMINI_VISION_MODEL || GEMINI_VISION_BEST }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_PLANT_ID }),
-  }),
-  visitBrief: Object.freeze({
-    name: 'visitBrief',
-    // Per-visit pocket-reference brief (previsit-brief.js) — summarization
-    // over deterministic grounding, not analysis, so it rides the WORKHORSE
-    // tier rather than the WDO brief's deepAnalysis (scope ruling
-    // 2026-08-06: deepAnalysis is overkill per-visit).
-    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: WORKHORSE }),
-    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }),
   }),
   deepAnalysis: Object.freeze({
     name: 'deepAnalysis',
@@ -673,6 +753,9 @@ module.exports = {
   EXTREME,
   FLAGSHIP,
   WORKHORSE,
+  ROUTINE,
+  ROUTINE_EFFORT,
+  ROUTINE_EXCLUDED_RE,
   FAST,
   VOICE,
   VISION,
@@ -697,6 +780,8 @@ module.exports = {
   PLANT_ID_REFEREE,
   LAWN_ASSESSMENT_REFEREE,
   ADS_ADVISOR,
+  SMS_SCHEDULING_DECIDE,
+  REPORT_ASK,
   TYPESAFE_JEV,
   CLOUDFLARE_CLEF,
   OPENAI_SMS_DRAFT,
@@ -733,6 +818,10 @@ module.exports = {
 //                                  default: gpt-4o-transcribe-diarize
 //   GEMINI_TRANSCRIPTION_MODEL     long-call verifier / transcription fallback
 //                                  default: gemini-2.5-flash
+//   OPENAI_VOICE_FILL_TRANSCRIBE_MODEL  Fast Complete voice fill speech-to-text
+//                                  (services/fast-complete-voice-fill.js; goes through
+//                                  call-recording-processor's transcribeWithOpenAI)
+//                                  default: gpt-transcribe (32-clip test 2026-10-03)
 //   OPENAI_TRANSCRIPT_LABEL_MODEL  post-transcription Agent/Caller relabeling
 //                                  default: gpt-5-mini (falls back to OPENAI_MODEL)
 //   CALL_EXTRACTION_PROVIDER /     V2 call-extraction route primary

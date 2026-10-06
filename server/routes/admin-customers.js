@@ -2,6 +2,7 @@ const { applyCustomerNameOrder, applyCustomerSearchFilter, applyStableCustomerOr
 const express = require('express');
 const Joi = require('joi');
 const { normalizeContactRole } = require('../constants/contact-roles');
+const { canonicalStoredPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const router = express.Router();
 const db = require('../models/db');
 const { technicianCurrentVisitFilter, technicianServicesCustomer } = require('../services/technician-visit-scope');
@@ -31,6 +32,7 @@ const CustomerCredit = require('../services/customer-credit');
 const {
   normalizeContactName,
   normalizeContactPhone,
+  contactPhoneProblem,
   normalizeContactEmail,
   normalizeContactRecord,
   clearLineTypeOnPhoneChange,
@@ -2347,6 +2349,8 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
     if (!firstName || !phone) {
       return res.status(400).json({ error: 'firstName and phone required' });
     }
+    const quickAddPhoneProblem = contactPhoneProblem(phone);
+    if (quickAddPhoneProblem) return res.status(400).json({ error: quickAddPhoneProblem, code: 'INVALID_PHONE' });
     const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
     if (normalizedAddress.unitConflict) {
       return res.status(400).json({ error: 'Address unit conflicts with the unit included in Address Line 1' });
@@ -2641,6 +2645,47 @@ router.get('/:id/cards', async (req, res, next) => {
         is_default: !!c.is_default,
       })),
     });
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/customers/:id/payment-methods/:methodId/removal-preview —
+// read-only facts the Remove dialog discloses before staff confirm: the
+// future secured visit this card holds, if any (same lookup as the portal's
+// removal notice). The verified-bank warning needs no lookup — the dialog
+// reads method_type / ach_status from the row it already has.
+router.get('/:id/payment-methods/:methodId/removal-preview', requireAdmin, async (req, res, next) => {
+  try {
+    const { removalPreview } = require('../services/payment-method-removal');
+    const preview = await removalPreview({ customerId: req.params.id, methodId: req.params.methodId });
+    if (!preview) return res.status(404).json({ error: 'Payment method not found' });
+    res.json(preview);
+  } catch (err) { next(err); }
+});
+
+// DELETE /api/admin/customers/:id/payment-methods/:methodId — staff removal
+// of a saved card/bank. Same removal path as the customer portal, with the
+// Auto Pay guard always on: the method Auto Pay is using → 409
+// autopay_method_in_use (switch or turn off Auto Pay first); staff removal
+// never turns Auto Pay off as a side effect.
+router.delete('/:id/payment-methods/:methodId', requireAdmin, async (req, res, next) => {
+  try {
+    const { removePaymentMethod } = require('../services/payment-method-removal');
+    const { auditStaffPaymentMethodRemoval } = require('../services/payment-method-removal-audit');
+    const { status, body, removedMethod } = await removePaymentMethod({
+      customerId: req.params.id,
+      methodId: req.params.methodId,
+      guard: true,
+      source: 'admin_delete',
+    });
+    if (removedMethod) {
+      // The detach is already final at Stripe — a lost audit row must not
+      // turn a completed removal into an error.
+      void auditStaffPaymentMethodRemoval({
+        actorId: req.technicianId, ip: req.ip, userAgent: req.get('user-agent') || null,
+        customerId: req.params.id, removedMethod,
+      }).catch(() => {});
+    }
+    res.status(status).json(body);
   } catch (err) { next(err); }
 });
 
@@ -3072,8 +3117,8 @@ router.get('/:id/estimates-summary', async (req, res, next) => {
     }
 
     const [estimates, lastMessage] = await Promise.all([
-      db('estimates')
-        .where({ customer_id: customer.id })
+      // Same list as the customer record (office only here).
+      require('../services/call-commitments').whereEstimateOnCustomerRecord(db('estimates'), customer)
         .orderBy('created_at', 'desc')
         .select(
           'id', 'status', 'token', 'service_interest', 'decline_reason',
@@ -3283,7 +3328,12 @@ router.get('/:id', async (req, res, next) => {
         .select('service_records.*', 'technicians.name as technician_name')
         .orderBy('service_records.service_date', 'desc')
         .limit(20),
-      db('estimates').where({ customer_id: c.id }).orderBy('created_at', 'desc'),
+      // Office: owned estimates, plus an unowned one typed with this
+      // customer's phone. A technician token keeps the linked ones only.
+      (req.techRole === 'technician'
+        ? db('estimates').where({ customer_id: c.id })
+        : require('../services/call-commitments').whereEstimateOnCustomerRecord(db('estimates'), c)
+      ).orderBy('created_at', 'desc'),
       db('payments').where({ 'payments.customer_id': c.id }).leftJoin('payment_methods', 'payments.payment_method_id', 'payment_methods.id').select('payments.*', db.raw('COALESCE(payment_methods.card_brand, payments.card_brand) as card_brand'), db.raw('COALESCE(payment_methods.last_four, payments.card_last_four) as last_four')).orderBy('payment_date', 'desc').limit(20),
       db('payments').where({ customer_id: c.id, status: 'paid' }).first(db.raw('COALESCE(SUM(amount - COALESCE(refund_amount, 0)), 0)::float as net')).catch(e => { logger.warn(`[customers:${c.id}] payments_sum: ${e.message}`); return { net: 0 }; }),
       customerScheduledHistory(db, c.id, { focusServiceId }),
@@ -3647,6 +3697,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, billingMode, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel, contactRole } = req.body;
     if (!firstName || !phone) return res.status(400).json({ error: 'First name and phone required' });
+    const createPhoneProblem = contactPhoneProblem(phone);
+    if (createPhoneProblem) return res.status(400).json({ error: createPhoneProblem, code: 'INVALID_PHONE' });
     const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
     if (normalizedAddress.unitConflict) {
       return res.status(400).json({ error: 'Address unit conflicts with the unit included in Address Line 1' });
@@ -3667,7 +3719,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       pipelineStage: cleanText(pipelineStage) || 'new_lead',
       notes: cleanOptionalText(notes),
       companyName: cleanOptionalText(companyName),
-      propertyType: cleanOptionalText(propertyType),
+      propertyType: canonicalStoredPropertyType(cleanOptionalText(propertyType)),
       profileLabel: cleanOptionalText(profileLabel),
       contactRole: normalizeContactRole(contactRole),
     };
@@ -4014,6 +4066,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         else if (v === 'last_name') { updates[v] = cleanOptionalText(req.body[k]); }
         else if (v === 'state') { updates[v] = cleanOptionalState(req.body[k]); }
         else if (v === 'address_line2') { updates[v] = normalizeUnitLine(cleanText(req.body[k])) || null; }
+        else if (v === 'property_type') { updates[v] = canonicalStoredPropertyType(req.body[k]); }
         else { updates[v] = req.body[k]; }
       }
     }
@@ -4022,6 +4075,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // and applied before the cross-account conflict check so dedup compares the
     // stored format.
     Object.assign(updates, normalizeContactRecord(updates));
+    // An unchanged stored number echoed by a full-form save is not a new write;
+    // only a number the operator is entering now is refused.
+    if (updates.phone && updates.phone !== before.phone) {
+      const phoneProblem = contactPhoneProblem(updates.phone);
+      if (phoneProblem) return res.status(400).json({ error: phoneProblem, code: 'INVALID_PHONE' });
+    }
     if (req.body.addressLine1 !== undefined || req.body.addressLine2 !== undefined) {
       const normalizedAddress = normalizeAdminAddressInput({
         addressLine1: req.body.addressLine1 !== undefined ? req.body.addressLine1 : before.address_line1,
@@ -4311,6 +4370,14 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
             applySessionRelease = payerRelease.apply || null;
           }
           await trx('customers').where({ id: req.params.id }).update(updates);
+          // An edited property type also lands on the primary property row,
+          // in this transaction, so property-scoped readers agree with the
+          // account. Only an ACTUAL change (the editor posts the whole form).
+          if (updates.property_type !== undefined
+            && String(updates.property_type ?? '') !== String(lockedBefore.property_type ?? '')) {
+            await require('../services/customer-properties')
+              .syncPrimaryPropertyType(req.params.id, updates.property_type, trx);
+          }
           // A Bill-To edit that can make a withdrawn combined-visit invoice
           // self-pay again (payer cleared) requeues it through the shared
           // reconciliation, inside this same transaction.
@@ -4634,6 +4701,9 @@ router.put('/:id/notification-prefs', requireAdmin, async (req, res, next) => {
       await trx('notification_prefs')
         .where({ customer_id: req.params.id })
         .update(dbUpdates);
+      if (dbUpdates.appointment_notify_primary !== undefined) {
+        await require('../services/recipient-optin').noteHolderSetNotifyPrimary(trx, req.params.id);
+      }
     });
 
     const prefs = await db('notification_prefs')

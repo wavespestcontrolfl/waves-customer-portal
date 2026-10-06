@@ -95,6 +95,22 @@ describe('ReportViewPage report chrome helpers', () => {
     })).toContain('What does Pest Pressure mean?');
   });
 
+  it('suggests the treated-areas question only off the pest line (owner 2026-10-05)', () => {
+    const data = { serviceCoverage: { enabled: true, items: [{ id: 'c1', areaName: 'Front perimeter', status: 'completed' }] } };
+    expect(reportAskPrompts(data, 'pest')).not.toContain('What areas were treated?');
+    expect(reportAskPrompts(data)).not.toContain('What areas were treated?');
+    expect(reportAskPrompts(data, 'tree_shrub')).toContain('What areas were treated?');
+  });
+
+  it('visitWorkSummary counts serviced areas off the pest line only', () => {
+    const base = {
+      applications: [{ product: { name: 'Taurus SC' }, method: 'broadcast_spray' }],
+      serviceCoverage: { enabled: true, items: [{ id: 'c1', areaName: 'Front perimeter', status: 'completed' }, { id: 'c2', areaName: 'Kitchen', status: 'completed' }] },
+    };
+    expect(visitWorkSummary({ ...base, serviceLine: 'pest' }, 'fallback')).toBe('1 product applied');
+    expect(visitWorkSummary({ ...base, serviceLine: 'tree_shrub' }, 'fallback')).toBe('1 product applied · 2 areas serviced');
+  });
+
   it('does not show a readiness status badge without re-entry context', () => {
     expect(readinessStatusBadge(null)).toBeNull();
   });
@@ -1320,6 +1336,70 @@ describe('smartStatusSummary — re-service (callback) branch', () => {
     expect(status.result).toBe('Service completed. Visit details are below.');
   });
 
+  // Owner 2026-10-04: on a routine pest visit "Today's result" says where we
+  // treated and the activity the customer is shown, not the generic line.
+  describe("Today's result on a routine Pest V2 visit", () => {
+    const pestVisit = (overrides = {}) => ({
+      serviceType: 'Quarterly Pest Control Service',
+      isCallback: false,
+      applications: [{ applicationArea: 'Perimeter, Entry points' }, { applicationArea: 'Kitchen, Bathrooms' }],
+      pestReportV2: { status: { key: 'protected', label: 'Protected' } },
+      treatmentPerformed: true,
+      // Re-entry timers are guidance, never the source of the location.
+      dynamicContext: { reentry: { targets: [{ key: 'exterior' }, { key: 'interior' }] } },
+      pestPressure: { enabled: true, showOnCustomerReport: true, label: 'Very Low' },
+      ...overrides,
+    });
+
+    it('names both sides and the pressure', () => {
+      expect(smartStatusSummary(pestVisit(), 'static').result)
+        .toBe('We treated outside and inside. Pest pressure: very low.');
+    });
+
+    it('names one side only when only one was recorded', () => {
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Perimeter' }] }), 'static').result)
+        .toBe('We treated outside. Pest pressure: very low.');
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Kitchen' }] }), 'static').result)
+        .toBe('We treated inside. Pest pressure: very low.');
+    });
+
+    it('reads the Fast Complete sheet\'s own Outside and Inside chips', () => {
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Outside' }] }), 'static').result)
+        .toBe('We treated outside. Pest pressure: very low.');
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: 'Inside, Outside' }] }), 'static').result)
+        .toBe('We treated outside and inside. Pest pressure: very low.');
+    });
+
+    it('ignores a station or monitor row: a device checked is not an area treated', () => {
+      expect(smartStatusSummary(pestVisit({
+        applications: [
+          { applicationArea: 'Perimeter' },
+          { applicationArea: 'Garage', method: 'station_check', product: { name: 'Rodent Bait Station', category: 'rodent station' } },
+        ],
+      }), 'static').result).toBe('We treated outside. Pest pressure: very low.');
+    });
+
+    it('makes no location claim from re-entry timers alone, or without the server\'s treatment verdict', () => {
+      // An application with no recorded area keeps a default interior timer.
+      expect(smartStatusSummary(pestVisit({ applications: [{ applicationArea: '' }] }), 'static').result)
+        .toBe('Pest pressure: very low.');
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: false }), 'static').result)
+        .toBe('Pest pressure: very low.');
+      // null = the product load failed.
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: null }), 'static').result)
+        .toBe('Pest pressure: very low.');
+      expect(smartStatusSummary(pestVisit({ pestPressure: { enabled: true, showOnCustomerReport: false, label: 'Very Low' } }), 'static').result)
+        .toBe('We treated outside and inside.');
+      expect(smartStatusSummary(pestVisit({ treatmentPerformed: false, pestPressure: null }), 'static').result)
+        .toBe('Service completed. Visit details are below.');
+    });
+
+    it('leaves a visit with no Pest V2 block on the generic line', () => {
+      expect(smartStatusSummary(pestVisit({ pestReportV2: null }), 'static').result)
+        .toBe('Service completed. Visit details are below.');
+    });
+  });
+
 });
 
 describe('lawn report lead status card (GATE_LAWN_REPORT_LEAD)', () => {
@@ -1340,5 +1420,61 @@ describe('lawn report lead status card (GATE_LAWN_REPORT_LEAD)', () => {
   it('a peace-of-mind line (tree & shrub) still wins and is unchanged', () => {
     const status = smartStatusSummary(lawn({ snapshot: { ...snapshot, peaceOfMind: 'We noted fungus — details below.' }, lead: { headline: 'x' } }), 'static');
     expect(status.result).toBe('We noted fungus — details below.');
+  });
+});
+
+// Owner report review 2026-10-03: a recurring pest visit listed the tank-mix
+// surfactant as "Perimeter protection … used along treated exterior zones to
+// maintain the protective band" because the mix was a perimeter spray.
+describe('a spray adjuvant is labeled for what it does to the spray', () => {
+  const surfactant = {
+    method: 'perimeter_spray',
+    targets: [],
+    product: { name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant', active_ingredient: 'Nonionic surfactant' },
+  };
+  const perimeterInsecticide = {
+    method: 'perimeter_spray',
+    targets: ['Ants'],
+    product: { name: 'Taurus SC', category: 'termiticide / insecticide', active_ingredient: 'Fipronil' },
+  };
+
+  it('on a pest visit: a spray coverage aid, never perimeter protection', () => {
+    expect(applicationPurpose(surfactant, 'pest')).toBe('Spray coverage aid');
+    expect(applicationPurposeCopy(surfactant, 'pest')).toBe('Added to the spray so it covers evenly and sticks to surfaces. It isn’t a pesticide on its own.');
+  });
+
+  it('matched by its name even with no category recorded', () => {
+    expect(applicationPurpose({ ...surfactant, product: { name: 'LESCO 90/10 Nonionic Surfactant' } }, 'pest')).toBe('Spray coverage aid');
+  });
+
+  it('the perimeter insecticide in the same mix keeps its perimeter label', () => {
+    expect(applicationPurpose(perimeterInsecticide, 'pest')).toBe('Perimeter protection');
+  });
+
+  it('tree & shrub keeps its own leaf wording', () => {
+    expect(applicationPurpose(surfactant, 'tree_shrub')).toBe('Spray coverage aid');
+    expect(applicationPurposeCopy(surfactant, 'tree_shrub')).toBe('Added to the tank mix so the treatment spreads and holds on waxy leaves and stems instead of beading off.');
+    expect(applicationTechnicalExplanation(surfactant, 'tree_shrub')[0]).toMatch(/^LESCO 90\/10 Nonionic Surfactant is a spray adjuvant, not a pesticide\. It lowers the surface tension/);
+  });
+
+  // GitHub Codex P1 on 4cc22e648b: the card's technical details still called
+  // it a residual perimeter application that pests contact.
+  it('its technical details agree: a spray adjuvant, never a residual perimeter application', () => {
+    for (const line of ['pest', 'termite', 'rodent', 'mosquito']) {
+      const details = applicationTechnicalExplanation(surfactant, line);
+      expect(details[0]).toBe('LESCO 90/10 Nonionic Surfactant is a spray adjuvant, not a pesticide. It is mixed into the spray so the treatment spreads evenly and sticks to the treated surfaces, improving the coverage of the products it is mixed with.');
+      expect(details.join(' ')).not.toMatch(/residual exterior perimeter application|bait placement/);
+      expect(applicationPurpose(surfactant, line)).toBe('Spray coverage aid');
+    }
+  });
+
+  it('matched by its active ingredient alone, the label and the details still agree', () => {
+    const byActive = { method: 'perimeter_spray', targets: [], product: { name: 'Spreader 90', category: '', active_ingredient: 'Nonionic surfactant' } };
+    expect(applicationPurpose(byActive, 'pest')).toBe('Spray coverage aid');
+    expect(applicationTechnicalExplanation(byActive, 'pest')[0]).toMatch(/^Spreader 90 is a spray adjuvant, not a pesticide\./);
+  });
+
+  it('the perimeter insecticide keeps its residual perimeter details', () => {
+    expect(applicationTechnicalExplanation(perimeterInsecticide, 'pest')[0]).toMatch(/residual exterior perimeter application/);
   });
 });

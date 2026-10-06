@@ -21,3 +21,46 @@ describe("admin session return target", () => {
     expect(location.href).toBe("/admin/login?next=%2Fadmin%2Fagents");
   });
 });
+
+describe("admin request body headers", () => {
+  const okResponse = { status: 200, ok: true, json: async () => ({ ok: true }) };
+
+  it("sends JSON bodies as application/json", async () => {
+    const fetchMock = vi.fn(async () => okResponse);
+    vi.stubGlobal("fetch", fetchMock);
+    await adminFetch("/admin/schedule/1/status", { method: "PATCH", body: JSON.stringify({ status: "en_route" }) });
+    expect(fetchMock.mock.calls[0][1].headers["Content-Type"]).toBe("application/json");
+  });
+
+  it("leaves Content-Type unset for a FormData body so the browser adds the multipart boundary", async () => {
+    const fetchMock = vi.fn(async () => okResponse);
+    vi.stubGlobal("fetch", fetchMock);
+    const body = new FormData();
+    body.append("audio", new Blob(["clip"], { type: "audio/webm" }), "clip.webm");
+    await adminFetch("/admin/dispatch/svc-1/fast-complete/voice-fill/dictation", { method: "POST", body });
+    const { headers, body: sent } = fetchMock.mock.calls[0][1];
+    expect(headers).not.toHaveProperty("Content-Type");
+    expect(sent).toBe(body);
+  });
+});
+
+describe("non-JSON error bodies", () => {
+  const response = (status, body, type) => ({
+    ok: false, status, statusText: "",
+    headers: { get: (name) => (name.toLowerCase() === "content-type" ? type : null) },
+    clone() { return this; },
+    json: async () => { throw new Error("not json"); },
+    text: async () => body,
+  });
+
+  it("reads a Cloudflare 524 HTML page as the status, not its markup", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response(524, "<!DOCTYPE html><html><title>524: A timeout occurred</title></html>", "text/html; charset=UTF-8")));
+    await expect(adminFetch("/admin/lawn-assessment/assess", { method: "POST" }))
+      .rejects.toMatchObject({ status: 524, message: "Request failed (524)" });
+  });
+
+  it("still surfaces a plain-text server message (Express labels res.send strings text/html)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => response(400, "Missing ?location= parameter", "text/html; charset=utf-8")));
+    await expect(adminFetch("/admin/settings/x")).rejects.toMatchObject({ status: 400, message: "Missing ?location= parameter" });
+  });
+});

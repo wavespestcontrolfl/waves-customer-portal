@@ -12,11 +12,10 @@ import TechNavigationLock, { useTechNavigationLock } from "./tech/TechNavigation
 
 const viewport = vi.hoisted(() => ({ mobile: false }));
 vi.mock("../hooks/useIsMobile", () => ({ default: () => viewport.mobile }));
-const fieldWorkspace = vi.hoisted(() => ({ enabled: true }));
 vi.mock("../hooks/useFeatureFlag", () => ({
   refetchFlags: vi.fn(() => Promise.resolve()),
   useFeatureFlag: vi.fn(() => false),
-  useFeatureFlagReady: () => ({ enabled: fieldWorkspace.enabled, ready: true }),
+  useFeatureFlagReady: () => ({ enabled: true, ready: true }),
 }));
 vi.mock("../utils/admin-fetch", async (importOriginal) => ({ ...(await importOriginal()), adminFetch: vi.fn() }));
 vi.mock("./NotificationBell", () => ({ default: () => null }));
@@ -60,7 +59,6 @@ describe("AdminLayoutV2", () => {
 
   afterEach(() => {
     viewport.mobile = false;
-    fieldWorkspace.enabled = true;
     cleanup();
     vi.clearAllMocks();
     vi.unstubAllGlobals();
@@ -121,30 +119,24 @@ describe("AdminLayoutV2", () => {
   });
 
   it.each([
-    ["/admin/today", true, false],
-    ["/admin/today/tools", true, false],
-    ["/admin/schedule", true, true],
-    // Field-workspace flag off: /admin/today shows the legacy route UI, which
-    // has no navigation of its own, so the admin chrome must stay.
-    ["/admin/today", false, true],
-  ])("on mobile at %s (field workspace flag %s) the admin top bar and tab bar are present: %s", async (path, flagOn, chrome) => {
+    "/admin/today",
+    "/admin/today/tools",
+    "/admin/schedule",
+  ])("on mobile at %s the admin top bar and tab bar are present, with the normal padding (owner 2026-10-05)", async (path) => {
     viewport.mobile = true;
-    fieldWorkspace.enabled = flagOn;
     adminFetch.mockResolvedValue({ id: 2, name: "Fixture technician", role: "technician" });
     render(<MemoryRouter initialEntries={[path]}><Routes><Route element={<AdminLayoutV2 />}>
       <Route path="/admin/today/*" element={<div>Today content</div>} />
       <Route path="/admin/schedule" element={<div>Schedule content</div>} />
     </Route></Routes></MemoryRouter>);
     await screen.findByText(path.startsWith("/admin/schedule") ? "Schedule content" : "Today content");
-    expect(Boolean(screen.queryByRole("button", { name: "Open menu" }))).toBe(chrome);
-    expect(Boolean(screen.queryByRole("navigation", { name: "Primary" }))).toBe(chrome);
-    if (chrome) {
-      const tabs = within(screen.getByRole("navigation", { name: "Primary" })).getAllByRole("link").map((link) => link.textContent);
-      expect(tabs).toEqual(["Today", "Schedule", "Customers", "Messages", "Settings"]);
-    }
+    expect(screen.getByRole("button", { name: "Open menu" })).toBeInTheDocument();
+    const tabs = within(screen.getByRole("navigation", { name: "Primary" })).getAllByRole("link").map((link) => link.textContent);
+    expect(tabs).toEqual(["Today", "Schedule", "Customers", "Messages", "Settings"]);
     const padding = document.getElementById("admin-main").style;
-    if (chrome) expect(padding.paddingTop).not.toBe("0px");
-    else expect([padding.paddingTop, padding.paddingBottom, padding.paddingLeft, padding.paddingRight]).toEqual(["0px", "0px", "0px", "0px"]);
+    expect(padding.paddingTop).toMatch(/68px/);
+    expect(padding.paddingBottom).toMatch(/72px/);
+    expect(padding.paddingLeft).toBe("16px");
   });
 
   it("keeps Dashboard (not Today) in the mobile tab bar for an admin", async () => {
@@ -289,5 +281,35 @@ describe("AdminLayoutV2", () => {
     expect(screen.queryByText("Customers page")).not.toBeInTheDocument();
     // ⌘K is swallowed while busy (fireEvent returns false when default was prevented).
     expect(fireEvent.keyDown(window, { key: "k", metaKey: true })).toBe(false);
+  });
+
+  it("holds the phone tab bar and top bar while a field action is in flight", async () => {
+    viewport.mobile = true;
+    function BusyChild() {
+      const { setNavigationBusy } = useTechNavigationLock();
+      const location = useLocation();
+      return <>
+        <button type="button" onClick={() => setNavigationBusy(true)}>Start contact</button>
+        <output data-testid="where">{location.pathname}</output>
+      </>;
+    }
+    render(
+      <TechNavigationLock>
+        <MemoryRouter initialEntries={["/admin/today"]}>
+          <Routes>
+            <Route element={<AdminLayoutV2 />}>
+              <Route path="/admin/today" element={<BusyChild />} />
+              <Route path="/admin/schedule" element={<div>Schedule page</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>
+      </TechNavigationLock>,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Start contact" }));
+    const tabBar = screen.getByRole("navigation", { name: "Primary" });
+    expect(tabBar).toHaveAttribute("aria-busy", "true");
+    fireEvent.click(within(tabBar).getByRole("link", { name: /Schedule/ }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/admin/today");
+    expect(screen.queryByText("Schedule page")).not.toBeInTheDocument();
   });
 });

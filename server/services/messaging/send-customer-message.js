@@ -577,6 +577,13 @@ async function sendCustomerMessageCore(input) {
     || (input.audience === 'customer' && input.purpose === 'service_completion'
       && input.metadata?.original_message_type === 'visit_summary'
       && ['visit_closeout_summary', 'scheduled_sms_cron'].includes(input.entryPoint))
+    // The report text to an on-location contact (contact-report-text.js): a
+    // bearer link to a third party, whose contact slot a portal save can
+    // remove between the recheck and the request. Its queued replay holds the
+    // customer row through the handoff (registry contact_report_ready_deferred).
+    || (input.audience === 'customer' && input.purpose === 'service_completion'
+      && input.metadata?.original_message_type === 'contact_report_ready'
+      && input.entryPoint === 'scheduled_sms_cron')
     // A review ask that follows a combined-visit summary shares that
     // summary's packet row through the request.
     || (input.audience === 'customer' && input.purpose === 'review_request'
@@ -646,7 +653,18 @@ async function sendCustomerMessageCore(input) {
     // reload under them and fail closed. A lead has no customer row: phone only.
     || (['lead', 'customer'].includes(input.audience) && input.purpose === 'estimate_followup'
       && input.entryPoint === 'estimate_service_details_send'
-      && input.metadata?.original_message_type === 'estimate_service_details');
+      && input.metadata?.original_message_type === 'estimate_service_details')
+    // The annual rate review letter's text pointer (rate-review-comms.js): its
+    // notice token is a bearer link that belongs to ONE customer, so the
+    // customer-comms + phone locks are held through the provider request and
+    // notice ownership and the recipient phone are re-read inside them (a
+    // merge undo can never repoint the notice between the check and Twilio).
+    // Operator-initiated and billing-purpose, so it never fans out through
+    // the billing delivery preferences.
+    || (input.audience === 'customer' && input.purpose === 'billing'
+      && input.operatorInitiated === true
+      && input.metadata?.original_message_type === 'price_change_notice'
+      && input.metadata?.rate_review_letter === true);
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
@@ -1392,6 +1410,14 @@ async function sendCustomerMessageCore(input) {
   // allowlist above) — its invoice check runs instead inside
   // providerPreparationCheck, composed with billingEmailPreSendCheck, under
   // the Email authority's own lock.
+  // SMS offer ledger (GATE_SMS_OFFER_LEDGER): the visit a visit-move offer
+  // describes, read just before the handoff so an edit right after the send
+  // can never pass as the offered state. Gate off, nothing is loaded.
+  const offerVisitSnapshot = await captureOfferVisitSnapshotBeforeSend(input);
+  // The offer's sent_at is this moment, just before the handoff: a customer
+  // who answers while the provider step is still finishing its own logging
+  // must not look as if they replied before the offer existed.
+  const offerDispatchAt = new Date();
   providerOutcome = providerCoordinationBlock || (withProviderHandoff && !billingEmailLeg
     ? await withProviderHandoff(dispatchProvider)
     : await dispatchProvider());
@@ -1560,7 +1586,7 @@ async function sendCustomerMessageCore(input) {
   // the send checks approved; sendInput.body may have had its links rewritten.
   // Not awaited: the text is already out, and a slow database must not hold
   // the send result. A lost write is re-recorded by the ledger's backfill sweep.
-  void recordSmsOfferAfterSend(input, sendInput, providerOutcome);
+  void recordSmsOfferAfterSend(input, sendInput, providerOutcome, offerVisitSnapshot, offerDispatchAt);
 
   return providerCoordination.attachReservationContext(providerHandoffReservation, {
     sent: true,
@@ -1607,7 +1633,19 @@ async function sendCustomerMessageCore(input) {
 
 // Never throws and never blocks the result: the text is already out. Gate off
 // (the default), the ledger module is not even loaded.
-async function recordSmsOfferAfterSend(input, sendInput, providerOutcome) {
+async function captureOfferVisitSnapshotBeforeSend(input) {
+  try {
+    const agentDecisionId = input?.metadata?.agentDecisionId;
+    if (!agentDecisionId || input?.channel !== 'sms') return null;
+    if (!require('../../config/feature-gates').gateEnvValue('GATE_SMS_OFFER_LEDGER')) return null;
+    return await require('../sms-offers').captureOfferVisitSnapshot({ agentDecisionId });
+  } catch (err) {
+    logger.warn(`[send-customer-message] offer visit snapshot skipped: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
+    return null;
+  }
+}
+
+async function recordSmsOfferAfterSend(input, sendInput, providerOutcome, preSendVisitSnapshot = null, dispatchAt = null) {
   try {
     const agentDecisionId = input?.metadata?.agentDecisionId;
     // Only a text the carrier took is an offer: the gate-, template- and
@@ -1621,7 +1659,11 @@ async function recordSmsOfferAfterSend(input, sendInput, providerOutcome) {
       outgoingBody: input.body,
       providerMessageId: providerOutcome?.providerMessageId || null,
       to: sendInput.to,
-      sentAt: providerOutcome?.sentAt ? new Date(providerOutcome.sentAt) : new Date(),
+      // The number the provider actually sent from (twilio.js's result), so
+      // the offer's Waves line never depends on the best-effort log row.
+      from: providerOutcome?.raw?.fromNumber || null,
+      sentAt: dispatchAt || (providerOutcome?.sentAt ? new Date(providerOutcome.sentAt) : new Date()),
+      preSendVisitSnapshot,
     });
   } catch (err) {
     logger.warn(`[send-customer-message] sms offer ledger skipped: ${err.message}`);
@@ -1758,6 +1800,7 @@ module.exports = {
     validateContract,
     recordPromiseEvidenceFallback,
     recordSmsOfferAfterSend,
+    captureOfferVisitSnapshotBeforeSend,
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,

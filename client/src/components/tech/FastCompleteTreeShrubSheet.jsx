@@ -9,10 +9,17 @@
 // Nothing is assumed applied. This month's protocol products are SUGGESTION
 // tiles, off until tapped; an amount fills only from what the server says was
 // recorded last time (labeled "last time"), else it is blank and required.
-// AI never guesses an amount. "+ Other product" adds any other catalog
-// product except an injection (the server hard-blocks injections on a T&S
+// AI never guesses an amount. The "Search products" box in the Products
+// section (one tap adds the row; "+ Other product" hands off to the full form
+// when the catalog did not load) adds any other catalog product except an injection (the server hard-blocks injections on a T&S
 // visit: they belong to the palm injection flow). A product the server flags
 // as an N/P fertilizer in the summer blackout cannot be turned on.
+//
+// Since 2026-10-05 the screen follows the lawn sheet's rulings (#5951): the
+// mic sits inside the note box, a Customer row (who was home, the shared
+// preset) is sent as customerInteraction, and no hint text ("Optional",
+// "Tap what you applied", the tip search label). Each photo slot keeps one
+// short line.
 //
 // The photos are five slots (the approved shot guide), sent as the body's
 // completionPhotos, never through the staged photo manager: staged photos
@@ -29,6 +36,13 @@
 // two required findings (plant groups, landscape condition). The body never
 // carries treatments_completed (the server derives it from the products).
 //
+// GATE_TS_WATCH_LIST: when the context carries `watchList`, a "This month's
+// watch list" block follows the photo read's finding tiles. Items the read
+// flagged take Seen / Not seen; "Add from watch list" marks any other item
+// seen; a seen item takes an optional extent. All optional: nothing there ever
+// blocks Complete, and a refer-only item takes no extent. The choices ride the
+// body as treeShrubReview.watchItems (tech-facing storage only).
+//
 // Context, visit identity and the catalog come from GET
 // /admin/dispatch/:id/tree-shrub/fast-context (404 {enabled:false} when the
 // gate is off: this visit then needs the full form).
@@ -41,15 +55,18 @@ import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import { prepareCompletionPhoto } from '../../lib/completion-photo';
 import { defaultApplicationMethodForLine } from '../../lib/product-rate-prefill';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, hasAmount, isOutOfStock, measureUnit, productUnits, seededAmount, stockHolds,
+  UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
 import { WarningIcon } from './FastCompleteProductPicker';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
-  SheetHeader, TipSection, VisitNote, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
+  SheetHeader, TipSection, VisitNote, methodLabel, techTipsOf, toggleInSet, useProductPicker, useTipLibrary,
   visitChangedSinceSchedule,
 } from './FastCompleteParts';
+import { CustomerHomeSection, DEFAULT_CUSTOMER_HOME } from './FastCompleteReport';
+import { PestCheckSection, usePestCheck } from './FastCompleteTreeShrubPestCheck';
+import { withPestCheck } from '../../lib/tree-shrub-pest-check';
 import { Button, ActionFeedback, cn } from '../ui';
 import '../../styles/tech-workflow.css';
 
@@ -68,6 +85,47 @@ const BEES_ACTIVE = 'Blooming — bees active';
 const BEES_ACTIVE_MESSAGE = 'Do not complete bee-sensitive insect/contact applications on blooming plants while bees are active.';
 const NP_BLACKOUT_TEXT = 'N/P blackout — can’t apply Jun 1–Sep 30';
 
+// The seasonal watch list (GATE_TS_WATCH_LIST). Extent values are the server's.
+const WATCH_TITLE = "This month's watch list";
+const WATCH_EXTENTS = [
+  { value: 'one_plant', label: 'One plant' },
+  { value: 'a_few', label: 'A few' },
+  { value: 'many', label: 'Many' },
+];
+const WATCH_REFER_LINE = 'Take a photo, add a note and call the office.';
+
+// The server's list for the visit month, or null when the gate is off (no key).
+function watchListFrom(data) {
+  if (!Array.isArray(data?.watchList)) return null;
+  return data.watchList
+    .filter((item) => item && typeof item.key === 'string' && typeof item.label === 'string')
+    .map((item) => ({
+      key: item.key,
+      label: item.label,
+      signal: typeof item.signal === 'string' && item.signal ? item.signal : item.label,
+      referOnly: item.referOnly === true,
+    }));
+}
+
+// The body's watchItems: what the tech decided. A read-flagged item may be
+// Seen or Not seen; any other item only goes as Seen (the tech added it).
+function watchItemsBody(list, choices, flagged) {
+  const out = [];
+  for (const item of list || []) {
+    const choice = choices[item.key];
+    if (!choice?.state) continue;
+    const fromRead = flagged.has(item.key);
+    if (choice.state === 'not_seen' && !fromRead) continue;
+    out.push({
+      key: item.key,
+      state: choice.state,
+      extent: choice.state === 'seen' && !item.referOnly ? choice.extent || null : null,
+      source: fromRead ? 'read' : 'tech',
+    });
+  }
+  return out;
+}
+
 // How a product went down. Foliar spray is the T&S default; the other two are
 // chips on an added product. None of them asks for a measured area.
 const METHOD_CHOICES = [
@@ -76,21 +134,16 @@ const METHOD_CHOICES = [
   { value: 'granular_broadcast', label: 'Granular' },
 ];
 const DEFAULT_METHOD = 'foliar_spray';
-const methodLabel = (value) => {
-  const text = String(value || '').replace(/_/g, ' ');
-  return text.charAt(0).toUpperCase() + text.slice(1);
-};
 
 // The approved shot guide: standing on the ground, about a minute for all of
 // them. The first two are the floor.
 const PHOTO_SLOTS = [
-  { key: 'front_beds', label: 'Front beds', when: 'Required', required: true, caption: 'The whole front bed line from the driveway apron or walk, chest height, same spot as last time.' },
-  { key: 'back_landscape', label: 'Back or side landscape', when: 'Required', required: true, caption: 'The back beds from the lanai or back door edge, or a side bed if the back is locked, fenced or has a dog.' },
-  { key: 'whole_palm', label: 'Whole palm', when: 'If palms', caption: 'Step back until the worst-looking palm fits top to bottom, shot from the ground.' },
-  { key: 'oldest_fronds', label: 'Oldest fronds', when: 'If palms', caption: 'The lowest fronds you can reach standing, at arm’s length.' },
-  { key: 'leaf_close_up', label: 'Leaf close-up', when: 'If something’s wrong', caption: 'One leaf or stem with the problem, 6 to 12 inches away; top and underside if there are insects or sooty mold.' },
+  { key: 'front_beds', label: 'Front beds', when: 'Required', required: true, caption: 'Whole front bed line, same spot as last time.' },
+  { key: 'back_landscape', label: 'Back or side landscape', when: 'Required', required: true, caption: 'Back beds, or a side bed if the back is gated.' },
+  { key: 'whole_palm', label: 'Whole palm', when: 'If palms', caption: 'The worst palm, top to bottom, from the ground.' },
+  { key: 'oldest_fronds', label: 'Oldest fronds', when: 'If palms', caption: 'Lowest fronds you can reach, at arm’s length.' },
+  { key: 'leaf_close_up', label: 'Leaf close-up', when: 'If something’s wrong', caption: 'One leaf or stem with the problem, close up.' },
 ];
-const MAX_PHOTOS = PHOTO_SLOTS.length;
 const SLOT_KEYS = new Set(PHOTO_SLOTS.map((slot) => slot.key));
 
 // Last visit's photo per slot, as the server signed it: only a known slot with
@@ -254,11 +307,13 @@ function contextFrom(data, service) {
       .filter((warning) => warning.message),
     warningsUnavailable: data?.warningsUnavailable === true,
     visitIdentity: recapVisitIdentity(data?.service),
+    watchList: watchListFrom(data),
+    pestCheck: data?.pestCheck && typeof data.pestCheck === 'object' ? data.pestCheck : null,
   };
 }
 
 const EMPTY_CONTEXT = {
-  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false,
+  loading: true, loadError: '', blockedReason: '', rows: [], products: [], warnings: [], warningsUnavailable: false, watchList: null, pestCheck: null,
   visitIdentity: null, visit: null, lastVisit: {}, lastVisitPhotos: {},
 };
 
@@ -343,12 +398,13 @@ function missingRequirement({ form, rows, slots, photoBusy, ctx, dictationPendin
 
 const inOptionOrder = (options, set) => options.filter((option) => set.has(option)).join(', ');
 
-function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable }) {
+function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tipsAvailable, watchChoices = {} }) {
   const active = rows.filter((row) => row.active);
   const applicationArea = inOptionOrder(AREA_OPTIONS, form.areas);
   const insect = active.some((row) => flagsOf(row.product).insectFamily);
   const irac = active.some((row) => flagsOf(row.product).needsIracFrac);
   const result = previewCurrent ? preview.result : null;
+  const watchItems = watchItemsBody(ctx.watchList, watchChoices, flaggedWatchKeys(ctx.watchList, result));
   return {
     visitOutcome: 'completed',
     ...(ctx.visitIdentity ? { expectedVisit: ctx.visitIdentity } : {}),
@@ -390,9 +446,12 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
           action: preview.rejected.has(finding.key) ? 'hidden' : decisionAction(finding.defaultAction),
           detail: finding.detail,
         })),
+        ...(watchItems.length ? { watchItems } : {}),
       },
-    } : {}),
+    } : watchItems.length ? { treeShrubReview: { watchItems } } : {}),
     technicianNotes: form.note.trim(),
+    // Who was home, as the pest and lawn sheets send it (the same field, the same values).
+    customerInteraction: form.customerHome,
     techTips: techTipsOf(form, tipsAvailable),
     // Same as the full form (owner ruling): the completion text, the review
     // ask and the pay link go out the way they do from there.
@@ -403,7 +462,7 @@ function completionBody({ form, rows, photos, preview, previewCurrent, ctx, tips
   };
 }
 
-export default function FastCompleteTreeShrubSheet({ service, request, onClose, onCompleted, onFullForm }) {
+export default function FastCompleteTreeShrubSheet({ service, request, operatorId, onClose, onCompleted, onFullForm }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
@@ -411,7 +470,7 @@ export default function FastCompleteTreeShrubSheet({ service, request, onClose, 
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const ctx = useTreeShrubContext({ base, request, service });
-  const submission = useFastCompleteSubmit({ base, request });
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. The full
   // form is another page and carries nothing over, so Full form and "+ Other
@@ -423,13 +482,15 @@ export default function FastCompleteTreeShrubSheet({ service, request, onClose, 
   // unknown or refused (it may have saved).
   const close = useCallback(() => {
     if (submitting) return;
-    if (done) onCompleted?.();
+    // The completion response rides along: admin Dispatch reads its invoice
+    // fields to stage the payment handoff (the technician page ignores it).
+    if (done) onCompleted?.(done.response || null);
     else onClose?.(ctx.blockedReason || submission.failure ? { refresh: true } : undefined);
   }, [submitting, done, ctx.blockedReason, submission.failure, onClose, onCompleted]);
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form can't resume a /complete attempt.
-  const locked = submitting || submission.failure !== null;
+  const locked = submissionHolds(submission);
 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>
@@ -440,7 +501,11 @@ export default function FastCompleteTreeShrubSheet({ service, request, onClose, 
 }
 
 function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted} />;
+  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+  if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
+  if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  const refusal = refusalWithoutContext(submission, ctx);
+  if (refusal) return refusal;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   const stop = ctx.loadError || ctx.blockedReason;
   if (ctx.loadError) {
@@ -457,16 +522,29 @@ function SheetBody({ service, request, ctx, submission, locked, dictationPending
   return <TreeShrubForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
 }
 
+// The ids of the library tips written for a watch item the tech marked Seen,
+// in library order ([] when nothing is seen or the library never loaded).
+function seenWatchTipIds(library, choices) {
+  const seen = new Set(Object.keys(choices).filter((key) => choices[key]?.state === 'seen'));
+  if (!seen.size) return [];
+  return (library?.groups || []).flatMap((group) => group.tips || [])
+    .filter((tip) => Array.isArray(tip.watchKeys) && tip.watchKeys.some((key) => seen.has(key)))
+    .map((tip) => tip.id);
+}
+
 function TreeShrubForm({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile }) {
   const base = `/admin/dispatch/${service?.id}`;
   const products = useProductRows(ctx);
   const { rows } = products;
+  // Watch-list choices by item key: { state: 'seen' | 'not_seen', extent }.
+  const [watchChoices, setWatchChoices] = useState({});
   const [form, setForm] = useState(() => ({
     note: '',
     // What the server says was serviced last time, kept to the form's own options.
     plantGroups: new Set(PLANT_GROUP_OPTIONS.filter((option) => (ctx.lastVisit?.plantGroups || []).includes(option))),
     areas: new Set(AREA_OPTIONS.filter((option) => (ctx.lastVisit?.areasTreated || []).includes(option))),
     condition: '', pollinator: '', irac: '', tipId: '', customTip: '',
+    customerHome: DEFAULT_CUSTOMER_HOME,
   }));
   const setField = useCallback((key, value) => setForm((prev) => ({ ...prev, [key]: value })), []);
   // Each dictated chunk joins what is already in the box.
@@ -475,7 +553,10 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   }, []);
   const tips = useTipLibrary({ base, request });
   const tipsAvailable = !!tips;
-  const photos = usePhotoSlots({ base, request });
+  // Tips written for a watch item the tech marked Seen lead the picker (library
+  // order, set by TipSection). Only the gated watch list yields Seen choices.
+  const priorityTipIds = useMemo(() => seenWatchTipIds(tips, watchChoices), [watchChoices, tips]);
+  const photos = usePhotoSlots({ base, request, watchList: Array.isArray(ctx.watchList) && ctx.watchList.length > 0 });
   const picker = useProductPicker({
     products: ctx.products,
     commonProducts: [],
@@ -484,11 +565,16 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     isMobile,
     onFullForm,
     onPick: products.addProduct,
+    // With a catalog the search sits in the Products section: no sheet to open.
+    inline: true,
   });
 
   const photoList = photos.list;
   const previewCurrent = !!photos.preview && sameSet(photos.preview.photos, photoList);
-  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending });
+  // GATE_TS_PEST_CHECK: gate off (no ctx.pestCheck) = no block, nothing sent.
+  const pestCheck = usePestCheck({ context: ctx.pestCheck, rows });
+  const removeMerit = (meritRows) => meritRows.forEach((row) => products.updateRow(row.productId, { active: false }));
+  const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || pestCheck.evaluation.blockMessage;
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the photos and note.
   const stockRow = rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
@@ -506,7 +592,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable }),
+      () => withPestCheck(completionBody({ form, rows, photos: photoList, preview: photos.preview, previewCurrent, ctx, tipsAvailable, watchChoices }), pestCheck.payload),
       `${names || 'Inspection'} · ${inOptionOrder(PLANT_GROUP_OPTIONS, form.plantGroups)}`,
     );
   };
@@ -521,9 +607,21 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
     <div className="tech-visit-form-area">
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} micInside />
           <PhotosSection photos={photos} lastPhotos={ctx.lastVisitPhotos} previewCurrent={previewCurrent} locked={locked || dictationPending} />
-          <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} />
+          {ctx.watchList && ctx.watchList.length > 0 && (
+            <WatchListSection
+              list={ctx.watchList}
+              flagged={flaggedWatchKeys(ctx.watchList, previewCurrent ? photos.preview.result : null)}
+              analyzed={previewCurrent}
+              readComplete={previewCurrent && photos.preview.result?.watchSignalsComplete === true}
+              choices={watchChoices}
+              onChoices={setWatchChoices}
+              locked={locked || dictationPending}
+            />
+          )}
+          <PestCheckSection state={pestCheck} locked={locked} onRemoveMerit={removeMerit} />
+          <ProductsSection ctx={ctx} products={products} locked={locked} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           {(insect || iracRows) && (
             <ComplianceSection form={form} setField={setField} insect={insect} iracRows={iracRows} manualIrac={needsManualIrac(rows, ctx)} locked={locked} />
           )}
@@ -532,7 +630,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               <Chip disabled={locked} key={label} label={label} pressed={form.plantGroups.has(label)} onClick={() => setField('plantGroups', toggleInSet(form.plantGroups, label))} />
             ))}
           </ChoiceSection>
-          <ChoiceSection title="Areas treated (optional)" columns={2}>
+          <ChoiceSection title="Areas treated" columns={2}>
             {AREA_OPTIONS.map((label) => (
               <Chip disabled={locked} key={label} label={label} pressed={form.areas.has(label)} onClick={() => setField('areas', toggleInSet(form.areas, label))} />
             ))}
@@ -542,9 +640,12 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
               <Chip disabled={locked} key={label} label={label === suggested ? `${label} (photo read)` : label} pressed={form.condition === label} onClick={() => setField('condition', label)} />
             ))}
           </ChoiceSection>
+          <CustomerHomeSection value={form.customerHome} locked={locked} onChange={(value) => setField('customerHome', value)} />
           {tipsAvailable && (
             <TipSection
+              quiet
               library={tips}
+              priorityTipIds={priorityTipIds}
               tipId={form.tipId}
               customTip={form.customTip}
               locked={locked}
@@ -558,7 +659,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
       <CompleteFooter
         submission={submission}
         missingReason={missingReason}
-        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow}
+        warn={missingReason === BEES_ACTIVE_MESSAGE || !!stockRow || !!pestCheck.evaluation.blockMessage}
         label="Complete tree & shrub"
         onSubmit={submit}
         coverProps={picker.coverProps}
@@ -575,7 +676,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
 // The five photo slots, the Analyze read, and what it flagged. `slots` is
 // slot key -> prepared photo; `list` is the photos in slot order, the order
 // the server scores and records them.
-function usePhotoSlots({ base, request }) {
+function usePhotoSlots({ base, request, watchList = false }) {
   const [slots, setSlots] = useState({});
   const [busyKeys, setBusyKeys] = useState(() => new Set());
   const [errors, setErrors] = useState({});
@@ -627,7 +728,8 @@ function usePhotoSlots({ base, request }) {
     try {
       const result = await request(`${base}/tree-shrub/assess-preview`, {
         method: 'POST',
-        body: JSON.stringify({ photos: analyzed.map((data) => ({ data })) }),
+        // watchList: ask for the watch read only when this sheet shows the list.
+        body: JSON.stringify({ photos: analyzed.map((data) => ({ data })), ...(watchList && { watchList: true }) }),
       });
       if (sequence !== readSequence.current) return;
       // Only a read that scored EVERY photo is reviewable: /complete trusts the
@@ -658,7 +760,7 @@ function PhotosSection({ photos, lastPhotos, previewCurrent, locked }) {
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Photos</h3>
-        <span className="tech-visit-muted">{`${count} of ${MAX_PHOTOS} · first two required`}</span>
+        <span className="tech-visit-muted">{`${count} added`}</span>
       </div>
       <div className="tech-ts-slots">
         {PHOTO_SLOTS.map((slot) => (
@@ -768,6 +870,132 @@ function PhotoSlot({ slot, photo, last, busy, error, locked, onFile, onClear }) 
   );
 }
 
+// The watch-list keys the current photo read flagged, kept to this month's list.
+function flaggedWatchKeys(list, result) {
+  const onList = new Set((list || []).map((item) => item.key));
+  return new Set((Array.isArray(result?.watchSignals) ? result.watchSignals : [])
+    .filter((key) => typeof key === 'string' && onList.has(key)));
+}
+
+// The seasonal watch list: what the read flagged (Seen / Not seen), anything
+// else the tech adds as seen, and an optional extent on a seen item.
+function WatchListSection({ list, flagged, analyzed, readComplete, choices, onChoices, locked }) {
+  const [adding, setAdding] = useState(false);
+  const flaggedItems = list.filter((item) => flagged.has(item.key));
+  const added = list.filter((item) => !flagged.has(item.key) && choices[item.key]?.state === 'seen');
+  const addable = list.filter((item) => !flagged.has(item.key) && choices[item.key]?.state !== 'seen');
+  // Tapping the chosen answer again goes back to undecided.
+  const setState = (key, state) => onChoices((prev) => {
+    const next = { ...prev };
+    if (prev[key]?.state === state) delete next[key];
+    else next[key] = { state, extent: state === 'seen' ? prev[key]?.extent || null : null };
+    return next;
+  });
+  const setExtent = (key, extent) => onChoices((prev) => ({
+    ...prev, [key]: { ...prev[key], extent: prev[key]?.extent === extent ? null : extent },
+  }));
+  const remove = (key) => onChoices((prev) => {
+    const next = { ...prev };
+    delete next[key];
+    return next;
+  });
+  return (
+    <section className="tech-visit-choice-section" aria-label={WATCH_TITLE}>
+      <div className="tech-visit-section-head">
+        <h3 className="tech-visit-section-title">{WATCH_TITLE}</h3>
+      </div>
+      {analyzed && readComplete && flaggedItems.length === 0 && (
+        <p className="tech-visit-muted" role="status">The photo read flagged nothing on this list.</p>
+      )}
+      {analyzed && !readComplete && (
+        <p className="tech-visit-muted" role="status">The photo read did not check this list. Add anything you saw.</p>
+      )}
+      <div className="tech-ts-findings">
+        {flaggedItems.map((item) => (
+          <WatchTile
+            key={item.key}
+            item={item}
+            title={item.signal}
+            choice={choices[item.key]}
+            locked={locked}
+            onState={(state) => setState(item.key, state)}
+            onExtent={(extent) => setExtent(item.key, extent)}
+          />
+        ))}
+        {added.map((item) => (
+          <WatchTile
+            key={item.key}
+            item={item}
+            title={item.label}
+            choice={choices[item.key]}
+            locked={locked}
+            onExtent={(extent) => setExtent(item.key, extent)}
+            onRemove={() => remove(item.key)}
+          />
+        ))}
+      </div>
+      {addable.length > 0 && (
+        <Button
+          type="button"
+          variant="secondary"
+          className="tech-visit-action tech-visit-wide"
+          aria-expanded={adding}
+          disabled={locked}
+          onClick={() => setAdding((open) => !open)}
+        >
+          Add from watch list
+        </Button>
+      )}
+      {adding && addable.length > 0 && (
+        <div className="tech-visit-tile-grid tech-visit-tile-grid--2">
+          {addable.map((item) => (
+            <Chip disabled={locked} key={item.key} label={item.label} onClick={() => setState(item.key, 'seen')} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// One watch item. A flagged item has Seen / Not seen; an added one has Remove.
+// A seen item takes an extent, except a refer-only one, which only says to call.
+function WatchTile({ item, title, choice, locked, onState, onExtent, onRemove }) {
+  const seen = choice?.state === 'seen';
+  return (
+    <div className={cn('tech-visit-card tech-ts-finding', choice?.state === 'not_seen' && 'tech-ts-finding--rejected')}>
+      <p className="tech-ts-finding-label">{title}</p>
+      {onState && (
+        <div className="tech-visit-tile-grid tech-visit-tile-grid--2">
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-product" aria-pressed={seen} aria-label={`Seen: ${item.label}`} disabled={locked} onClick={() => onState('seen')}>Seen</Button>
+          <Button type="button" variant="secondary" className="tech-visit-action tech-visit-product" aria-pressed={choice?.state === 'not_seen'} aria-label={`Not seen: ${item.label}`} disabled={locked} onClick={() => onState('not_seen')}>Not seen</Button>
+        </div>
+      )}
+      {seen && item.referOnly && <p className="tech-ts-finding-label" role="status">{WATCH_REFER_LINE}</p>}
+      {seen && !item.referOnly && (
+        <div className="tech-visit-tile-grid tech-visit-tile-grid--3">
+          {WATCH_EXTENTS.map((extent) => (
+            <Button
+              key={extent.value}
+              type="button"
+              variant="secondary"
+              className="tech-visit-action tech-visit-product"
+              aria-pressed={choice.extent === extent.value}
+              aria-label={`${extent.label}: ${item.label}`}
+              disabled={locked}
+              onClick={() => onExtent(extent.value)}
+            >
+              {extent.label}
+            </Button>
+          ))}
+        </div>
+      )}
+      {onRemove && (
+        <Button type="button" variant="ghost" className="tech-visit-action" aria-label={`Remove ${item.label}`} disabled={locked} onClick={onRemove}>Remove</Button>
+      )}
+    </div>
+  );
+}
+
 // One thing the photo read flagged. Kept unless the tech rejects it; a
 // rejected finding is hidden from the report.
 function FindingTile({ finding, rejected, locked, onToggle }) {
@@ -791,19 +1019,17 @@ function FindingTile({ finding, rejected, locked, onToggle }) {
 }
 
 // This month's protocol products as suggestions, then anything the tech adds.
-function ProductsSection({ ctx, products, locked, other, popover }) {
+function ProductsSection({ ctx, products, locked, other, popover, inlineSearch }) {
   const { rows, updateRow, removeRow } = products;
   const sectionWarnings = ctx.warnings.filter((warning) => warning.productId == null);
   return (
     <section className="tech-visit-choice-section">
       <div className="tech-visit-section-head">
         <h3 className="tech-visit-section-title">Products used</h3>
-        <span className="tech-visit-muted">Tap what you applied</span>
       </div>
       {sectionWarnings.map((warning) => (
         <p key={`${warning.type}-${warning.productId}-${warning.message}`} className="tech-visit-warning" role="status"><WarningIcon /> {warning.message}</p>
       ))}
-      {!rows.length && <p className="tech-visit-muted">No suggested products this month. Add what you applied.</p>}
       <div className="tech-visit-tile-grid">
         {rows.map((row) => (
           <ProductTile key={row.productId} row={row} locked={locked} onClick={() => updateRow(row.productId, { active: !row.active })} />
@@ -819,7 +1045,7 @@ function ProductsSection({ ctx, products, locked, other, popover }) {
           onRemove={() => removeRow(row.productId)}
         />
       ))}
-      <OtherProductButton {...other} popover={popover} />
+      {inlineSearch || <OtherProductButton {...other} popover={popover} />}
     </section>
   );
 }
@@ -827,33 +1053,19 @@ function ProductsSection({ ctx, products, locked, other, popover }) {
 // A product tile names what goes on the record. A suggestion starts off; a
 // product in the N/P summer blackout says so and cannot be turned on.
 function ProductTile({ row, locked, onClick }) {
-  const outOfStock = row.active && isOutOfStock(row.product);
   let detail = 'Tap if applied';
   if (row.blocked) detail = NP_BLACKOUT_TEXT;
   else if (row.active) detail = hasAmount(row) ? amountText(row.totalAmount, row.amountUnit) : 'How much?';
   return (
-    <Button
-      type="button"
-      variant="secondary"
-      className={cn('tech-visit-action tech-visit-product tech-visit-product-tile', {
-        'tech-visit-product--off': !row.active && !row.blocked,
-        'tech-visit-product--added': row.added && row.active,
-        'tech-visit-product--stock': outOfStock,
-      })}
+    <ProductTileButton
+      row={row}
+      detail={detail}
+      off={!row.active && !row.blocked}
+      added={row.added && row.active}
+      ariaProps={{ 'aria-pressed': row.active }}
       disabled={locked || row.blocked}
-      aria-pressed={row.active}
       onClick={onClick}
-    >
-      <span className="tech-visit-product-name">{row.name}</span>
-      <span className="sr-only"> — </span>
-      <span className="tech-visit-product-amount">{detail}</span>
-      {outOfStock && (
-        <>
-          {' '}
-          <span className="tech-visit-stock-flag"><WarningIcon />0 in stock</span>
-        </>
-      )}
-    </Button>
+    />
   );
 }
 

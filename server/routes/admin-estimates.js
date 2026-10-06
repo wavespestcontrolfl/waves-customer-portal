@@ -27,6 +27,7 @@ const {
 const EmailTemplateLibrary = require('../services/email-template-library');
 const sendgrid = require('../services/sendgrid-mail');
 const { clearRouteCacheForRequest } = require('../utils/route-cache');
+const { nanpNationalDigits, isValidNanpNumber, nanpPhoneProblem } = require('../utils/phone');
 const { clearEstimatePricingCache } = require('../services/estimate-pricing-cache');
 const {
   buildEstimatePricingAudit,
@@ -78,7 +79,7 @@ const {
 const {
   CONTENT_LIBRARY_VERSION,
   PRODUCT_REGISTRY_VERSION,
-  PROTOCOL_VERSION,
+  protocolVersion,
   TEMPLATE_VERSION,
 } = require('../services/lawn-service-outline');
 
@@ -867,6 +868,14 @@ function estimateEmailPriceLine(estimate) {
 // Uses the same template renderers as delivery, without minting tracked links,
 // auditing a template issue, or calling a transport. Only the link is shortened
 // at handoff; the manual send pins the base SMS template shown here.
+// A readable refusal when the estimate's saved phone is a US-shaped number that
+// cannot exist; null when absent (the "No phone on file" leg handles that),
+// valid, or not US-shaped.
+function estimateSmsPhoneProblem(estimate) {
+  const problem = nanpPhoneProblem(estimate.customer_phone);
+  return problem ? `${problem} Fix the phone on the contact or the estimate, then send again. Nothing was sent.` : null;
+}
+
 async function buildEstimateSendPreview(estimate) {
   const firstName = await estimateGreetingFirstName(db, estimate);
   const viewUrl = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;
@@ -894,6 +903,7 @@ async function buildEstimateSendPreview(estimate) {
     id: estimate.id, status: estimate.status, editVersion: estimateEditVersion(estimate),
     customerName: estimate.customer_name, customerPhone: estimate.customer_phone,
     customerEmail: estimate.customer_email, address: estimate.address,
+    smsBlockReason: estimateSmsPhoneProblem(estimate),
     updatedAt: estimate.updated_at,
     uncertainAttempt: uncertain,
     groupVersions: estimate.estimate_group_id ? Object.fromEntries((await db('estimates')
@@ -1246,6 +1256,19 @@ router.get('/:id/edit-source', async (req, res, next) => {
       notes: estimate.notes,
       serviceInterest: estimate.service_interest,
       showOneTimeOption: !!estimate.show_one_time_option,
+      // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): the saved tier mark
+      // and whether the stored result may carry one, so a reopened estimate
+      // shows its checkbox and a revise keeps the mark without a regenerate.
+      offerTiersRequested: estData?.offerTiersRequested === true,
+      offerTiersAvailable: (() => {
+        try {
+          const OfferTiers = require('../services/estimate-offer-tiers');
+          const { isCommercialEstimateData } = require('../services/estimate-delivery-options');
+          return OfferTiers.offerTiersSaveEligibility({
+            estData, commercial: isCommercialEstimateData(estData),
+          }).eligible === true;
+        } catch (_) { return false; }
+      })(),
       billByInvoice: !!estimate.bill_by_invoice,
       satelliteUrl: estimate.satellite_url,
       propertyId: estimate.property_id || null,
@@ -1366,6 +1389,13 @@ router.post('/:id/send', async (req, res, next) => {
       reviewedMessages = preview.messages;
     }
     assertEstimateSendable(estimate, { engineReviewAcknowledged });
+    // An impossible US number refuses the WHOLE send (400, nothing leaves, no
+    // claim taken) rather than letting the email go and the text fail at the
+    // provider: a resend after the fix would deliver the email twice.
+    if (sendMethod !== 'email') {
+      const smsProblem = estimateSmsPhoneProblem(estimate);
+      if (smsProblem) return res.status(400).json({ error: smsProblem, code: 'INVALID_SMS_PHONE' });
+    }
 
     if (scheduledAt) {
       const scheduledTime = new Date(scheduledAt);
@@ -1763,7 +1793,15 @@ async function applyLeadServiceForSend(estimate, { leadShapeRef = null, preserve
       .flatMap(([key, spec]) => spec.selected.map((t) => [t, key])));
     const selectedOrder = (Array.isArray(estData.engineRequest?.selectedServices) ? estData.engineRequest.selectedServices : [])
       .map((t) => tokenToKey[String(t).toUpperCase()]).filter(Boolean);
-    const leadKey = selectedOrder.find((k) => recurringKeys.includes(k));
+    // Good / Better / Best: an estimate the office marked for tiers leads
+    // with PEST whatever the selection order (the tool lists lawn first), so
+    // lawn is the parked line and the customer lands on the pest plan with
+    // Best one tap away. Parking pest instead would leave a lawn-only quote
+    // and no picker.
+    const leadKey = require('../services/estimate-offer-tiers').offerTiersRequested(estData)
+      && recurringKeys.includes('pest_control')
+      ? 'pest_control'
+      : selectedOrder.find((k) => recurringKeys.includes(k));
     if (!leadKey) return untouched;
     const toPark = recurringKeys.filter((k) => k !== leadKey && removable.has(k));
     if (toPark.length !== 1) return untouched;
@@ -2830,12 +2868,13 @@ async function sendEstimateNowInner(estimate, sendMethod, options, deliveryClaim
     if (!estimate.customer_phone) {
       channels.sms = { ok: false, error: 'No phone on file' };
     } else {
-      const digits = String(estimate.customer_phone).replace(/\D/g, '');
-      const normalized = digits.length === 11 && digits.startsWith('1') ? `+${digits}`
-        : digits.length === 10 ? `+1${digits}`
-        : null;
+      // Shared NANP rule (utils/phone): a ten-digit number whose area code or
+      // exchange starts with 0/1 can never be texted, so refuse the leg here,
+      // before any provider call, rather than at Twilio (21211).
+      const smsNational = nanpNationalDigits(estimate.customer_phone);
+      const normalized = smsNational && isValidNanpNumber(smsNational) ? `+1${smsNational}` : null;
       if (!normalized) {
-        channels.sms = { ok: false, error: `Invalid phone format: ${estimate.customer_phone}` };
+        channels.sms = { ok: false, error: nanpPhoneProblem(estimate.customer_phone) || `Invalid phone format: ${estimate.customer_phone}` };
       } else {
         try {
           const currentSmsBody = await smsTemplatesRouter.getTemplate('estimate_sent', { first_name: firstName, estimate_url: smsViewUrl }, {
@@ -3746,7 +3785,7 @@ router.get('/', async (req, res, next) => {
           const stats = outlineEventStats.get(row.id) || {};
           const staleReasons = [
             row.content_library_version !== CONTENT_LIBRARY_VERSION ? 'content library updated' : null,
-            row.protocol_version !== PROTOCOL_VERSION ? 'protocol updated' : null,
+            row.protocol_version !== protocolVersion() ? 'protocol updated' : null,
             row.product_registry_version !== PRODUCT_REGISTRY_VERSION ? 'product facts updated' : null,
             row.template_version !== TEMPLATE_VERSION ? 'template updated' : null,
           ].filter(Boolean);
@@ -3770,7 +3809,7 @@ router.get('/', async (req, res, next) => {
             productRegistryVersion: row.product_registry_version,
             templateVersion: row.template_version,
             currentContentLibraryVersion: CONTENT_LIBRARY_VERSION,
-            currentProtocolVersion: PROTOCOL_VERSION,
+            currentProtocolVersion: protocolVersion(),
             currentProductRegistryVersion: PRODUCT_REGISTRY_VERSION,
             currentTemplateVersion: TEMPLATE_VERSION,
             stale: staleReasons.length > 0,
@@ -5074,6 +5113,10 @@ router.post('/:id/follow-up', async (req, res, next) => {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
+    {
+      const smsProblem = estimateSmsPhoneProblem(estimate);
+      if (smsProblem) return res.status(400).json({ error: smsProblem, code: 'INVALID_SMS_PHONE' });
+    }
     if (estimate.status === 'accepted') return res.status(400).json({ error: 'Already accepted' });
     assertEstimateSendable(estimate);
     // Group-aware pricing-authority verdict (#3750, uncapped codex P0 r24):
@@ -5152,6 +5195,10 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     const estimate = await db('estimates').where({ id: req.params.id }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (!estimate.customer_phone) return res.status(400).json({ error: 'No phone on file' });
+    {
+      const smsProblem = estimateSmsPhoneProblem(estimate);
+      if (smsProblem) return res.status(400).json({ error: smsProblem, code: 'INVALID_SMS_PHONE' });
+    }
 
     // Status gate — only active offers can be booked. Drafts aren't real
     // offers yet; declined/expired/archived are intentionally closed and

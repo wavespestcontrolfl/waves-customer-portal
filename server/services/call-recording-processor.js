@@ -66,6 +66,7 @@ const { validateModelOutput, validatePersisted, SCHEMA_VERSION } = require('../s
 const { normalizeExtractionV2 } = require('../utils/normalize-extraction-v2');
 const { scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
 const { buildExtractionPrompt, buildPriorCallBlock, extractionPromptVersion, PROMPT_HASH } = require('./prompts/call-extraction-v1');
+const { appointmentConfirmedRules } = require('./prompts/appointment-confirmed-rules');
 const { dispatchWithFallback, anthropicText } = require('./llm/call');
 const { writeLegacyShadowRouteDecision } = require('./call-route-decisions');
 const { stageCustomerFieldCandidates } = require('./call-field-candidates');
@@ -114,7 +115,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -161,7 +162,7 @@ const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
-const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
+const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly, followUpProbeEnd } = require('./call-booking-catalog');
 const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
@@ -334,6 +335,9 @@ async function recheckCallBookingConflicts({
         // are still excluded via freshRowIds below.
         excludeCustomerId: isPrimary ? excludeCustomerId : null,
         excludeServiceIds: freshRowIds,
+        // The row's own technician (gate-dark, occupancy.js header): the
+        // recheck judges the same route the in-txn probe did.
+        technicianId: visit.technicianId || null,
       });
       for (const row of rows) {
         findings.push({
@@ -1243,6 +1247,23 @@ function slotElapsedAtBookingTime(scheduledDate, windowStart = null) {
   // is "00:00" for the elapsed comparison (codex #4890 r8 P2).
   const start = windowStart ? String(windowStart).replace(/^24:/, '00:') : windowStart;
   return sameDayWindowElapsed(scheduledDate, start);
+}
+
+// Spelled-email trust (owner ruling 2026-10-05) applies only to an address no
+// customer record already holds — the ownership gate the decoder adopt and
+// the domain-typo adopt use, with no customer exempted. An address the primary extractor captured
+// itself never went through those adopt paths, so it is checked here before
+// the read-back card (and with it the first-touch hold) is dropped. Fails
+// closed: a failed lookup keeps the card.
+async function spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail }) {
+  if (!spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)) return false;
+  // No customer is exempt: the canonical customer is not known yet (Step 3
+  // can still reassign a shared-phone call), so ANY record already holding
+  // the address keeps the read-back card.
+  const ownedByAnyone = await require('./email-bounce-recovery')
+    .correctedAddressOwnedByOther(String(extracted.email).trim().toLowerCase(), null)
+    .catch(() => true);
+  return !ownedByAnyone;
 }
 
 // codex #4919 round-9 P2: start_before_call and slot_elapsed_at_booking_time
@@ -7451,7 +7472,9 @@ async function transcribeWithOpenAI(audioBuffer, opts = {}) {
     const contentType = res.headers.get('content-type') || '';
     const data = contentType.includes('application/json') ? await res.json() : await res.text();
     const text = normalizeOpenAITranscript(data);
-    if (!text) return null;
+    // A successful response with no words. Callers that must tell silence from a
+    // provider failure (Fast Complete voice fill) ask for it with opts.emptyOk.
+    if (!text) return opts.emptyOk ? { text: '', segments: [] } : null;
     // PAN redaction guard — applied at the PROVIDER RETURN, before any other
     // LLM sees the text: the labeling pass (labelTranscriptWithOpenAI)
     // consumes this raw transcript, so scrubbing only at persistence would
@@ -8216,16 +8239,7 @@ IMPORTANT — lead_quality (only meaningful when is_lead=true; use "cold" otherw
 - "spam": not a real prospect (solicitor / robocall / wrong number).
 Do not inflate quality: a caller who is still comparing companies or said they'd call back is "cold", not "warm".
 
-IMPORTANT — appointment_confirmed rules:
-- Only set appointment_confirmed to true if BOTH a specific DATE and a specific TIME were explicitly agreed to by the caller.
-- Vague references like "tomorrow", "next week", "noonish", "sometime Tuesday" do NOT count — the caller must confirm an actual time (e.g. "10 AM", "2:30 PM", "noon").
-- ARRIVAL WINDOW EXCEPTION: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — STATED as an explicit AM/PM on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon"), or, when none was said, READ from business hours by the BUSINESS-HOURS READING rule below — DOES count as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set appointment_confirmed true and preferred_date_time to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") is a specific day here; the vague examples above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range or hour with an explicit AM/PM, "noon"/"midnight" or a day-part word keeps that period. BUSINESS-HOURS READING (owner decision 2026-09-29, the same rule the owner approved for reschedules on 2026-09-28): when the agreed START hour — one time, or a range's start — was said with NO AM/PM, no day-part word and no "noon"/"midnight" ("can we plan on 2 o'clock?" answered "Sure."; "Tuesday, 2 to 4"; "between 2 and 4"; "we'll see you at 10"), read it as business hours: 7 to 11 is the morning, 12 and 1 to 6 the afternoon. When staff COMMITTED to that hour and the caller ACCEPTED it (a plain "Sure."/"Yes."/"That works." to the offered hour counts), on a specific day, it qualifies as confirmed (appointment_confirmed true, preferred_date_time set from that reading) from that reading. Only ONE exact on-the-hour start that BOTH sides settled qualifies: an approximation ("around two", "two-ish"), a bound ("by two", "before two"), alternatives ("two or three", "two or four"), minutes ("two thirty"), a correction still open, or an hour that is not one of 1 to 12 does NOT. If anyone on the call states an AM/PM or a part of the day for that time that conflicts with the business-hours reading ("two in the morning", or a caller who said they can only do mornings while the hour reads as 2 PM), do not confirm: the stated period governs and the time is contested, so appointment_confirmed stays false. An offer staff did not commit to ("we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time") stays NOT confirmed.
-- If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
-- preferred_date_time must include the confirmed time, not just a date.
-- Resolve relative dates against the call date above in Eastern Time. "Today" means ${callDateET}; do not invent a prior year or use the model's training/current date.
-  - Do not set appointment_confirmed to true for unrelated business advice, SEO, marketing, construction advice, or other non-Waves services even if a time was discussed.
-  - Do set appointment_confirmed to true when a builder or construction company explicitly books a Waves pre-slab/preconstruction termite, soil-treatment, or concrete-pour field-service appointment with a specific date and time.
-- Do not set appointment_confirmed to true for follow-up/admin calls about an invoice, payment, receipt, compliance report, sticker, certificate, W-9, report, or paperwork unless the caller and agent also explicitly book a new Waves field-service visit.
+${appointmentConfirmedRules(callDateET)}
 - If the caller asks for soil poison, soil treatment, pre-slab/preconstruction termite work, new-construction termite treatment, or treatment before a slab/concrete pour, matched_service must be "Pre-Slab Termidor" — not "Termite Inspection".
 
 IMPORTANT — matched_service: recurring interest beats the single presenting pest:
@@ -8331,6 +8345,15 @@ Return ONLY valid JSON.`;
 // response_schema ("too many states for serving"), so we use plain JSON mode and
 // embed the schema as prompt guidance. Correctness is guaranteed by the two-pass
 // ajv validation in finalizeV2Extraction — the model output is never trusted directly.
+// ET wall-clock time of the call's start ("1:12 PM"), or null when the start is
+// unknown or unparseable. No fallback to now: a reprocess must not tell the
+// model the call was made at the time of the reprocess.
+function callTimeETString(callStartedAt) {
+  if (!callStartedAt) return null;
+  const at = new Date(callStartedAt);
+  return Number.isNaN(at.getTime()) ? null : formatETTime(at);
+}
+
 // Shared by the live Gemini path and the OpenAI shadow so both send the identical prompt.
 function buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptOpts = {}) {
   return buildExtractionPrompt(transcription, callerPhone, callDateET, promptOpts)
@@ -8406,6 +8429,10 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   const callDateET = etDateString(opts.callStartedAt || new Date());
   const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
     bookableServiceNames: opts.bookableServiceNames,
+    // The call's own ET clock time, so a time agreed with no day ("I'll be
+    // there at three") can be judged against it: today when still ahead.
+    // Only from a real call start; never guessed from "now" on a reprocess.
+    callTimeET: callTimeETString(opts.callStartedAt),
     // Existing-customer hint — V1 has had this since the non-lead veto work;
     // without it V2 reads "still on for Tuesday at 10?" as a fresh confirmed
     // booking (the duplicate-appointment path).
@@ -8479,10 +8506,10 @@ async function generateLeadSynopsis(transcription) {
     // that could steal live work. With every call bounded, a stuck pass
     // FAILS, releases and stops beating, and the heartbeat rule alone is
     // enough.
-    const response = await ledgerCall('anthropic', MODELS.FLAGSHIP, () => client.messages.create({
-      model: MODELS.FLAGSHIP,
-      ...anthropicEffortConfig(MODELS.FLAGSHIP),
-      max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 1200),
+    const response = await ledgerCall('anthropic', MODELS.ROUTINE, () => client.messages.create({
+      model: MODELS.ROUTINE,
+      ...anthropicEffortConfig(MODELS.ROUTINE, MODELS.ROUTINE_EFFORT),
+      max_tokens: anthropicMaxTokens(MODELS.ROUTINE, 1200),
       messages: [{
         role: 'user',
         content: `Role:
@@ -8530,6 +8557,11 @@ Use markdown headers (##) for sections. Use bullet points. Keep the entire outpu
       // need a second one inside it.
     }, { timeout: PROVIDER_FETCH_TIMEOUTS_MS.extraction, maxRetries: 0 }), { laneId: 'lead_synopsis' });
 
+    // A refusal's text is the model's explanation, never a synopsis.
+    if (response?.stop_reason === 'refusal') {
+      logger.warn('[call-proc] Synopsis generation refused by the model');
+      return null;
+    }
     // First TEXT block — a thinking block leads the content on Opus 5.5.
     return anthropicText(response).trim() || null;
   } catch (err) {
@@ -11302,6 +11334,17 @@ const CallRecordingProcessor = {
           if (onFileSatisfied.length) {
             logger.info(`[call-proc] Address flags satisfied by the on-file address for ${maskSid(callSid)}: ${onFileSatisfied.join(', ')} (no card)`);
           }
+          // Cards nobody needs (2026-10-05 audit) — trims the Needs Review
+          // cards only; finalFlags, the route decision and the routing
+          // verdict keep every flag.
+          const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction, { canonicalStreet: extracted?.address_line1 }).dropped);
+          if (unneededCards.size) {
+            logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
+            // Only cards this pass would file are skipped. Cards an earlier
+            // pass filed keep their filing-time snapshot of the ask and are
+            // left to the evidence sweep — the rolling extraction can change
+            // under them.
+          }
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
           // confirmation SMS (established business relationship; they called
@@ -11377,7 +11420,7 @@ const CallRecordingProcessor = {
           // don't block. Without this, promoting DRIVES_ROUTING would silence the
           // identity signals the shadow bridge used to surface. onConflict dedups
           // against the blocked-branch inserts below.
-          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f)).slice(0, 10)) {
+          for (const flag of finalFlags.filter((f) => ADVISORY_TRIAGE_FLAGS.has(f) && !unneededCards.has(f)).slice(0, 10)) {
             if (flag === 'missing_unit_number') clarifyUnitOwed = true;
             await db('triage_items')
               .insert(buildTriageItem({
@@ -11488,13 +11531,13 @@ const CallRecordingProcessor = {
             const blockingReasons = (routingResult.appointmentBlockingFlags && routingResult.appointmentBlockingFlags.length)
               ? routingResult.appointmentBlockingFlags
               : (noSchedulingAsk ? [] : [routingResult.reason || 'routing_rejected']);
-            const triageReasons = blockingReasons;
+            const triageReasons = blockingReasons.filter((f) => !unneededCards.has(f));
             // A held scheduling CHANGE (cancel / reschedule / coordination on
             // an existing visit) is owed work. The card files below, but
             // review_status is driven by bridgeNeedsConfirmation alone, so the
             // call itself looked fully processed (2026-09-02..08 audit: a
             // cancellation, two reschedules and a re-treat with no owner).
-            if (blockingReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
+            if (triageReasons.some((f) => SCHEDULING_CHANGE_REVIEW_FLAGS.includes(f))) schedulingChangeHeld = true;
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({
                 callLogId: call.id, flag, extraction: v2Extraction, addressValidation, onFileAddress,
@@ -11509,7 +11552,7 @@ const CallRecordingProcessor = {
             // set, so without this loop it would appear on no card at all.
             // Mirrors the allowed branch's fail-open advisory loop; onConflict
             // dedups against any same-reason row.
-            for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
+            for (const f of (routingResult.failedOpenFlags || []).filter((x) => !unneededCards.has(x)).slice(0, 10)) {
               try {
                 await db('triage_items')
                   .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
@@ -11537,7 +11580,7 @@ const CallRecordingProcessor = {
             // (phone via ANI, garbled email, on-file address, low confidence) —
             // book-and-flag, never book-and-hide (owner directive).
             if (routingResult.failedOpenFlags?.length) {
-              for (const f of routingResult.failedOpenFlags) {
+              for (const f of routingResult.failedOpenFlags.filter((x) => !unneededCards.has(x))) {
                 try {
                   await db('triage_items')
                     .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress }))
@@ -11731,6 +11774,12 @@ const CallRecordingProcessor = {
             && !needsConfirmation.includes('email_unverified')
             && !needsConfirmation.includes('email_invalid')) {
           needsConfirmation.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
+        // Spelled-email trust (owner ruling 2026-10-05): one spelling heard,
+        // and it is the address being saved — no read-back card, no hold.
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {
+          const at = needsConfirmation.indexOf('email_unverified');
+          if (at !== -1) needsConfirmation.splice(at, 1);
         }
         if (normalizedAddress) {
           // Adopt Google's normalized address BEFORE the customer/lead upsert
@@ -11940,6 +11989,12 @@ const CallRecordingProcessor = {
             && !emailReasons.includes('email_unverified')
             && !emailReasons.includes('email_invalid')) {
           emailReasons.push(dictationEmailPayload.email_candidates.length ? 'email_unverified' : 'email_invalid');
+        }
+        // Spelled-email trust (owner ruling 2026-10-05) — same rule as the
+        // shadow branch.
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail })) {
+          const at = emailReasons.indexOf('email_unverified');
+          if (at !== -1) emailReasons.splice(at, 1);
         }
         if (correctedEmail) {
           // Same ownership gate as the shadow-bridge site above (fails closed),
@@ -17505,8 +17560,10 @@ const CallRecordingProcessor = {
                 const displayH = hh % 12 || 12;
                 windowDisplay = `${displayH}:${String(mm).padStart(2, '0')} ${ampm}`;
               }
-              // Follow-up visit plan — only when the call specifically
-              // discussed a second/follow-up treatment (transcript-driven);
+              // Follow-up visit plan — when the call specifically discussed
+              // a second/follow-up treatment (transcript-driven), or the
+              // booked service is a two-treatment package (cockroach / flea /
+              // bed bug; GATE_PACKAGE_FOLLOWUP_AUTOBOOK, owner ruling 2026-10-04);
               // date from the transcript when agreed, else parent date + the
               // service's catalog interval (default 14 days). Never for a
               // covered re-service (codex #3222 r2): the re-service IS the
@@ -17653,17 +17710,31 @@ const CallRecordingProcessor = {
                 // dispatch. No confirmation SMS and no reminder registration
                 // for this row — customer comms go out for the initial
                 // visit only (owner directive).
+                // EXCEPT a two-treatment package under
+                // GATE_PACKAGE_FOLLOWUP_AUTOBOOK (owner ruling 2026-10-04:
+                // "visit two should be same time, we don't want to confirm,
+                // they get reminders, they can reschedule"): that child is
+                // written CONFIRMED with the package source_action — the
+                // customer sees it and can move it, the reminder self-heal
+                // sweep arms its 72h/24h reminders (never a confirmation
+                // text), and the parent move/cancel hooks carry it.
                 // Called on the fresh-insert path AND both reuse paths (marker/
                 // slot match, idempotency-key conflict) so a retry whose first
                 // attempt lost the savepointed follow-up insert — or a
                 // reprocess after the primary already exists — still creates
                 // the promised second treatment.
-                const ensureCallFollowUpVisit = async (primaryRow) => {
+                // `fresh`: the primary was inserted by THIS pass. Only a fresh
+                // primary gets the package visit 2 (confirmed shape, or a
+                // package-only plan nobody discussed): a reused row may have
+                // been booked as another service, moved, or closed by staff
+                // since, and its visit 2 stays with the closeout card.
+                const ensureCallFollowUpVisit = async (primaryRow, { fresh = false } = {}) => {
                   if (!callFollowUpPlan || !primaryRow?.id) return null;
+                  if (callFollowUpPlan.packageOnly && !fresh) return null;
                   // A terminal primary gets no visit 2 — reprocessing an old
                   // call whose booking since completed or was cancelled must
                   // not book a stray child off it.
-                  if (['cancelled', 'completed', 'skipped'].includes(primaryRow.status)) return null;
+                  if (['cancelled', 'completed', 'skipped', 'no_show'].includes(primaryRow.status)) return null;
                   // A street-level address hold has no visit 2 until the office
                   // confirms the address: the promised follow-up rides on the review
                   // card (payload.follow_up_plan) instead of a child at an unverified
@@ -17705,6 +17776,29 @@ const CallRecordingProcessor = {
                   // date re-validates against it; a plan that no longer
                   // resolves fails closed to no child — dispatch books by hand).
                   let fuPlan = callFollowUpPlan;
+                  // Package identity comes from the PRIMARY ROW (its persisted
+                  // key snapshot or catalog id): a retry may reuse a row booked
+                  // as a different service than this pass's extraction.
+                  let primaryServiceKey = primaryRow.service_key_snapshot || null;
+                  if (!primaryServiceKey && primaryRow.service_id) {
+                    primaryServiceKey = (await trx('services').where({ id: primaryRow.service_id }).first('service_key'))?.service_key || null;
+                  }
+                  const primaryIsPackage = require('./package-followup-booking').isPackageFollowUpServiceKey(primaryServiceKey);
+                  if (callFollowUpPlan.packageOnly && !primaryIsPackage) return null;
+                  // A pending office-review primary is not a booking yet: it
+                  // gets no package child here (office-confirm booking is a
+                  // follow-up change), so this writer keeps the pending shape.
+                  const packageFollowUp = require('../config/feature-gates').packageFollowupAutobookLive()
+                    && fresh
+                    && primaryIsPackage
+                    // isUnreviewedDispatchOwned, not only the pending shape: a
+                    // voice booking the rebooker moved stays 'confirmed' with
+                    // customer_confirmed false and is still unreviewed.
+                    && !require('./call-booking-source-actions').isUnreviewedDispatchOwned(primaryRow);
+                  // …and a visit 2 nobody discussed is not written at all
+                  // until then: a pending child still arms reminders through
+                  // the sweep, for a treatment the office has not approved.
+                  if (callFollowUpPlan.packageOnly && require('./call-booking-source-actions').isUnreviewedDispatchOwned(primaryRow)) return null;
                   const primaryActualDate = callBookingDateOnly(primaryRow.scheduled_date);
                   if (primaryActualDate && primaryActualDate !== scheduledDate) {
                     fuPlan = resolveCallFollowUpPlan({
@@ -17718,9 +17812,30 @@ const CallRecordingProcessor = {
                   // Runs in a SAVEPOINT (nested trx): a rejected follow-up
                   // insert must never roll back the confirmed primary
                   // appointment sharing this transaction.
-                  const fuStart = fuPlan.windowStart;
+                  // A package visit 2 is at visit 1's time (owner ruling
+                  // 2026-10-04, "same time") — the time visit 1's own hours
+                  // checks already passed; only the date can come from the call.
+                  const primaryStart = String(primaryRow.window_start || '').slice(0, 5);
+                  const fuStart = packageFollowUp && /^\d{2}:\d{2}$/.test(primaryStart) ? primaryStart : fuPlan.windowStart;
                   const [fuH, fuM] = fuStart.split(':').map(Number);
                   const fuEndH = fuH >= 23 ? 23 : fuH + 1;
+                  // A package visit 2 is the same treatment as visit 1, so it
+                  // holds the same block: visit 1's window length (or the
+                  // catalog duration when longer), never the bare one hour a
+                  // 90-minute flea or 120-minute bed bug job would outrun.
+                  let fuWindowEnd = `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`;
+                  if (packageFollowUp) {
+                    const toMin = (v) => { const m = String(v || '').match(/^(\d{1,2}):(\d{2})/); return m ? Number(m[1]) * 60 + Number(m[2]) : null; };
+                    const pStart = toMin(primaryRow.window_start);
+                    const pEnd = toMin(primaryRow.window_end);
+                    const blockMin = Math.max(
+                      60,
+                      pStart != null && pEnd != null && pEnd > pStart ? pEnd - pStart : 0,
+                      Number(callBookingCatalogRow?.default_duration_minutes) || 0,
+                    );
+                    const endMin = Math.min(fuH * 60 + fuM + blockMin, 23 * 60 + 59);
+                    fuWindowEnd = `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+                  }
                   try {
                     return await trx.transaction(async (sp) => {
                       // The follow-up inherits the primary's tech; if that tech
@@ -17732,6 +17847,18 @@ const CallRecordingProcessor = {
                           .first('id', 'employment_status', 'field_dispatchable');
                         if (!isAssignable(fuTech)) {
                           logger.warn(`[call-proc] follow-up technician ${followUpTechId} is not assignable; seeding unassigned`);
+                          followUpTechId = null;
+                        }
+                      }
+                      // A confirmed package visit 2 is customer-visible and arms
+                      // reminders, so the tech must be free on ITS date too
+                      // (dated absences), same check the package helper runs.
+                      if (followUpTechId && packageFollowUp) {
+                        try {
+                          await require('./technician-eligibility').assertAssignableTechnician(followUpTechId, { conn: sp, date: fuPlan.scheduledDate });
+                        } catch (eligErr) {
+                          if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
+                          logger.warn(`[call-proc] package visit 2 technician ${followUpTechId} not assignable on ${fuPlan.scheduledDate}; seeding unassigned`);
                           followUpTechId = null;
                         }
                       }
@@ -17777,13 +17904,14 @@ const CallRecordingProcessor = {
                           service_address_zip: primaryRow.service_address_zip || null,
                           scheduled_date: fuPlan.scheduledDate,
                           window_start: fuStart,
-                          window_end: `${String(fuEndH).padStart(2, '0')}:${String(fuM).padStart(2, '0')}`,
+                          window_end: fuWindowEnd,
                           window_display: `${fuH % 12 || 12}:${String(fuM).padStart(2, '0')} ${fuH >= 12 ? 'PM' : 'AM'}`,
                           service_type: serviceType,
                           service_id: callBookingCatalogRow?.id || null,
                           parent_service_id: primaryRow.id,
-                          status: 'pending',
+                          status: packageFollowUp ? 'confirmed' : 'pending',
                           customer_confirmed: false,
+                          ...(packageFollowUp ? { confirmed_at: new Date() } : {}),
                           // Billing shape rides the price: a priced package
                           // total covers both treatments → $0 "included" child
                           // (same no-charge shape as the completion-CTA flow:
@@ -17796,7 +17924,12 @@ const CallRecordingProcessor = {
                           // its partial unique index blocks a duplicate
                           // follow-up off this visit and carries no free
                           // semantics of its own.
-                          ...callFollowUpBillingShape(priceInfo.price),
+                          // A package visit 2 is ALWAYS the $0 included
+                          // shape, priced primary or not: the package price
+                          // on visit 1 covers both treatments, and
+                          // followup_included is what stops its completion
+                          // from owing a third visit.
+                          ...callFollowUpBillingShape(packageFollowUp ? 0 : priceInfo.price),
                           followup_source_service_id: primaryRow.id,
                           estimated_duration_minutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
                           // Customer-safe only: once dispatch confirms this row
@@ -17808,15 +17941,19 @@ const CallRecordingProcessor = {
                           // so the child needs no marker in notes.
                           notes: [
                             'Follow-up treatment (visit 2) booked from your phone call.',
-                            priceInfo.price != null ? 'Included in the package price on the initial visit.' : null,
+                            priceInfo.price != null || packageFollowUp ? 'Included in the package price on the initial visit.' : null,
                           ].filter(Boolean).join(' '),
                           internal_notes: [
-                            'Booked from phone call — confirm exact time with the customer before dispatch.',
+                            packageFollowUp
+                              ? 'Treatment 2 of a two-treatment package, booked from the phone call at the same time as visit 1. The customer gets reminders and can reschedule.'
+                              : 'Booked from phone call — confirm exact time with the customer before dispatch.',
                             `Call SID: ${callSid}.`,
                           ].join(' '),
                           booking_source: 'phone_call',
                           source_call_log_id: call.id,
-                          source_action: 'ai_call_pipeline_followup',
+                          source_action: packageFollowUp
+                            ? require('./package-followup-booking').PACKAGE_FOLLOWUP_SOURCE_ACTION
+                            : 'ai_call_pipeline_followup',
                           idempotency_key: computeAppointmentIdempotencyKey({
                             callLogId: call.id,
                             schedulingStatus: 'follow_up',
@@ -17842,7 +17979,7 @@ const CallRecordingProcessor = {
                     // Savepoint rolled back: visit 2 is lost but the confirmed
                     // primary appointment commits. Dispatch confirms follow-ups
                     // by hand, so surface it in the log for manual recovery.
-                    logger.warn(`[call-proc] Follow-up visit insert failed for ${callSid}; primary booking kept: ${fuErr.message}`);
+                    logger.warn(`[call-proc] Follow-up visit insert failed for ${callSid}; primary booking kept: ${fuErr.code || fuErr.name || 'error'}`);
                     return null;
                   }
                 };
@@ -17948,7 +18085,45 @@ const CallRecordingProcessor = {
                   if (reuseHeldForAddress) {
                     logger.warn(`[call-proc] reused booking for ${maskSid(callSid)} kept unassigned and without a follow-up: house number disputed (on_file_house_number_conflict)`);
                   }
-                  if (!isAttachedManualBooking && !existing.technician_id && defaultTechnicianId && !reuseHeldForAddress) {
+                  // Two technicians (gate-dark, see the fresh-insert pick
+                  // below): the unassigned reused row goes to the technician
+                  // free at ITS time with the closest route, not the default.
+                  // The row itself is excluded: unassigned, it would otherwise
+                  // read as a clash for every technician.
+                  let reuseCandidateTechId = defaultTechnicianId;
+                  let reuseTechPicked = false;
+                  if (!isAttachedManualBooking && !existing.technician_id && !reuseHeldForAddress) {
+                    try {
+                      const reusePick = await trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
+                        conn: pickSp,
+                        // The reused row's OWN day and window (a marker or
+                        // idempotency match can sit at a different time than
+                        // this call stated). A windowless row occupies no
+                        // time: the pick declines and the default stands.
+                        date: callBookingDateOnly(existing.scheduled_date),
+                        windowStart: existing.window_start ? String(existing.window_start).slice(0, 5) : null,
+                        windowEnd: existing.window_start
+                          ? followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes)
+                          : null,
+                        durationMinutes: existing.estimated_duration_minutes || callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                        lat: existing.lat ?? null,
+                        lng: existing.lng ?? null,
+                        // The row's own service: a replay can extract a
+                        // different one while the appointment stays as booked.
+                        serviceType: existing.service_type || serviceType,
+                        customerId,
+                        excludeServiceIds: [existing.id],
+                        excludeCustomerId: null,
+                      }));
+                      if (reusePick.active) {
+                        reuseCandidateTechId = reusePick.technician?.id || null;
+                        reuseTechPicked = true;
+                      }
+                    } catch (pickErr) {
+                      logger.warn(`[call-proc] technician pick failed for reused booking ${maskSid(callSid)} (default technician kept): ${pickErr.message}`);
+                    }
+                  }
+                  if (!isAttachedManualBooking && !existing.technician_id && reuseCandidateTechId && !reuseHeldForAddress) {
                     // Tech-day membership fence + route_order clear (uncapped
                     // audit r26 P1): unassigned → tech is a tech-day ENTRY,
                     // so it must hold the same 'slot-reserve' fence every
@@ -17962,19 +18137,49 @@ const CallRecordingProcessor = {
                       const { lockTechDays } = require('./scheduling/tech-day-lock');
                       await lockTechDays(trx, [
                         { techId: null, date: dayRow.day },
-                        { techId: defaultTechnicianId, date: dayRow.day },
+                        { techId: reuseCandidateTechId, date: dayRow.day },
                       ]);
                     }
                     // Re-checked FOR SHARE on the writing trx: the default tech was
                     // resolved before this transaction opened. If eligibility
                     // changed, leave the reused row unassigned rather than assign.
-                    let reuseTechId = defaultTechnicianId;
+                    let reuseTechId = reuseCandidateTechId;
                     try {
                       await assertAssignableTechnician(reuseTechId, { conn: trx, date: dayRow?.day });
+                      // A PICKED technician passed the capability filter on a
+                      // plain read; re-read it under the technician share lock
+                      // so an Off saved since cannot receive this visit.
+                      if (reuseTechPicked) {
+                        await require('./technician-capabilities').assertCapabilitiesActive(trx, reuseTechId,
+                          [{ id: existing.id, service_type: existing.service_type || serviceType }],
+                          (rowId, why) => Object.assign(new Error(`technician ${reuseTechId} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
+                      }
                     } catch (eligErr) {
                       if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                       logger.warn(`[call-proc] default technician ${reuseTechId} is no longer assignable; leaving reused booking unassigned`);
                       reuseTechId = null;
+                    }
+                    // The pick read availability before the tech-day locks above.
+                    // Read it again under them (the row itself excluded): a
+                    // booking or a schedule block that landed while this
+                    // transaction waited leaves the row unassigned for the
+                    // office instead of on a technician who is no longer free.
+                    if (reuseTechId && reuseTechPicked && existing.window_start) {
+                      try {
+                        const reuseStart = String(existing.window_start).slice(0, 5);
+                        const reuseEnd = followUpProbeEnd(existing.window_start, existing.window_end, existing.estimated_duration_minutes);
+                        const stillFree = !!reuseEnd && await trx.transaction((probeSp) => require('./scheduling/pick-technician').technicianFreeAt({
+                          conn: probeSp, technicianId: reuseTechId, date: dayRow.day, windowStart: reuseStart, windowEnd: reuseEnd,
+                          excludeServiceIds: [existing.id],
+                        }));
+                        if (!stillFree) {
+                          logger.info(`[call-proc] picked technician ${reuseTechId} no longer free for reused booking ${maskSid(callSid)}; leaving it unassigned`);
+                          reuseTechId = null;
+                        }
+                      } catch (recheckErr) {
+                        logger.warn(`[call-proc] reused-booking availability recheck failed for ${maskSid(callSid)} (left unassigned): ${recheckErr.message}`);
+                        reuseTechId = null;
+                      }
                     }
                     const [updatedExisting] = reuseTechId
                       ? await trx('scheduled_services')
@@ -18030,7 +18235,11 @@ const CallRecordingProcessor = {
                   }
                   if (isAttachedManualBooking) {
                     attachedManualBookingId = primaryRow.id;
+                    // A package-only plan (nobody discussed visit 2) asks for no
+                    // task when the booking already has its linked visit 2.
                     attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                    if (attachSkippedFollowUpPlan && callFollowUpPlan.packageOnly
+                      && await trx('scheduled_services').where({ followup_source_service_id: primaryRow.id }).first('id')) attachSkippedFollowUpPlan = false;
                     // Codex round-4 P1 (PR #4807): this row's source_call_log_id
                     // linkage may itself be durable from an earlier pass (a
                     // reprocess landing here via the `linked` lookup in
@@ -18263,7 +18472,11 @@ const CallRecordingProcessor = {
                   }
                   reusedExistingSchedule = true;
                   attachedManualBookingId = attachable.row.id;
+                  // A package-only plan asks for no task when the booking
+                  // already has its linked visit 2.
                   attachSkippedFollowUpPlan = !!callFollowUpPlan;
+                  if (attachSkippedFollowUpPlan && callFollowUpPlan.packageOnly
+                    && await trx('scheduled_services').where({ followup_source_service_id: attachable.row.id }).first('id')) attachSkippedFollowUpPlan = false;
                   // Codex round-4 P1 (PR #4807): the update just above stamped
                   // source_call_log_id onto this human-created booking — the
                   // ONLY linkage the hold stamp keys on — but this attach path
@@ -18372,9 +18585,43 @@ const CallRecordingProcessor = {
                 // resolved before the txn; if the FOR SHARE recheck below
                 // books unassigned instead, it re-fences the unassigned-day
                 // rung there (codex r1 P2).
+                // Two technicians (GATE_MULTI_TECH_CONFIRM + capacity mode,
+                // owner 2026-10-03): a FRESH call booking goes to the
+                // technician who is free at this time and whose route that day
+                // is closest (scheduling/pick-technician.js), not to the one
+                // default technician. Nobody free → unassigned, and the
+                // tech-blind probe below flags the overlap for the office as
+                // before. Gate off (pick.active false) or a failed pick: the
+                // default technician resolved above, byte for byte. Reads only,
+                // in their own savepoint so a failed read cannot abort `trx`.
+                let bookingTechnicianId = defaultTechnicianId;
+                let bookingTechnicianName = defaultTechnicianName;
+                let bookingTechnicianPicked = false;
+                const pickBookingTechnician = () => trx.transaction((pickSp) => require('./scheduling/pick-technician').pickTechnicianForVisit({
+                  conn: pickSp,
+                  date: scheduledDate,
+                  windowStart: windowStart || '09:00',
+                  windowEnd: windowEnd || '10:00',
+                  durationMinutes: callBookingCatalogRow?.default_duration_minutes || DEFAULT_CALL_BOOKING_DURATION_MINUTES,
+                  lat: propertyLinkage.lat ?? null,
+                  lng: propertyLinkage.lng ?? null,
+                  serviceType,
+                  customerId,
+                }));
+                try {
+                  const pick = await pickBookingTechnician();
+                  if (pick.active) {
+                    bookingTechnicianPicked = true;
+                    bookingTechnicianId = pick.technician?.id || null;
+                    bookingTechnicianName = pick.technician?.name || null;
+                    logger.info(`[call-proc] technician pick for ${maskSid(callSid)} on ${scheduledDate}: ${bookingTechnicianId || 'unassigned'} (${pick.reason})`);
+                  }
+                } catch (pickErr) {
+                  logger.warn(`[call-proc] technician pick failed for ${maskSid(callSid)} (default technician kept): ${pickErr.message}`);
+                }
                 try {
                   const { fenceBookingDay } = require('./scheduling/occupancy');
-                  bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: defaultTechnicianId || null }));
+                  bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: bookingTechnicianId || null }));
                   if (!bookingFence.acquired) {
                     logger.warn(`[call-proc] booking fence missed for ${maskSid(callSid)} on ${scheduledDate} (${bookingFence.reason}); booking unfenced, post-commit recheck flags overlaps`);
                   }
@@ -18393,10 +18640,81 @@ const CallRecordingProcessor = {
                     windowStart: windowStart || '09:00',
                     windowEnd: windowEnd || '10:00',
                     excludeCustomerId: customerId,
+                    // The technician this row is saved with: with two
+                    // technicians another technician's stop is no clash
+                    // (gate-dark, occupancy.js header); null stays tech-blind.
+                    technicianId: bookingTechnicianId || null,
                   });
                 } catch (occErr) {
                   logger.warn(`[call-proc] booking occupancy check failed for ${maskSid(callSid)} (booking proceeds unflagged): ${occErr.message}`);
                   bookingTimeConflicts = [];
+                }
+                // The pick ran before the fence. A booking that committed in
+                // between can sit on the picked technician's window: the
+                // fenced read above now sees it. Pick once more under the
+                // fence (the other technician may still be free), fence that
+                // technician's day, and read again. Still a clash, or nobody
+                // free: the visit is saved unassigned and the tech-blind read
+                // flags it for the office. try-locks never wait, so the extra
+                // rung cannot deadlock; each step keeps its own savepoint. The
+                // fenced read does not model schedule blocks, so a block that
+                // landed on the picked technician since the pick is read here
+                // too and takes the same path.
+                let pickedTechnicianBlocked = false;
+                if (bookingTechnicianPicked && bookingTechnicianId && !bookingTimeConflicts.length) {
+                  try {
+                    pickedTechnicianBlocked = !(await trx.transaction((probeSp) => require('./scheduling/pick-technician').technicianFreeAt({
+                      conn: probeSp, technicianId: bookingTechnicianId, date: scheduledDate,
+                      windowStart: windowStart || '09:00', windowEnd: windowEnd || '10:00', excludeCustomerId: customerId,
+                    })));
+                  } catch (freeErr) {
+                    logger.warn(`[call-proc] picked-technician recheck failed for ${maskSid(callSid)} (pick kept): ${freeErr.message}`);
+                  }
+                }
+                if (bookingTechnicianPicked && bookingTechnicianId && (bookingTimeConflicts.length || pickedTechnicianBlocked)) {
+                  let nextTechnician = null;
+                  try {
+                    const repick = await pickBookingTechnician();
+                    nextTechnician = repick.active ? (repick.technician || null) : null;
+                  } catch (pickErr) {
+                    logger.warn(`[call-proc] technician re-pick failed for ${maskSid(callSid)} (booking unassigned): ${pickErr.message}`);
+                  }
+                  logger.info(`[call-proc] picked technician ${bookingTechnicianId} taken before the fence for ${maskSid(callSid)}; now ${nextTechnician?.id || 'unassigned'}`);
+                  bookingTechnicianId = nextTechnician?.id || null;
+                  bookingTechnicianName = nextTechnician?.name || null;
+                  try {
+                    const { fenceBookingDay, findConflictingVisits } = require('./scheduling/occupancy');
+                    try {
+                      bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: bookingTechnicianId, deadline: bookingFence?.deadline ?? Date.now() }));
+                    } catch (fenceErr) {
+                      bookingFence = { acquired: false, keys: [], reason: 'error' };
+                      logger.warn(`[call-proc] re-pick fence failed for ${maskSid(callSid)} (booking proceeds unfenced): ${fenceErr.message}`);
+                    }
+                    bookingTimeConflicts = await trx.transaction((probeSp) => findConflictingVisits({
+                      db: probeSp,
+                      date: scheduledDate,
+                      windowStart: windowStart || '09:00',
+                      windowEnd: windowEnd || '10:00',
+                      excludeCustomerId: customerId,
+                      technicianId: bookingTechnicianId || null,
+                    }));
+                    if (bookingTechnicianId && bookingTimeConflicts.length) {
+                      // Lost the second technician too: unassigned. The
+                      // findings stand (the office card), and the unassigned-day
+                      // rung is the row's own fence.
+                      bookingTechnicianId = null;
+                      bookingTechnicianName = null;
+                      try {
+                        bookingFence = await trx.transaction((fenceSp) => fenceBookingDay(fenceSp, { date: scheduledDate, techId: null, deadline: bookingFence?.deadline ?? Date.now() }));
+                      } catch (fenceErr) {
+                        bookingFence = { acquired: false, keys: [], reason: 'error' };
+                      }
+                    }
+                  } catch (occErr) {
+                    logger.warn(`[call-proc] re-pick occupancy check failed for ${maskSid(callSid)} (booking unassigned, first findings kept): ${occErr.message}`);
+                    bookingTechnicianId = null;
+                    bookingTechnicianName = null;
+                  }
                 }
                 // Re-service lane dedupe on the FRESH-INSERT path only,
                 // under the reservice-lane advisory lock taken above and
@@ -18518,7 +18836,7 @@ const CallRecordingProcessor = {
                 const insertData = {
                   customer_id: customerId,
                   payer_id: callBookingPayerId || null,
-                  technician_id: defaultTechnicianId,
+                  technician_id: bookingTechnicianId,
                   property_id: propertyLinkage.propertyId,
                   ...(propertyLinkage.lat != null && propertyLinkage.lng != null
                     ? { lat: propertyLinkage.lat, lng: propertyLinkage.lng }
@@ -18573,7 +18891,7 @@ const CallRecordingProcessor = {
                     // internal_notes below.
                     'Booked via phone call.',
                     `Call SID: ${callSid}.`,
-                    defaultTechnicianName ? `Auto-assigned technician: ${defaultTechnicianName}.` : null,
+                    bookingTechnicianName ? `Auto-assigned technician: ${bookingTechnicianName}.` : null,
                     priceInfo.price != null
                       ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
                       : null,
@@ -18626,6 +18944,14 @@ const CallRecordingProcessor = {
                 if (insertData.technician_id) {
                   try {
                     await assertAssignableTechnician(insertData.technician_id, { conn: trx, date: String(scheduledDate).slice(0, 10) });
+                    // A PICKED technician passed the capability filter on a
+                    // plain read; re-read it under the technician share lock
+                    // so an Off saved since cannot receive this visit.
+                    if (bookingTechnicianPicked) {
+                      await require('./technician-capabilities').assertCapabilitiesActive(trx, insertData.technician_id,
+                        [{ id: null, service_type: serviceType }],
+                        (rowId, why) => Object.assign(new Error(`technician ${insertData.technician_id} ${why}`), { code: 'TECH_NOT_ASSIGNABLE' }));
+                    }
                   } catch (eligErr) {
                     if (eligErr.code !== 'TECH_NOT_ASSIGNABLE') throw eligErr;
                     logger.warn(`[call-proc] default technician ${insertData.technician_id} is no longer assignable; booking unassigned`);
@@ -18651,9 +18977,9 @@ const CallRecordingProcessor = {
                     }
                     // The staff-visible note was built before this recheck; an
                     // unassigned visit must not claim a technician owns it.
-                    if (defaultTechnicianName && typeof insertData.notes === 'string') {
+                    if (bookingTechnicianName && typeof insertData.notes === 'string') {
                       insertData.notes = insertData.notes
-                        .replace(`Auto-assigned technician: ${defaultTechnicianName}.`, '')
+                        .replace(`Auto-assigned technician: ${bookingTechnicianName}.`, '')
                         .replace(/\s{2,}/g, ' ')
                         .trim();
                     }
@@ -18780,7 +19106,7 @@ const CallRecordingProcessor = {
                       deferConversion: streetLevelPending,
                     });
                   }
-                  followUpCreated = await ensureCallFollowUpVisit(created);
+                  followUpCreated = await ensureCallFollowUpVisit(created, { fresh: true });
                   await stampCallbackNumberHoldForCall();
                   return created;
                 }
@@ -19020,6 +19346,12 @@ const CallRecordingProcessor = {
                           return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');
                         });
                     } else {
+                      // No new ask: the phone may already have said YES (an
+                      // earlier call), so no YES will arrive for this booking —
+                      // its follow-up (caller demotion, and the confirmation
+                      // when no fan-out sends it: a reused booking) is re-armed
+                      // on this visit for the opt-in sweep.
+                      await require('./recipient-optin').rearmOnSiteFollowUp(customerId, phoneKey, svc.id);
                       await markOptinAsk(entry, 'not_sent:no_new_ask');
                     }
                   } catch (askErr) {
@@ -19449,6 +19781,7 @@ const CallRecordingProcessor = {
                     scheduledDate,
                     windowStart: windowStart || '09:00',
                     windowEnd: windowEnd || '10:00',
+                    technicianId: svc.technician_id || null,
                   }];
                   if (followUpCreated) {
                     recheckVisits.push({
@@ -19460,6 +19793,7 @@ const CallRecordingProcessor = {
                       scheduledDate: callBookingDateOnly(followUpCreated.scheduled_date),
                       windowStart: followUpCreated.window_start,
                       windowEnd: followUpCreated.window_end,
+                      technicianId: followUpCreated.technician_id || null,
                     });
                   }
                   bookingTimeConflicts = await recheckCallBookingConflicts({
@@ -19650,9 +19984,11 @@ const CallRecordingProcessor = {
               }
               }
               if (followUpCreated) {
-                // Intentionally NO registerScheduleSideEffects here: the
-                // follow-up is pending and must not message the customer.
-                logger.info(`[call-proc] Follow-up visit created: ${followUpCreated.id} on ${followUpCreated.scheduled_date} (parent ${svc.id}); pending, no customer comms until confirmed`);
+                // Intentionally NO registerScheduleSideEffects here: a
+                // pending follow-up must not message the customer, and a
+                // confirmed package visit 2 gets no confirmation text — the
+                // reminder self-heal sweep arms its reminders.
+                logger.info(`[call-proc] Follow-up visit created: ${followUpCreated.id} on ${followUpCreated.scheduled_date} (parent ${svc.id}); ${followUpCreated.status === 'confirmed' ? 'confirmed package visit 2, reminders arm through the sweep' : 'pending, no customer comms until confirmed'}`);
               }
 
             } else if (!appointmentResult) {
@@ -20226,6 +20562,40 @@ const CallRecordingProcessor = {
                           .catch(() => null);
                         if (recentDup) continue;
                         if (!(await claimStillOwned())) return false;
+                        // One sender at a time for this phone + visit: the
+                        // replay in flight owns the text ('busy'); otherwise
+                        // the fan-out holds the row claim across its send.
+                        const followUpClaim = await require('./recipient-optin').claimFollowUpForFanOut(customerId, contact.phone, scheduledServiceId);
+                        if (followUpClaim === 'busy' || followUpClaim === 'sent') continue;
+                        // `result` = the send's outcome: an accepted or
+                        // uncertain handoff is stamped on the row with the
+                        // release, so the replay never follows it even where
+                        // the best-effort sms_log write was lost.
+                        const releaseFollowUpClaim = (result = null) => {
+                          if (followUpClaim !== 'claimed') return null;
+                          // Accepted, or handed off with an unknown fate. A
+                          // held / blocked send (sent false, nothing handed
+                          // off) is NOT evidence: the replay still owes it.
+                          const certainty = result ? require('./messaging/send-customer-message').classifyDeliveryCertainty(result) : 'not_sent';
+                          const confirmed = certainty === 'sent'
+                            || (certainty === 'unknown' && (result.sent === true || result.deliveryOutcome === 'uncertain'));
+                          return require('./recipient-optin').releaseFanOutFollowUpClaim(customerId, contact.phone, scheduledServiceId, { confirmed });
+                        };
+                        // Read AFTER the claim settles: the follow-up's replay
+                        // (this contact answered YES while this booking was
+                        // still processing) may already have texted this
+                        // visit's confirmation to this phone. Its body differs,
+                        // so the content dedupe above cannot see it; sms_log
+                        // carries the visit on every send made with
+                        // appointmentId (twilio.js noticeScope).
+                        // Only with the follow-up live: dark, this fan-out
+                        // is byte-for-byte what it was.
+                        if (require('./recipient-optin').isOnSiteFollowUpLive() && await require('./appointment-reminders').confirmationLoggedForVisitPhone({
+                          scheduledServiceId, phone: contact.phone,
+                        }).catch(() => false)) {
+                          await releaseFollowUpClaim();
+                          continue;
+                        }
                         const contactResult = await sendCustomerMessage({
                           to: contact.phone,
                           body: contactBody,
@@ -20253,7 +20623,10 @@ const CallRecordingProcessor = {
                             original_message_type: 'confirmation',
                             appointment_contact_role: contact.role,
                           },
-                        });
+                        }).then(
+                          async (result) => { await releaseFollowUpClaim(result); return result; },
+                          async (sendErr) => { await releaseFollowUpClaim(sendErr && sendErr.providerOutcome); throw sendErr; },
+                        );
                         if (!contactResult.sent && contactResult.code === 'QUIET_HOURS_HOLD'
                           && contactResult.deferred && contactResult.nextAllowedAt
                           && confirmationRearmed) {
@@ -22854,6 +23227,7 @@ CallRecordingProcessor._test = {
   emailPassEvidence,
   transcribeRecording,
   extractCallDataV2,
+  callTimeETString,
   CALL_EXTRACTION_ROUTE,
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,

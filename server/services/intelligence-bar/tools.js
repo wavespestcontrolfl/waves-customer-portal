@@ -12,10 +12,12 @@ const db = require('../../models/db');
 const { lockCustomerComms, lockSmsPhone } = require('../../utils/customer-comms-lock');
 // Shared admin window rules + gated occupancy probe (scheduling/window-rules.js).
 const { assertAdminAppointmentWindow, probeSlotOverlap, slotOverlapWarning } = require('../scheduling/window-rules');
+const { arrivalWindowRange } = require('../../utils/sms-time-format');
 const logger = require('../logger');
 const { applyAssignable, assertAssignableTechnician } = require('../technician-eligibility');
 const { createDefaultCustomerRows } = require('../customer-default-rows');
 const { isAlwaysFreeServiceType } = require('../no-cost-visit-types');
+const { isReService } = require('../re-service');
 const { resolveBillingLane } = require('../billing-lane');
 const { stampPrimaryLineDiscount, stampPricingRegimeMarker, capsSnapshotFromPricing } = require('../booking/visit-financial-stamps');
 const { discountStackingLive } = require('../../config/feature-gates');
@@ -32,6 +34,7 @@ const { CONTACT_FANOUT_DISCLOSURE, CONTACT_FANOUT_PHONE_HOLD_CLAUSE } = require(
 const {
   normalizeContactName,
   normalizeContactPhone,
+  contactPhoneProblem,
   normalizeContactEmail,
   normalizeContactStreet,
   normalizeContactCity,
@@ -129,7 +132,7 @@ Only returns active customers with prior service history in that category.`,
   },
   {
     name: 'get_schedule_view',
-    description: 'Get the schedule for a date or date range. Optionally filter by technician or zone/city.',
+    description: 'Get the schedule for a date or date range. Optionally filter by technician or zone/city. For ONE customer\'s visits (a customer brief, "when is their next visit") pass customer_id: without it the result lists every customer on those dates.',
     input_schema: {
       type: 'object',
       properties: {
@@ -139,6 +142,7 @@ Only returns active customers with prior service history in that category.`,
         date_to: { type: 'string', description: 'YYYY-MM-DD end of range' },
         technician_name: { type: 'string', description: 'Filter by technician name (as shown on the schedule)' },
         city: { type: 'string', description: 'Filter by customer city/zone' },
+        customer_id: { type: 'string', format: 'uuid', description: 'Only this customer\'s visits. Use it whenever the question is about one customer.' },
       },
     },
   },
@@ -313,6 +317,7 @@ price: the visit price in dollars when the user states one. A stated price needs
         technician_id: { type: 'string', format: 'uuid', description: 'Exact technician id — use after an ambiguous name match' },
         time_window: { type: 'string' },
         notes: { type: 'string' },
+        customer_request: { type: 'string', description: 'Re-service visits only ("Pest Control Re-Service" / "Lawn Care Re-Service"): why the customer asked for it, as the user told you (e.g. "ants back in the kitchen since the weekend"). The technician sees it on the job card as why the visit was booked. Put the reason HERE, not in notes. Omit when the user gave no reason; never invent one.' },
         price: { type: 'number', exclusiveMinimum: 0, maximum: 100000, description: 'Visit price in dollars, only when the user states one' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
@@ -867,8 +872,14 @@ async function getCustomerDetail(customerId) {
 // resolved customers so a date-wide read cannot expose other customers'
 // names, phones, addresses or notes to the model.
 async function getScheduleView(input, readCustomerIds = []) {
-  const { date = (!input.date_from && !input.date_to ? etDateString() : undefined), date_from, date_to, technician_name, city } = input;
+  const { date = (!input.date_from && !input.date_to ? etDateString() : undefined), date_from, date_to, technician_name, city, customer_id } = input;
   const offset = Math.max(0, Math.trunc(input.offset || 0));
+  // customer_id lands in a uuid-column comparison: a name-like value from the
+  // model would throw a Postgres cast error. Typed error instead (the same
+  // guard query_revenue uses).
+  if (customer_id && !UUID_RE.test(String(customer_id))) {
+    return { error: `customer_id must be a customer UUID, got "${customer_id}". Use query_customers to look the customer up, then retry with their id.` };
+  }
 
   let query = db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -887,6 +898,10 @@ async function getScheduleView(input, readCustomerIds = []) {
     )
     .whereNotIn('scheduled_services.status', ['cancelled']);
   if (readCustomerIds.length) query = query.whereIn('scheduled_services.customer_id', readCustomerIds);
+  // One customer's schedule (a brief). ANDed with the task scope above, so an
+  // id from outside a customer-scoped task returns nothing rather than
+  // another account's visits.
+  if (customer_id) query = query.where('scheduled_services.customer_id', customer_id);
 
   if (date) {
     query = query.where('scheduled_services.scheduled_date', date);
@@ -914,7 +929,11 @@ async function getScheduleView(input, readCustomerIds = []) {
       date: a.scheduled_date,
       service_type: a.service_type,
       status: a.status,
-      time_window: a.window_start || null,
+      // The customer's ARRIVAL window (start + 120 min, arrivalWindowRange),
+      // not the stored window_end: that is a scheduling block (a 90-minute
+      // service at 09:00 ends 10:30) and would read as "arriving by 10:30".
+      // A start alone read as an exact arrival time.
+      time_window: a.window_start ? (arrivalWindowRange(a.window_start) || a.window_start) : null,
       route_order: a.route_order,
       customer_id: a.customer_id,
       customer_name: `${a.first_name || ''} ${a.last_name || ''}`.trim(),
@@ -929,7 +948,8 @@ async function getScheduleView(input, readCustomerIds = []) {
     next_offset: fetched.length > 200 ? offset + 200 : null,
     date: date || null,
     coverage: readCustomerIds.length ? 'Requested date range for the task customer only; cancelled appointments excluded'
-      : 'Requested date range; cancelled appointments excluded',
+      : customer_id ? 'Requested date range for the one requested customer only; cancelled appointments excluded'
+        : 'Requested date range; cancelled appointments excluded',
   };
 }
 
@@ -1174,6 +1194,8 @@ async function createCustomer(input) {
   const lastName = normalizeContactName(String(input.last_name || '').trim()) || null;
   const phone = normalizeContactPhone(String(input.phone || '').trim());
   if (!firstName || !phone) return { error: 'first_name and phone are required' };
+  const phoneProblem = contactPhoneProblem(input.phone);
+  if (phoneProblem) return { error: phoneProblem };
 
   const phoneDigits = phone.replace(/\D/g, '').slice(-10);
   if (phoneDigits.length < 10) return { error: 'phone must include at least 10 digits' };
@@ -1295,6 +1317,13 @@ async function updateCustomer(customerId, updates, expectedVersion, notesPin = n
   // live check before this (GH r9 P1).
   if (before.deleted_at) {
     return { error: 'This customer record is no longer live (deleted or merged since the card was shown) — nothing was updated.', preview_changed: true };
+  }
+
+  // A phone being entered now must be a number that can exist; an unchanged
+  // stored number echoed back is not a new write.
+  if (clean.phone && clean.phone !== before.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
   }
 
   // Phone change → drop the stale line_type cache (see clearLineTypeOnPhoneChange).
@@ -1628,6 +1657,12 @@ async function bulkUpdateCustomers(customerIds, updates) {
   Object.assign(clean, normalizeContactRecord(clean));
   if (Object.keys(clean).length <= 1) return { error: 'No valid fields to update' };
   if (!customerIds || !customerIds.length) return { error: 'No customer IDs provided' };
+  // A bulk write stamps one number onto every selected row, so an impossible
+  // US phone is refused here, before either execution path (codex #6028 P2).
+  if (clean.phone) {
+    const phoneProblem = contactPhoneProblem(clean.phone);
+    if (phoneProblem) return { error: phoneProblem };
+  }
 
   // A bulk phone change re-points every row's primary number → drop their
   // line_type caches (no per-row before-state here, so clear unconditionally
@@ -2343,7 +2378,41 @@ const LIVE_APPOINTMENT_STATUSES = ['en_route', 'on_site'];
 // window start. Returns { start } (null start when no time was given) or
 // { error } for garbage input, so callers return a clear tool error instead
 // of a Postgres time-cast error.
-function parseTimeWindowStart(timeWindow) {
+// The refusal for a start that is not on the hour (owner rule — every creator
+// enforces it; Codex #3109 r33 flagged this tool as the bypass). Rejects
+// rather than rounding, and names the nearest valid starts ("Visits start on
+// the hour. Use 2:00 PM or 3:00 PM.") so the model can re-ask. Each candidate
+// (the hour before and the hour after) is checked against the shared admin
+// window rule with the flat-60 duration, so a 7:30 PM request names only
+// 7:00 PM (8:00 PM would end past the day end) and an 8:30 PM request, with
+// no valid neighbor, gets the rule's own refusal as invalid_appointment_window
+// (Codex r1 on #6023, P2). A reschedule passes the visit's preserved
+// duration, so a 90-minute visit asked for 6:30 PM is offered 6:00 PM only
+// (7:00–8:30 ends past the day end; Codex r2 on #6023, P2). The codes are stable: the proposal returns them
+// with no card (W5-dev-03), and the executor refuses the same start the same
+// way if no card was ever made.
+function offHourRefusal(hour, durationMinutes = 60) {
+  const hour12 = (h) => `${h % 12 || 12}:00 ${h >= 12 ? 'PM' : 'AM'}`;
+  const candidates = hour + 1 > 23 ? [hour] : [hour, hour + 1];
+  const valid = [];
+  let firstRefusal = null;
+  for (const h of candidates) {
+    const start = `${String(h).padStart(2, '0')}:00`;
+    const windowEnd = deriveWindowEnd(start, durationMinutes);
+    try {
+      if (!windowEnd) throw Object.assign(new Error('That window would cross midnight — pick an earlier start.'), { status: 422 });
+      assertAdminAppointmentWindow({ windowStart: start, windowEnd, durationMinutes });
+      valid.push(hour12(h));
+    } catch (err) {
+      if (err?.status !== 422) throw err;
+      if (!firstRefusal) firstRefusal = err.message;
+    }
+  }
+  if (!valid.length) return { error: firstRefusal, code: 'invalid_appointment_window' };
+  return { error: `Visits start on the hour. Use ${valid.join(' or ')}.`, code: 'window_not_on_the_hour' };
+}
+
+function parseTimeWindowStart(timeWindow, durationMinutes = 60) {
   if (timeWindow == null || String(timeWindow).trim() === '') return { start: null };
   const raw = String(timeWindow).trim().toLowerCase();
   if (raw === 'morning') return { start: '08:00' };
@@ -2359,13 +2428,8 @@ function parseTimeWindowStart(timeWindow) {
   if (hour > 23 || minute > 59) {
     return { error: `Unrecognized time_window "${timeWindow}" — use "morning", "afternoon", or a time like "9:00 AM" or "14:30"` };
   }
-  // Appointment windows start ON THE HOUR (owner rule — every creator
-  // enforces it; Codex #3109 r33 flagged this tool as the bypass). Reject
-  // rather than silently rounding: the operator asked for a specific time
-  // and the model can re-ask with the corrected value.
-  if (minute !== 0) {
-    return { error: `Appointment windows start on the hour — got "${timeWindow}"; use e.g. "${hour > 12 ? hour - 12 : hour || 12}:00 ${hour >= 12 ? 'PM' : 'AM'}"` };
-  }
+  // Appointment windows start ON THE HOUR; see offHourRefusal.
+  if (minute !== 0) return offHourRefusal(hour, durationMinutes);
   return { start: `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}` };
 }
 
@@ -2807,9 +2871,10 @@ function ibBookingBillingRefusal(customer, serviceType, price) {
   // customer, cut an invoice (or be dues-covered, or free by design)? Asked
   // for ONE visit with the stamps this insert writes: a priced booking
   // carries create_invoice_on_complete (the Schedule modal's own default), an
-  // unpriced one carries neither, and no callback marker or typed one-time
-  // profile (that mint trigger needs a price, and a priced booking already
-  // mints through the create-invoice stamp).
+  // unpriced one carries neither, and no typed one-time profile (that mint
+  // trigger needs a price, and a priced booking already mints through the
+  // create-invoice stamp). The insert's callback marker is not passed: it
+  // is set only on a re-service row, which the gate already frees by name.
   const verdict = recurringWithoutBillableAmount({
     isRecurring: true,
     recurringFloorPrice: priced ? price : 0,
@@ -2824,24 +2889,53 @@ function ibBookingBillingRefusal(customer, serviceType, price) {
   return `This visit needs a price: "${serviceType}" has no catalog price, and nothing in this customer's billing would invoice it. Ask the user for the visit price and propose the booking again with price${orFee}. Nothing was booked.`;
 }
 
+// Why the customer booked a re-service (scheduled_services.customer_request,
+// migration 20260927100000): the operator's words for it, saved exactly as the
+// Schedule screen's "Customer's words" box saves typed words — trimmed, capped,
+// source 'office' (never a quote; the operator relayed it). Same gate and same
+// two catalog rows as that box (reservice-office-request.js). Returns
+// { text } to stamp, null when no reason was given, or { error } when a reason
+// was given for a visit that cannot carry one — refused rather than dropped,
+// so words the card showed are never silently lost.
+function ibBookingCustomerRequest(rawRequest, catalogRow) {
+  const reserviceOfficeRequest = require('../reservice-office-request');
+  const text = reserviceOfficeRequest.cleanRequestText(rawRequest);
+  if (!text) return null;
+  const { isEnabled } = require('../../config/feature-gates');
+  if (!isEnabled('reserviceOfficeRequest')
+    || !reserviceOfficeRequest.isOfficeRequestServiceKey(catalogRow?.service_key)) {
+    return { error: 'customer_request is saved only on a Pest Control Re-Service or Lawn Care Re-Service visit — nothing was booked. Propose the booking again with the reason in notes instead, or without it.' };
+  }
+  return { text };
+}
+
 // Proposal-time twin for the confirm-card route: the same price and billing
 // verdict the executor asks at commit, so the card shows the price the
 // booking will carry and a booking that would be refused never reaches a
 // card. A read error THROWS (the caller fails the proposal closed); a missing
 // customer returns null — the route's own customer pin refuses that case.
-async function ibBookingProposal(customerId, serviceType, statedPrice) {
+async function ibBookingProposal(customerId, serviceType, statedPrice, customerRequest, timeWindow) {
+  // The window verdict comes first and reads nothing (W5-dev-03): a start the
+  // executor would refuse gets a coded refusal here, never a card.
+  const windowRefusal = ibBookingWindowRefusal(timeWindow);
+  if (windowRefusal) return windowRefusal;
   const customer = await db('customers').where({ id: customerId }).first();
   if (!customer) return null;
   const booking = await ibBookingPricing({ customer, serviceType, statedPrice });
   if (booking.error) return { error: booking.error };
   const refusal = ibBookingBillingRefusal(customer, serviceType, booking.price);
   if (refusal) return { error: refusal };
+  const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
+  if (request?.error) return { error: request.error };
   const discount = booking.pricing?.primaryDiscount || null;
   return {
     price: booking.price,
     source: booking.source,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
+    // The reason exactly as the insert will save it (trimmed, capped), so
+    // the card shows the saved words; null when none was given.
+    customerRequest: request?.text || null,
     listPrice: discount ? Number(booking.pricing.primaryBase) : null,
     discountName: discount?.discountName || null,
     discountPercent: discount && discount.discountType === 'percentage' ? Number(discount.discountAmount) : null,
@@ -2856,6 +2950,60 @@ async function ibBookingProposal(customerId, serviceType, statedPrice) {
   };
 }
 
+// Owner 2026-10-05: an overlap that is NEW since the card was shown (another
+// visit took the slot between proposal and Confirm) books nothing, sends
+// nothing, and refuses with preview_changed so the operator sees a fresh
+// card. An overlap that already existed when the card was built keeps the
+// 2026-08-25 / #3486 rule (staff saves never block on a conflict: warn).
+const BOOKING_NEW_OVERLAP_ERROR = 'Another visit now overlaps this time. Nothing was booked and no text was sent. Confirm the new card to book it anyway, or pick another time.';
+
+// Proposal-time twin of the locked probe in createAppointment: does another
+// visit already overlap this date and window? The route pins the answer as
+// _booking_overlap so the executor can tell an overlap that already existed
+// from one that is new. Same date/window derivation and the same
+// probeSlotOverlap as the executor; the read is not fenced (a pin, not a
+// guard — the executor re-probes under the occupancy lock). Returns
+// true/false, or null when there is no timed window to probe (the executor
+// probes nothing then either). A read error THROWS so the proposal fails
+// closed; an invalid date or window returns null (the executor refuses it).
+async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+  const dateStr = validScheduleDate(scheduledDate);
+  if (!dateStr) return null;
+  const win = parseTimeWindowStart(timeWindow);
+  if (win.error || !win.start) return null;
+  let windowEnd = deriveWindowEnd(win.start, 60);
+  if (!windowEnd) return null;
+  try {
+    ({ window_end: windowEnd } = assertAdminAppointmentWindow({ windowStart: win.start, windowEnd, durationMinutes: 60 }));
+  } catch (err) {
+    if (err?.status === 422) return null;
+    throw err;
+  }
+  const overlap = await db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
+  return overlap.length > 0;
+}
+
+// Proposal-time window verdict for create_appointment (W5-dev-03): the SAME
+// parse (parseTimeWindowStart) and the SAME shared admin window rule
+// (assertAdminAppointmentWindow) the executor runs, asked before a card
+// exists so a start the executor would refuse (a :30 start) is a refusal
+// with a code, not a card whose Confirm saves nothing. Returns null when the
+// window is acceptable or absent, else { error, code }.
+function ibBookingWindowRefusal(timeWindow) {
+  const win = parseTimeWindowStart(timeWindow);
+  if (win.error) return { error: win.error, code: win.code || 'invalid_appointment_window' };
+  if (!win.start) return null;
+  const windowEnd = deriveWindowEnd(win.start, 60);
+  if (!windowEnd) return { error: 'That window would cross midnight — pick an earlier start.', code: 'invalid_appointment_window' };
+  try {
+    assertAdminAppointmentWindow({ windowStart: win.start, windowEnd, durationMinutes: 60 });
+  } catch (err) {
+    if (err?.status === 422) return { error: err.message, code: 'invalid_appointment_window' };
+    throw err;
+  }
+  return null;
+}
+
 async function createAppointment(input, actionContext = {}) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
 
@@ -2864,7 +3012,7 @@ async function createAppointment(input, actionContext = {}) {
     return { error: `scheduled_date must be a valid YYYY-MM-DD date that is not in the past (got "${scheduled_date}")` };
   }
   const win = parseTimeWindowStart(time_window);
-  if (win.error) return { error: win.error };
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
 
   // Flat-60 convention (admin-schedule: every service call defaults to 60
   // minutes) so overlap checks see a real block, not an open-ended start.
@@ -2934,6 +3082,11 @@ async function createAppointment(input, actionContext = {}) {
   // transaction below, since this read is unlocked.
   const billingRefusal = ibBookingBillingRefusal(customer, service_type, booking.price);
   if (billingRefusal) return { error: billingRefusal };
+  // Why the customer booked (re-service rows only). The catalog row is the
+  // one the price check above just pinned against the card, and the locked
+  // re-read below refuses if it changed, so this verdict holds at the insert.
+  const customerRequest = ibBookingCustomerRequest(input.customer_request, booking.catalogRow);
+  if (customerRequest?.error) return { error: customerRequest.error };
 
   // Resolve the technician BEFORE any write. The old `.first()` on an
   // unordered ILIKE silently picked an arbitrary tech on multiple matches,
@@ -2992,6 +3145,16 @@ async function createAppointment(input, actionContext = {}) {
     // on schedule conflicts): the booking commits with a warning.
     if (win.start && windowEnd) {
       const overlap = await probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd });
+      // A card that pinned "no overlap" approved a free slot (owner
+      // 2026-10-05): an overlap that appeared since is NEW. Throwing here
+      // rolls the transaction back before the insert, so nothing is booked
+      // and the post-commit confirmation text below never runs. A pinned
+      // "overlap existed", or no pin at all, keeps the advisory warning.
+      if (overlap.length && input._booking_overlap === false) {
+        const err = new Error('booking_overlap_new');
+        err.bookingOverlapNew = true;
+        throw err;
+      }
       if (overlap.length) overlapAdvisory = slotOverlapWarning(dateStr);
     }
     // Rung 6 — the same comms fence withCustomerCommsLock provided.
@@ -3054,6 +3217,19 @@ async function createAppointment(input, actionContext = {}) {
       window_start: win.start,
       window_end: windowEnd,
       notes: notes || null,
+      ...(customerRequest ? {
+        customer_request: customerRequest.text,
+        customer_request_source: 'office',
+      } : {}),
+      // A re-service is a callback, derived from the catalog row exactly as
+      // the Schedule POST derives it (re-service.js). Callback reporting, the
+      // dispatch badge, the re-service report copy and plan-visit counts read
+      // this persisted flag, not the service name.
+      is_callback: isReService({
+        serviceKey: lockedBooking.catalogRow?.service_key,
+        serviceName: lockedBooking.catalogRow?.name,
+        serviceType: service_type,
+      }),
       // The catalog link and the price exactly as the Schedule POST stamps
       // them: service_id + key/category snapshots, and for a priced visit
       // estimated_price, the primary line's gross, and the create-invoice
@@ -3137,6 +3313,9 @@ async function createAppointment(input, actionContext = {}) {
     }
     if (err && err.bookingPriceChanged) {
       return { error: BOOKING_PRICE_CHANGED_ERROR, preview_changed: true };
+    }
+    if (err && err.bookingOverlapNew) {
+      return { error: BOOKING_NEW_OVERLAP_ERROR, preview_changed: true };
     }
     if (err && err.previewChanged) {
       return {
@@ -3336,8 +3515,11 @@ async function rescheduleAppointment(input, actionContext = {}) {
   if (!dateStr) {
     return { error: `new_date must be a valid YYYY-MM-DD date that is not in the past (got "${new_date}")` };
   }
-  const win = parseTimeWindowStart(new_time_window);
-  if (win.error) return { error: win.error };
+  // The visit's own window length, judged before the new start is parsed so
+  // an off-hour refusal names only starts this visit can actually take.
+  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
+  const win = parseTimeWindowStart(new_time_window, apptDuration);
+  if (win.error) return { error: win.error, ...(win.code ? { code: win.code } : {}) };
 
   const oldDate = appt.scheduled_date;
   // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this tool moves ONE
@@ -3363,7 +3545,6 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // and the audit log both read window_end, so both would break. The shared
   // deriveWindowEnd returns null when the preserved duration would carry the
   // end past midnight — reject rather than persist a wrapped, inverted block.
-  const apptDuration = windowDurationMinutes(appt.window_start, appt.window_end, appt.estimated_duration_minutes);
   const newStart = win.start || appt.window_start;
   let newWindowEnd = win.start
     ? deriveWindowEnd(win.start, apptDuration)
@@ -3468,6 +3649,12 @@ async function rescheduleAppointment(input, actionContext = {}) {
   // so the pre-read `appt` may name a tech who was swapped out meanwhile).
   let committedTechId = null;
   let overlapAdvisory = null;
+  // A package visit 1 with a live visit 2: the card shows one visit, so the
+  // bar does not move it (ib-write-tools: the card shows everything the
+  // commit does). The Schedule screen moves both.
+  if (await require('../package-followup-booking').hasLivePackageChild(db, [appt.id])) {
+    return { error: 'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.' };
+  }
   await db.transaction(async (trx) => {
       // Rung 1 (date-wide occupancy) FIRST, then the stop lock (codex
       // #3609 r30 P2): probeSlotOverlap's ordering contract puts the
@@ -3490,6 +3677,10 @@ async function rescheduleAppointment(input, actionContext = {}) {
       // would strand its siblings and parent at the old stop. Throws an
       // operational 409 the executor surfaces as the tool error.
       await require('../visit-groups').assertRowMovableAlone(trx, appointment_id, appt.visit_id);
+      // Package visit 2 recheck, atomic with this write (the preflight
+      // above is only a fast refusal).
+      await require('../package-followup-booking').assertNoLivePackageChildLocked(trx, [appointment_id],
+        'This visit has a linked second treatment (a two-treatment package visit 2), and moving it here would not show that visit on the card. Move it from the Schedule screen, which moves both. Nothing was changed.');
       const committed = await applyTrackLifecycleCas(
         trx('scheduled_services')
           .where('id', appointment_id)
@@ -3661,7 +3852,7 @@ async function rescheduleAppointment(input, actionContext = {}) {
 // invoice, no inspection-credit offer, and is neither a follow-up child nor
 // grouped — nothing this card would need to void, reverse, or disclose a
 // group/follow-up side effect for. Anything else cancels from Dispatch.
-const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
+const CARD_CANCEL_REFUSED_MESSAGE = 'This visit has a saved card or card request on file, a saved-card fee agreement, a prepayment or prepaid plan coverage, an invoice of any kind on record, an inspection-credit offer tied to it, a plan make-up visit, is a follow-up visit, has a linked follow-up visit that cancels with it, or is part of a grouped visit, so it can only be cancelled from the Dispatch screen. Nothing was changed.';
 
 async function cancelAppointment(input, actionContext = {}) {
   const { appointment_id, reason } = input;
@@ -3941,6 +4132,13 @@ async function cancelAppointment(input, actionContext = {}) {
         const { prepaidCommitmentReason } = require('../appointment-cancel-impact');
         const { cardRailRows } = require('../appointment-cancel-impact');
         if (await prepaidCommitmentReason(trx, lockedRow) || (await cardRailRows(trx, appointment_id)).length > 0) {
+          throw new Error('__cancel_card_refused__');
+        }
+        // A linked follow-up (call-booked child or package visit 2) booked
+        // since the proposal: cancelling this visit would cancel that one
+        // too, which the card never showed. Re-read on this trx and refuse.
+        const { linkedFollowUpRows } = require('../appointment-cancel-impact');
+        if ((await linkedFollowUpRows(trx, appointment_id)).length > 0) {
           throw new Error('__cancel_card_refused__');
         }
         const { cardRailFingerprint } = require('../appointment-cancel-impact');
@@ -4229,7 +4427,7 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal,
   // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.

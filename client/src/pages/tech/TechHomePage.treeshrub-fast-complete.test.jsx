@@ -5,7 +5,7 @@
 // everything else keeps today's route, the Dispatch typed-completion deep link.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
@@ -52,7 +52,7 @@ function mount() {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role: 'technician' }));
   return render(<MemoryRouter initialEntries={['/admin/today/tools']}><Routes>
-    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace: true, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
     </Route>
@@ -82,7 +82,7 @@ it('keeps today\'s Dispatch deep link when the flag is false or absent', async (
   rows = [row('svc-ts-off', { treeShrubFastCompleteEnabled: false })];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-ts-off');
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-ts-off'));
   expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
 });
 
@@ -90,7 +90,7 @@ it('keeps the deep link for a typed visit that is not tree & shrub even with the
   rows = [row('svc-other-typed', { treeShrubFastCompleteEnabled: true, completionProfile: { category: 'pest_control', findingsType: 'palm_injection' } })];
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-other-typed');
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-other-typed'));
   expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
 });
 
@@ -99,6 +99,6 @@ it('sends the sheet\'s full-form escape to the Dispatch typed completion', async
   mount();
   fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
   fireEvent.click(await screen.findByRole('button', { name: 'Sheet full form' }));
-  expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-ts-escape');
+  await waitFor(() => expect(assign).toHaveBeenCalledWith('/admin/dispatch?tab=schedule&completeService=svc-ts-escape'));
   expect(screen.queryByText(/Tree and shrub sheet/)).not.toBeInTheDocument();
 });

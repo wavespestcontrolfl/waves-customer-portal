@@ -83,8 +83,18 @@ describe('which writes skip the card', () => {
   });
 
   test('the lead and schedule edits the owner asked for execute directly', () => {
-    for (const name of ['update_property_access', 'adjust_stock']) {
+    for (const name of ['update_property_access', 'create_restock_request']) {
       expect([name, OwnerDirect.executesWithoutCard(name, {})]).toEqual([name, true]);
+    }
+  });
+
+  test('stock writes always keep the card, owner 2026-10-05: adjust_stock and update_restock_request are off the list', () => {
+    for (const name of ['adjust_stock', 'update_restock_request']) {
+      expect(OwnerDirect.OWNER_DIRECT_TOOL_NAMES.has(name)).toBe(false);
+      for (const input of [{}, { quantity: 2, unit: 'gal' }, { action: 'receive', quantity: 2, unit: 'gal' }]) {
+        expect([name, OwnerDirect.executesWithoutCard(name, input)]).toEqual([name, false]);
+        expect([name, OwnerDirect.mayExecuteWithoutCard(name, input)]).toEqual([name, false]);
+      }
     }
   });
 

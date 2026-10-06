@@ -17,8 +17,10 @@ const {
 } = require('../services/autopay-eligibility');
 const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+const { AUTOPAY_OFF_UPDATES, disableAutopayInTransaction, sendAutopayDisabledNotice } = require('../services/autopay-disable');
 
 router.use(authenticate);
 
@@ -28,6 +30,48 @@ function getStripe() {
   if (!stripeConfig.secretKey) return null;
   _stripe = new Stripe(stripeConfig.secretKey, { apiVersion: '2024-12-18.acacia' });
   return _stripe;
+}
+
+// Annual rate review (dark, GATE_RATE_REVIEW): a delivered, not-yet-applied
+// rate change shows on the billing card as the upcoming rate and the next
+// charge at it. The charge comes from the one surcharge authority for the
+// method Auto Pay will charge, over the account's whole debit — never
+// base-rate arithmetic; only the monthly dues have an exact next charge
+// (amount + date); no Auto Pay method, a pause covering that date, or any
+// other lane = nothing to announce (nextCharge null). Gate off or
+// nothing pending = no field (byte-identical payload); a read failure omits
+// the field, never the card.
+async function rateChangesField(customerId, { autopayEnabled, method, funding, customer, monthlyBilling }) {
+  try {
+    const changes = await require('../services/rate-review-comms').upcomingRateChanges(customerId);
+    if (!changes.length) return {};
+    // An annual-prepay invoice still awaiting payment: the dues cron skips the account
+    // (getPaymentPendingCustomerIds), so no monthly charge is announced. Unreadable = none.
+    const prepayPending = await require('../services/annual-prepay-renewals')
+      .getPaymentPendingCustomerIds(undefined, undefined, { throwOnError: true })
+      .then((ids) => [...ids].map(String).includes(String(customerId)), () => true);
+    const out = { rate_changes: changes.map(({ chargeCents, chargeDate, ...change }) => {
+      const at = chargeDate ? new Date(`${chargeDate}T16:00:00Z`) : null;
+      // Announced only when that debit will really run on this method: the
+      // account still bills monthly dues (the lane the cron charges), Auto
+      // Pay is on, no prepay invoice is pending, no pause covers the date (the cron's isPaused), service is
+      // not paused after failed payments (the cron skips service_paused_at) and
+      // the method is not a card expired by then (charge() refuses it).
+      const runs = monthlyBilling && autopayEnabled && method && chargeCents > 0 && at
+        && !prepayPending && !customer.service_paused_at && !isPaused(customer, at) && !(isCardMethodType(method.method_type) && isExpiredCardMethod(method, at));
+      const charge = runs ? computeChargeAmount(chargeCents / 100, method.method_type, { funding }) : null;
+      return { ...change, nextCharge: charge ? { total: charge.total, base: charge.base, surcharge: charge.surcharge, date: chargeDate } : null };
+    }) };
+    // The card's own "Next charge" is the same debit when the dates meet:
+    // it must state the new amount too, never two totals for one charge.
+    const nextDay = dateOnlyString(customer.next_charge_date);
+    const sameDebit = out.rate_changes.map((c) => c.nextCharge).filter((c) => c && nextDay && c.date === nextDay).pop();
+    if (sameDebit) Object.assign(out, { next_charge_amount: sameDebit.total, next_charge_base_amount: sameDebit.base, next_charge_surcharge_amount: sameDebit.surcharge });
+    return out;
+  } catch (err) {
+    logger.warn(`[customer-autopay] upcoming rate changes read failed: ${err.message}`);
+    return {};
+  }
 }
 
 async function resolveAutopayCardFunding(paymentMethod) {
@@ -82,7 +126,7 @@ router.get('/', async (req, res, next) => {
         'id', 'monthly_rate', 'waveguard_tier',
         'autopay_enabled', 'autopay_paused_until', 'autopay_pause_reason',
         'autopay_payment_method_id', 'billing_day', 'next_charge_date',
-        'ach_status',
+        'ach_status', 'service_paused_at',
       )
       .first();
 
@@ -207,6 +251,8 @@ router.get('/', async (req, res, next) => {
       autopay_selected_method_ids: selectedMethodIds,
       removal_guard: isEnabled('portalMethodRemovalGuard'),
       recent_events: recentEvents,
+      // A cancelled account's read-only session: no upcoming rate (its service has ended).
+      ...(cancelledRead ? {} : await rateChangesField(req.customerId, { autopayEnabled: customerAutopayEnabled, method: chargeableAutopayMethod, funding: autopayFunding, customer, monthlyBilling: !nonMonthlyBilling })),
     });
   } catch (err) { next(err); }
 });
@@ -313,10 +359,7 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       updates.autopay_enabled = autopay_enabled;
       events.push({ type: autopay_enabled ? 'autopay_enabled' : 'autopay_disabled', details: {} });
       // Clear pause when disabling/enabling
-      if (!autopay_enabled) {
-        updates.autopay_paused_until = null;
-        updates.autopay_pause_reason = null;
-      }
+      if (!autopay_enabled) Object.assign(updates, AUTOPAY_OFF_UPDATES);
     }
 
     if (autopay_payment_method_id !== undefined && autopay_payment_method_id !== current.autopay_payment_method_id) {
@@ -402,32 +445,24 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
     let selectedGone = false;
     // True only for the request that performs the enabled→disabled
-    // transition under the lock: two overlapping disables both read
-    // "enabled" before either locks, and the second must not send a
-    // second Auto Pay-off email (GH codex r1 P2).
+    // transition under the lock (see disableAutopayInTransaction).
     let disabledTransition = false;
     let disabledMethodId = null;
     await db.transaction(async (trx) => {
+      if (updates.autopay_enabled === false) {
+        // The shared disable path (services/autopay-disable.js) — the same
+        // one staff turn Auto Pay off through. It locks the customer row
+        // first, writes the flags, and commits the opt-out event with them.
+        ({ transition: disabledTransition, methodId: disabledMethodId } = await disableAutopayInTransaction(
+          trx, req.customerId, { updates, details: {} },
+        ));
+        return;
+      }
       // Lock order = CUSTOMER first, then the method row (pre-push r2 P1:
       // every Auto Pay mutation — enrollment, removal, set-default, the
       // detached webhook — takes the same order, so removal vs replacement
       // can never deadlock).
-      const locked = await trx('customers').where({ id: req.customerId }).forUpdate().first('id', 'autopay_enabled', 'autopay_payment_method_id');
-      // Nullable flag: only explicit false is "off" (customerOnAutopay
-      // parity, GH codex r3 P2) — a NULL-flag customer turning Auto Pay off
-      // IS a transition and gets the notice.
-      disabledTransition = updates.autopay_enabled === false && locked?.autopay_enabled !== false;
-      // The method the notice names = the one in charge immediately before
-      // the disable, read under the lock — the pre-lock `current` read can
-      // be stale if a switch landed in between (GH codex r2 P2).
-      disabledMethodId = locked?.autopay_payment_method_id || null;
-      if (disabledTransition && !disabledMethodId) {
-        // Legacy enrollment without a pointer: the method in charge is the
-        // default+enabled fallback collection would bill — resolve it under
-        // the lock BEFORE the flags are cleared below (GH codex r4 P2).
-        const fallback = await getChargeableAutopayMethod({ id: req.customerId, ...locked }, trx);
-        disabledMethodId = fallback?.id || null;
-      }
+      await trx('customers').where({ id: req.customerId }).forUpdate().first('id');
       // Re-verify the method under lock (pre-push r1 P0 — shared protocol
       // with DELETE /cards/:id, which holds the row FOR UPDATE across its
       // detach): pointing Auto Pay at a row a concurrent removal just
@@ -442,21 +477,6 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
 
       if (Object.keys(updates).length > 0) {
         await trx('customers').where({ id: req.customerId }).update(updates);
-      }
-
-      if (updates.autopay_enabled === false) {
-        await trx('payment_methods').where({ customer_id: req.customerId }).update({ autopay_enabled: false });
-        // The opt-out EVENT commits with the opt-out STATE: this row is what
-        // enrollConsentedMethod's opted_out_after_authorization guard reads,
-        // so a post-commit best-effort write left a gap where a delayed
-        // webhook enrollment could land after the disable committed but
-        // before (or without) the event row — overwriting a real opt-out.
-        await logAutopay(req.customerId, 'autopay_disabled', {
-          details: {},
-          db: trx,
-          required: true,
-        });
-        return;
       }
 
       if (shouldMirrorAutopayMethod) {
@@ -490,16 +510,8 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       : (selectedPaymentMethod?.id || current.autopay_payment_method_id || null);
 
     if (updates.autopay_enabled === false) {
-      // Negative counterpart of the enabled notice (gated inside the
-      // sender); the pointer that was in charge names the method. Only the
-      // request that actually flipped the flag under the lock sends.
-      if (disabledTransition) void PaymentLifecycleEmail.sendAutopayDisabled({
-        customerId: req.customerId,
-        paymentMethodId: disabledMethodId,
-        disabledAt: new Date(),
-      }).catch((emailErr) => {
-        logger.warn(`[customer-autopay] autopay disabled email failed for customer ${req.customerId}: ${emailErr.message}`);
-      });
+      // Only the request that actually flipped the flag under the lock sends.
+      if (disabledTransition) void sendAutopayDisabledNotice({ customerId: req.customerId, paymentMethodId: disabledMethodId });
     } else if (enabledEvent && activePaymentMethodId) {
       PaymentLifecycleEmail.sendAutopayEnabled({
         customerId: req.customerId,

@@ -8,6 +8,7 @@ import {
   deleteServicePhotoDraft,
   deleteServicePhotoDraftIfCurrent,
   getServicePhotoDraft,
+  inspectServicePhotoDraft,
   pruneServicePhotoDrafts,
   putCompletionDraft,
   putRecapClipDraft,
@@ -74,6 +75,20 @@ describe('service photo drafts', () => {
 
     expect(await deleteServicePhotoDraft('visit-1', 'tech-a')).toBe(true);
     expect(await getServicePhotoDraft('visit-1', 'tech-a')).toBeNull();
+  });
+
+  it('distinguishes a missing service-photo draft from unavailable IndexedDB', async () => {
+    await putServicePhotoDraft('visit-1', { draftId: 'draft-a', stage: 'failed' }, 'tech-a');
+    await expect(inspectServicePhotoDraft('visit-1', 'tech-a')).resolves.toEqual({
+      available: true, draft: { draftId: 'draft-a', stage: 'failed' },
+    });
+    await deleteServicePhotoDraft('visit-1', 'tech-a');
+    await expect(inspectServicePhotoDraft('visit-1', 'tech-a')).resolves.toEqual({ available: true, draft: null });
+    const factory = globalThis.indexedDB;
+    try {
+      delete globalThis.indexedDB;
+      await expect(inspectServicePhotoDraft('visit-1', 'tech-a')).resolves.toEqual({ available: false, draft: null });
+    } finally { globalThis.indexedDB = factory; }
   });
 
   it('prunes only service-photo rows after the shared 14-day retention window', async () => {

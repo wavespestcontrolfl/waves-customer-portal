@@ -44,7 +44,7 @@ const APPROVED_STATES = ['approved', 'auto_approved'];
 // if it's price_scraping_enabled AND resolves to one of these; everything else falls to the
 // generic adapter (direct URL, no search), so it's not driven autonomously. Veseris is a
 // LOGIN adapter — it additionally needs decrypted credentials attached (see LOGIN_ADAPTER_KEYS).
-const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone', 'veseris', 'shopify', 'amazon'];
+const SCRAPABLE_ADAPTER_KEYS = ['domyown', 'solutions', 'keystone', 'veseris', 'shopify', 'amazon', 'diypest', 'forestry'];
 
 // Adapters that authenticate before scraping (account pricing). For these, the weekly scan
 // decrypts the vendor's stored credentials and attaches them to the scan spec.
@@ -72,6 +72,11 @@ function parseMatches(m) {
   return [];
 }
 
+function shippingKey(sh) {
+  if (!sh) return '-';
+  return [sh.basis || '', Number(sh.amount) || 0].join(':');
+}
+
 // Content key for ONE opportunity line — product + competitor URL + both prices. A
 // changed price yields a new key (a genuinely new ask). Dedup is PER-MATCH, not
 // per-draft, so a later {A,B} scan when {A} is already pending re-stages only B.
@@ -81,6 +86,10 @@ function matchKey(m) {
     String((m && m.competitor && m.competitor.source_url) || ''),
     Number(m && m.competitor && m.competitor.price) || 0,
     Number(m && m.baseline && m.baseline.price) || 0,
+    // Delivered basis: a corrected shipping basis / amount is a different ask, not a
+    // duplicate of an older active draft that was priced on the old shipping.
+    shippingKey(m && m.competitor && m.competitor.shipping),
+    shippingKey(m && m.baseline && m.baseline.shipping),
   ].join('|');
 }
 
@@ -247,13 +256,23 @@ function opportunityToMatch(product, scan) {
   return {
     product: product.name,
     epaReg: product.epaReg || null,
-    baseline: { vendor: opp.baseline.vendor || 'SiteOne', price: Number(opp.baseline.price), quantity: opp.baseline.quantity },
+    baseline: {
+      vendor: opp.baseline.vendor || 'SiteOne',
+      price: Number(opp.baseline.price),
+      quantity: opp.baseline.quantity,
+      shipping: opp.baseline.shipping || null,
+    },
     competitor: {
       vendor: best.vendor || 'competitor',
       price: Number(best.price),
       quantity: best.quantity,
       source_url: best.source_url,
       name: best.name || null,
+      // DELIVERED basis the opportunity was ranked on (price + shipping). Carried so the
+      // email / owner copy show the same numbers the scan decided on; an 'estimated'
+      // basis stays labelled all the way to the email line.
+      shipping: best.shipping || null,
+      landedPrice: best.landedPrice != null ? Number(best.landedPrice) : null,
     },
   };
 }

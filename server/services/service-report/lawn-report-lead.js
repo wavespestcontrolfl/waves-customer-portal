@@ -35,6 +35,7 @@
  */
 
 const { aftercareCustomerTask, normalizeLawnAftercare } = require('./lawn-aftercare');
+const { RAINFAST_WATCH_LINE } = require('./lawn-rainfast-watch');
 const { issueRestatesAftercare } = require('./lawn-report-insights');
 
 // The client's static labels around the lead ("What we applied today", "Your
@@ -53,7 +54,10 @@ const LEAD_WORD_BUDGET = 250;
 // `whatToExpect` after applied, since it is the only place an approved
 // expectation sentence appears. "Since your last visit" goes last of all: it
 // is the only place the customer sees it.
-const BUDGET_DROP_ORDER = ['why', 'watching', 'applied', 'whatToExpect', 'sinceLast'];
+// "From your technician" (GATE_LAWN_TECH_PARAGRAPH) goes FIRST: it is additive,
+// so a region that runs over budget gives it up before any fixed sentence, and
+// gate on never costs a gate-off field its place.
+const BUDGET_DROP_ORDER = ['techParagraph', 'why', 'watching', 'applied', 'whatToExpect', 'sinceLast'];
 // Per-field word caps. Model-written copy (the narrative overlay, a generated
 // treatment narrative) reaches these fields unbounded, so any one field over
 // its cap is left out of the lead rather than cut mid-sentence; the same
@@ -64,27 +68,30 @@ const BUDGET_DROP_ORDER = ['why', 'watching', 'applied', 'whatToExpect', 'sinceL
 // since-last block (40 + its label) is kept whenever that still fits and
 // given up, last, when it does not.
 const FIELD_WORD_CAPS = {
-  headline: 12, why: 40, applied: 60, yourPart: 30, next: 30, sinceLast: 40, whatToExpect: 42, watching: 20,
+  headline: 12, why: 40, applied: 60, yourPart: 30, next: 30, sinceLast: 40, whatToExpect: 42, watching: 20, techParagraph: 70,
 };
 // The client's "Since your last visit, <Mon D>", "What to expect" and
 // "Watching" labels, each counted only when its block renders.
 const SINCE_LAST_LABEL_WORDS = 6;
 const WHAT_TO_EXPECT_LABEL_WORDS = 3;
 const WATCHING_LABEL_WORDS = 1;
+// "From your technician".
+const TECH_PARAGRAPH_LABEL_WORDS = 3;
 // Every lead field and the strings it puts on screen: the one list the word
 // count and the budget read, so a new field is one row here.
 const LEAD_FIELDS = {
   headline: (lead) => [lead.headline],
   why: (lead) => [lead.why],
-  sinceLast: (lead) => (lead.sinceLast && Array.isArray(lead.sinceLast.lines) ? lead.sinceLast.lines : []),
+  sinceLast: (lead) => lead.sinceLastBudgetLines || (lead.sinceLast && Array.isArray(lead.sinceLast.lines) ? lead.sinceLast.lines : []),
   applied: (lead) => [lead.applied],
+  techParagraph: (lead) => [lead.techParagraph],
   whatToExpect: (lead) => [lead.whatToExpect],
   watching: (lead) => [lead.watching],
   yourPart: (lead) => (Array.isArray(lead.yourPart) ? lead.yourPart : []),
   next: (lead) => [lead.next],
 };
 // Fields that are absent, not null, when they have nothing to say.
-const OPTIONAL_FIELDS = new Set(['sinceLast', 'whatToExpect', 'watching']);
+const OPTIONAL_FIELDS = new Set(['sinceLast', 'whatToExpect', 'watching', 'techParagraph']);
 
 // The retired follow-up card's stock line. It is a placeholder, not a task.
 const STOCK_NO_ACTION = /^no action is needed\b/i;
@@ -164,15 +171,25 @@ function deriveNext(reportV2, topIssue, bannerPresent) {
 // line is its own sentence; the last ones are the least important).
 function deriveSinceLast(copy) {
   const priorDate = copy && /^\d{4}-\d{2}-\d{2}$/.test(String(copy.priorDate || '')) ? copy.priorDate : null;
-  const lines = (copy && Array.isArray(copy.lines) ? copy.lines : []).map(clean).filter(Boolean);
   if (!priorDate) return null;
-  while (lines.length && lines.reduce((sum, line) => sum + countWords(line), 0) > FIELD_WORD_CAPS.sinceLast) lines.pop();
-  return lines.length ? { priorDate, lines } : null;
+  const clipped = (list) => (Array.isArray(list) ? list : []).map(clean).filter(Boolean);
+  const lines = clipped(copy.lines);
+  // GATE_LAWN_LIGHTING: `budgetLines` is the block gate-off would have printed. The
+  // word cap runs over IT, so withheld lines still take their room and the lines
+  // that survive are exactly gate-off's survivors minus the withheld ones.
+  const budget = copy.budgetLines ? clipped(copy.budgetLines) : [...lines];
+  while (budget.length && budget.reduce((sum, line) => sum + countWords(line), 0) > FIELD_WORD_CAPS.sinceLast) budget.pop();
+  const kept = lines.filter((line) => budget.includes(line));
+  return { priorDate, lines: kept, budget };
 }
 
 function dropField(lead, field) {
-  if (OPTIONAL_FIELDS.has(field)) delete lead[field];
-  else lead[field] = null;
+  if (OPTIONAL_FIELDS.has(field)) {
+    delete lead[field];
+    if (field === 'sinceLast') delete lead.sinceLastBudgetLines;
+  } else {
+    lead[field] = null;
+  }
 }
 
 // The writer's fields, or null when the gate is off / nothing was written.
@@ -185,6 +202,11 @@ function v6CopyOf(copyV6) {
  * @param {object} [extras]
  * @param {{priorDate:string, lines:string[]}|null} [extras.sinceLast] the
  *   "Since your last visit" block (lawn-since-last-copy.js), when its gate is live
+ * @param {string|null} [extras.techParagraph] the frozen "From your technician"
+ *   paragraph (lawn-tech-paragraph.js), when GATE_LAWN_TECH_PARAGRAPH is live and
+ *   one was written at completion; printed as given, never composed here
+ * @param {{line: string}|null} [extras.rainfastWatch] the live view's rainfast
+ *   breach sentence (lawn-rainfast-watch.js), when GATE_LAWN_RAINFAST_WATCH is live
  * @param {{headline, whatWeDid, whatToExpect, watching}|null} [extras.copyV6] the
  *   v6 copy's fixed-sentence fields (lawn-copy-v6.js), when its gate is live;
  *   each is a string or null (a null headline falls to the snapshot's)
@@ -194,7 +216,7 @@ function v6CopyOf(copyV6) {
  *   whatToExpect?: string, watching?: string } | null}
  *   null when there is no snapshot to lead with.
  */
-function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null } = {}) {
+function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null, rainfastWatch = null, techParagraph = null } = {}) {
   const snapshot = reportV2 && reportV2.snapshot;
   if (!snapshot || typeof snapshot !== 'object') return null;
   const bannerPresent = bannerHasWateringLines(reportV2.banner);
@@ -217,7 +239,12 @@ function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null } = {}) {
   }
   lead.yourPart = lead.yourPart.filter((task) => countWords(task) <= FIELD_WORD_CAPS.yourPart);
   const since = deriveSinceLast(sinceLast);
-  if (since) lead.sinceLast = since;
+  if (since && since.lines.length) lead.sinceLast = { priorDate: since.priorDate, lines: since.lines };
+  // The region budget counts the block gate-off would have printed (see deriveSinceLast).
+  // Non-enumerable: no payload key, and it is absent unless the light rules withheld a line.
+  if (since && since.budget.length !== since.lines.length) {
+    Object.defineProperty(lead, 'sinceLastBudgetLines', { value: since.budget, writable: true, configurable: true, enumerable: false });
+  }
   // Approved expectation sentences and the fixed watching line: under a
   // banner the same wording test that guards every lead field applies, and a
   // field over its cap is left out whole.
@@ -226,6 +253,24 @@ function deriveLawnLead(reportV2, { sinceLast = null, copyV6 = null } = {}) {
       const text = pick([v6[field]], bannerPresent);
       if (text && countWords(text) <= FIELD_WORD_CAPS[field]) lead[field] = text;
     }
+  }
+  // GATE_LAWN_TECH_PARAGRAPH: the frozen paragraph, already screened where it was
+  // written and again where it was read. Only the key's presence differs from a
+  // lead without it; a text over the cap is left out whole, never cut.
+  const tech = clean(techParagraph);
+  if (tech && countWords(tech) <= FIELD_WORD_CAPS.techParagraph) lead.techParagraph = tech;
+  // GATE_LAWN_RAINFAST_WATCH (P31, live view only): the one fixed sentence joins
+  // the Watching line, after the writer's own sentence. Only the exact module
+  // sentence is accepted. It gives no watering advice, so the banner-ownership
+  // wording test (which would reject its "rain") does not apply. The combined
+  // field is held to the Watching word cap too: when the two do not fit, the
+  // rainfast sentence REPLACES the writer's (it is the more specific fact, and
+  // it fits alone). The budget loop below still governs the whole region:
+  // Watching is given up whole when the region runs over.
+  if (rainfastWatch && rainfastWatch.line === RAINFAST_WATCH_LINE
+    && countWords(RAINFAST_WATCH_LINE) <= FIELD_WORD_CAPS.watching) {
+    const combined = lead.watching ? `${lead.watching} ${RAINFAST_WATCH_LINE}` : RAINFAST_WATCH_LINE;
+    lead.watching = countWords(combined) <= FIELD_WORD_CAPS.watching ? combined : RAINFAST_WATCH_LINE;
   }
   for (const field of BUDGET_DROP_ORDER) {
     if (leadWords({ ...reportV2, lead }) <= LEAD_WORD_BUDGET) break;
@@ -261,12 +306,22 @@ function leadWords(reportV2) {
   const parts = [];
   if (banner && Array.isArray(banner.lines)) parts.push(...banner.lines);
   if (banner && banner.mowHold) parts.push(banner.mowHold.line);
+  // GATE_LAWN_WATERING_FORECAST live-view lines (the payload only carries them
+  // on a live render of a water-in; PDF/static strip them before this runs).
+  // The page prints the measured-rain note when it exists, else the forecast
+  // sentence: count the one that will be displayed (LawnWateringBanner).
+  if (banner && banner.state !== 'hold' && banner.state !== 'hold_then_water_in') {
+    const live = banner.observedRain && typeof banner.observedRain.line === 'string' && banner.observedRain.line
+      ? banner.observedRain.line : banner.forecastLine;
+    if (typeof live === 'string' && live) parts.push(live);
+  }
   if (lead) for (const strings of Object.values(LEAD_FIELDS)) parts.push(...strings(lead));
   const dateWords = lead ? nextVisitDateWords(reportV2.snapshot && reportV2.snapshot.nextVisit) : 0;
   const labelWords = lead
     ? (LEAD_FIELDS.sinceLast(lead).length ? SINCE_LAST_LABEL_WORDS : 0)
       + (LEAD_FIELDS.whatToExpect(lead)[0] ? WHAT_TO_EXPECT_LABEL_WORDS : 0)
       + (LEAD_FIELDS.watching(lead)[0] ? WATCHING_LABEL_WORDS : 0)
+      + (LEAD_FIELDS.techParagraph(lead)[0] ? TECH_PARAGRAPH_LABEL_WORDS : 0)
     : 0;
   return parts.reduce((sum, part) => sum + countWords(part), 0) + dateWords + labelWords + STATIC_LABEL_WORDS;
 }

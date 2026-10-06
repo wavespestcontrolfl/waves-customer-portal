@@ -149,7 +149,7 @@ describe('VisitBriefPanel', () => {
     );
     expect(screen.queryByText('Call')).not.toBeInTheDocument();
     expect(screen.queryByText('Text')).not.toBeInTheDocument();
-    expect(screen.getByText('Navigate')).toBeInTheDocument();
+    expect(screen.queryByText('Navigate')).not.toBeInTheDocument();
   });
 
   it('gate codes render only when the brief response carries facts (or a served brief)', () => {
@@ -195,6 +195,84 @@ describe('VisitBriefPanel', () => {
       />,
     );
     expect(screen.getByText('Chemical sensitivity — no interior spray')).toBeInTheDocument();
+  });
+
+  describe('neighborhood gate codes from the visit', () => {
+    const gateStop = (alert = {}) => stopOf({
+      ...BASE_SERVICE,
+      neighborhoodGateActions: true,
+      propertyAlerts: [{ type: 'gate', text: 'Gate: 4242 (neighborhood)', neighborhoodEntryId: 'entry-1', neighborhoodEntryCode: '4242', reportedWrong: false, ...alert }],
+    });
+    const panel = (stop, props = {}) => render(
+      <VisitBriefPanel stop={stop} detail={undefined} onRetry={vi.fn()} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()} {...props} />,
+    );
+
+    it('Wrong code asks first, reports the entry through the visit and refreshes the route', async () => {
+      const request = vi.fn().mockResolvedValue({ id: 'entry-1', status: 'needs_confirm' });
+      const onGateChanged = vi.fn();
+      const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValue(true);
+      panel(gateStop(), { request, onGateChanged });
+      fireEvent.click(screen.getByRole('button', { name: 'Wrong code' }));
+      expect(request).not.toHaveBeenCalled();
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Wrong code' })); });
+      expect(confirm).toHaveBeenCalledTimes(2);
+      expect(request).toHaveBeenCalledWith(
+        '/admin/neighborhood-access/visits/svc-1/entries/entry-1/wrong',
+        { method: 'POST', body: '{"code":"4242"}' },
+      );
+      expect(onGateChanged).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('status')).toHaveTextContent('Reported. The office will check that code.');
+    });
+
+    it('a code the office changed meanwhile is refused and the route refreshes', async () => {
+      const request = vi.fn().mockRejectedValue(Object.assign(new Error('That code was changed. Check your route for the new one.'), { status: 409, code: 'entry_changed' }));
+      const onGateChanged = vi.fn();
+      vi.spyOn(window, 'confirm').mockReturnValue(true);
+      panel(gateStop(), { request, onGateChanged });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Wrong code' })); });
+      expect(screen.getByRole('alert')).toHaveTextContent('That code was changed');
+      expect(onGateChanged).toHaveBeenCalledTimes(1);
+    });
+
+    it('a code already reported shows that instead of the button', () => {
+      panel(gateStop({ reportedWrong: true }), { request: vi.fn() });
+      expect(screen.getByText('Reported wrong')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Wrong code' })).not.toBeInTheDocument();
+    });
+
+    it('Add gate code posts the typed code and shows the server\'s refusal inline', async () => {
+      const request = vi.fn()
+        .mockRejectedValueOnce(new Error('A keypad code is 3 to 8 digits, with an optional leading or trailing # or *'))
+        .mockResolvedValue({ id: 'entry-2', status: 'active' });
+      const onGateChanged = vi.fn();
+      panel(gateStop(), { request, onGateChanged });
+      fireEvent.click(screen.getByRole('button', { name: 'Add gate code' }));
+      fireEvent.change(screen.getByLabelText('Neighborhood gate code'), { target: { value: ' 12 ' } });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save' })); });
+      expect(request).toHaveBeenCalledWith('/admin/neighborhood-access/visits/svc-1/entries', { method: 'POST', body: '{"code":"12"}' });
+      expect(screen.getByRole('alert')).toHaveTextContent('A keypad code is 3 to 8 digits');
+      expect(onGateChanged).not.toHaveBeenCalled();
+      fireEvent.change(screen.getByLabelText('Neighborhood gate code'), { target: { value: '5150' } });
+      await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Save' })); });
+      expect(onGateChanged).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('status')).toHaveTextContent("Saved to this neighborhood's gate codes.");
+      expect(screen.queryByLabelText('Neighborhood gate code')).not.toBeInTheDocument();
+    });
+
+    it('a stop with no neighborhood and no alerts still offers nothing; a marked stop offers Add with no alerts', () => {
+      const { unmount } = panel(stopOf(BASE_SERVICE), { request: vi.fn() });
+      expect(screen.queryByText('Access')).not.toBeInTheDocument();
+      unmount();
+      panel(stopOf({ ...BASE_SERVICE, neighborhoodGateActions: true }), { request: vi.fn() });
+      expect(screen.getByRole('button', { name: 'Add gate code' })).toBeInTheDocument();
+    });
+
+    it('without the stop mark (gate off) a neighborhood code line has no controls', () => {
+      panel(stopOf({ ...BASE_SERVICE, propertyAlerts: [{ type: 'gate', text: 'Gate: 4242 (neighborhood)' }] }), { request: vi.fn() });
+      expect(screen.getByText('Gate: 4242 (neighborhood)')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Wrong code' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Add gate code' })).not.toBeInTheDocument();
+    });
   });
 
   it('shows the retry row only when every detail fetch failed', () => {
@@ -561,7 +639,7 @@ describe('VisitBriefPanel', () => {
     const onProject = vi.fn();
     render(<VisitBriefPanel stop={stopOf({ ...BASE_SERVICE, status })} detail={detailFor({})}
       onRetry={vi.fn()} onPhotos={vi.fn()} onProject={onProject} onZone={vi.fn()} onLead={vi.fn()} />);
-    const report = screen.getByRole('button', { name: /🗂️/ });
+    const report = screen.getByRole('button', { name: /Report|Completed|Sent|Continue|Open closeout/ });
     expect(report).toBeDisabled();
     fireEvent.click(report);
     expect(onProject).not.toHaveBeenCalled();
@@ -580,13 +658,13 @@ describe('VisitBriefPanel', () => {
         onRetry={vi.fn()} onPhotos={vi.fn()} onProject={onProject} onZone={onZone} onLead={vi.fn()}
       />,
     );
-    expect(screen.getByText('🗂️ Sent')).toBeInTheDocument();
+    expect(screen.getByText('Sent')).toBeInTheDocument();
     expect(screen.getAllByText('Rodent Station Check').length).toBeGreaterThan(0);
     expect(screen.getAllByLabelText('Trace treatment zone')).toHaveLength(1);
-    fireEvent.click(screen.getByText('🗂️ Sent'));
-    expect(screen.getByText('🗂️ Sent')).toBeDisabled();
+    fireEvent.click(screen.getByText('Sent'));
+    expect(screen.getByText('Sent')).toBeDisabled();
     expect(onProject).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByText('🗂️ Report'));
+    fireEvent.click(screen.getByText('Report'));
     expect(onProject).toHaveBeenCalledWith(traceless);
   });
 });
@@ -597,26 +675,26 @@ describe('VisitBriefPanel consultation outcome action', () => {
   it('shows Outcome only on a Waves Assessment and hands it the service', () => {
     const onOutcome = vi.fn();
     render(<VisitBriefPanel stop={stopOf(assessment)} detail={detailFor({})} onProject={vi.fn()} onOutcome={onOutcome} />);
-    fireEvent.click(screen.getByRole('button', { name: '📝 Outcome' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Outcome' }));
     expect(onOutcome).toHaveBeenCalledWith(assessment);
   });
 
   it('recognizes the catalog key when the display name differs', () => {
     const keyed = { ...assessment, serviceType: 'Free Consultation', completionProfile: { serviceKey: 'lawn_inspection' } };
     render(<VisitBriefPanel stop={stopOf(keyed)} detail={detailFor({})} onProject={vi.fn()} onOutcome={vi.fn()} />);
-    expect(screen.getByRole('button', { name: '📝 Outcome' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Outcome' })).toBeInTheDocument();
   });
 
   it('hides Outcome on other services and on visits that never happened', () => {
     const { unmount } = render(<VisitBriefPanel stop={stopOf(BASE_SERVICE)} detail={detailFor({})} onProject={vi.fn()} onOutcome={vi.fn()} />);
-    expect(screen.queryByRole('button', { name: '📝 Outcome' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Outcome' })).toBeNull();
     unmount();
     render(<VisitBriefPanel stop={stopOf({ ...assessment, status: 'no_show' })} detail={detailFor({})} onProject={vi.fn()} onOutcome={vi.fn()} />);
-    expect(screen.queryByRole('button', { name: '📝 Outcome' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Outcome' })).toBeNull();
   });
 
   it('keeps Outcome on a completed assessment (editable until won)', () => {
     render(<VisitBriefPanel stop={stopOf({ ...assessment, status: 'completed' })} detail={detailFor({})} onProject={vi.fn()} onOutcome={vi.fn()} />);
-    expect(screen.getByRole('button', { name: '📝 Outcome' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Outcome' })).toBeInTheDocument();
   });
 });

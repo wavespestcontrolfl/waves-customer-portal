@@ -16,7 +16,7 @@ const logger = require('./logger');
 const { heldVisitSubquery, isStreetLevelHoldVisit } = require('./street-level-hold');
 // Boundary-rotation generation guard (codex #3233 r37).
 const PROCESS_BOOT_AT = new Date();
-const { sendCustomerMessage } = require('./messaging/send-customer-message');
+const { sendCustomerMessage, classifyDeliveryCertainty } = require('./messaging/send-customer-message');
 const { readCachedLineType, cacheLineType, NON_SMS_LINE_TYPES } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -2186,6 +2186,38 @@ async function appendHeldEstimateAcceptLine(body, { record, contact, customer, s
   }
 }
 
+// The appointment_confirmation body, one place for the primary's confirmation
+// (deliverConfirmation) and the replay to a service contact who answered YES
+// (sendConfirmationToServiceContact). `ladder` (optional) receives the
+// rendered row's templateKey.
+async function renderConfirmationBody({ scheduledServiceId, customerId, firstName, serviceLabel, date, time, day, rescheduleLine, ladder = null }) {
+  return renderAppointmentPageTemplate(
+    'appointment_confirmation',
+    async () => {
+      // Confirm-first label ONLY when there is something to confirm:
+      // a self-booked visit is inserted already confirmed
+      // (routes/booking.js), and asking that customer to "view and
+      // confirm" points at a page with no Confirm button.
+      const svcRow = await db('scheduled_services')
+        .where({ id: scheduledServiceId })
+        .first('status', 'customer_confirmed');
+      const alreadyConfirmed = String(svcRow?.status || '').toLowerCase() === 'confirmed'
+        || !!svcRow?.customer_confirmed;
+      const appointmentLink = await buildAppointmentLink(scheduledServiceId, {
+        customerId,
+        label: alreadyConfirmed ? 'Everything about your visit' : 'View and confirm your appointment',
+      });
+      // {window}, not {time} — the v2 body quotes the 2-hour arrival
+      // promise, and every sender resolves it through the one helper.
+      const window = await confirmationArrivalWindow({ scheduledServiceId });
+      return { first_name: firstName || 'there', service_type: serviceLabel, date, time, day, window, appointment_line: appointmentLink.line };
+    },
+    { first_name: firstName || 'there', service_type: serviceLabel, date, time, day, reschedule_line: rescheduleLine },
+    { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
+    ladder,
+  );
+}
+
 async function deliverConfirmation(record, { scheduledServiceId, customerId, apptTime, serviceLabel, recheckBeforeSend = false }) {
   if (apptTime.getTime() <= Date.now()) {
     // Deferred path (codex #3609 r22 P2): the time this sender read can have
@@ -2318,31 +2350,9 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
           const ladder = {};
-          const rendered = await renderAppointmentPageTemplate(
-            'appointment_confirmation',
-            async () => {
-              // Confirm-first label ONLY when there is something to confirm:
-              // a self-booked visit is inserted already confirmed
-              // (routes/booking.js), and asking that customer to "view and
-              // confirm" points at a page with no Confirm button.
-              const svcRow = await db('scheduled_services')
-                .where({ id: scheduledServiceId })
-                .first('status', 'customer_confirmed');
-              const alreadyConfirmed = String(svcRow?.status || '').toLowerCase() === 'confirmed'
-                || !!svcRow?.customer_confirmed;
-              const appointmentLink = await buildAppointmentLink(scheduledServiceId, {
-                customerId,
-                label: alreadyConfirmed ? 'Everything about your visit' : 'View and confirm your appointment',
-              });
-              // {window}, not {time} — the v2 body quotes the 2-hour arrival
-              // promise, and every sender resolves it through the one helper.
-              const window = await confirmationArrivalWindow({ scheduledServiceId });
-              return { first_name: firstName, service_type: serviceLabel, date, time, day, window, appointment_line: appointmentLink.line };
-            },
-            { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
-            { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
-            ladder,
-          );
+          const rendered = await renderConfirmationBody({
+            scheduledServiceId, customerId, firstName, serviceLabel, date, time, day, rescheduleLine: reschedule.line, ladder,
+          });
           // safeSendAppointment reads this metadata after the render, so
           // the send records the row that actually rendered (v2 or base).
           if (ladder.templateKey) confirmationMeta.templateKey = ladder.templateKey;
@@ -5860,6 +5870,160 @@ AppointmentReminders.composeScheduledApptTime = composeScheduledApptTime;
 // The visit-aware prefs row for the call-booking confirmation email and the
 // deferred-replay recheck (app property scope, PR 3).
 AppointmentReminders.visitPrefsRow = visitPrefsRow;
+
+// classifyDeliveryCertainty verdict -> replay result.
+const REPLAY_DELIVERY_RESULT = Object.freeze({
+  sent: { sent: true },
+  not_sent: { sent: false, reason: 'not_sent' },
+  unknown: { sent: false, reason: 'delivery_uncertain' },
+});
+
+// Has a confirmation text for this visit been logged to this phone? The one
+// per-visit check shared by the replay below and the call pipeline's contact
+// fan-out, so neither sender repeats the other. sms_log carries the visit on
+// every send made with appointmentId (twilio.js stamps
+// metadata.scheduled_service_id through noticeScope); a queued copy writes it
+// itself. Matches the phone on its last 10 digits (sms_log holds the E.164
+// the sender normalized; a slot phone may be stored formatted), ignores a
+// definitively failed attempt (it delivered nothing) and spans the visit's
+// lifetime (a reprocess days later must not resend). Throws on an unreadable
+// log: each caller picks its own failure posture.
+async function confirmationLoggedForVisitPhone({ scheduledServiceId, phone }) {
+  const contactKey = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (!scheduledServiceId || !contactKey) return false;
+  const priorSend = await db('sms_log')
+    .where({ message_type: 'confirmation' })
+    .whereRaw("right(regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g'), 10) = ?", [contactKey])
+    .whereRaw('metadata::text like ?', [`%${scheduledServiceId}%`])
+    .whereRaw("coalesce(status, '') not in ('failed', 'undelivered', 'canceled')")
+    .first('id');
+  return !!priorSend;
+}
+AppointmentReminders.confirmationLoggedForVisitPhone = confirmationLoggedForVisitPhone;
+
+// Send ONE service contact the same appointment confirmation text the primary
+// got, for a visit that is still confirmed and ahead. Used when an on-site
+// recipient answers YES to the opt-in ask AFTER the booking confirmation went
+// out (owner 2026-10-02: the caller and the on-site person both get it). When
+// it answers the recipient's own YES (inReplyToYes) it rides
+// conversationalContext like the other inbound-reply senders; a retry honors
+// the send window with the service-contact trust floor. It renders the SAME
+// `appointment_confirmation` template ladder as deliverConfirmation and honors
+// the same holds (the visit's callback-number hold, the account's confirmation
+// choices, the visit's own pending confirmation). The slot, window, reminders
+// and the primary's own confirmation are untouched. Deduped on sms_log for the
+// visit's lifetime: the same phone (last 10), message_type 'confirmation' and
+// visit is never re-sent. Returns { sent, reason }; the caller decides which
+// reasons are final (recipient-optin's REPLAY_TERMINAL_REASONS).
+// Replay stage 1 — the visit: { reason } when nothing can be sent for it now,
+// else its rows. Throws on an unreadable read (the replay retries).
+async function replayVisit({ customerId, scheduledServiceId }) {
+  const [svc, reminder = {}, acct, apptTime] = await Promise.all([
+    // Only a confirmed visit (not over, called off, under way or being rescheduled).
+    db('scheduled_services').where({ id: scheduledServiceId, customer_id: customerId, status: 'confirmed' })
+      .first('id', 'service_type'),
+    // A CANCELLED reminder row means the slot was pulled.
+    db('appointment_reminders').where({ scheduled_service_id: scheduledServiceId })
+      .first('cancelled', 'service_type', 'confirmation_sent'),
+    db('customers').where({ id: customerId }).first(),
+    // The canonical customer-promised arrival (reservation arrival: a
+    // combined allocation's later member resolves to the group's arrival,
+    // not its own work slot).
+    scheduledServiceApptTime(scheduledServiceId, { throwOnError: true }),
+  ]);
+  if (!svc || reminder.cancelled || !(apptTime?.getTime() > Date.now())) return { reason: 'visit_not_live' };
+  // The visit's own confirmation is still pending (held for the send window
+  // or a move): its fan-out owns this recipient now. Wait for it; once it
+  // has gone out the dedupe sees it and ends the replay.
+  if (reminder.confirmation_sent === false) return { reason: 'primary_confirmation_pending' };
+  // A callback-number hold (the caller disclaimed the number the visit was
+  // booked under) holds every appointment text for the visit, exactly as
+  // safeSendAppointment holds them; it fails closed, and can clear later.
+  if (await callbackNumberHoldActiveForVisit(scheduledServiceId)) return { reason: 'callback_number_hold' };
+  return { svc, reminder, acct, apptTime };
+}
+
+// Replay stage 2 — the recipient: { reason } when this phone gets no text,
+// else the resolved contact. Throws on an unreadable read (the replay retries).
+async function replayRecipient({ customerId, scheduledServiceId, contactKey, acct }) {
+  // The account's confirmation choices apply to this text exactly as to the
+  // primary's: confirmations off or an email-only channel = no text.
+  const prefs = await getReminderPrefs(customerId, { scheduledServiceId });
+  if (prefs.unavailable) throw new Error('prefs unavailable');
+  if (!prefs.appointmentConfirmation || !prefs.smsEnabled || apptChannel(prefs.confirmationChannel) === 'email') return { reason: 'sms_not_chosen' };
+  // Revalidated at send time (a retry can run from the sweep days after the
+  // YES): the phone must still be one of the account's appointment
+  // recipients through the SAME resolver every appointment text uses (slot
+  // membership, consent stamp, the per-phone unconsented hold), and its
+  // opt-in for this customer must still be confirmed. The opt-in row is read
+  // directly so an unreadable one throws (retry), never reads as a refusal.
+  const recipient = getAppointmentContacts(acct, prefs.raw).find((c) => String(c.phone).replace(/\D/g, '').slice(-10) === contactKey);
+  const optin = await db('recipient_optin').where({ customer_id: customerId, phone_key: contactKey }).first('status');
+  if (!recipient || optin?.status !== 'confirmed') return { reason: 'not_a_recipient' };
+  if (await confirmationLoggedForVisitPhone({ scheduledServiceId, phone: contactKey })) return { reason: 'already_sent' };
+  return { recipient };
+}
+
+async function sendConfirmationToServiceContact({ customerId, scheduledServiceId, phone, inReplyToYes = false } = {}) {
+  const contactKey = String(phone || '').replace(/\D/g, '').slice(-10);
+  if (!customerId || !scheduledServiceId || !contactKey) return { sent: false, reason: 'missing_input' };
+  try {
+    const visit = await replayVisit({ customerId, scheduledServiceId });
+    if (visit.reason) return { sent: false, reason: visit.reason };
+    const { svc, reminder, acct, apptTime } = visit;
+    const { recipient, reason } = await replayRecipient({ customerId, scheduledServiceId, contactKey, acct });
+    if (reason) return { sent: false, reason };
+    const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
+    const body = await renderConfirmationBody({
+      scheduledServiceId,
+      customerId,
+      firstName: firstNameFrom(recipient.name),
+      // Same customer-facing label as the reminder rail: the reminder row's
+      // (merged, add-on-aware) label when registered, admin suffixes stripped.
+      serviceLabel: smsServiceLabelStored(reminder.service_type || svc.service_type),
+      date: formatDate(apptTime),
+      time: formatTime(apptTime),
+      day: formatDay(apptTime),
+      rescheduleLine: reschedule.line,
+    });
+    if (!body) return { sent: false, reason: 'template_unavailable' };
+    const result = await sendCustomerMessage({
+      to: recipient.phone,
+      body,
+      channel: 'sms',
+      audience: 'customer',
+      purpose: 'appointment_confirmation',
+      customerId,
+      appointmentId: scheduledServiceId,
+      renderedSlotMs: apptTime.getTime(),
+      identityTrustLevel: 'service_contact_authorized',
+      // Only the immediate answer to the recipient's own YES is a reply; a
+      // sweep retry honors the send window (a held send stays retryable).
+      conversationalContext: inReplyToYes === true,
+      metadata: {
+        original_message_type: 'confirmation',
+        appointment_contact_role: recipient.role,
+        scheduled_service_id: scheduledServiceId,
+        entry_point: 'recipient_optin_confirmed_replay',
+      },
+    });
+    // The shared delivery verdict (disabled template / owner-silence sentinels
+    // read as not_sent even with sent:true): definitely not sent = retryable;
+    // uncertain may have reached the person = final, never resent.
+    return REPLAY_DELIVERY_RESULT[classifyDeliveryCertainty(result)];
+  } catch (err) {
+    // A send that threw AFTER the provider took it (err.providerOutcome) may
+    // have reached the person: final, never resent.
+    if (err?.providerOutcome && classifyDeliveryCertainty(err.providerOutcome) !== 'not_sent') {
+      logger.warn(`[appt-remind] confirmation replay threw after the provider handoff (${err.name}); not retried`);
+      return { sent: false, reason: 'delivery_uncertain' };
+    }
+    // An unreadable visit / prefs / dedupe read fails CLOSED and retries.
+    logger.warn(`[appt-remind] confirmation replay to service contact failed (${err.name})`);
+    return { sent: false, reason: 'error' };
+  }
+}
+AppointmentReminders.sendConfirmationToServiceContact = sendConfirmationToServiceContact;
 
 // Shared with twilio.js's en-route/arrival senders (owner ruling
 // 2026-09-25) — see the function's own comment.

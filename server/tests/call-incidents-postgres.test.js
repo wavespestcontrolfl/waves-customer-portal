@@ -268,7 +268,9 @@ describe('the two-model rule for a call finding', () => {
   test('the Sunday proposer counts distinct confirmed calls in the unversioned cohort', async () => {
     for (let i = 0; i < 5; i++) await finding(await call());
     await calls.adjudicateCallFindings({ dbi: database, now: NOW, reader: agreeing });
-    const out = await calls.proposeCallFixes({ dbi: database, now: new Date('2026-10-04T08:50:00Z') });
+    // The cutoff must not be a fixed date: ai_incidents.adjudicated_at defaults to the database's
+    // own now(), so a hardcoded cutoff excludes every incident once the calendar passes it.
+    const out = await calls.proposeCallFixes({ dbi: database, now: new Date(Date.now() + 60_000) });
     expect(out).toMatchObject({ proposed: 1 });
     expect(await database('ai_fix_proposals').first()).toMatchObject({
       area: 'calls', surface: 'call_extraction', failure_mode: 'appointment_agreed_missed', prompt_version: null, status: 'pending', evidence_count: 5,

@@ -438,9 +438,20 @@ describe("completionResumeOwedError", () => {
       "first_application_coverage_changed",
       "invoice_hold_handover_failed",
       "deferred_prepay_lookup_failed",
+      "membership_dues_coverage_unverified",
     ]) {
       expect(completionResumeOwedError({ status: 503, code })).toBe(true);
     }
+  });
+
+  // The dues commit-time confirmation (409 MEMBERSHIP_DUES_COVERAGE_CHANGED) is
+  // thrown INSIDE the completion transaction: nothing is committed, the attempt
+  // is marked failed, and a same-key resubmit re-runs the closeout. It is not a
+  // resume-owed error and does not reset the key.
+  it("a pre-commit 409 dues-coverage refusal is not resume-owed and keeps the key", () => {
+    const error = { status: 409, code: "MEMBERSHIP_DUES_COVERAGE_CHANGED" };
+    expect(completionResumeOwedError(error)).toBe(false);
+    expect(shouldResetCompletionIdempotencyKey(error)).toBe(false);
   });
 
   it("leaves every other error to the existing handlers", () => {

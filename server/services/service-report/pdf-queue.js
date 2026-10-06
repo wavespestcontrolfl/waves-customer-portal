@@ -30,6 +30,7 @@ const { photoMarksPdfSignature } = require('./photo-marks');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
 const { stationMapPdfSignature } = require('../termite-stations');
 const { treatmentNarrativePdfSignature } = require('./treatment-narrative');
+const { treeShrubTechParagraphPdfSignature } = require('./tree-shrub-tech-paragraph-gate');
 const { detectServiceLine } = require('./service-line-configs');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { publicOriginPdfSignature } = require('../../utils/portal-url');
@@ -55,9 +56,8 @@ function isMissingQueueError(err) {
 const PENDING_DEFER_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
 // Uncached reasons that are TRANSIENT (a retry can succeed any minute) and so
 // take the normal failure retry ladder rather than a wait for ET midnight:
-// the lawn freeze's 'unfrozen' and the pest week's provider/freeze failures
-// (codex P2 2026-09-28 round 5). Every other reason is time-dependent.
-const TRANSIENT_UNCACHED_REASONS = new Set(['unfrozen', 'pest_week_weather_unavailable']);
+// the lawn freeze's 'unfrozen'. Every other reason is time-dependent.
+const TRANSIENT_UNCACHED_REASONS = new Set(['unfrozen']);
 
 function nextPdfRenderAttemptAt(now = new Date(), attempts = 0) {
   const index = Math.min(Math.max(Number(attempts || 0), 0), RETRY_DELAYS_MINUTES.length - 1);
@@ -186,6 +186,8 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
   const tzSignature = await treatmentZonePdfSignature(service, knex);
   const smSignature = await stationMapPdfSignature(service, knex);
+  // T&S "From your technician" paragraph (GATE_TS_TECH_PARAGRAPH): '' unless the gate is live and a whole frozen entry exists.
+  const tsParagraphSignature = await treeShrubTechParagraphPdfSignature(service, knex);
   // Assessment identity + copy version in the key, so a stale in-flight render
   // cannot republish over a newer one (#3168).
   // ONE canonical lookup feeds BOTH the pin and the storage-key component
@@ -265,7 +267,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // fence compares against it (the browser fetches its own /data, so a
     // change anywhere in between skips the store).
     cardFenceAtRender = await reserviceCardRenderFence(service, knex);
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, pestWeekWeather: true });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanAvailableAt: canonical.weekPlanAvailableAt, propertyHistoryEnabled, lawnHistory, pinnedLawnHistoryIdentity, lawnPhotoFindings: true });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     cockroachRenderedSignature = cockroachReportV2RenderedSignature(data, service);
     reserviceRenderedSignature = reserviceReportRenderedSignature(data, service);
@@ -298,13 +300,6 @@ async function renderAndStoreServiceReportPdf(recordId, {
     // (codex P1 #3600 r11).
     attachTermiteReportV2(data, service);
     attachCockroachReportV2(data, service);
-    // This path never composes pestReportV2 itself (the actual bytes come
-    // from the browser's own /data fetch below) — but `data` already
-    // carries `pestWeekWeatherUncacheable` straight from buildReportV1Data
-    // above (codex P1 2026-09-29 round 3: report-data.js's
-    // resolvePestWeekWeather / resolvePestWeekWeatherForBuild is the ONE
-    // canonical fetch+freeze every caller of buildReportV1Data shares — no
-    // separate preflight fetch left here to disagree with the render).
     const rendered = await renderServiceReportV1Pdf(data, {
       token: reportToken,
       req,
@@ -409,28 +404,6 @@ async function renderAndStoreServiceReportPdf(recordId, {
         uncachedReason: reason,
       };
     }
-    // Mirrors the lawn guard above for the pest-line rain block (codex P0
-    // 2026-09-28): a still-OPEN 7-day window is not yet reproducible, so
-    // storing it under the stable '-pex2' key would serve the "no rain
-    // block" bytes forever even after the window settles and a later render
-    // would include it. Wait for the window to close; no amount of retrying
-    // resolves it any sooner.
-    if (renderedData?.pestWeekWeatherUncacheable) {
-      // The reason decides the retry shape (codex P2 2026-09-28 round 5):
-      // an OPEN window or missing coordinates are time-dependent (wait for
-      // ET midnight, like the lawn pending reasons); a provider outage or a
-      // failed freeze is transient and takes the normal failure retry
-      // ladder instead of deferring for up to three days.
-      const pending = renderedData.pestWeekWeatherPendingReason || 'open_window';
-      const uncachedReason = pending === 'open_window' ? 'pest_week_weather_unsettled'
-        : pending === 'no_coordinates' ? 'pest_week_weather_no_coordinates'
-          : 'pest_week_weather_unavailable';
-      logger.warn(`[service-report-pdf] pest week weather not cacheable for ${recordId} (${pending}) — serving without storing`);
-      return {
-        key: null, pdf, rendered: true, token: reportToken, uncached: true,
-        uncachedReason,
-      };
-    }
     const laAfter = await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled });
     if (laAfter !== laSignature) {
       logger.warn(`[service-report-pdf] lawn assessment changed during render for ${recordId} — not caching this render`);
@@ -487,7 +460,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       };
     }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsBefore + photoSetBefore + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + applicatorRenderedPdfSignature(renderedData) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + cockroachRenderedSignature + reserviceRenderedSignature + reserviceTrendsBefore + photoSetBefore + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + tsParagraphSignature + applicatorRenderedPdfSignature(renderedData) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };
@@ -649,7 +622,7 @@ async function getOrRenderServiceReportPdf(recordId, {
       // second service_records read, and threads the same
       // propertyHistoryEnabled lawnAssessmentPdfSignature is already given
       // just below (Sonnet fallback-audit P1s, 2026-09-28).
-      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex, { serviceData: service.service_data, lawnFields: service, propertyHistoryEnabled }) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex, { serviceLine: service.service_line || detectServiceLine(service.service_type) }) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + await applicatorIdentityPdfSignature(service.id, knex) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summaryCopySignature(service) + mosquitoReportV2PdfSignature(service) + pestReportV2PdfSignature(service) + termiteReportV2PdfSignature(service) + await cockroachReportV2PdfSignature(service, knex) + await reserviceReportPdfSignature(service, { knex }) + await reserviceTrendsPdfSignature(service, knex) + await reportPhotoSetPdfSignature(service.id, knex, { serviceData: service.service_data, lawnFields: service, propertyHistoryEnabled }) + await treatmentZonePdfSignature(service, knex) + await stationMapPdfSignature(service, knex) + await treatmentNarrativePdfSignature(service.id, knex, { serviceLine: service.service_line || detectServiceLine(service.service_type) }) + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + treeShrubReviewPdfSignature(service) + await treeShrubTechParagraphPdfSignature(service, knex) + await applicatorIdentityPdfSignature(service.id, knex) + await lawnAssessmentPdfSignature(service, knex, { propertyHistoryEnabled }) + photoMarksPdfSignature() + publicOriginPdfSignature(),
     })
     : null;
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)

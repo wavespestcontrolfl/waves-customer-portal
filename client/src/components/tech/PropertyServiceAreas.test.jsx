@@ -20,6 +20,14 @@ describe('property area review', () => {
     expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(null);
     expect(adminFetch).toHaveBeenCalledTimes(1);
   });
+  it('reads through the fetcher it is given (the lawn Fast Complete sheet passes its own), not the admin fetch', async () => {
+    const request = vi.fn().mockResolvedValue(measurements());
+    const onMeasurements = vi.fn();
+    render(<PropertyServiceAreas {...props} request={request} onMeasurements={onMeasurements} />);
+    await waitFor(() => expect(onMeasurements).toHaveBeenCalledWith(expect.objectContaining({ propertyId: 'property-1' })));
+    expect(request).toHaveBeenCalledWith('/admin/schedule/visit-1/property-areas');
+    expect(adminFetch).not.toHaveBeenCalled();
+  });
   it('saves only checked areas and preserves source; changing a value requires a new check', async () => {
     const onMeasurements = vi.fn();
     render(<PropertyServiceAreas {...props} onMeasurements={onMeasurements} />);
@@ -130,5 +138,38 @@ describe('property area review', () => {
     render(<PropertyServiceAreas serviceId="visit-1" serviceLine={serviceLine} />);
     await screen.findByRole('button', { name: 'Review areas' });
     expect(!!screen.queryByRole('button', { name: 'Get area estimate' })).toBe(offered);
+  });
+  it.each([
+    ['reviewed', { sqft: 4200, source: 'field', reviewedAt: '2026-09-27T00:00:00Z' }],
+    ['recorded but not reviewed', { sqft: 5750, source: 'recorded', reviewedAt: null }],
+  ])('renders no card on a lawn completion when a %s lawn area exists (the whole lawn is treated)', async (_label, lawn) => {
+    adminFetch.mockResolvedValue({ ...measurements(), areas: { ...measurements().areas, lawn } });
+    const onMeasurements = vi.fn();
+    const view = render(<PropertyServiceAreas serviceId="visit-1" serviceLine="lawn" onVisitAreaChange={vi.fn()} onMeasurements={onMeasurements} />);
+    await waitFor(() => expect(onMeasurements).toHaveBeenCalledWith(expect.objectContaining({ propertyId: 'property-1' })));
+    expect(view.container).toBeEmptyDOMElement();
+  });
+  it.each([
+    ['no lawn area', null],
+    ['a lookup estimate only', { sqft: 4200, source: 'imagery', reviewedAt: null }],
+  ])('still shows the card on a lawn completion with %s', async (_label, lawn) => {
+    adminFetch.mockResolvedValue({ ...measurements(), areas: { ...measurements().areas, lawn } });
+    render(<PropertyServiceAreas serviceId="visit-1" serviceLine="lawn" onVisitAreaChange={vi.fn()} />);
+    expect(await screen.findByLabelText('Area treated today (sq ft)')).toHaveValue(null);
+    expect(screen.getByRole('button', { name: 'Review areas' })).toBeInTheDocument();
+  });
+  it('keeps a typed lawn area visible on a recorded lawn so it can be cleared', async () => {
+    adminFetch.mockResolvedValue({ ...measurements(), areas: { ...measurements().areas, lawn: { sqft: 5750, source: 'recorded', reviewedAt: null } } });
+    const onChange = vi.fn();
+    render(<PropertyServiceAreas serviceId="visit-1" serviceLine="lawn" visitArea="2000" onVisitAreaChange={onChange} />);
+    expect(await screen.findByLabelText('Area treated today (sq ft)')).toHaveValue(2000);
+    fireEvent.click(screen.getByRole('button', { name: 'Use property area' }));
+    expect(onChange).toHaveBeenCalledWith(null);
+  });
+  it('leaves the property editor and other service lines alone', async () => {
+    adminFetch.mockResolvedValue({ ...measurements(), areas: { ...measurements().areas, lawn: { sqft: 5750, source: 'recorded', reviewedAt: null } } });
+    render(<PropertyServiceAreas customerId="customer-1" propertyId="property-1" />);
+    expect(await screen.findByText('Treatable lawn')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Review areas' })).toBeInTheDocument();
   });
 });

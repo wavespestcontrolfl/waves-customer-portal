@@ -62,6 +62,36 @@ const WINDOW_SPAN = 15;
 // apply. Default is ZERO — every OTHER unwrapped site fails.
 const ALLOWLIST = [
   {
+    file: 'services/access-code-capture.js',
+    snippet: "const live = await trx('sms_log').where({ id: message.id }).forUpdate().first('customer_id', 'direction', 'message_type', 'to_phone', 'message_body');",
+    reason: 'sourceStillCurrent: re-locks the ONE inbound text this sweep pass already read, by id, to compare its owner and words; inbound texts are never send reservations.',
+  },
+  {
+    file: 'services/access-code-capture.js',
+    snippet: "const candidates = await conn('sms_log as s')",
+    reason: 'runAccessCodeNet candidate page: inbound texts only (direction inbound), which a send reservation never is.',
+  },
+  {
+    file: 'services/access-code-capture.js',
+    snippet: "const source = await trx('sms_log').where({ id: row.source_id }).forUpdate().first(...SOURCE_COLUMNS);",
+    reason: 'sourceStillSupports: locks the one source text of a found row, by id, and refuses it unless it is still an eligible inbound text.',
+  },
+  {
+    file: 'services/rate-review-comms.js',
+    snippet: "const log = await trx('sms_log').where({ twilio_sid: sid }).first('customer_id');",
+    reason: 'handleSmsDeliveryFailure: keyed by twilio_sid (the failed text Twilio is reporting) and reads only the customer id — a send reservation never has a sid until it is promoted to a real send, so no placeholder can be read as a message.',
+  },
+  {
+    file: 'services/contact-report-text.js',
+    snippet: "const existing = await trx('sms_log')",
+    reason: 'queueContactReportTexts: existence check for THIS report\'s own queued or sent contact text (message_type contact_report_ready + its contact_report_key), the one-text-per-contact-per-report dedupe under the customer row lock. A review-ask or reply reservation never carries that message type or key, and a row in any state (in flight included) must count as already queued.',
+  },
+  {
+    file: 'services/sms-scheduling-act.js',
+    snippet: "const newer = await trx('sms_log')",
+    reason: 'buildMoveGuard newer-message fence: an existence check, under the move\'s locks, for ANY row on this phone-and-line conversation after the accepted reply. Nothing is presented as a message. A reply reservation in flight is Waves answering right now, which is exactly when the automatic move must stand down, so hiding reservations would weaken the fence; a placeholder can only refuse a move (staff handle it), never cause one.',
+  },
+  {
     file: 'services/visit-completion-packets.js',
     snippet: "return Boolean(await trx('sms_log').where({ message_type: 'visit_summary', status: 'scheduled' })",
     reason: 'summaryStillToCarryLink: existence check for THIS visit\'s own queued (scheduled) visit-summary row that still carries the invoice link (message_type visit_summary + billing_link metadata + visit_id); no review-ask or reply reservation can match that shape, and the row being asked about is the queued summary itself.',
@@ -477,6 +507,11 @@ const ALLOWLIST = [
     reason: 'status filtered to a set that excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
+    file: 'services/review-request.js',
+    snippet: 'const accepted = await db("sms_log")',
+    reason: 'the review page\'s batch form of the delivery-evidence lookup above (#5682): status filtered to sent / delivered, which excludes \'sending\' — an unresolved reservation cannot match.',
+  },
+  {
     file: 'services/sms-additional-properties.js',
     snippet: 'const message = await conn(\'sms_log\').where({ id: smsLogId }).first();',
     reason: 'single-row lookup by id — not a list read.',
@@ -647,6 +682,11 @@ const ALLOWLIST = [
     file: 'services/email-division/eligibility.js',
     snippet: "const inboundSms = await database('sms_log')",
     reason: 'RECENT_HUMAN_CONTACT existence check (direction inbound): an inbound row is the customer\'s own message and is never a send reservation (those are always outbound placeholders), so the exclusion cannot apply regardless.',
+  },
+  {
+    file: 'services/appointment-reminders.js',
+    snippet: "const priorSend = await db('sms_log')",
+    reason: 'confirmationLoggedForVisitPhone per-visit dedupe existence check (the on-site replay and the call pipeline contact fan-out): deliberately counts an in-flight reservation — a confirmation already being sent to this phone for this visit must block a second one; it presents nothing as a delivered message.',
   },
 ];
 

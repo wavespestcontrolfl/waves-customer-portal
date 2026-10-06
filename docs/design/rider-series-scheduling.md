@@ -5,6 +5,12 @@ customers with lawn every 6 weeks plus quarterly pest, pest should ride every
 other lawn visit (every ~12 weeks) instead of running its own independent
 quarterly series — one trip per lawn visit, no solo pest trips.
 
+**Superseded for pest (owner ruling 2026-10-05):** pest and lawn never share
+one stop (two stop groups, pest_stop / lawn_stop). `RIDER_PAIRINGS` now holds
+only tree & shrub riders; a pest, termite-bait or mosquito series walks its own
+cadence, and a linked pest series stops riding at its next extension (the
+preview returns `pairing_not_enabled`). The pest examples below are history.
+
 **This document covers the READ-ONLY PREVIEW only.** The write engine that
 would actually set `scheduled_services.rides_parent_id` and reschedule real
 visits is **PR #5268**, now a paused draft after five non-converging Codex
@@ -54,6 +60,28 @@ write engine's own `server/services/rider-series.js`):
 | `NEAR_TERM_DAYS` | 7 | a window this close is a fixed anchor, never planned into |
 | `OVERDUE_WAIT_DAYS` | 28 | `MAX_WAIT_DAYS - MIN_GAP_DAYS` |
 | `MAX_HORIZON_EXTRA_DAYS` | 730 | horizon cap past the standalone horizon |
+
+Gaps per rider cadence (`RIDER_GAPS`, owner ruling 2026-10-01, second batch).
+The three constants above are the quarterly row. On a monthly lawn host (28 to
+35 days between visits) `min` sits between k−1 and k lawn gaps, so the rider
+takes every k-th lawn visit:
+
+| rider cadence | min | target | max | lawn visit taken |
+|---|---|---|---|---|
+| `monthly` | 21 | 28 | 49 | every visit |
+| `bimonthly` | 49 | 56 | 77 | every 2nd |
+| `quarterly` | 77 | 84 | 105 | every 3rd (every 2nd on a 6-week lawn) |
+| `semiannual` | 161 | 182 | 196 | every 6th |
+| `seasonal_feb_oct` | 21 | 28 | 49 | every Feb–Oct visit |
+
+A seasonal rider never takes a Nov–Jan lawn date. Its wait does not run
+through the winter: a window that starts off season starts on the season's
+first day, and one that only ends off season stays open the same number of
+days into the next season. With no lawn date to take it stands alone on its
+own Feb–Oct walk date. A cadence with no row is planned with the quarterly
+gaps. Which host may carry which rider is `RIDER_PAIRINGS`; its `gated` row
+(bi-monthly tree & shrub on a monthly lawn) is open only while
+`GATE_RIDER_PAIRS_MONTHLY_LAWN` is on.
 
 `planRiderDates` (pure, no DB) and `computeRiderHorizon` apply the SAME rule
 the write engine uses — copied, not re-derived, so the preview and the
@@ -364,7 +392,7 @@ report picking one. Output is ordered by customer id, then root id.
 `20260928220000_scheduled_services_rides_parent`) is nullable,
 self-referencing, `ON DELETE SET NULL`. It is written in ONE place: estimate
 accept, behind `GATE_PEST_RIDES_LAWN_AT_ACCEPT` (`rider-accept-seeding.js`).
-A quarterly rider (pest, tree & shrub, termite bait) accepted with a 6-week
+A quarterly tree & shrub rider (pest and termite bait until 2026-10-05) accepted with a 6-week
 or monthly lawn is seeded on lawn dates and linked only when every rider date
 is a real lawn date AND the two first visits group into one stop under the
 canonical visit-group rules. Nothing reads the link yet: series extension

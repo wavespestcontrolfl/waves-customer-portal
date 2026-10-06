@@ -13,13 +13,17 @@
  *
  * An optional `imageSlots` (an integer 1..MAX_IMAGE_SLOTS = 4, Clef's per-request
  * maximum) lets a package take that many photos on the Clef provider only
- * (askPackage `{ images }`); none declares it yet. A registered package with any
+ * (askPackage `{ images }`); photo_privacy.v1 is the first. A registered package with any
  * other value fails at load.
  *
  * Question ids are the keys of `questions` (Jev answers by id). A `noul`
  * question answers a 0..1 probability that the statement is true.
  */
 const crypto = require('crypto');
+// call_judge.v3's appointment contract, FROZEN as asked (Codex #5994 r3): a
+// snapshot of auditAppointmentContract() taken when v3 was published. When the
+// production rules change, add call_judge.v4 with a new snapshot; never edit this file.
+const CALL_JUDGE_V3_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('path').join(__dirname, 'call-judge-v3-appointment-contract.txt'), 'utf8');
 
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -59,6 +63,21 @@ const CALL_JUDGE = {
     appointment_agreed: noul('Did both parties agree on a specific appointment (a date or day and a time or window)?'),
     quote_promised: noul('Did Waves staff promise to send or follow up with a quote/estimate/price later?'),
     complaint: noul('Does the caller express a complaint or dissatisfaction with Waves service?'),
+  },
+};
+
+// v3 (Codex #5994): appointment_agreed asks the production extractor's own
+// appointment_confirmed rules (prompts/appointment-confirmed-rules.js, frozen
+// as a snapshot below), the same text the Deep auditor grades by, so every call_judge answer, the auditor and
+// production share one label. v2 asked a looser question ("a day and a time or
+// window"); it stays registered so rows answered under it still resolve.
+const CALL_JUDGE_V3 = {
+  ...CALL_JUDGE,
+  id: 'call_judge.v3',
+  version: 3,
+  questions: {
+    ...CALL_JUDGE.questions,
+    appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V3_APPOINTMENT_CONTRACT}`),
   },
 };
 
@@ -178,13 +197,88 @@ const VOICEMAIL = {
   },
 };
 
+// Access and safety flags for a visit (Clef second wave, idea 5; owner order
+// 2026-10-03): six yes/no reads of what a technician who has never met the
+// customer should know before arriving, asked by the visit-access sweep
+// (./visit-access-shadow.js) for today's and tomorrow's visits. Nothing in
+// production makes these judgments today, so only two questions have a
+// baseline (the structured pet count and whether any code is on file); the
+// rest are label-only rows. The state never holds a saved code: `structured`
+// says only WHETHER codes are on file, and a text that mentions access leaves
+// only as a closed-vocabulary marker (visit-access-shadow.js). Yes/no only
+// (the Clef replay showed multi-way choices are weak). Evidence only: no card,
+// brief, bell or customer text changes.
+const VISIT_ACCESS = {
+  id: 'visit_access.v1',
+  capability: 'visit_access',
+  version: 1,
+  description: 'Six yes/no access and safety reads for an upcoming visit: dog, code or key or person needed, contact first, person needing notice, past access problem, access fact not on file.',
+  stateShape: ['service_line', 'visit_count', 'structured', 'notes_text', 'recent_texts', 'last_tech_notes'],
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    dog_on_property: noul('Is there a dog, or another animal that could be loose, at this property?', {
+      true: 'The notes, the customer texts, the last technician note or the pet count say a dog or other animal lives there or may be out in the yard or home.',
+      false: 'No animal is mentioned and the pet count is zero, or the only animals mentioned are ones a technician would never meet (fish, a caged bird).',
+    }),
+    needs_code_key_or_person: noul('Does the technician need a gate, garage, lockbox or door code, a key, or a person to open up, to reach the areas this visit treats?', {
+      true: 'A code is on file, or the notes or texts say a code, key, gate opener or someone at home is needed to get in.',
+      false: 'The property is open: nothing says a code, key or person is needed.',
+    }),
+    contact_before_arrival: noul('Did the customer ask Waves to call, text or knock before the technician arrives or starts?', {
+      true: 'The notes or texts ask for a call, a text, a knock or a heads-up before arrival or before treatment starts.',
+      false: 'No such request. The automatic on-the-way text alone does not count.',
+    }),
+    person_home_needs_notice: noul('Is there a person at the home who needs notice or special care before the technician works: an elderly or ill person, an infant, someone who sleeps during the day, or someone with a medical or chemical sensitivity?', {
+      true: 'The notes or texts mention such a person or sensitivity.',
+      false: 'Nothing mentions one.',
+    }),
+    past_access_problem: noul('Did a past visit hit an access problem at this property: a locked gate, nobody home when someone was needed, a dog out, or an area the technician could not reach?', {
+      true: 'The last technician note, the notes or the texts describe such a problem on an earlier visit.',
+      false: 'No earlier access problem is described.',
+    }),
+    access_fact_not_on_file: noul('Do the customer texts state an access fact (a code, a gate, a key location, a dog or other animal) that the structured fields do not already hold?', {
+      true: 'A text mentions a code while no code is on file, a dog or pet while the pet count is zero, or a side gate while none is noted.',
+      false: 'The texts state no access fact, or every one they state is already in the structured fields.',
+    }),
+  },
+};
+
+// What a photo shows that should not be public (Clef second wave, idea 3;
+// owner CW-D5 2026-10-02). One photo per request, Clef only (Jev takes no
+// images). The first caller is the technician social post (routes/tech-social.js),
+// in shadow: the publish path has no image check today. Every question asks the
+// positive ("does it show ..."), never a negation. This is not identification:
+// nothing here names a pest, plant or person. `surface` is where the photo is
+// headed (social | report | blog_hero); `caption` is the text published with it.
+// The wording is the draft measured on 39 report photos (2026-10-02 replay).
+const PHOTO_PRIVACY = {
+  id: 'photo_privacy.v1',
+  capability: 'photo_privacy',
+  version: 1,
+  description: 'Six yes/no reads of one photo before it is public: a face, a person, readable address text, a license plate, a child, a pet.',
+  stateShape: ['surface', 'caption'],
+  imageSlots: 1,
+  thresholds: { ...THRESHOLDS },
+  questions: {
+    shows_face: noul('Does the photo show a recognizable human face?'),
+    shows_person: noul('Does the photo show any person, including from behind or at a distance?'),
+    shows_address_text: noul('Does the photo show a readable house number, street sign or address text?'),
+    shows_license_plate: noul('Does the photo show a readable vehicle license plate?'),
+    shows_child: noul('Does the photo show a child?'),
+    shows_pet: noul('Does the photo show a pet or domestic animal?'),
+  },
+};
+
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
+  [CALL_JUDGE_V3.id]: CALL_JUDGE_V3,
   [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
   [SMS_COURTESY.id]: SMS_COURTESY,
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,
   [SMS_SOLICITATION.id]: SMS_SOLICITATION,
   [VOICEMAIL.id]: VOICEMAIL,
+  [PHOTO_PRIVACY.id]: PHOTO_PRIVACY,
+  [VISIT_ACCESS.id]: VISIT_ACCESS,
 });
 
 // Clef's per-request image maximum (callWorkersAIDecision CLEF_MAX_IMAGES): a

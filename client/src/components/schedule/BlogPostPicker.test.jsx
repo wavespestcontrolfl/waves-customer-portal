@@ -1,8 +1,12 @@
 // @vitest-environment jsdom
 // The Waves blog post picker on the completion forms (GATE_REPORT_BLOG_POST):
 // it searches as the operator types (short queries never search), lists the
-// live posts the server answers, picks one, and removes it.
+// live posts the server answers, picks one, and removes it. When no post holds
+// every word, it says so, shows the closest posts and (the server's
+// GATE_BLOG_SEARCH_SUGGEST on) suggests the search as a new post for the
+// autonomous blog queue (owner mockup approval 2026-10-03).
 import React from 'react';
+import '@testing-library/jest-dom/vitest';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import BlogPostPicker, { blogPostPath } from './BlogPostPicker';
@@ -15,10 +19,20 @@ const POST = {
   url: 'https://www.wavespestcontrol.com/pest-control/get-rid-of-ghost-ants-in-sarasota/',
 };
 
-function Harness({ search, initial = null }) {
+function Harness({ search, suggest = null, initial = null }) {
   const [value, setValue] = React.useState(initial);
-  return <BlogPostPicker search={search} value={value} onChange={setValue} />;
+  return <BlogPostPicker search={search} suggest={suggest} value={value} onChange={setValue} />;
 }
+
+const NEAR = {
+  id: 'post-9',
+  title: 'What Dollarweed Tells You About Your Venice Lawn\'s Water',
+  url: 'https://www.wavespestcontrol.com/lawn-care/dollarweed-control-venice-fl/',
+  exact: false,
+};
+const searchFor = async (query) => {
+  fireEvent.change(screen.getByLabelText('Search the Waves blog'), { target: { value: query } });
+};
 
 describe('BlogPostPicker', () => {
   test('searches as the operator types and picks a post', async () => {
@@ -73,5 +87,149 @@ describe('BlogPostPicker', () => {
   test('blogPostPath is the URL path without the leading slash', () => {
     expect(blogPostPath(POST.url)).toBe('pest-control/get-rid-of-ghost-ants-in-sarasota/');
     expect(blogPostPath('not a url')).toBe('');
+  });
+
+  // Owner 2026-10-04: typing "Co" read "No post covers “Co” yet".
+  test('a word still being typed lists the posts that start with it, with no "No post covers" line and no suggestion', async () => {
+    const starting = { ...POST, id: 'post-3', title: 'German Cockroaches in the Kitchen', exact: false, starts: true };
+    const search = vi.fn(async () => ({ posts: [starting, { ...NEAR, starts: false }], suggest: true }));
+    render(<Harness search={search} suggest={vi.fn()} />);
+    await searchFor('Co');
+    expect(await screen.findByRole('button', { name: /German Cockroaches/ })).toBeTruthy();
+    expect(screen.queryByText(/No post covers/)).toBeNull();
+    expect(screen.queryByText('Closest posts')).toBeNull();
+    // Only the posts that start the search, never the closest ones under them.
+    expect(screen.queryByRole('button', { name: /Dollarweed/ })).toBeNull();
+    // No suggestion: the server refuses a word no live post holds whole
+    // (GitHub Codex P2 on 67df0afca0).
+    expect(screen.queryByRole('button', { name: /Suggest a post/ })).toBeNull();
+  });
+
+  test('a word still being typed that no post starts with every other word lists the closest, with no suggestion (GitHub Codex P2 on 7331ef2402)', async () => {
+    const search = vi.fn(async () => ({ posts: [{ ...NEAR, starts: false }], suggest: true }));
+    render(<Harness search={search} suggest={vi.fn()} />);
+    await searchFor('ghost cockr');
+    expect(await screen.findByRole('button', { name: /Dollarweed/ })).toBeTruthy();
+    expect(screen.queryByText(/No post covers/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Suggest a post/ })).toBeNull();
+  });
+
+  test('a space after the last word is sent, so the server reads the word as finished (pre-push P1 on 63db0f3ccc)', async () => {
+    const search = vi.fn(async () => ({ posts: [], suggest: true }));
+    render(<Harness search={search} suggest={vi.fn()} />);
+    await searchFor('  Co ');
+    expect(await screen.findByText('No post covers “Co” yet.')).toBeTruthy();
+    expect(search).toHaveBeenCalledWith('Co ');
+  });
+
+  describe('a search no post covers', () => {
+    test('says so, shows the closest posts, and suggests the search as a new post', async () => {
+      const search = vi.fn(async () => ({ posts: [NEAR], suggest: true }));
+      const suggest = vi.fn(async () => ({ status: 'queued' }));
+      render(<Harness search={search} suggest={suggest} />);
+      await searchFor('Standing water');
+      expect(await screen.findByText('No post covers “Standing water” yet.')).toBeTruthy();
+      expect(screen.getByText('Closest posts').style.fontSize).toBe('14px');
+      expect(screen.getByRole('button', { name: /Dollarweed/ })).toBeTruthy();
+      expect(screen.getByText('It goes straight into the blog queue and is written and published automatically.')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Suggest a post about “Standing water”' }));
+      expect(await screen.findByRole('button', { name: 'Suggested: “Standing water”' })).toBeDisabled();
+      expect(suggest).toHaveBeenCalledWith('Standing water');
+      expect(screen.getByText('In the blog queue. It will be written and published automatically.')).toBeTruthy();
+    });
+
+    test('a topic someone already suggested says so', async () => {
+      const search = vi.fn(async () => ({ posts: [], suggest: true }));
+      render(<Harness search={search} suggest={vi.fn(async () => ({ status: 'already_queued' }))} />);
+      await searchFor('standing water');
+      fireEvent.click(await screen.findByRole('button', { name: 'Suggest a post about “standing water”' }));
+      expect(await screen.findByRole('button', { name: 'Already in the blog queue' })).toBeDisabled();
+      expect(screen.getByText('Someone suggested it already. It will be written and published automatically.')).toBeTruthy();
+      expect(screen.queryByText('Closest posts')).toBeNull();
+    });
+
+    test('a suggestion that did not go through can be sent again', async () => {
+      const search = vi.fn(async () => ({ posts: [], suggest: true }));
+      const suggest = vi.fn().mockRejectedValueOnce(new Error('down')).mockResolvedValueOnce({ status: 'queued' });
+      render(<Harness search={search} suggest={suggest} />);
+      await searchFor('standing water');
+      fireEvent.click(await screen.findByRole('button', { name: 'Suggest a post about “standing water”' }));
+      expect(await screen.findByText('That didn’t go through. Try again.')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Suggest a post about “standing water”' }));
+      expect(await screen.findByRole('button', { name: 'Suggested: “standing water”' })).toBeTruthy();
+    });
+
+    test('a phrase the server refuses says what to leave out and is not offered again (pre-push P1 on 1aaeaa36ab)', async () => {
+      const search = vi.fn(async () => ({ posts: [], suggest: true }));
+      const suggest = vi.fn().mockRejectedValue(Object.assign(new Error('not_a_topic'), { status: 422 }));
+      render(<Harness search={search} suggest={suggest} />);
+      await searchFor('ants at John Smith home');
+      fireEvent.click(await screen.findByRole('button', { name: 'Suggest a post about “ants at John Smith home”' }));
+      expect(await screen.findByRole('button', { name: 'Can’t suggest this one' })).toBeDisabled();
+      expect(screen.getByText('Use plain topic words, with no names, addresses or phone numbers.')).toBeTruthy();
+      expect(suggest).toHaveBeenCalledTimes(1);
+      await searchFor('ghost ants');
+      expect(await screen.findByRole('button', { name: 'Suggest a post about “ghost ants”' })).not.toBeDisabled();
+    });
+
+    test.each([
+      ['a live post now covers it', { status: 409, code: 'covered' }, 'A post covers this now', 'Search again to see it.'],
+      ['the day\'s limit', { status: 429, code: 'too_many_suggestions' }, 'Today’s limit reached', 'Suggest more tomorrow.'],
+      ['suggestions off', { status: 404, code: 'suggestions_off' }, 'Can’t suggest right now', 'Suggestions aren’t open for this visit.'],
+      ['a visit that carries no post', { status: 409, code: 'not_available' }, 'Can’t suggest right now', 'Suggestions aren’t open for this visit.'],
+      // GitHub Codex P2 on 322faf591d: a topic the blog queue tried and
+      // skipped is no queued work.
+      ['a topic the blog queue tried and skipped', { status: 409, code: 'declined' }, 'Passed on before', 'The blog queue tried this topic and skipped it. Try other words.'],
+    ])('%s is a final answer, never a try-again (GitHub Codex P2 on 45144528b8)', async (_label, fields, button, note) => {
+      const search = vi.fn(async () => ({ posts: [], suggest: true }));
+      const suggest = vi.fn().mockRejectedValue(Object.assign(new Error('refused'), fields));
+      render(<Harness search={search} suggest={suggest} />);
+      await searchFor('standing water');
+      fireEvent.click(await screen.findByRole('button', { name: 'Suggest a post about “standing water”' }));
+      expect(await screen.findByRole('button', { name: button })).toBeDisabled();
+      expect(screen.getByText(note)).toBeTruthy();
+      expect(screen.queryByText('That didn’t go through. Try again.')).toBeNull();
+    });
+
+    test('a 429 from the API\'s own rate limiter is only a burst: it can be sent again (GitHub Codex P2 on 8a39d94de4)', async () => {
+      const search = vi.fn(async () => ({ posts: [], suggest: true }));
+      const suggest = vi.fn()
+        .mockRejectedValueOnce(Object.assign(new Error('Too many requests'), { status: 429 }))
+        .mockResolvedValueOnce({ status: 'queued' });
+      render(<Harness search={search} suggest={suggest} />);
+      await searchFor('standing water');
+      fireEvent.click(await screen.findByRole('button', { name: 'Suggest a post about “standing water”' }));
+      expect(await screen.findByText('That didn’t go through. Try again.')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Suggest a post about “standing water”' }));
+      expect(await screen.findByRole('button', { name: 'Suggested: “standing water”' })).toBeTruthy();
+    });
+
+    test('a new search starts a new suggestion', async () => {
+      const search = vi.fn(async () => ({ posts: [], suggest: true }));
+      render(<Harness search={search} suggest={vi.fn(async () => ({ status: 'queued' }))} />);
+      await searchFor('standing water');
+      fireEvent.click(await screen.findByRole('button', { name: 'Suggest a post about “standing water”' }));
+      await screen.findByRole('button', { name: 'Suggested: “standing water”' });
+      await searchFor('love bugs');
+      expect(await screen.findByRole('button', { name: 'Suggest a post about “love bugs”' })).not.toBeDisabled();
+    });
+  });
+
+  test('when some posts hold every word, only those show and nothing is offered', async () => {
+    const search = vi.fn(async () => ({ posts: [{ ...POST, exact: true }, NEAR], suggest: true }));
+    render(<Harness search={search} suggest={vi.fn()} />);
+    await searchFor('ghost ants');
+    expect(await screen.findByRole('button', { name: /Ghost Ants in Sarasota/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Dollarweed/ })).toBeNull();
+    expect(screen.queryByText(/No post covers/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Suggest a post/ })).toBeNull();
+  });
+
+  test('with suggestions off on the server, no suggestion is offered', async () => {
+    const search = vi.fn(async () => ({ posts: [], suggest: false }));
+    render(<Harness search={search} suggest={vi.fn()} />);
+    await searchFor('standing water');
+    expect(await screen.findByText('No live posts match.')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Suggest a post/ })).toBeNull();
   });
 });

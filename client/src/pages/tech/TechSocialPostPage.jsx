@@ -20,13 +20,19 @@ import { useTechBasePath } from '../../components/tech/techBasePath';
 
 const API = import.meta.env.VITE_API_URL || '';
 
+// Inside the field workspace (.tech-field, tech-field.css) these resolve to the
+// Waves Admin look; the fallbacks are the same light values, for a render
+// outside it. `white` is text on an accent fill, `head` is a
+// heading, `sunk` is a field or sub-card sitting on a card.
 const D = {
-  bg: '#0f1923', card: '#1e293b', border: '#334155',
-  teal: '#0ea5e9', green: '#10b981', amber: '#f59e0b', red: '#ef4444',
-  text: '#e2e8f0', muted: '#94a3b8', white: '#fff',
+  bg: 'var(--tfx-bg, #fafaf9)', card: 'var(--tfx-card, #ffffff)', border: 'var(--tfx-border, #d6d3d1)',
+  teal: 'var(--tfx-accent, #1c1917)', green: 'var(--tfx-ok, #1c1917)', amber: 'var(--tfx-amber, #854d0e)', red: 'var(--tfx-red, #a32d2d)',
+  text: 'var(--tfx-text, #1c1917)', muted: 'var(--tfx-muted, #57534e)',
+  white: 'var(--tfx-on-accent, #ffffff)', head: 'var(--tfx-text, #1c1917)',
+  sunk: 'var(--tfx-bg, #fafaf9)', redBg: 'var(--tfx-red-bg, #fcebeb)', okBg: 'var(--tfx-card, #ffffff)',
 };
-const HEAD = "'Montserrat', system-ui, sans-serif";
-const BODY = "'DM Sans', system-ui, sans-serif";
+const HEAD = "var(--tfx-font, 'Roboto', system-ui, sans-serif)";
+const BODY = "var(--tfx-font, 'Roboto', system-ui, sans-serif)";
 
 // Mirrors the server's PUBLISHABLE + PLATFORM_LIMITS. TikTok = copy-only (no API).
 const PLATFORMS = [
@@ -83,19 +89,19 @@ function mimeFromDataUrl(dataUrl, fallback = 'image/jpeg') {
 
 function btn(bg, fg = D.white, disabled = false) {
   return {
-    minHeight: 46, padding: '0 16px', border: 'none', borderRadius: 10,
-    background: bg, color: fg, fontFamily: HEAD, fontWeight: 700, fontSize: 15,
+    minHeight: 46, padding: '0 16px', border: 'none', borderRadius: 4,
+    background: bg, color: fg, fontFamily: HEAD, fontWeight: 500, fontSize: 15,
     cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1,
   };
 }
 const inputStyle = {
   width: '100%', boxSizing: 'border-box', minHeight: 44, padding: '8px 12px',
-  background: '#0b131b', border: `1px solid ${D.border}`, borderRadius: 8,
+  background: D.sunk, border: `1px solid ${D.border}`, borderRadius: 4,
   color: D.text, fontSize: 15, fontFamily: BODY, outline: 'none',
 };
 
 function Card({ children, style }) {
-  return <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 12, padding: 16, marginBottom: 14, ...style }}>{children}</div>;
+  return <div style={{ background: D.card, border: `1px solid ${D.border}`, borderRadius: 6, padding: 16, marginBottom: 14, ...style }}>{children}</div>;
 }
 
 export default function TechSocialPostPage() {
@@ -248,14 +254,14 @@ export default function TechSocialPostPage() {
   return (
     <div style={{ maxWidth: 480, margin: '0 auto', color: D.text, fontFamily: BODY }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-        <button type="button" onClick={() => navigate(visit ? `${techBase}?visit=${encodeURIComponent(visit)}` : techBase)} style={{ background: 'transparent', border: `1px solid ${D.border}`, color: D.text, padding: '8px 12px', borderRadius: 8, fontSize: 14, cursor: 'pointer' }}>
+        <button type="button" onClick={() => navigate(visit ? `${techBase}?visit=${encodeURIComponent(visit)}` : techBase)} style={{ background: 'transparent', border: `1px solid ${D.border}`, color: D.text, padding: '8px 12px', borderRadius: 4, fontSize: 14, cursor: 'pointer' }}>
           ← Back
         </button>
-        <h1 style={{ fontFamily: HEAD, fontSize: 20, fontWeight: 700, color: D.white, margin: 0 }}>Field Social Post</h1>
+        <h1 style={{ fontFamily: HEAD, fontSize: 20, fontWeight: 500, color: D.head, margin: 0 }}>Field Social Post</h1>
       </div>
 
-      {error ? <Card style={{ borderColor: D.red, background: '#2a1416' }}><span style={{ color: D.red }}>{error}</span></Card> : null}
-      {notice ? <Card style={{ borderColor: D.green, background: '#0f2a1c' }}><span style={{ color: D.green }}>{notice}</span></Card> : null}
+      {error ? <Card style={{ borderColor: D.red, background: D.redBg }}><span style={{ color: D.red }}>{error}</span></Card> : null}
+      {notice ? <Card style={{ borderColor: D.green, background: D.okBg }}><span style={{ color: D.green }}>{notice}</span></Card> : null}
 
       {enabled === false ? (
         <Card style={{ borderColor: D.amber }}>
@@ -264,20 +270,20 @@ export default function TechSocialPostPage() {
       ) : step === 'capture' ? (
         <>
           <Card>
-            <div style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 16, color: D.white, marginBottom: 10 }}>Photo</div>
+            <div style={{ fontFamily: HEAD, fontWeight: 500, fontSize: 16, color: D.head, marginBottom: 10 }}>Photo</div>
             {photo ? (
               <div style={{ position: 'relative', marginBottom: 12 }}>
-                <img src={photo.dataUrl} alt="field" style={{ width: '100%', maxHeight: 280, objectFit: 'cover', borderRadius: 8, border: `1px solid ${D.border}` }} />
+                <img src={photo.dataUrl} alt="field" style={{ width: '100%', maxHeight: 280, objectFit: 'cover', borderRadius: 4, border: `1px solid ${D.border}` }} />
                 <button onClick={() => setPhoto(null)} aria-label="Remove photo"
-                  style={{ position: 'absolute', top: 8, right: 8, width: 28, height: 28, borderRadius: 999, border: 'none', background: 'rgba(0,0,0,0.65)', color: D.white, cursor: 'pointer', fontSize: 16, lineHeight: '28px', padding: 0 }}>×</button>
+                  style={{ position: 'absolute', top: 8, right: 8, width: 28, height: 28, borderRadius: 999, border: 'none', background: 'rgba(0,0,0,0.65)', color: '#fff', cursor: 'pointer', fontSize: 16, lineHeight: '28px', padding: 0 }}>×</button>
               </div>
             ) : null}
             <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={(e) => addPhoto(e.target.files)} style={{ display: 'none' }} />
-            <button onClick={() => fileRef.current?.click()} style={btn('#0b131b', D.teal)}>{photo ? 'Retake photo' : '+ Take photo'}</button>
+            <button onClick={() => fileRef.current?.click()} style={btn(D.sunk, D.teal)}>{photo ? 'Retake photo' : '+ Take photo'}</button>
           </Card>
 
           <Card>
-            <div style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 16, color: D.white, marginBottom: 8 }}>A couple words</div>
+            <div style={{ fontFamily: HEAD, fontWeight: 500, fontSize: 16, color: D.head, marginBottom: 8 }}>A couple words</div>
             <textarea
               style={{ ...inputStyle, minHeight: 70, resize: 'vertical', fontFamily: BODY }}
               placeholder="e.g. german roach behind the dishwasher — sealed it up"
@@ -289,7 +295,7 @@ export default function TechSocialPostPage() {
           </Card>
 
           <Card>
-            <div style={{ fontFamily: HEAD, fontWeight: 700, fontSize: 16, color: D.white, marginBottom: 8 }}>Location (for Google Business)</div>
+            <div style={{ fontFamily: HEAD, fontWeight: 500, fontSize: 16, color: D.head, marginBottom: 8 }}>Location (for Google Business)</div>
             <select style={{ ...inputStyle, appearance: 'auto' }} value={locationId} onChange={(e) => setLocationId(e.target.value)}>
               <option value="">Auto — nearest to me</option>
               {locations.map((l) => <option key={l.id} value={l.id}>{l.name} ({l.area})</option>)}
@@ -304,9 +310,9 @@ export default function TechSocialPostPage() {
         <>
           <Card>
             <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-              {photo ? <img src={photo.dataUrl} alt="field" style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 8, border: `1px solid ${D.border}` }} /> : null}
+              {photo ? <img src={photo.dataUrl} alt="field" style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 4, border: `1px solid ${D.border}` }} /> : null}
               <div style={{ fontSize: 13, color: D.muted }}>
-                Google Business posts to <span style={{ color: D.text, fontWeight: 700 }}>{resolvedLocation?.name || '—'}</span>.
+                Google Business posts to <span style={{ color: D.text, fontWeight: 500 }}>{resolvedLocation?.name || '—'}</span>.
                 <button onClick={reset} style={{ ...btn('transparent', D.teal), padding: 0, minHeight: 0, fontSize: 13, marginLeft: 6 }}>Change</button>
               </div>
             </div>
@@ -320,12 +326,12 @@ export default function TechSocialPostPage() {
             return (
               <Card key={p.key}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: HEAD, fontWeight: 700, color: D.white, fontSize: 15 }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: HEAD, fontWeight: 500, color: D.head, fontSize: 15 }}>
                     {p.publish ? (
                       <input type="checkbox" checked={selected.has(p.key)} disabled={posted.has(p.key)} onChange={() => toggle(p.key)} style={{ width: 18, height: 18 }} />
                     ) : null}
                     {p.label}
-                    {!p.publish ? <span style={{ color: D.amber, fontSize: 11, fontWeight: 600 }}>{p.note}</span> : null}
+                    {!p.publish ? <span style={{ color: D.amber, fontSize: 11, fontWeight: 500 }}>{p.note}</span> : null}
                   </label>
                   <span style={{ color: over ? D.amber : D.muted, fontSize: 12, fontFamily: BODY }}>{text.length}/{p.limit}</span>
                 </div>
@@ -336,7 +342,7 @@ export default function TechSocialPostPage() {
                 />
                 {issues.length ? <div style={{ color: D.amber, fontSize: 12, marginTop: 6 }}>⚠ {issues.join('; ')}</div> : null}
                 <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                  <button onClick={() => copyCaption(p.key)} style={{ ...btn('#0b131b', D.teal), minHeight: 38, fontSize: 13 }}>Copy</button>
+                  <button onClick={() => copyCaption(p.key)} style={{ ...btn(D.sunk, D.teal), minHeight: 38, fontSize: 13 }}>Copy</button>
                   {posted.has(p.key) ? (
                     <span style={{ alignSelf: 'center', fontSize: 13, color: D.green }}>✓ posted</span>
                   ) : res ? (

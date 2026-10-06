@@ -32,20 +32,10 @@
       "outcome": "pass"
     },
     "W2-dev-01": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "other_account_facts_in_brief",
-      "failures": [
-        "target_resolution:other_account_facts_in_brief"
-      ]
+      "outcome": "pass"
     },
     "W2-dev-02": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "other_account_facts_in_brief",
-      "failures": [
-        "target_resolution:other_account_facts_in_brief"
-      ]
+      "outcome": "pass"
     },
     "W2-dev-03": {
       "outcome": "pass"
@@ -54,12 +44,7 @@
       "outcome": "pass"
     },
     "W2-dev-05": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "schedule_view_window_has_no_end",
-      "failures": [
-        "tool_result:schedule_view_window_has_no_end"
-      ]
+      "outcome": "pass"
     },
     "W2-dev-06": {
       "outcome": "pass"
@@ -101,8 +86,7 @@
       "point": "target_resolution",
       "code": "lead_target_not_established",
       "failures": [
-        "target_resolution:lead_target_not_established",
-        "confirm:superseded_pending_card_still_executable"
+        "target_resolution:lead_target_not_established"
       ]
     },
     "W3-dev-07": {
@@ -159,13 +143,7 @@
       "outcome": "pass"
     },
     "W5-dev-03": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "half_hour_refusal_not_specific",
-      "failures": [
-        "tool_result:half_hour_refusal_not_specific",
-        "proposal:half_hour_request_carded"
-      ]
+      "outcome": "pass"
     },
     "W5-dev-04": {
       "outcome": "pass"
@@ -174,39 +152,16 @@
       "outcome": "pass"
     },
     "W5-dev-06": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "commercial_refusal_not_specific",
-      "failures": [
-        "tool_result:commercial_refusal_not_specific",
-        "proposal:commercial_booking_carded",
-        "domain_rule:commercial_account_booked_on_price",
-        "side_effect:guard_sent_a_text",
-        "side_effect:guard_outbound_row_added"
-      ]
+      "outcome": "pass"
     },
     "W5-dev-07": {
-      "outcome": "fail",
-      "point": "confirm",
-      "code": "obsolete_booking_proposal_still_executable",
-      "failures": [
-        "confirm:obsolete_booking_proposal_still_executable",
-        "read_back:final_booking_wrong",
-        "side_effect:nine_am_row_exists"
-      ]
+      "outcome": "pass"
     },
     "W5-dev-08": {
       "outcome": "pass"
     },
     "W5-dev-09": {
-      "outcome": "fail",
-      "point": "domain_rule",
-      "code": "taken_slot_double_booked",
-      "failures": [
-        "domain_rule:taken_slot_double_booked",
-        "side_effect:guard_sent_a_text",
-        "side_effect:guard_outbound_row_added"
-      ]
+      "outcome": "pass"
     },
     "W5-dev-10": {
       "outcome": "pass"
@@ -298,13 +253,7 @@
       ]
     },
     "W7-dev-04": {
-      "outcome": "fail",
-      "point": "read_back",
-      "code": "queued_text_not_canceled",
-      "failures": [
-        "read_back:queued_text_not_canceled",
-        "side_effect:guard_outbound_row_added"
-      ]
+      "outcome": "pass"
     },
     "W7-dev-05": {
       "outcome": "fail",
@@ -361,15 +310,7 @@
       "outcome": "pass"
     },
     "W8-dev-07": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "sent_quote_refusal_not_specific",
-      "failures": [
-        "tool_result:sent_quote_refusal_not_specific",
-        "domain_rule:sent_quote_revision_offered",
-        "side_effect:sent_quote_changed",
-        "side_effect:guard_unchanged_rows_changed"
-      ]
+      "outcome": "pass"
     },
     "W8-dev-08": {
       "outcome": "pass"
@@ -492,14 +433,7 @@
       "outcome": "pass"
     },
     "W10-dev-06": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "product_target_not_established",
-      "failures": [
-        "target_resolution:product_target_not_established",
-        "tool_result:missing_unit_not_clarified",
-        "side_effect:stock_changed_without_a_unit"
-      ]
+      "outcome": "pass"
     },
     "W10-dev-07": {
       "outcome": "fail",

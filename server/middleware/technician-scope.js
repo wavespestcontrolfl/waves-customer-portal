@@ -48,6 +48,9 @@ const TECHNICIAN_ALLOW_LIST = [
   // The dispatch facade's job list only (the route pins a technician to their
   // own visits); the route board and insights are admin-only.
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/dispatch\/jobs$/ },
+  // Access codes of one assigned visit (owner 2026-10-05); the route pins the
+  // technician to their own visit. Every other access-codes route is admin-only.
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/access-codes\/visits\/[^/]+$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/visit-closeouts(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/services(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/line(\/.*)?$/ },
@@ -79,11 +82,18 @@ const TECHNICIAN_ALLOW_LIST = [
   // field overrides; the Field Estimator UI is admin-only). Codex #5568 r3.
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/protocols(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/protocols\/job-card(\/.*)?$/ },
+  // Neighborhood gate codes from a visit (owner 2026-10-03): add a code that
+  // worked, or report one wrong. The router pins both to a visit on the
+  // technician's own route; the directory itself stays admin-only.
+  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/neighborhood-access\/visits\/[^/]+\/entries(\/[^/]+\/wrong)?$/ },
   // Pay at the visit (owner: card on file, pay after the first visit).
+  // Void is not on the list (owner 2026-10-03, "narrow"): the route is
+  // requireAdmin, so a technician login never reached it.
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/invoices\/[^/]+$/ },
-  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/invoices\/[^/]+\/(charge-card|charge-card-quote|void)$/ },
+  { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/invoices\/[^/]+\/(charge-card|charge-card-quote)$/ },
   { bucket: 'own-visits', methods: ['POST'], pattern: /^\/api\/admin\/pricing-config\/(estimate|quick-quote)$/ },
-  { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/job-costs(\/.*)?$/ },
+  // Job costs (/api/admin/job-costs) are not on the list (owner 2026-10-03,
+  // "narrow"): per-job cost and margin data is the owner's.
   // Tap to Pay at the visit: the technician mints the handoff (the route
   // checks the invoice's customer is on their route); the terminal-scoped
   // token does the rest. /capture is admin-only.
@@ -144,7 +154,14 @@ const TECHNICIAN_ALLOW_LIST = [
 
   // Equipment and inventory: read only.
   { bucket: 'equipment-read', methods: READ, pattern: /^\/api\/admin\/equipment(-systems|-maintenance)?(\/.*)?$/ },
-  { bucket: 'equipment-read', methods: READ, pattern: /^\/api\/admin\/inventory(\/.*)?$/ },
+  // Inventory reads are the stock and field set only (owner 2026-10-03,
+  // "narrow"): the product list (router-stripped of prices and vendor rows),
+  // the stats projection, the forecast and the restock queue (spend stripped
+  // by the router). Vendors, price history, price-sync, approvals, scrape
+  // jobs, aliases, movements (rows carry costUsed), service-usage,
+  // protocol-health, the label tools and the unit-review queue (an admin-only
+  // tab: its one action is an admin write) are admin-only.
+  { bucket: 'equipment-read', methods: READ, pattern: /^\/api\/admin\/inventory(\/(stats|waveguard-forecast|restock-requests))?$/ },
   // Two field writes a technician keeps (owner 2026-10-03). The job card's
   // "Order more" files a restock REQUEST: the route records the requesting
   // technician (created_by), dedupes against a live request and never moves

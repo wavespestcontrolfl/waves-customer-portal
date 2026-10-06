@@ -190,12 +190,28 @@ describe('computeBookingMisses — confirmed-slot vs schedule diff', () => {
     expect(computeBookingMisses([call()], [unrelated], { now: NOW })).toHaveLength(1);
   });
 
-  test('another customer\'s same-date booking never clears', () => {
-    expect(computeBookingMisses([call()], [bookedRow({ customer_id: 'cust-other', source_call_log_id: 'call-1' })], { now: NOW })).toHaveLength(1);
+  test('another customer\'s same-date booking at the same time never clears without the call on it', () => {
+    expect(computeBookingMisses([call()], [bookedRow({ customer_id: 'cust-other' })], { now: NOW })).toHaveLength(1);
   });
 
-  test('an UNLINKED call (customer_id null) with a confirmed slot is always a miss', () => {
-    expect(computeBookingMisses([call({ customer_id: null })], [bookedRow({ source_call_log_id: 'call-1' })], { now: NOW })).toHaveLength(1);
+  // Owner 2026-10-03: the office booked a spouse's call on the household's
+  // account; the visit carried the call's id and the pager rang four more times.
+  test('a visit that carries the call clears it under ANY customer: the call id or the Call SID note, linked call or not', () => {
+    const household = [
+      bookedRow({ customer_id: 'cust-other', source_call_log_id: 'call-1' }),
+      bookedRow({ customer_id: 'cust-other', notes: 'Booked from call. Call SID: CAsynthetic001' }),
+    ];
+    for (const row of household) {
+      expect(computeBookingMisses([call({ customer_id: null })], [row], { now: NOW })).toHaveLength(0);
+      expect(computeBookingMisses([call()], [row], { now: NOW })).toHaveLength(0);
+    }
+  });
+
+  test('an UNLINKED call (customer_id null) is a miss unless a visit carries the call: a same-slot row alone, or another call\'s visit, does not clear', () => {
+    const unlinked = call({ customer_id: null });
+    expect(computeBookingMisses([unlinked], [], { now: NOW })).toHaveLength(1);
+    expect(computeBookingMisses([unlinked], [bookedRow({ customer_id: null })], { now: NOW })).toHaveLength(1);
+    expect(computeBookingMisses([unlinked], [bookedRow({ customer_id: 'cust-other', source_call_log_id: 'call-2' })], { now: NOW })).toHaveLength(1);
   });
 
   test('in-grace calls and non-confirmed extractions are excluded', () => {

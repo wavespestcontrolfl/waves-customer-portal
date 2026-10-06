@@ -48,6 +48,7 @@ import { flushSync } from 'react-dom';
 import { useParams } from 'react-router-dom';
 import PriceCard, { RowInclusions } from '../components/estimate/PriceCard';
 import AddOnsBlock from '../components/estimate/AddOnsBlock';
+import OfferTierPicker from '../components/estimate/OfferTierPicker';
 import SlotPicker from '../components/estimate/SlotPicker';
 import WebsiteCallbackButton from '../components/estimate/WebsiteCallbackButton';
 import WebsiteEstimateFlow, { WebsiteEstimateFrame } from '../components/estimate/WebsiteEstimateFlow';
@@ -1700,6 +1701,16 @@ const ONE_TIME_TOGGLE_LABELS = {
 export function oneTimeToggleLabels(serviceCategory) {
   return ONE_TIME_TOGGLE_LABELS[serviceCategory]
     || { recurring: 'Recurring Pest Control', oneTime: 'One-Time Pest Control' };
+}
+
+// Which Good / Better / Best tile the page is on. The tiers are a view over
+// two ordinary page states (see OfferTierPicker): 'best' = the estimate as
+// quoted; 'pest_only' = lawn removed through the opt-out rail, recurring =
+// Better, one-time mode = Good. null when the payload carries no block.
+export function selectedOfferTierKey(offerTiers, serviceMode) {
+  if (!offerTiers) return null;
+  if (offerTiers.state === 'best') return 'best';
+  return serviceMode === 'one_time' ? 'good' : 'better';
 }
 
 export function OneTimeModeToggle({ mode, oneTimePrice, onChange, disabled = false, serviceCategory = null }) {
@@ -3887,13 +3898,67 @@ export function ContactGapFields({
   onEmailChange,
   onEmailBlur,
   emailInvalid = false,
+  phone = '',
+  onPhoneChange,
+  onPhoneSave,
+  phoneSaving = false,
+  phoneError = '',
   disabled = false,
 }) {
-  if (!gaps || (!gaps.firstName && !gaps.lastName && !gaps.email)) return null;
+  if (!gaps || (!gaps.firstName && !gaps.lastName && !gaps.email && !gaps.phone)) return null;
+  const phoneDigits = String(phone).replace(/\D/g, '');
+  const phoneReady = phoneDigits.length === 10 || (phoneDigits.length === 11 && phoneDigits.startsWith('1'));
   const firstNameMissing = gaps.firstName && firstNameTouched && !firstName.trim();
   const lastNameMissing = gaps.lastName && lastNameTouched && !lastName.trim();
   return (
     <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
+      {/* Mobile number (owner 2026-10-04): asked only when the estimate has no
+          phone and no customer record. It is saved on its own, before the card
+          step and the Accept button unlock: the card and the booking are both
+          set up against the phone. */}
+      {gaps.phone ? (
+        <div style={{ display: 'grid', gap: 6 }}>
+          <label htmlFor="estimate-contact-phone" style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>Mobile number</label>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <input
+              id="estimate-contact-phone"
+              type="tel"
+              value={phone}
+              onChange={(e) => onPhoneChange?.(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && phoneReady && !phoneSaving) { e.preventDefault(); onPhoneSave?.(); } }}
+              autoComplete="tel"
+              inputMode="tel"
+              maxLength={20}
+              disabled={disabled || phoneSaving}
+              aria-required="true"
+              aria-invalid={phoneError ? true : undefined}
+              aria-describedby="estimate-contact-phone-help"
+              placeholder="(941) 555-0142"
+              style={{ ...softExitInputStyle, flex: '1 1 180px', minWidth: 0, ...(phoneError ? { borderColor: W.red } : {}) }}
+            />
+            <button
+              type="button"
+              onClick={() => onPhoneSave?.()}
+              disabled={disabled || phoneSaving || !phoneReady}
+              style={{
+                minHeight: 44, padding: '0 16px', borderRadius: 10, border: `1px solid ${COLORS.navy}`,
+                background: COLORS.navy, color: '#fff', fontSize: 14, fontWeight: 600,
+                cursor: disabled || phoneSaving || !phoneReady ? 'default' : 'pointer',
+                opacity: disabled || phoneSaving || !phoneReady ? 0.55 : 1,
+              }}
+            >
+              {phoneSaving ? 'Saving…' : 'Save number'}
+            </button>
+          </div>
+          {phoneError ? (
+            <span role="alert" style={{ fontSize: 14, color: W.red }}>{phoneError}</span>
+          ) : (
+            <span id="estimate-contact-phone-help" style={{ fontSize: 14, color: COLORS.navy }}>
+              We use it for your appointment reminders and to reach you on service day. Save it to continue.
+            </span>
+          )}
+        </div>
+      ) : null}
       {gaps.firstName ? (
         <label style={{ display: 'grid', gap: 6 }}>
           <span style={{ fontSize: 14, fontWeight: 600, color: COLORS.navy }}>First name</span>
@@ -4198,6 +4263,9 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
         </div>
         <div style={{ fontSize: 16, color: ESTIMATE_BODY, marginTop: 12, lineHeight: 1.5 }}>
           We'll send you the signing link. Signing starts your plan; your 12-month coverage begins on your installation date.
+          {acceptResult?.annualChargeAfterInstallation
+            ? ' Nothing is charged when you sign. Billing for your plan starts after your station installation is completed.'
+            : ''}
         </div>
       </div>
     );
@@ -4320,6 +4388,14 @@ export function SuccessCard({ acceptResult, appointmentLabel = null, recurring =
               // "up to": the acknowledged total is a ceiling (GitHub Codex #5595 r1).
               const ceilingText = chargedText ? ` of up to ${fmtMoney(chargedTotal)}` : '';
               return `Your plan is approved. Nothing was charged today — your annual prepay${ceilingText} is charged to your saved card (or debited from your saved bank account) after your first visit. Any account credit lowers it.`;
+            }
+            if (acceptResult.prepayChargeStatus === 'after_installation') {
+              // GATE_PAF_TERMITE: signed and active, charged after the
+              // station installation. No amount, no pay link. Neutral about
+              // WHO is billed and how: the same agreement wording also goes
+              // to an account billed through a third-party payer, or with no
+              // saved method (GitHub Codex #5816 r5).
+              return 'Your plan agreement is signed. Nothing is charged yet. Billing for your plan starts after your station installation is completed.';
             }
             if (acceptResult.prepayChargeStatus === 'processing') {
               return `Your annual prepay bank payment${chargedText} is processing — we'll confirm when it completes.`;
@@ -4604,7 +4680,11 @@ function ReviewBeforeBookingCard({ reason }) {
         Call Waves to confirm — {WAVES_PHONE_DISPLAY}
       </a>
       <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 12, lineHeight: 1.5 }}>
-        Prefer we reach out? We’ll follow up to confirm and schedule your visit. You pay on service day; no card or deposit now.
+        Prefer we reach out? We’ll follow up to confirm and schedule your visit.
+        {/* The payment-timing sentence stays for the trenching review only. A contact_review estimate (its phone belongs to
+            another customer) can be an invoice-only guarantee renewal or a recurring plan that may prepay, so "you pay on
+            service day" is not known to be true: that one sentence is simply not shown (no new wording). */}
+        {reason === 'contact_review' ? '' : ' You pay on service day; no card or deposit now.'}
       </div>
     </div>
   );
@@ -5823,6 +5903,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   const [contactEmail, setContactEmail] = useState('');
   const [contactLastNameTouched, setContactLastNameTouched] = useState(false);
   const [contactEmailTouched, setContactEmailTouched] = useState(false);
+  // Mobile number for an estimate that has none (contactGaps.phone). Saved by
+  // its own request (PUT /contact-phone) before the card step and Accept.
+  const [contactPhone, setContactPhone] = useState('');
+  const [contactPhoneSaving, setContactPhoneSaving] = useState(false);
+  const [contactPhoneError, setContactPhoneError] = useState('');
   // Acceptance deposit (flat $49/$99). depositIntent holds the live
   // POST /deposit-intent response while the Payment Element modal is open;
   // the ref carries the paid PI id into accept (server live-verifies it —
@@ -6162,6 +6247,18 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     const primarySection = pestSection || services.find((section) => section.isRecurring) || services[0];
     return selectedFrequencyForSection(primarySection, selected);
   }, [services, selected]);
+  // Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS): absent block = no
+  // picker and the page is exactly what it was before.
+  const offerTiers = data?.offerTiers || null;
+  const tiered = !!offerTiers;
+  const tierCompanionKey = offerTiers?.companionKey || null;
+  // The picker owns the companion's remove / add-back, so its "add it back"
+  // mirror offer is suppressed the way a removed service's is.
+  const addOfferSuppressKeys = useMemo(() => {
+    const removed = data?.serviceOptOut?.removedKeys;
+    if (!tierCompanionKey) return removed;
+    return Array.from(new Set([...(Array.isArray(removed) ? removed : []), tierCompanionKey]));
+  }, [data?.serviceOptOut?.removedKeys, tierCompanionKey]);
   const addServiceOffer = useMemo(
     // Accepted estimates always evaluate the offer in recurring terms (owner
     // ask 2026-07-09): the accepted page upsells the next recurring service
@@ -6172,9 +6269,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       services,
       data?.cta?.terminalState === 'accepted' ? 'recurring' : serviceMode,
       data?.estimate?.membership,
-      data?.serviceOptOut?.removedKeys,
+      addOfferSuppressKeys,
     ),
-    [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership, data?.serviceOptOut?.removedKeys]
+    [services, serviceMode, data?.cta?.terminalState, data?.estimate?.membership, addOfferSuppressKeys]
   );
   // Priced add (GATE_ESTIMATE_SERVICE_ADD): the offer prices in place when the
   // server stamped its key addable — same optOut state and rail as a restore.
@@ -6184,7 +6281,8 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // is used only when the stamp covers it; otherwise the priced offer is
   // built from the stamp — a ladder pick the server did not stamp must
   // never hide a priced add-on behind the office inquiry (pre-push codex P1).
-  const addableStamp = data?.serviceOptOut?.addable || [];
+  const addableStamp = (data?.serviceOptOut?.addable || [])
+    .filter((a) => !(tierCompanionKey && a?.key === tierCompanionKey));
   // Recurring mode only, like the legacy ladder: a priced add rewrites the
   // estimate as a recurring bundle, never from the one-time flow (GH codex
   // r4 P2).
@@ -6323,6 +6421,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     }
     setSelected(nextSelected);
     setSelectedAddOns(selectedAddOnsForServices(nextServices, nextSelected));
+    // Callers that must act on the reloaded payload (the offer-tier picker)
+    // read it from the resolved value; every other caller ignores it.
+    return body;
   }, [token, adminPreviewRequested, pdfDocumentMode, pdfDocPin]);
 
 
@@ -6439,6 +6540,14 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           return 'limit_reached';
         }
         if (r.status === 409 && body.code === 'SLOT_UNAVAILABLE') return 'slot_unavailable';
+        // B18: the phone turned contradictory while the hold was being extended - the route answers the coded
+        // office-review 409 and has released the hold. The ONE transition (like every other park call site) commits
+        // the review state locally from this body, then refreshes best effort; it never rejects. The callers' own
+        // guards stop on the cleared reservation, so no generic dead-hold recovery runs over it.
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          await enterContactReviewRef.current(body);
+          return 'contact_review';
+        }
         // The route's specialized no-booking bodies (codex r7 P2): staff can
         // reshape an estimate mid-checkout into a commercial-manual,
         // guarantee-only or trenching-review contract, and /extend preserves
@@ -6496,6 +6605,45 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       method: 'DELETE',
     }).then((r) => r.ok || r.status === 404).catch(() => false);
   }, [token, readOnlyPreview]);
+
+  // B18: the server parked this estimate for the office (ACCEPT_NEEDS_OFFICE_REVIEW: its phone belongs to another
+  // customer) - answered by the accept PUT AND by both card-intent routes. ONE transition for all three call sites:
+  // drop every captured or minted card (Auto Pay card, one-time hold, open modals), release the slot hold the way the
+  // accept recovery does, and refetch /data, which now answers with the page's existing review-before-booking state
+  // (cta.reviewBeforeBooking, reviewReason 'contact_review'). Returns the sentence to show. A ref, assigned every
+  // render, so the handlers need no dependency on it.
+  const enterContactReviewRef = useRef(null);
+  enterContactReviewRef.current = async (body) => {
+    recurringCardSetupIntentIdRef.current = null;
+    setInlineCardIntent(null);
+    recurringCardIntentOpenRef.current = false;
+    setRecurringCardIntent(null);
+    cardHoldSetupIntentIdRef.current = null;
+    setCardHoldIntent(null);
+    const heldId = reservationRef.current?.scheduledServiceId || null;
+    setReservation(null);
+    setSelectedSlotId(null);
+    setSelectedSlotMeta(null);
+    setPaymentPreference(null);
+    // The review state is committed HERE, from the 409 body, before any network call: `data.cta` otherwise still
+    // carries the old bookable payload until the /data refetch lands, and a refetch that fails would send the customer
+    // back to a stale booking UI that only ever answers the same 409. These are the cta fields the page reads for
+    // its review card (the same ones /data sets for a contact_review park); the server's sentence is the one returned.
+    const sentence = body?.error || 'A Waves specialist reviews this quote with you and schedules your visit.';
+    setData((prev) => (prev ? {
+      ...prev,
+      cta: { ...(prev.cta || {}), canAccept: false, reviewBeforeBooking: true, reviewReason: 'contact_review', reviewMessage: sentence },
+    } : prev));
+    // A release that fails (network / 5xx) leaves the hold live and its id otherwise lost: retry once, and if it
+    // still fails keep the id in the page's existing pending-recovery ref - the same one recoverFromDeadHold
+    // sets before its release and falls back to on a retry - rather than dropping it.
+    let released = await releaseHeldReservation(heldId);
+    if (!released) released = await releaseHeldReservation(heldId);
+    if (!released && heldId) pendingRecoveryHoldRef.current = heldId;
+    // The refetch only refreshes the rest of the page and is best effort: the review state is already on screen.
+    try { await loadEstimate({ preserveSelection: true }); } catch { /* the local review state stands */ }
+    return sentence;
+  };
 
   // The ONE recovery for a hold that is definitively gone (codex r3 P1).
   // Clearing `reservation` alone was not enough: `data.estimate.acceptance`
@@ -6976,9 +7124,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     try {
       const quote = await submitOptOut(sectionKey, false, true);
       setOptOut({ sectionKey, phase: 'preview', quote, message: '' });
+      return true;
     } catch (err) {
       setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
       setError(err.message);
+      return false;
     }
   }, [readOnlyPreview, submitOptOut]);
 
@@ -7000,9 +7150,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     try {
       const quote = await submitOptOut(sectionKey, true, true);
       setOptOut({ sectionKey, phase: 'preview', quote, message: '' });
+      return true;
     } catch (err) {
       setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
       setError(err.message);
+      return false;
     }
   }, [readOnlyPreview, submitOptOut]);
 
@@ -7035,22 +7187,141 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         // accept charge a different per-application amount than the panel
         // disclosed (codex #3684 r4 P1); the reload resets every section to
         // the server's cadence, the one the confirmed numbers describe.
-        await loadEstimate({ preserveSelection: false });
+        const reloaded = await loadEstimate({ preserveSelection: false });
         scrollToPriceSection();
+        return { ok: true, body: reloaded || null };
       } catch (err) {
         setOptOut({ sectionKey: null, phase: 'idle', quote: null, message: '' });
         setError(err.message);
         // Resync to server truth — the PUT may have landed despite the error
         // surfacing here (same rationale as the bond/interior/add-on paths).
         await loadEstimate({ preserveSelection: true }).catch(() => {});
+        return { ok: false, body: null };
       } finally {
         repriceEpochRef.current += 1;
       }
     };
     const chained = addOnMutationChainRef.current.then(run, run);
     addOnMutationChainRef.current = chained;
-    await chained;
+    // Resolves { ok, body } once the reload settled (body = the reloaded
+    // /data payload) — the offer-tier picker acts on it; other callers ignore it.
+    return chained;
   }, [readOnlyPreview, submitOptOut, loadEstimate, scrollToPriceSection, releaseHeldReservation, reservation]);
+
+  // ── Good / Better / Best (GATE_ESTIMATE_OFFER_TIERS) ───────────────────
+  // The picker drives the SAME opt-out rail the per-service controls use
+  // (dry-run preview → confirm with previewBasis → reload); it adds no fetch
+  // of its own. A move between Better and Good is only the page's one-time
+  // mode; every move that adds or removes the companion goes through the rail.
+  const resetForServiceModeChange = useCallback((nextMode) => {
+    reserveAttemptRef.current += 1;
+    setServiceMode(nextMode);
+    // Reset selection state that doesn't apply in the other mode
+    setSelectedSlotId(null);
+    setSelectedSlotMeta(null);
+    setPaymentPreference(null);
+    setReservation(null);
+    setAcceptResult(null);
+    setError(null);
+    setCtaPhase('configure');
+    setSlotsRefreshSignal((v) => v + 1);
+  }, [setCtaPhase]);
+
+  // The tile the customer is moving to while the rail change is previewed /
+  // committed (null | 'good' | 'better' | 'best').
+  const [pendingTier, setPendingTier] = useState(null);
+  const [tierCommitting, setTierCommitting] = useState(false);
+
+  const cancelTierMove = useCallback(() => {
+    setPendingTier(null);
+    cancelRemoveService();
+  }, [cancelRemoveService]);
+
+  const onSelectOfferTier = useCallback(async (key) => {
+    if (!offerTiers || tierCommitting) return;
+    if (ctaPhaseRef.current === 'submitting') return;
+    const companionKey = offerTiers.companionKey;
+    const companionBusy = optOut.sectionKey === companionKey;
+    if (companionBusy && (optOut.phase === 'previewing' || optOut.phase === 'submitting')) return;
+    if (companionBusy && optOut.phase === 'preview' && pendingTier) {
+      // An open confirm: the tile it targets is a no-op; any other tile closes it first.
+      if (key === pendingTier) return;
+      cancelTierMove();
+    }
+    if (key === selectedOfferTierKey(offerTiers, serviceMode)) return;
+    if (offerTiers.state === 'pest_only' && key !== 'best') {
+      // Better <-> Good: only the page's one-time mode changes.
+      if (key === 'good') {
+        const oneTimeAvailable = !!data?.estimate?.showOneTimeOption
+          && Number(data?.pricing?.anchorOneTimePrice || 0) > 0;
+        if (!oneTimeAvailable) return;
+      }
+      resetForServiceModeChange(key === 'good' ? 'one_time' : 'recurring');
+      return;
+    }
+    if (offerTiers.state === 'best' && key === 'best') return;
+    setPendingTier(key);
+    const started = offerTiers.state === 'pest_only'
+      ? await onPreviewRestoreService(companionKey)
+      : await onPreviewRemoveService(companionKey);
+    if (!started) setPendingTier(null);
+  }, [
+    offerTiers, tierCommitting, optOut.sectionKey, optOut.phase, pendingTier, serviceMode, data?.estimate?.showOneTimeOption,
+    data?.pricing?.anchorOneTimePrice, cancelTierMove, resetForServiceModeChange, onPreviewRestoreService, onPreviewRemoveService,
+  ]);
+
+  // Selection-aware figures for the tile the customer is on: the rows of the
+  // matched cadence combo, else of the selected pest cadence.
+  const tierCurrentRows = useMemo(() => {
+    if (!offerTiers || serviceMode === 'one_time') return null;
+    const source = Array.isArray(selectedCombo?.perServiceTreatments) && selectedCombo.perServiceTreatments.length
+      ? selectedCombo.perServiceTreatments
+      : selectedCombinedFrequency(data?.pricing, selectedFrequency)?.perServiceTreatments;
+    const rows = (Array.isArray(source) ? source : [])
+      .map((row) => ({
+        service: row?.service,
+        perApplication: Number(row?.displayPrice) > 0 ? Number(row.displayPrice) : (Number(row?.perTreatment) > 0 ? Number(row.perTreatment) : null),
+        visitsPerYear: Number(row?.visitsPerYear) || null,
+      }))
+      .filter((row) => row.service && row.perApplication != null);
+    return rows.length ? rows : null;
+  }, [offerTiers, serviceMode, selectedCombo, data?.pricing, selectedFrequency]);
+  const tierCadenceIsDefault = useMemo(() => {
+    const defaults = defaultSelectedForServices(services);
+    return services.every((section) => (selected?.[section.key] || defaults[section.key]) === defaults[section.key]);
+  }, [services, selected]);
+
+  const confirmTierMove = useCallback(async () => {
+    const target = pendingTier;
+    const companionKey = offerTiers?.companionKey;
+    if (!target || !companionKey || tierCommitting) return;
+    setTierCommitting(true);
+    try {
+      const restoring = offerTiers.state === 'pest_only';
+      const result = await commitOptOut(
+        companionKey,
+        restoring,
+        optOut.sectionKey === companionKey ? optOut.quote?.previewBasis || null : null,
+      );
+      if (!result?.ok) return;
+      const reloaded = result.body;
+      if (target === 'good') {
+        if (reloaded?.estimate?.showOneTimeOption && Number(reloaded?.pricing?.anchorOneTimePrice || 0) > 0) {
+          resetForServiceModeChange('one_time');
+        } else {
+          // The move was saved (lawn care is off the estimate) but the server
+          // did not open the one-time visit — say so rather than leaving the
+          // customer on the pest plan as if they had picked it.
+          setError('The one-time visit isn\'t available on this estimate right now. Your estimate now shows the pest control plan; you can add lawn care back above, or call us and we\'ll set up a single visit.');
+        }
+      } else if (target === 'best' && serviceMode === 'one_time') {
+        resetForServiceModeChange('recurring');
+      }
+    } finally {
+      setTierCommitting(false);
+      setPendingTier(null);
+    }
+  }, [pendingTier, offerTiers, tierCommitting, commitOptOut, optOut.sectionKey, optOut.quote, serviceMode, resetForServiceModeChange]);
 
   const handlePaymentChoice = useCallback(async (pref) => {
     // Staff draft preview: every booking path starts here — keep it inert
@@ -7136,7 +7407,19 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
       if (r.status === 409) {
         const body = await r.json().catch(() => ({}));
         if (reserveAttemptRef.current !== attemptId) return;
+        if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          // Parked for the office (B18): leave the booking UI for the review state, same transition as the accept.
+          await enterContactReviewRef.current(body);
+          return;
+        }
         const message = body.error || 'Unable to reserve this slot.';
+        if (body.code === 'CUSTOMER_BUSY_RETRY') {
+          // The matched customer row was being updated for a moment (nothing was reserved): retryable, with the
+          // server's own sentence - the customer's picked slot and payment choice stay, so they just tap again.
+          setError(message);
+          setCtaPhase('configure');
+          return;
+        }
         setPaymentPreference(null);
         setSelectedSlotId(null);
         setSelectedSlotMeta(null);
@@ -7220,6 +7503,33 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // after that step. Same shape as the server's EMAIL_RE; blank stays fine.
   const contactEmailInvalid = contactEmailGap && !!contactEmail.trim()
     && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(contactEmail.trim());
+  // While the estimate has no phone, the card step and Accept stay locked:
+  // the server refuses both until a phone is on the estimate.
+  const contactPhoneGap = !!data?.contactGaps?.phone;
+  const saveContactPhone = useCallback(async () => {
+    if (readOnlyPreview || contactPhoneSaving) return;
+    setContactPhoneSaving(true);
+    setContactPhoneError('');
+    try {
+      const r = await fetch(`${API_BASE}/estimates/${token}/contact-phone`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contactPhone }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setContactPhoneError(body.error || 'We could not save that number. Please try again, or call our office.');
+        return;
+      }
+      // The estimate now has a phone: reload so the gap, the card policy and
+      // every phone-dependent option reflect it.
+      await loadEstimate({ preserveSelection: true });
+    } catch {
+      setContactPhoneError('We could not save that number. Please check your connection and try again.');
+    } finally {
+      setContactPhoneSaving(false);
+    }
+  }, [readOnlyPreview, contactPhoneSaving, contactPhone, token, loadEstimate]);
 
   const performAccept = useCallback(async () => {
     // Defense in depth for the draft preview — handlePaymentChoice already
@@ -7231,6 +7541,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     // Required-field guard mirrors confirmDisabled below (defense in depth —
     // the button is disabled while this is true, but a stale disabled-state
     // read should never let a request through with a required field blank).
+    if (contactPhoneGap) {
+      setError('Please save your mobile number to continue.');
+      return;
+    }
     if (contactFirstNameMissing) {
       setContactFirstNameTouched(true);
       setError('Please enter your first name to continue.');
@@ -7486,6 +7800,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
+          if (body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+            throw new Error(await enterContactReviewRef.current(body));
+          }
           if (body.code === 'PAYMENT_TIMING_REFRESH') {
             // The server bills this selection now (afterVisitDeferred false) or
             // after the visit (true): show that timing for it, drop the
@@ -7657,7 +7974,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     } finally {
       acceptInFlightRef.current = false;
     }
-  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
+  }, [readOnlyPreview, data, existingAppointment, loadEstimate, token, selectedSlotId, paymentPreference, serviceMode, selectedFrequency, serviceCadences, extendHoldAndSettle, recoverFromDeadHold, contactPhoneGap, contactFirstNameGap, contactFirstNameMissing, contactFirstName, contactLastNameGap, contactEmailGap, contactLastName, contactEmail, contactEmailInvalid]);
 
   // Deposit-gated confirm (flat $49/$99, PR #1660). When the resolved policy
   // requires a deposit and none is collected yet, mint the intent and open
@@ -7666,6 +7983,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // is off, so this falls straight through to performAccept.
   const handleConfirm = useCallback(async () => {
     if (readOnlyPreview) return;
+    // No card step and no accept while the estimate has no phone: the server
+    // refuses both. The review button is disabled for it; this covers every
+    // other entry (the annual-prepay confirm).
+    if (data?.contactGaps?.phone) {
+      setError('Please save your mobile number to continue.');
+      return;
+    }
     // Live-ref submit lock (mirror of the onToggleAddOn/SlotPicker guards):
     // a double-tap on Confirm must not double-enter the flow — the second
     // entry would re-mint a deposit/card-hold intent and re-PUT /accept.
@@ -7702,6 +8026,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          throw new Error(await enterContactReviewRef.current(body));
+        }
         if (r.status === 409 && body.exemptReason) {
           // Policy says no hold owed — fall through to accept. 'saved_method'
           // means the hold still stands (a saved card backs it); any other
@@ -7803,6 +8130,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          throw new Error(await enterContactReviewRef.current(body));
+        }
         if (r.status === 409 && body.exemptReason) {
           // Policy says no card owed — fall through to the deposit/accept.
           // Only saved_method_consented / autopay_already_active keep the
@@ -8035,6 +8365,10 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
         body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference, replaceSetupIntentId: setupIntentId }),
       });
       const body = await r.json().catch(() => ({}));
+      if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+        await enterContactReviewRef.current(body);
+        return false;
+      }
       if (!r.ok || !body?.clientSecret) return false;
       if (recurringCardIntentOpenRef.current) {
         setRecurringCardIntent(body);
@@ -8130,6 +8464,9 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   useEffect(() => {
     if (ctaPhase !== 'review' || !reservation) return;
     if (readOnlyPreview || !inlineAutoPayActive || inlineCardIntent) return;
+    // No card intent while the estimate has no phone: the server refuses it.
+    // The effect reruns when the saved number closes the gap.
+    if (data?.contactGaps?.phone) return;
     if (recurringCardSetupIntentIdRef.current || recurringCardForceRef.current) return;
     if (inlineIntentMintRef.current) return;
     inlineIntentMintRef.current = true;
@@ -8141,6 +8478,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
           body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
         });
         const body = await r.json().catch(() => ({}));
+        // Parked for the office (B18): the page leaves checkout for the review state whatever the staleness below says.
+        if (r.status === 409 && body.code === 'ACCEPT_NEEDS_OFFICE_REVIEW') {
+          await enterContactReviewRef.current(body);
+          return;
+        }
         // Staleness re-check at RESOLVE time (r3 P2): a confirm tapped before
         // this pre-mint resolved fell back to the modal path with its own
         // intent — accepting this late response would render the inline
@@ -8789,6 +9131,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 // the read-only accepted recap (an accepted plan's price is
                 // frozen), and never while the cards are locked mid-submit.
                 serviceOptOut={section.removable === true && !readOnly && !cardsDisabled && !restartQuote
+                  && !(tiered && section.key === tierCompanionKey)
                   ? {
                     phase: optOut.sectionKey === section.key ? optOut.phase : 'idle',
                     quote: optOut.sectionKey === section.key ? optOut.quote : null,
@@ -8823,10 +9166,13 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               so the "Add it back" control must not render. */}
           {!readOnly && !restartQuote && data?.serviceOptOut?.restoreBlocked !== true
             && (data?.serviceOptOut?.removedKeys || []).some((key) =>
-              !(data?.serviceOptOut?.restoreBlockedKeys || []).includes(key)) ? (
+              !(data?.serviceOptOut?.restoreBlockedKeys || []).includes(key)
+              && !(tiered && key === tierCompanionKey)) ? (
             <div style={{ marginTop: 12 }}>
               {data.serviceOptOut.removedKeys.map((key, i) => {
                 if ((data.serviceOptOut.restoreBlockedKeys || []).includes(key)) return null;
+                // The picker owns the companion's add-back when tiers are offered.
+                if (tiered && key === tierCompanionKey) return null;
                 const label = data.serviceOptOut.removedLabels?.[i] || key;
                 const active = optOut.sectionKey === key;
                 // A line Waves parked at send time (GATE_ESTIMATE_LEAD_SERVICE_SEND)
@@ -9603,6 +9949,11 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                 onEmailChange={setContactEmail}
                 onEmailBlur={() => setContactEmailTouched(true)}
                 emailInvalid={contactEmailTouched && contactEmailInvalid}
+                phone={contactPhone}
+                onPhoneChange={(value) => { setContactPhone(value); setContactPhoneError(''); }}
+                onPhoneSave={saveContactPhone}
+                phoneSaving={contactPhoneSaving}
+                phoneError={contactPhoneError}
                 // Locked for the whole confirm, including the inline card
                 // confirmSetup() wait (ctaPhase stays 'review' there) — the
                 // running confirm already captured these values.
@@ -9619,6 +9970,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               // only confirm — the underlying review CTA stays disabled so
               // a plain confirm can't race the payment authorization
               // (pre-push Codex P0 r2).
+              || contactPhoneGap
               || contactFirstNameMissing
               || contactLastNameMissing
               || contactEmailInvalid
@@ -9721,6 +10073,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   serviceCadences={serviceCadences}
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
+                  onContactReview={(body) => enterContactReviewRef.current(body).catch(() => {})}
                 />
               </div>
             ) : (
@@ -9864,7 +10217,32 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               ranged price is a recurring concept, and a one-time accept there
               dead-ends — no slots exist, and the one-time card-hold/deposit
               gates require a booked appointment the customer can't pick. */}
-          {!estimate.isOneTimeOnly && !manualScheduleAccept && !restartQuote && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
+          {tiered ? (
+            !estimate.isOneTimeOnly && !manualScheduleAccept && !restartQuote ? (
+              <OfferTierPicker
+                tiers={offerTiers}
+                selectedKey={selectedOfferTierKey(offerTiers, serviceMode)}
+                onSelect={onSelectOfferTier}
+                // Same lock as the one-time toggle: a tile change mid-submit
+                // would clear the slot the request is committing.
+                disabled={ctaPhase === 'submitting'}
+                estimate={estimate}
+                // The selected tile quotes the cadence chosen below, like the
+                // price card; the other tiles stay at the standard schedule.
+                currentRows={tierCurrentRows}
+                cadenceIsDefault={tierCadenceIsDefault}
+                change={pendingTier ? {
+                  phase: tierCommitting || (optOut.sectionKey === tierCompanionKey && optOut.phase === 'submitting')
+                    ? 'committing'
+                    : (optOut.sectionKey === tierCompanionKey ? optOut.phase : 'idle'),
+                  targetKey: pendingTier,
+                  quote: optOut.sectionKey === tierCompanionKey ? optOut.quote : null,
+                  onConfirm: confirmTierMove,
+                  onCancel: cancelTierMove,
+                } : null}
+              />
+            ) : null
+          ) : !estimate.isOneTimeOnly && !manualScheduleAccept && !restartQuote && estimate.showOneTimeOption && (pricing.anchorOneTimePrice || 0) > 0 ? (
             <OneTimeModeToggle
               mode={serviceMode}
               oneTimePrice={pricing.anchorOneTimePrice}
@@ -9873,19 +10251,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
               // 'submitting' (reserve/accept in flight) — a mode flip
               // mid-submit would clear the slot the request is committing.
               disabled={ctaPhase === 'submitting'}
-              onChange={(m) => {
-                reserveAttemptRef.current += 1;
-                setServiceMode(m);
-                // Reset selection state that doesn't apply in the other mode
-                setSelectedSlotId(null);
-                setSelectedSlotMeta(null);
-                setPaymentPreference(null);
-                setReservation(null);
-                setAcceptResult(null);
-                setError(null);
-                setCtaPhase('configure');
-                setSlotsRefreshSignal((v) => v + 1);
-              }}
+              onChange={resetForServiceModeChange}
             />
           ) : null}
 

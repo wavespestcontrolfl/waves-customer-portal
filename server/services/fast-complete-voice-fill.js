@@ -1,6 +1,6 @@
 /**
  * Fast Complete voice fill — turns what a technician SAID into the taps a Fast
- * Complete sheet would otherwise need (POST /:serviceId/fast-complete/voice-fill,
+ * Complete sheet would otherwise need (POST /:serviceId/fast-complete/voice-fill/clip,
  * dark behind GATE_FAST_COMPLETE_VOICE_FILL).
  *
  * The model only MAPS speech onto the choices this sheet already offers; the
@@ -27,10 +27,15 @@
  * negation, grounded notes, safety and company-name screens); how the tech
  * phrased something is settled by that confirm tap, not by more server rules.
  *
- * Only `pest_reservice` is built here. A sheet is one registry entry: its
- * completion-profile service key and a context loader that returns the choice
- * lists, so lawn_reservice / tree_shrub plug in later without touching the
- * schema, prompt or validator.
+ * Two readers share the product rules above. The pest re-service sheet's whole
+ * fill (`voiceFillFromClip`: products, visit taps and both notes from a clip),
+ * and the report flow's product read (`voiceProductsFromNote`: any untyped pest
+ * visit, a regular visit or a re-service; products only, read from the note the
+ * tech dictated, since that flow already reads where, pests and how through
+ * visit-voice-facts.js). `transcribeVisitClip` is the report flow's note mic:
+ * the same transcriber, primed with the same product names, answering the words
+ * for the note box. Both also take a lawn re-service (its own catalog and its own
+ * ways, loadLawnReserviceContext), whose sheet reads products from its note too.
  *
  * Privacy: the transcript and both notes are never logged or stored here; the
  * route's audit line carries counts only.
@@ -39,7 +44,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { callAnthropic } = require('./llm/call');
-const { resolveEligibility, loadRecapCatalogProducts, loadCommonProducts } = require('./pest-recap');
+const { resolveEligibility, loadRecapCatalogProducts, loadCommonProducts, sheetRecordFor } = require('./pest-recap');
 
 // The model tier for the fill. One constant: the bake-off (FAST vs FLAGSHIP)
 // changes this line only.
@@ -77,6 +82,17 @@ const PEST_SHEET_ACTIVITY = Object.freeze(['none', 'light', 'moderate', 'heavy']
 // The How row (a spray) and the ways an added product can go down.
 const PEST_SHEET_VISIT_METHODS = Object.freeze(['spot_treatment', 'perimeter_spray']);
 const PEST_SHEET_PRODUCT_METHODS = Object.freeze(['spot_treatment', 'perimeter_spray', 'bait_placement', 'granular_broadcast']);
+// A specialty visit's rows (a lane or a typed form on the report flow) offer the
+// pest ways plus three more: FastCompleteSheet.jsx LANE_METHOD_CHOICES.
+const SPECIALTY_SHEET_PRODUCT_METHODS = Object.freeze([...PEST_SHEET_PRODUCT_METHODS, 'broadcast_spray', 'fog_ulv', 'soil_drench']);
+// Where a liquid and a granular broadcast are offered side by side, the bare word
+// "broadcast" proves neither: a spray needs "spray" beside it, granules need a
+// granule word. Fog/ULV's words are too short for the derived rule.
+const SPECIALTY_METHOD_WORDS = Object.freeze({
+  broadcast_spray: /\bbroadcast\W+spray\w*|\bspray\w*\W+(?:\w+\W+){0,3}broadcast\b|\bblanket\W+spray\w*/,
+  granular_broadcast: /\b(granular|granules?|spread|spreader|spreading)\b/,
+  fog_ulv: /\b(fog|fogged|fogging|fogger|ulv|mist|misted|misting)\b/,
+});
 const UNITS_BY_MEASURE = Object.freeze({
   liquid: Object.freeze(['tsp', 'fl_oz', 'gal']),
   weight: Object.freeze(['g', 'oz', 'lb']),
@@ -178,11 +194,19 @@ async function loadProductAliases(knex, productIds) {
   }
 }
 
-async function loadPestReserviceContext(serviceId, knex = db) {
+// `anyPestVisit`: the report flow's readers take every visit that sheet opens
+// for: an untyped pest visit (pest-recap's eligibility: a pest_control profile
+// that is not typed and not project-backed), and a specialty visit whose own
+// record the sheet reads from the note (a lane or a typed form, pest-recap's
+// sheetRecordFor, with its own gates). The re-service sheet's fill takes only a
+// pest re-service.
+async function loadPestContext(serviceId, knex = db, { anyPestVisit = false } = {}) {
   const { ok, reason, svc, profile, eligible } = await resolveEligibility(serviceId, knex);
   if (!ok) return { ok: false, reason };
-  if (profile?.serviceKey !== 'pest_re_service') return { ok: false, reason: 'not_pest_re_service' };
-  if (!eligible) return { ok: false, reason: 'not_eligible' };
+  if (!anyPestVisit && profile?.serviceKey !== 'pest_re_service') return { ok: false, reason: 'not_pest_re_service' };
+  const record = anyPestVisit ? await sheetRecordFor(profile, svc, knex) : { lane: null, typedType: null };
+  const specialty = record.lane || record.typedType || null;
+  if (!eligible && !specialty) return { ok: false, reason: 'not_eligible' };
   const catalog = (await loadRecapCatalogProducts(knex).catch(() => []))
     .filter((row) => row && row.id != null && String(row.name || '').trim() && !HIDDEN_CATEGORIES.has(categoryKey(row)));
   // A failed read leaves no usable catalog: with no catalog nothing can be
@@ -213,14 +237,104 @@ async function loadPestReserviceContext(serviceId, knex = db) {
     ok: true,
     context: {
       sheet: 'pest_reservice',
+      label: specialty ? `${String(specialty).replace(/_/g, ' ')} visit` : (profile?.serviceKey === 'pest_re_service' ? SHEET_LABEL : PEST_VISIT_LABEL),
       products,
       pests: [...PEST_SHEET_PESTS],
       areas: [...PEST_SHEET_AREAS],
       activity: [...PEST_SHEET_ACTIVITY],
       visitMethods: [...PEST_SHEET_VISIT_METHODS],
-      productMethods: [...new Set([...PEST_SHEET_PRODUCT_METHODS, ...products.map((p) => p.catalogMethod).filter(Boolean)])],
+      productMethods: [...new Set([...(specialty ? SPECIALTY_SHEET_PRODUCT_METHODS : PEST_SHEET_PRODUCT_METHODS), ...products.map((p) => p.catalogMethod).filter(Boolean)])],
+      // A specialty visit's rows offer three more ways (FastCompleteSheet
+      // LANE_METHOD_CHOICES), and with a liquid and a granular broadcast side by
+      // side the bare word "broadcast" proves neither.
+      ...(specialty ? { standardMethods: SPECIALTY_SHEET_PRODUCT_METHODS, methodWords: SPECIALTY_METHOD_WORDS } : {}),
     },
   };
+}
+
+const loadPestReserviceContext = (serviceId, knex = db) => loadPestContext(serviceId, knex);
+
+// ── The lawn re-service sheet's context ──────────────────────────────────
+// FastCompleteLawnReserviceSheet.jsx: the catalog and the ways that sheet offers
+// (services/lawn-reservice-fast-context.js, the same read its screen loads), while
+// its own gate is on. Only its products are read: a row there has no "follows How",
+// so every way the sheet offers is a product way (`anyProductMethod`). The visit
+// lists below only give the shared schema its enums; nothing is read from them.
+const LAWN_SHEET_LABEL = 'lawn re-service';
+// The lawn sheet's own evidence for a way, where the pest words or the derived
+// rule would be wrong on a lawn: the side-by-side broadcast and fog words above,
+// and the three below. The ways left to the derived rule read their own
+// distinctive stem (drench, foliar, injection); spot treatment keeps the shared
+// "spot".
+const LAWN_METHOD_WORDS = Object.freeze({
+  ...SPECIALTY_METHOD_WORDS,
+  // The derived rule keeps a key's last word's stem, which here would read any
+  // "checked" as a station check and "stressed" or "street" as a pin stream.
+  station_check: /\bstations?\b/,
+  pin_stream: /\bpin\W?stream\w*/,
+  bait_placement: /\bbait(ed|s|ing)?\b/,
+});
+// The measure a lawn row offers units in, as the sheet decides it
+// (FastCompleteLawnReserviceSheet productRow): the product's own, unless the last
+// visit recorded an amount in a unit of another measure (a liquid logged in
+// pounds), which then is the row's.
+function lawnRowMeasure(row, last) {
+  const own = productMeasure(row);
+  if (!last || !(Number(last.totalAmount) > 0) || sheetUnit(last.amountUnit, own)) return own;
+  return unitMeasure(last.amountUnit) || own;
+}
+const LAWN_TRANSCRIBE_WORDS = 'broadcast, spot treatment, granular, spreader, soil drench, foliar, pounds, ounces, gallons, per thousand, square feet, front lawn, back lawn, side lawns, weeds, dollarweed, sedge, crabgrass, chinch bugs, sod webworms, fungus, fertilizer, pre-emergent, no wait, same as last time';
+async function loadLawnReserviceContext(serviceId, knex = db) {
+  if (!require('../config/feature-gates').lawnReserviceFastCompleteLive()) return { ok: false, reason: 'not_eligible' };
+  const lawn = await require('./lawn-reservice-fast-context').buildLawnReserviceFastContext(serviceId, knex);
+  if (!lawn.ok) return { ok: false, reason: lawn.reason === 'not_found' ? 'not_found' : 'not_eligible' };
+  if (!lawn.eligible) {
+    if (lawn.reason === 'catalog_unavailable') logger.warn(`[voice-fill] product catalog empty or unavailable for ${serviceId}`);
+    return { ok: false, reason: lawn.reason === 'catalog_unavailable' ? 'catalog_unavailable' : 'not_eligible' };
+  }
+  const catalog = lawn.products.filter((row) => row && row.id != null && String(row.name || '').trim() && !HIDDEN_CATEGORIES.has(categoryKey(row)));
+  if (!catalog.length) return { ok: false, reason: 'catalog_unavailable' };
+  const aliases = await loadProductAliases(knex, catalog.map((row) => row.id));
+  // What the property's last lawn visit recorded for each product: the tile opens
+  // in that unit's measure.
+  const lastById = new Map((lawn.lastVisit?.products || []).filter((p) => p?.productId != null).map((p) => [String(p.productId), p]));
+  const products = catalog.map((row) => {
+    const measure = lawnRowMeasure(row, lastById.get(String(row.id)));
+    return {
+      id: String(row.id),
+      name: String(row.display_name || row.name).trim(),
+      fullName: String(row.name).trim(),
+      aliases: (aliases.get(String(row.id)) || []).slice(0, 8),
+      measure,
+      units: [...UNITS_BY_MEASURE[measure]],
+      catalogMethod: '',
+    };
+  });
+  const methods = lawn.methods.map((choice) => choice.value);
+  return {
+    ok: true,
+    context: {
+      sheet: 'lawn_reservice',
+      label: LAWN_SHEET_LABEL,
+      products,
+      pests: [...PEST_SHEET_PESTS],
+      areas: [...PEST_SHEET_AREAS],
+      activity: [...PEST_SHEET_ACTIVITY],
+      visitMethods: methods,
+      productMethods: methods,
+      anyProductMethod: true,
+      methodWords: LAWN_METHOD_WORDS,
+      sheetWords: LAWN_TRANSCRIBE_WORDS,
+    },
+  };
+}
+
+// The visit a note read is for: any pest visit the report flow takes, else a lawn
+// re-service on its own sheet.
+async function loadNoteContext(serviceId, knex = db) {
+  const pest = await loadPestContext(serviceId, knex, { anyPestVisit: true });
+  if (pest.ok || pest.reason !== 'not_eligible') return pest;
+  return loadLawnReserviceContext(serviceId, knex);
 }
 
 // The method a product's row offers on the pest sheet, derived EXACTLY as the
@@ -263,6 +377,7 @@ function catalogMethodOf(row) {
 // and validator beside this one rather than a registry the first sheet doesn't need.
 const SHEET = 'pest_reservice';
 const SHEET_LABEL = 'pest re-service';
+const PEST_VISIT_LABEL = 'pest visit';
 
 // ── Structured-output schema ─────────────────────────────────────────────
 // No numeric minimum/maximum (Anthropic rejects them) and no nullable types:
@@ -349,7 +464,7 @@ function productLine(product) {
 
 function buildPrompt(ctx, transcript) {
   return [
-    `SHEET: ${SHEET_LABEL}`,
+    `SHEET: ${ctx.label || SHEET_LABEL}`,
     '',
     'PRODUCTS (id | name | units):',
     ...ctx.products.map(productLine),
@@ -369,6 +484,19 @@ function buildPrompt(ctx, transcript) {
 
 // ── Validator ────────────────────────────────────────────────────────────
 const cleanText = (value, max) => String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+// A heard quote, shortened for display WITHOUT breaking its grounding: a cut
+// lands on a word boundary and ends in an ellipsis, which heardInTranscript reads
+// as a piece break. (A mid-word cut made "…Act" a word the tech never said and
+// refused a whole visit in the live run.)
+function clipHeard(value, max = CAPS.heard) {
+  const text = cleanText(value, 4000);
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max - 1);
+  // drop the last token only when the cut landed inside it
+  const midWord = /[a-z0-9]/i.test(cut.slice(-1)) && /[a-z0-9]/i.test(text.charAt(max - 1));
+  const atWord = midWord ? (cut.slice(0, Math.max(cut.lastIndexOf(' '), 0)) || cut) : cut;
+  return `${atWord.replace(/[\s.,;:!?]+$/, '')}…`;
+}
 // Free-form notes keep their line breaks (a tech may dictate a list).
 const cleanNote = (value, max) => String(value ?? '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, max);
 const norm = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -376,8 +504,13 @@ const norm = (text) => String(text ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '
 // A heard snippet is real when each of its pieces (the model may join separate
 // quotes with an ellipsis, a bar, or as whole sentences — seen live on Sonnet 5)
 // occurs in the transcript.
+// Pieces also break at sentence ends and commas: the live model joins separate
+// phrases that way ("Same mix as last time, Talstar"). A product's NAME must still
+// sit inside one piece (productPieces), so scattered words are never assembled
+// into a name ("green, guard, pro").
+const HEARD_BREAKS = /\.{3}|…|\s\|\s|\s\/\s|(?<=[.!?;,:])\s+/;
 function heardInTranscript(heard, normTranscript) {
-  const pieces = String(heard || '').split(/\.{3}|…|\s\|\s|\s\/\s|(?<=[.!?;])\s+/).map(norm).filter(Boolean);
+  const pieces = String(heard || '').split(HEARD_BREAKS).map(norm).filter(Boolean);
   return pieces.length > 0 && pieces.every((piece) => ` ${normTranscript} `.includes(` ${piece} `));
 }
 
@@ -559,17 +692,23 @@ function isCarrierVolume(tokens, start, end, unit, stops = []) {
 // corrected just after it ("four ounces, no wait, five").
 const RETRACT_BEFORE = 3;
 const CORRECTION_AFTER = 3;
+// ("no weight" is how a transcriber often writes "no wait": a correction only when a
+// replacement number follows it, see isCorrectingNo)
 const CORRECTION_CUES = [['no', 'wait'], ['wait'], ['make', 'it'], ['make', 'that'], ['i', 'mean'], ['actually'], ['sorry'], ['correction'], ['make', 'that'], ['scratch', 'that']];
 // A bare "no" between two numbers ("four ounces, no, five ounces") corrects the
 // first and is not a negation of the second.
 // ("no, it was five", "no, make it five", "no, actually five": a short filler may sit between)
-const CORRECTION_FILLERS = new Set(['it', 'was', 'is', 'make', 'that', 'actually', 'sorry', 'i', 'meant', 'mean']);
+const CORRECTION_FILLERS = new Set(['wait', 'weight', 'it', 'was', 'is', 'make', 'that', 'actually', 'sorry', 'i', 'meant', 'mean']);
 function isCorrectingNo(tokens, j) {
   if (tokens[j] !== 'no') return false;
   let k = j + 1;
   while (k <= j + 3 && CORRECTION_FILLERS.has(tokens[k])) k += 1;
   return Boolean(readSpokenNumber(tokens, k));
 }
+// "no wait", and "no weight" before a number (how a transcriber writes it): a
+// correction cue, never a negation.
+const isNoWait = (tokens, j) => tokens[j] === 'no'
+  && (tokens[j + 1] === 'wait' || (tokens[j + 1] === 'weight' && Boolean(readSpokenNumber(tokens, j + 2))));
 function isRetracted(tokens, breaks, start, end, stops = []) {
   for (let j = start - 1; j >= 0 && start - j <= RETRACT_BEFORE; j -= 1) {
     if (isNegationAt(tokens, j) && !isCorrectingNo(tokens, j)) return true;
@@ -590,7 +729,12 @@ function isRetracted(tokens, breaks, start, end, stops = []) {
 // mixing rate, never the amount used.
 const RATE_BASES = new Set(['gallon', 'gallons', 'gal', 'thousand', 'k', 'square', 'sq', 'acre', 'acres', 'tank', 'liter', 'litre']);
 // also "for every gallon", "for each gallon", "to the gallon" ("in a gallon" is the tank mix, the amount used)
-const isRate = (tokens, end) => tokens[end] === 'per'
+// Any "per" after a number is a rate. A transcriber does hear "ounces,
+// perimeter" as "ounces per meter", but "per minute" and "per meter" are also
+// real rates and the words alone cannot tell them apart: the amount is dropped
+// and the tech gets a Check to enter it.
+const perRate = (tokens, end) => tokens[end] === 'per';
+const isRate = (tokens, end) => perRate(tokens, end)
   || (isArticle(tokens[end]) && RATE_BASES.has(tokens[end + 1]))
   || ((tokens[end] === 'every' || tokens[end] === 'each') && RATE_BASES.has(tokens[end + 1]))
   // "in each / in every gallon", "for one gallon", "for 1 gallon"
@@ -628,27 +772,13 @@ function quantitiesIn(text) {
 // Only a positive dose / mix phrase says "same as last time"; a historical or
 // negated mention ("last time I used...", "but not today", "same area") does not.
 const SAME_AS_LAST_RE = /\b(same (amount|mix|rate|dose|as last time|as last visit)|the usual (mix|amount|rate|dose)|like last time)\b/i;
-const NOT_SAME_AS_LAST_RE = /\b(last time i|but not|not today|not this time|same area|(not|never|isn'?t|wasn'?t|no longer)( (the|quite|exactly))? same|different (amount|mix|rate|dose))\b/i;
+const NOT_SAME_AS_LAST_RE = /\b(last time i|but not|not today|not this time|same area|(not|never|isn['\s]?t|wasn['\s]?t|no longer)( (the|quite|exactly))? same|different (amount|mix|rate|dose))\b/i;
 
 function pushUnclear(unclear, heard, reason) {
   const entry = { heard: cleanText(heard, CAPS.heard), reason: cleanText(reason, CAPS.reason) };
   if (!entry.heard && !entry.reason) return;
   if (unclear.some((u) => u.heard === entry.heard && u.reason === entry.reason)) return;
   unclear.push(entry);
-}
-
-// The spoken sentence a product's heard words sit in. One "same mix as last
-// time, Taurus, Talstar and the surfactant" covers every product it lists, so
-// the same-as-last words are looked for in the whole sentence, never across
-// sentences.
-// With { contrast: true } a contrast ends the span too ("Taurus same as last
-// time, but Talstar was new"): the phrase is looked for there, while a
-// contradiction is looked for in the whole sentence ("... but a different rate").
-function sentenceOf(transcript, heard, { contrast = false } = {}) {
-  const first = norm(String(heard).split(/\.{3}|…/)[0]);
-  if (!first) return '';
-  const split = contrast ? /(?<=[.!?])\s+|\b(?:but|except|however|whereas)\b/i : /(?<=[.!?])\s+/;
-  return String(transcript || '').split(split).find((part) => part && ` ${norm(part)} `.includes(` ${first} `)) || '';
 }
 
 // The amount as the schema carries it: 0 / '' / missing is "not spoken" (nothing
@@ -758,6 +888,16 @@ function hasApplicationContext(run, tokens, breaks, quantities) {
   return quantities.some((q) => q.nameAt === run.start || (q.start >= from && q.end <= to));
 }
 
+// The one piece of a (possibly stitched) quote that names this product on its
+// own; '' when no single piece does.
+// Among several pieces that name it, the one that names it unambiguously wins
+// ("Alpine, Alpine WSG" is Alpine WSG, not the shorthand both Alpines share).
+function productPieces(product, heard, ctx) {
+  const naming = String(heard || '').split(HEARD_BREAKS).filter((piece) => nameEvidence(product, tokensOf(piece)).qualifies);
+  const clear = naming.filter((piece) => productEvidenceVerdict(product, heardProducts(ctx, piece)) === null);
+  return clear.length ? clear : naming.slice(0, 1);
+}
+
 // Every product's evidence against one heard snippet, computed once per row.
 function heardProducts(ctx, heard) {
   const tokens = tokensOf(heard);
@@ -832,7 +972,7 @@ const isCurrentVisitAt = (tokens, j) => tokens[j] === 'today' || tokens[j] === '
 function isNegationAt(tokens, j) {
   if (isOtherVisitAt(tokens, j)) return true;
   if (tokens[j] === 'out') return tokens[j + 1] === 'of';
-  return NEGATION_WORDS.has(tokens[j]) && !(tokens[j] === 'no' && tokens[j + 1] === 'wait');
+  return NEGATION_WORDS.has(tokens[j]) && !isNoWait(tokens, j);
 }
 // Token positions a negation word governs: up to NEGATED_SPAN words after it, never
 // past a clause break ("Activity was not heavy, just light": only "heavy"; "Did not
@@ -849,48 +989,91 @@ function negatedPositions(tokens, breaks) {
 
 const AUXILIARY_WORDS = new Set(['i', 'we', 'all', 'was', 'were', 'is', 'are', 'got', 'get', 'did', 'does', 'do', 'has', 'have', 'had', 'been', 'be', 'being', 'will', 'would', 'could', 'should', 'actually', 'really', 't']);
 const POST_NEGATION_WINDOW = 4;
-function isNegatedMention(mention, world) {
-  let from = mention.start;
-  while (from > 0 && !world.breaks[from] && mention.start - from < NEGATION_WINDOW) from -= 1;
-  for (let j = from; j < mention.start; j += 1) if (isNegationAt(world.tokens, j)) return true;
-  // "Last time I used four ounces of Taurus", "Last time, I used...": another
-  // visit's, anywhere earlier in the sentence (a comma does not end it).
-  // A current-visit word after the marker ("..., but today I used Talstar") ends it.
-  let clause = from;
-  while (clause > 0 && !world.stops[clause]) clause -= 1;
-  let other = false;
-  for (let j = clause; j < mention.start; j += 1) {
-    if (isOtherVisitAt(world.tokens, j)) other = true;
-    else if (isCurrentVisitAt(world.tokens, j)) other = false;
-  }
-  if (other) return true;
-  // "Taurus not", "Taurus was not used", "four ounces of Taurus weren't used":
-  // a negation after the name, past auxiliary words, in the same clause.
-  // (a relative clause about the product crosses its comma: "Taurus, which I did not use")
-  const relative = world.breaks[mention.end] && ['which', 'that'].includes(world.tokens[mention.end]);
-  const after = relative ? mention.end + 1 : mention.end;
-  for (let j = after; j < world.tokens.length && j - after < POST_NEGATION_WINDOW && !world.breaks[j]; j += 1) {
-    const token = world.tokens[j];
-    // "Taurus was out of stock", "Taurus ran out", "Taurus was all out"
-    if ((token === 'out' && (world.tokens[j + 1] === 'of' || world.tokens[j - 1] === 'ran' || world.tokens[j - 1] === 'all' || j === mention.end + 1))
-      || token === 'ran' && world.tokens[j + 1] === 'out') return true;
-    if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) return token !== 'no' || world.tokens[j + 1] !== 'wait';
-    if (!AUXILIARY_WORDS.has(token)) return false;
+// The three ways a mention is not a use on this visit, one rule each.
+
+// A negation word shortly before the name, in the same clause.
+function negatedBefore(mention, world) {
+  // a clause break right before the name: nothing earlier governs it
+  if (world.breaks[mention.start]) return false;
+  for (let j = mention.start - 1; j >= 0 && mention.start - j <= NEGATION_WINDOW; j -= 1) {
+    if (isNegationAt(world.tokens, j)) return true;
+    if (world.breaks[j]) return false;
   }
   return false;
 }
 
+// "Last time I used four ounces of Taurus", "Last time, I used...": another
+// visit's, anywhere earlier in the sentence (a comma does not end it). A
+// current-visit word after the marker ("..., but today I used Talstar") ends it.
+function fromAnotherVisit(mention, world) {
+  let start = mention.start;
+  while (start > 0 && !world.stops[start]) start -= 1;
+  let other = false;
+  for (let j = start; j < mention.start; j += 1) {
+    if (isOtherVisitAt(world.tokens, j)) other = true;
+    else if (isCurrentVisitAt(world.tokens, j)) other = false;
+  }
+  return other;
+}
+
+// What one word after the name says: 'negated', 'continue' (an auxiliary, keep
+// reading) or 'used'. "Taurus was out of stock", "Taurus ran out", "Taurus was
+// all out", "Taurus was not used".
+function wordAfterName(tokens, j, firstAfter) {
+  const token = tokens[j];
+  const outOf = token === 'out' && (tokens[j + 1] === 'of' || tokens[j - 1] === 'ran' || tokens[j - 1] === 'all' || j === firstAfter + 1);
+  if (outOf || (token === 'ran' && tokens[j + 1] === 'out')) return 'negated';
+  if (token === 'not' || token === 'never' || NEGATION_WORDS.has(token)) {
+    return isNoWait(tokens, j) ? 'used' : 'negated';
+  }
+  return AUXILIARY_WORDS.has(token) ? 'continue' : 'used';
+}
+
+// A negation after the name, past auxiliary words, in the same clause; a relative
+// clause about the product crosses its comma ("Taurus, which I did not use").
+function negatedAfter(mention, world) {
+  const relative = world.breaks[mention.end] && ['which', 'that'].includes(world.tokens[mention.end]);
+  const after = relative ? mention.end + 1 : mention.end;
+  for (let j = after; j < world.tokens.length && j - after < POST_NEGATION_WINDOW && !world.breaks[j]; j += 1) {
+    const verdict = wordAfterName(world.tokens, j, mention.end);
+    if (verdict !== 'continue') return verdict === 'negated';
+  }
+  return false;
+}
+
+const isNegatedMention = (mention, world) => negatedBefore(mention, world) || fromAnotherVisit(mention, world) || negatedAfter(mention, world);
+
+// The mentions of this product that the quote points at: those overlapped by ANY
+// piece of the (possibly stitched) quote where that piece was said, negated ones
+// included. "Same mix as last time, Taurus" points through its second piece; a
+// quote of a negated mention points at that negated mention.
+function quotedMentions(product, heard, world) {
+  const all = world.mentions.filter((m) => m.id === product.id);
+  const pieces = String(heard).split(HEARD_BREAKS).map(tokensOf).filter((piece) => piece.length);
+  const placed = pieces.map((piece) => world.tokens.map((_, i) => i)
+    .filter((i) => piece.every((t, k) => world.tokens[i + k] === t)).map((i) => ({ start: i, end: i + piece.length })));
+  const hit = all.filter((m) => placed.some((ranges) => ranges.some((r) => m.start < r.end && m.end > r.start)));
+  if (hit.length < 2) return hit;
+  // A short piece ("Taurus") can sit on several mentions: the one whose sentence
+  // holds the most of the quote's pieces is the one the quote is about.
+  const score = (m) => {
+    const { from, to } = sentenceSpan(m, world);
+    return placed.filter((ranges) => ranges.some((r) => r.start >= from && r.end <= to)).length;
+  };
+  const best = Math.max(...hit.map(score));
+  return hit.filter((m) => score(m) === best);
+}
+
 // The places in the transcript this product is named, as the heard words point
-// to them: the mentions that the heard's first contiguous piece overlaps; if it
-// overlaps none (or cannot be placed), every mention of the product. Mentions the
-// tech negated are left out whenever the product has a positive one.
+// to them: the POSITIVE mentions the quote overlaps; if it overlaps none (or
+// cannot be placed), every positive mention of the product. Mentions the tech
+// negated are left out whenever the product has a positive one.
 function productMentions(product, heard, world) {
   const all = world.mentions.filter((m) => m.id === product.id);
   const positive = all.filter((m) => !isNegatedMention(m, world));
   const mine = positive.length ? positive : all;
-  const piece = tokensOf(String(heard).split(/\.{3}|…/)[0]);
-  const ranges = world.tokens.map((_, i) => i).filter((i) => piece.length && piece.every((t, k) => world.tokens[i + k] === t)).map((i) => ({ start: i, end: i + piece.length }));
-  const hit = mine.filter((m) => ranges.some((r) => m.start < r.end && m.end > r.start));
+  const quoted = quotedMentions(product, heard, world);
+  const hit = mine.filter((m) => quoted.includes(m));
   return hit.length ? hit : mine;
 }
 
@@ -915,6 +1098,14 @@ const mentionClause = (mention, world) => {
   while (from > 0 && !world.stops[from]) from -= 1;
   const prevEnd = Math.max(from, ...world.mentions.filter((m) => m.end <= mention.start).map((m) => m.end));
   return { from: prevEnd, to: afterSpan(mention, world).to };
+};
+// The whole sentence a mention sits in, as a token range.
+const sentenceSpan = (mention, world) => {
+  let from = mention.start;
+  while (from > 0 && !world.stops[from]) from -= 1;
+  let to = mention.end;
+  while (to < world.tokens.length && !world.stops[to]) to += 1;
+  return { from, to };
 };
 // The positive words of a token range: negated and product-name words left out.
 const positiveWords = (world, { from, to }) => world.tokens.slice(from, to)
@@ -956,16 +1147,32 @@ function mentionQuantities(mention, world) {
 
 // Why a product row cannot be applied at all, as { reason, text } (the words the
 // Check chip shows), or null. Checked in order; the first refusal wins.
-function productRefusal(raw, product, heard, normTranscript, seen, evidence, world) {
+function productRefusal(raw, product, heard, normTranscript, seen, evidence, world, pieces = [], said = heard) {
   if (!product) return { reason: 'not_on_sheet', text: heard || raw.productId };
-  if (!heardInTranscript(heard, normTranscript)) return { reason: 'not_heard', text: heard || product.name };
+  if (!heardInTranscript(said, normTranscript)) return { reason: 'not_heard', text: heard || product.name };
   if (seen.has(product.id)) return { reason: 'duplicate_product', text: heard };
   const reason = productEvidenceVerdict(product, evidence);
   if (reason) return { reason, text: heard };
   const mentions = world.mentions.filter((m) => m.id === product.id);
   // Named only by a lone ordinary word with no application wording near it.
   if (!mentions.length) return { reason: 'product_not_heard', text: heard };
-  return mentions.every((m) => isNegatedMention(m, world)) ? { reason: 'negated_product', text: heard } : null;
+  if (mentions.every((m) => isNegatedMention(m, world))) return { reason: 'negated_product', text: heard };
+  // The quote piece that names the product must sit on a use of it: when every
+  // place those words were said is negated ("Used Alpine PT. Alpine WSG was not
+  // used."), a positive mention elsewhere (the shared "Alpine") does not rescue it.
+  // (only the NAME words of the piece: "Taurus" said again positively still counts)
+  // Every name run in the piece counts ("Did not use Atticus Talak but used Talstar P"
+  // names it twice, once positively).
+  // ...and every unambiguous naming piece of the quote, in any order.
+  const named = pieces.flatMap((piece) => {
+    const pieceTokens = tokensOf(piece);
+    return nameEvidence(product, pieceTokens).runs.flatMap((run) => {
+      const words = pieceTokens.slice(run.start, run.end);
+      return mentions.filter((m) => world.tokens.some((_, i) => words.every((w, k) => world.tokens[i + k] === w)
+        && m.start < i + words.length && m.end > i));
+    });
+  });
+  return named.length && named.every((m) => isNegatedMention(m, world)) ? { reason: 'negated_product', text: heard } : null;
 }
 
 // Why a spoken unit word does not back the model's unit (null when it does).
@@ -1040,27 +1247,99 @@ const METHOD_LEXICON = {
 // "foliar_spray" → "foliar"), at its start ("drenched", "injected"); a context
 // noun ("soil", "trunk") proves nothing.
 const GENERIC_METHOD_WORDS = new Set(['spray', 'treatment', 'application', 'placement', 'and', 'the', 'of']);
-function methodLexicon(method) {
+function methodLexicon(method, ctx = null) {
+  if (ctx?.methodWords?.[method]) return ctx.methodWords[method];
   if (METHOD_LEXICON[method]) return METHOD_LEXICON[method];
   const action = method.split('_').filter((w) => w.length >= 4 && !GENERIC_METHOD_WORDS.has(w)).pop();
   return action ? new RegExp(`\\b${action.slice(0, Math.max(4, action.length - 3))}\\w*\\b`) : null;
 }
 
 function productMethod(raw, product, heard, transcript, ctx, world, unclear) {
-  const offered = PEST_SHEET_PRODUCT_METHODS.includes(raw.method) || (product.catalogMethod && raw.method === product.catalogMethod);
+  // The pest sheet: its standard ways (four; a specialty visit's seven) plus the
+  // product's own. A sheet whose rows each pick their own way (lawn): any way that
+  // sheet offers.
+  const offered = ctx.anyProductMethod
+    ? ctx.productMethods.includes(raw.method)
+    : (ctx.standardMethods || PEST_SHEET_PRODUCT_METHODS).includes(raw.method) || (product.catalogMethod && raw.method === product.catalogMethod);
   if (!offered) return '';
-  const text = productMentions(product, heard, world).map((m) => positiveWords(world, mentionClause(m, world))).join(' . ');
-  if (methodLexicon(raw.method)?.test(text)) return raw.method;
-  pushUnclear(unclear, heard, 'method_not_heard');
+  const mentions = productMentions(product, heard, world);
+  const text = mentions.map((m) => positiveWords(world, mentionClause(m, world))).join(' . ');
+  if (methodLexicon(raw.method, ctx)?.test(text)) return raw.method;
+  // Said in the product's sentence but beside another product ("did the perimeter
+  // with Taurus, Talstar and surfactant"): the row simply follows the visit's How,
+  // no Check. A method with no word for it anywhere near is a Check.
+  // ...unless its own clause names a DIFFERENT way ("Spot treated with Taurus and
+  // sprayed Talstar around the perimeter"): that spoken method was dropped, so Check.
+  // (the standard ways and every catalog way the sheet offers)
+  const ways = [...new Set([...Object.keys(METHOD_LEXICON), ...ctx.productMethods, product.catalogMethod].filter(Boolean))];
+  const ownOther = ways.some((method) => method !== raw.method && methodLexicon(method, ctx)?.test(text));
+  // Shared only when the way is said in the sentence's lead-in, before the first
+  // product name ("Did the perimeter with Taurus, Talstar and surfactant"): a way
+  // said after another product's name ("...and sprayed Talstar around the
+  // perimeter") is that product's.
+  const shared = mentions.length > 0 && mentions.every((m) => methodLexicon(raw.method, ctx)?.test(leadInWords(m, world)));
+  if (ownOther || !shared) pushUnclear(unclear, heard, 'method_not_heard');
   return '';
 }
 
-function productSameAsLast(raw, amount, heard, transcript, unclear) {
+// The words of the sentence a mention sits in; with `contrast`, only the part of
+// it on the mention's side of a "but / except / however / whereas".
+const CONTRAST_WORDS = new Set(['but', 'except', 'however', 'whereas']);
+function mentionSentenceWords(mention, world, { contrast = false } = {}) {
+  let { from, to } = sentenceSpan(mention, world);
+  if (contrast) {
+    for (let j = mention.start; j >= from; j -= 1) if (CONTRAST_WORDS.has(world.tokens[j])) { from = j + 1; break; }
+    for (let j = mention.end; j < to; j += 1) if (CONTRAST_WORDS.has(world.tokens[j])) { to = j; break; }
+  }
+  return world.tokens.slice(from, to).join(' ');
+}
+
+// What ends a shared lead-in between the first name and a later one: a contrast,
+// or "then" (the next step: "Spot treated with Taurus, then used Talstar").
+const endsLeadIn = (token) => CONTRAST_WORDS.has(token) || token === 'then';
+// The sentence's words before its first product name, when no contrast word sits
+// between them and this mention; '' otherwise.
+function leadInWords(mention, world) {
+  const { from, to } = sentenceSpan(mention, world);
+  const firstName = Math.min(...world.mentions.filter((m) => m.start >= from && m.end <= to).map((m) => m.start));
+  const crossed = world.tokens.slice(firstName, mention.start).some(endsLeadIn);
+  return crossed ? '' : world.tokens.slice(from, firstName).filter((_, i) => !world.negated.has(from + i)).join(' ');
+}
+
+// The words that GOVERN a mention in a sentence naming several products: the
+// lead-in before the first name ("Same mix as last time, Taurus, Talstar and the
+// surfactant" covers the list) plus the mention's own clause, up to the next
+// name. Another product's clause ("... and Talstar was same as last time") is not
+// this one's.
+function governingWords(mention, world) {
+  const { from, to } = sentenceSpan(mention, world);
+  const inSentence = world.mentions.filter((m) => m.start >= from && m.end <= to);
+  const firstName = Math.min(...inSentence.map((m) => m.start));
+  const next = Math.min(to, ...inSentence.filter((m) => m.start > mention.start).map((m) => m.start));
+  const own = world.tokens.slice(mention.start, next);
+  // a contrast or "then" ends the mention's own clause too
+  const cut = own.findIndex(endsLeadIn);
+  // the lead-in covers only the names on its own side of a contrast
+  const crossed = world.tokens.slice(firstName, mention.start).some(endsLeadIn);
+  const leadIn = crossed ? [] : world.tokens.slice(from, firstName);
+  return [...leadIn, '.', ...(cut === -1 ? own : own.slice(0, cut))].join(' ');
+}
+
+function productSameAsLast(raw, amount, heard, transcript, unclear, product, world) {
   // a spoken number wins over the flag
   if (raw.sameAsLast !== true || amount !== null) return false;
-  const said = `${heard} . ${sentenceOf(transcript, heard, { contrast: true })}`;
-  const whole = `${heard} . ${sentenceOf(transcript, heard)}`;
-  if (SAME_AS_LAST_RE.test(said) && !NOT_SAME_AS_LAST_RE.test(whole)) return true;
+  // Read from the sentence where THIS product is named, never from the quote: a
+  // stitched quote ("Taurus, same as last time" / "same as last time, Taurus") could
+  // borrow the phrase from another product's sentence.
+  // When the quote does not single out one mention ("Taurus" said twice), every
+  // mention's sentence must carry the phrase: a later question about the product
+  // never authorizes the flag for an earlier application.
+  const quoted = quotedMentions(product, heard, world);
+  const quotesANegation = quoted.length > 0 && quoted.every((m) => isNegatedMention(m, world));
+  const mentions = productMentions(product, heard, world);
+  const ok = !quotesANegation && mentions.length > 0 && mentions.every((m) => SAME_AS_LAST_RE.test(governingWords(m, world))
+    && !NOT_SAME_AS_LAST_RE.test(mentionSentenceWords(m, world)));
+  if (ok) return true;
   pushUnclear(unclear, heard, 'same_as_last_not_heard');
   return false;
 }
@@ -1071,17 +1350,20 @@ function validateProducts(rawProducts, ctx, normTranscript, unclear, transcript 
   const out = [];
   for (const raw of Array.isArray(rawProducts) ? rawProducts : []) {
     if (!raw || typeof raw !== 'object') continue;
-    const heard = cleanText(raw.heard, CAPS.heard);
+    // the whole quote is grounded; only the returned text is clipped
+    const said = cleanText(raw.heard, 4000);
+    const heard = clipHeard(raw.heard);
     const product = byId.get(String(raw.productId ?? '').trim());
-    const evidence = product ? heardProducts(ctx, heard) : null;
-    const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world);
+    const pieces = product ? productPieces(product, heard, ctx) : [];
+    const evidence = product ? heardProducts(ctx, pieces[0] || '') : null;
+    const refusal = productRefusal(raw, product, heard, normTranscript, seen, evidence, world, pieces, said);
     if (refusal) {
       pushUnclear(unclear, refusal.text, refusal.reason);
       continue;
     }
     seen.add(product.id);
     const { amount, unit } = productAmount(raw, product, heard, unclear, world);
-    const sameAsLast = productSameAsLast(raw, amount, heard, transcript, unclear);
+    const sameAsLast = productSameAsLast(raw, amount, heard, transcript, unclear, product, world);
     const method = productMethod(raw, product, heard, transcript, ctx, world, unclear);
     out.push({ productId: product.id, amount, unit, sameAsLast, method, heard });
   }
@@ -1238,8 +1520,9 @@ const EMPTY_VISIT = Object.freeze({ pests: [], otherPest: '', areas: [], method:
 
 function validateVisit(rawVisit, ctx, normTranscript, unclear, transcript = '', world = transcriptWorld(ctx, transcript)) {
   const visit = rawVisit && typeof rawVisit === 'object' ? rawVisit : {};
-  const heard = cleanText(visit.heard, CAPS.heard);
-  const heardOk = heardInTranscript(heard, normTranscript);
+  const heard = clipHeard(visit.heard);
+  // the whole quote is grounded; only the returned text is clipped
+  const heardOk = heardInTranscript(cleanText(visit.heard, 4000), normTranscript);
   const { pests, areas, method, activity, otherPest } = pickVisitFields(visit, ctx, heard, unclear, heardOk ? visitEvidence(world) : null);
   const feet = linearFeet(visit.linearFt, transcript);
   if (feet.reason) pushUnclear(unclear, heard, feet.reason);
@@ -1299,6 +1582,23 @@ function validateFill(raw, ctx, transcript) {
     ...splitNotes(input.customerNote, input.officeNote, transcript, unclear),
     unclear: unclear.slice(0, CAPS.unclear),
   };
+}
+
+// The report flow's product read: the same product rules, and only the model's
+// own Checks that are about a product. The visit fields and notes the model also
+// returns are not this reader's (the report flow reads them from the note itself).
+const PRODUCT_UNCLEAR_REASONS = new Set(['ambiguous_product', 'unknown_product', 'unclear_amount', 'unclear_unit']);
+function validateProductFill(raw, ctx, transcript) {
+  const input = raw && typeof raw === 'object' ? raw : {};
+  const normTranscript = norm(transcript);
+  const unclear = [];
+  const products = validateProducts(input.products, ctx, normTranscript, unclear, transcript, transcriptWorld(ctx, transcript));
+  for (const item of Array.isArray(input.unclear) ? input.unclear : []) {
+    if (item && typeof item === 'object' && PRODUCT_UNCLEAR_REASONS.has(item.reason) && heardInTranscript(item.heard, normTranscript)) {
+      pushUnclear(unclear, item.heard, item.reason);
+    }
+  }
+  return { products, unclear: unclear.slice(0, CAPS.unclear) };
 }
 
 // The customer/office split, enforced here rather than trusted to the model.
@@ -1460,21 +1760,12 @@ function fillCounts(fill) {
 }
 
 /**
- * Fill one sheet from a transcript.
- * Returns { ok: true, fill } or { ok: false, reason }:
- *   unknown_sheet | bad_transcript | not_found | not_pest_re_service |
- *   not_eligible | catalog_unavailable | model_failed.
+ * The fill for words already in hand, against a loaded sheet context
+ * (`validate`: the whole sheet's fill, or the report flow's products only).
+ * Returns { ok: true, fill } or { ok: false, reason: catalog_unavailable | model_failed }.
  * `call` is injectable for tests (defaults to the shared Anthropic adapter).
  */
-async function voiceFill({ serviceId, sheet, transcript, knex = db, call = callAnthropic }) {
-  if (sheet !== SHEET) return { ok: false, reason: 'unknown_sheet' };
-  const text = typeof transcript === 'string' ? transcript.trim() : '';
-  if (!text || text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'bad_transcript' };
-
-  const loaded = await loadPestReserviceContext(serviceId, knex);
-  if (!loaded.ok) return { ok: false, reason: loaded.reason };
-  const { context } = loaded;
-
+async function fillFromContext(context, text, call, validate = validateFill) {
   let result;
   try {
     result = await call({
@@ -1498,7 +1789,114 @@ async function voiceFill({ serviceId, sheet, transcript, knex = db, call = callA
     logger.warn(`[voice-fill] model failed: ${result?.reason || 'no_json'}`);
     return { ok: false, reason: 'model_failed' };
   }
-  return { ok: true, fill: validateFill(result.json, context, text) };
+  return { ok: true, fill: validate(result.json, context, text) };
+}
+
+// ── Voice fill from a recorded clip ───────────────────────────────────────
+// Owner ruling 2026-10-03 ("always our transcriber"): the mic records and the
+// clip is transcribed HERE, primed with this sheet's own product names, on every
+// device. Measured on 32 recorded visits: the browser's speech recognition
+// filled 6 forms perfectly, an unprimed transcriber 9, this route's setup 19-20.
+// The words exist only inside this call: never logged, stored or returned.
+// Registered as lane voice_fill_transcription (model-switchboard.js) and listed
+// with the other transcription selectors in config/models.js. Read at call time.
+const VOICE_FILL_TRANSCRIBE_MODEL = 'gpt-transcribe';
+const TRANSCRIBE_SHEET_WORDS = 'perimeter, foundation, spot treatment, bait placement, granules, lanai, linear feet, re-service, no wait, same as last time';
+const TRANSCRIBE_PROMPT_MAX_CHARS = 1800;
+
+/** The transcriber's hint: the sheet's product names and aliases, then its own words. */
+function transcriptionPrompt(ctx) {
+  const names = [...new Set(ctx.products.flatMap((product) => [product.name, ...product.aliases]).map((name) => String(name).trim()).filter(Boolean))];
+  let list = '';
+  for (const name of names) {
+    if (list.length + name.length + 2 > TRANSCRIBE_PROMPT_MAX_CHARS) break;
+    list += list ? `, ${name}` : name;
+  }
+  const trade = ctx.sheet === 'lawn_reservice' ? 'lawn care' : 'pest control';
+  return `A ${trade} technician describing a completed visit. Product names that may be said: ${list}. Other words that may be said: ${ctx.sheetWords || TRANSCRIBE_SHEET_WORDS}.`;
+}
+
+/**
+ * A recorded clip as words, heard with the sheet's own product names.
+ * Returns { ok: true, text } or { ok: false, reason: transcription_failed |
+ * transcription_unreliable | nothing_heard }.
+ */
+async function hearClip(context, { audio, mimeType, filename, durationSeconds = 0 }, transcribe) {
+  const { transcribeWithOpenAI, isImplausibleTranscript } = require('./call-recording-processor');
+  let heard;
+  try {
+    heard = await (transcribe || transcribeWithOpenAI)(audio, {
+      model: process.env.OPENAI_VOICE_FILL_TRANSCRIBE_MODEL || VOICE_FILL_TRANSCRIBE_MODEL,
+      prompt: transcriptionPrompt(context),
+      mimeType,
+      filename,
+      // silence is an answer (nothing_heard), not a provider failure
+      emptyOk: true,
+    });
+  } catch (err) {
+    logger.warn(`[voice-fill] transcription threw: ${err?.name || 'Error'}`);
+    return { ok: false, reason: 'transcription_failed' };
+  }
+  if (!heard) return { ok: false, reason: 'transcription_failed' };
+  const text = String(heard.text || '').trim();
+  // Same guard as field dictation: far more characters than the clip's seconds can
+  // hold is a fabricated transcript. Unknown duration fails open.
+  if (isImplausibleTranscript(text, Number(durationSeconds) || 0)) return { ok: false, reason: 'transcription_unreliable' };
+  return text ? { ok: true, text } : { ok: false, reason: 'nothing_heard' };
+}
+
+/**
+ * Fill one sheet from a recorded clip.
+ * Returns { ok: true, fill, chars } or { ok: false, reason }: the context and
+ * model reasons, plus transcription_failed | transcription_unreliable | nothing_heard |
+ * clip_too_long.
+ * `transcribe` is injectable for tests (defaults to the shared OpenAI transcriber).
+ */
+async function voiceFillFromClip({ serviceId, sheet, audio, mimeType, filename, durationSeconds = 0, knex = db, call = callAnthropic, transcribe = null }) {
+  if (sheet !== SHEET) return { ok: false, reason: 'unknown_sheet' };
+  const loaded = await loadPestReserviceContext(serviceId, knex);
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  const heard = await hearClip(loaded.context, { audio, mimeType, filename, durationSeconds }, transcribe);
+  if (!heard.ok) return heard;
+  // Never cut: a correction near the end would be lost. Too long is refused, and
+  // the tech says it in shorter pieces.
+  if (heard.text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'clip_too_long' };
+  const result = await fillFromContext(loaded.context, heard.text, call);
+  return result.ok ? { ...result, chars: heard.text.length } : result;
+}
+
+// ── The note readers (the report flow, and the lawn re-service sheet) ─────
+// Those sheets' note is the tech's own words, on the screen and editable, so the
+// mic answers the words (`transcribeVisitClip`) and the products are read from the
+// note (`voiceProductsFromNote`): when the report is written on the report flow,
+// on the tech's tap on the lawn sheet.
+
+/**
+ * The report flow's note mic: one clip as words for the note box.
+ * Returns { ok: true, text } or { ok: false, reason }: the context reasons plus
+ * transcription_failed | transcription_unreliable | nothing_heard.
+ */
+async function transcribeVisitClip({ serviceId, audio, mimeType, filename, durationSeconds = 0, knex = db, transcribe = null }) {
+  const loaded = await loadNoteContext(serviceId, knex);
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  return hearClip(loaded.context, { audio, mimeType, filename, durationSeconds }, transcribe);
+}
+
+/**
+ * The products a note names, as taps for the report flow's product rows.
+ * Returns { ok: true, fill: { products, unclear }, chars } or { ok: false, reason }:
+ * the context and model reasons, plus note_too_long. An empty note is an empty fill
+ * and no model call.
+ */
+async function voiceProductsFromNote({ serviceId, note, knex = db, call = callAnthropic }) {
+  const text = typeof note === 'string' ? note.trim() : '';
+  const loaded = await loadNoteContext(serviceId, knex);
+  if (!loaded.ok) return { ok: false, reason: loaded.reason };
+  if (!text) return { ok: true, fill: { products: [], unclear: [] }, chars: 0 };
+  // Never cut: a correction near the end would be lost.
+  if (text.length > MAX_TRANSCRIPT_CHARS) return { ok: false, reason: 'note_too_long' };
+  const result = await fillFromContext(loaded.context, text, call, validateProductFill);
+  return result.ok ? { ...result, chars: text.length } : result;
 }
 
 module.exports = {
@@ -1508,6 +1906,7 @@ module.exports = {
   MAX_TRANSCRIPT_CHARS,
   CAPS,
   SHEET,
+  SPECIALTY_SHEET_PRODUCT_METHODS,
   PEST_SHEET_PESTS,
   PEST_SHEET_AREAS,
   PEST_SHEET_ACTIVITY,
@@ -1516,9 +1915,15 @@ module.exports = {
   UNITS_BY_MEASURE,
   productMeasure,
   loadPestReserviceContext,
+  loadPestContext,
+  loadLawnReserviceContext,
   buildSchema,
   buildPrompt,
   validateFill,
+  validateProductFill,
   fillCounts,
-  voiceFill,
+  voiceFillFromClip,
+  transcribeVisitClip,
+  voiceProductsFromNote,
+  transcriptionPrompt,
 };

@@ -192,3 +192,23 @@ test('gate on: the send key and categories are unchanged', async () => {
   expect(args.idempotencyKey).toBe('estimate_followup_engage_viewed_gone_quiet_72h:est-1');
   expect(args.categories).toEqual(['estimate_followup', 'estimate_followup_engage_viewed_gone_quiet_72h']);
 });
+
+// Owner 2026-10-04 (accept-card phone capture): a phone the customer typed on the estimate page gets no automated
+// text before the estimate is accepted. The email half still goes.
+describe('a typed phone gets no follow-up text before acceptance', () => {
+  const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+  const typed = (overrides = {}) => est({ customer_phone: '+19415550142', customer_phone_typed: '+19415550142', status: 'viewed', ...overrides });
+
+  test('typed + not accepted: no SMS, the email still sends', async () => {
+    await _private.sendDualChannel(typed(), { sms: 'Still thinking it over?', email: emailLeg() });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('an office-supplied phone, or the same estimate once accepted, texts as before', async () => {
+    await _private.sendDualChannel(est({ customer_phone: '+19415550142', status: 'viewed' }), { sms: 'Still thinking it over?' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    await _private.sendDualChannel(typed({ status: 'accepted' }), { sms: 'Thanks!' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+  });
+});

@@ -3146,3 +3146,140 @@ entry) are left as written: read them as pointing at the paragraph of the
 same name in `docs/gates-and-env.md`. The catalogue covers documented
 variables only; a variable with no entry may still exist in
 `server/config/feature-gates.js`.
+
+## 2026-10-03 — The field workspace (`/admin/today`) takes the Waves Admin look
+
+Owner-approved mockup (2026-10-03, "approve the look"): the field workspace
+behind the `tech-field-workspace` flag drops its navy/Montserrat palette for
+the admin one: the admin shell's theme tokens, Roboto, weights 400/500,
+UPPERCASE 11px button and section labels, hairline borders, 4px/6px radii,
+one dark primary button per view. `tech-field.css` carries it; the legacy
+dark forms inside `.tf-existing` keep their palette until their own slice.
+Visual only: same data, same actions. On a computer the Today page splits
+into two columns (up next + route; follow-through). The flag-off legacy page
+is unchanged.
+
+## 2026-10-03 — Schedule changes live inside the Today page; the time clock moves to Today
+
+Owner rulings 2026-10-03: in the field workspace, schedule changes
+(`visit_*` cards) render inside the Today overview instead of floating over
+it: a change touching today or tomorrow keeps its own card, the rest fold
+into one summary with Review and Clear all. Tools, More and an open visit
+keep the floating cards (they do not render the inline feed). The time clock
+moves from More to Today (`TechTimeTrackingCard variant="field"`).
+
+## 2026-10-03 — The visit sheets and the remaining field cards take the Waves Admin look
+
+Owner 2026-10-03 (phone screenshots): the "Complete lawn visit" sheet and the
+field notices still drew the old navy tech-portal palette inside Waves Admin.
+Slice B of the field-workspace look: `styles/tech-workflow.css` (the Fast
+Complete, recap, photo and trace sheets) is now the admin look, self-contained
+(the sheets portal onto `<body>`, outside `.tech-field`, and open from
+Dispatch and Schedule too, so it redeclares the admin tokens with their values
+as fallbacks): white sheet, stone page ground, hairline borders, 4px/6px
+radii, Roboto at 400/500, one dark ink primary action, pressed choices filled
+ink, amber for a stock warning, red only for an over-label-max or error.
+The trace modal (`TechTreatmentZoneModal`) drops its dark appearance for the
+admin "M" one. The notice cards, assistant bar, recap capture, flag-lead
+modal use the same ink-and-stone palette. The inline-styled panels that sit
+straight on the page (visit brief, visual notes, the three tool pages) read
+`--tfx-*` tokens that only `.tech-field` defines, so the flag-off page keeps its
+palette. `.tf-existing` is no longer a dark box. The 11px labels of the Today
+page stay 14px in the sheets (the portal-brand gate bans smaller text in
+`tech-workflow.css`). Visual only: same data, same actions.
+
+## 2026-10-03 — The old dark Today page is deleted; the `tech-field-workspace` flag is gone
+
+Owner 2026-10-03 (phone screenshots of the navy page inside Waves Admin, "this
+should have been deprecated in favor of the Waves Admin UI"; "ok go"): the
+per-user `tech-field-workspace` flag and its flag-off page are removed.
+`/admin/today` renders the field workspace for every staff login, with no
+flag read (so a failed flag fetch in a dead zone can no longer fall back to
+the old page). On a phone the admin top bar and tab bar always step aside on
+`/admin/today`; the workspace's own Menu tab leads back to the rest of Waves
+Admin. One behavior difference from the deleted page: it listed completed
+visits and reopened a completed pest visit in the recap editor from Project
+Report; the workspace offers no report for a completed visit (its existing
+rule), so that edit is no longer on the Today page. Existing rows in
+`user_feature_flags` for the key are inert.
+
+## 2026-10-04 — The technician can change the four lawn scores until Confirm
+
+Owner 2026-10-04 (phone screenshot of Complete service → Lawn assessment):
+"the lawn assessment portion should be editable by the tech after it
+renders". This replaces the 2026-09-24 ruling that a score the AI read was
+read-only. In `LawnAssessmentCompletionBlock` (the full completion form and
+the lawn Fast Complete sheet share it) Density, Weed control, Color and
+Condition are number fields after Analyze, pre-filled with the saved score,
+and lock to text when the assessment is confirmed. A changed or emptied score
+shows the AI's own read under it ("AI 80"); an emptied field posts null, which
+the server reads as "back to the AI score". The Fungus control and Thatch
+condition tiles are gone (owner: "four only, drop the two tiles"): when the AI
+left one blank, `/admin/lawn-assessment/confirm` writes its "no finding" score
+(Fungus 95, Thatch 85, or the Condition score when that is higher) on the
+save that completes the row, and the run's
+`reconciliation.confirmation.synthetic_sub_scores` names those keys. It is
+never a low Condition: the report and the tips read a low sub-score as
+evidence of disease or thatch, and Condition may be low for drought or
+insects. One more case: when the technician
+enters Condition above a Fungus or Thatch the AI read, that sub-score is
+raised to it on the completing save, so the report and the tips never cite a
+low sub-score against the correction. Neither applies to a sub-score the
+client posted (the standalone page shows those fields), nor to a legacy row
+whose Condition is only the 95 fallback of no stressor signal at all.
+Server rule (`resolveConfirmScores`, and `legacyConfirmFinalScores` for rows
+with no run): posted number, then the saved row value, then the AI read. The
+run's `scores_adjusted` snapshot stays the AI read, so calibration records the
+technician-versus-AI difference. The standalone admin Lawn assessment page
+(`LawnAssessmentPanel`) is unchanged.
+
+## 2026-10-04 — The last navy field pieces take the Waves Admin look
+
+Owner 2026-10-04 ("slice 3", "ok go"): the timecard sign-off card, the Quick
+Move sheet and the Project Report service picker (all in `TechHomePage.jsx`)
+move from the tech-portal navy palette to the admin one: white surface,
+hairline borders, 4px/6px radii, weight 500, 14px text, one ink primary
+button, amber for overtime and a 50%+ rain chance, red only for an error.
+The `--tfx-*` palettes in the visit brief, visual notes and the three tool
+pages keep their tokens but fall back to the same light values (the page
+that needed the navy fallbacks was deleted). Visual only: same data, same
+actions.
+
+## 2026-10-05 — `/admin/today` uses the normal Waves Admin bars, and notices never cover the page
+
+Owner 2026-10-05 (phone screenshots): "the floating notice cards cover the
+whole screen and the technician cannot scroll", and "the main bottom icons
+should stay, this lane should follow the other sections UI protocol". Two
+changes, both visual and placement only: same data, same polling, same
+"Got it" and dismiss calls, same auto-dismiss timers.
+
+1. Admin chrome. On a phone `/admin/today` keeps the admin top bar and the
+   admin bottom tab bar, with the normal main padding, like `/admin/schedule`.
+   The layout state that hid them is gone. The workspace drops its own
+   "waves tech" header and its fixed Today / Tools / More / Menu bar. A
+   page-level tab row at the top of the workspace (Today, Tools, More) takes
+   their place, as links that keep `?visit=` and hold while a save is in
+   flight. There is no Menu link: the admin bar is there. The page scrolls in
+   the admin main area. The admin top bar, tab bar, sidebar and palette still
+   hold while the workspace's navigation lock is busy.
+2. Notices. `GeofenceArrivalPrompt` takes a `placement`. On the Today overview
+   (no open visit) every card renders in the page flow at the top: no fixed
+   position, no overlay, no height cap; the existing card caps and "N more
+   notices" lines stay. On Tools, More and an open visit only the
+   time-critical arrival cards still float (arrival reminder, arrival
+   selector, timer started, timer stopped). Every other card (visit, photo,
+   text, tracking, open-visits nudge, storm) waits on Today, stays unread, and
+   one in-page line at the top, "N notices on Today", links there. Review on a
+   storm card still opens Quick Move, on Today.
+
+## 2026-10-05 — The open visit screen follows the Waves Admin look
+
+Owner 2026-10-05: "fix the visit screen ... also make sure you're following
+the admin UI for the headers, font etc". On `/admin/today?visit=…` the visit
+brief no longer repeats the address or adds a second Navigate button beside
+the visit's Directions; Call, Text, Report, Photos, Zone, Outcome and the flag
+button use the admin button look with line icons instead of emoji, and the
+flag button reads "Flag opportunity". Section labels (Access, Quoted, Money,
+Actions) are 14px / 500 sentence case like an admin card title, and amber
+stays only on a real warning (no card on file). The install hint card takes
+the admin palette. Visual only: same data, same actions.

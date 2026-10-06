@@ -129,6 +129,8 @@ function roundedTreeShrubTierQuote(v1Result = {}, tsLI = {}, tier = 'standard') 
     // ...and the large palms among them, so every cadence row prices the
     // same canopies the selected row did.
     largePalmCount: tsLI.palmCountSource === 'service_line' ? tsLI.largePalmCount : undefined,
+    // A lookup-sourced count nets the density trees the same way on every row.
+    palmCountFromLookup: tsLI.palmCountFromLookup === true,
     // The selected line's quote-time knob snapshot governs every alternate
     // cadence row too — otherwise a post-send admin flip would reprice the
     // rows the customer can still switch to.
@@ -666,6 +668,7 @@ function mapV1ToLegacyShape(v1Result) {
       annualAfterCredits: palmAnnualAfterCredits,
       monthlyAfterCredits: palmMonthlyAfterCredits,
       treatmentLabel: palmLI.treatmentLabel,
+      ...(palmLI.scopeNote ? { scopeNote: palmLI.scopeNote } : {}),
       measurements: palmLI.measurements,
       palmCountSource: palmLI.palmCountSource,
       palmCountWasManualOverride: palmLI.palmCountWasManualOverride,

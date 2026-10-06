@@ -21,7 +21,7 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
-const { condoUnitFolioLive } = require('../../config/feature-gates');
+const { condoUnitFolioLive, lookupBusinessIdentityLive, commercialSuiteSizingLive } = require('../../config/feature-gates');
 const { lookupCountyParcelByPoint, unitParcelFromAggregate, unitParcelFromAggregateRow, normalizeUnitId, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
 const { routeSpellingVariants, terminalSuffixVariant } = require('./route-spellings');
 const { USPS_STREET_SUFFIXES, STREET_SUFFIX_CANON_OVERRIDES } = require('./usps-street-suffixes');
@@ -1975,6 +1975,83 @@ function condoUnitFolioEnabled() {
   return typeof condoUnitFolioLive === 'function' && condoUnitFolioLive() === true;
 }
 
+// Parent parcel (address-match PR 6, GATE_LOOKUP_BUSINESS_IDENTITY, off
+// unless exactly 'true', read per call; typeof guard as above). A storefront
+// with its own street number inside a plaza parcel fails the situs guard and
+// its parcel is dropped — correctly: the plaza's building and lot are not
+// the storefront's. But WHICH parcel the point sits in is still a fact: the
+// storefront is one part of a larger commercial property. That fact alone
+// is kept, as context, when every condition holds:
+//  - the geocode is ROOFTOP (an interpolated point is a guess along the street);
+//  - the point sits at least 5 m inside the parcel line (a point hugging the
+//    line may belong to the neighbor);
+//  - the parcel is a store / office / restaurant-type commercial parcel (DOR
+//    majors 11–27) — never an apartment, condo or other residential master
+//    parcel, which the situs guard exists to drop (the Luxe Ave shape);
+//  - the typed address names no dwelling unit.
+// Only identifying fields are kept. The parcel's lot and building figures
+// never ride along, so they cannot reach a size or lot input.
+const PARENT_PARCEL_MIN_EDGE_M = 5;
+const PARENT_PARCEL_DOR_MIN = 11;
+const PARENT_PARCEL_DOR_MAX = 27;
+
+// Both gates, like the business-identity leg that reads the context
+// (GATE_LOOKUP_BUSINESS_IDENTITY needs GATE_COMMERCIAL_SUITE_SIZING).
+function parentParcelEnabled() {
+  return typeof lookupBusinessIdentityLive === 'function' && lookupBusinessIdentityLive() === true
+    && typeof commercialSuiteSizingLive === 'function' && commercialSuiteSizingLive() === true;
+}
+
+// Kept by EVERY live lookup while the gates are on, whoever asked: the cache
+// row is shared by all callers, so what it holds must not depend on which
+// caller filled it. Only the opted-in callers (the admin estimate tool's
+// lookup, the estimator engine) ever read it; the route strips it from every
+// other caller's response (property-lookup-v2.js).
+// parcel-gis helpers behind typeof guards (suites that mock the module
+// without them read "layer on" / "not inside").
+function statewideParcelLayerDisabled() {
+  const fn = require('./parcel-gis').isParcelGisDisabled;
+  return typeof fn === 'function' && fn() === true;
+}
+
+// The county layer's own kill switch (county-parcel-gis.js isDisabled reads
+// the same variable the same way): off, it returns null without asking.
+function countyParcelLayerDisabled() {
+  return process.env.COUNTY_PARCEL_GIS_DISABLED === '1' || process.env.COUNTY_PARCEL_GIS_DISABLED === 'true';
+}
+
+function pointInsideParcelPolygon(polygon, lng, lat) {
+  const fn = require('./parcel-gis').pointInsidePolygon;
+  return typeof fn === 'function' && fn(polygon, lng, lat) === true;
+}
+
+function parentParcelContext(parcel, { address, gisPrecision, point }) {
+  if (!parentParcelEnabled() || !parcel || gisPrecision !== 'rooftop') return null;
+  // The shared unit-address predicate: it sets a building designator aside
+  // ("Bldg #2" is not a unit) and catches a bare trailing unit ("… Dr 201").
+  if (addressMayNameUnit(address)) return null;
+  const major = parseInt(dorMajorCategory(parcel.dorUseCode), 10);
+  if (!Number.isFinite(major) || major < PARENT_PARCEL_DOR_MIN || major > PARENT_PARCEL_DOR_MAX) return null;
+  const { pointToPolygonEdgeMeters } = require('./parcel-gis');
+  if (typeof pointToPolygonEdgeMeters !== 'function') return null;
+  // Inside first: the county layer can hand back a nearby parcel that does
+  // not contain the point, and the edge distance alone is unsigned — 20 m
+  // OUTSIDE the line (or inside a hole in the parcel) would read the same as
+  // 20 m inside it.
+  if (!pointInsideParcelPolygon(parcel.polygon, Number(point?.lng), Number(point?.lat))) return null;
+  const edgeM = pointToPolygonEdgeMeters(parcel.polygon, Number(point?.lng), Number(point?.lat));
+  if (edgeM === null || edgeM < PARENT_PARCEL_MIN_EDGE_M) return null;
+  return {
+    parcelId: parcel.parcelId || null,
+    county: parcel.county || null,
+    situsAddress: parcel.situsAddress || null,
+    dorUseCode: parcel.dorUseCode || null,
+    landUseDescription: parcel.landUseDescription || null,
+    precision: gisPrecision,
+    edgeDistanceM: Math.round(edgeM),
+  };
+}
+
 const TYPED_DWELLING_UNIT_RE = /(?:\b(?:APT|APARTMENT|UNIT)\b\.?\s*#?\s*|#\s*)([A-Z0-9-]+)/i;
 const TYPED_BUILDING_RE = /\b(?:BLDG|BUILDING)\b\.?\s*#?\s*([A-Z0-9-]+)/i;
 // Designators that are not a dwelling unit: a suite is commercial, and a
@@ -2242,9 +2319,10 @@ function aiRecordHouseNumberMismatch(record, typedAddress) {
 // out-param; no network. Returns the surviving parcel (possibly a unit parcel
 // resolved out of an aggregate), the park marker when one survives, and
 // dropReason (null when the parcel was kept or there was none to judge).
-function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecision, diag = null }) {
+function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecision, diag = null, point = null }) {
   let parcel = inputParcel;
   let parkParcelSignal = null;
+  let parentParcel = null;
   let dropReason = null;
   if (parcel && isMobileHomeParkParcel(parcel)) {
     // Land-lease mobile-home park master parcel: the polygon genuinely
@@ -2312,6 +2390,9 @@ function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecisio
     // would all describe the wrong building — and let the typed-address
     // search below decide. No address values in the log (PII rule).
     logger.warn('[county-property] GIS parcel situs house number disagrees with typed address — degrading to address search');
+    // The parcel's facts are dropped; which commercial parcel the point
+    // sits in may still be kept as context (parentParcelContext).
+    parentParcel = parentParcelContext(parcel, { address, gisPrecision, point });
     parcel = null;
     dropReason = 'situs_house_number_mismatch';
   } else if (parcel && gisPrecision === 'interpolated'
@@ -2324,7 +2405,7 @@ function applyGisParcelGuards(inputParcel, { searchAddress, address, gisPrecisio
     parcel = null;
     dropReason = 'interpolated_unconfirmed';
   }
-  return { parcel, parkParcelSignal, dropReason };
+  return { parcel, parkParcelSignal, dropReason, parentParcel };
 }
 
 // Optional `diag` out-param: when supplied, the trio records which AI legs
@@ -2349,6 +2430,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
   // failure mode degrades to the address-search path below.
   let parcel = null;
   let parkParcelSignal = null;
+  let parentParcel = null;
   const gisPrecision = parcelGisPrecision(geoContext);
   // Diag helper shared by county and AI legs (see the function comment):
   // a null result after ~the leg's whole configured timeout is the only
@@ -2364,16 +2446,39 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
       return value;
     });
   };
+  // No usable geocode point: the check cannot apply to this address at all,
+  // which is a definitive outcome too.
+  if (diag && !gisPrecision) diag.parentParcelCheckRan = true;
   if (gisPrecision) {
     const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyMs());
     // County roll layer first: fresher than the annual FDOR statewide roll (new
     // plats appear sooner) and it carries the land-use description that splits
     // paired villas / condos from detached homes. FDOR statewide is the
     // fallback, within whatever county budget remains.
-    parcel = await diagTimedLeg('county_gis', gisTimeoutMs, lookupCountyParcelByPoint(geoContext.lat, geoContext.lng, {
+    // Whether the point lookup gave a definitive answer (a parcel, or a clean
+    // "none here"). A leg that threw, ran out its timeout, or was skipped for
+    // budget is NOT an answer — the parent-parcel check did not run, and the
+    // cached row must stay re-checkable (property-lookup-v2.js).
+    let pointLookupFailed = false;
+    const pointLeg = (timeoutMs, promise) => {
+      const legT0 = Date.now();
+      return promise
+        .catch(() => { pointLookupFailed = true; return null; })
+        .then((value) => {
+          if (value === null && Number(timeoutMs) > 0 && Date.now() - legT0 >= Number(timeoutMs) - 250) pointLookupFailed = true;
+          return value;
+        });
+    };
+    // The county layer reports its own swallowed query errors here.
+    const pointDiag = { errors: [] };
+    parcel = await diagTimedLeg('county_gis', gisTimeoutMs, pointLeg(gisTimeoutMs, lookupCountyParcelByPoint(geoContext.lat, geoContext.lng, {
       county: geoContext.county,
       timeoutMs: gisTimeoutMs,
-    }).catch(() => null));
+      diag: pointDiag,
+    })));
+    // A query error, or the county layer switched off: skipped, not a clean
+    // "no parcel" (re-enabling it must be able to retry this address).
+    if (pointDiag.errors.length || countyParcelLayerDisabled()) pointLookupFailed = true;
     // The county roll answered for this point (condo unit folio: only then is
     // "no stacked building here" a definitive, cacheable outcome — a failed or
     // timed-out leg also reads null and must stay retryable).
@@ -2381,13 +2486,52 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
     if (!parcel) {
       const fdorTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyMs());
       if (fdorTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS) {
-        parcel = await diagTimedLeg('fdor_gis', fdorTimeoutMs, lookupParcelByPoint(geoContext.lat, geoContext.lng, { timeoutMs: fdorTimeoutMs })
-          .catch(() => null));
+        // A county-layer failure stays a failure unless the statewide layer
+        // actually finds the parcel (checked below).
+        parcel = await diagTimedLeg('fdor_gis', fdorTimeoutMs, pointLeg(fdorTimeoutMs, lookupParcelByPoint(geoContext.lat, geoContext.lng, {
+          timeoutMs: fdorTimeoutMs,
+          // The statewide layer swallows its own errors by default; here a
+          // failed query must read as a failure, not as "no parcel".
+          rethrowErrors: true,
+        })));
+      } else {
+        pointLookupFailed = true;
       }
+      // The statewide layer switched off (PARCEL_GIS_DISABLED) returns null
+      // without asking anyone: skipped, not a clean "no parcel".
+      if (!parcel && statewideParcelLayerDisabled()) pointLookupFailed = true;
     }
-    const guarded = applyGisParcelGuards(parcel, { searchAddress, address, gisPrecision, diag });
+    // A parcel in hand was examined, whichever layer found it: a county-layer
+    // failure the statewide layer recovered from is a completed check.
+    if (parcel) pointLookupFailed = false;
+    const point = { lat: geoContext.lat, lng: geoContext.lng };
+    // The county layer can hand back the nearest parcel when none contains
+    // the point. The existing guards judge it as before; for the parent
+    // parcel it is not the parcel the point sits in.
+    const countyParcelMissesPoint = Boolean(parcel) && Array.isArray(parcel.polygon)
+      && !pointInsideParcelPolygon(parcel.polygon, point.lng, point.lat);
+    const guarded = applyGisParcelGuards(parcel, {
+      searchAddress, address, gisPrecision, diag, point,
+    });
     parcel = guarded.parcel;
     parkParcelSignal = guarded.parkParcelSignal;
+    parentParcel = guarded.parentParcel;
+    // That nearest-parcel case, dropped by the situs guard: the statewide
+    // layer is asked which parcel DOES contain the point, for the parent
+    // context only (the facts stay dropped either way).
+    if (options.retainParentParcel === true && parentParcelEnabled() && gisPrecision === 'rooftop'
+      && countyParcelMissesPoint && guarded.dropReason === 'situs_house_number_mismatch' && !parentParcel) {
+      const parentTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyMs());
+      if (parentTimeoutMs >= COUNTY_LOOKUP_MIN_REMAINING_MS && !statewideParcelLayerDisabled()) {
+        const statewide = await pointLeg(parentTimeoutMs, lookupParcelByPoint(point.lat, point.lng, { timeoutMs: parentTimeoutMs, rethrowErrors: true }));
+        if (statewide && situsHouseNumberMismatch(searchAddress, statewide.situsAddress)) {
+          parentParcel = parentParcelContext(statewide, { address, gisPrecision, point });
+        }
+      } else {
+        pointLookupFailed = true;
+      }
+    }
+    if (diag) diag.parentParcelCheckRan = !pointLookupFailed;
   }
 
   // County record: keyed by parcel ID when GIS matched, else (or on a
@@ -2474,6 +2618,26 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
   ].filter(Boolean);
 
   if (!records.length) {
+    // Opted-in callers only: for everyone else a lookup with no record stays
+    // exactly the null it was.
+    if (!parkParcelSignal && parentParcel && options.commercialSuiteSizing === true && options.retainParentParcel === true) {
+      // Every fact provider failed or found nothing — the usual state of an
+      // unlisted storefront, the case the parent parcel exists for. Ship a
+      // facts-free record carrying only that context. Its source stays the
+      // shaped default: the roll did NOT vouch for this address, so it must
+      // not read as county evidence.
+      const contextOnly = shapeAsPropertyRecord(
+        { confidence: 'low', county: parentParcel.county || geoContext?.county || '' },
+        searchAddress,
+        'county_gis',
+      );
+      contextOnly._parentParcel = parentParcel;
+      // Every provider failing is an outage or a miss, not an answer: the
+      // lookup must stay retryable, so this record is never cached
+      // (lookup-cache.js saveLookup).
+      contextOnly._contextOnly = true;
+      return contextOnly;
+    }
     if (!parkParcelSignal) return null;
     // Every fact provider failed or timed out, but the GIS point positively
     // identified a park — returning null here would collapse to the generic
@@ -2500,6 +2664,12 @@ async function lookupPropertyFromAITrio(address, geoContext = null, diag = null,
   // on that record. A slim multi-situs county record already carries its
   // own (address-confirmed) marker via the preserve above.
   if (!countyRecord) stampMultiSitusParcelSignal(merged, parkParcelSignal);
+  // Same rule for the parent parcel: context only when the roll did not
+  // resolve the typed address on a parcel of its own.
+  // Only for a caller that asked to keep it (the property-lookup route, for
+  // its shared cache row). A direct caller of this function gets the record
+  // it always got.
+  if (!countyRecord && parentParcel && options.retainParentParcel === true) merged._parentParcel = parentParcel;
   return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
 }
 
@@ -5711,7 +5881,20 @@ function summarizeProviderError(err) {
   };
 }
 
+// The county-roll MATCHER's version (address-match round 1, PR 3). A cached
+// roll-miss row (no county evidence) records the matcher that failed to
+// place it; when the matcher changes — a new route alias, a suffix spelling,
+// a guard, a new county source — the row is a stale failure and the next
+// lookup re-runs instead of waiting out the 21-day roll-miss TTL. Bump this
+// string in the PR that changes the matcher; a cached hit with county
+// evidence is never affected, and tech-verified overrides live on the same
+// row and survive (they are re-applied to the live result).
+//   2026-10-03  route aliases (#5641), USPS suffix table / Charlotte situs
+//               ZIP / Florida-only geocode (#5661), multi-situs cell split
+const ROLL_MATCHER_VERSION = '2026-10-03';
+
 module.exports = {
+  ROLL_MATCHER_VERSION,
   // Lot values from the county parsers are capped at this bound —
   // consumers combining them with UNCAPPED figures (e.g. _buildings gross
   // areas) must treat an at-cap lot as unusable for geometry math.

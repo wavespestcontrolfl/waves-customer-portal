@@ -36,9 +36,12 @@ function offerLedgerLive() {
   return gateEnvValue('GATE_SMS_OFFER_LEDGER');
 }
 
+// The canonical identity of a US number (its ten digits). An international
+// number is not recorded: its last ten digits could collide with a US
+// number, and the decide step would then mix two conversations.
 function phoneLast10(value) {
-  const digits = String(value || '').replace(/\D/g, '');
-  return digits.length >= 10 ? digits.slice(-10) : null;
+  const key = require('../utils/phone').phoneIdentityKey(String(value || ''));
+  return key && !key.startsWith('+') ? key : null;
 }
 
 function parseJson(value) {
@@ -159,14 +162,17 @@ function resolveSlot(pair, sentAt, dayLabel) {
 }
 
 /**
- * Rebuild one phone+kind chain of standing offers (open or superseded; any
+ * Rebuild one phone+kind+line chain of standing offers (open or superseded; any
  * later status, such as accepted, is final and left alone) in send order.
  * Demotes before promoting so the one-open index never sees two open rows.
  * Returns how many previously open rows were demoted and the open row's id.
  */
-async function relinkOfferChain(trx, phone, kind) {
+async function relinkOfferChain(trx, phone, kind, line = null) {
   const chain = await trx('sms_offers')
     .where({ phone_last10: phone, kind })
+    // Per Waves line: a same-kind offer from another line is its own chain
+    // (sms_offers_one_open_per_phone_kind_line).
+    .whereRaw("COALESCE(waves_line, '') = ?", [line || ''])
     .whereIn('status', ['open', 'superseded'])
     .orderBy([{ column: 'sent_at', order: 'asc' }, { column: 'id', order: 'asc' }])
     .select('id', 'status', 'sent_at', 'superseded_by', 'closed_at');
@@ -190,12 +196,54 @@ async function relinkOfferChain(trx, phone, kind) {
   return { demoted, openId: last ? last.id : null };
 }
 
+function hhmmOf(value) {
+  const m = value == null ? null : String(value).match(/^(\d{1,2}):(\d{2})/);
+  return m ? `${String(Number(m[1])).padStart(2, '0')}:${m[2]}` : null;
+}
+
+function lineIdentity(value) {
+  return value ? require('../utils/phone').phoneIdentityKey(String(value)) : null;
+}
+
+/**
+ * Read by the send step just BEFORE the provider handoff, for a decision send
+ * whose offer is a visit move: the visit as the offer describes it. Gate off,
+ * or anything else, null. Never throws (a miss only means the decide step will
+ * refuse that offer's accepts).
+ */
+async function captureOfferVisitSnapshot({ agentDecisionId, dbh = db } = {}) {
+  if (!agentDecisionId || !offerLedgerLive()) return null;
+  try {
+    const decision = await dbh('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot');
+    const lookup = parseJson(decision?.input_snapshot)?.open_times_snapshot?.lookup || {};
+    const source = lookup.source || (lookup.scheduledServiceId ? 'scheduler' : null);
+    if (source !== 'scheduler' || !lookup.scheduledServiceId) return null;
+    return { ...(await visitSnapshot(dbh, lookup.scheduledServiceId)), scheduled_service_id: lookup.scheduledServiceId, pre_send: true };
+  } catch (err) {
+    logger.warn(`[sms-offers] pre-send visit snapshot skipped: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
+    return null;
+  }
+}
+
+/** The visit's date, window and status now; null fields when it is gone. */
+async function visitSnapshot(dbh, scheduledServiceId) {
+  const v = await dbh('scheduled_services').where({ id: scheduledServiceId })
+    .first('scheduled_date', 'window_start', 'window_end', 'status', 'updated_at');
+  const date = v?.scheduled_date instanceof Date ? v.scheduled_date.toISOString().slice(0, 10) : (v?.scheduled_date ? String(v.scheduled_date).slice(0, 10) : null);
+  // updated_at lets the decide step refuse a snapshot that may hold an edit
+  // made around the send (after the text went out, before this read).
+  return {
+    date, start: hhmmOf(v?.window_start), end: hhmmOf(v?.window_end), status: v?.status || null,
+    updated_at: v?.updated_at ? new Date(v.updated_at).toISOString() : null, taken_at: new Date().toISOString(),
+  };
+}
+
 /**
  * Record the offer an accepted send carried. Idempotent per decision; a newer
  * offer to the same phone for the same kind supersedes the open one. Returns
  * { recorded: true, id } or { recorded: false, reason } and never throws.
  */
-async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessageId = null, to, sentAt = new Date(), ignoreLinks = false, dbh = db } = {}) {
+async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessageId = null, to, from = null, sentAt = new Date(), ignoreLinks = false, preSendVisitSnapshot = null, dbh = db } = {}) {
   if (!offerLedgerLive()) return { recorded: false, reason: 'gate_off' };
   if (!agentDecisionId) return { recorded: false, reason: 'no_decision' };
   try {
@@ -205,6 +253,21 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
     const built = buildOfferRow({ decision, outgoingBody, providerMessageId, to, sentAt, ignoreLinks });
     if (built.skip) return { recorded: false, reason: built.skip };
     const { row } = built;
+    // A visit-move offer keeps the visit as it stood just BEFORE the send
+    // (read by the send step, captureOfferVisitSnapshot), so the decide step
+    // can tell whether it changed after the offer went out. With none (a
+    // backfilled offer), the visit is read now and marked post-send: the
+    // decide step never treats that as the offered state.
+    if (row.kind === 'move_visit' && row.scheduled_service_id) {
+      const snap = preSendVisitSnapshot?.scheduled_service_id === row.scheduled_service_id
+        ? preSendVisitSnapshot
+        : { ...(await visitSnapshot(dbh, row.scheduled_service_id)), post_send: true };
+      row.visit_snapshot = JSON.stringify(snap);
+    }
+    // The Waves line the text went out on: the caller's, else the send's own
+    // log row (written by the provider step during the send).
+    row.waves_line = lineIdentity(from)
+      || lineIdentity((providerMessageId ? await dbh('sms_log').where({ twilio_sid: providerMessageId }).first('from_phone') : null)?.from_phone);
     return await dbh.transaction(async (trx) => {
       // Offers to one phone are serialised so "one open offer per phone and
       // kind" holds without a failed insert.
@@ -219,7 +282,7 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
       // the writes arrive in.
       const [inserted] = await trx('sms_offers').insert({ ...row, status: 'superseded' }).returning('id');
       const id = inserted?.id || inserted;
-      const { demoted, openId } = await relinkOfferChain(trx, row.phone_last10, row.kind);
+      const { demoted, openId } = await relinkOfferChain(trx, row.phone_last10, row.kind, row.waves_line);
       return { recorded: true, id, superseded: demoted, late: openId !== id };
     });
   } catch (err) {
@@ -233,6 +296,7 @@ async function recordOfferForSend({ agentDecisionId, outgoingBody, providerMessa
 // nothing left to match a reply against.
 const BACKFILL_LOOKBACK_HOURS = OFFER_TTL_HOURS;
 const BACKFILL_BATCH = 200;
+const BACKFILL_SENT_AT_MARGIN_MS = 30000;
 // 10 pages = 2,000 decision sends in 48h, far above today's volume (~5 a day).
 const BACKFILL_MAX_PAGES = 10;
 
@@ -275,7 +339,7 @@ async function backfillMissedOffers({ now = new Date(), dbh = db, batchSize = BA
       rows = await query
         .orderBy([{ column: 'sl.created_at', order: 'asc' }, { column: 'sl.id', order: 'asc' }])
         .limit(batchSize)
-        .select('sl.id', 'ad.id as agent_decision_id', 'sl.message_body', 'sl.twilio_sid', 'sl.to_phone', 'sl.created_at');
+        .select('sl.id', 'ad.id as agent_decision_id', 'sl.message_body', 'sl.twilio_sid', 'sl.to_phone', 'sl.from_phone', 'sl.created_at');
     } catch (err) {
       logger.warn(`[sms-offers] backfill scan failed: ${String(err?.code || err?.name || 'error').slice(0, 40)}`);
       return { scanned: seen.size, recorded, errors: errors + 1, skipped: seen.size - recorded - errors, reason: 'error' };
@@ -289,7 +353,11 @@ async function backfillMissedOffers({ now = new Date(), dbh = db, batchSize = BA
         outgoingBody: r.message_body,
         providerMessageId: r.twilio_sid,
         to: r.to_phone,
-        sentAt: new Date(r.created_at),
+        from: r.from_phone,
+        // The log row is written after the provider took the text; the offer
+        // stood from a little before that (same reason the live path stamps
+        // the moment before its handoff).
+        sentAt: new Date(new Date(r.created_at).getTime() - BACKFILL_SENT_AT_MARGIN_MS),
         ignoreLinks: true,
         dbh,
       });
@@ -311,6 +379,8 @@ module.exports = {
   windowForLabel,
   phoneLast10,
   withoutLinks,
+  visitSnapshot,
+  captureOfferVisitSnapshot,
   OFFER_TTL_HOURS,
   KIND_BY_SOURCE,
 };

@@ -19,6 +19,7 @@
  *     normalized: { street_line_1, city, state, postal_code } | null,
  *     hasInferred, hasReplaced, hasUnconfirmed,  // booleans
  *     missingComponents,  // Google missingComponentTypes (e.g. ['subpremise']) | []
+ *     addressUse: { business, residential, poBox }, // Google's own result.metadata booleans (NOT USPS data; uspsData is a separate field this module does not read); null when not returned
  *     providerResponseId,                         // for audit
  *     raw,               // trimmed provider payload (debug; not persisted whole)
  *   }
@@ -64,12 +65,12 @@ function pickComponent(components, type) {
 // in addressComponents — only street/route/locality/state/postal/country. It
 // does return geocode.location (lat/lng), so we reverse-geocode that through the
 // Geocoding API (which DOES return county) to determine service area.
-async function reverseGeocodeCounty(location, key) {
+async function reverseGeocodeCounty(location, key, signal = null) {
   if (!location || typeof location.latitude !== 'number') return null;
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?latlng=${location.latitude},${location.longitude}`
       + `&result_type=administrative_area_level_2&key=${key}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS) });
+    const res = await fetch(url, { signal: withTimeout(signal) });
     if (!res.ok) return null;
     const data = await res.json();
     for (const r of data.results || []) {
@@ -87,6 +88,12 @@ async function reverseGeocodeCounty(location, key) {
 // requires inServiceArea === true. Unknown county (null) is NOT good enough —
 // it downgrades to confirm_needed so an unverifiable-area address never
 // auto-routes; out-of-area resolves to OUT_OF_SERVICE_AREA.
+function addressUseFlags(result) {
+  const metadata = result ? result.metadata : null;
+  const flag = (v) => (typeof v === 'boolean' ? v : null);
+  return { business: flag(metadata?.business), residential: flag(metadata?.residential), poBox: flag(metadata?.poBox) };
+}
+
 function deriveStatus(result, county) {
   const verdict = result?.verdict || {};
   const address = result?.address || {};
@@ -115,6 +122,10 @@ function deriveStatus(result, county) {
     // in ai_address_validation so triage can name the specific ask instead of
     // a generic "could not be verified".
     missingComponents: Array.isArray(address.missingComponentTypes) ? address.missingComponentTypes : [],
+    // Google's own classification of the address (result.metadata; absent
+    // for many addresses: null, never a guess). Not USPS data. Display
+    // only: no status above reads it.
+    addressUse: addressUseFlags(result),
   };
 
   // Incompleteness first, so garbage that geocodes to some random out-of-area
@@ -145,7 +156,13 @@ function deriveStatus(result, county) {
 // other consumers, including moving-address validation, supply no default hint.
 const SERVICE_STATE = 'FL';
 
-async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null } = {}) {
+// `signal` (optional): a caller's abort, combined with the per-request
+// timeout on BOTH provider calls; an aborted call resolves api_unavailable.
+function withTimeout(signal) {
+  return signal ? AbortSignal.any([signal, AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS)]) : AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS);
+}
+
+async function validateAddress({ addressLines, regionCode = 'US', administrativeArea = null, signal } = {}) {
   const lines = (addressLines || []).filter(Boolean);
   // Geography comes from locality/state tails only. A line that starts
   // with a house number ("100 Main St Apt CT") carries a state only when the
@@ -176,7 +193,7 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
   try {
     const res = await fetch(`https://addressvalidation.googleapis.com/v1:validateAddress?key=${key}`, {
       method: 'POST',
-      signal: AbortSignal.timeout(GOOGLE_ADDRESS_TIMEOUT_MS),
+      signal: withTimeout(signal),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ address: { regionCode, ...(regionHint ? { administrativeArea: regionHint } : {}), addressLines: lines } }),
     });
@@ -186,7 +203,7 @@ async function validateAddress({ addressLines, regionCode = 'US', administrative
       return { status: STATUSES.API_UNAVAILABLE, inServiceArea: null, county: null, granularity: null, normalized: null, hasInferred: false, hasReplaced: false, hasUnconfirmed: false, missingComponents: [] };
     }
     const data = await res.json();
-    const county = await reverseGeocodeCounty(data.result?.geocode?.location, key);
+    const county = await reverseGeocodeCounty(data.result?.geocode?.location, key, signal);
     const out = deriveStatus(data.result, county);
     // Explicit non-Florida geography stays outside the service area even
     // when AV is incomplete. Recovery may receive a flat extraction that

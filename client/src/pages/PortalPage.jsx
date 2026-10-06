@@ -2154,8 +2154,12 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         {metrics.map((m, i) => {
           const current = scores[m.key] || 0;
-          const initial = initialScores?.[m.initialKey] || 0;
-          const delta = current - initial;
+          // The server flags the first-visit color as hidden when the first and latest
+          // photos were not taken in known, compatible light (GATE_LAWN_LIGHTING):
+          // today's color shows alone, with no "from" and no change.
+          const compareHidden = m.key === 'colorHealth' && initialScores?.colorHidden === true;
+          const initial = compareHidden ? 0 : (initialScores?.[m.initialKey] || 0);
+          const delta = compareHidden ? 0 : current - initial;
           return (
             <div key={m.key}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
@@ -2170,17 +2174,17 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
                       {delta > 0 ? '+' : ''}{delta}
                     </span>
                   )}
-                  <span style={{ color: PORTAL_SHELL.muted, fontSize: 14, marginLeft: 4 }}>from {initial}%</span>
+                  {!compareHidden && <span style={{ color: PORTAL_SHELL.muted, fontSize: 14, marginLeft: 4 }}>from {initial}%</span>}
                 </span>
               </div>
               <div style={{
                 position: 'relative', height: 8, borderRadius: 4, background: B.grayLight, overflow: 'hidden',
               }}>
-                <div style={{
+                {!compareHidden && <div style={{
                   position: 'absolute', height: '100%', borderRadius: 4,
                   background: `linear-gradient(90deg, ${B.teal}30, ${B.green}30)`,
                   width: `${initial}%`,
-                }} />
+                }} />}
                 <div style={{
                   position: 'absolute', height: '100%', borderRadius: 4,
                   background: `linear-gradient(90deg, ${B.teal}, ${B.green})`,
@@ -4471,6 +4475,28 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const perPropertyTexts = savedScope && propertyPrefs.some((p) => p.propertyId);
   const shownTextsEntry = perPropertyTexts ? propertyPrefs.find((p) => p.id === activePropertyId) || null : null;
   const [propertyPrefsError, setPropertyPrefsError] = useState(false);
+  // What an on-location contact is told they get. The server says when the
+  // report text is on (GATE_CONTACT_REPORT_TEXT).
+  // The report text follows the account holder's own visit-complete text, so
+  // the wording carries that condition.
+  const contactTextsFor = (entry) => (entry?.contactReportTexts === true
+    ? 'appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit'
+    : 'appointment texts');
+  // The report text never goes to a contact our records mark as a tenant, or
+  // to any contact on a property manager's account
+  // (customer-contact.js slotWithheldFromReports). A contact added here has
+  // no recorded role, so the copy promises only what the records decide.
+  const contactReportExceptionFor = (entry) => (entry?.contactReportTexts === true
+    ? ' Contacts our records list as tenants, and contacts on a property manager\'s account other than a manager or landlord, get appointment texts only.'
+    : '');
+  // The entries the contact card renders (one house, or the profile list).
+  const contactCardEntries = perPropertyTexts
+    ? propertyPrefs.filter((p) => p.id === activePropertyId)
+    : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer?.id) : propertyPrefs;
+  // The card's header copy promises the report text only when every entry under it gets it.
+  const contactCardReportTexts = { contactReportTexts: contactCardEntries.length > 0 && contactCardEntries.every((p) => p.contactReportTexts === true) };
+  const contactTexts = contactTextsFor(contactCardReportTexts);
+  const contactReportException = contactReportExceptionFor(contactCardReportTexts);
 
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
@@ -5464,8 +5490,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     // One profile, several saved houses: contacts and texts are
                     // stored per PROFILE, so a tenant added here hears about
                     // every house — say so (codex #4207 r1c).
-                    ? 'Add anyone who should get appointment texts — a spouse, partner, tenant, or property manager. These contacts and settings apply to every property on this profile.'
-                    : 'Add anyone who should get appointment texts for this property — a spouse, partner, tenant, or property manager.'}
+                    ? `Add anyone who should get ${contactTexts} — a spouse, partner, tenant, or property manager.${contactReportException} These contacts and settings apply to every property on this profile.`
+                    : `Add anyone who should get ${contactTexts} for this property — a spouse, partner, tenant, or property manager.${contactReportException}`}
                 </div>
               </>
             )}
@@ -5474,7 +5500,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
             {/* A lone SECONDARY saved property (the primary retired) still gets its
                 own toggles — never the contacts-only card editing the profile
                 defaults (GitHub codex r0 P2). */}
-            {(perPropertyTexts ? propertyPrefs.filter((p) => p.id === activePropertyId) : propertyPrefs.length > 1 ? propertyPrefs.filter((p) => p.id === customer.id) : propertyPrefs).map((property) => {
+            {contactCardEntries.map((property) => {
               const label = property.propertyId
                 ? (property.label || propertyRelationshipChip(property) || property.profileLabel || 'Service property')
                 : (property.profileLabel || 'Service property');
@@ -5649,7 +5675,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     </label>
                     <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
                       <div style={{ fontSize: 14, color: muted, lineHeight: 1.4, flex: compact ? '1 1 100%' : 1, minWidth: 0 }}>
-                        These people receive appointment texts for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}). {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
+                        These people receive {contactTextsFor(property)} for this property — a spouse, tenant, property manager, anyone (up to {MAX_PROPERTY_CONTACTS}).{contactReportExceptionFor(property)} {multiProperty ? 'Turn on “Send me appointment alerts” to receive alerts using your Service notification settings.' : 'You’ll keep getting them too.'}
                       </div>
                       <button
                         type="button"
@@ -16314,6 +16340,7 @@ function chatRowsFor(data) {
     role: 'assistant',
     content: data.reply || "I'm having trouble right now. Please try calling us at (941) 297-5749.",
     reportable: !!data.reply && data.canReport !== false,
+    conversationId: data.conversationId || null,
     actions: chatActionsOf(data.actions),
     cards: chatCardsOf(data.cards),
   }];
@@ -16322,6 +16349,18 @@ function chatRowsFor(data) {
   }
   return rows;
 }
+
+function newChatRequestId() {
+  if (typeof globalThis.crypto?.randomUUID === 'function') return globalThis.crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((n) => n.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const CHAT_TRANSPORT_TIMEOUT_MS = 17_000;
 
 function ChatActions({ actions, onNavigate }) {
   if (!actions?.length) return null;
@@ -16341,7 +16380,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
   useLockBodyScroll(true);
   const dialogRef = useModalFocus(true, onClose);
   const compact = useIsMobile(760);
-  const firstName = customer?.firstName || customer?.first_name || '';
+  const firstName = [customer?.firstName, customer?.first_name].find(Boolean);
   const [messages, setMessages] = useState([
     { role: 'assistant', content: `Hi${firstName ? ` ${firstName}` : ''}! I'm the Waves AI assistant. How can I help you today?` },
   ]);
@@ -16352,18 +16391,21 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
   const messagesEndRef = useRef(null);
   const sessionId = useRef(`chat-${Date.now()}`);
   const initialSentRef = useRef(false);
+  // A network timeout is ambiguous: the server may have completed the turn.
+  // Keep each unresolved text's durable id so later turns cannot discard it.
+  const retryTurnsRef = useRef(new Map());
 
   // Report an AI reply as inappropriate (Microsoft Store policy 11.16 —
   // users must be able to flag AI-generated content for review).
-  const reportMessage = async (idx, content) => {
-    if (reportState[idx] === 'sending' || reportState[idx] === 'done') return;
+  const reportMessage = async (idx, content, conversationId) => {
+    if (['sending', 'done'].includes(reportState[idx])) return;
     setReportState(prev => ({ ...prev, [idx]: 'sending' }));
     try {
       // api.request, not raw fetch: access tokens expire after 15 minutes and
       // only the api client can rotate the refresh session on a 401.
       await api.request('/ai/chat/report', {
         method: 'POST',
-        body: JSON.stringify({ sessionId: sessionId.current, messageContent: content }),
+        body: JSON.stringify({ sessionId: sessionId.current, conversationId, messageContent: content }),
       });
       setReportState(prev => ({ ...prev, [idx]: 'done' }));
     } catch {
@@ -16393,22 +16435,54 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
     const text = (typeof textOverride === 'string' ? textOverride : input).trim();
     if (!text || sending) return;
 
-    setMessages(prev => [...prev, { role: 'user', content: text }]);
+    const retryRequestId = retryTurnsRef.current.get(text);
+    const retrying = Boolean(retryRequestId);
+    const requestId = retryRequestId || newChatRequestId();
+
+    if (!retrying) setMessages(prev => [...prev, { role: 'user', content: text }]);
     setInput('');
     setSending(true);
 
+    const controller = new AbortController();
+    let timer;
     try {
       // api.request, not raw fetch: access tokens expire after 15 minutes and
       // only the api client can rotate the refresh session on a 401.
-      const data = await api.request('/ai/chat', {
+      const request = api.request('/ai/chat', {
         method: 'POST',
-        body: JSON.stringify({ message: text, sessionId: sessionId.current }),
+        body: JSON.stringify({ message: text, sessionId: sessionId.current, requestId }),
+        signal: controller.signal,
       });
+      // The signal bounds fetch, but an expired-token request can be waiting
+      // inside the shared refresh promise or Web Lock, neither of which owns
+      // this signal. Race the whole API operation so the chat always becomes
+      // retryable after 17s. The shared refresh may still finish for the rest
+      // of the app; this turn keeps its requestId for reconciliation.
+      const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('Portal chat transport deadline reached'));
+        }, CHAT_TRANSPORT_TIMEOUT_MS);
+      });
+      const data = await Promise.race([request, deadline]);
       setMessages(prev => [...prev, ...chatRowsFor(data)]);
+      if (data.retryable) {
+        retryTurnsRef.current.set(text, requestId);
+        // The input stays enabled while a turn is pending so the customer can
+        // draft their next question. Restore the retry text only if they have
+        // not started one; the retry map still preserves this original turn.
+        setInput(current => current.trim() ? current : text);
+      } else {
+        retryTurnsRef.current.delete(text);
+      }
     } catch {
       setMessages(prev => [...prev, { role: 'assistant', content: "Connection issue — please try again or call us at (941) 297-5749." }]);
+      retryTurnsRef.current.set(text, requestId);
+      setInput(current => current.trim() ? current : text);
+    } finally {
+      clearTimeout(timer);
+      setSending(false);
     }
-    setSending(false);
   };
 
   return (
@@ -16513,7 +16587,7 @@ function ChatWidget({ customer, onClose, initialQuestion, onNavigate }) {
                 ) : (
                   <button
                     type="button"
-                    onClick={() => reportMessage(i, msg.content)}
+                    onClick={() => reportMessage(i, msg.content, msg.conversationId)}
                     disabled={reportState[i] === 'sending'}
                     aria-label="Report this AI response as inappropriate"
                     style={{

@@ -920,7 +920,9 @@ function sameDayOptions(now = new Date()) {
 // on this data (it can be seconds stale in either direction).
 // nameScope gates WHO gets identified, and defaults to nobody (fail
 // closed). The probe is tech-blind by design — it must see every
-// technician's rows to mirror commit — but the payload rides two very
+// technician's rows to mirror commit (with a second technician and
+// GATE_MULTI_TECH_CONFIRM on, commit probes the visit's own technician's
+// route and conflictsForTarget narrows the same way) — but the payload rides two very
 // different trust levels: `checkTarget` is admin-only (requireAdmin) and
 // passes NAME_ALL, while `getOptions` is reachable by an assigned tech
 // (GET /api/tech/services/:id/rain-out-options), so it passes its own
@@ -1204,7 +1206,7 @@ function routeScopeConflicts({ occupancy, serviceId, service, route, target }) {
   }
   const distinct = [...distinctByKey.values()];
   const probed = distinct.map((w) => conflictsForTarget(
-    occupancy, serviceId, targetDate, w, { excludeServiceIds: sweptIds },
+    occupancy, serviceId, targetDate, w, { excludeServiceIds: sweptIds, technicianId: service.technician_id },
   ));
   const byId = new Map();
   for (const conflict of probed.flat()) {
@@ -1248,6 +1250,9 @@ async function checkTarget({ serviceId, target, caller = null }) {
   }
   const conflicts = conflictsForTarget(occupancy, serviceId, targetDate, target.window, {
     routeSiblingIds: new Set(route.map((j) => String(j.id))),
+    // Commit keeps the visit's technician and probes that route (second
+    // technician, gate-scoped in conflictsForTarget), so the warning does too.
+    technicianId: service.technician_id,
   });
   // Returned alongside (not merged): the sheet shows these only while the
   // scope toggle is on "this + rest of route", the one case commit moves
@@ -1423,7 +1428,9 @@ async function getOptions(serviceId, { caller = null } = {}) {
     logger.info(`[rain-out] occupancy snapshot failed for ${serviceId}: ${err.message}`);
   }
   for (const opt of sameDay) {
-    opt.conflicts = conflictsForTarget(occupancy, serviceId, opt.date, opt.window, { routeSiblingIds });
+    opt.conflicts = conflictsForTarget(occupancy, serviceId, opt.date, opt.window, {
+      routeSiblingIds, technicianId: service.technician_id,
+    });
     // What the shifted rest-of-route would land on — shown only while the
     // sheet's scope toggle is on "rest of route".
     opt.routeConflicts = routeScopeConflicts({

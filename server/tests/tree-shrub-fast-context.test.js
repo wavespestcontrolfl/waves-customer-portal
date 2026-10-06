@@ -330,6 +330,28 @@ describe('buildTreeShrubFastContext', () => {
     expect(ctx.products.find((p) => p.id === 'palm').tsFlags.npBlackout).toBe(false);
   });
 
+  test('due rules hold a Snapshot applied under 60 days ago; the palm feed still suggests', async () => {
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': [],
+      'property_application_history as pah': [],
+      'property_application_history as history': [
+        { application_date: '2026-09-05', property_id: 'prop-1', product_name: 'Snapshot 2.5TG', application_rate: 2.3, rate_unit: 'lb' },
+      ],
+    }));
+    expect(ctx.monthProducts).toEqual([{ productId: 'palm', method: 'granular_broadcast' }]);
+    expect(ctx.monthProductHolds).toEqual([{ name: 'Snapshot 2.5TG', reason: 'Snapshot was applied less than 60 days ago.' }]);
+  });
+
+  test('an unreadable application history holds Snapshot and the palm feed instead of suggesting them', async () => {
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': [],
+      'property_application_history as pah': [],
+      'property_application_history as history': new Error('db down'),
+    }));
+    expect(ctx.monthProducts).toEqual([]);
+    expect(ctx.monthProductHolds.map((h) => h.name)).toEqual(['Snapshot 2.5TG', 'LESCO 8-0-12 Palm & Tropical Ornamental Fertilizer (#511542)']);
+  });
+
   test('a summer visit in a blackout zone flags N/P fertilizer on the catalog rows', async () => {
     const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
       scheduled_services: visit({ scheduled_date: '2026-07-10' }), products_catalog: catalog,
@@ -516,5 +538,92 @@ describe('buildTreeShrubFastContext', () => {
       const { ctx } = await run([photo('p1', 'front_beds')], { 'service_records as sr': new Error('boom') });
       expect(ctx.lastVisitPhotos).toEqual({});
     });
+  });
+});
+
+describe('GATE_TS_WATCH_LIST: the fast-context watchList', () => {
+  const saved = process.env.GATE_TS_WATCH_LIST;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_TS_WATCH_LIST; else process.env.GATE_TS_WATCH_LIST = saved;
+  });
+  const catalog = [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })];
+  const build = (scheduledDate) => buildTreeShrubFastContext('visit-1', fakeKnex({
+    scheduled_services: visit({ scheduled_date: scheduledDate }), products_catalog: catalog,
+  }));
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+  });
+
+  test('gate off: the key is absent', async () => {
+    delete process.env.GATE_TS_WATCH_LIST;
+    const ctx = await build('2026-10-01');
+    expect(ctx.eligible).toBe(true);
+    expect('watchList' in ctx).toBe(false);
+  });
+
+  test('gate on: the visit month items, in order, as key / label / signal / referOnly', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    const ctx = await build('2026-12-03');
+    expect(ctx.watchList.map((item) => item.key)).toEqual([
+      'scale', 'cold_freeze_damage', 'declining_palms', 'sooty_mold',
+      'palm_potassium_deficiency', 'palm_magnesium_deficiency', 'palm_fronds_dying_one_side', 'trunk_conk_base',
+    ]);
+    expect(ctx.watchList[0]).toEqual({ key: 'scale', label: 'Scale', signal: 'Possible scale', referOnly: false });
+    expect(ctx.watchList.find((item) => item.key === 'declining_palms').referOnly).toBe(true);
+    expect(Object.keys(ctx.watchList[0]).sort()).toEqual(['key', 'label', 'referOnly', 'signal']);
+  });
+
+  test('gate on: the month is the New York month of the visit date', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    expect((await build('2026-03-31')).watchList[0].key).toBe('whitefly');
+    expect((await build('2026-04-01')).watchList.map((item) => item.key)).toContain('caterpillars');
+  });
+
+  test('an ineligible visit carries no watch list even with the gate on', async () => {
+    process.env.GATE_TS_WATCH_LIST = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    const ctx = await build('2026-10-01');
+    expect(ctx.eligible).toBe(false);
+    expect('watchList' in ctx).toBe(false);
+  });
+});
+
+describe('GATE_TS_PEST_CHECK: the fast-context pestCheck', () => {
+  const saved = process.env.GATE_TS_PEST_CHECK;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.GATE_TS_PEST_CHECK; else process.env.GATE_TS_PEST_CHECK = saved;
+  });
+  const catalog = [cat('snapshot', 'Snapshot 2.5TG', { category: 'herbicide' })];
+  const build = () => buildTreeShrubFastContext('visit-1', fakeKnex({
+    scheduled_services: visit({ scheduled_date: '2026-10-01' }), products_catalog: catalog,
+  }));
+  beforeEach(() => {
+    resolveCompletionProfileForScheduledService.mockReset();
+    resolveCompletionProfileForScheduledService.mockResolvedValue(TS_PROFILE);
+  });
+
+  test('gate off: the key is absent', async () => {
+    delete process.env.GATE_TS_PEST_CHECK;
+    const ctx = await build();
+    expect(ctx.eligible).toBe(true);
+    expect('pestCheck' in ctx).toBe(false);
+  });
+
+  test('gate on: the six insect types, key and label', async () => {
+    process.env.GATE_TS_PEST_CHECK = 'true';
+    const ctx = await build();
+    expect(ctx.pestCheck.insectTypes.map((type) => type.key)).toEqual([
+      'armored_scale', 'soft_scale', 'whitefly', 'caterpillars', 'mites', 'other',
+    ]);
+    expect(ctx.pestCheck.insectTypes[0]).toEqual({ key: 'armored_scale', label: 'Armored scale' });
+  });
+
+  test('an ineligible visit carries no pestCheck even with the gate on', async () => {
+    process.env.GATE_TS_PEST_CHECK = 'true';
+    resolveCompletionProfileForScheduledService.mockResolvedValue({ ...TS_PROFILE, findingsType: 'pest' });
+    const ctx = await build();
+    expect(ctx.eligible).toBe(false);
+    expect('pestCheck' in ctx).toBe(false);
   });
 });

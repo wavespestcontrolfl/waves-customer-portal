@@ -76,6 +76,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
+import { ActiveCodeRow, AddCodeForm, FoundCodeCard } from "./AccessCodePanels";
 import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
 import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
@@ -142,6 +143,7 @@ import CustomerRequestsPanel from "./CustomerRequestsPanel";
 import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "./CustomerGeocodeReviewPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
 import CancelPlanDialog from "./CancelPlanDialog";
+import RemovePaymentMethodDialog from "./RemovePaymentMethodDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
@@ -6320,6 +6322,7 @@ function CustomerProfileBilling({
   payments,
   setRefundPayment,
   cards,
+  setRemovePaymentMethod,
   setCancelSignupOpen,
   setCancelPlanOpen,
 }) {
@@ -6544,6 +6547,15 @@ function CustomerProfileBilling({
                 >
                   Default
                 </Badge>
+              )}
+              {isAdmin && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={() => setRemovePaymentMethod(cd)}
+                >
+                  Remove
+                </Button>
               )}
             </div>
           ))}
@@ -7474,6 +7486,115 @@ export function CustomerNeighborhoodBlock({ customerId }) {
   );
 }
 
+// ─── Access codes (every code a client gives, staff only) ────────
+// Active codes, the ones found in texts that wait for a one-tap office save,
+// and an add form. Admin-only; renders nothing at all when the section is off
+// (404) or the viewer is not a full admin (403). The visit picker uses the
+// visits the access-codes API returns with their homes.
+export function CustomerAccessCodesBlock({ customerId }) {
+  const [codes, setCodes] = useState(null);
+  const [loadError, setLoadError] = useState("");
+  const [adding, setAdding] = useState(false);
+  const seq = useRef(0);
+
+  const load = useCallback(async () => {
+    const mine = ++seq.current;
+    try {
+      const data = await adminFetch(`/admin/access-codes?customerId=${encodeURIComponent(customerId)}`);
+      if (mine !== seq.current) return;
+      setLoadError("");
+      setCodes({
+        active: Array.isArray(data?.active) ? data.active : [],
+        found: Array.isArray(data?.found) ? data.found : [],
+        properties: Array.isArray(data?.properties) ? data.properties : [],
+        visits: Array.isArray(data?.visits) ? data.visits : null,
+      });
+    } catch (err) {
+      if (mine !== seq.current || err?.status === 404 || err?.status === 403) return;
+      setLoadError(apiErrorMessage(err, "Could not load access codes"));
+    }
+  }, [customerId]);
+
+  useEffect(() => {
+    setCodes(null);
+    setLoadError("");
+    setAdding(false);
+    load();
+    return () => { seq.current += 1; };
+  }, [load]);
+
+  const post = async (path, body) => {
+    await adminFetch(`/admin/access-codes${path}`, { method: "POST", body: JSON.stringify(body || {}) });
+    await load();
+  };
+
+  if (loadError) {
+    return (
+      <div className="mt-3">
+        <AccessPrefsSubheading>Access codes</AccessPrefsSubheading>
+        <div className="flex flex-wrap items-center gap-2 text-ui-label text-ink-secondary">
+          {loadError}
+          <Button size="sm" variant="ghost" onClick={() => load()}>Try again</Button>
+        </div>
+      </div>
+    );
+  }
+  if (!codes) return null;
+  return (
+    <div className="mt-3" data-testid="access-codes-block">
+      <div className="flex items-center justify-between gap-2">
+        <AccessPrefsSubheading>Access codes</AccessPrefsSubheading>
+        {!adding && (
+          <button
+            type="button"
+            onClick={() => setAdding(true)}
+            className="text-ui-label text-zinc-900 underline underline-offset-2 hover:no-underline u-focus-ring"
+          >
+            Add a code
+          </button>
+        )}
+      </div>
+      {adding && (
+        <div className="mb-2">
+          <AddCodeForm
+            visits={codes?.visits || []}
+            homes={codes?.properties || []}
+            onSubmit={(body) => post("", { customerId, ...body })}
+            onCancel={() => setAdding(false)}
+          />
+        </div>
+      )}
+      <div className="text-ui-caption font-medium text-ink-secondary mb-1">Active</div>
+      {codes.active.length === 0 ? (
+        <div className="text-ui-label text-ink-tertiary italic">No access codes on file.</div>
+      ) : (
+        <div className="grid gap-2">
+          {codes.active.map((row) => (
+            <ActiveCodeRow homes={codes?.properties || []} key={row.id} row={row} onRetire={(r) => post(`/${r.id}/retire`)} />
+          ))}
+        </div>
+      )}
+      {codes.found.length > 0 && (
+        <>
+          <div className="text-ui-caption font-medium text-ink-secondary mt-3 mb-1">Found in messages</div>
+          <div className="grid gap-2">
+            {codes.found.map((row) => (
+              <FoundCodeCard
+                key={`${row.id}:${row.updatedAt || ""}`}
+                row={row}
+                visits={codes?.visits || []}
+                homes={codes?.properties || []}
+                onSave={(r, body) => post(`/${r.id}/accept`, body)}
+                onDismiss={(r) => post(`/${r.id}/dismiss`)}
+              />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -7554,6 +7675,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved }) {
       <>
         <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} />
         {isAdmin && <CustomerNeighborhoodBlock customerId={customerId} />}
+        {isAdmin && <CustomerAccessCodesBlock customerId={customerId} />}
       </>
     );
   }
@@ -10211,6 +10333,7 @@ function useCustomerProfileNavigation({
   const [cancelSignupOpen, setCancelSignupOpen] = useState(false);
   const [cancelPlanOpen, setCancelPlanOpen] = useState(false);
   const [refundPayment, setRefundPayment] = useState(null);
+  const [removePaymentMethod, setRemovePaymentMethod] = useState(null);
   const panelRef = useRef(null);
   const activeTabButtonRef = useRef(null);
   const [headerPast, setHeaderPast] = useState(false);
@@ -10272,7 +10395,8 @@ function useCustomerProfileNavigation({
     annualPrepayInvoiceOpen ||
     cancelSignupOpen ||
     cancelPlanOpen ||
-    !!refundPayment;
+    !!refundPayment ||
+    !!removePaymentMethod;
   useEffect(() => {
     if (embedded) return undefined;
     const handler = (e) => {
@@ -10342,6 +10466,7 @@ function useCustomerProfileNavigation({
     setCancelSignupOpen(false);
     setCancelPlanOpen(false);
     setRefundPayment(null);
+    setRemovePaymentMethod(null);
   }, [customerId, profileReloadKey, isAdmin]);
   return {
     activeTab,
@@ -10351,6 +10476,7 @@ function useCustomerProfileNavigation({
     viewServiceRecords,
     setAnnualPrepayInvoiceOpen,
     setRefundPayment,
+    setRemovePaymentMethod,
     setCancelSignupOpen,
     setCancelPlanOpen,
     setTimelineFilter,
@@ -10375,6 +10501,7 @@ function useCustomerProfileNavigation({
     cancelSignupOpen,
     cancelPlanOpen,
     refundPayment,
+    removePaymentMethod,
     handleDraftActiveChange,
     guardedClose,
     guardedSelectCustomer,
@@ -10700,6 +10827,7 @@ export default function Customer360ProfileV2({
     viewServiceRecords,
     setAnnualPrepayInvoiceOpen,
     setRefundPayment,
+    setRemovePaymentMethod,
     setCancelSignupOpen,
     setCancelPlanOpen,
     setTimelineFilter,
@@ -10721,6 +10849,7 @@ export default function Customer360ProfileV2({
     cancelSignupOpen,
     cancelPlanOpen,
     refundPayment,
+    removePaymentMethod,
     handleDraftActiveChange,
     guardedClose,
     guardedSelectCustomer,
@@ -10988,6 +11117,7 @@ export default function Customer360ProfileV2({
         payments={payments}
         setRefundPayment={setRefundPayment}
         cards={cards}
+        setRemovePaymentMethod={setRemovePaymentMethod}
         setCancelSignupOpen={setCancelSignupOpen}
         setCancelPlanOpen={setCancelPlanOpen}
       />
@@ -11170,6 +11300,16 @@ export default function Customer360ProfileV2({
               onDone={reloadCustomer}
             />
           )}
+          {/* Renders nothing without a method. Same sub-modal layer as
+              CancelPlanDialog: ui/Dialog's default layer paints beneath this
+              z-[1000] profile overlay. */}
+          <RemovePaymentMethodDialog
+            customer={c}
+            method={removePaymentMethod}
+            onClose={() => setRemovePaymentMethod(null)}
+            onDone={reloadCustomer}
+            layer={1120}
+          />
           <CustomerProfileEditor
             editOpen={editOpen}
             savingEdit={savingEdit}

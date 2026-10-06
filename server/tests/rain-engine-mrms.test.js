@@ -192,4 +192,138 @@ describe('fetchMrmsDailyRain payload handling', () => {
     global.fetch = jest.fn().mockRejectedValue(new Error('boom'));
     expect(await fetchMrmsDailyRain({ latitude: 27, longitude: -82, start: '2026-07-24', end: '2026-07-26' })).toBeNull();
   });
+
+  // IEM caches a multiday response for an hour per ~8-mile cell, so a nearby
+  // property can be handed the first requester's rain (2026-09-28: 22 of 31
+  // Monday watering emails). The response names the 1 km cell it was read at.
+  const HOME = { latitude: 27.5773, longitude: -82.429, start: '2026-09-28', end: '2026-09-29' };
+  const HOME_CELL = { mrms_iemre_grid_i: 4357, mrms_iemre_grid_j: 457 };
+  const NEIGHBOR_CELL = { mrms_iemre_grid_i: 4344, mrms_iemre_grid_j: 450 };
+  const startOf = (url) => url.split('/multiday/')[1].split('/')[0];
+
+  test("a neighbor's cached response is re-requested under another window and never returned", async () => {
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ ...NEIGHBOR_CELL, data: [{ date: '2026-09-28', mrms_precip_in: 0.91 }, { date: '2026-09-29', mrms_precip_in: 0.5 }] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ...HOME_CELL,
+          data: [
+            { date: '2026-09-20', mrms_precip_in: 2 },
+            { date: '2026-09-28', mrms_precip_in: 0.39 },
+            { date: '2026-09-29', mrms_precip_in: 0 },
+          ],
+        }),
+      });
+    const out = await fetchMrmsDailyRain(HOME);
+    expect(out).toEqual({ days: [{ date: '2026-09-28', inches: 0.39 }, { date: '2026-09-29', inches: 0 }], complete: true });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    const [first, second] = global.fetch.mock.calls.map(([url]) => url);
+    expect(startOf(first)).toBe('2026-09-28');
+    expect(startOf(second) < '2026-09-28').toBe(true);
+    expect(second.endsWith('/2026-09-29/27.5773/-82.4290/json')).toBe(true);
+  });
+
+  test('another cell on every attempt yields null (the caller falls back), each attempt under its own window', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ...NEIGHBOR_CELL, data: [{ date: '2026-09-28', mrms_precip_in: 0.91 }] }),
+    });
+    expect(await fetchMrmsDailyRain(HOME)).toBeNull();
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+    expect(new Set(global.fetch.mock.calls.map(([url]) => startOf(url))).size).toBe(3);
+  });
+
+  test('a re-request never leaves the start year (the relay returns no MRMS for a two-year window)', async () => {
+    const neighbor = { ok: true, json: async () => ({ ...NEIGHBOR_CELL, data: [{ date: '2027-01-04', mrms_precip_in: 0.91 }] }) };
+    global.fetch = jest.fn().mockResolvedValue(neighbor);
+    expect(await fetchMrmsDailyRain({ ...HOME, start: '2027-01-04', end: '2027-01-10' })).toBeNull();
+    const starts = global.fetch.mock.calls.map(([url]) => startOf(url));
+    expect(starts.length).toBeGreaterThan(1);
+    expect(new Set(starts).size).toBe(starts.length);
+    expect(starts.every((s) => s >= '2027-01-01' && s <= '2027-01-04')).toBe(true);
+    // A window that starts on January 1 cannot start earlier: the re-request ends later instead.
+    global.fetch = jest.fn().mockResolvedValue(neighbor);
+    expect(await fetchMrmsDailyRain({ ...HOME, start: '2027-01-01', end: '2027-01-03' })).toBeNull();
+    const windows = global.fetch.mock.calls.map(([url]) => url.split('/multiday/')[1].split('/').slice(0, 2));
+    expect(windows.length).toBe(3);
+    expect(windows.every(([s, e]) => s === '2027-01-01' && e >= '2027-01-03' && e <= '2027-12-31')).toBe(true);
+    expect(new Set(windows.map(([, e]) => e)).size).toBe(3);
+  });
+
+  test('a window that spans two years is asked one year at a time and joined', async () => {
+    // The relay returns null MRMS for every day of a two-year window (seen live 2026-10-05).
+    global.fetch = jest.fn(async (url) => {
+      const [s, e] = url.split('/multiday/')[1].split('/');
+      if (s.slice(0, 4) !== e.slice(0, 4)) return { ok: true, json: async () => ({ data: [{ date: s, mrms_precip_in: null }] }) };
+      const data = s.startsWith('2026')
+        ? [{ date: '2026-12-30', mrms_precip_in: 0.2 }, { date: '2026-12-31', mrms_precip_in: 0 }]
+        : [{ date: '2027-01-01', mrms_precip_in: 0.5 }, { date: '2027-01-02', mrms_precip_in: 0.18 }];
+      return { ok: true, json: async () => ({ ...HOME_CELL, data }) };
+    });
+    const out = await fetchMrmsDailyRain({ ...HOME, start: '2026-12-30', end: '2027-01-02' });
+    expect(out).toEqual({
+      days: [
+        { date: '2026-12-30', inches: 0.2 },
+        { date: '2026-12-31', inches: 0 },
+        { date: '2027-01-01', inches: 0.5 },
+        { date: '2027-01-02', inches: 0.18 },
+      ],
+      complete: true,
+    });
+    expect(global.fetch.mock.calls.map(([url]) => url.split('/multiday/')[1].split('/').slice(0, 2).join('..')).sort())
+      .toEqual(['2026-12-30..2026-12-31', '2027-01-01..2027-01-02']);
+  });
+
+  test('one failed year leaves its days as gaps and keeps the other year', async () => {
+    global.fetch = jest.fn(async (url) => (url.includes('/2027-01-01/')
+      ? { ok: false }
+      : { ok: true, json: async () => ({ ...HOME_CELL, data: [{ date: '2026-12-31', mrms_precip_in: 0.4 }] }) }));
+    const out = await fetchMrmsDailyRain({ ...HOME, start: '2026-12-31', end: '2027-01-01' });
+    expect(out).toEqual({ days: [{ date: '2026-12-31', inches: 0.4 }, { date: '2027-01-01', inches: null }], complete: false });
+  });
+
+  test("one year's timeout does not cancel the other year's re-request in flight", async () => {
+    jest.useFakeTimers();
+    try {
+      const later = (ms, body, signal) => new Promise((resolve, reject) => {
+        const t = setTimeout(() => resolve({ ok: true, json: async () => body }), ms);
+        signal.addEventListener('abort', () => { clearTimeout(t); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); });
+      });
+      global.fetch = jest.fn((url, { signal }) => {
+        // 2027 never answers: only its own 6 s timeout ends it.
+        if (url.includes('/2027-01-01/')) return later(600000, {}, signal);
+        // 2026: a neighbor's response at 4 s, then the re-request answers at 7 s.
+        return url.includes('/2026-12-31/2026-12-31/')
+          ? later(4000, { ...NEIGHBOR_CELL, data: [{ date: '2026-12-31', mrms_precip_in: 0.9 }] }, signal)
+          : later(3000, { ...HOME_CELL, data: [{ date: '2026-12-31', mrms_precip_in: 0.4 }] }, signal);
+      });
+      const pending = fetchMrmsDailyRain({ ...HOME, start: '2026-12-31', end: '2027-01-01' });
+      await jest.advanceTimersByTimeAsync(8000);
+      expect(await pending).toEqual({ days: [{ date: '2026-12-31', inches: 0.4 }, { date: '2027-01-01', inches: null }], complete: false });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the matching cell is taken on the first request; a cell-edge coordinate accepts either side', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ ...HOME_CELL, data: [{ date: '2026-09-28', mrms_precip_in: 0.1 }, { date: '2026-09-29', mrms_precip_in: 0 }] }),
+    });
+    expect((await fetchMrmsDailyRain(HOME)).complete).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    // 27.52 / -82.53 sit exactly on a 0.01 degree line on both axes.
+    for (const cell of [{ mrms_iemre_grid_i: 4346, mrms_iemre_grid_j: 451 }, { mrms_iemre_grid_i: 4347, mrms_iemre_grid_j: 452 }]) {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({ ...cell, data: [{ date: '2026-09-28', mrms_precip_in: 0.1 }, { date: '2026-09-29', mrms_precip_in: 0 }] }),
+      });
+      expect(await fetchMrmsDailyRain({ ...HOME, latitude: 27.52, longitude: -82.53 })).not.toBeNull();
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    }
+  });
 });

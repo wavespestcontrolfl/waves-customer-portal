@@ -1,10 +1,17 @@
-import React, { useEffect, useId, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState } from "react";
 
 // A Waves blog post for the customer (GATE_REPORT_BLOG_POST, owner "ok go"
 // 2026-10-01): search the live Waves blog the way Quick Links searches links,
 // and pick one post. The pick goes on the customer's report as "From the
-// Waves blog". Optional. `search(query)` answers { posts: [{ id, title, url }] }
-// (GET /admin/dispatch/:serviceId/blog-posts?q=); `value` is the picked post.
+// Waves blog". Optional. `search(query)` answers { posts: [{ id, title, url,
+// exact, starts }], suggest } (GET /admin/dispatch/:serviceId/blog-posts?q=);
+// `value` is the picked post. While the last word is still being typed, the
+// posts that hold a word starting with it (`starts`) are the matches (owner
+// 2026-10-04: "Co" read as no post). When no post holds every word of the search, the
+// picker says so, shows the closest posts, and (with the server's `suggest`
+// on) offers to suggest a post on it: `suggest(phrase)` answers { status:
+// 'queued' | 'already_queued' } or a refusal (POST .../blog-suggestions;
+// owner mockup approval 2026-10-03, straight into the autonomous blog queue).
 
 const SEARCH_DELAY_MS = 250;
 const MIN_QUERY_CHARS = 2;
@@ -25,38 +32,155 @@ export function useBlogPostSearch(search) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState([]);
   const [status, setStatus] = useState("idle");
+  // Whether the server takes a suggested post for this search (its gate).
+  const [canSuggest, setCanSuggest] = useState(false);
   const sequence = useRef(0);
   useEffect(() => {
     const q = query.trim();
     const current = ++sequence.current;
     if (q.length < MIN_QUERY_CHARS) {
       setResults([]);
+      setCanSuggest(false);
       setStatus("idle");
       return undefined;
     }
     setStatus("searching");
+    // The text goes as typed at its end: a space after the last word says the
+    // word is finished, so the server never reads it as one still being
+    // typed (pre-push P1 on 63db0f3ccc).
+    const sent = query.trimStart();
     const timer = setTimeout(() => {
       Promise.resolve()
-        .then(() => search(q))
+        .then(() => search(sent))
         .then((data) => {
           if (current !== sequence.current) return;
           setResults(Array.isArray(data?.posts) ? data.posts : []);
+          setCanSuggest(data?.suggest === true);
           setStatus("done");
         })
         .catch(() => {
           if (current !== sequence.current) return;
           setResults([]);
+          setCanSuggest(false);
           setStatus("failed");
         });
     }, SEARCH_DELAY_MS);
     return () => clearTimeout(timer);
   }, [query, search]);
-  return { query, setQuery, results, status };
+  // The posts that hold every word; with none, those that hold every word
+  // with the last still being typed (its start); with none, the closest.
+  const exact = results.filter((post) => post.exact === true);
+  const starting = results.filter((post) => post.starts === true);
+  // The server read the last word by its start (every post then says whether
+  // it `starts` the search): the word is on no post whole.
+  const typing = results.some((post) => typeof post.starts === "boolean");
+  return { query, setQuery, results, status, covered: exact.length > 0, typing, shown: exact.length ? exact : starting.length ? starting : results, canSuggest };
 }
 
-export default function BlogPostPicker({ search, value = null, onChange, disabled = false, tokens = {} }) {
+// The server's final answer to a suggestion, by its status and code:
+// refused (422), limit (429 too_many_suggestions, the day's cap), unavailable
+// (404 with suggestions off, or 409 not_available), declined (409 declined:
+// the blog queue tried the topic and skipped it; GitHub Codex P2 on
+// 322faf591d), covered (409, a live post now holds every word). Anything else
+// may pass and can be sent again: a 429
+// from the API's own rate limiter carries no code and is only a burst (GitHub
+// Codex P2s on 45144528b8 and 8a39d94de4).
+function suggestionAnswer(err) {
+  if (err?.status === 422) return "refused";
+  if (err?.status === 429) return err?.code === "too_many_suggestions" ? "limit" : "failed";
+  if (err?.status === 404 || err?.code === "not_available") return "unavailable";
+  if (err?.status === 409) return err?.code === "declined" ? "declined" : "covered";
+  return "failed";
+}
+// Answers a new tap cannot change: only a new search starts over.
+const FINAL_ANSWERS = new Set(["refused", "limit", "unavailable", "declined", "covered"]);
+
+// One tap suggests the search as a new post. The answer stands while the
+// search text stays the same: idle, sending, queued, already (someone
+// suggested it before), a final refusal (above) or failed.
+export function useBlogSuggestion(suggest, query) {
+  const phrase = String(query || "").trim();
+  const [state, setState] = useState({ phrase: null, status: "idle" });
+  const send = useCallback(() => {
+    if (typeof suggest !== "function" || !phrase) return;
+    setState({ phrase, status: "sending" });
+    const settle = (status) => setState((prev) => (prev.phrase === phrase ? { phrase, status } : prev));
+    Promise.resolve()
+      .then(() => suggest(phrase))
+      .then((data) => settle(data?.status === "queued" ? "queued" : data?.status === "already_queued" ? "already" : "failed"))
+      .catch((err) => settle(suggestionAnswer(err)));
+  }, [suggest, phrase]);
+  return { status: state.phrase === phrase ? state.status : "idle", send };
+}
+
+// What the picker says about a suggestion, by its status.
+export const SUGGESTION_COPY = {
+  idle: { button: (phrase) => `Suggest a post about “${phrase}”`, note: "It goes straight into the blog queue and is written and published automatically." },
+  sending: { button: () => "Suggesting…", note: "It goes straight into the blog queue and is written and published automatically." },
+  queued: { button: (phrase) => `Suggested: “${phrase}”`, note: "In the blog queue. It will be written and published automatically." },
+  already: { button: () => "Already in the blog queue", note: "Someone suggested it already. It will be written and published automatically." },
+  failed: { button: (phrase) => `Suggest a post about “${phrase}”`, note: "That didn’t go through. Try again." },
+  refused: { button: () => "Can’t suggest this one", note: "Use plain topic words, with no names, addresses or phone numbers." },
+  limit: { button: () => "Today’s limit reached", note: "Suggest more tomorrow." },
+  unavailable: { button: () => "Can’t suggest right now", note: "Suggestions aren’t open for this visit." },
+  declined: { button: () => "Passed on before", note: "The blog queue tried this topic and skipped it. Try other words." },
+  covered: { button: () => "A post covers this now", note: "Search again to see it." },
+};
+
+// The search's status lines: searching, failed, nothing found, or (no post
+// holds every word) that no post covers the search yet, above the closest.
+function SearchStatusLines({ status, results, uncovered, phrase, ink, muted }) {
+  const line = (text, color = muted) => <p style={{ margin: "6px 0 0", fontSize: 14, color }}>{text}</p>;
+  if (status === "searching") return line("Searching…");
+  if (status === "failed") return line("The blog search didn’t answer. Try again.");
+  if (status !== "done") return null;
+  if (!uncovered) return results.length ? null : line("No live posts match.");
+  return (
+    <>
+      {line(`No post covers “${phrase}” yet.`, ink)}
+      {results.length > 0 && (
+        <p style={{ margin: "8px 0 0", fontSize: 14, letterSpacing: "0.04em", textTransform: "uppercase", color: muted }}>Closest posts</p>
+      )}
+    </>
+  );
+}
+
+// "Suggest a post about …" and, after the tap, what became of it.
+function SuggestBlock({ phrase, suggestion, disabled, buttonStyle, muted }) {
+  const done = suggestion.status === "queued" || suggestion.status === "already";
+  const settled = done || FINAL_ANSWERS.has(suggestion.status);
+  const copy = SUGGESTION_COPY[suggestion.status];
+  return (
+    <>
+      <button
+        type="button"
+        onClick={suggestion.send}
+        disabled={disabled || settled || suggestion.status === "sending"}
+        aria-live="polite"
+        style={{
+          ...buttonStyle, marginTop: 8, borderStyle: done ? "solid" : "dashed", fontWeight: 500, cursor: disabled || settled ? "default" : "pointer",
+          // A final refusal reads as inactive at a glance, not as a live button.
+          ...(FINAL_ANSWERS.has(suggestion.status) ? { color: muted } : {}),
+        }}
+      >
+        {copy.button(phrase)}
+      </button>
+      <p style={{ margin: "6px 0 0", fontSize: 14, color: muted }}>{copy.note}</p>
+    </>
+  );
+}
+
+export default function BlogPostPicker({ search, suggest = null, value = null, onChange, disabled = false, tokens = {} }) {
   const inputId = useId();
-  const { query, setQuery, results, status } = useBlogPostSearch(search);
+  const { query, setQuery, results, status, covered, typing, shown, canSuggest } = useBlogPostSearch(search);
+  const suggestion = useBlogSuggestion(suggest, query);
+  const phrase = query.trim();
+  // No post holds every word: say so, show the closest, offer a suggestion.
+  // Never while the last word is still being typed: its posts (or, with
+  // none holding every word, the closest) are the list, and the server
+  // refuses a phrase with a word no live post holds whole (GitHub Codex P2s
+  // on 67df0afca0 and 7331ef2402).
+  const uncovered = status === "done" && !covered && !typing && canSuggest && typeof suggest === "function";
   const ink = tokens.ink || "#111";
   const muted = tokens.muted || "#525252";
   const border = tokens.border || "#E5E5E5";
@@ -104,15 +228,16 @@ export default function BlogPostPicker({ search, value = null, onChange, disable
             disabled={disabled}
             style={{ ...(tokens.inputStyle || {}), width: "100%", boxSizing: "border-box" }}
           />
-          {status === "searching" && <p style={{ margin: "6px 0 0", fontSize: 14, color: muted }}>Searching…</p>}
-          {status === "failed" && <p style={{ margin: "6px 0 0", fontSize: 14, color: muted }}>The blog search didn’t answer. Try again.</p>}
-          {status === "done" && !results.length && <p style={{ margin: "6px 0 0", fontSize: 14, color: muted }}>No live posts match.</p>}
-          {results.map((post) => (
+          <SearchStatusLines status={status} results={results} uncovered={uncovered} phrase={phrase} ink={ink} muted={muted} />
+          {(status === "done" ? shown : results).map((post) => (
             <button key={post.id} type="button" disabled={disabled} onClick={() => onChange(post)} style={rowStyle(false)}>
               <span style={{ display: "block", fontWeight: 500, lineHeight: 1.35 }}>{post.title}</span>
               <span style={{ display: "block", fontSize: 14, color: muted, overflowWrap: "anywhere" }}>{blogPostPath(post.url)}</span>
             </button>
           ))}
+          {uncovered && (
+            <SuggestBlock phrase={phrase} suggestion={suggestion} disabled={disabled} buttonStyle={{ ...rowStyle(false), borderColor: ink }} muted={muted} />
+          )}
         </>
       )}
     </div>

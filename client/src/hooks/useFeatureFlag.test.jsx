@@ -29,11 +29,11 @@ it('never lets a superseded flag read overwrite the new login\'s flags', async (
 
   // The superseded read was aborted; even if its answer still lands, it loses.
   expect(pending[0].init.signal.aborted).toBe(true);
-  pending[0].resolve(flagsBody({ 'tech-field-workspace': true }));
-  pending[1].resolve(flagsBody({ 'tech-field-workspace': false }));
+  pending[0].resolve(flagsBody({ 'fixture-flag': true }));
+  pending[1].resolve(flagsBody({ 'fixture-flag': false }));
 
-  await expect(second).resolves.toEqual({ 'tech-field-workspace': false });
-  await expect(first).resolves.toEqual({ 'tech-field-workspace': false });
+  await expect(second).resolves.toEqual({ 'fixture-flag': false });
+  await expect(first).resolves.toEqual({ 'fixture-flag': false });
 });
 
 it('resolves to no flags, without a network read, when nobody is signed in', async () => {

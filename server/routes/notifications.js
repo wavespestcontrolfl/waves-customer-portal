@@ -54,6 +54,14 @@ function serviceContactConsentUpdates(contacts = [], consentGiven = false) {
   };
 }
 
+// Whether the contact card mentions the report text: the gate alone. The
+// card's wording carries the condition itself ("when your own visit-complete
+// texts are on"), because whether that text goes out depends on the phone,
+// the per-property toggles and the delivery channel at each visit.
+function contactReportTextsOn() {
+  return require('../config/feature-gates').contactReportTextLive();
+}
+
 function serviceContactPayload(slot = {}) {
   const name = String(slot.name || '').trim();
   return {
@@ -676,6 +684,7 @@ async function savedPropertyPreferences(req) {
       }),
       serviceContacts: serviceContactsPayload(profile),
       maxServiceContacts: MAX_SERVICE_CONTACTS,
+      contactReportTexts: contactReportTextsOn(),
     };
   });
 }
@@ -735,6 +744,7 @@ router.get('/property-preferences', async (req, res, next) => {
         }),
         serviceContacts: serviceContactsPayload(p),
         maxServiceContacts: MAX_SERVICE_CONTACTS,
+        contactReportTexts: contactReportTextsOn(),
       })),
     });
   } catch (err) {
@@ -890,6 +900,9 @@ router.put('/preferences', async (req, res, next) => {
       if (Object.keys(propertyDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: req.customerId })
           .update({ ...propertyDbUpdates, updated_at: new Date() });
+        if (propertyDbUpdates.appointment_notify_primary !== undefined) {
+          await require('../services/recipient-optin').noteHolderSetNotifyPrimary(trx, req.customerId);
+        }
       }
       if (Object.keys(channelDbUpdates).length) {
         await trx('notification_prefs').where({ customer_id: primaryId })
@@ -1133,6 +1146,9 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
       await trx('notification_prefs').where({ customer_id: req.params.customerId }).forUpdate().first('customer_id');
       await require('../utils/customer-comms-lock').lockAssignedCustomerEmails(trx, dbUpdates);
       await trx('notification_prefs').where({ customer_id: req.params.customerId }).update(dbUpdates);
+      if (dbUpdates.appointment_notify_primary !== undefined) {
+        await require('../services/recipient-optin').noteHolderSetNotifyPrimary(trx, req.params.customerId);
+      }
     });
     if (pendingOptinDispatch) {
       const { dispatchRecipientOptins } = require('../services/recipient-optin');

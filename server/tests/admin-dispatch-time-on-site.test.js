@@ -1172,7 +1172,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // The invoice-issued closeout (#4127) may take its gate lock, the mint
     // advisory lock and the issued invoice row FIRST — ahead of every lock
     // below, matching the invoice → customer order of the reversal paths.
-    expect(source).toMatch(/const persistRecord = async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*(?:\s*if \(issuedInvoiceCloseout\) \{[\s\S]*?\n\s*\}\s*\n)?(?:\s*\/\/[^\n]*\n)*\s*if \(propertyHistoryEnabled && canLinkLawnAssessmentRecord\) \{\s*await require\('\.\/lawn-assessment'\)\.lockCustomerBaseline\(svc\.customer_id, trx\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingEstimate\(trx, completionPricingPlan\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingParent\(trx, completionPricingPlan\);\s*\}\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
+    expect(source).toMatch(/const persistRecord = async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*(?:\s*if \(systemQuietCloseout\) \{[\s\S]*?\n\s*\}\s*\n)?(?:\s*\/\/[^\n]*\n)*(?:\s*if \(issuedInvoiceCloseout\) \{[\s\S]*?\n\s*\}\s*\n)?(?:\s*\/\/[^\n]*\n)*\s*if \(propertyHistoryEnabled && canLinkLawnAssessmentRecord\) \{\s*await require\('\.\/lawn-assessment'\)\.lockCustomerBaseline\(svc\.customer_id, trx\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingEstimate\(trx, completionPricingPlan\);\s*\}\s*(?:\s*\/\/[^\n]*\n)*\s*const snapshotCustomerRow = await trx\('customers'\)[^;]*;\s*if \(completionPricingPlan\) \{\s*await require\('\.\.\/services\/completion-pricing'\)\.lockCompletionPricingParent\(trx, completionPricingPlan\);\s*\}\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
     expect(source).toMatch(/else await withTrackedServicePhotoTransaction\(\{\s*knex: db,\s*newlyUploadedObjects,\s*\}, persistRecord\);/);
   });
 
@@ -1514,7 +1514,10 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // (dispatch-completion-deferred markInvoiceSenderOwnsPayLink), the same atomic
     // jsonb key-merge on the same key, so the completion no longer calls
     // mergeRecordNotesKeys for it. Still not a whole-column write.
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(18);
+    // 19 with the membership-dues stale-rate restamp (B08): the required-mint
+    // catch refreshes the frozen dues amount after a monthly-rate change, a
+    // key-merge like the SCHEDULED_PRICE_MOVED restamp.
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(19);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {

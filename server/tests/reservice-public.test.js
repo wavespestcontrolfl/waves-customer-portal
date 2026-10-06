@@ -54,6 +54,12 @@ jest.mock('../services/visit-prep', () => ({
   })),
 }));
 
+// The owner's re-service bell (registry trigger); its copy and bell policy
+// have their own suites — this file pins when the route fires it.
+jest.mock('../services/notification-triggers', () => ({
+  triggerNotification: jest.fn(async () => ({ bellWritten: true })),
+}));
+
 // Universal query-chain mock (same shape booking-customers-only-gate.test.js
 // uses): chain methods return the chain, .first() resolves firstResults,
 // list terminals resolve listResults.
@@ -106,6 +112,7 @@ const {
   reserviceLanesForCustomer,
 } = require('../services/reservice-scheduler');
 const { buildReserviceLink, reserviceSmsLineFor } = require('../services/reservice-link');
+const db = require('../models/db');
 const reservicePublicRouter = require('../routes/reservice-public');
 const { createSelfBooking } = require('../routes/booking')._internals;
 
@@ -673,6 +680,125 @@ describe('GATE_RESERVICE_PEST_CHIPS', () => {
     expect(arg.customer_notes).toBe('Re-service requested via self-serve link');
     expect(arg.callbackVisit.customerRequest).toBeUndefined();
   });
+  // Owner 2026-10-05: a self-booked re-service rang nobody (the internal
+  // text it sent is silenced by the bell policy). Every path that sees the
+  // booking asks for the bell; the bell itself is built from the saved visit.
+  describe('owner bell on a self-booked re-service', () => {
+    const flush = () => new Promise((r) => setImmediate(r));
+    let ring;
+    beforeEach(() => { ring = jest.spyOn(reservicePublicRouter._internals, 'ringReserviceBooked').mockResolvedValue(); });
+    afterEach(() => ring.mockRestore());
+
+    async function post(result) {
+      const csb = jest.spyOn(require('../routes/booking')._internals, 'createSelfBooking').mockResolvedValue(result);
+      try {
+        await callHandler(postHandler(), { params: { token: 'a'.repeat(64) }, body: { date: POST_SLOT_DATE, start_time: '09:00', lane: 'pest', details: 'ants' } });
+        await flush();
+      } finally {
+        csb.mockRestore();
+      }
+    }
+
+    test.each([
+      ['a new booking', { ok: true, body: { booking: { id: 'booking-1' } } }],
+      ['an idempotent replay', { ok: true, body: { booking: { id: 'booking-1' }, replayed: true } }],
+      ['a lane-dedupe race lost inside the transaction', { ok: false, status: 409, code: 'ALREADY_BOOKED', error: 'already' }],
+    ])('%s asks for the bell for this customer', async (_label, result) => {
+      await post(result);
+      expect(ring).toHaveBeenCalledTimes(1);
+      expect(ring.mock.calls[0][0].id).toBe(CUST_ID);
+    });
+
+    test('a slot race asks for no bell (nothing was booked)', async () => {
+      await post({ ok: false, status: 409, code: 'SLOT_TAKEN', error: 'taken' });
+      expect(ring).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ringReserviceBooked builds from the committed visit', () => {
+    const { triggerNotification } = require('../services/notification-triggers');
+    const { ringReserviceBooked } = reservicePublicRouter._internals;
+    beforeEach(() => triggerNotification.mockReset().mockResolvedValue({ bellWritten: true, push: { sent: 1 } }));
+
+    const VISIT_ROW = {
+      id: 'visit-1', service_type: 'Pest Control Re-Service', service_key: 'pest_re_service', window_start: '13:00:00',
+      customer_request: 'roaches in the kitchen', customer_request_pests: ['roaches'], service_date: '2026-10-09',
+    };
+    // A fake knex: the visit read resolves `rows`; inside the transaction the
+    // delivery-record read resolves `delivered`, and inserts are captured.
+    function conn(rows, { delivered = null } = {}) {
+      const calls = [];
+      const inserts = [];
+      const locks = [];
+      const chain = (result) => {
+        const q = {};
+        for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereRaw', 'select']) q[m] = (...a) => { calls.push([m, ...a]); return q; };
+        q.first = async () => result;
+        q.insert = async (row) => { inserts.push(row); };
+        q.then = (ok, err) => Promise.resolve(result).then(ok, err);
+        return q;
+      };
+      const trx = jest.fn(() => chain(delivered));
+      trx.raw = async (sql, args) => { locks.push(args); };
+      const fn = jest.fn(() => chain(rows));
+      fn.raw = (sql) => sql;
+      fn.transaction = async (work) => work(trx);
+      return { fn, calls, inserts, locks };
+    }
+    const optsOf = () => triggerNotification.mock.calls[0][2];
+
+    test('rings each open link booking with its STORED words and pests, keyed and locked per visit', async () => {
+      const { fn, calls, locks } = conn([VISIT_ROW]);
+      await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie', last_name: 'Doe' }, fn);
+      expect(calls).toEqual(expect.arrayContaining([
+        ['where', 'sba.source', 'reservice_link'],
+        ['whereIn', 's.status', OPEN_CALLBACK_STATUSES],
+        ['where', 's.customer_id', CUST_ID],
+      ]));
+      expect(locks).toEqual([['reservice-bell:visit-1']]);
+      expect(triggerNotification).toHaveBeenCalledWith('reservice_self_booked', {
+        customerId: CUST_ID, scheduledServiceId: 'visit-1', serviceDate: '2026-10-09', name: 'Jamie Doe',
+        when: 'Fri, Oct 9 at 1:00 PM', pests: 'Roaches', request: 'roaches in the kitchen',
+      }, expect.objectContaining({ dedupeKey: 'reservice-booked:visit-1' }));
+    });
+
+    test('no open link booking: no bell', async () => {
+      await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, conn([]).fn);
+      expect(triggerNotification).not.toHaveBeenCalled();
+    });
+
+    // Codex r3/r4: a push-only admin setup writes no bell row, so delivery is
+    // recorded on its own and a recovery pushes exactly once.
+    test('first delivery: push allowed, and a bell or a push records the delivery', async () => {
+      for (const stats of [{ bellWritten: true, push: { sent: 0 } }, { bellWritten: false, push: { sent: 2 } }]) {
+        triggerNotification.mockReset().mockResolvedValue(stats);
+        const { fn, inserts } = conn([VISIT_ROW]);
+        await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, fn);
+        expect(optsOf().beforePush()).toBe(true);
+        expect(inserts).toEqual([expect.objectContaining({ customer_id: CUST_ID, action: 'reservice_bell_delivered', metadata: JSON.stringify({ scheduledServiceId: 'visit-1' }) })]);
+      }
+    });
+
+    test('nothing delivered (no bell, no push): no record, so the next submit tries again', async () => {
+      triggerNotification.mockReset().mockResolvedValue({ bellWritten: false, push: { sent: 0 } });
+      const { fn, inserts } = conn([VISIT_ROW]);
+      await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, fn);
+      expect(inserts).toEqual([]);
+    });
+
+    test('already delivered: the bell is re-offered to its dedupe but no push, no second record', async () => {
+      const { fn, inserts } = conn([VISIT_ROW], { delivered: { id: 'log-1' } });
+      await ringReserviceBooked({ id: CUST_ID, first_name: 'Jamie' }, fn);
+      expect(optsOf().beforePush()).toBe(false);
+      expect(inserts).toEqual([]);
+    });
+  });
+
+    test('source pin: createSelfBooking sends no internal text for a re-service (one alert, not two)', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
+      expect(src).toMatch(/const reserviceOwnBell = !!callbackVisit && !callbackVisit\.alertLabel;\s*if \(process\.env\.ADAM_PHONE && !reserviceOwnBell\)/);
+    });
+
   // GATE_RESERVICE_DETAILS_REQUIRED (owner 2026-10-02: any text counts; a
   // pest chip alone does not replace the box).
   describe('GATE_RESERVICE_DETAILS_REQUIRED', () => {
@@ -927,6 +1053,55 @@ describe('staff geocode review blocks coordinate-less re-service offers', () => 
       await expect(reservicePublicRouter._test.reserviceLocationReviewRequired(customer())).resolves.toBe(true);
     },
   );
+
+  test('the portal reader keeps its customer, catalog, coverage, and callback reads on the supplied executor', async () => {
+    const database = jest.fn((table) => db(table));
+
+    await expect(reservicePublicRouter._internals.pageLaneState(token, database)).resolves.toEqual(expect.objectContaining({
+      customer: expect.objectContaining({ id: CUST_ID }),
+      bookableLanes: ['pest'],
+    }));
+
+    expect(database).toHaveBeenCalledWith('customers');
+    expect(database).toHaveBeenCalledWith('services');
+    expect(database).toHaveBeenCalledWith('scheduled_services as s');
+  });
+
+  test.each([
+    ['coverage', 1, { code: 'PORTAL_CHAT_DEADLINE' }],
+    ['coverage', 1, { code: 'ABORT_ERR' }],
+    ['coverage', 1, { code: '57014' }],
+    ['coverage', 1, { name: 'AbortError' }],
+    ['coverage', 1, { name: 'KnexTimeoutError' }],
+    ['callback', 2, { code: 'PORTAL_CHAT_DEADLINE' }],
+    ['callback', 2, { code: 'ABORT_ERR' }],
+    ['callback', 2, { code: '57014' }],
+    ['callback', 2, { name: 'AbortError' }],
+    ['callback', 2, { name: 'KnexTimeoutError' }],
+  ])('the coordinated %s read propagates cancellation %# before another query', async (_stage, failedRead, identity) => {
+    const cancelled = Object.assign(new Error('read cancelled'), identity);
+    let laneReads = 0;
+    const database = jest.fn((table) => {
+      const query = db(table);
+      if (table === 'scheduled_services as s' && ++laneReads === failedRead) {
+        query.then = (resolve, reject) => Promise.reject(cancelled).then(resolve, reject);
+      }
+      return query;
+    });
+
+    await expect(reservicePublicRouter._internals.pageLaneState(token, database)).rejects.toBe(cancelled);
+    expect(laneReads).toBe(failedRead);
+  });
+
+  test('the location-review reader forwards the supplied executor', async () => {
+    const database = jest.fn();
+    const reviewedServiceLocation = jest.spyOn(require('../services/customer-geocode-review'), 'reviewedServiceLocation')
+      .mockResolvedValue({ location: null, permanent: true, reason: 'address_review_required' });
+
+    await expect(reservicePublicRouter._test.reserviceLocationReviewRequired(customer(), database)).resolves.toBe(true);
+
+    expect(reviewedServiceLocation).toHaveBeenCalledWith(expect.objectContaining({ customer_id: CUST_ID }), database);
+  });
 
   test('a complete stored pair and a dark review gate preserve the existing offer path', async () => {
     setReview(review('needs_pin'));

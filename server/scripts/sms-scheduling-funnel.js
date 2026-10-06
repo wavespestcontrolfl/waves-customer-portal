@@ -41,9 +41,24 @@ function printReport(since, until, f) {
     lines.push(
       `  Offers recorded                    ${f.offers.sent} (${kinds})`,
       `    open / expired / superseded      ${f.offers.open} / ${f.offers.expired} / ${f.offers.superseded}`,
+      `    accepted (moved by text)         ${f.offers.accepted}`,
       `    followed by a move or booking    ${f.offers.followed_by_change_48h} of ${f.offers.matured} matured`,
       `    with a slot that did not resolve ${f.offers.with_unresolved_slot}`,
     );
+  }
+  if (f.decisions) {
+    const fmt = (o) => Object.keys(o).sort().map((k) => `${k} ${o[k]}`).join(', ') || 'none';
+    lines.push(
+      `  Decide step (shadow) decisions     ${f.decisions.total} texts`,
+      `    distinct visit-move offers       ${f.decisions.move_offers_decided} (the exit bar's sample: 40 needed)`,
+      `    by outcome                       ${fmt(f.decisions.by_outcome)}`,
+      `    refused because                  ${fmt(f.decisions.refusals)}`,
+      `    would-move then moved there <48h ${f.decisions.would_move_matched} of ${f.decisions.would_move_matured} matured (precision; logged moves only)`,
+      `    real accepts it caught           ${f.decisions.recall.caught} of ${f.decisions.recall.real_accepts} (recall: offers whose visit moved into an offered time <48h)`,
+    );
+    // The move executor's results (GATE_SMS_SCHEDULING_ACT_MOVE); a moved
+    // decision is left out of the precision line above.
+    if (Object.keys(f.decisions.executed || {}).length) lines.push(`    executor took                    ${fmt(f.decisions.executed)}`);
   }
   console.log(lines.join('\n'));
 }

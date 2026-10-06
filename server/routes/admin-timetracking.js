@@ -26,6 +26,7 @@ const {
   canonicalStaffEmail,
 } = require('../utils/staff-identity');
 const { assertMayChangeFullAccessEmail } = require('../services/intelligence-bar/ib-access');
+const analyticsMath = require('../services/time-tracking-analytics');
 
 const STAFF_ENTRY_WORK_DATE_SQL = staffWorkDateSql('time_entries.clock_in');
 
@@ -408,6 +409,58 @@ router.get('/weekly', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.get('/payroll-export', requireAdmin, retiredDailyApproval);
 
+// time_entries (job, not voided) joined to the scheduled_services row they
+// worked, with the columns workDuration reads aliased ss_*. Shared by the
+// analytics and comparison reads so both plan minutes the way the planners do.
+function jobEntriesWithPlan(start, end, { requireJob = true } = {}) {
+  let q = db('time_entries')
+    .where('time_entries.entry_type', 'job')
+    .where('time_entries.status', '!=', 'voided')
+    .whereNotNull('time_entries.duration_minutes');
+  if (requireJob) q = q.whereNotNull('time_entries.job_id');
+  return applyStaffEntryWorkDateRange(q, start, end)
+    .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')
+    .leftJoin('scheduled_services', 'time_entries.job_id', 'scheduled_services.id')
+    .select(
+      'technicians.name as tech_name',
+      'time_entries.technician_id',
+      'time_entries.job_id',
+      'time_entries.service_type',
+      'time_entries.duration_minutes',
+      'scheduled_services.id as ss_id',
+      'scheduled_services.visit_id as ss_visit_id',
+      'scheduled_services.service_type as ss_service_type',
+      'scheduled_services.is_recurring as ss_is_recurring',
+      'scheduled_services.is_callback as ss_is_callback',
+      'scheduled_services.window_start as ss_window_start',
+      'scheduled_services.window_end as ss_window_end',
+      'scheduled_services.estimated_duration_minutes as ss_estimated_duration_minutes',
+    );
+}
+
+// A grouped visit runs on one timer tied to its primary member, so its planned
+// minutes must come from EVERY live member, totalled the way the scheduler
+// totals a stop (day-quality's coVisitOnSiteMinutes). Completed members count
+// (the work was done); cancelled / skipped / rescheduled / no-show ones do not.
+async function withVisitGroupMinutes(entryRows) {
+  const visitIds = [...new Set(entryRows.map((r) => r.ss_visit_id).filter((id) => id != null))];
+  if (!visitIds.length) return entryRows;
+  const { dayStopSelect, coVisitOnSiteMinutes } = require('../services/scheduling/day-quality');
+  const { NOT_A_ROUTE_STOP_STATUSES } = require('../services/stops-ahead');
+  const members = await db('scheduled_services')
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .whereIn('scheduled_services.visit_id', visitIds)
+    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+    .select(...dayStopSelect(db));
+  const byVisit = new Map();
+  for (const m of members) {
+    if (!byVisit.has(m.visit_id)) byVisit.set(m.visit_id, []);
+    byVisit.get(m.visit_id).push(m);
+  }
+  const minutesByVisit = new Map([...byVisit].map(([id, rows]) => [id, coVisitOnSiteMinutes(rows)]));
+  return analyticsMath.applyVisitGroupMinutes(entryRows, minutesByVisit);
+}
+
 // ---------------------------------------------------------------------------
 // GET /analytics — actual vs estimated, utilization, RPMH, overtime
 // ---------------------------------------------------------------------------
@@ -417,27 +470,14 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
     const now = new Date();
     const { start, end } = staffAnalyticsDateRange({ startDate, endDate }, now);
 
-    // Actual vs estimated by service type
-    let svcQuery = applyStaffEntryWorkDateRange(
-      db('time_entries')
-        .where('time_entries.entry_type', 'job')
-        .where('time_entries.status', '!=', 'voided')
-        .whereNotNull('time_entries.duration_minutes')
-        .whereNotNull('time_entries.job_id'),
-      start,
-      end,
-    )
-      .leftJoin('scheduled_services', 'time_entries.job_id', 'scheduled_services.id')
-      .select(
-        db.raw("COALESCE(time_entries.service_type, scheduled_services.service_type, 'Unknown') as svc_type"),
-        db.raw('AVG(time_entries.duration_minutes) as avg_actual'),
-        db.raw('COUNT(*) as job_count'),
-        db.raw('AVG(scheduled_services.estimated_duration) as avg_estimated'),
-      )
-      .groupByRaw("COALESCE(time_entries.service_type, scheduled_services.service_type, 'Unknown')");
-
-    if (technicianId) svcQuery = svcQuery.where('time_entries.technician_id', technicianId);
-    const serviceTypeStats = await svcQuery;
+    // Every completed job timer in the range (linked to a scheduled row or
+    // not), collapsed ONCE into physical stops; each table below reads the
+    // same stops. Planned minutes come from the planners' workDuration.
+    let entryQuery = jobEntriesWithPlan(start, end, { requireJob: false });
+    if (technicianId) entryQuery = entryQuery.where('time_entries.technician_id', technicianId);
+    const stops = analyticsMath.collapseEntriesToStops(await withVisitGroupMinutes(await entryQuery));
+    // Actual vs estimated by service type (stops linked to a scheduled row).
+    const serviceTypeStats = analyticsMath.buildServiceTypeStats(stops);
 
     // Utilization by tech
     let utilQuery = db('time_entry_daily_summary')
@@ -487,11 +527,65 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
       )
       .orderBy('time_weekly_summary.week_start');
 
+    // Efficiency: budget (planned minutes of the stops done) over the shift.
+    // The denominator is read from the shift entries themselves, with an open
+    // shift counted up to now — the daily summary is only written at clock-out
+    // or overnight, so it would leave today's jobs over no shift at all.
+    let shiftQuery = applyStaffEntryWorkDateRange(
+      db('time_entries')
+        .where('time_entries.entry_type', 'shift')
+        .where('time_entries.status', '!=', 'voided'),
+      start,
+      end,
+    )
+      .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')
+      .select(
+        'technicians.name as tech_name',
+        'time_entries.technician_id',
+        'time_entries.duration_minutes',
+        'time_entries.clock_in',
+        'time_entries.status',
+      );
+    if (technicianId) shiftQuery = shiftQuery.where('time_entries.technician_id', technicianId);
+    const liveShiftRows = analyticsMath.buildLiveShiftRows(await shiftQuery, now);
+    const efficiencyByTech = analyticsMath.buildEfficiencyByTech(stops, liveShiftRows);
+
+    // Booked ahead: the scheduler's own day-quality measurement for the next
+    // 3 ET weeks from today — physical stops and co-visit-aware on-site
+    // minutes, the same numbers the route scorecard plans with.
+    const today = staffWorkDate(now);
+    const weekStarts = analyticsMath.loadAheadWeekStarts(now);
+    const lastWeekEnd = addStaffWorkDays(weekStarts[weekStarts.length - 1], 6);
+    const { getScheduleQualityMeasurements } = require('../services/scheduling/day-quality');
+    const ahead = await getScheduleQualityMeasurements(
+      { date_from: today, date_to: lastWeekEnd, includeStopExtras: true }, db, now,
+    );
+    const aheadDays = ahead && !ahead.error ? ahead.days : [];
+
+    // Trailing 4 completed weeks of what the team actually clocked.
+    const thisWeek = weekStarts[0];
+    let trailingQuery = db('time_weekly_summary')
+      .where('week_start', '>=', addStaffWorkDays(thisWeek, -28))
+      .where('week_start', '<', thisWeek)
+      .select(
+        db.raw("to_char(week_start, 'YYYY-MM-DD') as week_start"),
+        'total_job_minutes',
+        'total_shift_minutes',
+      );
+    if (technicianId) trailingQuery = trailingQuery.where('technician_id', technicianId);
+    const trailingRows = await trailingQuery;
+
     res.json({
       serviceTypeStats,
       utilizationByTech,
       rpmhByTech,
       overtimeTrend,
+      efficiencyByTech,
+      efficiencyBands: analyticsMath.EFFICIENCY_BANDS,
+      loadAhead: {
+        weeks: analyticsMath.buildLoadAhead(aheadDays, now, { technicianId: technicianId || null }),
+        trailing: analyticsMath.buildTrailing(trailingRows),
+      },
       dateRange: { start, end },
     });
   } catch (err) {
@@ -507,27 +601,8 @@ router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
     const { startDate, endDate } = req.query;
     const { start, end } = staffAnalyticsDateRange({ startDate, endDate });
 
-    const comparison = await applyStaffEntryWorkDateRange(
-      db('time_entries')
-        .where('time_entries.entry_type', 'job')
-        .where('time_entries.status', '!=', 'voided')
-        .whereNotNull('time_entries.duration_minutes'),
-      start,
-      end,
-    )
-      .leftJoin('technicians', 'time_entries.technician_id', 'technicians.id')
-      .leftJoin('scheduled_services', 'time_entries.job_id', 'scheduled_services.id')
-      .select(
-        'technicians.name as tech_name',
-        'time_entries.technician_id',
-        db.raw("COALESCE(time_entries.service_type, scheduled_services.service_type, 'Unknown') as svc_type"),
-        db.raw('AVG(time_entries.duration_minutes) as avg_actual'),
-        db.raw('COUNT(*) as job_count'),
-        db.raw('AVG(scheduled_services.estimated_duration) as avg_estimated'),
-      )
-      .groupBy('technicians.name', 'time_entries.technician_id',
-        db.raw("COALESCE(time_entries.service_type, scheduled_services.service_type, 'Unknown')"))
-      .orderBy(['technicians.name', 'svc_type']);
+    const rows = await withVisitGroupMinutes(await jobEntriesWithPlan(start, end, { requireJob: false }));
+    const comparison = analyticsMath.buildComparison(analyticsMath.collapseEntriesToStops(rows));
 
     res.json(comparison);
   } catch (err) {

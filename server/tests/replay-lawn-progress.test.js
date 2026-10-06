@@ -26,8 +26,9 @@ const FIXTURE = [
   { id: 'a0000001', customerId: 'cust-a', propertyId: 'prop-a', date: '2026-04-01', season: 'peak', isBaseline: true, scores: S(), photos: [80, 80], applied: [{ name: 'Celsius WG' }, { name: 'LESCO 24-0-11' }] },
   { id: 'a0000002', customerId: 'cust-a', propertyId: 'prop-a', date: '2026-05-01', season: 'peak', scores: S({ weed_suppression: 85, color_health: 85, overall: 78 }), photos: [80, 80, 55], applied: [] },
   { id: 'a0000003', customerId: 'cust-a', propertyId: 'prop-a', date: '2026-06-20', season: 'peak', scores: S({ color_health: 60, overall: 66 }), photos: [30], applied: [] },
-  // B: winter to spring, color down, granular applied in winter.
-  { id: 'b0000001', customerId: 'cust-b', propertyId: 'prop-b', date: '2026-01-10', season: 'dormant', scores: S(), photos: [80, 80], applied: [{ name: 'LESCO 24-0-11' }, { name: 'Brand New Product' }] },
+  // B: winter to spring, color down, granular and an iron spray applied in winter (granular builds no
+  // item since 2026-10-03; the iron spray is the color metric the season change is judged on).
+  { id: 'b0000001', customerId: 'cust-b', propertyId: 'prop-b', date: '2026-01-10', season: 'dormant', scores: S(), photos: [80, 80], applied: [{ name: 'LESCO 24-0-11' }, { name: 'LESCO Chelated Iron Plus' }, { name: 'Brand New Product' }] },
   { id: 'b0000002', customerId: 'cust-b', propertyId: 'prop-b', date: '2026-03-01', season: 'shoulder', scores: S({ color_health: 50, overall: 60 }), photos: [80, 80], applied: [] },
   // C: two visits two days apart, no photo evidence on the second.
   { id: 'c0000001', customerId: 'cust-c', propertyId: 'prop-c', date: '2026-05-01', season: 'peak', scores: S(), photos: [80, 80], applied: [{ name: 'Celsius WG' }] },
@@ -80,14 +81,11 @@ describe('replayLawnProgress over the fixture', () => {
     expect(Object.values(s.overall).reduce((a, b) => a + b, 0)).toBe(5);
   });
 
-  it('a2: a good month after the herbicide and feed is on track; density is judged on its own, longer window', () => {
+  it('a2: a good month after the herbicide and feed: Celsius is on track, and the granular feed (no progress window) builds no item', () => {
     const a2 = result.pairs.find((p) => p.assessment === 'a0000002');
     expect(a2).toBeTruthy();
-    expect(a2.items.map((i) => `${i.item}=${i.state}`)).toEqual(expect.arrayContaining([
-      'herbicide_broadleaf:weed_suppression=on_track',
-      'granular_fertilizer:color_health=on_track',
-      'granular_fertilizer:turf_density=too_early',
-    ]));
+    // Granular color and density were judged until 2026-10-03; their day counts were unsourced.
+    expect(a2.items.map((i) => `${i.item}=${i.state}`)).toEqual(['herbicide_celsius:weed_suppression=on_track']);
   });
 
   it('a3: one poor photo cannot support a comparison, so everything is unclear and the direction unknown', () => {
@@ -98,7 +96,8 @@ describe('replayLawnProgress over the fixture', () => {
 
   it('b2: winter color change is seasonal and the unmapped name is listed', () => {
     const b2 = result.pairs.find((p) => p.date === '2026-03-01');
-    expect(b2.items.find((i) => i.item === 'granular_fertilizer:color_health').state).toBe('seasonal');
+    expect(b2.items.map((i) => i.item)).toEqual(['iron_micros:color_health']);
+    expect(b2.items[0].state).toBe('seasonal');
     expect(o.unmappedProducts).toEqual({ 'Brand New Product': 1 });
   });
 
@@ -114,7 +113,7 @@ describe('replayLawnProgress over the fixture', () => {
   it('a divergent metric is unclear while the rest of the pair compares (e2 color)', () => {
     const e2 = result.pairs.find((p) => p.date === '2026-07-01');
     // Celsius (weeds, 30 days, delta 0) is behind; the feed row has no windows (K-Flow) and is judged by its own metric
-    expect(e2.items.find((i) => i.item === 'herbicide_broadleaf:weed_suppression').state).toBe('behind');
+    expect(e2.items.find((i) => i.item === 'herbicide_celsius:weed_suppression').state).toBe('behind');
     expect(e2.items.find((i) => i.item === 'potassium_feed:color_health').state).toBe('unclear');
   });
 

@@ -229,8 +229,21 @@ function KeyLine({ label, value, dot }) {
   );
 }
 
+// GATE_TS_TECH_PARAGRAPH: the technician's paragraph, written once at completion
+// and frozen server-side; printed as given, right under the "what we applied"
+// line. An absent, empty or non-string value renders nothing.
+function TechParagraphCard({ text }) {
+  if (typeof text !== 'string' || !text.trim()) return null;
+  return (
+    <div data-testid="ts-tech-paragraph" style={{ marginTop: 10, padding: '11px 13px', background: CARD, border: `1px solid ${BORDER}`, borderRadius: 10 }}>
+      <div data-gt="eyebrow" style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 14, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.06em' }}>From your technician</div>
+      <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{text}</div>
+    </div>
+  );
+}
+
 // ── 1. Tree & Shrub Health Snapshot (hero) ──────────────────────────────────────
-export function TreeShrubSnapshotHero({ snapshot = {} }) {
+export function TreeShrubSnapshotHero({ snapshot = {}, techParagraph }) {
   const {
     overallScore, statusHeadline, scoreExplanation, peaceOfMind, todaysFocus = [],
     watching = [], wavesNext, customerAction, noActionNeeded, nextVisit,
@@ -252,7 +265,7 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
           <div data-gt="eyebrow" style={{ fontSize: 14, textTransform: 'uppercase', letterSpacing: '0.08em', color: MUTED, fontWeight: 700, marginBottom: 4 }}>
             Overall Landscape Plant Health
           </div>
-          <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 25, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
+          <h2 className="sr-v2-hero-title" style={{ fontFamily: FONTS.serif, fontSize: 20, fontWeight: 500, lineHeight: 1.2, color: TEXT, margin: '0 0 8px' }}>
             {statusHeadline || statusMeta(status).label}
           </h2>
           {scoreExplanation ? (
@@ -283,6 +296,8 @@ export function TreeShrubSnapshotHero({ snapshot = {} }) {
           <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 3 }}>{snapshot.treatmentSummary}</div>
         </div>
       ) : null}
+
+      <TechParagraphCard text={techParagraph} />
 
       {watching.length ? (
         <div style={{ marginTop: 16, paddingTop: 16, borderTop: `1px solid ${BORDER}` }}>

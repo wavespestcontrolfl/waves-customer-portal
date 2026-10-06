@@ -224,3 +224,37 @@ it('a re-check for the same visit holds the last summary as stale instead of cle
   expect(result.current.availability).toBeNull();
 });
 
+it('the move choice on a shared stop rides the request, and changing it searches again', async () => {
+  const fetch = vi.fn().mockImplementation(async () => ({ ok: true, json: async () => ({ slots: [daySlot] }) }));
+  vi.stubGlobal('fetch', fetch);
+  const { rerender } = renderHook(({ moveScope }) => useBestTimes({ date: '2035-01-02', serviceId: 'combo-fixture', technicianId: 'tech', arrivalWindows: true, moveScope }), { initialProps: { moveScope: 'together' } });
+  // Only this hook's own requests (an earlier test's debounce can still fire).
+  const scopes = () => fetch.mock.calls.map((c) => JSON.parse(c[1].body)).filter((body) => body.serviceId === 'combo-fixture').map((body) => body.moveScope);
+  await waitFor(() => expect(scopes().length).toBeGreaterThan(0));
+  expect([...new Set(scopes())]).toEqual(['together']);
+  rerender({ moveScope: 'separate' });
+  await waitFor(() => expect(scopes()).toContain('separate'));
+});
+
+
+it('prices the typed hour on every route in auto mode and drops the single-route verdict', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({
+    slots: [],
+    pickedByTech: [{ start: '13:00', fits: true, detour_minutes: 12, drive_in_minutes: 9, from_home_base: false, from_name: 'S', technician: { id: 't-b', name: 'Tech B' } }],
+  }) });
+  vi.stubGlobal('fetch', fetch);
+  const { result } = renderHook(() => useBestTimes({ date: '2035-01-02', customerId: 'fixture', compareTechsAt: '13:00' }));
+  await waitFor(() => expect(result.current.pickedByTech).toHaveLength(1));
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ pickedStart: '13:00', compareTechs: true });
+  expect(result.current.pickedByTech[0]).toMatchObject({ technicianId: 't-b', detourMinutes: 12 });
+});
+
+it('never compares routes once one technician is chosen', async () => {
+  const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ slots: [] }) });
+  vi.stubGlobal('fetch', fetch);
+  renderHook(() => useBestTimes({ date: '2035-01-02', customerId: 'fixture', technicianId: 'tech', compareTechsAt: '13:00' }));
+  await waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  const body = JSON.parse(fetch.mock.calls[0][1].body);
+  expect(body.compareTechs).toBeUndefined();
+  expect(body.pickedStart).toBeUndefined();
+});

@@ -23,6 +23,7 @@ const MODULES = [
   ['schedule-tools', 'SCHEDULE_TOOLS', 'executeScheduleTool'],
   ['closeout-tools', 'CLOSEOUT_TOOLS', 'executeCloseoutTool'],
   ['closeout-repair-tools', 'CLOSEOUT_REPAIR_TOOLS', 'executeCloseoutRepairTool'],
+  ['receipt-resend-tools', 'RECEIPT_RESEND_TOOLS', 'executeReceiptResendTool'],
   ['dashboard-tools', 'DASHBOARD_TOOLS', 'executeDashboardTool'],
   ['seo-tools', 'SEO_TOOLS', 'executeSeoTool'],
   ['procurement-tools', 'PROCUREMENT_TOOLS', 'executeProcurementTool'],
@@ -61,6 +62,7 @@ const MODULES = [
   ['gap-report-tools', 'GAP_REPORT_TOOLS', 'executeGapReportTool'],
   ['needs-me-tools', 'NEEDS_ME_TOOLS', 'executeNeedsMeTool'],
   ['billing-reader-tools', 'BILLING_READER_TOOLS', 'executeBillingReaderTool'],
+  ['billing-write-tools', 'BILLING_WRITE_TOOLS', 'executeBillingWriteTool'],
 ];
 
 const ajv = new Ajv({ strict: false, allErrors: true, coerceTypes: false });

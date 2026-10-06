@@ -42,20 +42,21 @@ import useLockBodyScroll from '../../hooks/useLockBodyScroll';
 import { recapVisitIdentity } from '../../hooks/useServiceRecapDraft';
 import useFastCompleteSubmit from '../../hooks/useFastCompleteSubmit';
 import {
-  UNIT_CHOICES, amountText, categoryLabel, hasAmount, isOutOfStock, measureUnit, productUnits, seededAmount, stockHolds,
+  UNIT_CHOICES, amountText, categoryLabel, hasAmount, measureUnit, productUnits, seededAmount, stockHolds,
 } from '../../lib/fast-complete-products';
 import { submittedAmount } from '../../lib/measure-units';
-import { WarningIcon } from './FastCompleteProductPicker';
-import { isSendableRateUnit } from './FastCompleteSheet';
 import { prefillRateCeiling, resolveRatePrefill } from '../../lib/product-rate-prefill';
 import {
   LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition,
 } from '../../lib/lawn-targets';
 import {
-  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, OtherProductButton, SavedView,
-  SheetHeader, VisitNote, toggleInSet, useProductPicker, visitChangedSinceSchedule,
+  AmountEntry, CLOSED_VISIT_STATUSES, Chip, ChoiceSection, CompleteFooter, FastCompleteFrame, MethodSection, OtherProductButton, RecoveredCompletion, refusalWithoutContext, submissionHolds, ProductTileButton, SavedView,
+  SheetHeader, VisitNote, isSendableRateUnit, toggleInSet, useProductPicker, visitChangedSinceSchedule,
 } from './FastCompleteParts';
-import { Button, ActionFeedback, Input, Select, cn } from '../ui';
+import {
+  NoteProductsFill, ProductHeardLines, VoiceFillReview, useLawnVoiceFill, useNoteClip,
+} from './FastCompleteVoiceFill';
+import { Button, ActionFeedback, Input, Select } from '../ui';
 import '../../styles/tech-workflow.css';
 
 // The typed form's option lists (server/services/project-types.js
@@ -350,6 +351,29 @@ function useProductRows(ctx) {
     ]));
   }, [lastAmounts, ctx]);
   const removeRow = useCallback((productId) => setRows((prev) => prev.filter((row) => row.productId !== productId)), []);
+  // Voice fill: a row built the way "+ Other product" builds it, and the read's
+  // rows and patches landed the way the tech's own taps land (a tile turned on
+  // takes the first active row's Where; a way set seeds the square feet it needs).
+  const makeRow = useCallback((product) => ({
+    ...productRow(product, { last: lastAmounts[String(product.id)] || null, added: true, ctx }),
+    active: true,
+  }), [lastAmounts, ctx]);
+  const applyVoiceFill = useCallback((added, patches) => {
+    setRows((prev) => {
+      const seed = prev.find((row) => row.active && row.areas.length)?.areas || [];
+      const known = new Set(prev.map((row) => String(row.productId)));
+      const land = (row, patch) => {
+        const next = { ...row, ...patch };
+        if ('method' in patch && patch.method !== row.method) next.rateInput = null;
+        if (!next.areas.length) next.areas = [...seed];
+        return withAreaSeed(next, ctx);
+      };
+      return [
+        ...prev.map((row) => (patches[row.productId] ? land(row, patches[row.productId]) : row)),
+        ...added.filter((row) => !known.has(String(row.productId))).map((row) => land(row, {})),
+      ];
+    });
+  }, [ctx]);
   // A fresh stock read changes each row's stock on hand, nothing the tech set.
   const applyStock = useCallback((fresh) => {
     setRows((prev) => prev.map((row) => {
@@ -357,13 +381,13 @@ function useProductRows(ctx) {
       return latest ? { ...row, product: { ...row.product, inventory_on_hand: latest.inventory_on_hand, inventory_unit: latest.inventory_unit } } : row;
     }));
   }, []);
-  return { rows, updateRow, activate, addProduct, removeRow, applyStock };
+  return { rows, updateRow, activate, addProduct, removeRow, applyStock, makeRow, applyVoiceFill };
 }
 
 const toggleInList = (list, value) => (list.includes(value) ? list.filter((item) => item !== value) : [...list, value]);
 const inOptionOrder = (options, set) => options.filter((option) => set.has(option)).join(', ');
 
-function missingRequirement({ form, rows, ctx, dictationPending }) {
+function missingRequirement({ form, rows, ctx, dictationPending, voice = null }) {
   const active = rows.filter((row) => row.active);
   const outOfStock = !ctx.stockAdvisory && active.find((row) => stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
   const missingAmount = active.find((row) => !hasAmount(row));
@@ -391,6 +415,11 @@ function missingRequirement({ form, rows, ctx, dictationPending }) {
     [missingWhere, missingWhere && `Pick where ${missingWhere.name} went.`],
     [!form.pressure, 'Select the weed pressure.'],
     [!form.condition, 'Select the lawn condition.'],
+    // Voice fill: the note is still being read, a product it set waits on the
+    // tech's ✓, or something it could not settle is still open.
+    [voice?.filling, 'Reading your note…'],
+    [voice?.confirms > 0, 'Confirm the products I filled.'],
+    [voice?.checks > 0, 'Check what I couldn\'t fill.'],
   ].find(([missing]) => missing) || [];
   return reason;
 }
@@ -435,7 +464,7 @@ function completionBody({ form, rows, ctx }) {
   };
 }
 
-export default function FastCompleteLawnReserviceSheet({ service, request, onClose, onCompleted, onFullForm }) {
+export default function FastCompleteLawnReserviceSheet({ service, request, operatorId, onClose, onCompleted, onFullForm, voiceFillEnabled = false }) {
   const isMobile = useIsMobile();
   const closeRef = useRef(null);
   const dialogRef = useModalFocus(true, () => closeRef.current?.());
@@ -443,7 +472,7 @@ export default function FastCompleteLawnReserviceSheet({ service, request, onClo
   const titleId = useId();
   const base = `/admin/dispatch/${service?.id}`;
   const ctx = useLawnContext({ base, request, service });
-  const submission = useFastCompleteSubmit({ base, request });
+  const submission = useFastCompleteSubmit({ base, request, serviceId: service?.id, operatorId });
   const { submitting, done } = submission;
   // A recorded dictation clip is still being taken or transcribed. The full
   // form is another page and carries nothing over, so Full form and "+ Other
@@ -461,18 +490,22 @@ export default function FastCompleteLawnReserviceSheet({ service, request, onClo
   closeRef.current = close;
   // Nothing is editable while a save is in flight, unresolved or refused for
   // good; the full form can't resume a /complete attempt.
-  const locked = submitting || submission.failure !== null;
+  const locked = submissionHolds(submission);
 
   return (
     <FastCompleteFrame isMobile={isMobile} dialogRef={dialogRef} titleId={titleId} onDismiss={close}>
       <SheetHeader titleId={titleId} title={done ? 'Lawn re-service complete' : 'Complete lawn re-service'} service={service} visit={ctx.visit} done={!!done} locked={locked} dictationPending={dictationPending} submitting={submitting} onFullForm={onFullForm} onClose={close} />
-      <SheetBody service={service} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} />
+      <SheetBody service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={setDictationPending} onCompleted={onCompleted} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled === true} />
     </FastCompleteFrame>
   );
 }
 
-function SheetBody({ service, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile }) {
-  if (submission.done) return <SavedView service={service} summary={submission.done.summary} onCompleted={onCompleted} />;
+function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, voiceFillEnabled }) {
+  if (submission.done) return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={onCompleted} />;
+  if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
+  if (submission.restored) return <RecoveredCompletion submission={submission} />;
+  const refusal = refusalWithoutContext(submission, ctx);
+  if (refusal) return refusal;
   if (ctx.loading) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Loading…</ActionFeedback>;
   if (ctx.loadError) {
     return (
@@ -485,10 +518,10 @@ function SheetBody({ service, ctx, submission, locked, dictationPending, onDicta
     );
   }
   if (ctx.blockedReason) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">{ctx.blockedReason}</ActionFeedback>;
-  return <LawnForm service={service} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} />;
+  return <LawnForm service={service} request={request} ctx={ctx} submission={submission} locked={locked} dictationPending={dictationPending} onDictationPending={onDictationPending} onFullForm={onFullForm} isMobile={isMobile} voiceFillEnabled={voiceFillEnabled} />;
 }
 
-function LawnForm({ ctx, service, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile }) {
+function LawnForm({ ctx, service, request, submission, locked, dictationPending, onDictationPending, onFullForm, isMobile, voiceFillEnabled = false }) {
   const products = useProductRows(ctx);
   // Clearing a Treating-for chip also clears it as a target on every product
   // row, so picking it again never revives an old per-row choice.
@@ -507,6 +540,11 @@ function LawnForm({ ctx, service, submission, locked, dictationPending, onDictat
   const appendNote = useCallback((text) => {
     setForm((prev) => ({ ...prev, note: prev.note.trim() ? `${prev.note.trimEnd()} ${text}` : text }));
   }, []);
+  // Voice fill (GATE_FAST_COMPLETE_VOICE_FILL, the `voiceFillEnabled` prop): the
+  // note's mic goes to our own transcriber, and one tap reads the products out of
+  // the note onto the rows, each to confirm. Off, the sheet is as it was.
+  const noteClip = useNoteClip({ enabled: voiceFillEnabled, request, serviceId: service?.id, onText: appendNote });
+  const voice = useLawnVoiceFill({ enabled: voiceFillEnabled, request, serviceId: service?.id, products, ctx });
   const lastVisitCommon = useMemo(() => (Array.isArray(ctx.lastVisit?.products) ? ctx.lastVisit.products : [])
     .map((p) => ({ productId: p.productId, usualUnit: p.amountUnit || null, usualAmount: p.totalAmount ?? null })), [ctx.lastVisit]);
   const picker = useProductPicker({
@@ -515,13 +553,16 @@ function LawnForm({ ctx, service, submission, locked, dictationPending, onDictat
     // The last lawn visit's products lead the picker, with their recorded amount.
     commonProducts: lastVisitCommon,
     rows,
-    locked: locked || dictationPending,
+    locked: locked || dictationPending || voice.filling,
     isMobile,
     onFullForm,
     onPick: products.addProduct,
   });
 
-  const missingReason = missingRequirement({ form, rows, ctx, dictationPending });
+  const missingReason = missingRequirement({
+    form, rows, ctx, dictationPending,
+    voice: voice.enabled ? { filling: voice.filling, confirms: voice.confirms.length, checks: voice.checks.length } : null,
+  });
   // "Update inventory, then tap Check stock": the tech re-reads the stock here
   // instead of closing the sheet and losing the note and taps.
   const stockRow = !ctx.stockAdvisory && rows.find((row) => row.active && stockHolds(row.product, submittedAmount(row.totalAmount, row.amountUnit).amountUnit));
@@ -549,8 +590,11 @@ function LawnForm({ ctx, service, submission, locked, dictationPending, onDictat
       <div className="tech-visit-body" {...picker.coverProps}>
         <fieldset className="tech-visit-form" disabled={locked}>
           <CustomerRequest request={ctx.customerRequest} />
-          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked} />
-          <ProductsSection ctx={ctx} form={form} products={products} locked={locked} other={picker.button} popover={picker.popover} />
+          <VisitNote note={form.note} onChange={(value) => setField('note', value)} onDictated={appendNote} onDictationPending={onDictationPending} serviceId={service?.id} locked={locked || voice.filling} onClip={noteClip.onClip} />
+          {noteClip.error && <p className="tech-visit-muted tech-visit-status--warn" role="status">{noteClip.error}</p>}
+          <NoteProductsFill voice={voice} note={form.note} locked={locked} busy={dictationPending} />
+          <VoiceFillReview voice={voice} locked={locked} />
+          <ProductsSection ctx={ctx} form={form} products={products} locked={locked || voice.filling} other={picker.button} popover={picker.popover} heardLines={<ProductHeardLines voice={voice} rows={rows.filter((row) => row.active)} />} />
           <ChoiceSection title="Treating for" columns={2}>
             {TURF_ISSUE_OPTIONS.map((label) => (
               <Chip disabled={locked} key={label} label={label} pressed={form.issues.has(label)} onClick={() => toggleIssue(label)} />
@@ -603,7 +647,7 @@ function CustomerRequest({ request }) {
 }
 
 // The last lawn visit's products as suggestions, then anything the tech adds.
-function ProductsSection({ ctx, form, products, locked, other, popover }) {
+function ProductsSection({ ctx, form, products, locked, other, popover, heardLines = null }) {
   const { rows, updateRow, activate, removeRow } = products;
   const hint = ctx.lastVisit ? 'Tap what you applied' : 'Add what you applied';
   return (
@@ -621,6 +665,7 @@ function ProductsSection({ ctx, form, products, locked, other, popover }) {
       {rows.filter((row) => row.active).map((row) => (
         <ProductEditor key={row.productId} row={row} methods={ctx.methods} sqft={needsSqft(ctx, row)} targetIssues={isPesticideRow(row) ? targetIssuesOf(form) : null} rate={rowRate(row)} locked={locked} onChange={(patch) => updateRow(row.productId, patch)} onRemove={() => removeRow(row.productId)} />
       ))}
+      {heardLines}
       <OtherProductButton {...other} popover={popover} />
     </section>
   );
@@ -628,32 +673,18 @@ function ProductsSection({ ctx, form, products, locked, other, popover }) {
 
 // A product tile names what goes on the record. A suggestion starts off.
 function ProductTile({ row, locked, onClick }) {
-  const outOfStock = row.active && isOutOfStock(row.product);
   let detail = 'Tap if applied';
   if (row.active) detail = hasAmount(row) ? amountText(row.totalAmount, row.amountUnit) : 'How much?';
   return (
-    <Button
-      type="button"
-      variant="secondary"
-      className={cn('tech-visit-action tech-visit-product tech-visit-product-tile', {
-        'tech-visit-product--off': !row.active,
-        'tech-visit-product--added': row.added && row.active,
-        'tech-visit-product--stock': outOfStock,
-      })}
+    <ProductTileButton
+      row={row}
+      detail={detail}
+      off={!row.active}
+      added={row.added && row.active}
+      ariaProps={{ 'aria-pressed': row.active }}
       disabled={locked}
-      aria-pressed={row.active}
       onClick={onClick}
-    >
-      <span className="tech-visit-product-name">{row.name}</span>
-      <span className="sr-only"> — </span>
-      <span className="tech-visit-product-amount">{detail}</span>
-      {outOfStock && (
-        <>
-          {' '}
-          <span className="tech-visit-stock-flag"><WarningIcon />0 in stock</span>
-        </>
-      )}
-    </Button>
+    />
   );
 }
 
@@ -673,7 +704,7 @@ function ProductEditor({ row, methods, sqft, targetIssues, rate, locked, onChang
       <AmountEntry id={amountId} row={row} locked={locked} onChange={onChange} />
       {row.fromLast && <p className="tech-visit-muted">last time</p>}
       <RateSection {...part} rate={rate} />
-      <MethodSection {...part} methods={methods} />
+      <MethodSection {...part} methods={methods} footnote="Perimeter spray? Use Full form." />
       {targetIssues && <TargetsSection {...part} targetIssues={targetIssues} />}
       {!targetIssues && isNutritionRow(row) && <PurposeSection {...part} />}
       {sqft && <SqftSection {...part} />}
@@ -710,37 +741,6 @@ function RateSection({ row, rate, locked, onChange }) {
       </div>
       {rate.from && <p className="tech-visit-muted">{rate.from}</p>}
       {overLabel && <p className="tech-visit-warning" role="status">&gt; label max {rate.max}</p>}
-    </div>
-  );
-}
-
-function MethodSection({ row, methods, locked, onChange }) {
-  const methodId = useId();
-  // An older context without `common` shows every method as a button.
-  const hasCommon = methods.some((choice) => choice.common);
-  const common = hasCommon ? methods.filter((choice) => choice.common) : methods;
-  const more = hasCommon ? methods.filter((choice) => !choice.common) : [];
-  return (
-    <div>
-      <span id={methodId} className="tech-product-editor-label">How</span>
-      <div role="group" aria-labelledby={methodId} className="tech-visit-tile-grid">
-        {common.map((choice) => (
-          <Chip disabled={locked} key={choice.value} label={choice.label} pressed={row.method === choice.value} onClick={() => onChange({ method: choice.value })} />
-        ))}
-      </div>
-      {more.length > 0 && (
-        <Select
-          aria-label={`More methods for ${row.name}`}
-          className="tech-visit-control"
-          disabled={locked}
-          value={more.some((choice) => choice.value === row.method) ? row.method : ''}
-          onChange={(e) => { if (e.target.value) onChange({ method: e.target.value }); }}
-        >
-          <option value="">More methods</option>
-          {more.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}
-        </Select>
-      )}
-      <p className="tech-visit-muted">Perimeter spray? Use Full form.</p>
     </div>
   );
 }

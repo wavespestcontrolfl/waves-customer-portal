@@ -14,6 +14,9 @@ const logger = require('../services/logger');
 const lawnAssessment = require('../services/lawn-assessment');
 const visitAssessment = require('../services/lawn-visit-assessment');
 const visitInput = require('../services/lawn-visit-input');
+const shotList = require('../services/lawn-photo-shots');
+const { decodedBase64Bytes } = require('../utils/request-photo-validation');
+const shotListLive = () => require('../config/feature-gates').gateEnvValue('GATE_LAWN_SHOT_LIST');
 const visitResult = require('../services/lawn-visit-result');
 const visitScores = require('../services/lawn-visit-scores');
 const visitRuns = require('../services/lawn-visit-runs');
@@ -25,6 +28,7 @@ const { seasonAwareAdjustment } = require('../services/service-report/lawn-seaso
 const { fetchRecentMinTempF } = require('../services/service-report/application-conditions');
 const { loadCustomerGrassContext } = require('../services/lawn-grass-context');
 const { getProtocolWindowContext, summarizeProtocolContext } = require('../services/lawn-protocol-operating-layer');
+const { visitProtocolQuery } = require('../services/lawn-program');
 
 let PhotoService;
 try { PhotoService = require('../services/photos'); } catch { PhotoService = null; }
@@ -118,18 +122,17 @@ function finiteNumberOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-// /confirm's legacy (no-run) branch. Owner ruling 2026-09-24: lawn health
-// scores are READ-ONLY from photos. adjustedScores is honored ONLY for a key
-// the AI's own read left null on this assessment row — a blank AI read is
-// the one thing a technician may fill in. A key the AI DID determine keeps
-// its stored value regardless of what the client sends. Stress/Damage is
-// fixed the same way when AI-known — never re-derived from a component edit,
-// since an AI-known fungus/thatch can't be moved either. Only a genuinely
-// AI-blank Stress accepts a tech entry, falling back to the prior
-// derivation: worst of the fungus + thatch scores and the AI worst-spot
-// floor stored at /assess (which already folds in insect/drought/mechanical
-// and the worst per-photo disease/thatch). Pre-stress_damage rows (null
-// floor) fall back to worst-of(fungus, thatch) — never 0.
+// /confirm's legacy (no-run) branch. Owner ruling 2026-10-04 (replaces the
+// 2026-09-24 read-only ruling): the technician may change any score until the
+// assessment is confirmed. A score is, in order: the number posted in this
+// request, the value already saved in the row's column (the AI read, or an
+// earlier entry), then the AI's read. A key posted as null/blank goes back to
+// the AI's read. With no entry and no AI read, Stress/Damage falls back to
+// the prior derivation: worst of the fungus + thatch scores and the AI
+// worst-spot floor stored at /assess (which already folds in
+// insect/drought/mechanical and the worst per-photo disease/thatch).
+// Pre-stress_damage rows (null floor) fall back to worst-of(fungus, thatch)
+// — never 0.
 const LEGACY_SCORE_KEYS = ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage'];
 // The AI's read for a legacy (no-run) row: the adjusted_scores snapshot /assess
 // wrote (a pending save never rewrites it). A missing or score-less snapshot
@@ -169,31 +172,32 @@ function legacyConfirmFinalScores(assessment, adjustedScores) {
   const aiRead = legacyAiRead(assessment);
   const aiValue = (key) => (aiRead ? aiRead[key] : assessment[key]);
   const aiKnown = (key) => aiValue(key) != null && aiValue(key) !== '';
-  // The drawer posts only typed keys, so a key that is neither AI-known nor
-  // typed keeps the earlier saved fill, else stays unknown (null) — never
-  // scoreValue's 0 default.
+  const aiScore = (key) => (aiKnown(key) ? scoreValue(aiValue(key)) : null);
+  // The drawer posts only typed keys, so an omitted key keeps what the row
+  // already holds (the AI read or an earlier entry), else stays unknown
+  // (null) — never scoreValue's 0 default.
   const typed = (key) => adjustedScores?.[key] != null && adjustedScores[key] !== ''
     && Number.isFinite(Number(adjustedScores[key]));
-  // A key posted as null/blank clears an earlier fill; an omitted key keeps it.
+  // A key posted as null/blank clears an earlier entry; an omitted key keeps it.
   const cleared = (key) => adjustedScores != null && Object.prototype.hasOwnProperty.call(adjustedScores, key) && !typed(key);
-  const saved = (key) => (!cleared(key) && assessment[key] != null ? scoreValue(assessment[key]) : null);
+  const saved = (key) => (!cleared(key) && assessment[key] != null && assessment[key] !== '' ? scoreValue(assessment[key]) : null);
   const finalScores = Object.fromEntries(
     ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level']
-      .map((key) => [key, aiKnown(key) ? scoreValue(aiValue(key)) : (typed(key) ? scoreValue(adjustedScores[key]) : saved(key))]),
+      .map((key) => [key, typed(key) ? scoreValue(adjustedScores[key]) : (saved(key) ?? aiScore(key))]),
   );
-  if (aiKnown('stress_damage')) {
-    finalScores.stress_damage = scoreValue(aiValue('stress_damage'));
-    return finalScores;
-  }
   if (typed('stress_damage')) {
     finalScores.stress_damage = scoreValue(adjustedScores.stress_damage);
     return finalScores;
   }
-  // A pending save stores Stress only when it is real (AI-read or typed —
-  // legacyStressIsFixed), so a stored Stress the AI didn't read is the
-  // technician's earlier entry: keep it.
-  if (!cleared('stress_damage') && assessment.stress_damage != null && assessment.stress_damage !== '' && !assessment.confirmed_by_tech) {
-    finalScores.stress_damage = scoreValue(assessment.stress_damage);
+  // A stored Stress is real: the AI's read, or the technician's entry. A
+  // pending save stores Stress only when it is real (legacyStressIsFixed),
+  // and a confirmed row never reaches here (confirmLegacyAssessment).
+  if (saved('stress_damage') != null) {
+    finalScores.stress_damage = saved('stress_damage');
+    return finalScores;
+  }
+  if (aiKnown('stress_damage')) {
+    finalScores.stress_damage = aiScore('stress_damage');
     return finalScores;
   }
   // Derive from the KNOWN components only, with the 95 floor.
@@ -479,14 +483,32 @@ router.get('/customers', async (req, res, next) => {
 // reject so a tech can't accidentally attach one customer's assessment
 // to another customer's appointment.
 // =========================================================================
+// Cloudflare fronts the portal API and answers 524 to the technician once an
+// origin response passes 100 s, while the AI calls below kept running against
+// the dispatcher's 4-minute default budget (and the legacy Gemini scorer had no
+// deadline at all). The whole AI phase of one /assess request now shares this
+// wall-clock budget, leaving room for the photo upload and the DB work around
+// it; a photo that misses it falls to the existing "enter scores manually" path.
+const LAWN_ASSESS_AI_BUDGET_MS = 70 * 1000;
+
 router.post('/assess', async (req, res, next) => {
   try {
     const { customerId, serviceId, photos } = req.body;
+    // What is left of the budget when a call starts; zero or less once it has
+    // run out, which the services read as "skip the call" (a queued photo in
+    // the pool below then takes the manual-scores path instead of a fresh call).
+    const aiDeadline = Date.now() + LAWN_ASSESS_AI_BUDGET_MS;
+    const aiTimeoutMs = () => aiDeadline - Date.now();
     const propertyHistoryEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_PROPERTY_HISTORY');
     // GATE_LAWN_VISIT_ASSESSMENT (services/lawn-visit-assessment.js): one
     // multimodal call over every photo of the visit in place of the per-photo
     // quality gate + parallel scorer below. Decided once per request.
     const visitAssessmentEnabled = require('../config/feature-gates').gateEnvValue('GATE_LAWN_VISIT_ASSESSMENT');
+    // GATE_LAWN_SHOT_LIST (services/lawn-photo-shots.js): the eight-shot photo
+    // contract (cap 8, shot keys as zones, per-shot maximum), the zone-weighted
+    // legacy merge and the front-first hero photo. Decided once per request;
+    // off = every line below behaves exactly as before.
+    const shotListEnabled = shotListLive();
 
     if (!customerId) return res.status(400).json({ error: 'customerId is required' });
     if (!photos || !photos.length) return res.status(400).json({ error: 'At least one photo is required' });
@@ -496,13 +518,23 @@ router.post('/assess', async (req, res, next) => {
     if (!(await technicianServicesCustomer(req, customerId))) return res.status(404).json({ error: 'Customer not found' });
     // Gate on: up to six photos, each optionally labeled with the zone the
     // technician shot (front / close_up / trouble) — the only source of a zone claim.
-    const visitPhotos = visitAssessmentEnabled ? visitInput.validateVisitPhotos(photos) : null;
+    const visitPhotos = visitAssessmentEnabled ? visitInput.validateVisitPhotos(photos, { shotList: shotListEnabled }) : null;
     if (visitPhotos?.error) return res.status(400).json({ error: visitPhotos.error });
     // Gate off still records a chosen slot (photoFieldsAt below), so the
     // one-Front rule is enforced on this path too.
     if (!visitAssessmentEnabled && Array.isArray(photos)
       && photos.filter((photo) => visitInput.normalizePhotoZone(photo?.zone) === 'front').length > 1) {
       return res.status(400).json({ error: 'Only one photo can be the Front photo' });
+    }
+    // Shot list on, visit assessment off: the per-photo path has no photo-count
+    // cap of its own, so the shot list brings the cap, the same raw-zone and
+    // per-shot checks as the visit path (shotList.validateZones), and the size rule.
+    if (shotListEnabled && !visitAssessmentEnabled && Array.isArray(photos)) {
+      if (photos.length > shotList.SHOT_CAP) return res.status(400).json({ error: `At most ${shotList.SHOT_CAP} photos per visit` });
+      const zoneCheck = shotList.validateZones(photos.map((photo) => photo?.zone));
+      const sizeError = shotList.photoSizeError(photos.map((photo) => (typeof photo?.data === 'string' ? decodedBase64Bytes(photo.data) : 0)));
+      const shotError = zoneCheck.error || sizeError;
+      if (shotError) return res.status(400).json({ error: shotError });
     }
 
     // Verify customer exists. The premise AND the move stamp are read in one
@@ -573,7 +605,7 @@ router.post('/assess', async (req, res, next) => {
     let qualityResults = visitAssessmentEnabled
       ? photos.map(() => ({ passed: true, issues: [] }))
       : await withConcurrency(photos, 3, (photo) =>
-        LawnIntel.assessPhotoQuality(photo.data, photo.mimeType || 'image/jpeg'),
+        LawnIntel.assessPhotoQuality(photo.data, photo.mimeType || 'image/jpeg', { timeoutMs: aiTimeoutMs() }),
       );
 
     // Track quality outcomes by ORIGINAL photo index. The downstream
@@ -696,9 +728,11 @@ router.post('/assess', async (req, res, next) => {
       // Honor the window the office linked on the appointment (catch-up / rescheduled
       // / manually-assigned visits): a keyed window overrides the date-derived one so
       // the model sees the products the tech is actually expected to apply.
-      const assignedWindowKey = scheduledService?.lawn_protocol_window_key || null;
+      // The visit's own assignment rides with it (key and version too, not just the
+      // window key), so a visit pinned to an older protocol version gets ITS
+      // context, never a newer version's window by key collision.
       const protoCtx = track
-        ? await getProtocolWindowContext(db, { serviceDate: visitDate, grassTrack: track, windowKey: assignedWindowKey })
+        ? await getProtocolWindowContext(db, visitProtocolQuery({ serviceDate: visitDate, grassTrack: track, scheduledService }))
         : null;
       const structured = protoCtx ? summarizeProtocolContext(protoCtx) : null;
       // Only claim products we're CERTAIN were applied: default-in-plan AND
@@ -750,7 +784,7 @@ router.post('/assess', async (req, res, next) => {
     // at 6 concurrent vision calls per /assess request, which is
     // well inside both providers' burst limits.
     const photoResults = visitAssessmentEnabled ? [] : await withConcurrency(photosToAnalyze, 3, (photo) =>
-      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg', visionContext),
+      lawnAssessment.analyzePhoto(photo.data, photo.mimeType || 'image/jpeg', visionContext, { timeoutMs: aiTimeoutMs() }),
     );
 
     // Map AI result back to original photo index. validResults preserves
@@ -789,14 +823,20 @@ router.post('/assess', async (req, res, next) => {
     let mergedComposite;
     let displayScores;
     if (visitAssessmentEnabled) {
-      visitAnalysis = await visitAssessment.analyzeVisit({ photos, visionContext });
+      visitAnalysis = await visitAssessment.analyzeVisit({ photos, visionContext, shotList: shotListEnabled, timeoutMs: aiTimeoutMs() });
       let allPoor;
       ({ qualityResults, resultByPhotoIndex, allPoor } = visitResult.photoRowInputs(visitAnalysis));
       // The model answered but called every photo unusable: the legacy
       // retake hold, not an assessment scored off images it could not read.
       if (allPoor) return allPhotosFailed(qualityResults);
     } else {
-      mergedComposite = mergePhotoComposites(validResults);
+      // Shot list on: weight each photo's area scores by its recorded shot
+      // (detail shots count for nothing). Off: the plain mean, as before.
+      const resultZones = [];
+      photoResults.forEach((result, k) => {
+        if (result) resultZones.push(visitInput.normalizePhotoZone(photos[analyzedIndices[k]]?.zone, { shotList: true }));
+      });
+      mergedComposite = mergePhotoComposites(validResults, shotListEnabled ? { zones: resultZones } : undefined);
       // Convert to display scores
       displayScores = lawnAssessment.mapToDisplayScores(mergedComposite);
     }
@@ -865,6 +905,10 @@ router.post('/assess', async (req, res, next) => {
     const photoMeta = photos.map((p, i) => ({
       filename: `lawn_${customerId}_${Date.now()}_${i}.${(p.mimeType || 'image/jpeg').split('/')[1]}`,
       uploadedAt: new Date().toISOString(),
+      // Capture mode, stored at capture time (no schema change): the zones on the
+      // photo rows cannot say which vocabulary they were captured under. Absent,
+      // not false, with the gate off, so those rows are unchanged.
+      ...(shotListEnabled ? { photoVocabulary: shotList.PHOTO_VOCABULARY } : {}),
     }));
 
     // Save the assessment. Gate on: the raw output and provenance live on the
@@ -988,7 +1032,7 @@ router.post('/assess', async (req, res, next) => {
         // picker is ungated), so close-up/trouble photos stay out of the
         // report's pairing and fallback. Unlabeled photos keep the legacy
         // upload-order type.
-        const zone = visitInput.normalizePhotoZone(photos[i]?.zone);
+        const zone = visitInput.normalizePhotoZone(photos[i]?.zone, { shotList: shotListEnabled });
         if (zone) return { photo_type: visitInput.photoTypeForZone(zone), zone };
         return { photo_type: photos.length === 1 ? 'general' : (i === 0 ? 'front_yard' : i === 1 ? 'side_yard' : 'trouble_spot') };
       };
@@ -999,6 +1043,11 @@ router.post('/assess', async (req, res, next) => {
     const photoRowsByIndex = photos.map(() => null);
     let bestPhotoId = null;
     let bestQuality = -1;
+    // Shot list on: the report's lead photo prefers the front shot, then any
+    // other overview, over a macro close-up (lawn-photo-shots.js heroRank), and
+    // quality only breaks ties inside a tier. Off: the rank is 0 for every
+    // photo, so quality alone decides, exactly as before.
+    let bestHeroRank = 0;
 
     for (let i = 0; i < photos.length; i++) {
       const photo = photos[i];
@@ -1090,7 +1139,10 @@ router.post('/assess', async (req, res, next) => {
         // Best-photo selection considers quality-gated photos only.
         // A failed photo can never become is_best_photo regardless of
         // its computed quality_score.
-        if (qualityCheck.passed !== false && qualityScore > bestQuality) {
+        const heroRank = shotListEnabled ? shotList.heroRank(photoRecord.zone) : 0;
+        if (qualityCheck.passed !== false
+          && shotList.beatsHero({ rank: heroRank, quality: qualityScore }, { rank: bestHeroRank, quality: bestQuality })) {
+          bestHeroRank = heroRank;
           bestQuality = qualityScore;
           bestPhotoId = photoRecord.id;
         }
@@ -1203,7 +1255,24 @@ async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyH
     await lawnAssessment.lockCustomerBaseline(original.customer_id, trx);
     const write = async (conn) => {
       const assessment = await conn('lawn_assessments').where({ id: assessmentId }).forUpdate().first();
-      const finalScores = legacyConfirmFinalScores(assessment, adjustedScores);
+      // Scores are editable only until confirmation (owner ruling
+      // 2026-10-04). A retry or a stale second session returns the confirmed
+      // row; its payload never rewrites it (as visitRuns.confirmLockedRun).
+      if (assessment.confirmed_by_tech) return { assessment, confirmed: true, alreadyConfirmed: true, missingScores: [] };
+      // A blank Fungus/Thatch is settled without an entry only when Condition
+      // is a real value (AI-read or entered) or derived from a known
+      // component — the 95 fallback of a row with no stressor signal at all
+      // is neither, and the screen shows that Condition as an empty field.
+      // Condition is the technician's entry when it is real and not the AI's
+      // own read.
+      const resolved = legacyConfirmFinalScores(assessment, adjustedScores);
+      const conditionReal = legacyStressIsFixed(assessment, adjustedScores);
+      const { scores: finalScores, synthetic: syntheticSubScores = [] } = conditionReal || resolved.fungus_control != null || resolved.thatch_level != null
+        ? visitScores.alignWithCondition(resolved, {
+          posted: adjustedScores,
+          conditionEntered: conditionReal && resolved.stress_damage !== legacyAiScores(assessment).stress_damage,
+        })
+        : { scores: { ...resolved, stress_damage: null } };
       const missingScores = visitScores.missingScores(finalScores);
       const pending = missingScores.length > 0;
       const textUpdate = adjustedScores?.observations != null ? { observations: adjustedScores.observations } : {};
@@ -1231,7 +1300,7 @@ async function confirmLegacyAssessment({ assessmentId, adjustedScores, propertyH
         ? await lawnAssessment.installConfirmedBaseline({ assessmentId, updateData }, { knex: conn })
         : (await conn('lawn_assessments').where({ id: assessmentId }).update(updateData).returning('*'))[0];
       if (persistChecks) await persistChecks(updated, conn);
-      return { assessment: updated, confirmed: !pending, missingScores };
+      return { assessment: updated, confirmed: !pending, missingScores, syntheticSubScores };
     };
     if (propertyHistoryEnabled || persistChecks) {
       const { withTurfProfileFence } = require('../services/customer-pricing-ai');
@@ -1361,11 +1430,14 @@ router.post('/confirm', async (req, res, next) => {
         // 3. Tech calibration — record AI vs tech score differences. The
         // drawer posts only typed keys now, so compare against the FINAL saved
         // scores (the confirmed row), never the sparse request payload.
-        const confirmedScores = Object.fromEntries(
+        // Fungus/Thatch keys that hold no reading are left out.
+        const confirmedScores = visitScores.calibrationScores(Object.fromEntries(
           ['turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level', 'stress_damage']
             .map((key) => [key, updated?.[key] ?? null]),
-        );
-        if (updated) {
+        ), confirmation.syntheticSubScores);
+        // The first confirmation recorded the comparison; a retry or stale
+        // session changed nothing and no longer knows the synthetic keys.
+        if (updated && !confirmation.alreadyConfirmed) {
           const calibrationBaseline = assessment.adjusted_scores || assessment.composite_scores;
           const aiScores = calibrationBaseline
             ? (typeof calibrationBaseline === 'string' ? JSON.parse(calibrationBaseline) : calibrationBaseline)
@@ -1444,7 +1516,7 @@ router.get('/service/:serviceId', async (req, res, next) => {
       db('lawn_assessments').where({ service_id: req.params.serviceId }),
     ).first();
 
-    if (!assessment) return res.json({ assessment: null });
+    if (!assessment) return res.json({ ...(shotListLive() ? { shotListEnabled: true } : {}), assessment: null });
 
     const visitRun = await visitRuns.loadRun(assessment.id, db);
     const photos = await db('lawn_assessment_photos')
@@ -1453,13 +1525,16 @@ router.get('/service/:serviceId', async (req, res, next) => {
       .catch(() => []);
 
     res.json({
+      // GATE_LAWN_SHOT_LIST: how the admin drawer learns the shot list is live
+      // (key absent when off, so the gate-off payload is unchanged).
+      ...(shotListLive() ? { shotListEnabled: true } : {}),
       assessment: {
         ...normalizeAssessmentRow(assessment),
         photo_records: photos,
       },
       visitAssessment: visitRuns.responseForRun(visitRun),
-      // Legacy rows: the server's own AI read, so the drawer locks exactly
-      // what /confirm will ignore (run-backed rows carry visitAssessment.aiScores).
+      // Legacy rows: the server's own AI read, shown beside a score the
+      // technician changed (run-backed rows carry visitAssessment.aiScores).
       ...(visitRun ? {} : { aiScores: legacyAiScores(assessment) }),
     });
   } catch (err) {

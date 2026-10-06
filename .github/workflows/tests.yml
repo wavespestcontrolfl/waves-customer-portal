@@ -203,7 +203,7 @@ jobs:
         working-directory: server
         env:
           VISIT_PACKET_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/visit-completion-packets-postgres.test.js tests/invoice-issued-closeout-completion-postgres.test.js tests/visit-linked-invoice-withdrawal-postgres.test.js tests/assessment-estimate-closeout-postgres.test.js
       - name: Invoice-issued closeout resolver transaction tests
         working-directory: server
         env:
@@ -256,11 +256,11 @@ jobs:
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx jest --ci --silent --runInBand tests/previsit-balance-authority-postgres.test.js
-      - name: Report blog search ranking tests
+      - name: Report blog search ranking and suggestion fence tests
         working-directory: server
         env:
           REPORT_BLOG_SEARCH_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand --no-coverage tests/report-blog-post-postgres.test.js
+        run: npx jest --ci --silent --runInBand --no-coverage tests/report-blog-post-postgres.test.js tests/blog-suggest-claim-fence-postgres.test.js tests/report-blog-suggestion-postgres.test.js
       - name: Customer backend coverage floor
         # A focused, measured threshold for customer-app auth, pricing,
         # autopay, notification, and upload-validation logic. The server-unit
@@ -336,7 +336,8 @@ jobs:
         env:
           RESERVATION_ARRIVAL_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
           RESERVATION_HOLD_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js tests/reservation-hold-grace-postgres.test.js
+          SLOT_PARK_LOCK_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/reservation-arrival-postgres.test.js tests/reservation-hold-grace-postgres.test.js tests/slot-park-lock-contention-postgres.test.js
       - name: Staff arrival-window transaction tests
         working-directory: server
         env:
@@ -361,7 +362,7 @@ jobs:
         working-directory: server
         env:
           IB_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/intelligence-bar-task-recovery-db.test.js
+        run: npx jest --ci --silent --runInBand tests/intelligence-bar-task-recovery-db.test.js tests/intelligence-bar-superseded-cards-db.test.js
       - name: Tool contract tests (202 IB/agent tools vs the migrated schema)
         # Blocks on critical only (schema drift, missing tables/columns);
         # execute-smoke warnings (e.g. uuid-typed params fed 'test') are
@@ -401,7 +402,10 @@ jobs:
       - name: Server tests (no DB — golden masters keep in-memory semantics)
         working-directory: server
         # Recycle cumulative worker heaps between suites before V8 exhausts its limit.
-        run: npx jest --ci --silent --maxWorkers=2 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB"}'
+        # Three workers on the 4-vCPU runner: shards took 3-7 min against 5-8 with two.
+        # The default 5 s test timeout is raised to 15 s because a third worker slows
+        # cold module loads; a test that sets its own timeout keeps it.
+        run: npx jest --ci --silent --maxWorkers=3 --shard=${{ matrix.shard }}/3 --config='{"workerIdleMemoryLimit":"2GB","testTimeout":15000}'
 
   client:
     runs-on: ubuntu-latest

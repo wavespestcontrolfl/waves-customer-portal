@@ -1,4 +1,4 @@
-import LawnVisitReview, { createVisitReview, visitReviewPayload } from "../../components/lawn/LawnVisitReview";
+import LawnAssessmentCompletionBlock, { LAWN_ASSESSMENT_METRICS } from "../../components/lawn/LawnAssessmentCompletionBlock";
 import PropertyServiceAreas from "../../components/tech/PropertyServiceAreas";
 import lawnScores from '@lawn-scores';
 import { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } from '@legacy-visit-money-submission';
@@ -61,6 +61,8 @@ import RescheduleDialogView from "../../components/schedule/RescheduleDialogView
 
 import { addETDays, etDateString, etDatetimeLocalToISO, etParts, formatETDateOnly, formatETDateTime } from "../../lib/timezone";
 import { completionDraftKey } from "../../lib/completion-drafts";
+import { PEST_SWEEP_ACTION } from "../../lib/pest-sweep-action";
+import { elapsedSince, onSiteTimeOf } from "../../lib/on-site-time";
 import { prepareCompletionPhoto } from "../../lib/completion-photo";
 import {
   stackablePresets,
@@ -107,7 +109,7 @@ import {
   specialtyCompletionFor,
   specialtyFindingActionConflict,
 } from "../../lib/service-completion-presets";
-import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
+import { LAWN_DEFAULT_AREAS, LAWN_FIELD_ACTIONS, isLawnFindingSelection, lawnPlanSelections, reconcileLawnPlanSelections, lawnPlanActionOptions, previousLawnAssessment, recordedLawnArea, withdrawLawnPlanSuggestions } from "../../lib/lawn-completion";
 import LawnFindingPicker from "../../components/tech/LawnFindingPicker";
 import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useCancelFeeNotice } from "../../components/schedule/CancelFeeNotice";
@@ -470,6 +472,53 @@ export function productAreaChoices(areasServiced, currentValue) {
   }
   return choices;
 }
+// The visit's areas on a regular pest visit (owner 2026-10-04): there is no
+// visit-level "Areas treated" field, so the areas sent at completion are the
+// union of the product rows' own areas, in the area list's order. An area
+// that is not on the list (a restored legacy value) follows the list ones,
+// so it still shows and submits instead of vanishing.
+const PRODUCT_ROW_AREAS_SEP = "\u0001";
+export function areasFromProductRows(selectedProducts, orderedAreas) {
+  const used = new Set();
+  const offList = [];
+  for (const row of selectedProducts || []) {
+    for (const area of parseApplicationAreas(row?.applicationArea)) {
+      if (orderedAreas.includes(area)) used.add(area);
+      else if (!offList.includes(area)) offList.push(area);
+    }
+  }
+  return [...orderedAreas.filter((area) => used.has(area)), ...offList];
+}
+// A seeded default product row on a regular pest visit starts on an area
+// (owner 2026-10-05, "prefill areas"): with no row area the report's exterior
+// re-entry line drops off, and a tech would tap Perimeter on nearly every
+// visit. An exterior method starts on "Perimeter"; any other method starts
+// empty (the interior defaults only seed on typed visits such as cockroach,
+// which keep their own area field). The value must sit on the pest area list
+// AND on the exterior side of treatment-area-scopes.json, or it is not
+// offered. Fills an empty area only, and is marked applicationAreaDefault
+// like the lawn prefill: it follows a method change until the tech picks an
+// area (which clears the mark), and a tech's own pick is never replaced.
+const PEST_ROW_DEFAULT_AREAS = {
+  exterior: ["Perimeter"],
+};
+const PEST_ROW_METHOD_SCOPE = {
+  perimeter_spray: "exterior",
+  broadcast_spray: "exterior",
+  granular_broadcast: "exterior",
+};
+export function pestRowDefaultArea(applicationMethod) {
+  const scope = PEST_ROW_METHOD_SCOPE[normalizeApplicationMethod(applicationMethod)];
+  if (!scope) return "";
+  return PEST_ROW_DEFAULT_AREAS[scope]
+    .filter((area) => AREAS_BY_SERVICE.pest.includes(area) && AREA_SCOPES[scope].includes(area))
+    .join(", ");
+}
+export function withPestRowDefaultArea(row) {
+  if (!row || row.applicationArea) return row;
+  const applicationArea = pestRowDefaultArea(row.applicationMethod);
+  return applicationArea ? { ...row, applicationArea, applicationAreaDefault: true } : row;
+}
 function toggleProductAreaValue(currentValue, area, orderedChoices) {
   const selected = parseApplicationAreas(currentValue);
   const next = selected.includes(area)
@@ -477,6 +526,10 @@ function toggleProductAreaValue(currentValue, area, orderedChoices) {
     : orderedChoices.filter((a) => selected.includes(a) || a === area);
   return next.join(", ");
 }
+// A fresh completion opens on "home — spoke with them" (owner 2026-10-04; the
+// Fast Complete sheets' DEFAULT_CUSTOMER_HOME is the same value). The tech
+// changes it only when it was not so.
+const DEFAULT_CUSTOMER_INTERACTION = "tech_home_spoke_with_them";
 const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "tech_home_spoke_with_them", label: "Customer home — spoke with them" },
   { value: "not_home_full_access", label: "Customer not home — full access" },
@@ -1248,6 +1301,18 @@ function completionDraftTombstoneKey(serviceId) {
   return `${completionDraftKey(serviceId)}_discarded`;
 }
 
+function completionDraftTombstoneMatches(tombstone, draftId) {
+  if (tombstone === null) return false;
+  if (!tombstone) return true;
+  if (tombstone === String(draftId)) return true;
+  try {
+    const ids = JSON.parse(tombstone);
+    return Array.isArray(ids) && ids.map(String).includes(String(draftId));
+  } catch {
+    return tombstone === draftId;
+  }
+}
+
 // The signed-in admin's id. Unsubmitted drafts (photos, captions, notes) are
 // stored under it so a shared tablet never offers one operator's field work
 // to the next: the IndexedDB row is keyed by it and the localStorage
@@ -1342,6 +1407,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "setup_fee_claim_in_flight",           // another closeout of the series is billing its setup fee; the resume re-reads the claim
   "setup_fee_park_failed",               // the setup fee could not be parked for the office; the resume parks it
   "deferred_prepay_lookup_failed",       // the deferred annual-prepay hold could not be read; the resume re-reads it
+  "membership_dues_coverage_unverified", // the month's dues could not be checked / the dues mint was refused retryably (month busy, rate or lane moved); the resume re-reads coverage and mints
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is
@@ -1396,6 +1462,27 @@ export function buildPhotoRecoveryOutcome({
   };
 }
 
+export function buildPhotoReconcileFailureOutcome(draft, errorCode) {
+  const handedOff = errorCode === "photo_reconciliation_handed_off";
+  const result = {
+    ...draft.pendingPhotoCompletion,
+    completionPhotoUpload: { failed: 0, reconcileOwed: true, handedOff },
+  };
+  return {
+    draft: {
+      ...draft,
+      servicePhotos: [],
+      reconcileOwed: true,
+      reconciliationHandedOff: handedOff,
+      pendingPhotoCompletion: result,
+    },
+    result,
+    message: handedOff
+      ? "Report repair was handed to the office. You can dismiss this recovery on this device."
+      : "Photos uploaded, but the report could not be updated yet. Retry when connected.",
+  };
+}
+
 // Whether the success overlay should auto-dismiss, and after how long. A
 // required follow-up suggestion keeps it open so the tech can act on the
 // CTA — it dismisses via the Done button. Keep the panel open when a pest
@@ -1427,7 +1514,7 @@ export function completionAutoCloseDelay(completion, photosOwed, recapEligible) 
 // from the autosave revision (see buildPhotoRecoveryOutcome above) carry the
 // panel's shape, not the completion body's: derive the body fields the same
 // way.
-export function buildPhotoRetryFormBody(photo, index) {
+export function buildPhotoRetryFormBody(photo, index, expectedVisit = null, expectedServiceRecordId = null) {
   const [header, encoded] = photo.data.split(",");
   const bytes = Uint8Array.from(atob(encoded), (character) => character.charCodeAt(0));
   const form = new FormData();
@@ -1437,6 +1524,11 @@ export function buildPhotoRetryFormBody(photo, index) {
   if (photo.caption) form.append("caption", photo.caption);
   const aiTags = photo.aiTags || (photo.captionSource === "ai" ? { captionSource: "ai" } : null);
   if (aiTags) form.append("aiTags", JSON.stringify(aiTags));
+  // New completion receipts carry the visit identity frozen under the
+  // completion lock. Older persisted drafts predate that receipt; omission
+  // deliberately retains the optional deployed API contract for them.
+  if (expectedVisit) form.append("expectedVisit", JSON.stringify(expectedVisit));
+  if (expectedServiceRecordId) form.append("expectedServiceRecordId", expectedServiceRecordId);
   return form;
 }
 
@@ -1507,20 +1599,6 @@ function minutesToTime(total) {
   const h = Math.floor(total / 60);
   const m = total % 60;
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
-}
-
-function elapsedSince(isoTime) {
-  if (!isoTime) return "0:00";
-  const diff = Math.max(
-    0,
-    Math.floor((Date.now() - new Date(isoTime).getTime()) / 1000),
-  );
-  const m = Math.floor(diff / 60);
-  const s = diff % 60;
-  const h = Math.floor(m / 60);
-  if (h > 0)
-    return `${h}:${String(m % 60).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
-  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 const btnBase = {
@@ -1933,7 +2011,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   });
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
-  const [saveError, setSaveError] = useState("");
+  const [saveError, setSaveErrorState] = useState("");
+  const setSaveError = setSaveErrorState;
   const saveErrorRef = useRef(null);
   useEffect(() => { saveErrorRef.current?.focus(); }, [saveError]);
   // "Apply price & service change to" — series rows only, rendered only when
@@ -2122,8 +2201,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   // and the range chip would move the finished (or cancelled / skipped /
   // no-show) visit onto a live day (update-details allows the edit) — no
   // hint at all (Codex #4120 r4 P2, r5 P2).
+  // How a shared stop moves (the choice box near the date and time). Declared
+  // here because the availability search below answers for that move.
+  const [comboMove, setComboMove] = useState("together");
   const { bestTimes, picked, bestInRange, availability } = useBestTimes({
     enabled: !isTerminalVisit,
+    moveScope: comboMove,
     // Availability strip (GATE_RESCHEDULE_AVAILABILITY): one search over the
     // days around the picked date. Gate off = no `availability`, and the
     // three-line hint below renders exactly as before.
@@ -2166,6 +2249,71 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
   ].join("|");
   const openedSlotKey = useRef(slotKey).current;
   const slotEdited = slotKey !== openedSlotKey;
+  // A stop shared by two or more services (lawn + pest). update-details
+  // writes ONE row, so a date, time or technician change on it would leave
+  // the other services behind. The operator chooses here (owner rulings
+  // 2026-10-03: a combo can be moved together or separated from this form,
+  // and a technician-only change asks too) and the ONE save request carries
+  // the choice (`comboMove`). The server does the rest: it checks the move
+  // before it writes anything, saves the other changes, then moves the whole
+  // stop and sends the one customer text, or splits the service off first.
+  // The stop is read live on open, so every screen that opens this form
+  // (Day, 5-Day, Week, List, the dispatch board) sees a combo the same way;
+  // `service.visit` (the Day feed) only fills the moment before the read.
+  // Not known to be a combo = today's behavior, server guard included.
+  const [comboVisitInfo, setComboVisitInfo] = useState(service.visit || null);
+  // Resolves to the live summary (null = not shared), or undefined when the
+  // read failed or answered without one. A failed read on open is not fatal:
+  // the server still refuses a slot change on a shared stop, and that
+  // refusal re-reads the stop and shows the choice (handleSave's catch).
+  const readComboVisit = () => adminFetch(`/admin/schedule/${service.id}/visit-summary`)
+    .then((r) => (r && Object.prototype.hasOwnProperty.call(r, "visit") ? (r.visit || null) : undefined))
+    .catch(() => undefined);
+  useEffect(() => {
+    let live = true;
+    readComboVisit().then((visit) => { if (live && visit !== undefined) setComboVisitInfo(visit); });
+    return () => { live = false; };
+  }, [service.id]);
+  // Counted by LIVE services: a stop whose other service is cancelled or
+  // done is an ordinary single visit (the server moves it as one row).
+  const comboCount = Number(comboVisitInfo?.liveCount ?? comboVisitInfo?.serviceCount);
+  const comboVisit = comboVisitInfo && comboVisitInfo.id && comboCount > 1 ? comboVisitInfo : null;
+  // The slot and technician the form opened on: where the stop is.
+  const comboOpened = useRef({
+    date: form.scheduledDate,
+    start: String(form.windowStart || "").slice(0, 5),
+    end: String(form.windowEnd || "").slice(0, 5),
+    duration: slotCheckDuration,
+    technicianId: form.technicianId,
+    serviceType: form.serviceType,
+    serviceKey: form.serviceKey,
+  }).current;
+  const comboStart = String(form.windowStart || "").slice(0, 5);
+  const comboEnd = String(form.windowEnd || "").slice(0, 5);
+  const comboPlaceChanged = form.scheduledDate !== comboOpened.date || comboStart !== comboOpened.start;
+  const comboTechChanged = form.technicianId !== comboOpened.technicianId;
+  const spanOf = (start, end) => {
+    const [h1, m1] = String(start).split(":").map(Number);
+    const [h2, m2] = String(end).split(":").map(Number);
+    return [h1, m1, h2, m2].every(Number.isFinite) ? h2 * 60 + m2 - (h1 * 60 + m1) : null;
+  };
+  // The whole-stop move keeps every service's own length. A stop that opened
+  // with no time has no span to keep: giving it a time (a suggested slot
+  // fills both bounds) is a move, not a length change.
+  const comboOpenedSpan = spanOf(comboOpened.start, comboOpened.end);
+  const comboLengthChanged = slotCheckDuration !== comboOpened.duration
+    || (comboOpenedSpan != null && spanOf(comboStart, comboEnd) !== comboOpenedSpan);
+  // The choice is owed whenever the save would move or reassign the stop.
+  const comboSlotChanged = !!comboVisit && (comboPlaceChanged || comboLengthChanged || comboTechChanged);
+  // The whole-stop move re-dates THIS visit's stop only: the server never
+  // widens a grouped recurring visit to its series, so no later visit moves
+  // and no series ack is owed. Separate leaves an ordinary row, with the
+  // ordinary series rules.
+  const comboTogether = comboSlotChanged && comboMove === "together";
+  // A different service can take this one off the shared stop (the server
+  // regroups by family), which "together" cannot then honour. The server
+  // refuses a different address itself.
+  const comboRegroupingEdit = form.serviceType !== comboOpened.serviceType || form.serviceKey !== comboOpened.serviceKey;
   // A VERIFIED miss only (never "could not check"): Save stays enabled —
   // the strip is advisory — but says what it is about to do.
   const routeMissVerdict = slotEdited && availabilityVerdict(availability, stripCurrent)?.tone === "miss";
@@ -3137,6 +3285,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     (form.scheduledDate !== initialScheduledDate ||
       (form.windowStart || "") !== initialWindowStart) &&
     !!form.windowStart;
+  const moveNotifyOffered = scheduleMoved;
 
   // See lineDiscountSaveBlocked's own comment for the compounding hazard
   // this guards against. Also the ONE condition (interaction between the
@@ -3315,6 +3464,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     recurringNth, recurringWeekday, recurringIntervalDays, skipWeekends, weekendShift,
     discountType, discountAmount, discountPresetId, storedDiscountCleared, createInvoice, assignmentScope,
     priceServiceScope, timeOnSiteMinutes, reentryExterior, reentryInterior,
+    // How a combo stop moves (together / separate) decides which write runs.
+    comboMove,
   };
   const saveInputsDrifted = (before) => {
     const after = saveInputsRef.current;
@@ -3439,6 +3590,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         }
       }
     }
+    let saveRequestSent = false;
     try {
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
@@ -3449,16 +3601,33 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // payload's gross convention apart from MobileServiceEditModal's net
       // convention by the field's presence, never by guessing from the number.
       const primaryLinePriceValue = parseFinitePrice(form.price) ?? undefined;
-      const notifyOnMove = scheduleMoved && notificationType === "sms";
+      const notifyOnMove = moveNotifyOffered && notificationType === "sms";
+      // Refusals the server also makes, said here before the request.
+      if (comboTogether && comboLengthChanged) {
+        throw new Error("Moving the whole stop keeps each service's length. Save the move first, or choose Separate to change this service's length.");
+      }
+      if (comboTogether && form.scheduledDate !== comboOpened.date && isRecurring && !serviceIsRecurringTemplate) {
+        throw new Error("Make this visit recurring in its own save, then move the stop: the plan is built from the visit's date.");
+      }
+      if (comboTogether && comboRegroupingEdit) {
+        throw new Error("A different service can take this service off the shared stop. Save that change on its own first, or choose Separate.");
+      }
+      saveRequestSent = true;
       const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          // A shared stop: the server runs the choice in this one request.
+          comboMove: comboSlotChanged ? comboMove : undefined,
+          // The stop this form showed; the server refuses if it changed.
+          comboVisit: comboSlotChanged && Array.isArray(comboVisit.liveMemberIds)
+            ? { id: comboVisit.id, memberIds: comboVisit.memberIds, liveCount: comboVisit.liveCount, liveMemberIds: comboVisit.liveMemberIds }
+            : undefined,
           ...(selectedPropertyId ? { propertyId: selectedPropertyId } : {}),
           notifyCustomer: notifyOnMove || undefined,
           // Collective-move ack — bound to the previewed occurrence set the
           // modal showed (empty when this save is not a collective move).
-          ...seriesAckPayload(seriesPreview.preview),
+          ...(comboTogether ? {} : seriesAckPayload(seriesPreview.preview)),
           // Sent unconditionally (see primaryLinePriceValue's own comment) —
           // NOT only when sendAddons — so the server can tell this payload's
           // gross-Price convention apart from MobileServiceEditModal's net
@@ -3550,9 +3719,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               : (storedDiscountCleared ? null : undefined),
           estimatedPrice: parseFinitePrice(form.price) ?? undefined,
           createInvoice: takePayment || createInvoice,
+          // The whole-stop move reassigns this stop only (the choice box
+          // says so and the scope picker is hidden for it).
           assignmentScope:
             form.technicianId !== (service.technicianId || "")
-              ? assignmentScope
+              ? (comboTogether ? "this_only" : assignmentScope)
               : undefined,
           priceServiceScope: priceServiceScopeActive
             ? priceServiceScope
@@ -3583,6 +3754,27 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               : typeof appointmentTotal === "number" ? appointmentTotal : undefined,
         }),
       });
+      // The whole-stop move's outcome rides in the saved answer: the other
+      // changes are saved either way.
+      const stopMove = result?.comboMove || null;
+      // Not moved (refused, partly, or not confirmed): the details ARE saved,
+      // so the form closes on them like any save and the notice says what
+      // happened to the move. Reopening reads the appointment fresh; nothing
+      // is retried from this form's now-stale state.
+      if (stopMove && stopMove.moved !== true) {
+        const reason = stopMove.needsAttention?.message || stopMove.error || "The stop was not moved.";
+        showScheduleSaveNotice(stopMove.needsAttention
+          ? `The other changes were saved. ${reason}`
+          : stopMove.moved === null
+            ? `The other changes were saved. The move did not confirm, so the stop may or may not have moved: check the schedule. If it moved and the customer has not been told, text them. (${reason})`
+            : `The other changes were saved, but the stop was not moved: ${reason} Reopen the appointment to move it.`);
+      }
+      let comboMoveWarnings = stopMove?.moved === true && Array.isArray(stopMove.warnings) ? stopMove.warnings : [];
+      if (stopMove?.moved === true && notifyOnMove && stopMove.notificationSent === false) {
+        comboMoveWarnings = [...comboMoveWarnings, stopMove.notificationSkipped === "already_at_target"
+          ? "The stop was already at this time, so no new text was sent. If the customer has not been told about the move, text them."
+          : `The customer was not texted about the move: ${stopMove.notificationError || "the text could not be sent"}.`];
+      }
       if (notifyOnMove && result?.notificationSent === false) {
         showScheduleSaveNotice(
           `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
@@ -3591,8 +3783,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       // Advisory schedule-overlap notes: the save COMMITTED (conflicts no
       // longer block admin edits) — tell the operator what now stacks so
       // the double-booking is a choice, not a surprise.
-      if (Array.isArray(result?.warnings) && result.warnings.length) {
-        showScheduleSaveNotice(`Appointment saved.\n\n${result.warnings.join("\n\n")}`);
+      if (comboMoveWarnings.length || (Array.isArray(result?.warnings) && result.warnings.length)) {
+        showScheduleSaveNotice(`Appointment saved.\n\n${[...comboMoveWarnings, ...(result?.warnings || [])].join("\n\n")}`);
       }
       // A 'following' scope rewrites visits the operator can't see from this
       // modal — report what actually moved rather than closing silently.
@@ -3742,7 +3934,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       onSaved?.();
     } catch (e) {
       const ack = parseSeriesAckError(e);
-      if (ack?.code === SERIES_ACK_REQUIRED) {
+      // The server refused a date/time change because the stop is shared and
+      // this form did not know it (the read on open was slow, failed, or the
+      // stop was grouped since). Nothing was changed. Read the stop now and
+      // show the choice.
+      const sharedStopNow = e.code === "VISIT_EDIT_SCHEDULE_UNSUPPORTED" && !comboVisit ? await readComboVisit() : null;
+      // A shared-stop save is one request that can split or move the stop and
+      // text the customer. No answer at all (the connection dropped) does not
+      // mean nothing happened: never call it a plain failed save.
+      if (saveRequestSent && comboSlotChanged && e.status == null) {
+        setSaveError("The save did not confirm, so it may or may not have gone through, including the move and any customer text. Close this and check the schedule before you save again.");
+      } else if (sharedStopNow && Number(sharedStopNow.liveCount ?? sharedStopNow.serviceCount) > 1) {
+        setComboVisitInfo(sharedStopNow);
+        setSaveError("This stop has more than one service. Choose how to move it below the date and time, then save again. Nothing was changed.");
+      } else if (ack?.code === SERIES_ACK_REQUIRED) {
         // Nothing saved, nothing moved — the server refused up front. Show
         // the refreshed recurring-plan line; the operator saves again.
         seriesPreview.replace(ack.preview);
@@ -3771,6 +3976,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         // field. Invalidate it and re-run the dry-run now.
         setPreviewNonce((n) => n + 1);
       } else {
+        // The stop already moved (its own committed action); say so, so the
+        // operator fixes the rest instead of re-doing the move.
         setSaveError("Save failed: " + e.message);
       }
     }
@@ -3926,6 +4133,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     // source wins) — a transition here must invalidate any cached preview
     // even when nothing else on the form changed (:3659).
     stackingEnabled, stackingKnown,
+    // The whole-stop choice changes which date the money is planned on.
+    comboTogether,
   });
   useEffect(() => {
     const requestId = ++previewRequestRef.current;
@@ -3941,6 +4150,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           signal: controller.signal,
           body: JSON.stringify({
             ...form,
+            // The save plans the money on the stop's current date when the
+            // whole stop moves together; the preview must do the same.
+            comboMove: comboTogether ? "together" : undefined,
             isRecurring,
             ...(sendAddons ? { addons: addonsPayload } : {}),
             primaryLinePrice: parseFinitePrice(form.price) ?? undefined,
@@ -4544,7 +4756,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </option>
                 ))}
               </select>
-              {serviceHasSeries &&
+              {serviceHasSeries && !comboTogether &&
                 technicianId !== (service.technicianId || "") && (
                   <div style={{ marginTop: 10 }}>
                     <label style={labelStyle}>Apply staff change to</label>
@@ -4729,6 +4941,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       {" "}
       <div
         onClick={(e) => e.stopPropagation()}
+        // Frozen for the whole save: a save is up to three writes, and a
+        // field changed between them would not be in any of them.
+        inert={saving ? "" : undefined}
+        data-testid="edit-appointment-body"
         style={{
           height: "100%",
           overflow: "auto",
@@ -5849,13 +6065,41 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
-              <SeriesMoveNotice
-                tone="inline"
-                preview={seriesPreview.preview}
-                loading={seriesPreview.loading}
-                stale={seriesStale}
-                style={{ marginTop: -2, marginBottom: 14 }}
-              />{" "}
+              {comboSlotChanged && (
+                <div
+                  role="group"
+                  aria-label="How to move this stop"
+                  data-testid="combo-move-choice"
+                  style={{ marginTop: -2, marginBottom: 14, padding: "10px 12px", borderRadius: 6, background: "#F4F4F5", color: "#18181B", fontSize: 14, lineHeight: 1.5 }}
+                >
+                  <div style={{ fontWeight: 600 }}>
+                    This stop has {comboCount} services
+                    {Array.isArray(comboVisit.serviceTypes) && comboVisit.serviceTypes.length === comboCount ? ` (${comboVisit.serviceTypes.join(", ")})` : ""}.
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
+                    <input type="radio" name="combo-move" checked={comboMove === "together"} onChange={() => setComboMove("together")} disabled={saving} />
+                    Move all of them together
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, minHeight: 44, cursor: "pointer" }}>
+                    <input type="radio" name="combo-move" checked={comboMove === "separate"} onChange={() => setComboMove("separate")} disabled={saving} />
+                    Separate: move only this service
+                  </label>
+                  {comboTogether && (service.isRecurring ?? service.is_recurring) ? (
+                    <div data-testid="combo-move-scope" style={{ color: "#52525B" }}>
+                      Only this visit moves{comboTechChanged ? " and changes technician" : ""}. Later visits in the plan stay where they are{comboTechChanged ? ", with their technician" : ""}.
+                    </div>
+                  ) : null}
+                </div>
+              )}
+              {!comboTogether && (
+                <SeriesMoveNotice
+                  tone="inline"
+                  preview={seriesPreview.preview}
+                  loading={seriesPreview.loading}
+                  stale={seriesStale}
+                  style={{ marginTop: -2, marginBottom: 14 }}
+                />
+              )}{" "}
               <SlotConflictNotice
                 // The strip states the route problem itself; the
                 // double-booking notice (no `warning`) always stays.
@@ -6007,7 +6251,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   </div>{" "}
                 </div>
               )}{" "}
-              {scheduleMoved && (
+              {moveNotifyOffered && (
                 <div style={{ marginBottom: 14 }}>
                   {" "}
                   <label style={labelStyle}>Client booking notifications</label>{" "}
@@ -7526,7 +7770,7 @@ export function ProtocolPanel({ service, onClose }) {
           : Promise.resolve(null),
         isLawn && trackKey && lawnSqft
           ? adminFetch(
-              `/admin/protocols/lawn-mix?track=${trackKey}&month=${month}&lawnSqft=${encodeURIComponent(lawnSqft)}`,
+              `/admin/protocols/lawn-mix?track=${trackKey}&month=${visitMonth || month}&lawnSqft=${encodeURIComponent(lawnSqft)}${service.id ? `&scheduledServiceId=${encodeURIComponent(service.id)}` : ""}`,
             )
           : Promise.resolve(null),
         !isLawn && protocolProgram
@@ -9906,143 +10150,6 @@ export function TypedFindingsSection({
   );
 }
 
-// The four scores the tech reviews/adjusts, matching the customer report's
-// consolidated diagnosis (Density / Weeds / Color / Stress-Damage). The AI still
-// assesses the underlying fungus/thatch/insect/drought/mechanical signals — those
-// stay on the assessment row for analytics + folding into stress_damage — but the
-// tech now corrects one "Stress" score directly instead of separate Fungus/Thatch.
-const LAWN_ASSESSMENT_METRICS = [
-  { key: "turf_density", label: "Density" },
-  { key: "weed_suppression", label: "Weed control" },
-  { key: "color_health", label: "Color" },
-  { key: "stress_damage", label: "Condition" },
-];
-
-// Owner ruling 2026-09-24: an optional per-photo slot label. All optional —
-// no count requirement, no blocking. 'front' is the only slot the report's
-// before/after slider pairs across visits (server/services/lawn-visit-input.js
-// PHOTO_ZONES); close_up/trouble are a different spot every visit and never
-// pair. Kept in parity with PHOTO_ZONE_LABELS in
-// client/src/components/lawn/LawnVisitReview.jsx.
-const LAWN_PHOTO_ZONES = [
-  { value: "front", label: "Front" },
-  { value: "close_up", label: "Close-up" },
-  { value: "trouble", label: "Trouble / watch area" },
-];
-
-// Stress flags and the "Protocol field checks" inputs (thatch, chinch pair,
-// nematode/large-patch pills, Soil K, protocol notes) were removed from this
-// sheet entirely (owner trim 2026-08-07) — nearly all were captured on every
-// visit and read by nothing, and the owner ruled the rest off too. The
-// completion capture is now photos, the gauge reading, and the four score
-// counters. The server endpoints still accept the retired keys from old
-// payloads. Soil K no longer has a client input anywhere, so the plan
-// engine's profile-completeness check no longer requires it; drought_stress
-// likewise no longer reaches the planner's drought-prep selection — both are
-// deliberate owner rulings, not oversights.
-
-function lawnScoreColor(value) {
-  const n = Number(value) || 0;
-  if (n >= 75) return D.green;
-  if (n >= 50) return D.amber;
-  return D.red;
-}
-
-function resizeLawnAssessmentImage(dataUrl, maxEdge = 1600, quality = 0.85) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const longEdge = Math.max(img.width, img.height);
-      if (longEdge <= maxEdge) return resolve(dataUrl);
-      const scale = maxEdge / longEdge;
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.round(img.width * scale);
-      canvas.height = Math.round(img.height * scale);
-      canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      resolve(canvas.toDataURL("image/jpeg", quality));
-    };
-    img.onerror = () => resolve(dataUrl);
-    img.src = dataUrl;
-  });
-}
-
-function readLawnAssessmentPhoto(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = async () => {
-      const resized = await resizeLawnAssessmentImage(reader.result);
-      resolve({
-        data: resized,
-        preview: resized,
-        name: file.name,
-        mimeType: resized.match(/data:([^;]+)/)?.[1] || file.type || "image/jpeg",
-      });
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-function parseAssessmentScores(row = {}) {
-  const turf_density = lawnScores.lawnScoreValue(row.turf_density ?? row.turfDensity);
-  const weed_suppression = lawnScores.lawnScoreValue(row.weed_suppression ?? row.weedSuppression);
-  const color_health = lawnScores.lawnScoreValue(row.color_health ?? row.colorHealth);
-  // Preserve known AI components. Missing components get explicit controls
-  // during confirmation so unknown values never become invented scores.
-  const fungus_control = lawnScores.lawnScoreValue(row.fungus_control ?? row.fungusControl);
-  const thatch_level = lawnScores.lawnScoreValue(row.thatch_level ?? row.thatchLevel);
-  // Legacy assessments (created before the stress_damage column) have a null
-  // stress_damage. Coercing that to 0 would make a plain re-confirm POST
-  // stress_damage: 0, which /confirm treats as an explicit "push Stress to 0"
-  // override and persists an artificially low score. Instead derive it exactly the
-  // way the server's confirm fallback does — min(fungus, thatch, AI-floor) with the
-  // legacy 95 floor — so posting the seeded chip value is a no-op, not an override.
-  const rawStress = lawnScores.lawnScoreValue(row.stress_damage ?? row.stressDamage);
-  const components = [fungus_control, thatch_level].filter((value) => value != null);
-  const stress_damage = rawStress != null
-    ? rawStress
-    : (components.length ? Math.min(...components, 95) : null);
-  return { turf_density, weed_suppression, color_health, fungus_control, thatch_level, stress_damage };
-}
-
-// The AI's own read — used ONLY to decide which metrics stay editable, never
-// what's displayed (that's techScores/scoreSource, which may already hold a
-// technician's earlier fill of a genuinely blank metric from a prior partial
-// save). Run-backed: the run's immutable scores_adjusted snapshot
-// (visitAssessment.aiScores from the server), which a save never touches —
-// so a metric a technician already filled correctly stays editable instead
-// of looking "AI-known" just because it now has a value (Codex P1
-// 2026-09-24). Legacy (no run, visitAssessment null): the assessment row's
-// own RAW columns, mirroring the server's legacy /confirm rule exactly —
-// including that stress_damage is read raw, never parseAssessmentScores's
-// derived worst-of-fungus/thatch guess, which could already be non-null
-// while the server still considers Stress unknown.
-// Locked metrics always show the AI's own read. A row adjusted before the
-// read-only ruling can still carry an old technician value in its columns;
-// only AI-blank metrics keep the saved technician fill.
-function withAiScores(scores, aiScores) {
-  const out = { ...(scores || {}) };
-  for (const [key, value] of Object.entries(aiScores || {})) {
-    if (lawnScores.lawnScoreValue(value) != null) out[key] = value;
-  }
-  return out;
-}
-
-function resolveAiScores(assessment = {}, visitAssessment, serverAiScores) {
-  if (visitAssessment?.aiScores) return visitAssessment.aiScores;
-  // Legacy rows: the reload route sends the server's own AI read.
-  if (serverAiScores) return serverAiScores;
-  const raw = (a, b) => lawnScores.lawnScoreValue(assessment[a] ?? assessment[b]);
-  return {
-    turf_density: raw("turf_density", "turfDensity"),
-    weed_suppression: raw("weed_suppression", "weedSuppression"),
-    color_health: raw("color_health", "colorHealth"),
-    fungus_control: raw("fungus_control", "fungusControl"),
-    thatch_level: raw("thatch_level", "thatchLevel"),
-    stress_damage: raw("stress_damage", "stressDamage"),
-  };
-}
-
 function LawnPreviousVisitCard({ service }) {
   const [state, setState] = useState({ loading: true, row: null, error: false });
   const customerId = service.customerId || service.customer_id;
@@ -10121,569 +10228,6 @@ function LawnVisitPlanSummary({ defaults, protocol, areaValue, onAreaChange, onR
             </>}
       </div>
     </section>
-  );
-}
-
-function LawnAssessmentCompletionBlock({
-  service,
-  disabled,
-  onConfirmed,
-  // Fires false while the existing-assessment lookup is in flight and true
-  // once it settles — the parent must not treat the pre-load null confirmed
-  // id as "retake pending".
-  onReady,
-  // Height measurement stays optional; separate lawn-length photo capture is retired.
-  showGaugeReading = false,
-  gaugeHeightIn = null,
-  onGaugeHeight,
-  // The tech's free-text visit notes (owned by CompletionPanel) — passed through
-  // so the AI photo analysis can factor them in alongside the images.
-  technicianNotes = "",
-}) {
-  const [photos, setPhotos] = useState([]);
-  const [result, setResult] = useState(null);
-  const [visitReview, setVisitReview] = useState(null);
-  const [techScores, setTechScores] = useState(null);
-  // Keys the technician actually typed this session. Only these are posted:
-  // the server ignores AI-known keys anyway, and resending a server-derived
-  // value (e.g. Stress) would read as an explicit entry and freeze it.
-  const [typedKeys, setTypedKeys] = useState(() => new Set());
-  const [confirmedId, setConfirmedId] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [error, setError] = useState("");
-  const fileRef = useRef(null);
-  useEffect(() => {
-    let cancelled = false;
-    setPhotos([]);
-    setResult(null);
-    setVisitReview(null);
-    setTechScores(null);
-    setTypedKeys(new Set());
-    setConfirmedId(null);
-    setError("");
-    onConfirmed?.(null);
-    onReady?.(false);
-    if (!service?.id) {
-      onReady?.(true);
-      return () => { cancelled = true; };
-    }
-
-    setLoading(true);
-    adminFetch(`/admin/lawn-assessment/service/${service.id}`)
-      .then((data) => {
-        if (cancelled || !data?.assessment) return;
-        const assessment = data.assessment;
-        const scores = parseAssessmentScores(assessment);
-        setResult({
-          success: true,
-          visitAssessment: data.visitAssessment,
-          assessment,
-          adjustedScores: scores,
-          displayScores: scores,
-          aiScores: resolveAiScores(assessment, data.visitAssessment, data.aiScores),
-          observations: assessment.observations || "",
-        });
-        // A confirmed row shows exactly what was saved (and what the customer
-        // report uses); only a pending row shows the AI read for locked keys.
-        setTechScores(assessment.confirmed_by_tech ? scores : withAiScores(scores, resolveAiScores(assessment, data.visitAssessment, data.aiScores)));
-        setTypedKeys(new Set());
-        setVisitReview(createVisitReview(data.visitAssessment, assessment.observations));
-        if (assessment.confirmed_by_tech) {
-          setConfirmedId(assessment.id);
-          onConfirmed?.(assessment.id);
-        }
-      })
-      .then(() => {
-        if (!cancelled) onReady?.(true);
-      })
-      .catch(() => {
-        // The lookup learned NOTHING — report failed, never ready: the parent
-        // omits lawnAssessmentId so the server's visit-linked fallback (DB
-        // truth) still grounds any existing confirmed scores.
-        if (!cancelled) onReady?.("failed");
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [service?.id]);
-
-  async function addPhotos(event) {
-    const files = Array.from(event.target.files || []);
-    const remaining = Math.max(0, 3 - photos.length);
-    if (!files.length || remaining === 0) return;
-    setError("");
-    try {
-      const nextPhotos = await Promise.all(
-        files.slice(0, remaining).map(readLawnAssessmentPhoto),
-      );
-      setPhotos((prev) => [...prev, ...nextPhotos.map((photo) => ({ ...photo, zone: null }))].slice(0, 3));
-      setResult(null);
-      setTechScores(null);
-      setTypedKeys(new Set());
-      setConfirmedId(null);
-      onConfirmed?.(null);
-    } catch (err) {
-      setError(err.message || "Photo read failed");
-    } finally {
-      if (fileRef.current) fileRef.current.value = "";
-    }
-  }
-
-  // Only one photo may carry the "front" slot at a time — the before/after
-  // slider pairs on it, so picking Front on another photo clears the prior
-  // one. Picking the same slot again clears it (every slot, including none,
-  // is a valid choice).
-  function setPhotoZone(index, zone) {
-    setPhotos((prev) => {
-      const current = prev[index]?.zone || null;
-      const next = current === zone ? null : zone;
-      return prev.map((photo, i) => {
-        if (i === index) return { ...photo, zone: next };
-        if (next === "front" && photo.zone === "front") return { ...photo, zone: null };
-        return photo;
-      });
-    });
-  }
-
-  // Owner ruling 2026-09-24: lawn health scores are read-only from photos.
-  // The only manual entry allowed is filling a metric the AI left blank —
-  // this never touches a metric the AI already scored (the server enforces
-  // the same rule independently; this just keeps the tech from typing into
-  // a metric that won't take effect).
-  function fillScore(key, rawValue) {
-    setTypedKeys((prev) => new Set(prev).add(key));
-    setTechScores((prev) => {
-      if (!prev) return prev;
-      if (rawValue === "") return { ...prev, [key]: null };
-      const n = Number(rawValue);
-      if (!Number.isFinite(n)) return prev;
-      return { ...prev, [key]: Math.max(0, Math.min(100, Math.round(n))) };
-    });
-  }
-
-  async function analyze() {
-    if (!service?.customerId || photos.length === 0) return;
-    setAnalyzing(true);
-    // Same suspension as the confirmation POST: the vision analysis can run
-    // long, and a report generated mid-analysis would carry an explicit-null
-    // assessment state for scores that are about to be reviewed.
-    onReady?.(false);
-    setError("");
-    try {
-      const response = await adminFetch("/admin/lawn-assessment/assess", {
-        method: "POST",
-        body: JSON.stringify({
-          customerId: service.customerId,
-          serviceId: service.id,
-          photos: photos.map((photo) => ({
-            data: photo.data.split(",")[1],
-            mimeType: photo.mimeType || "image/jpeg",
-            ...(photo.zone ? { zone: photo.zone } : {}),
-          })),
-          // Extra context for the vision model (see buildVisionPrompt server-side).
-          turfHeightIn: gaugeHeightIn,
-          technicianNotes,
-        }),
-      });
-      if (response.success === false) {
-        setError(response.message || "Assessment failed. Retake photos and try again.");
-        return;
-      }
-      const scores = response.adjustedScores || response.displayScores || {};
-      setResult({ ...response, aiScores: resolveAiScores(response.assessment, response.visitAssessment) });
-      setVisitReview(createVisitReview(response.visitAssessment, response.assessment?.observations !== undefined ? response.assessment.observations : response.observations));
-      setTechScores({ ...scores });
-      setTypedKeys(new Set());
-      setConfirmedId(null);
-      onConfirmed?.(null);
-    } catch (err) {
-      setError(err.message || "Assessment failed");
-    } finally {
-      setAnalyzing(false);
-      // Settled either way: post-analysis the row is unconfirmed (or the
-      // analysis failed with photos pending) — explicit null IS the true
-      // "review outstanding" state.
-      onReady?.(true);
-    }
-  }
-
-  async function confirm() {
-    if (!result?.assessment?.id) return;
-    setConfirming(true);
-    // Readiness is suspended while the confirmation POST is in flight — the
-    // parent's id is stale until it lands, and generating meanwhile would
-    // send an explicit null that suppresses the assessment being confirmed.
-    onReady?.(false);
-    setError("");
-    try {
-      const { confirmed: confirmationComplete, assessment: savedAssessment, visitAssessment } = await adminFetch("/admin/lawn-assessment/confirm", {
-        method: "POST",
-        body: JSON.stringify({
-          assessmentId: result.assessment.id,
-          adjustedScores: Object.fromEntries([...typedKeys].map((key) => [key, techScores?.[key] ?? null])),
-          ...visitReviewPayload(visitReview),
-        }),
-      });
-      setResult((prev) => ({
-        ...prev,
-        assessment: savedAssessment || prev.assessment,
-        visitAssessment: visitAssessment ?? prev.visitAssessment,
-      }));
-      // Show what the server actually saved.
-      if (savedAssessment) {
-        const saved = parseAssessmentScores(savedAssessment);
-        setTechScores(savedAssessment.confirmed_by_tech ? saved : withAiScores(saved, result.aiScores));
-        setTypedKeys(new Set());
-      }
-      if (visitAssessment) {
-        setVisitReview(createVisitReview(visitAssessment, savedAssessment?.observations));
-      }
-      const assessmentId = confirmationComplete === false ? null : savedAssessment?.id || result.assessment.id;
-      setConfirmedId(assessmentId);
-      onConfirmed?.(assessmentId);
-      onReady?.(true);
-      setError(assessmentId ? "" : "Scores saved. Complete the missing scores before confirming.");
-    } catch (err) {
-      setError(err.message || "Confirm failed");
-      // A definitive 4xx rejection means the write did NOT commit — null is
-      // the true state (retake still pending), so readiness returns true and
-      // the explicit-null payload keeps any superseded row suppressed.
-      // Ambiguous failures (network, 5xx, lost response) report failed: the
-      // write may have committed, so the server grounds from DB truth.
-      const definitiveRejection =
-        Number(err?.status) >= 400 && Number(err?.status) < 500;
-      onReady?.(definitiveRejection ? true : "failed");
-    } finally {
-      setConfirming(false);
-    }
-  }
-
-  const scoreSource = techScores || result?.adjustedScores || result?.displayScores || null;
-  const hasResult = !!result?.assessment?.id;
-  const confirmed = !!confirmedId;
-  // Keep the usual four controls; expose underlying scores only when the
-  // saved assessment lacks them. Keep them editable until the save completes.
-  // Same rule as the aiValue check below: whether an underlying signal is
-  // AI-blank comes from result.aiScores (the immutable read), never the
-  // mutable assessment row — otherwise a prior save's fill of a genuinely
-  // blank Fungus/Thatch would hide the tile entirely on reload instead of
-  // keeping it open for correction (Codex P1 2026-09-24).
-  const metrics = [...LAWN_ASSESSMENT_METRICS, ...[
-    { key: "fungus_control", label: "Fungus control" },
-    { key: "thatch_level", label: "Thatch condition" },
-  ].filter((metric) => !confirmed && lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]) == null)];
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {loading && (
-        <div style={{ fontSize: 12, color: D.muted }}>Checking existing assessment...</div>
-      )}
-      {/* Capture row — always visible so the mowing-height reading can be
-          added even after the assessment is analyzed (Codex P1). "Add turf photos" +
-          "Analyze lawn" stay pre-analysis only. */}
-      <input
-        ref={fileRef}
-        type="file"
-        aria-label="Add turf photos"
-        accept="image/*"
-        multiple
-        onChange={addPhotos}
-        style={{ display: "none" }}
-      />
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        {!hasResult && (
-          <>
-            <button
-              type="button"
-              onClick={() => fileRef.current?.click()}
-              disabled={disabled || photos.length >= 3 || analyzing}
-              style={{
-                height: 38,
-                padding: "0 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.white,
-                color: D.heading,
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: disabled || photos.length >= 3 || analyzing ? "not-allowed" : "pointer",
-                opacity: disabled || photos.length >= 3 || analyzing ? 0.55 : 1,
-              }}
-            >
-              Add turf photos
-            </button>
-            <span style={{ fontSize: 12, color: D.muted }}>{photos.length}/3</span>
-          </>
-        )}
-            {showGaugeReading && (
-              <>
-                <span style={{ fontSize: 12, color: D.muted, fontWeight: 500 }}>Lawn length</span>
-                <input
-                  type="number"
-                  inputMode="decimal"
-                  step="0.25"
-                  min="0.5"
-                  max="8"
-                  value={gaugeHeightIn ?? ""}
-                  disabled={disabled || analyzing}
-                  placeholder="e.g. 4"
-                  onChange={(e) => onGaugeHeight?.(e.target.value === "" ? null : Number(e.target.value))}
-                  style={{
-                    width: 64,
-                    height: 38,
-                    padding: "0 10px",
-                    borderRadius: 8,
-                    border: `1px solid ${D.border}`,
-                    background: D.white,
-                    color: D.heading,
-                    fontSize: 13,
-                  }}
-                />
-                <span style={{ fontSize: 12, color: D.muted }}>inches</span>
-              </>
-            )}
-          </div>
-          {!hasResult && (
-            <>
-          {photos.length > 0 && (
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {photos.map((photo, index) => (
-                <div key={`${photo.name}-${index}`} style={{ position: "relative", width: 96 }}>
-                  <img
-                    src={photo.preview}
-                    alt=""
-                    style={{
-                      display: "block",
-                      width: 96,
-                      height: 78,
-                      objectFit: "cover",
-                      borderRadius: 8,
-                      border: `1px solid ${D.border}`,
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setPhotos((prev) => prev.filter((_, i) => i !== index))}
-                    aria-label="Remove assessment photo"
-                    style={{
-                      position: "absolute",
-                      top: -7,
-                      right: -7,
-                      width: 22,
-                      height: 22,
-                      borderRadius: "50%",
-                      border: "none",
-                      background: D.heading,
-                      color: "#fff",
-                      cursor: "pointer",
-                      lineHeight: 1,
-                    }}
-                  >
-                    x
-                  </button>
-                  {/* Optional slot label — all optional, no count requirement.
-                      Only one photo may hold "front" at a time (setPhotoZone). */}
-                  <select
-                    value={photo.zone || ""}
-                    disabled={disabled || analyzing}
-                    onChange={(e) => setPhotoZone(index, e.target.value || null)}
-                    aria-label={`Slot for photo ${index + 1}`}
-                    style={{
-                      display: "block",
-                      width: "100%",
-                      marginTop: 4,
-                      height: 34,
-                      borderRadius: 6,
-                      border: `1px solid ${D.border}`,
-                      background: D.white,
-                      color: D.heading,
-                      fontSize: 14,
-                      padding: "0 2px",
-                    }}
-                  >
-                    <option value="">No slot</option>
-                    {LAWN_PHOTO_ZONES.map((zone) => (
-                      <option key={zone.value} value={zone.value}>{zone.label}</option>
-                    ))}
-                  </select>
-                </div>
-              ))}
-            </div>
-          )}
-          {/* A soft hint, never a requirement (owner 2026-10-02): the report's
-              "since your last visit" score line needs 2+ usable photos on both
-              visits (lawn-progress.js COMPARABLE_LEVELS), so a 1-photo visit
-              can never show it. Analyze stays enabled at one photo. */}
-          {photos.length < 2 && (
-            <div data-testid="lawn-photo-nudge" style={{ fontSize: 14, color: D.muted, lineHeight: 1.4 }}>
-              2 or 3 photos work best: front, close-up and any trouble spot. With one photo, next visit&apos;s report can&apos;t show whether the lawn improved.
-            </div>
-          )}
-          <button
-            type="button"
-            onClick={analyze}
-            disabled={disabled || photos.length === 0 || analyzing}
-            style={{
-              height: 40,
-              borderRadius: 8,
-              border: "none",
-              background: D.green,
-              color: "#fff",
-              fontSize: 13,
-              fontWeight: 500,
-              cursor: disabled || photos.length === 0 || analyzing ? "not-allowed" : "pointer",
-              opacity: disabled || photos.length === 0 || analyzing ? 0.55 : 1,
-            }}
-          >
-            {analyzing ? "Analyzing..." : "Analyze lawn"}
-          </button>
-        </>
-      )}
-      {hasResult && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(${LAWN_ASSESSMENT_METRICS.length}, minmax(0, 1fr))`, gap: 6 }}>
-            {metrics.map((metric) => {
-              const value = lawnScores.lawnScoreValue(scoreSource?.[metric.key]);
-              // Whether the AI itself knew this metric — from result.aiScores
-              // (the run's immutable snapshot, or the assessment's raw
-              // columns for a legacy no-run row; see resolveAiScores), never
-              // from scoreSource or the mutable assessment row a reload
-              // reads back. A prior save's tech fill of a genuinely blank
-              // metric must not look "AI-known" just because it now has a
-              // value (Codex P1 2026-09-24) — and a fill-in input stays open
-              // (still editable, still shows what was typed) once the tech
-              // starts typing, instead of collapsing to read-only the moment
-              // it first has a value.
-              const aiValue = lawnScores.lawnScoreValue(result?.aiScores?.[metric.key]);
-              return (
-                <div
-                  key={metric.key}
-                  style={{
-                    border: `1px solid ${D.border}`,
-                    borderRadius: 8,
-                    padding: "8px 4px",
-                    textAlign: "center",
-                    background: D.white,
-                    minWidth: 0,
-                  }}
-                >
-                  <div style={{ fontSize: 15, fontWeight: 500, color: value == null ? D.muted : lawnScoreColor(value), lineHeight: 1.1 }}>
-                    {value == null ? "—" : `${value}/100`}
-                  </div>
-                  <div style={{ fontSize: 14, color: D.muted, marginTop: 3 }}>{metric.label}</div>
-                  {/* AI-known scores are read-only (owner ruling 2026-09-24).
-                      A metric the AI left blank (aiValue == null) is the one
-                      the tech can fill — the server enforces this too. */}
-                  {!confirmed && aiValue == null && (
-                    <input
-                      type="number"
-                      inputMode="numeric"
-                      min={0}
-                      max={100}
-                      value={techScores?.[metric.key] ?? ""}
-                      aria-label={`Enter ${metric.label}`}
-                      placeholder="0-100"
-                      onChange={(e) => fillScore(metric.key, e.target.value)}
-                      style={{
-                        width: "100%",
-                        marginTop: 6,
-                        height: 28,
-                        padding: "0 6px",
-                        borderRadius: 6,
-                        border: `1px solid ${D.border}`,
-                        background: D.white,
-                        color: D.heading,
-                        fontSize: 13,
-                        textAlign: "center",
-                        boxSizing: "border-box",
-                      }}
-                    />
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <LawnVisitReview
-            visitAssessment={result.visitAssessment}
-            value={visitReview}
-            onChange={setVisitReview}
-            disabled={disabled || confirming || analyzing || confirmed}
-          />
-          <div style={{ display: "flex", gap: 8 }}>
-            {confirmed ? (
-              <div
-                style={{
-                  flex: 1,
-                  padding: "10px 12px",
-                  borderRadius: 8,
-                  background: `${D.green}14`,
-                  color: D.green,
-                  fontSize: 13,
-                  fontWeight: 500,
-                  textAlign: "center",
-                }}
-              >
-                Assessment confirmed
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={confirm}
-                disabled={disabled || confirming}
-                style={{
-                  flex: 1,
-                  height: 40,
-                  borderRadius: 8,
-                  border: "none",
-                  background: D.green,
-                  color: "#fff",
-                  fontSize: 13,
-                  fontWeight: 500,
-                  cursor: disabled || confirming ? "not-allowed" : "pointer",
-                  opacity: disabled || confirming ? 0.55 : 1,
-                }}
-              >
-                {confirming ? "Confirming..." : "Confirm assessment"}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => {
-                setPhotos([]);
-                setResult(null);
-                setTechScores(null);
-                setTypedKeys(new Set());
-                setConfirmedId(null);
-                setError("");
-                onConfirmed?.(null);
-              }}
-              disabled={disabled || analyzing || confirming}
-              style={{
-                height: 40,
-                padding: "0 14px",
-                borderRadius: 8,
-                border: `1px solid ${D.border}`,
-                background: D.white,
-                color: D.text,
-                fontSize: 13,
-                fontWeight: 500,
-                cursor: disabled || analyzing || confirming ? "not-allowed" : "pointer",
-                opacity: disabled || analyzing || confirming ? 0.55 : 1,
-              }}
-            >
-              Retake
-            </button>
-          </div>
-        </>
-      )}
-      {error && <div style={{ fontSize: 14, color: D.red, lineHeight: 1.45 }}>{error}</div>}
-    </div>
   );
 }
 
@@ -12742,16 +12286,17 @@ export function CompletionPanel({
   const [lawnPlanReloadKey, setLawnPlanReloadKey] = useState(0);
   const lawnDefaultsEnabled = completionImprovements && lawnCompletionDefaults?.enabled === true && lawnCompletionDefaults.serviceId === service.id;
   const currentLawnPlanReady = lawnPlanReady === service.id;
-  const reviewedLawnArea = currentPropertyAreas?.areas.lawn?.reviewedAt ? currentPropertyAreas.areas.lawn.sqft : undefined;
+  // A lawn visit treats the whole recorded lawn, reviewed or not.
+  const recordedLawnAreaSqft = recordedLawnArea(currentPropertyAreas?.areas.lawn);
   const propertyAreasIdentity = currentPropertyAreas ? `${currentPropertyAreas.propertyId}|${currentPropertyAreas.addressKey ?? ""}` : null;
   // A lawn area entered for one property (e.g. restored from a draft) never
   // applies to another, including the same row at a new address.
   const effectiveLawnAreaOverride = lawnAreaOverride !== undefined
     && (!propertyAreasIdentity || lawnAreaOverrideFor === null || lawnAreaOverrideFor === propertyAreasIdentity)
     ? lawnAreaOverride : undefined;
-  const lawnPlanArea = lawnDefaultsEnabled ? effectiveLawnAreaOverride ?? (currentPropertyAreas ? reviewedLawnArea ?? null : undefined) : undefined;
+  const lawnPlanArea = lawnDefaultsEnabled ? effectiveLawnAreaOverride ?? (currentPropertyAreas ? recordedLawnAreaSqft ?? null : undefined) : undefined;
   const lawnVisitArea = effectiveLawnAreaOverride !== undefined ? effectiveLawnAreaOverride
-    : currentPropertyAreas ? reviewedLawnArea ?? "" : lawnCompletionDefaults?.lawnSqft ?? "";
+    : currentPropertyAreas ? recordedLawnAreaSqft ?? "" : lawnCompletionDefaults?.lawnSqft ?? "";
   useEffect(() => {
     let live = true;
     setLawnSqftForPrefill(null);
@@ -12986,7 +12531,7 @@ export function CompletionPanel({
   // footage the trace already measured. Fail-soft — no trace (or gate off)
   // just leaves the field manual.
   const [tracedLinearFt, setTracedLinearFt] = useState(null);
-  const [customerInteraction, setCustomerInteraction] = useState("");
+  const [customerInteraction, setCustomerInteraction] = useState(DEFAULT_CUSTOMER_INTERACTION);
   const [customerConcern, setCustomerConcern] = useState("");
 
   // Bait station map (station-map-v1). Only station-typed completions
@@ -13783,6 +13328,7 @@ export function CompletionPanel({
   const [committedReplayReady, setCommittedReplayReady] = useState(false);
   const [photoRetrying, setPhotoRetrying] = useState(false);
   const [photoRetryError, setPhotoRetryError] = useState("");
+  const [photoRetryConflict, setPhotoRetryConflict] = useState(false);
   const photoRetryLockRef = useRef(false);
   // Synchronous lock for the restore await in handleSubmit: `submitting` is
   // state and may not have re-rendered between two quick taps, so without
@@ -14074,14 +13620,40 @@ export function CompletionPanel({
   // request indefinitely (local audit P1 on #3701).
   const typedAreaKey = typedTreatmentArea?.key || null;
   const typedAreaValue = typedAreaKey ? (findingsValues?.[typedAreaKey] ?? "") : "";
+  // Real treated areas only — the generic status chips ("No issues found" /
+  // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
+  // they aren't areas and don't belong in the treated-areas list.
+  const specialtyCompletion = specialtyCompletionFor(service);
+  // A regular pest visit (owner 2026-10-04): the recurring and one-time
+  // general pest services and pest re-services, the same visits that open on
+  // the house tank mix (isPestDefaultMixVisit). Not a typed form, bed bug
+  // or specialty lane. It takes no Protocol actions field and no visit-level
+  // Areas treated field: the product rows say what went where.
+  const isRegularPestVisit = !isTypedFindings && !isBedBugVisit && !specialtyCompletion
+    && isPestDefaultMixVisit(service);
+  // A string key keeps the memo (an effect dependency downstream) steady
+  // while a product row's other fields change.
+  // `areasServiced` is empty here except for an old draft's ticks waiting
+  // for a product row to carry them (the migration effect below).
+  const productRowAreasKey = isRegularPestVisit
+    ? areasFromProductRows(
+      [...selectedProducts, { applicationArea: areasServiced.join(", ") }],
+      AREAS_BY_SERVICE.pest,
+    ).join(PRODUCT_ROW_AREAS_SEP)
+    : "";
   const completionAreasServiced = useMemo(
-    () => completionAreasForTypedFindings({
-      typedAreaKey,
-      findingsValues: typedAreaKey ? { [typedAreaKey]: typedAreaValue } : null,
-      genericAreas: areasServiced,
-    }),
-    [typedAreaKey, typedAreaValue, areasServiced],
+    () => (isRegularPestVisit
+      ? (productRowAreasKey ? productRowAreasKey.split(PRODUCT_ROW_AREAS_SEP) : [])
+      : completionAreasForTypedFindings({
+        typedAreaKey,
+        findingsValues: typedAreaKey ? { [typedAreaKey]: typedAreaValue } : null,
+        genericAreas: areasServiced,
+      })),
+    [isRegularPestVisit, productRowAreasKey, typedAreaKey, typedAreaValue, areasServiced],
   );
+  // The areas a product row's picker offers: the whole pest list on a regular
+  // pest visit, else only the areas ticked at the visit level.
+  const productAreaPickerChoices = isRegularPestVisit ? AREAS_BY_SERVICE.pest : completionAreasServiced;
   const areasTreatedHidden = treeShrubCloseoutOn
     || typedFindingsOwnAreas
     // Station visits have no meaningful "areas treated" — the station
@@ -14090,6 +13662,10 @@ export function CompletionPanel({
     // records spray evidence gets the picker back (typedFormTakesPlaces,
     // shared with the tech sheet).
     || !typedFormTakesPlaces(service.completionProfile?.findingsType, { sprayed: sprayEvidenceInForm });
+  // The visit-level field is also gone on a regular pest visit, but its areas
+  // live on the product rows there, so this never clears them (unlike
+  // areasTreatedHidden above).
+  const areasTreatedFieldHidden = areasTreatedHidden || isRegularPestVisit;
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the
@@ -14156,6 +13732,32 @@ export function CompletionPanel({
       ));
     }
   }, [areasTreatedHidden, areasServiced, selectedProducts, typedTreatmentArea?.key]);
+  // A regular pest visit has no visit-level areas either (owner 2026-10-04):
+  // the areas belong on the product rows. A draft saved before the change
+  // carries visit-level ticks, which say where the visit went but not which
+  // product went there, so the ticks no row names go onto ONE row (the
+  // first with no area, else the first), where the technician sees and can
+  // move them: none dropped (Codex P2 r1 #5889), none copied onto every row
+  // (Codex P2 r2). With no product row yet the ticks stay in the hidden
+  // state, still sent by completionAreasServiced, until a row exists.
+  useEffect(() => {
+    if (!isRegularPestVisit || !areasServiced.length) return;
+    const carried = areasFromProductRows([{ applicationArea: areasServiced.join(", ") }], AREAS_BY_SERVICE.pest);
+    if (carried.length) {
+      if (!selectedProducts.some(Boolean)) return;
+      setSelectedProducts((prev) => {
+        const named = new Set(prev.flatMap((p) => (p ? parseApplicationAreas(p.applicationArea) : [])));
+        const missing = carried.filter((area) => !named.has(area));
+        const empty = prev.findIndex((p) => p && !p.applicationArea);
+        const target = empty >= 0 ? empty : prev.findIndex(Boolean);
+        if (!missing.length || target < 0) return prev;
+        return prev.map((p, index) => (index === target
+          ? { ...p, applicationArea: [...parseApplicationAreas(p.applicationArea), ...missing].join(", ") }
+          : p));
+      });
+    }
+    setAreasServiced([]);
+  }, [isRegularPestVisit, areasServiced, selectedProducts]);
   // Default pest tank mix (owner ruling 2026-09-26, supersedes 2026-08-29):
   // recurring general-pest, one-time pest, and pest re-service completions
   // open with Taurus SC + Atticus Talak 7.9 F + the LESCO 90/10 Nonionic
@@ -14199,7 +13801,9 @@ export function CompletionPanel({
     const rows = pestDefaultMixSelections(products)
       .filter(({ product }) => !protocolCompletionDefaultsRemovedIds.includes(String(product.id)))
       .map(({ product, totalAmount }) => ({
-      ...buildSelectedProduct(product),
+      // A regular pest visit's seeded rows start on their area (owner
+      // 2026-10-05): Perimeter for the exterior mix and its surfactant.
+      ...(isRegularPestVisit ? withPestRowDefaultArea(buildSelectedProduct(product)) : buildSelectedProduct(product)),
       totalAmount,
       totalAmountManual: true,
       // Marked manual so a rate or area edit cannot recompute the house
@@ -14214,7 +13818,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
@@ -14266,12 +13870,15 @@ export function CompletionPanel({
       // A row the tech already removed by hand never comes back, even
       // into a freshly emptied list (a sibling's removal, or the outage
       // clearing effect, both restart from empty).
-      .filter((row) => !protocolCompletionDefaultsRemovedIds.includes(String(row.productId)));
+      .filter((row) => !protocolCompletionDefaultsRemovedIds.includes(String(row.productId)))
+      // On a regular pest visit a seeded row starts on its area (owner
+      // 2026-10-05); every other line keeps its rows as built.
+      .map((row) => (isRegularPestVisit ? withPestRowDefaultArea(row) : row));
     if (!rows.length) return;
     protocolCompletionDefaultsSeededRef.current = true;
     protocolCompletionDefaultsSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
+  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, isRegularPestVisit, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
   // Pre-push audit P1, PR #5049 r1 (cockroach/protocol rows) + Codex r3 P1
   // (pest-mix rows): an inspection_only / customer_declined outcome bills
   // as NOTHING applied (shared/specialty-service-closeouts.js's own
@@ -14427,10 +14034,6 @@ export function CompletionPanel({
     setLawnAssessmentId(assessmentId || null);
     setLawnAssessmentRevision((v) => v + 1);
   };
-  // Real treated areas only — the generic status chips ("No issues found" /
-  // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
-  // they aren't areas and don't belong in the treated-areas list.
-  const specialtyCompletion = specialtyCompletionFor(service);
   // Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): the
   // schedule payload says when Generate first fills this visit's own record
   // (its places and findings) from the notes.
@@ -14518,10 +14121,7 @@ export function CompletionPanel({
         ? AREAS_BY_SERVICE.bed_bug
         : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest))),
   ];
-  const onSiteEntry = (service.statusLog || []).find(
-    (e) => e.status === "on_site",
-  );
-  const onSiteTime = onSiteEntry ? onSiteEntry.at : service.checkInTime;
+  const onSiteTime = onSiteTimeOf(service);
 
   const svcTypeLower = (service.serviceType || "").toLowerCase();
   const isCallback =
@@ -15187,6 +14787,12 @@ export function CompletionPanel({
     (query) => adminFetch(`/admin/dispatch/${service.id}/blog-posts?q=${encodeURIComponent(query)}`),
     [service.id],
   );
+  // A search no post covers, suggested as a new post for the autonomous blog
+  // queue (GATE_BLOG_SEARCH_SUGGEST; the search answer says when it's taken).
+  const suggestBlogPost = useCallback(
+    (phrase) => adminFetch(`/admin/dispatch/${service.id}/blog-suggestions`, { method: "POST", body: JSON.stringify({ phrase }) }),
+    [service.id],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -15523,10 +15129,14 @@ export function CompletionPanel({
   }
 
   function clearSavedDraft() {
-    const discardedId = draftSnapshotRef.current?.draftId || savedDraft?.draftId || "";
+    const discarded = draftSnapshotRef.current || savedDraft;
+    const discardedIds = [...new Set([
+      discarded?.draftId, discarded?.discardedPhotoDraftId,
+    ].filter(Boolean).map(String))];
+    const tombstone = discardedIds.length > 1 ? JSON.stringify(discardedIds) : discardedIds[0] || "";
     draftSnapshotRef.current = null;
     try {
-      localStorage.setItem(completionDraftTombstoneKey(service.id), discardedId);
+      localStorage.setItem(completionDraftTombstoneKey(service.id), tombstone);
       localStorage.removeItem(completionDraftKey(service.id));
     } catch { /* unavailable */ }
     void deleteCompletionDraft(service.id, completionDraftScope()).then((deleted) => {
@@ -15571,7 +15181,7 @@ export function CompletionPanel({
       let stored = loaded;
       // A residual row whose delete never committed (page killed mid-discard)
       // is not a draft: drop it and finish the delete now.
-      if (stored && tombstone !== null && (!tombstone || tombstone === stored.draftId)) {
+      if (stored && completionDraftTombstoneMatches(tombstone, stored.draftId)) {
         stored = null;
         void deleteCompletionDraft(service.id, scope).then((deleted) => {
           if (!deleted) return;
@@ -15652,7 +15262,8 @@ export function CompletionPanel({
       (completionImprovements && isLawn && lawnAreaOverride !== undefined) ||
       lawnRemovedDefaultIds.length > 0 ||
       protocolCompletionDefaultsRemovedIds.length > 0 ||
-      customerInteraction ||
+      // The default is the opening state, not tech input.
+      (customerInteraction && customerInteraction !== DEFAULT_CUSTOMER_INTERACTION) ||
       customerConcern.trim() ||
       selectedProtocolActionLabels.length ||
       selectedObservationLabels.length ||
@@ -16188,8 +15799,11 @@ export function CompletionPanel({
         setStationNumberBase(Number(savedDraft.stationNumberBase));
       }
     }
+    // A draft's own answer wins; one saved with none (before the default
+    // existed) opens on the default (owner 2026-10-04).
     setCustomerInteraction(
-      normalizeCustomerInteractionValue(savedDraft.customerInteraction),
+      normalizeCustomerInteractionValue(savedDraft.customerInteraction)
+        || DEFAULT_CUSTOMER_INTERACTION,
     );
     setCustomerConcern(savedDraft.customerConcern || "");
     setSelectedProtocolActionLabels(
@@ -17253,7 +16867,7 @@ export function CompletionPanel({
         applicationMethod: productApplicationMethod(p, serviceTypeForArea),
         applicationArea:
           p.applicationArea ||
-          (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+          (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
         areaValue: p.areaValue ?? null,
         areaUnit: p.areaUnit || null,
         targets: Array.isArray(p.targets) ? p.targets : [],
@@ -17704,6 +17318,13 @@ export function CompletionPanel({
           if (!p.totalAmountManual) next.totalAmount = "";
         }
         if (field === "applicationArea") next.applicationAreaDefault = false;
+        // An untouched pest default area follows the method (Codex P2 #5978):
+        // spot treatment never keeps "Perimeter" it did not choose.
+        if (field === "applicationMethod" && isRegularPestVisit && p.applicationAreaDefault) {
+          // The mark stays until the tech edits the area itself, so a method
+          // switched away and back restores "Perimeter" (Codex P2 #5978 r2).
+          next.applicationArea = pestRowDefaultArea(value);
+        }
         // The row the tech typed into owns its gallons from here on, and the
         // first such row owns the tank.
         if (field === "carrierGallons") Object.assign(next, markTankEntry(next, tankOwner));
@@ -17949,25 +17570,51 @@ export function CompletionPanel({
   }
 
   async function retryCompletionPhotos() {
-    if (photoRetryLockRef.current) return;
     const draft = draftSnapshotRef.current;
-    if (!draft?.servicePhotos?.length && !draft?.reconcileOwed) return;
+    if ([
+      photoRetryLockRef.current,
+      ![draft?.servicePhotos?.length, draft?.reconcileOwed].some(Boolean),
+    ].some(Boolean)) return;
     photoRetryLockRef.current = true;
     setPhotoRetrying(true);
     setPhotoRetryError("");
+    setPhotoRetryConflict(false);
     const failedPhotos = [];
+    let reconciliationNeeded = draft.reconcileOwed === true;
+    let retryPermanentlyBlocked = false;
     try {
-      for (const [index, photo] of (draft.servicePhotos || []).entries()) {
+      const { servicePhotos: photos = [], pendingPhotoCompletion = {} } = draft;
+      for (const [index, photo] of photos.entries()) {
         try {
-          const form = buildPhotoRetryFormBody(photo, index);
+          const form = buildPhotoRetryFormBody(
+            photo,
+            index,
+            pendingPhotoCompletion.servicePhotoVisit,
+            pendingPhotoCompletion.serviceRecordId,
+          );
           // Existing attachment route dedupes by image hash. A lost response
           // can safely retry the same bytes without repeating closeout.
           await adminFetch(`/tech/services/${service.id}/photos`, {
             method: "POST", body: form,
             headers: { Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` },
           });
-        } catch {
+          reconciliationNeeded = true;
+        } catch (error) {
           failedPhotos.push(photo);
+          const uploadDefinitelyRejected = [
+            error?.code === "visit_identity_changed",
+            Number(error?.status) === 403,
+          ].some(Boolean);
+          // A transport/server failure can arrive after the attachment row
+          // committed but before the response reached this device. Preserve
+          // the reconciliation obligation until the server confirms it, so
+          // discarding the local copy cannot leave a stale report behind.
+          reconciliationNeeded = [reconciliationNeeded, !uploadDefinitelyRejected].some(Boolean);
+          if (uploadDefinitelyRejected) {
+            retryPermanentlyBlocked = true;
+            failedPhotos.push(...photos.slice(index + 1));
+            break;
+          }
         }
       }
       if (!failedPhotos.length) {
@@ -17977,39 +17624,98 @@ export function CompletionPanel({
         // until the server reconciles them. Keep the marker (photos already
         // uploaded, reconciliation owed) if that step fails (Codex #4091 P1).
         try {
-          await adminFetch(`/tech/services/${service.id}/photos/reconcile`, { method: "POST" });
-        } catch {
-          const owed = { ...draft, servicePhotos: [], reconcileOwed: true,
-            pendingPhotoCompletion: { ...draft.pendingPhotoCompletion, completionPhotoUpload: { failed: 0, reconcileOwed: true } } };
-          draftSnapshotRef.current = owed;
-          await saveDraftSnapshot(owed);
+          await adminFetch(`/tech/services/${service.id}/photos/reconcile`, {
+            method: "POST",
+            body: JSON.stringify({
+              abandonMissingPhotos: draft.abandonMissingPhotos === true,
+              expectedVisit: pendingPhotoCompletion.servicePhotoVisit,
+              expectedServiceRecordId: pendingPhotoCompletion.serviceRecordId,
+            }),
+          });
+        } catch (error) {
+          const outcome = buildPhotoReconcileFailureOutcome(draft, error?.code);
+          draftSnapshotRef.current = outcome.draft;
+          await saveDraftSnapshot(outcome.draft);
           if (!completionPanelClosedRef.current) {
-            setCompletionResult(owed.pendingPhotoCompletion);
-            setPhotoRetryError("Photos uploaded, but the report could not be updated yet. Retry when connected.");
+            setCompletionResult(outcome.result);
+            setPhotoRetryError(outcome.message);
           }
           return;
         }
         await finishCompletionSuccess({
-          ...draft.pendingPhotoCompletion,
+          ...pendingPhotoCompletion,
           completionPhotoUpload: { failed: 0 },
         });
       } else {
         const result = {
-          ...draft.pendingPhotoCompletion,
+          ...pendingPhotoCompletion,
           completionPhotoUpload: { failed: failedPhotos.length },
         };
-        const remaining = { ...draft, servicePhotos: failedPhotos, reconcileOwed: false, pendingPhotoCompletion: result };
+        // A partially successful retry has already changed the visit's photo
+        // set. Keep that reconciliation obligation beside the failed local
+        // copies so discarding those copies cannot leave the report stale.
+        const remaining = {
+          ...draft,
+          servicePhotos: failedPhotos,
+          reconcileOwed: reconciliationNeeded,
+          pendingPhotoCompletion: result,
+        };
         draftSnapshotRef.current = remaining;
         await saveDraftSnapshot(remaining);
         if (!completionPanelClosedRef.current) {
           setCompletionResult(result);
-          setPhotoRetryError("Some photos still could not upload. Your copies are retained on this device; retry when connected.");
+          setPhotoRetryConflict(retryPermanentlyBlocked);
+          setPhotoRetryError(retryPermanentlyBlocked
+            ? "This visit changed or is no longer accessible, so these photos can’t be attached safely. Your copies remain on this device until you discard them."
+            : "Some photos still could not upload. Your copies are retained on this device; retry when connected.");
         }
       }
     } finally {
       photoRetryLockRef.current = false;
       if (!completionPanelClosedRef.current) setPhotoRetrying(false);
     }
+  }
+
+  function discardRetainedCompletionPhotos() {
+    if (photoRetryLockRef.current) return;
+    const draft = draftSnapshotRef.current;
+    if (draft?.reconcileOwed && !draft?.reconciliationHandedOff) {
+      const result = {
+        ...draft.pendingPhotoCompletion,
+        completionPhotoUpload: { failed: 0, reconcileOwed: true },
+      };
+      // Mint a new photo revision before the asynchronous IndexedDB write.
+      // If the page dies, metadata for this revision cannot reattach the
+      // discarded photos from the older stored revision.
+      const owed = {
+        ...draft,
+        draftId: crypto.randomUUID(),
+        discardedPhotoDraftId: draft.draftId,
+        savedAt: new Date().toISOString(),
+        servicePhotos: [],
+        generationPhotoCount: 0,
+        reconcileOwed: true,
+        abandonMissingPhotos: true,
+        pendingPhotoCompletion: result,
+      };
+      draftSnapshotRef.current = owed;
+      void saveDraftSnapshot(owed);
+      setPhotoRetryConflict(false);
+      setPhotoRetryError("");
+      setCompletionResult(result);
+      return;
+    }
+    clearSavedDraft();
+    clearCompletionResumeOwed(service.id);
+    sideEffectsCommittedRef.current = false;
+    lastSubmitBodyRef.current = null;
+    setCommittedReplayReady(false);
+    setPhotoRetryConflict(false);
+    setPhotoRetryError("");
+    setCompletionResult((current) => current ? {
+      ...current,
+      completionPhotoUpload: { ...current.completionPhotoUpload, failed: 0, reconcileOwed: false, handedOff: false },
+    } : current);
   }
 
   // Terminal SUCCESS for a committed chain resolved under ANOTHER key (see
@@ -18731,7 +18437,7 @@ export function CompletionPanel({
             applicationMethod: productApplicationMethod(p, serviceTypeForArea),
           applicationArea:
             p.applicationArea ||
-            (completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
+            (!isRegularPestVisit && completionAreasServiced.length === 1 ? completionAreasServiced[0] : null),
           areaValue: p.areaValue,
           areaUnit: p.areaUnit,
           targets: Array.isArray(p.targets) ? p.targets : [],
@@ -18864,7 +18570,11 @@ export function CompletionPanel({
             return entries.length ? { termiteStations: entries } : {};
           })()
           : {}),
-        customerInteraction: normalizeCustomerInteractionValue(customerInteraction),
+        // Quick complete hides the question, so its untouched default is not
+        // an answer the tech gave: it goes as before, empty.
+        customerInteraction: quickComplete && customerInteraction === DEFAULT_CUSTOMER_INTERACTION
+          ? ""
+          : normalizeCustomerInteractionValue(customerInteraction),
         protocolActionsCompleted: reportProtocolActions,
         protocolActionScopesCompleted: reportProtocolActionScopes,
         observations: reportObservations,
@@ -19204,11 +18914,15 @@ export function CompletionPanel({
       ? [...protocolActions, ...LAWN_FIELD_ACTIONS]
       : protocolActions;
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
+  // A regular pest visit has no Protocol actions field (owner 2026-10-04):
+  // the product rows say what was done. An action a restored draft already
+  // carries stays selected (its marker line shows in the notes) and submits.
   const hideProtocolActionsField =
-    isLawn &&
-    !protocolActionsLoading &&
-    !protocolActionError &&
-    effectiveProtocolActions.length === 0;
+    isRegularPestVisit ||
+    (isLawn &&
+      !protocolActionsLoading &&
+      !protocolActionError &&
+      effectiveProtocolActions.length === 0);
   const protocolActionSelectOptions = effectiveProtocolActions.map((action, index) => ({
     value: action.id ? String(action.id) : `action-${index}`,
     label: action.label || action.note || action.raw || "Protocol action",
@@ -19300,6 +19014,18 @@ export function CompletionPanel({
       }
       applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
     }
+  }
+  // The "Swept eaves and webs" box on a regular pest visit (owner 2026-10-05).
+  // Ticking it is the same as picking the sweep from the old dropdown
+  // (applyProtocolAction: label, scope, [Protocol] note line); unticking is
+  // the same as the x on its pill (removeSelectedLabel).
+  const pestSweepLabel = activeSelectedLabels(selectedProtocolActionLabels).find(
+    (label) => String(label).trim().toLowerCase() === PEST_SWEEP_ACTION.label.toLowerCase(),
+  );
+  function handlePestSweepChange(checked) {
+    if (generating) return;
+    if (checked) applyProtocolAction(PEST_SWEEP_ACTION);
+    else if (pestSweepLabel) removeSelectedLabel("protocol", pestSweepLabel);
   }
   function handleLawnFindingAdd(text) {
     if (generating || photoAnalyzing || activeSelectedLabels(selectedObservationLabels).includes(text)) return;
@@ -19670,20 +19396,37 @@ export function CompletionPanel({
     </div>
   );
   const photoReconcileOwed = completionResult?.completionPhotoUpload?.reconcileOwed === true;
+  const photoReconcileHandedOff = completionResult?.completionPhotoUpload?.handedOff === true;
   const photoRecoveryNotice = (completionResult?.completionPhotoUpload?.failed > 0 || photoReconcileOwed) && (
     <div role="status" style={{ marginTop: 16, padding: 16, width: "100%", maxWidth: 360, boxSizing: "border-box",
       color: "#111111", background: "#FFFFFF", border: "1px solid #E5E5E5", borderRadius: 12, fontSize: 14, lineHeight: 1.5 }}>
       <p style={{ margin: "0 0 12px" }}>
-        {photoReconcileOwed
+        {photoReconcileHandedOff
+          ? "The visit is saved. Report repair was handed to the office because your access changed."
+          : photoReconcileOwed
           ? "The visit is saved and the photos are uploaded. The report still needs updating with them."
           : `The visit is saved. ${completionResult.completionPhotoUpload.failed} ${completionResult.completionPhotoUpload.failed === 1 ? "photo still needs" : "photos still need"} uploading.`}
       </p>
       {photoRetryError && <p>{photoRetryError}</p>}
       {draftStorageStatus}
-      <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
-        style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
-        {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
-      </button>
+      {!photoRetryConflict && !photoReconcileHandedOff && (
+        <button type="button" onClick={retryCompletionPhotos} disabled={photoRetrying}
+          style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          {photoRetrying ? (photoReconcileOwed ? "Updating report…" : "Uploading photos…") : (photoReconcileOwed ? "Finish report update" : "Retry photo uploads")}
+        </button>
+      )}
+      {!photoReconcileOwed && (
+        <button type="button" onClick={discardRetainedCompletionPhotos} disabled={photoRetrying}
+          style={{ marginLeft: photoRetryConflict ? 0 : 8, padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          Discard retained photos
+        </button>
+      )}
+      {photoReconcileHandedOff && (
+        <button type="button" onClick={discardRetainedCompletionPhotos}
+          style={{ padding: "12px 16px", borderRadius: 24, border: "none", background: "#111111", color: "#FFFFFF", fontSize: 14 }}>
+          Dismiss local recovery
+        </button>
+      )}
       <button type="button" onClick={() => onClose(true)} style={{ marginLeft: 8, padding: 12, border: "none", background: "transparent", color: "#111111", fontSize: 14 }}>
         Later
       </button>
@@ -20324,6 +20067,7 @@ export function CompletionPanel({
             {isLawn && !quickComplete && (
               <Field label="Lawn assessment">
                 <LawnAssessmentCompletionBlock
+                  request={adminFetch}
                   service={service}
                   disabled={isIncompleteVisit || submitting || generating}
                   onConfirmed={handleLawnAssessmentConfirmed}
@@ -20604,6 +20348,30 @@ export function CompletionPanel({
               );
             })}
             {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
+            {isRegularPestVisit && (
+              <div style={{ marginBottom: 20 }}>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    fontFamily: font,
+                    fontSize: 14,
+                    color: M.ink,
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(pestSweepLabel)}
+                    disabled={generating}
+                    onChange={(e) => handlePestSweepChange(e.target.checked)}
+                    style={{ width: 18, height: 18, accentColor: M.ink }}
+                  />
+                  Swept eaves and webs
+                </label>
+              </div>
+            )}
             {!isTypedFindings && !hideProtocolActionsField && (
               <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
@@ -20703,6 +20471,7 @@ export function CompletionPanel({
               <Field label="Blog post for the customer">
                 <BlogPostPicker
                   search={searchBlogPosts}
+                  suggest={suggestBlogPost}
                   value={blogPost}
                   onChange={setBlogPost}
                   disabled={generating || submitting}
@@ -21382,12 +21151,12 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
                           : null}{" "}
                       </select>{" "}
-                      {completionAreasServiced.length > 0 && (() => {
+                      {productAreaPickerChoices.length > 0 && (() => {
                         const selectedAreas = parseApplicationAreas(
                           sp.applicationArea,
                         );
                         const areaChoices = productAreaChoices(
-                          completionAreasServiced,
+                          productAreaPickerChoices,
                           sp.applicationArea,
                         );
                         return (
@@ -21558,7 +21327,7 @@ export function CompletionPanel({
                 (owner 2026-07-23): the chips are structural-pest rooms/zones;
                 those visits carry their own location semantics (zone trace,
                 trap locations, entry points, station map). */}
-            {!quickComplete && !areasTreatedHidden && (
+            {!quickComplete && !areasTreatedFieldHidden && (
               <Field label="Areas treated">
                 {" "}
                 {/* Owner directive 2026-08-27: every multi-choice control is
@@ -22706,6 +22475,7 @@ export function CompletionPanel({
               {" "}
               <label style={labelStyle}>Lawn Assessment</label>{" "}
               <LawnAssessmentCompletionBlock
+                  request={adminFetch}
                 service={service}
                 disabled={isIncompleteVisit || submitting || generating}
                 onConfirmed={handleLawnAssessmentConfirmed}
@@ -23097,6 +22867,22 @@ export function CompletionPanel({
               );
             })}
             {completionImprovements && isLawn && <LawnFindingPicker disabled={generating || photoAnalyzing} onAdd={handleLawnFindingAdd} />}
+            {isRegularPestVisit && (
+              <div style={{ marginBottom: 12 }}>
+                <label
+                  style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: D.text, cursor: "pointer" }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={Boolean(pestSweepLabel)}
+                    disabled={generating}
+                    onChange={(e) => handlePestSweepChange(e.target.checked)}
+                    style={{ width: 16, height: 16 }}
+                  />
+                  Swept eaves and webs
+                </label>
+              </div>
+            )}
             {!isTypedFindings && !hideProtocolActionsField && (
             <details open={!(completionImprovements && isLawn) || undefined}>
                 {completionImprovements && isLawn && <summary style={{ fontSize: 14, cursor: "pointer", padding: "12px 0" }}>Additional work{selectedProtocolActionCount ? ` · ${selectedProtocolActionCount} recorded` : ""}</summary>}
@@ -23191,6 +22977,7 @@ export function CompletionPanel({
                 <label style={labelStyle}>Blog post for the customer</label>{" "}
                 <BlogPostPicker
                   search={searchBlogPosts}
+                  suggest={suggestBlogPost}
                   value={blogPost}
                   onChange={setBlogPost}
                   disabled={generating || submitting}
@@ -23821,12 +23608,12 @@ export function CompletionPanel({
                           ? catalogUnitOption(sp.amountUnit, STANDARD_AMOUNT_UNIT_OPTIONS)
                           : null}{" "}
                   </select>{" "}
-                  {completionAreasServiced.length > 0 && (() => {
+                  {productAreaPickerChoices.length > 0 && (() => {
                     const selectedAreas = parseApplicationAreas(
                       sp.applicationArea,
                     );
                     const areaChoices = productAreaChoices(
-                      completionAreasServiced,
+                      productAreaPickerChoices,
                       sp.applicationArea,
                     );
                     return (
@@ -23997,7 +23784,7 @@ export function CompletionPanel({
           {/* Areas Serviced — hidden for Tree & Shrub and rodent lines (owner
               2026-07-23): the chips are structural-pest rooms/zones; those
               visits carry their own location semantics. */}
-          {!quickComplete && !areasTreatedHidden && (
+          {!quickComplete && !areasTreatedFieldHidden && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Areas Treated</label>{" "}

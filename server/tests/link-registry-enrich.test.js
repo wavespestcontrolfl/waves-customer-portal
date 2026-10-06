@@ -270,3 +270,14 @@ describe('enrichDomains', () => {
     expect(db2._store.updates[0].patch.domain_rating).toBeUndefined();
   });
 });
+
+describe('intOrNull', () => {
+  const { intOrNull } = require('../services/seo/link-registry-enrich')._test;
+  test('caps values past the 32-bit column limit instead of failing the run', () => {
+    expect(intOrNull(5e9)).toBe(2147483647);
+    expect(intOrNull(-5e9)).toBe(-2147483647);
+    expect(intOrNull('1234.6')).toBe(1235);
+    expect(intOrNull(null)).toBeNull();
+    expect(intOrNull('n/a')).toBeNull();
+  });
+});

@@ -534,7 +534,44 @@ describe('model-switchboard', () => {
     // NEWSLETTER is reached only through the newsletterWriter policy in
     // llm/call.js, whose wire cap gives always-thinking models their floor;
     // its default (Opus 5.5) is itself a requires:'deep' model.
-    expect(deepSafe).toEqual(['ADS_ADVISOR', 'DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE']);
+    // SMS_SCHEDULING_DECIDE: dispatched through llm/call.js like the
+    // referees; its default (Sonnet 5.5) is a requires:'deep' model.
+    // ROUTINE: its default (Sonnet 5.5) is a requires:'deep' model; the
+    // routineAnswer policy goes through llm/call.js and the two direct sites
+    // (invoice PDFs, lead synopsis) floor max_tokens and read the first text block.
+    expect(deepSafe).toEqual(['ADS_ADVISOR', 'DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE', 'REPORT_ASK', 'ROUTINE', 'SMS_SCHEDULING_DECIDE']);
+    // Low effort rides the always-thinking default only; an Opus 4.8 rollback sends none.
+    expect(MODELS.ROUTINE_EFFORT).toBe(MODELS.anthropicThinkingAlwaysOn(MODELS.ROUTINE) ? 'low' : undefined);
+    const routineLeg = { provider: 'anthropic', model: MODELS.ROUTINE, ...(MODELS.ROUTINE_EFFORT ? { effort: MODELS.ROUTINE_EFFORT } : {}) };
+    expect(MODELS.TEXT_POLICIES.routineAnswer.primary).toEqual(routineLeg);
+    for (const id of ['wiki_qa_staff', 'invoice_pdf', 'lead_synopsis']) {
+      expect(lanes.find((l) => l.id === id).primary.selector).toBe('ROUTINE');
+    }
+    // The ROUTINE picker never offers Fable / Mythos, and the registry refuses a hand-set one.
+    const routineAccepts = selectors.find((s) => s.key === 'ROUTINE').accepts;
+    expect(routineAccepts.catalogOnly).toBe(true);
+    expect(routineAccepts.allowedIds).toEqual(expect.arrayContaining([MODELS.DEFAULTS.ROUTINE, MODELS.DEFAULTS.FLAGSHIP]));
+    expect(routineAccepts.allowedIds.some((id) => /^claude-(fable|mythos)/.test(id))).toBe(false);
+    const prevRoutine = process.env.MODEL_ROUTINE;
+    try {
+      process.env.MODEL_ROUTINE = 'claude-fable-5-1';
+      jest.isolateModules(() => { expect(require('../config/models').ROUTINE).toBe(MODELS.DEFAULTS.ROUTINE); });
+      process.env.MODEL_ROUTINE = 'claude-opus-4-8';
+      jest.isolateModules(() => {
+        const rolledBack = require('../config/models');
+        expect(rolledBack.ROUTINE).toBe('claude-opus-4-8');
+        expect(rolledBack.ROUTINE_EFFORT).toBeUndefined();
+        expect(rolledBack.TEXT_POLICIES.routineAnswer.primary).toEqual({ provider: 'anthropic', model: 'claude-opus-4-8' });
+      });
+    } finally {
+      if (prevRoutine === undefined) delete process.env.MODEL_ROUTINE; else process.env.MODEL_ROUTINE = prevRoutine;
+    }
+    // Expense categories stay on the flagship (owner, 2026-10-04 bake-off).
+    expect(lanes.find((l) => l.id === 'expense_categorize').primary.selector).toBe('FLAGSHIP');
+    // Published alt text is customer-visible: it stays on the vision policy.
+    expect(lanes.find((l) => l.id === 'hero_alt').primary.selector).toBe('VISION');
+    // Customer-facing wiki answers stay on the flagship policy.
+    expect(lanes.find((l) => l.id === 'wiki_qa').primary.selector).toBe('FLAGSHIP');
     expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');
     expect(lanes.find((l) => l.id === 'newsletter').primary.accepts.deep).toBe(true);
     expect(lanes.find((l) => l.id === 'events_curation').primary.accepts.deep).toBe(true);

@@ -519,6 +519,8 @@ module.exports = {
   // The same scrub for other customer-typed text the writer reads (why the
   // customer booked).
   scrubCustomerText: scrub,
+  // Whether a sentence is about getting in (a code, a keypad, working a gate).
+  isAccessSentence: accessSentence,
   resolveContextWindow,
   RECURRING_CAP_DAYS,
   ONE_TIME_CAP_DAYS,

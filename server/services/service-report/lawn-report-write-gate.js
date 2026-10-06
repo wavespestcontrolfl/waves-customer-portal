@@ -14,11 +14,46 @@
  */
 
 const logger = require('../logger');
+const featureGates = require('../../config/feature-gates');
+const { resolveWaterInForecast } = require('./lawn-watering-forecast');
 
 function parseJsonObject(value) {
   if (!value) return {};
   if (typeof value === 'object') return value;
   try { return JSON.parse(value) || {}; } catch { return {}; }
+}
+
+// Whether the record already carries a frozen watering snapshot (any shape):
+// the forecast sentence is only ever added to a NEW freeze.
+function hasFrozenWateringInstruction(record) {
+  const notes = parseJsonObject(record && record.structured_notes);
+  return !!(notes.lawnWateringFreeze || (notes.lawnReportV2 && notes.lawnReportV2.wateringInstruction));
+}
+
+// The paragraph step on its own: never throws, returns { [assessmentId]: entry }
+// for the caller's in-memory structured_notes, or null.
+async function freezeTechParagraphFor({ record, data, instruction, service, knex }) {
+  try {
+    const tech = require('./lawn-tech-paragraph');
+    const assessmentId = data && data.lawnAssessment && data.lawnAssessment.assessmentId;
+    if (assessmentId == null) return null;
+    const outcome = await tech.createAndFreezeTechParagraph({
+      serviceRecordId: service.id,
+      assessmentId,
+      // The row's CURRENT notes, read inside the step's one deadline: a retried
+      // completion finds the freeze and spends no second call.
+      getStructuredNotes: async () => (await knex('service_records').where({ id: service.id }).first('structured_notes'))?.structured_notes,
+      gatherInputs: () => require('./lawn-tech-paragraph-inputs').gatherTechParagraphInputs({ record, data, instruction, knex }),
+      knex,
+    });
+    if (outcome.status !== 'frozen' && outcome.status !== 'already_frozen') {
+      logger.info(`[lawn-tech-paragraph] none for service_record ${service.id}: ${outcome.status}${outcome.problems && outcome.problems.length ? ` (${outcome.problems.join(', ')})` : ''}`);
+    }
+    return outcome.entry ? { [String(assessmentId)]: outcome.entry } : null;
+  } catch (err) {
+    logger.warn(`[lawn-tech-paragraph] step failed for service_record ${service && service.id}: ${err.message}`);
+    return null;
+  }
 }
 
 /**
@@ -101,6 +136,21 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     // a state-null visit is regenerated too, from the frozen product facts, so
     // it reads the same at every render.
     if (instructionOut.instruction && instructionOut.instruction.state && !instructionOut.productsLoadFailed) {
+      // GATE_LAWN_WATERING_FORECAST: a water-in whose property forecast reaches
+      // the label amount inside its window freezes ONE conditional sentence
+      // beside the instruction (never inside `lines`). Read once, here, before
+      // the first-writer-wins freeze: a record that is already frozen is never
+      // touched, so a replay is byte-identical. Off, or any miss: exactly the
+      // instruction as built.
+      if (featureGates.lawnWateringForecastLive() && !hasFrozenWateringInstruction(record)) {
+        const forecast = await resolveWaterInForecast({
+          instruction: instructionOut.instruction,
+          latitude: record.customer_latitude ?? record.latitude ?? record.lat,
+          longitude: record.customer_longitude ?? record.longitude ?? record.lng,
+          fetchForecast: require('./application-conditions').fetchPropertyForecast,
+        });
+        if (forecast) instructionOut.instruction = { ...instructionOut.instruction, forecast };
+      }
       await knex('service_records')
         .where({ id: service.id })
         .whereRaw("(structured_notes::jsonb -> 'lawnWateringFreeze') IS NULL")
@@ -115,7 +165,21 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
         .then((row) => parseJsonObject(row && row.structured_notes).lawnWateringFreeze || null);
     }
 
-    return { smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true };
+    // "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH): ONE model call,
+    // here, frozen first-writer-wins under its own top-level key (never inside
+    // lawnReportV2, whose write above replaces the whole object). A render only
+    // reads the frozen text. Any miss, slow call or rejection stores nothing and
+    // costs the completion nothing but the call's own deadline. Gate off: no
+    // read and no call.
+    let techParagraphFreeze = null;
+    if (featureGates.lawnTechParagraphLive()) {
+      techParagraphFreeze = await freezeTechParagraphFor({ record, data, instruction: instructionOut.instruction, service, knex });
+    }
+
+    return {
+      smsSummary: frozen.smsSummary, frozen, wateringFreeze, reportToken: token, warnings, persisted: true,
+      ...(techParagraphFreeze ? { techParagraphFreeze } : {}),
+    };
   } catch (err) {
     logger.warn(`[lawn-report-gate] synthesis failed for service_record ${service?.id}: ${err.message}`);
     return empty;

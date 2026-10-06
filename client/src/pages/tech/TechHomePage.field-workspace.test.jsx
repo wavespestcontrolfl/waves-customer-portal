@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({ navigationBusy: vi.fn(), socketEvent: null }))
 vi.mock('socket.io-client', () => ({ io: () => ({ on: (_event, callback) => { mocks.socketEvent = callback; }, off: vi.fn(), disconnect: vi.fn() }) }));
 vi.mock('../../hooks/useFeatureFlag', () => ({ useFeatureFlag: (key) => key === 'pest-recap-v1', useFeatureFlagReady: () => ({ enabled: false, ready: true }) }));
 vi.mock('../../components/tech/TechIntelligenceBar', () => ({ default: () => <div>Field assistant</div> }));
-vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: () => null }));
+vi.mock('../../components/tech/GeofenceArrivalPrompt', () => ({ default: ({ inlineScheduleChanges, placement }) => <div data-testid="floating-notices" data-inline={String(Boolean(inlineScheduleChanges))} data-placement={placement} /> }));
 vi.mock('../../components/tech/CreateProjectModal', () => ({
   default: ({ onPendingPhotosChange, onCreated }) => <div role="dialog" aria-label="Create project fixture">
     <button onClick={() => onPendingPhotosChange(true)}>Queue report photo</button>
@@ -44,11 +44,11 @@ let briefStatus;
 let fetchMock;
 let followThrough;
 
-function mount(path = '/admin/today', { enabled = true, role = 'technician' } = {}) {
+function mount(path = '/admin/today', { role = 'technician' } = {}) {
   localStorage.setItem('waves_admin_token', 'fixture-only');
   localStorage.setItem('waves_admin_user', JSON.stringify({ id: 'tech-fixture', name: 'Fixture Technician', role }));
   return render(<MemoryRouter initialEntries={[path]}><Routes>
-    <Route path="/admin/today" element={<Outlet context={{ fieldWorkspace: enabled, setNavigationBusy: mocks.navigationBusy }} />}>
+    <Route path="/admin/today" element={<Outlet context={{ setNavigationBusy: mocks.navigationBusy }} />}>
       <Route index element={<TechHomePage />} />
       <Route path="tools" element={<TechHomePage section="tools" />} />
       <Route path="more" element={<TechHomePage section="more" />} />
@@ -274,7 +274,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     rows = [row('one')];
     mount('/admin/today/tools');
     fireEvent.click(await screen.findByRole('button', { name: /Project Report/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Queue report photo' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Queue report photo' }));
     await waitFor(() => expect(mocks.navigationBusy).toHaveBeenLastCalledWith(true));
 
     fireEvent.click(screen.getByRole('button', { name: 'Clear report photos' }));
@@ -289,7 +289,7 @@ describe('Tech field workspace uses the existing route workflow', () => {
     const initialReads = scheduleReads();
     fireEvent.click(report);
     rows = [row('one', { linkedProject: { id: 'created-report', status: 'draft' } })];
-    fireEvent.click(screen.getByRole('button', { name: 'Finish partial report' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Finish partial report' }));
 
     expect(await screen.findByTestId('project-detail')).toHaveAttribute('data-project-id', 'created-report');
     await waitFor(() => expect(scheduleReads()).toBeGreaterThan(initialReads));
@@ -391,9 +391,15 @@ describe('Tech field workspace uses the existing route workflow', () => {
     expect(screen.queryByText('Messages')).not.toBeInTheDocument();
   });
 
-  it('keeps the legacy route when the workspace flag is off', async () => {
-    mount('/admin/today/tools', { enabled: false });
-    expect(await screen.findByRole('heading', { name: 'Quick Actions' })).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'Tools' })).not.toBeInTheDocument();
+  it.each([
+    ['the Today overview (shown in the page)', '/admin/today', 'true', 'page'],
+    ['Tools', '/admin/today/tools', 'false', 'elsewhere'],
+    ['More', '/admin/today/more', 'false', 'elsewhere'],
+    ['an open visit', '/admin/today?visit=row%3Atwo', 'false', 'elsewhere'],
+  ])('schedule changes stop floating only on %s; notices sit in the page only on Today (owner 2026-10-05)', async (_label, path, inline, placement) => {
+    mount(path);
+    await waitFor(() => expect(screen.getByTestId('floating-notices')).toHaveAttribute('data-inline', inline));
+    expect(screen.getByTestId('floating-notices')).toHaveAttribute('data-placement', placement);
   });
+
 });

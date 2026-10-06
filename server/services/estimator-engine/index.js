@@ -492,7 +492,35 @@ function commercialHint(context) {
   return propType === 'commercial' || context.lead?.is_commercial === true;
 }
 
+// Phone-aware DBPR classification for a suite a LISTING sized (PR 5b). Only
+// a license result changes anything, and only the classification fields: the
+// listing's value, source, url and evidence are kept. Fail-open.
+async function classifyListingSuiteByLicense(suiteSize, { addressLine, phone, commercialRiskType, commercialSubtype }) {
+  try {
+    const { resolveCommercialSuiteSize } = require('../commercial-suite-size');
+    const { suiteAddressParts } = require('../commercial-suite-size/address-parts');
+    const license = await resolveCommercialSuiteSize({
+      address: suiteAddressParts(addressLine), phone, businessNameHint: null, commercialRiskType, commercialSubtype,
+    }, { skipWebSearch: true, skipListing: true });
+    if (license && license.source === SQFT_SOURCES.LICENSE_SEATS) {
+      return {
+        ...suiteSize,
+        licenseBacked: true,
+        businessType: 'restaurant_food',
+        businessName: license.businessName || suiteSize.businessName || null,
+        ...(license.seats != null ? { seats: license.seats } : {}),
+        // The license record that justified the classification rides with the result.
+        evidence: [...(suiteSize.evidence || []), ...(license.evidence || [])],
+      };
+    }
+  } catch (err) {
+    logger.warn(`[estimator-engine] listing suite license classification failed: ${err.message}`);
+  }
+  return suiteSize;
+}
+
 const { sameStreetAddress, addressAddsLocality, addressCompletesGatheredStreet } = require('./address-compare');
+const { applyBusinessCommercialVerdict, stampBusinessScope, withoutBusinessListing } = require('./business-scope-engine');
 
 // Property lookup + (when the county roll is unassessed) the
 // subdivision-median dig. Both fail-open.
@@ -517,7 +545,8 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
       // The normalized profile carries the pricing feature modifiers the raw
       // record doesn't (pool/cage, shrub density, landscape complexity,
       // water adjacency) — dropping it priced known features as absent.
-      enriched = lookup?.enriched || null;
+      // Minus the Places listing (never stored; business-scope-engine.js).
+      enriched = withoutBusinessListing(lookup?.enriched || null);
       lookupCache = lookup?.meta?.cache || null;
     } catch (err) {
       logger.warn(`[estimator-engine] property lookup failed (continuing without): ${err.message}`);
@@ -574,7 +603,15 @@ async function gatherPropertySignals(context, { refreshLookup = false, persistLo
     }
   }
 
-  return { address, propertyRecord, enriched, parcelView, subdivisionMedian };
+  // The lookup's permit-plan facts (R2-B), object state only: the profile
+  // already withheld (null) or never had (undefined) the rest, and the
+  // engine never reads the raw record stamp — same rule as the median.
+  const permitFacts = enriched?.permitBuildingFacts && typeof enriched.permitBuildingFacts === 'object'
+    && Number(enriched.permitBuildingFacts.conditionedSqft) > 0
+    ? { conditionedSqft: Math.round(Number(enriched.permitBuildingFacts.conditionedSqft)), permitNo: enriched.permitBuildingFacts.permitNo || null }
+    : null;
+
+  return { address, propertyRecord, enriched, parcelView, subdivisionMedian, permitFacts };
 }
 
 // One-bell + durability: for PROMISED quotes the processor's generic
@@ -2315,7 +2352,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
   const S = origin.strings;
   const threadKey = origin.threadKey || null;
   try {
-    const { address, propertyRecord, enriched, parcelView, subdivisionMedian } = await gatherPropertySignals(context, { refreshLookup, persistLookup: !dryRun });
+    const { address, propertyRecord, enriched, parcelView, subdivisionMedian, permitFacts } = await gatherPropertySignals(context, { refreshLookup, persistLookup: !dryRun });
     result.addressUsed = address;
 
     // An ambiguous shared-phone profile must not size the draft either —
@@ -2331,6 +2368,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       customer: trustedCustomer,
       isCommercial: commercialHint(context),
       subdivisionMedian,
+      permitFacts,
     });
 
     const composed = await composeIntent(context, propertyFacts);
@@ -2373,7 +2411,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // the extraction missed). When it differs from — or fills in — the
     // address the property signals were gathered for, re-gather; otherwise
     // the draft is priced off the wrong (or no) parcel.
-    let effectiveSignals = { propertyRecord, enriched, parcelView, subdivisionMedian };
+    let effectiveSignals = { propertyRecord, enriched, parcelView, subdivisionMedian, permitFacts };
     let addressRegathered = false;
     if (intent.address
       && (!address || !sameStreetAddress(intent.address, address) || addressAddsLocality(intent.address, address))) {
@@ -2450,6 +2488,17 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // re-gathered signals carry their OWN audit, so a corrected address is
     // judged on its own lookup, not the original one's.
     const effectiveParcelOk = parcelSignalsDescribeGatheredAddress(effectiveSignals);
+    // GATE_LOOKUP_BUSINESS_IDENTITY: a business listed at the address with the
+    // scope still open is only ever a "staff must confirm" (red lane, or a
+    // review flag for a caller who lives there). Places never changes the
+    // intent or any size here. null (and no effect anywhere below) without it.
+    const businessVerdict = applyBusinessCommercialVerdict({
+      intent,
+      enriched: effectiveSignals.enriched,
+      parcelOk: effectiveParcelOk,
+      extraction: context.extraction,
+      crossProperty: crossPropertyRegather,
+    });
     propertyFacts = resolvePropertyFacts({
       // Caller-stated facts (extraction) describe the property discussed on
       // THIS call — they stay.
@@ -2463,8 +2512,11 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       // sized from it carry a fallback source that already routes the
       // draft to review.
       subdivisionMedian: effectiveSignals.subdivisionMedian,
+      // Same reasoning: the permit plan is the lookup's own address and a
+      // fallback source that already routes the draft to review.
+      permitFacts: effectiveSignals.permitFacts || null,
     });
-    result.propertyFacts = propertyFacts;
+    result.propertyFacts = stampBusinessScope(propertyFacts, businessVerdict);
 
     // Facts view for the SCOPE classifiers on a true property switch: the
     // arbitration deliberately keeps the call's caller-stated facts (they
@@ -2669,7 +2721,8 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             // re-resolved with those (no second web search).
             const lookupSuiteSize = effectiveParcelOk ? (effectiveSignals.enriched?.suiteSize || null) : null;
             let suiteSize = (lookupSuiteSize && Number(lookupSuiteSize.value) > 0
-              && (lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS || lookupSuiteSize.source === 'verified'))
+              && (lookupSuiteSize.source === SQFT_SOURCES.LICENSE_SEATS || lookupSuiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT
+                || lookupSuiteSize.source === 'verified'))
               ? lookupSuiteSize
               : null;
             if (!suiteSize) {
@@ -2700,6 +2753,20 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
                 }
               }
             }
+            // A listing size the lookup found was resolved WITHOUT the call's
+            // phone, which is what picks one license when several share the
+            // suite: run the license check once more with it (no listing
+            // search, no web search) for the CLASSIFICATION only. The
+            // listing's size and link stand.
+            if (suiteSize && suiteSize.source === SQFT_SOURCES.LISTING_VERIFIED_TEXT && suiteSize.licenseBacked !== true
+              && (context?.phone || suiteSize.licenseChecked === false)) {
+              suiteSize = await classifyListingSuiteByLicense(suiteSize, {
+                addressLine: intent.address || result.addressUsed || address,
+                phone: context?.phone || null,
+                commercialRiskType: intent.commercial_risk_type || null,
+                commercialSubtype: intent.commercial_subtype || null,
+              });
+            }
             if (suiteSize && Number(suiteSize.value) > 0) {
               propertyFacts.home = {
                 value: suiteSize.value,
@@ -2716,7 +2783,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
               // this: a web-search businessType is model output, and model
               // output must not pick the pricing program (AGENTS.md).
               if (!intent.commercial_risk_type
-                && suiteSize.source === SQFT_SOURCES.LICENSE_SEATS) {
+                && (suiteSize.source === SQFT_SOURCES.LICENSE_SEATS || suiteSize.licenseBacked === true)) {
                 intent.commercial_risk_type = 'restaurant_food';
               }
             }
@@ -3441,6 +3508,7 @@ module.exports = {
   runDraftPipeline,
   notify,
   _private: {
+    classifyListingSuiteByLicense,
     addressFromContext, ownStreetForUnitAdoption, commercialHint, gatherPropertySignals, sameStreetAddress, addressAddsLocality,
     parcelSignalsDescribeGatheredAddress, resolveAgreedPriceForCall, supersedeRowScopedDraftBlock,
     clearDraftBlockOnCall,

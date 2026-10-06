@@ -160,6 +160,7 @@ async function releasePageEditLockConnection(lockConn, unlockError) {
 // operatorBriefTextForComparisonGate lives there too, shared with the
 // publisher's owner-list commit chokepoint (business-name-confirmer).
 const { OPERATOR_INTERCEPT_BUCKET, deriveSyncGuardrailOptions, operatorBriefTextForComparisonGate } = require('./guardrail-options');
+const { isBlogSearchSuggestion } = require('../service-report/report-blog-suggestion');
 
 // City → GBP location for autonomous gbp_post distribution, backed by the
 // canonical CITY_TO_LOCATION map in config/locations.js. A post goes to the
@@ -326,9 +327,12 @@ class AutonomousRunner {
         // navigational, and the decision-router pins the action for this
         // bucket anyway (profiler output would be ignored). The quality
         // gate's serp/gsc evidence checks exempt this bucket to match.
+        // "Suggest a post" rows share the bucket but are profiled: the
+        // router's SERP safety demotions and the gate's SERP check apply to
+        // them (GitHub Codex P1 on ba9bed50fc).
         persist: !dryRun,
         skipSerp: opp.action_type === 'add_internal_links'
-          || opp.bucket === OPERATOR_INTERCEPT_BUCKET,
+          || (opp.bucket === OPERATOR_INTERCEPT_BUCKET && !isBlogSearchSuggestion(opp)),
       });
     } catch (err) {
       await this._releaseClaimOrThrow(queue, opp.id, { claimToken });

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { callStartedAt } = require('../utils/call-timeline');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { ringTargetForLine } = require('../services/tech-line');
 const twilio = require('twilio');
@@ -55,7 +56,7 @@ function scheduleRecordingRecovery(callSid) {
       } catch (err) {
         logger.warn(`[call-status] repeat-caller bell failed for ${maskSid(callSid)}: ${err.message}`);
       }
-      // An UNKNOWN caller (no customer on file) who waited 25s+ and left no
+      // An UNKNOWN caller (no customer on file) who waited 15s+ and left no
       // voicemail gets a text-back from the line they called — same grace,
       // own try/catch so a failure here never blocks the bells above.
       try {
@@ -3550,6 +3551,12 @@ router.post('/call-status', async (req, res) => {
         // duration-gated recording sweeps).
         const status = nextCallStatus(existing.status, CallStatus);
         const incomingDuration = parseInt(CallDuration || 0) || 0;
+        const eventMs = Date.parse(req.body.Timestamp || '');
+        // Not before the call began: callStartedAt, because a row inserted
+        // after the call was over has a created_at later than its real end.
+        const callBeganMs = callStartedAt(existing)?.getTime();
+        const callEndedAt = Number.isFinite(eventMs) && eventMs <= Date.now() && eventMs >= callBeganMs
+          ? new Date(eventMs).toISOString() : null;
         // On a row that is already terminal the duration never decreases: a
         // retried "completed" or a late leg callback can carry
         // CallDuration "0" (a truthy string) and would otherwise zero the
@@ -3560,6 +3567,17 @@ router.post('/call-status', async (req, res) => {
         await trx('call_log').where('twilio_call_sid', CallSid).update({
           status,
           duration_seconds: duration,
+          // When the call actually ended: Twilio's own event time on the
+          // first terminal callback (the existing key wins on a retry).
+          // created_at is written before any ringing and duration_seconds is
+          // one leg's, so their sum is not the end;
+          // sms-pending-conversations.js reads this to tell whether a text
+          // arrived before the conversation was over. Never our receipt
+          // time: a delayed callback would move the end past texts that
+          // came in after the hangup. No usable Timestamp, no stamp.
+          ...(TERMINAL_CALL_STATUSES.has(CallStatus) && callEndedAt ? {
+            metadata: trx.raw("jsonb_build_object('ended_at', ?::text) || COALESCE(metadata, '{}'::jsonb)", [callEndedAt]),
+          } : {}),
           updated_at: new Date(),
         });
         return;

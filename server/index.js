@@ -500,6 +500,8 @@ app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 // BEFORE the global limiter, or an over-budget IP gets a 429 (and no
 // no-store/CORP) from a route that is supposed to be dark / generic.
 app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
+// Accept-card phone capture: the same reason. Its privacy headers and its gate-off 404 land before the global limiter.
+app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard);
 
 app.use('/api/', limiter);
 
@@ -759,6 +761,7 @@ app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'))
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));
 app.use('/api/admin/neighborhood-access', require('./routes/admin-neighborhood-access'));
+app.use('/api/admin/access-codes', require('./routes/admin-access-codes'));
 app.use('/api/admin/customer-geocodes', require('./routes/admin-customer-geocodes'));
 app.use('/api/admin/dashboard', adminDashboardRoutes);
 app.use('/api/admin/kpi-targets', require('./routes/admin-kpi-targets'));
@@ -1644,8 +1647,11 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
         cron.schedule('*/15 * * * *', async () => {
           try {
             await runExclusive('recipient-optin-sweep', async () => {
-              const { sweepUndispatchedOptins } = require('./services/recipient-optin');
+              const { sweepUndispatchedOptins, sweepOnSiteFollowUps } = require('./services/recipient-optin');
               await sweepUndispatchedOptins();
+              // Caller demotion + booking-confirmation replays to on-site
+              // recipients that were held or failed after their YES.
+              await sweepOnSiteFollowUps();
             });
           } catch (err) {
             logger.error(`[cron] recipient opt-in sweep failed: ${err.message}`);

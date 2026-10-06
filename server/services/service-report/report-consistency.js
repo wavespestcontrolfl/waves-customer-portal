@@ -899,6 +899,14 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
   // reportV2 by spread, which would drop it, so it is read first. They reach
   // the customer only through reportV2.lead, never as a payload key.
   const copyV6 = (data && data.reportV2 && data.reportV2.copyV6) || null;
+  // The live view's rainfast breach sentence (GATE_LAWN_RAINFAST_WATCH) rides
+  // the same non-enumerable hand-off and reaches the customer only through
+  // reportV2.lead.watching.
+  const rainfastWatch = (data && data.reportV2 && data.reportV2.rainfastWatch) || null;
+  // The frozen "From your technician" paragraph (GATE_LAWN_TECH_PARAGRAPH): the
+  // same non-enumerable hand-off, reaching the customer only through
+  // reportV2.lead.techParagraph.
+  const techParagraph = (data && data.reportV2 && data.reportV2.techParagraph) || null;
   applyReconciliationFixes(data, dynamicContext);
   // The lead (GATE_LAWN_REPORT_LEAD) is derived from the FINAL reconciled
   // strings, so it runs after the fixes above and even when
@@ -907,7 +915,7 @@ function applyLawnReportReconciliation(data, dynamicContext = null) {
   // a lead failure leaves the payload exactly as reconciled.
   if (data && data.reportV2 && data.serviceLine === 'lawn' && lawnReportLeadLive()) {
     try {
-      const lead = deriveLawnLead(data.reportV2, { sinceLast, copyV6 });
+      const lead = deriveLawnLead(data.reportV2, { sinceLast, copyV6, rainfastWatch, techParagraph });
       if (lead) data.reportV2 = { ...data.reportV2, lead };
     } catch { /* the lead is best-effort — the report renders without it */ }
   }

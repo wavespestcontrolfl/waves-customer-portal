@@ -1,7 +1,14 @@
 import 'fake-indexeddb/auto';
 import { IDBFactory } from 'fake-indexeddb';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { photoVisitChanged, postServicePhoto, retainFailedPhoto, restoreServicePhoto } from './service-photo-recovery';
+import {
+  confirmPhotoDraft,
+  persistCurrentPhotoStage,
+  photoVisitChanged,
+  postServicePhoto,
+  retainFailedPhoto,
+  restoreServicePhoto,
+} from './service-photo-recovery';
 import { getServicePhotoDraft } from './completion-resume-store';
 afterEach(() => vi.unstubAllGlobals());
 
@@ -82,6 +89,42 @@ it.each(['http', 'network'])('persists the upload receipt before reconciliation 
     { expectedServiceRecordId: 'record-original', expectedVisit: receiptVisit },
     { expectedServiceRecordId: 'record-original', expectedVisit: receiptVisit },
   ]);
+});
+
+it('keeps an accepted receipt in memory when IndexedDB cannot confirm or remove its draft', async () => {
+  const factory = new IDBFactory();
+  globalThis.indexedDB = factory;
+  const photo = {
+    draftId: 'draft-confirmation',
+    file: new File(['original'], 'lawn.jpg', { type: 'image/jpeg' }),
+    photoType: 'after',
+    capturedAt: '2026-10-02T14:00:00Z',
+    expectedVisit: captured,
+  };
+  expect(await persistCurrentPhotoStage(
+    photo, 'visit-confirmation', 'tech-a', 'uploading', 'Uploading',
+  )).toBe('saved');
+  const fetchMock = vi.fn(async () => ({
+    ok: true,
+    json: async () => ({ photo: { id: 'accepted-photo' }, reconcileRequired: false }),
+  }));
+  vi.stubGlobal('fetch', fetchMock);
+  vi.stubGlobal('indexedDB', undefined);
+
+  await expect(postServicePhoto(photo, 'visit-confirmation', 'token', 'tech-a'))
+    .resolves.toMatchObject({ photo: { id: 'accepted-photo' } });
+  expect(await confirmPhotoDraft(photo, 'visit-confirmation', 'tech-a')).toBe(false);
+  expect(photo.uploadReceipt).toMatchObject({ photo: { id: 'accepted-photo' } });
+
+  vi.stubGlobal('indexedDB', factory);
+  await expect(getServicePhotoDraft('visit-confirmation', 'tech-a')).resolves.toMatchObject({
+    stage: 'uploading', uploadReceipt: null,
+  });
+  await expect(postServicePhoto(photo, 'visit-confirmation', 'token', 'tech-a'))
+    .resolves.toMatchObject({ photo: { id: 'accepted-photo' } });
+  expect(fetchMock).toHaveBeenCalledTimes(1);
+  expect(await confirmPhotoDraft(photo, 'visit-confirmation', 'tech-a')).toBe(true);
+  await expect(getServicePhotoDraft('visit-confirmation', 'tech-a')).resolves.toBeNull();
 });
 
 it('refuses a receipt with missing identity instead of reconciling the latest record', async () => {

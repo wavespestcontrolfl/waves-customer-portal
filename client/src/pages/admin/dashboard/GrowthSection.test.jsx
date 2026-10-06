@@ -12,6 +12,7 @@ const data = { kpis: { revenueMTD: 123, activeCustomers: 10, newCustomersThisMon
 const props = {
   funnel: { funnel: {}, rates: {} },
   capAlloc: { channels: [] },
+  serviceLines: { lines: [], caveats: [] },
   kpis: { sales: { conversion: 50, booked: 1, leads: 2 }, membershipsSold: 3 },
   salesCapture: { captured: 100, missed: 100, captureRate: 50, wonCount: 1, lostCount: 1 },
 };
@@ -21,7 +22,7 @@ it('keeps independent growth panels usable when the main feed fails', () => {
   const retry = vi.fn();
   mount({ data: null, loadError: new Error('offline'), onRetry: retry });
   expect(screen.getByRole('alert')).toHaveTextContent('Growth data could not be loaded');
-  for (const label of ['Sales capture', 'Lead → Booked', 'Marketing attribution', 'Estimate funnel']) {
+  for (const label of ['Sales capture', 'Lead → Booked', 'Marketing attribution', 'Estimate funnel', 'By service line']) {
     expect(screen.getByText(label)).toBeInTheDocument();
   }
   expect(screen.queryByText('Revenue MTD')).not.toBeInTheDocument();

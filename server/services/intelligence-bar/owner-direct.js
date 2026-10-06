@@ -55,6 +55,14 @@ const { executionOutcome } = require('./outcomes');
 //     message, irreversible; Codex r5)
 //   - every external_action: send_sms, reply_via_sms, send_email_reply,
 //     review requests and replies, block_sender, outside-service writes
+//   - adjust_stock and update_restock_request (receive): both change the stock count. Stock
+//     writes always show a confirm card, owner 2026-10-05: the operator's wording cannot be
+//     trusted for the amount ("2 of the Talak" became 2 fl oz). create_restock_request stays
+//     on the list: it saves a request and changes no stock.
+//   - remove_saved_payment_method (Stripe detach, optional Auto Pay-off,
+//     customer emails) and correct_invoice_address (rewrites the address a
+//     customer-facing receipt prints; money-domain document) — both always
+//     carded, owner 2026-10-03
 const OWNER_DIRECT_TOOL_NAMES = new Set([
   'update_lead_contact',
   'update_lead_status',
@@ -66,9 +74,7 @@ const OWNER_DIRECT_TOOL_NAMES = new Set([
   'update_property_access',
   'assign_technician',
   'reschedule_appointment',
-  'adjust_stock',
   'create_restock_request',
-  'update_restock_request',
   'toggle_estimate_v2_view',
 ]);
 

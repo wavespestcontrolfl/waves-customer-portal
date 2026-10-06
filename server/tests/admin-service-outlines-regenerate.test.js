@@ -18,7 +18,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/lawn-service-outline', () => ({
   CONTENT_LIBRARY_VERSION: 'content-v1',
   PRODUCT_REGISTRY_VERSION: 'products-v1',
-  PROTOCOL_VERSION: 'protocol-v1',
+  protocolVersion: () => 'protocol-v1',
   TEMPLATE_VERSION: 'template-v1',
   buildOutline: jest.fn(),
   createPublicToken: jest.fn(() => 'abcdefghijklmnopqrstuvwxyzABCDEFGHI'),

@@ -53,6 +53,26 @@ export function formatAnswer(answer) {
 
 function SubjectText({ subject }) {
   const [open, setOpen] = useState(false);
+  if (subject && subject.type === "social_post") {
+    // A photo question: the reviewer judges the hosted photo itself. Only an
+    // https address is ever rendered.
+    const photo = /^https:\/\//.test(subject.imageUrl || "") ? subject.imageUrl : null;
+    return (
+      <div className="min-w-0 space-y-2">
+        <div className="text-12 font-medium uppercase text-ink-secondary">
+          Social post photo{subject.at ? ` · ${timeLabel(subject.at)}` : ""}
+        </div>
+        {photo ? (
+          <a href={photo} target="_blank" rel="noopener noreferrer" className="block">
+            <img src={photo} alt="The photo this post published" loading="lazy" className="max-h-96 w-auto max-w-full rounded-md border border-zinc-200" />
+          </a>
+        ) : (
+          <div className="text-14 text-ink-secondary">Photo unavailable.</div>
+        )}
+        {subject.text && <div className="whitespace-pre-wrap break-words text-ui-body text-zinc-800">{subject.text}</div>}
+      </div>
+    );
+  }
   if (!subject || !subject.text) {
     return <div className="text-14 text-ink-secondary">Subject text unavailable.</div>;
   }
@@ -76,6 +96,19 @@ function SubjectText({ subject }) {
             {open ? "Collapse transcript" : "Show full transcript"}
           </button>
         )}
+      </div>
+    );
+  }
+  if (subject.type === "scheduled_services") {
+    // A visit's facts as the models read them (visit_access): saved
+    // preferences, notes, customer texts and the last technician note, with
+    // access details withheld. Not the customer's own words alone.
+    return (
+      <div className="min-w-0 space-y-1">
+        <div className="text-12 font-medium uppercase text-ink-secondary">
+          Visit facts the models read{subject.at ? ` · visit ${subject.at}` : ""}
+        </div>
+        <div className="whitespace-pre-wrap break-words text-ui-body text-zinc-800">{subject.text}</div>
       </div>
     );
   }

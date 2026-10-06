@@ -25,7 +25,7 @@ jest.mock('../services/typed-decisions/eval', () => ({ evaluateCapabilities: (..
 const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-typed-decisions');
-const { callSubjectHash, smsSubjectHash } = require('../services/typed-decisions/subject-hash');
+const { callSubjectHash, smsSubjectHash, socialPostSubjectHash } = require('../services/typed-decisions/subject-hash');
 
 const ID = '11111111-1111-4111-8111-111111111111';
 const SEEN = { p: 0.9, yes: true, confident: true };
@@ -164,6 +164,62 @@ describe('GET /reviews', () => {
     const { status, body } = await get('/reviews');
     expect(status).toBe(200);
     expect(body.reviews[0].subject).toBeNull();
+  });
+});
+
+describe('social post photo subjects (photo_privacy.v1)', () => {
+  const POST_ID = '33333333-3333-4333-8333-333333333333';
+  const IMAGE = 'https://cdn.example.test/tech-field-abc.jpg';
+  const CAPTIONS = JSON.stringify({ facebook: 'Lawn treatment in Bradenton today.', instagram: 'Lawn day.' });
+  const HASH = socialPostSubjectHash({ imageUrl: IMAGE, captions: CAPTIONS });
+  const photoRow = (over = {}) => baseRow({
+    provider: 'cloudflare', capability: 'photo_privacy', package_id: 'photo_privacy.v1', served_model: 'clef-flash',
+    subject_type: 'social_post', subject_id: POST_ID, question_id: 'shows_face', baseline_answers: JSON.stringify({ production: false }), subject_hash: HASH, ...over,
+  });
+
+  test('the queue shows the hosted photo and the caption the model was given; no digest leaves the server', async () => {
+    const log = installDb({
+      decision_reviews: { list: [photoRow()] },
+      social_media_posts: { list: [{ id: POST_ID, image_url: IMAGE, published_content: CAPTIONS, created_at: new Date('2026-10-03T12:00:00Z') }] },
+    });
+    const { status, body } = await get('/reviews');
+    expect(status).toBe(200);
+    expect(body.reviews[0]).toMatchObject({ subjectType: 'social_post', providerLabel: 'Clef', subjectChanged: false, subjectVersion: HASH });
+    expect(body.reviews[0].subject).toEqual({ type: 'social_post', text: 'Lawn treatment in Bradenton today.', imageUrl: IMAGE, at: '2026-10-03T12:00:00.000Z' });
+    expect(body.reviews[0].question).toMatch(/recognizable human face/);
+    // never read as a text: the sms_log table is not touched
+    expect(log.sms_log).toBeUndefined();
+  });
+
+  test('a post whose photo or caption changed after Clef answered is flagged and cannot be labeled', async () => {
+    installDb({
+      decision_reviews: { list: [photoRow()], first: [photoRow()] },
+      social_media_posts: { list: [{ id: POST_ID, image_url: 'https://cdn.example.test/other.jpg', published_content: CAPTIONS, created_at: new Date() }], first: { image_url: 'https://cdn.example.test/other.jpg', published_content: CAPTIONS } },
+    });
+    expect((await get('/reviews')).body.reviews[0].subjectChanged).toBe(true);
+    const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: HASH });
+    expect(status).toBe(409);
+    expect(body.code).toBe('subject_changed');
+  });
+
+  test('an unchanged post is labeled against its digest', async () => {
+    const log = installDb({
+      decision_reviews: { first: [photoRow()], returning: [photoRow({ label_status: 'confirmed_error' })] },
+      social_media_posts: { first: { image_url: IMAGE, published_content: CAPTIONS } },
+    });
+    const { status } = await post(`/reviews/${ID}/label`, { verdict: 'jev_wrong', correct_value: false, seen_answer: SEEN, seen_subject: HASH });
+    expect(status).toBe(200);
+    expect(called(log, 'decision_reviews', 'whereRaw')).toContainEqual(['subject_hash IS NOT DISTINCT FROM ?', [HASH]]);
+    expect(log.sms_log).toBeUndefined();
+  });
+
+  test('a subject type this route cannot read back is refused, never judged as a text', async () => {
+    const log = installDb({ decision_reviews: { first: [photoRow({ subject_type: 'service_photo' })] } });
+    const { status, body } = await post(`/reviews/${ID}/label`, { verdict: 'jev_right', seen_answer: SEEN, seen_subject: HASH });
+    expect(status).toBe(409);
+    expect(body.code).toBe('subject_changed');
+    expect(log.sms_log).toBeUndefined();
+    expect(called(log, 'decision_reviews', 'update')).toEqual([]);
   });
 });
 

@@ -15,7 +15,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
 const { stalePendingExtractionProposals, findPendingExtractionProposal, upsertSensitiveProposal, findSmsExtractionProposals, buildIdempotencyKey } = require('./data-hygiene/proposal-store');
 const { resolvePropertyPreferencesTarget, applyPropertyPreferenceValue } = require('./data-hygiene/property-preferences');
-const { VERSION, extractSmsOperations, explicitContactPreference, matchesExplicitAccessCode, statesClock } = require('./sms-operational-extractor');
+const { VERSION, extractSmsOperations, explicitContactPreference, matchesAccessCode, statesClock } = require('./sms-operational-extractor');
 const { IRRIGATION_INPUT_FIELDS } = require('./irrigation-schedule-confirmation');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
 const { isSmsReaction } = require('./sms-intent');
@@ -247,7 +247,7 @@ function factVerdict(fact, { properties, current = {}, expectedCurrent = current
   if (fact.duration !== 'durable' || TEMPORARY_INSTRUCTION.test(`${messageBody} ${fact.quote}`)) return 'temporary_instruction';
   if (fact.field === 'contact_preference'
     && explicitContactPreference(fact.quote) !== fact.value) return 'preference_uncertain';
-  if (fact.field.endsWith('_code') && !matchesExplicitAccessCode(fact)) return 'code_uncertain';
+  if (fact.field.endsWith('_code') && !matchesAccessCode(fact, { messageBody, properties })) return 'code_uncertain';
   const maxLength = { neighborhood_gate_code: 100, property_gate_code: 100, lockbox_code: 100,
     garage_code: 100, irrigation_controller_location: 200 }[fact.field] ?? 600;
   if (fact.value.length > maxLength) return 'value_too_long';
@@ -552,7 +552,8 @@ async function recordMessageOperations(conn, message, extracted, matchedContext)
       if (prior.skip) return { skipped: 'replay_receipt_terminal', receipt_status: prior.existing.status };
       replayAppliedFields = await appliedSmsProfileFields(trx, live);
     } else if (live.operational_analysis?.version === VERSION) return { skipped: 'already_processed' };
-    const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id');
+    // The address fields feed the house-number and ZIP check of a natural-wording code at write time.
+    const properties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).select('id', 'address_line1', 'zip');
     const [current = {}] = await trx('property_preferences').where({ customer_id: customer.id }).forUpdate().limit(1).select('*');
     const sender = { inbound: message.from_phone, outbound: message.to_phone }[message.direction];
     const matches = await trx('customers').whereNull('deleted_at')
@@ -1031,6 +1032,21 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict } });
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
+  // The 24h window rolls from created_at, so a promise still overdue after a
+  // day gets a NEW row and the old one stayed open: one promise piled up four
+  // to six unread rows (prod 2026-10-05). The daily re-ring stays; only the
+  // newest row for this key may stay open. Runs for a deduped result too, so
+  // rows an older build left behind close on the next ring. openToCloser: a
+  // row a person marked done is taken over too (their Reopen would bring an
+  // obsolete duplicate back); a row a system component closed is left alone.
+  if (notification.id) {
+    const { doneColumns, openToCloser } = require('./notification-service')._private;
+    await openToCloser(trx('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .whereNot({ id: notification.id }), 'supersede')
+      .update(doneColumns({ by: 'supersede', resolution: 'Replaced by a newer reminder for the same promise', keepExisting: true, conn: trx }));
+  }
   return notification;
 }
 

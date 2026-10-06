@@ -128,8 +128,63 @@ function fastCompletionAttemptKey(serviceId, operatorId) {
   return `${FAST_COMPLETION_PREFIX}${String(operatorId)}:${String(serviceId)}`;
 }
 
-function withFastCompletionKey(key, operation) {
-  const pending = (fastCompletionOperations.get(key) || Promise.resolve()).then(() => operation(key));
+// Which Fast Complete rows exist, kept outside IndexedDB: after a reload a
+// device whose store cannot be read still knows a saved attempt is there,
+// so Tech Home opens no fresh completion over it (GitHub Codex P2 on #5979).
+const FAST_COMPLETION_MARKER_PREFIX = "waves_fast_complete_saved:";
+function setFastCompletionMarker(key, present) {
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return;
+    if (present) storage.setItem(FAST_COMPLETION_MARKER_PREFIX + key, "1");
+    else storage.removeItem(FAST_COMPLETION_MARKER_PREFIX + key);
+  } catch { /* best effort */ }
+}
+// The services this operator has a marked saved row for: what a scan can
+// still list when IndexedDB cannot be read (GitHub Codex P2 on #5979).
+export function listFastCompletionMarkers(operatorId) {
+  if (!operatorId) return [];
+  const prefix = `${FAST_COMPLETION_MARKER_PREFIX}${FAST_COMPLETION_PREFIX}${String(operatorId)}:`;
+  try {
+    const storage = globalThis.localStorage;
+    if (!storage) return [];
+    const ids = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const name = storage.key(index);
+      if (name && name.startsWith(prefix) && storage.getItem(name) === "1") ids.push(name.slice(prefix.length));
+    }
+    return ids;
+  } catch {
+    return [];
+  }
+}
+export function hasFastCompletionMarker(serviceId, operatorId) {
+  const key = fastCompletionAttemptKey(serviceId, operatorId);
+  if (!key) return false;
+  try {
+    return globalThis.localStorage?.getItem(FAST_COMPLETION_MARKER_PREFIX + key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+// A Fast Complete storage operation that has not answered after this long
+// counts as unavailable: the per-key queue moves on, so one stalled open or
+// read never holds every later read and write for that visit (GitHub Codex
+// P2s on #5979). A late answer is ignored; IndexedDB's transaction lock and
+// the compare predicates still fence it against the operations after it.
+export const FAST_COMPLETION_TIMEOUT_MS = 5000;
+function boundedFastCompletion(operation, timedOut) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(timedOut), FAST_COMPLETION_TIMEOUT_MS);
+    Promise.resolve().then(operation).then(resolve, () => resolve(timedOut))
+      .finally(() => clearTimeout(timer));
+  });
+}
+
+function withFastCompletionKey(key, operation, timedOut = false) {
+  const pending = (fastCompletionOperations.get(key) || Promise.resolve())
+    .then(() => boundedFastCompletion(() => operation(key), timedOut));
   fastCompletionOperations.set(key, pending);
   void pending.finally(() => {
     if (fastCompletionOperations.get(key) === pending) fastCompletionOperations.delete(key);
@@ -137,9 +192,9 @@ function withFastCompletionKey(key, operation) {
   return pending;
 }
 
-function withFastCompletionAttempt(serviceId, operatorId, operation) {
+function withFastCompletionAttempt(serviceId, operatorId, operation, timedOut) {
   const key = fastCompletionAttemptKey(serviceId, operatorId);
-  return key ? withFastCompletionKey(key, operation) : Promise.resolve(null);
+  return key ? withFastCompletionKey(key, operation, timedOut) : Promise.resolve(null);
 }
 
 // One readwrite transaction protects a Fast Complete row across browser tabs.
@@ -152,6 +207,7 @@ function mutateFastCompletionRow(key, mutate) {
     return new Promise((resolve) => {
       let settled = false;
       let result = false;
+      let wrote = null;
       const done = (value) => {
         if (settled) return;
         settled = true;
@@ -166,6 +222,7 @@ function mutateFastCompletionRow(key, mutate) {
           try {
             const mutation = mutate(read.result);
             if (!mutation) return;
+            wrote = mutation.delete ? "delete" : "put";
             const write = mutation.delete ? store.delete(key) : store.put(mutation.value, key);
             write.onsuccess = () => { result = true; };
             write.onerror = () => done(false);
@@ -174,7 +231,10 @@ function mutateFastCompletionRow(key, mutate) {
           }
         };
         read.onerror = () => done(false);
-        tx.oncomplete = () => done(result);
+        tx.oncomplete = () => {
+          if (result && wrote) setFastCompletionMarker(key, wrote === "put");
+          done(result);
+        };
         tx.onerror = () => done(false);
         tx.onabort = () => done(false);
       } catch {
@@ -199,6 +259,12 @@ export function putFastCompletionAttempt(serviceId, operatorId, attempt, now = D
     body: attempt.body,
     summary: String(attempt.summary || ""),
     storedAt: now,
+    // The server refused this exact body for good, but the device could not
+    // delete it: a reload offers it to discard, never to retry.
+    ...(attempt.refused === true ? { refused: true } : {}),
+    // The sheet that made the body, when its findings alone cannot say (the
+    // lawn visit sheet shares its findings type with the lawn re-service).
+    ...(typeof attempt.sheet === "string" && attempt.sheet ? { sheet: attempt.sheet } : {}),
   };
   const key = fastCompletionAttemptKey(serviceId, operatorId);
   if (!key) return Promise.resolve(false);
@@ -218,7 +284,7 @@ export function getFastCompletionAttempt(serviceId, operatorId) {
   const unavailable = {};
   return withFastCompletionAttempt(serviceId, operatorId, (scopedKey) => (
     withStore(FAST_COMPLETION_DB_NAME, "readonly", unavailable, (store) => store.get(scopedKey))
-  )).then((record) => {
+  ), unavailable).then((record) => {
     if (record === unavailable) return { available: false, attempt: null };
     const matches = record?.version === 1
       && record.operatorId === String(operatorId)
@@ -230,9 +296,13 @@ export function getFastCompletionAttempt(serviceId, operatorId) {
 
 // The index cursor exposes only metadata keys, so a menu scan never clones
 // photo-bearing bodies. The exact request is loaded only on explicit open.
-export async function listFastCompletionAttempts(operatorId) {
+export function listFastCompletionAttempts(operatorId) {
   const unavailable = { available: false, attempts: [] };
-  if (!operatorId) return unavailable;
+  if (!operatorId) return Promise.resolve(unavailable);
+  return boundedFastCompletion(() => scanFastCompletionAttempts(operatorId, unavailable), unavailable);
+}
+
+async function scanFastCompletionAttempts(operatorId, unavailable) {
   const db = await openDb(FAST_COMPLETION_DB_NAME);
   if (!db) return unavailable;
   return new Promise((resolve) => {
@@ -433,6 +503,20 @@ export function putServicePhotoDraftIfCurrent(serviceId, record, operatorScope, 
 
 export function getServicePhotoDraft(serviceId, operatorScope) {
   return getCompletionDraft(serviceId, servicePhotoDraftScope(operatorScope));
+}
+
+// Ownership checks before a cross-tab upload must distinguish a missing row
+// (another tab completed/deleted it) from an unavailable IndexedDB read. A
+// null-only read cannot safely make that decision.
+export function inspectServicePhotoDraft(serviceId, operatorScope) {
+  const unavailable = {};
+  const scope = servicePhotoDraftScope(operatorScope);
+  return withDraft(serviceId, scope, (key) => (
+    withStore(DRAFT_DB_NAME, "readonly", unavailable, (store) => store.get(key))
+  )).then((row) => ({
+    available: row !== unavailable,
+    draft: row && row !== unavailable && typeof row.draft === "object" ? row.draft : null,
+  }));
 }
 
 export function deleteServicePhotoDraft(serviceId, operatorScope) {

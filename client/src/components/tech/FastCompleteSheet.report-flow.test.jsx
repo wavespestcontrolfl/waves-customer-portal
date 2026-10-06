@@ -8,6 +8,7 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { IDBFactory } from 'fake-indexeddb';
 
 vi.mock('./TechTreatmentZoneModal', () => ({
   default: ({ onSaved, onClose, expectedPropertyId, openVisitOnly }) => (
@@ -27,6 +28,7 @@ vi.mock('./TechServicePhotosModal', () => ({
 
 import FastCompleteSheet from './FastCompleteSheet';
 import { perimeterFeetOf, reportParts } from './FastCompleteReport';
+import { getFastCompletionAttempt } from '../../lib/completion-resume-store';
 
 beforeEach(() => { vi.spyOn(window, 'scrollTo').mockImplementation(() => {}); });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -136,8 +138,13 @@ describe('a report-flow sheet routed from a stale schedule row', () => {
 async function generate({ note = NOTE, rating = '3, moderate' } = {}) {
   fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: note } });
   if (rating) fireEvent.click(screen.getByRole('button', { name: rating }));
+  // Generate holds (disabled, its reason in the footer) while the visit's
+  // photos and promises load, and a click before then does nothing: wait for
+  // it to be live (the CI flake of 2026-10-03, reproduced with a slow photos
+  // read).
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
   fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
-  await screen.findByText('Report the customer will see');
+  await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
 }
 
 function conflict(code, message) {
@@ -171,14 +178,14 @@ describe('the visit the tech tapped', () => {
 });
 
 describe('the visit step', () => {
-  test('a regular pest visit opens as a service: no pest, where or how taps, customer not home with full access', async () => {
+  test('a regular pest visit opens as a service: no pest, where or how taps, customer home and spoke with them (owner 2026-10-04)', async () => {
     await openSheet(makeRequest());
     expect(screen.getByRole('heading', { name: 'Complete service' })).toBeTruthy();
     for (const gone of ['Ants', 'Outside', 'Inside', 'Spot treatment', 'Perimeter spray', 'Light']) {
       expect(screen.queryByRole('button', { name: gone })).toBeNull();
     }
-    expect(screen.getByRole('button', { name: 'Not home — full access' }).getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByRole('button', { name: 'Home — spoke with them' }).getAttribute('aria-pressed')).toBe('false');
+    expect(screen.getByRole('button', { name: 'Home — spoke with them' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', { name: 'Not home — full access' }).getAttribute('aria-pressed')).toBe('false');
     expect(screen.getByRole('button', { name: 'Not home — partial access' }).getAttribute('aria-pressed')).toBe('false');
     const tracker = screen.getByRole('group', { name: 'Pest activity' });
     expect(within(tracker).getAllByRole('button').map((button) => button.textContent)).toEqual(['1', '2', '3', '4', '5']);
@@ -252,10 +259,17 @@ describe('the visit step', () => {
 });
 
 describe('generate and read', () => {
+  test('a tech who taps nothing for the customer sends home, spoke with them (owner 2026-10-04)', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    expect(request.bodies('/generate-report')[0]).toMatchObject({ customerInteraction: 'Customer home — spoke with them' });
+  });
+
   test('the report request carries the note and the taps; the note\'s facts are read beside it', async () => {
     const request = makeRequest();
     await openSheet(request);
-    fireEvent.click(screen.getByRole('button', { name: 'Home — spoke with them' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Not home — partial access' }));
     await generate();
     const [payload] = request.bodies('/generate-report');
     // The note is read first, and the report is written from exactly what
@@ -266,7 +280,7 @@ describe('generate and read', () => {
     expect(payload).toMatchObject({
       scheduledServiceId: 'svc-1',
       serviceNotes: NOTE,
-      customerInteraction: 'Customer home — spoke with them',
+      customerInteraction: 'Customer not home — partial access',
       pestActivityRating: 3,
       includeCustomerComms: true,
       technicianName: 'Adam',
@@ -539,13 +553,77 @@ describe('generate and read', () => {
   });
 });
 
+// "Swept eaves and webs" (owner 2026-10-05, "sweep on fast form"): the full
+// form's one protocol action, so the report's spider section can read it.
+const SWEEP_LABEL = 'Swept eaves, window frames, door frames, and lanai';
+const sweepBox = () => screen.queryByRole('checkbox', { name: 'Swept eaves and webs' });
+
+describe('the swept eaves and webs box', () => {
+  test('shows once, unchecked, on a regular pest visit', async () => {
+    await openSheet(makeRequest());
+    expect(screen.getAllByRole('checkbox', { name: 'Swept eaves and webs' })).toHaveLength(1);
+    expect(sweepBox().checked).toBe(false);
+  });
+
+  test('an initial cleanout gets no box, as on the full form (not a regular pest visit)', async () => {
+    const request = makeRequest({ service: { ...REGULAR, serviceType: 'Initial Pest Cleanout', serviceKey: 'pest_initial_cleanout' } });
+    render(<FastCompleteSheet service={{ ...SERVICE, serviceType: 'Initial Pest Cleanout' }} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    await screen.findByRole('button', { name: 'Generate AI report' });
+    expect(sweepBox()).toBeNull();
+  });
+
+  test('shows on a pest re-service too, as it does on the full form', async () => {
+    await openSheet(makeRequest({ service: RESERVICE }), { ...SERVICE, serviceType: 'Pest Control Re-Service' });
+    expect(sweepBox().checked).toBe(false);
+  });
+
+  test('checked: the writer and the completion carry the label with its exterior, no-treatment scope', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    fireEvent.click(sweepBox());
+    expect(sweepBox().checked).toBe(true);
+    await generate();
+    expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([SWEEP_LABEL]);
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body.protocolActionsCompleted).toEqual([SWEEP_LABEL]);
+    expect(body.protocolActionScopesCompleted).toEqual([{ label: SWEEP_LABEL, scope: 'exterior', treatmentApplied: false }]);
+  });
+
+  test('unchecked: no protocol action goes to the writer or the completion', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    // The full form's shape: an empty list, which the writer reads as none.
+    expect(request.bodies('/generate-report')[0].actionsCompleted).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    const [body] = request.bodies('/complete');
+    expect(body).not.toHaveProperty('protocolActionsCompleted');
+    expect(body).not.toHaveProperty('protocolActionScopesCompleted');
+  });
+
+  test('ticking it after the report was written makes the report stale until it is written again with the action', async () => {
+    const request = makeRequest();
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Back to the visit' }));
+    fireEvent.click(sweepBox());
+    expect(screen.queryByRole('button', { name: 'Back to the report' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Write it again' }));
+    await waitFor(() => expect(request.bodies('/generate-report')).toHaveLength(2));
+    expect(request.bodies('/generate-report')[1]).toMatchObject({ actionsCompleted: [SWEEP_LABEL], fresh: true });
+  });
+});
+
 describe('complete and send', () => {
   test('a regular visit posts the full completion with the report, the heard facts and the full form\'s customer text', async () => {
     const request = makeRequest({
       complete: [{ success: true, completionSmsStatus: 'sent', invoiceId: 'inv-1', invoiceTotal: 95, invoiceStatus: 'sent' }],
     });
     await openSheet(request);
-    fireEvent.click(screen.getByRole('button', { name: 'Home — spoke with them' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Not home — partial access' }));
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
@@ -555,7 +633,7 @@ describe('complete and send', () => {
       technicianNotes: REPORT,
       reportDraftBase: REPORT,
       areasServiced: ['Inside', 'Outside'],
-      customerInteraction: 'tech_home_spoke_with_them',
+      customerInteraction: 'not_home_partial_access',
       clientPestRating: 3,
       sendCompletionSms: true,
       includePayLink: true,
@@ -808,6 +886,38 @@ describe('complete and send', () => {
     expect(screen.queryByTestId('fast-complete-sent')).toBeNull();
   });
 
+  test('the send carries the photo descriptions the report was written from (Codex P2 on #5701)', async () => {
+    const request = makeRequest({ photos: [
+      { id: 'p1', url: 'https://example.test/p1.jpg', caption: '  Counter edge  ' },
+      { id: 'p2', url: 'https://example.test/p2.jpg' },
+      { id: 'p3', url: 'https://example.test/p3.jpg', caption: 'Garage door sweep' },
+    ] });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(request.bodies('/complete')[0].photoCaptionsSeen).toEqual(['Counter edge', 'Garage door sweep']);
+    cleanup();
+
+    // No described photo: an empty list, so one described elsewhere still refuses.
+    const bare = makeRequest();
+    await openSheet(bare);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(bare.bodies('/complete')[0].photoCaptionsSeen).toEqual([]);
+  });
+
+  test('a photo description changed on another device stops the send with the reason', async () => {
+    const message = 'A photo description changed after this report was written. Close this visit and reopen it, then write the report again.';
+    const request = makeRequest({ complete: [conflict('photo_captions_changed', message)] });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    expect(await screen.findByText(message)).toBeTruthy();
+    expect(screen.queryByTestId('fast-complete-sent')).toBeNull();
+  });
+
   test('a refused removal shows why and keeps the hold', async () => {
     const request = makeRequest({
       trace: (path, options) => {
@@ -971,7 +1081,7 @@ describe('complete and send', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Go back' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete & send' }));
     await screen.findByTestId('fast-complete-sent');
     const [first, retried, fresh] = request.bodies('/complete');
     expect(retried.idempotencyKey).toBe(first.idempotencyKey);
@@ -984,8 +1094,36 @@ describe('complete and send', () => {
     await generate();
     fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Go back' }));
-    expect(screen.getByRole('button', { name: 'Complete & send' }).disabled).toBe(false);
+    expect((await screen.findByRole('button', { name: 'Complete & send' })).disabled).toBe(false);
     expect(request.bodies('/complete')).toHaveLength(1);
+  });
+
+  describe('with this device keeping the attempt', () => {
+    let factory;
+    beforeEach(() => { factory = globalThis.indexedDB; globalThis.indexedDB = new IDBFactory(); });
+    afterEach(() => { globalThis.indexedDB = factory; });
+
+    test('a Go back that cannot discard the saved attempt says so on the heads-up (pre-push P1 on 5f95bc558d)', async () => {
+      const request = makeRequest({ complete: [conflict('report_rules_review', 'Refused words: "safe"'), { success: true }] });
+      render(<FastCompleteSheet service={SERVICE} operatorId="tech-a" request={request} onClose={() => {}} onCompleted={() => {}} />);
+      await screen.findByText(/Taurus SC 4 fl oz/);
+      await generate();
+      fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+      const back = await screen.findByRole('button', { name: 'Go back' });
+      const [sent] = request.bodies('/complete');
+      expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(sent);
+      const store = globalThis.indexedDB;
+      globalThis.indexedDB = undefined;
+      try {
+        fireEvent.click(back);
+        expect(await within(screen.getByRole('alertdialog')).findByText(/Could not discard the saved completion/)).toBeTruthy();
+      } finally { globalThis.indexedDB = store; }
+      expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt.body).toEqual(sent);
+      fireEvent.click(back);
+      expect((await screen.findByRole('button', { name: 'Complete & send' })).disabled).toBe(false);
+      await waitFor(async () => expect((await getFastCompletionAttempt('svc-1', 'tech-a')).attempt).toBeNull());
+      expect(request.bodies('/complete')).toHaveLength(1);
+    });
   });
 });
 

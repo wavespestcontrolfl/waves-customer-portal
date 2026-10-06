@@ -762,6 +762,12 @@ async function reserveSlot({
   serviceMode = 'recurring',
   selectedFrequency = '',
   serviceCadences = null,
+  // Optional caller-supplied no-booking revalidation, run on the LOCKED estimate row before any hold is
+  // minted - the SAME name and contract as extendReservation's: `(estimateRow, trx) => null | { status, body }`
+  // (may be async; `trx` is the reservation transaction, for reads that must be locked with it). The public /reserve route passes it so a state that appeared after its pre-transaction
+  // read (trenching review, the contact_review park) cannot consume capacity. Staff / system callers that
+  // reserve for an estimate that cannot be parked (one-tap-purchase's own linked draft) omit it.
+  revalidateEstimate = null,
 }) {
   // One booking_config read (lunch interval + day-end override, 60s TTL) for
   // every synchronous lunch/day-end check below — see
@@ -1033,6 +1039,18 @@ async function reserveSlot({
             err.code = 'ESTIMATE_NOT_FOUND';
             throw err;
           }
+        }
+      }
+
+      // Caller-supplied no-booking revalidation on the LOCKED row, before the profile resolve, any capacity
+      // check and the hold insert (see the parameter's comment). The route owns the predicate and the bodies.
+      if (typeof revalidateEstimate === 'function') {
+        const refusal = await revalidateEstimate(estimate, trx);
+        if (refusal) {
+          const err = new Error('estimate cannot be self-booked');
+          err.code = 'ESTIMATE_NO_BOOKING';
+          err.response = refusal;
+          throw err;
         }
       }
 
@@ -2077,6 +2095,11 @@ async function commitReservation({
       .update(updates)
       .returning('*');
     if (capacityFit) await persistArrivalOrder(client, capacityFit, scheduledServiceId);
+    // Two-treatment package (cockroach / flea): graduating the hold IS the
+    // booking, so visit 2 books here for both estimate-accept branches and
+    // one-tap — gate-dark, savepoint-isolated, no-op for every other
+    // service (package-followup-booking.js).
+    await require('./package-followup-booking').ensurePackageFollowUpVisit({ trx: client, primary: updated });
     // Tech-facing "new visit" card (tech-visit-notifications.js): the hold
     // kept its technician, and graduating it IS the booking — no assignment
     // write follows to announce it. Rides `client` so it waits for the
@@ -2129,17 +2152,28 @@ async function commitReservation({
 // visit. Plain chaining rather than .modify() so the builder stays a bare
 // where/whereNull/whereNotNull sequence for callers that pass no estimateId.
 function uncommittedHoldQuery(client, { scheduledServiceId, estimateId }) {
+  // One hold by id (optionally pinned to its estimate), or - with no id - every live hold of the estimate.
   const q = client('scheduled_services')
-    .where({ id: scheduledServiceId })
+    .where(scheduledServiceId ? { id: scheduledServiceId } : { source_estimate_id: estimateId })
     .whereNull('customer_id')
     .whereNotNull('reservation_expires_at');
-  return estimateId ? q.where({ source_estimate_id: estimateId }) : q;
+  return estimateId && scheduledServiceId ? q.where({ source_estimate_id: estimateId }) : q;
 }
 
 async function releaseReservation({ scheduledServiceId, estimateId }) {
   if (!scheduledServiceId) return { released: false };
   const count = await uncommittedHoldQuery(db, { scheduledServiceId, estimateId }).del();
   return { released: count > 0 };
+}
+
+// Release EVERY live uncommitted hold of an estimate (the ONE shared uncommittedHoldQuery predicate: no customer, a
+// reservation timestamp, this estimate's source link). Used when an estimate is observed parked for the office
+// (routes/estimate-public.js parkSideEffects), so a hold that slipped in just before the park does not keep
+// capacity until it expires. A committed visit is never touched.
+async function releaseEstimateHolds({ estimateId, database = null }) {
+  if (!estimateId) return { released: 0 };
+  const count = await uncommittedHoldQuery(database || db, { estimateId }).del();
+  return { released: count };
 }
 
 /**
@@ -2408,7 +2442,7 @@ async function extendReservation({ estimateId, scheduledServiceId, holdMinutes =
       // viewability predicate above does not re-derive. The route owns the
       // predicate and the response bodies; this only enforces the verdict.
       if (typeof revalidateEstimate === 'function') {
-        const refusal = await revalidateEstimate(estimate);
+        const refusal = await revalidateEstimate(estimate, trx);
         if (refusal) {
           const err = new Error('estimate cannot be self-booked');
           err.code = 'ESTIMATE_NO_BOOKING';
@@ -2667,6 +2701,7 @@ module.exports = {
   prepareReservationCommit,
   commitReservation,
   releaseReservation,
+  releaseEstimateHolds,
   releaseExpiredReservations,
   extendReservation,
   // Commit-time grace window: RESERVATION_COMMIT_GRACE_MINUTES is the

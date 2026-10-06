@@ -28,6 +28,7 @@ const {
 } = require('../services/product-costing');
 const { syncPricesToEstimator } = require('../services/price-sync');
 const protocols = require('../config/protocols.json');
+const { lawnProtocols } = require('../services/lawn-program');
 const { validateRule } = require('../services/service-report/lawn-watering-rule');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
@@ -67,7 +68,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 // Label review remains owner-only under STAFF_INVENTORY_REQUEST above.
 // Opening a product validates any active EPA source; only explicit extract calls AI.
-const { gateEnvValue } = require('../config/feature-gates');
+const featureGates = require('../config/feature-gates');
+
+const { gateEnvValue } = featureGates;
 const labelReview = require('../services/product-label-review');
 const labelExtractLimiter = require('express-rate-limit')({
   windowMs: 10 * 60 * 1000, limit: 5, standardHeaders: 'draft-7', legacyHeaders: false,
@@ -75,32 +78,53 @@ const labelExtractLimiter = require('express-rate-limit')({
   message: { error: 'Too many label reads. Try again in ten minutes.' },
 });
 const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
-router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE') }));
-router.use('/:id/label-review', (req, res, next) => {
-  if (!gateEnvValue('GATE_LABEL_PIPELINE')) return res.status(404).json({ enabled: false, error: 'Label pipeline is unavailable.' });
-  if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid product id.' });
-  next();
-});
-router.get('/:id/label-review', async (req, res, next) => {
-  try { res.json(await labelReview.getLabelReview(req.params.id)); } catch (err) { next(err); }
-});
-router.post('/:id/label-review/extract', labelExtractLimiter, async (req, res, next) => {
-  try { res.json(await labelReview.extractLabelReview(req.params.id, req.technicianId)); } catch (err) { next(err); }
-});
-router.post('/:id/label-review/decision', async (req, res, next) => {
-  try {
-    if (!UUID_RE.test(req.body.candidateId || '') || !['approve', 'reject'].includes(req.body.decision)) {
-      return res.status(400).json({ error: 'A candidate id and review decision are required.' });
-    }
-    res.json(await labelReview.decideLabelReview(req.params.id, req.technicianId, req.body));
-  } catch (err) { next(err); }
-});
-router.post('/:id/label-review/revoke', async (req, res, next) => {
-  try {
-    if (!UUID_RE.test(req.body.reviewId || '')) return res.status(400).json({ error: 'A review id is required.' });
-    res.json(await labelReview.revokeLabelReview(req.params.id, req.technicianId, req.body.reviewId));
-  } catch (err) { next(err); }
-});
+const { rateGateOn } = require('../services/product-label-rates');
+router.get('/label-pipeline', (req, res) => res.json({ enabled: gateEnvValue('GATE_LABEL_PIPELINE'), rates: rateGateOn() }));
+// One handler set per kind of label evidence; the service holds the shared
+// flow. Paths stay literal below so the staff route census can read them.
+// The use() guards are inline so the public-route scanner can prove they are
+// not routers.
+function labelReviewHandlers(kind, enabled) {
+  return {
+    guard: (req, res, next) => {
+      if (!enabled()) return res.status(404).json({ enabled: false, error: 'Label pipeline is unavailable.' });
+      if (!UUID_RE.test(req.params.id)) return res.status(400).json({ error: 'Invalid product id.' });
+      next();
+    },
+    get: async (req, res, next) => {
+      try { res.json(await labelReview.getLabelReview(req.params.id, kind)); } catch (err) { next(err); }
+    },
+    extract: async (req, res, next) => {
+      try { res.json(await labelReview.extractLabelReview(req.params.id, req.technicianId, kind)); } catch (err) { next(err); }
+    },
+    decision: async (req, res, next) => {
+      try {
+        if (!UUID_RE.test(req.body.candidateId || '') || !['approve', 'reject'].includes(req.body.decision)) {
+          return res.status(400).json({ error: 'A candidate id and review decision are required.' });
+        }
+        res.json(await labelReview.decideLabelReview(req.params.id, req.technicianId, req.body, kind));
+      } catch (err) { next(err); }
+    },
+    revoke: async (req, res, next) => {
+      try {
+        if (!UUID_RE.test(req.body.reviewId || '')) return res.status(400).json({ error: 'A review id is required.' });
+        res.json(await labelReview.revokeLabelReview(req.params.id, req.technicianId, req.body.reviewId, kind));
+      } catch (err) { next(err); }
+    },
+  };
+}
+const weatherReview = labelReviewHandlers('weather', () => gateEnvValue('GATE_LABEL_PIPELINE'));
+router.use('/:id/label-review', (req, res, next) => weatherReview.guard(req, res, next));
+router.get('/:id/label-review', weatherReview.get);
+router.post('/:id/label-review/extract', labelExtractLimiter, weatherReview.extract);
+router.post('/:id/label-review/decision', weatherReview.decision);
+router.post('/:id/label-review/revoke', weatherReview.revoke);
+const rateReview = labelReviewHandlers('rates', rateGateOn);
+router.use('/:id/label-rate-review', (req, res, next) => rateReview.guard(req, res, next));
+router.get('/:id/label-rate-review', rateReview.get);
+router.post('/:id/label-rate-review/extract', labelExtractLimiter, rateReview.extract);
+router.post('/:id/label-rate-review/decision', rateReview.decision);
+router.post('/:id/label-rate-review/revoke', rateReview.revoke);
 
 // Robust quantity → total oz: normalizeQuantityToOz handles simple "128 oz"
 // forms; parsePackSize additionally handles supported multipack/fraction
@@ -677,6 +701,8 @@ function mapProduct(product, vendorPricing = []) {
     reorderQuantity: numberOrNull(product.reorder_quantity),
     perCompletionUsage: numberOrNull(product.per_completion_usage),
     perCompletionServiceLines: Array.isArray(product.per_completion_service_lines) ? product.per_completion_service_lines : null,
+    // The lines this product is applied on (the tech sheets list by it); null = not tagged.
+    serviceLines: Array.isArray(product.service_lines) ? product.service_lines : null,
     vendorPricing: enrichedPricing,
     unitPrices,
     // Product Registry fields
@@ -752,15 +778,51 @@ const LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
   { key: 'moisture_manager', label: 'Moisture Manager', aliases: ['Moisture Manager'], type: 'wetting_agent', category: 'wetting agent' },
 ];
 
+// The same readiness list for the v13 lawn program (GATE_LAWN_V13): every product
+// the recipe names, by its exact catalog name. The legacy aliases cannot be reused:
+// 'Dylox', 'Dismiss', 'Dispatch' and 'LESCO 24-0-11' would match v13's other
+// products by substring and read the wrong catalog row.
+const V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS = [
+  ['v13_nutra_tech', 'LESCO Nutra-TECH T&O Micronutrient Package', 'fertilizer', 'micronutrient support'],
+  ['v13_stonewall_4fl', 'LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
+  ['v13_stonewall_15_0_15', 'LESCO Stonewall 0.43% 15-0-15 50% PolyPlus OPTI45 Pre-Emergent Plus Fertilizer', 'pesticide', 'pre-emergent herbicide with fertilizer'],
+  ['v13_dimension_2ew', 'Dimension 2EW Dithiopyr 24% Pre-Emergent Liquid Herbicide', 'pesticide', 'pre-emergent herbicide'],
+  ['v13_dimension_18_0_10', 'LESCO Dimension 0.21% 18-0-10 50% PolyPlus OPTI45 MOP Pre-Emergent Plus Fertilizer', 'pesticide', 'pre-emergent herbicide with fertilizer'],
+  ['v13_lesco_24_0_11', 'LESCO 24-0-11 with PolyPlus OPTI', 'fertilizer', 'fertilizer'],
+  ['v13_tetrino', 'Tetrino Insecticide', 'pesticide', 'insecticide'],
+  ['v13_arena', 'Arena 50 WDG', 'pesticide', 'insecticide'],
+  ['v13_talak', 'Atticus Talak 7.9 F', 'pesticide', 'insecticide'],
+  ['v13_acelepryn', 'Acelepryn Insecticide', 'pesticide', 'insecticide'],
+  ['v13_dylox_6_2_g', 'Dylox 6.2 G Granular Insecticide', 'pesticide', 'insecticide'],
+  ['v13_artavia', 'Artavia 2 SC (Azoxy)', 'pesticide', 'fungicide'],
+  ['v13_velista', 'Velista', 'pesticide', 'fungicide'],
+  ['v13_gravex', 'Gravex 20 EW', 'pesticide', 'fungicide'],
+  ['v13_celsius', 'Celsius WG', 'pesticide', 'post-emergent herbicide'],
+  ['v13_certainty', 'Certainty Turf Herbicide', 'pesticide', 'post-emergent herbicide'],
+  ['v13_blindside', 'Blindside Herbicide', 'pesticide', 'post-emergent herbicide'],
+  ['v13_dismiss', 'Dismiss 64 oz', 'pesticide', 'sedge herbicide'],
+  ['v13_nis', 'LESCO 90/10 Nonionic Surfactant', 'adjuvant', 'surfactant'],
+  ['v13_dispatch', 'Dispatch Sprayable Wetting Agent', 'wetting_agent', 'wetting agent'],
+].map(([key, label, type, category]) => ({ key, label, aliases: [label], type, category }));
+
+// Gate off: the legacy list, untouched. On: the v13 list, so readiness covers
+// the program the portal actually runs.
+function lawnProtocolProductDefinitions() {
+  return featureGates.lawnV13Live?.() === true ? V13_LAWN_PROTOCOL_PRODUCT_DEFINITIONS : LAWN_PROTOCOL_PRODUCT_DEFINITIONS;
+}
+
 function normalizeProtocolText(value) {
   return String(value || '').toLowerCase();
 }
 
 function protocolProductReferences(definition) {
   const refs = [];
-  for (const [trackKey, track] of Object.entries(protocols.lawn || {})) {
+  for (const [trackKey, track] of Object.entries(lawnProtocols() || {})) {
     for (const visit of track.visits || []) {
-      const text = normalizeProtocolText([visit.primary, visit.secondary, visit.notes].filter(Boolean).join('\n'));
+      // A cadence variant's step (v13 April on the 9x plan) is part of the visit: its
+      // products are referenced by that month too.
+      const variantSteps = Object.values(visit.cadenceVariants || {}).flatMap((variant) => [variant.primary, variant.secondary]);
+      const text = normalizeProtocolText([visit.primary, visit.secondary, visit.notes, ...variantSteps].filter(Boolean).join('\n'));
       if (definition.aliases.some((alias) => text.includes(normalizeProtocolText(alias)))) {
         refs.push({
           turf: trackKey,
@@ -859,7 +921,7 @@ function protocolTemplateCounts() {
   return {
     pest: Math.max(0, (protocols.pest?.visits || []).length - 2),
     termite: (protocols.termite?.visits || []).length,
-    lawn: Object.keys(protocols.lawn || {}).length,
+    lawn: Object.keys(lawnProtocols() || {}).length,
     // Dedicated programs now exist for these — counting keyword hits inside
     // the PEST visit text predates them and returned stale zeros.
     mosquito: (protocols.mosquito?.visits || []).length,
@@ -973,7 +1035,7 @@ router.get('/', async (req, res, next) => {
 router.get('/lawn-outline-facts', async (req, res, next) => {
   try {
     const rows = [];
-    for (const definition of LAWN_PROTOCOL_PRODUCT_DEFINITIONS) {
+    for (const definition of lawnProtocolProductDefinitions()) {
       const references = protocolProductReferences(definition);
       if (!references.length) continue;
       let product = null;
@@ -3093,7 +3155,7 @@ router.get('/restock-requests/:id/order-evidence', async (req, res, next) => {
 router.get('/restock-requests', async (req, res, next) => {
   try {
     res.json(await require('../services/inventory-restock-queue').listRestockRequests({
-      status: req.query.status || 'open', limit: req.query.limit, showSpend: req.techRole === 'admin', requestId: req.query.requestId,
+      status: req.query.status || 'open', limit: req.query.limit, showSpend: req.techRole === 'admin', officeDetail: req.techRole === 'admin', requestId: req.query.requestId,
     }));
   } catch (err) { next(err); }
 });
@@ -3671,6 +3733,9 @@ router.put('/:id', async (req, res, next) => {
     if (req.body.lowStockThreshold !== undefined) upd.low_stock_threshold = nextThreshold;
 
     Object.assign(upd, await autoReorderPatch(req.body));
+    // Which service lines apply this product (null = not tagged); same ids as
+    // the per-visit consumable lines.
+    if (req.body.serviceLines !== undefined) upd.service_lines = serviceLinesOrNull(req.body.serviceLines);
 
     const sizeInPayload = upd.container_size !== undefined || upd.unit_size_oz !== undefined;
     const updated = await db.transaction(async (trx) => {

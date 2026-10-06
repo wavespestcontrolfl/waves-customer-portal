@@ -513,7 +513,7 @@ function genericCompletionFacts(opts = {}) {
         { file: REPORT_VIEW_PAGE, section: 'From the Waves blog card', readerSymbol: 'blogPost' },
       ],
       whenMissing: 'hidden',
-      notes: 'The form sends the post id (blogPostId); the server checks it against the one link rule (report-blog-post.js: published, live on the hub, live URL on the site\'s own host) and freezes the title and URL. Every service but WDO, termite pre-treat, lawn and tree, shrub & palm (report-blog-post.js blogPostAllowedFor).',
+      notes: 'The form sends the post id (blogPostId); the server checks it against the one link rule (report-blog-post.js: published, live on the hub, live URL on the site\'s own host) and freezes the title and URL. Every service but WDO, termite pre-treat, and tree, shrub & palm (report-blog-post.js blogPostAllowedFor; lawn allowed 2026-10-04).',
     },
     {
       key: 'protocol_actions_completed',
@@ -1175,6 +1175,7 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   reviewScheduledFor: 'Review-ask scheduling bookkeeping (the computed send time).',
   customerRequestedReview: 'Review-ask scheduling bookkeeping (who asked, when, where) — carried through paid-invoice deferral, never itself a report claim.',
   incompleteReason: 'Internal completion-state bookkeeping (why a visit is marked incomplete), not a customer-facing fact.',
+  servicePhotoVisit: 'Frozen visit identity for binding recovered photo uploads and report reconciliation to their original completion record; internal ownership/revision bookkeeping, not a customer report fact.',
   propertyServiceArea: 'Frozen job-coverage bookkeeping (area treated vs the reviewed property area at completion) for job quantities and product-area math; not rendered on the customer report.',
   visitDriveCostAllocation: 'Drive-cost costing bookkeeping, not a customer report fact.',
   timeOnSiteAdjusted: 'Audit marker for an admin-typed duration override; no reader keys off it (see the field\'s own comment in complete-scheduled-service.js).',

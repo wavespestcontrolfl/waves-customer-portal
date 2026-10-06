@@ -4,6 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import ServiceReportDocument from './ServiceReportDocument';
+import { LawnLeadCard } from '../components/report/lawnV2/LawnReportV2';
 
 afterEach(() => cleanup());
 
@@ -156,8 +157,25 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
   });
 
   it('names only the treated zones, not the whole property, for a partial application', () => {
-    render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    // Non-pest lines keep the per-product Areas line (owner 2026-10-05: only
+    // the pest report drops treated areas).
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'tree_shrub' }} token="tok123" />);
     expect(screen.getByText('Front perimeter')).toBeInTheDocument();
+  });
+
+  it('prints no per-product Areas or Target line on a pest report', () => {
+    const { container } = render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
+    expect(container.textContent).toContain('Alpine WSG');
+    expect(container.textContent).toContain('Active ingredient:');
+    expect(container.textContent).not.toMatch(/Areas:/);
+    expect(container.textContent).not.toMatch(/Target:/);
+    expect(container.textContent).not.toContain('Front perimeter');
+  });
+
+  it('keeps the per-product Target line on a non-pest report', () => {
+    const { container } = render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'tree_shrub' }} token="tok123" />);
+    expect(container.textContent).toMatch(/Target:\s*German cockroaches/);
+    expect(container.textContent).toMatch(/Areas:/);
   });
 
   it('never publishes a fixed re-entry figure — duration OR computed clock time', () => {
@@ -455,6 +473,57 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(render(<ServiceReportDocument data={without} token="tok124" />).container.textContent).not.toContain('What to expect');
   });
 
+  it('prints "From your technician" (GATE_LAWN_TECH_PARAGRAPH) word for word, and nothing when the key is absent', () => {
+    const text = 'Our technician saw chinch bugs at the trouble spot, which explains the damaged turf in the photo. Arena 50 WDG went on the front and side yards to treat them.';
+    const snapshot = { overallScore: 86, statusHeadline: 'Looking healthy' };
+    const withKey = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Looking healthy', techParagraph: text } } };
+    const { container, unmount } = render(<ServiceReportDocument data={withKey} token="tok126" />);
+    expect(container.textContent).toContain('From your technician');
+    expect(screen.getByText(text)).toBeInTheDocument();
+    unmount();
+    const without = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Looking healthy' } } };
+    expect(render(<ServiceReportDocument data={without} token="tok127" />).container.textContent).not.toContain('From your technician');
+    // Tree & shrub payloads never carry a lead, and one that did would still not print it.
+    cleanup();
+    const treeShrub = { ...BASE_DATA, serviceLine: 'tree_shrub', reportV2: { snapshot, lead: { techParagraph: text } } };
+    expect(render(<ServiceReportDocument data={treeShrub} token="tok128" />).container.textContent).not.toContain(text);
+  });
+
+  it('web and PDF print the same paragraph under the same label (1:1 mirror)', () => {
+    const text = 'Our technician found chinch bugs in the trouble spot, and the damage you see in that photo is from them. We treated the front and side yards with Arena 50 WDG to go after them.';
+    const snapshot = { overallScore: 94, statusHeadline: 'Looking great' };
+    const lead = { headline: 'Looking great', applied: 'Today we applied an insect control and a fertilizer.', techParagraph: text };
+    const web = render(<LawnLeadCard lead={lead} snapshot={snapshot} />);
+    const webBlock = web.getByTestId('lawn-lead-tech');
+    const webLabel = webBlock.children[0].textContent;
+    const webText = webBlock.children[1].textContent;
+    web.unmount();
+    const pdf = render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead } }} token="tok129" />);
+    const pdfParagraph = pdf.getByText(text);
+    const pdfLabel = pdfParagraph.parentElement.children[0].textContent;
+    expect(webText).toBe(text);
+    expect(pdfParagraph.textContent).toBe(webText);
+    expect(pdfLabel.toLowerCase()).toBe(webLabel.toLowerCase());
+    expect(pdf.container.textContent.split('From your technician').length - 1).toBe(1);
+  });
+
+  it('prints the tree & shrub "From your technician" (GATE_TS_TECH_PARAGRAPH) word for word from reportV2.techParagraph, and nothing when the key is absent', () => {
+    const text = 'Our technician found scale on the hedge along the back fence. Merit 2F went on the hedges, and Palm Gro 8-2-12 went on the palms.';
+    const snapshot = { overallScore: 77, statusHeadline: 'Landscape looking healthy' };
+    const withKey = { ...BASE_DATA, serviceLine: 'tree_shrub', reportV2: { snapshot, techParagraph: text } };
+    const { container, unmount } = render(<ServiceReportDocument data={withKey} token="tok130" />);
+    expect(container.textContent).toContain('From your technician');
+    expect(screen.getByText(text)).toBeInTheDocument();
+    expect(container.textContent.split('From your technician').length - 1).toBe(1);
+    unmount();
+    const without = { ...BASE_DATA, serviceLine: 'tree_shrub', reportV2: { snapshot } };
+    expect(render(<ServiceReportDocument data={without} token="tok131" />).container.textContent).not.toContain('From your technician');
+    cleanup();
+    // Another service line never prints a tree & shrub key.
+    const pest = { ...BASE_DATA, serviceLine: 'pest', reportV2: { snapshot, techParagraph: text } };
+    expect(render(<ServiceReportDocument data={pest} token="tok132" />).container.textContent).not.toContain(text);
+  });
+
   it('prints the lead headline (the frozen v6 one) as Overall, so a later assessment correction cannot make the PDF disagree', () => {
     const snapshot = { overallScore: 86, statusHeadline: 'Needs attention — weed pressure' };
     const data = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { snapshot, lead: { headline: 'Stable — watching weed pressure' } } };
@@ -477,6 +546,90 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toMatch(/hash-chained/);
   });
 
+  describe('lawn photo set (GATE_LAWN_REPORT_PHOTO_SET)', () => {
+    const SET = [
+      { url: 'https://cdn.example.com/set-front.jpg', shot: 'front', label: 'Front yard' },
+      { url: 'https://cdn.example.com/set-back.jpg', shot: 'back', label: 'Back yard' },
+      { url: 'https://cdn.example.com/set-close.jpg', shot: 'close_up', label: 'Close-up' },
+      { url: 'https://cdn.example.com/set-trouble.jpg', shot: 'trouble', label: 'Trouble spot' },
+    ];
+    // The gallery the server already builds for a lawn visit: a quality-ordered
+    // copy of the turf photos (lawn- ids), the V2 strip, and a real service photo.
+    const lawnData = (extra = {}) => ({
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      photos: [
+        { id: 'p1', url: 'https://cdn.example.com/service-photo.jpg', caption: 'Gate latch fixed' },
+        { id: 'lawn-1', url: 'https://cdn.example.com/other-trouble.jpg', caption: 'raw vision text' },
+        { id: 'lawn-2', url: 'https://cdn.example.com/other-front.jpg', caption: 'raw vision text' },
+      ],
+      reportV2: {
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong' },
+        photos: [{ url: 'https://cdn.example.com/strip-front.jpg', label: 'Front yard' }],
+        ...extra,
+      },
+    });
+    const srcs = (container) => [...container.querySelectorAll('figure img')].map((img) => img.getAttribute('src'));
+
+    it('prints the set in shot order with its labels, in place of the lawn gallery copies', () => {
+      const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET })} token="tok123" />);
+      expect(srcs(container)).toEqual(['https://cdn.example.com/service-photo.jpg', ...SET.map((p) => p.url)]);
+      for (const label of ['Front yard', 'Back yard', 'Close-up', 'Trouble spot']) expect(screen.getByText(label)).toBeInTheDocument();
+      expect(container.querySelector('a[href*="cdn.example.com"]')).toBeNull();
+      expect(screen.queryByText('raw vision text')).toBeNull();
+    });
+
+    it('without a photoSet the gallery is exactly as it was', () => {
+      const { container } = render(<ServiceReportDocument data={lawnData()} token="tok123" />);
+      expect(srcs(container)).toEqual([
+        'https://cdn.example.com/service-photo.jpg', 'https://cdn.example.com/other-trouble.jpg',
+        'https://cdn.example.com/other-front.jpg', 'https://cdn.example.com/strip-front.jpg',
+      ]);
+    });
+
+    describe('"What the photos showed"', () => {
+      const FINDINGS = [
+        { label: 'Weed pressure', photos: [{ url: SET[0].url, label: 'Front yard' }, { url: SET[2].url, label: 'Close-up' }] },
+        { label: 'General lawn stress', photos: [], confirm: 'The photos from this visit cannot confirm this. A blade close-up photo would let us confirm it.' },
+      ];
+
+      it('prints each finding, its thumbnails and its one fixed sentence, with no links', () => {
+        const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET, photoFindings: FINDINGS })} token="tok123" />);
+        const block = container.querySelector('[data-testid="doc-photo-findings"]');
+        expect(block).not.toBeNull();
+        expect(block.textContent).toContain('What the photos showed');
+        expect(block.textContent).toContain('Weed pressure');
+        expect(block.textContent).toContain('General lawn stress');
+        expect(block.textContent).toContain('The photos from this visit cannot confirm this. A blade close-up photo would let us confirm it.');
+        expect([...block.querySelectorAll('img')].map((img) => img.getAttribute('src'))).toEqual([SET[0].url, SET[2].url]);
+        expect(block.querySelector('a')).toBeNull();
+      });
+
+      it('prints nothing for an empty list', () => {
+        const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET, photoFindings: [] })} token="tok123" />);
+        expect(container.querySelector('[data-testid="doc-photo-findings"]')).toBeNull();
+      });
+
+      it('prints nothing without a set, and a thumbnail that fails to load drops itself', () => {
+        const noSet = render(<ServiceReportDocument data={lawnData({ photoFindings: FINDINGS })} token="tok123" />);
+        expect(noSet.container.querySelector('[data-testid="doc-photo-findings"]')).toBeNull();
+        noSet.unmount();
+        const { container } = render(<ServiceReportDocument data={lawnData({ photoSet: SET, photoFindings: FINDINGS })} token="tok123" />);
+        const thumb = container.querySelector(`[data-testid="doc-photo-findings"] img[src="${SET[0].url}"]`);
+        fireEvent.error(thumb);
+        expect(container.querySelector(`[data-testid="doc-photo-findings"] img[src="${SET[0].url}"]`)).toBeNull();
+        expect(window.__WAVES_PDF_IMAGE_FAILURES).toBeGreaterThan(0);
+      });
+    });
+
+    it('keeps approved moments and the gauge photo beside the set', () => {
+      const data = { ...lawnData({ photoSet: SET }), proofMoments: [{ id: 'm1', mediaUrl: 'https://cdn.example.com/moment.jpg', mediaType: 'image', customerCaption: 'Entry point sealed' }], mowingHeight: { heightIn: 3.5, photoUrl: 'https://cdn.example.com/gauge.jpg' } };
+      const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+      expect(srcs(container)).toEqual(expect.arrayContaining(['https://cdn.example.com/moment.jpg', 'https://cdn.example.com/gauge.jpg']));
+      expect(srcs(container).slice(1, 5)).toEqual(SET.map((p) => p.url));
+    });
+  });
+
   it('reads legacy weather aliases and canonical interaction outcomes', () => {
     const data = {
       ...BASE_DATA,
@@ -491,13 +644,14 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
 
   it('keeps a recorded application area when the app has no zones', () => {
     const app = { ...BASE_DATA.applications[0], zone_ids: [], applicationArea: 'Attic and soffit line' };
-    render(<ServiceReportDocument data={{ ...BASE_DATA, applications: [app] }} token="tok123" />);
+    render(<ServiceReportDocument data={{ ...BASE_DATA, serviceLine: 'tree_shrub', applications: [app] }} token="tok123" />);
     expect(screen.getByText('Attic and soffit line')).toBeInTheDocument();
   });
 
   it('records serviced areas with reasons, and never the internal description', () => {
     const data = {
       ...BASE_DATA,
+      serviceLine: 'tree_shrub',
       coverageServiceType: 'pest_control',
       serviceCoverage: {
         enabled: true,
@@ -516,6 +670,21 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(screen.getByText(/Exterior perimeter service completed/)).toBeInTheDocument();
     expect(screen.getByText(/Could not access: vehicle parked inside/)).toBeInTheDocument();
     expect(container.textContent).not.toContain('perimeter dbl-rate');
+  });
+
+  it('prints no Areas serviced section on a pest report, even with coverage rows', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceCoverage: {
+        enabled: true,
+        items: [{ id: 'z1', markerLabel: 'A', areaName: 'Front perimeter', status: 'completed', customerDescription: 'Exterior perimeter service completed.' }],
+        summary: { completedCount: 1 },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(screen.queryByText('Areas serviced')).toBeNull();
+    expect(container.textContent).not.toMatch(/Exterior perimeter service completed/);
+    expect(container.textContent).not.toMatch(/1 completed/);
   });
 
   it('honours the Pest Pressure visibility flags the PDF cache key is hashed on', () => {
@@ -1764,12 +1933,11 @@ describe('ServiceReportDocument — re-service (callback) block', () => {
 });
 
 describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPECTATIONS, dark)', () => {
-  it('renders the rain, spider, and what-to-expect blocks when present on pestReportV2.expectations', () => {
+  it('renders the spider and what-to-expect blocks when present on pestReportV2.expectations', () => {
     render(<ServiceReportDocument data={{
       ...BASE_DATA,
       pestReportV2: {
         expectations: {
-          rain: { lines: ['It\'s rained about 1.2" at your property over the past week.'] },
           // whatWeDid is server-fixed wording (never a raw protocol-action
           // label — owner ruling 2026-09-28); this matches the actual
           // server output.
@@ -1783,27 +1951,16 @@ describe('ServiceReportDocument — Pest V2 expectations (GATE_PEST_REPORT_EXPEC
         },
       },
     }} token="tok123" />);
-    expect(screen.getByText('Rain and your treatment')).toBeInTheDocument();
-    expect(screen.getByText(/rained about 1\.2"/)).toBeInTheDocument();
     expect(screen.getByText('Spiders')).toBeInTheDocument();
     expect(screen.getByText(/knocked down webs/)).toBeInTheDocument();
     expect(screen.getByText('What to expect')).toBeInTheDocument();
     expect(screen.getByText(/Non-repellent products/)).toBeInTheDocument();
   });
 
-  it('omits all three blocks when expectations is absent (gate off — the common case today)', () => {
+  it('omits both blocks when expectations is absent (gate off — the common case today)', () => {
     render(<ServiceReportDocument data={BASE_DATA} token="tok123" />);
-    expect(screen.queryByText('Rain and your treatment')).toBeNull();
     expect(screen.queryByText('Spiders')).toBeNull();
     expect(screen.queryByText('What to expect')).toBeNull();
-  });
-
-  it('the PDF/static render never carries the live-forecast heavy-rain caveat — server-side, forecastHeavyRain is only ever true for mode==="live" (reports-public.js), so a PDF payload\'s rain.lines can only ever be the trailing-week facts, never this sentence', () => {
-    render(<ServiceReportDocument data={{
-      ...BASE_DATA,
-      pestReportV2: { expectations: { rain: { lines: ['It\'s rained about 0.2" at your property over the past week.'] } } },
-    }} token="tok123" />);
-    expect(screen.queryByText(/Heavy rain right after a treatment/)).toBeNull();
   });
 });
 

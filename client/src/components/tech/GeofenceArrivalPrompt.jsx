@@ -21,8 +21,13 @@
  *     on this tech's route) — same kept-until-"Got it" rule and cap,
  *     sharing the visit-card slot
  *
- * Mount once inside TechHomePage — it renders a fixed-position
- * container so the parent layout doesn't need to reserve space.
+ * Mount once inside TechHomePage. `placement` decides where the cards sit
+ * (owner 2026-10-05, after phone screenshots of notices covering the screen):
+ *   - 'page' (default; the Today overview): every card renders in the page
+ *     flow at the top, so the tech scrolls past them. No overlay.
+ *   - 'elsewhere' (Tools, More, an open visit): only the time-critical
+ *     arrival cards float; every other card waits on Today, and one small
+ *     line at the top says how many there are and links there.
  *
  * Audit focus:
  * - Polling cleanup: confirm the 10s interval is cleared on unmount and
@@ -42,8 +47,12 @@
  *   timer events also drive mileage. Confirm a stop here doesn't
  *   double-write the mileage record.
  */
+import { TIME_TRACKING_CHANGED } from './timeTrackingEvents';
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { getAdminAuthToken } from '../../lib/adminAuth';
+import { useTechBasePath } from './techBasePath';
+import useIsMobile from '../../hooks/useIsMobile';
 import { formatETDateOnly } from '../../lib/timezone';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -73,12 +82,16 @@ const NUDGE_TYPES = new Set(['tech_open_visit_nudge']);
 // kept until "Got it" the same way, so it isn't lost to the 5-min auto-
 // dismiss timer before the tech has opened the stop.
 const PHOTO_TYPES = new Set(['customer_visit_photos']);
+// Time-critical: these still float over Tools, More and an open visit.
+const FLOATING_TYPES = new Set(['geofence_arrival_reminder', 'geofence_arrival_select', 'geofence_timer_started', 'geofence_timer_stopped']);
 const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES]);
+// Waves Admin look: ink and stone, amber for a warning, red only where the
+// notice is a genuine alert (a cancelled visit, a late arrival check).
 const VISIT_ACCENT = {
-  visit_assigned: '#0ea5e9',
-  visit_rescheduled: '#f59e0b',
-  visit_unassigned: '#94a3b8',
-  visit_cancelled: '#ef4444',
+  visit_assigned: '#1c1917',
+  visit_rescheduled: '#854d0e',
+  visit_unassigned: '#78716c',
+  visit_cancelled: '#a32d2d',
 };
 const VISIT_ICON = {
   visit_assigned: '🗓',
@@ -88,14 +101,15 @@ const VISIT_ICON = {
 };
 
 const COLORS = {
-  bg: '#1e293b',
-  border: '#334155',
-  text: '#e2e8f0',
-  muted: '#94a3b8',
-  teal: '#0ea5e9',
-  green: '#10b981',
-  amber: '#f59e0b',
-  red: '#ef4444',
+  bg: '#ffffff',
+  border: '#e7e5e4',
+  borderStrong: '#d6d3d1',
+  text: '#1c1917',
+  muted: '#57534e',
+  faint: '#78716c',
+  ink: '#1c1917',
+  amber: '#854d0e',
+  red: '#a32d2d',
 };
 
 async function apiPost(path, body) {
@@ -127,7 +141,9 @@ function getPosition() {
   });
 }
 
-export default function GeofenceArrivalPrompt({ onStormReview }) {
+export default function GeofenceArrivalPrompt({ onStormReview, inlineScheduleChanges = false, placement = 'page', navigationBusy = false }) {
+  const elsewhere = placement === 'elsewhere';
+  const isMobile = useIsMobile();
   const [active, setActive] = useState([]);
   const seenIds = useRef(new Set());
 
@@ -136,6 +152,11 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       const { notifications = [] } = await apiGet('/api/tech/notifications');
       const fresh = notifications.filter((n) => !seenIds.current.has(n.id));
       fresh.forEach((n) => seenIds.current.add(n.id));
+      // Automatic geofence mode starts and stops job timers server-side and
+      // only posts these notices: the time clock reloads on them too (Codex #5786).
+      if (fresh.some((n) => n.type === 'geofence_timer_started' || n.type === 'geofence_timer_stopped')) {
+        window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
+      }
       // Visit cards never auto-dismiss, so the server feed is their only
       // source of truth: one the feed no longer lists (tapped "Got it" on
       // the tech's other device, or pushed out of the feed window by a
@@ -174,11 +195,13 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
   // Storm cards are capped so a burst of alerts can never bury the home
   // screen: one card per stop (newest wins when the sweep re-alerts), at
   // most MAX_STORM_CARDS on screen, the rest summarized in one line.
-  const { cards, hiddenStormCount, hiddenVisitCount } = useMemo(() => {
+  const { cards, hiddenStormCount, hiddenVisitCount, waitingCount } = useMemo(() => {
     const stormByJob = new Map();
     const otherCards = [];
     const visitCards = [];
     for (const n of active) {
+      // Shown in the page instead (TechScheduleChanges), not floated here.
+      if (inlineScheduleChanges && VISIT_TYPES.has(n.type)) continue;
       if (KEPT_TYPES.has(n.type)) { visitCards.push(n); continue; }
       if (n.type !== 'storm_watch_alert') { otherCards.push(n); continue; }
       const jobKey = n.payload?.job_id || n.id;
@@ -190,6 +213,15 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     const stormAlerts = [...stormByJob.values()].sort(
       (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
     );
+    // Away from Today only the arrival cards render; everything else is
+    // counted for the "notices on Today" line and left unread.
+    if (elsewhere) {
+      return {
+        cards: otherCards.filter((n) => FLOATING_TYPES.has(n.type)),
+        hiddenStormCount: 0, hiddenVisitCount: 0,
+        waitingCount: visitCards.length + stormAlerts.length,
+      };
+    }
     const shownStorms = stormAlerts.slice(0, MAX_STORM_CARDS);
     // Tracking cards (follow_through_tracking) rank ahead of routine kept
     // cards inside the cap — stage 2 first, then stage 1 — so two newer
@@ -210,8 +242,9 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       cards: [...otherCards, ...shownStorms, ...shownVisits],
       hiddenStormCount: stormAlerts.length - shownStorms.length,
       hiddenVisitCount: visitsRanked.length - shownVisits.length,
+      waitingCount: 0,
     };
-  }, [active]);
+  }, [active, inlineScheduleChanges, elsewhere]);
 
   // Superseded same-stop storm alerts are duplicates of information the tech
   // IS seeing (the newest card for that stop) — mark them read immediately so
@@ -272,6 +305,8 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     try {
       await apiPost(`/api/tech/notifications/${n.id}/confirm-start`, body);
       removeCard(n.id, { silent: true });
+      // The Today page's time clock reloads (TechTimeTrackingCard).
+      window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
     } catch (err) {
       alert('Could not start timer: ' + String(err).slice(0, 140));
     }
@@ -281,23 +316,27 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     try {
       await apiPost(`/api/tech/notifications/${n.id}/undo-stop`);
       removeCard(n.id, { silent: true });
+      window.dispatchEvent(new Event(TIME_TRACKING_CHANGED));
     } catch (err) {
       alert('Undo failed: ' + String(err).slice(0, 140));
     }
   }
 
-  if (active.length === 0) return null;
+  const showStack = cards.length > 0 || hiddenVisitCount > 0 || hiddenStormCount > 0;
+  if (!showStack && waitingCount === 0) return null;
 
   return (
-    <div style={{
-      position: 'fixed', top: 'calc(12px + env(safe-area-inset-top, 0px))', left: 12, right: 12, zIndex: 10_000,
+    <>
+    {elsewhere && waitingCount > 0 && <NoticesOnToday count={waitingCount} busy={navigationBusy} />}
+    {showStack && <div data-testid="notice-stack" data-placement={elsewhere ? 'float' : 'page'} style={elsewhere ? {
+      // On a phone the floating arrival cards sit below the admin top bar (52px), so the bar stays reachable.
+      position: 'fixed', top: isMobile ? 'calc(60px + env(safe-area-inset-top, 0px))' : 12, left: 12, right: 12, zIndex: 10_000,
       display: 'flex', flexDirection: 'column', gap: 10, pointerEvents: 'none',
-      // The stack scrolls inside the viewport instead of running past it:
-      // a phone-height screen must still reach every card.
-      maxHeight: 'calc(100vh - 24px - env(safe-area-inset-top, 0px))', overflowY: 'auto',
-    }}>
+      // Arrival cards are few; a cap keeps even a burst from covering the page.
+      maxHeight: '50dvh', overflowY: 'auto',
+    } : { display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 12 }}>
       {cards.map((n) => (
-        <div key={n.id} style={{ pointerEvents: 'auto' }}>
+        <div key={n.id} style={elsewhere ? { pointerEvents: 'auto', filter: 'drop-shadow(0 6px 14px rgba(28,25,23,0.18))' } : undefined}>
           {n.type === 'geofence_arrival_reminder' && (
             <ReminderCard n={n} onStart={() => handleStart(n)} onDismiss={() => removeCard(n.id)} />
           )}
@@ -338,20 +377,44 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
         </div>
       ))}
       {hiddenVisitCount > 0 && (
-        <div style={{ ...cardStyle(COLORS.muted), pointerEvents: 'auto', padding: 10 }} data-testid="visit-notice-more">
+        <div style={{ ...cardStyle(COLORS.muted), padding: 10 }} data-testid="visit-notice-more">
           <div style={{ fontSize: 13, color: COLORS.muted }}>
             🗓 {hiddenVisitCount} more notice{hiddenVisitCount === 1 ? '' : 's'} — they'll surface as you clear these.
           </div>
         </div>
       )}
       {hiddenStormCount > 0 && (
-        <div style={{ ...cardStyle(COLORS.amber), pointerEvents: 'auto', padding: 10 }}>
+        <div style={{ ...cardStyle(COLORS.amber), padding: 10 }}>
           <div style={{ fontSize: 13, color: COLORS.muted }}>
             ⛈️ {hiddenStormCount} more storm watch{hiddenStormCount === 1 ? '' : 'es'} — they'll surface as you clear these.
           </div>
         </div>
       )}
-    </div>
+    </div>}
+    </>
+  );
+}
+
+// "N notices on Today": the one in-page line shown away from Today for the
+// cards that wait there. Held while a visit action is in flight, like the
+// workspace's other links.
+function NoticesOnToday({ count, busy }) {
+  const base = useTechBasePath();
+  return (
+    <Link
+      to={base}
+      aria-disabled={busy || undefined}
+      onClick={(event) => { if (busy) event.preventDefault(); }}
+      data-testid="notices-on-today"
+      style={{
+        display: 'flex', alignItems: 'center', minHeight: 44, marginBottom: 12, padding: '0 14px', boxSizing: 'border-box',
+        border: `0.5px solid ${COLORS.borderStrong}`, borderRadius: 6, background: COLORS.bg, color: COLORS.text,
+        fontFamily: "'Roboto', system-ui, sans-serif", fontSize: 14, fontWeight: 500, textDecoration: 'none',
+        opacity: busy ? 0.5 : 1,
+      }}
+    >
+      {count} {count === 1 ? 'notice' : 'notices'} on Today
+    </Link>
   );
 }
 
@@ -363,7 +426,7 @@ function StormCard({ n, onReview, onDismiss }) {
   return (
     <div style={cardStyle(COLORS.amber)}>
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>⛈️ Storm watch</div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text, marginBottom: 12 }}>
+      <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.text, marginBottom: 12 }}>
         {n.message || `Storms approaching an upcoming stop${p.city ? ` in ${p.city}` : ''}.`}
       </div>
       <div style={{ display: 'flex', gap: 8 }}>
@@ -377,11 +440,11 @@ function StormCard({ n, onReview, onDismiss }) {
 function ReminderCard({ n, onStart, onDismiss }) {
   const p = n.payload || {};
   return (
-    <div style={cardStyle(p.unscheduled ? COLORS.amber : COLORS.teal)}>
+    <div style={cardStyle(p.unscheduled ? COLORS.amber : COLORS.ink)}>
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
         {p.unscheduled ? '⚠️ Unscheduled visit' : '📍 Arrived'}
       </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.text, marginBottom: 4 }}>
         {p.customer_name || 'Customer'}
       </div>
       {p.service_type && (
@@ -404,7 +467,7 @@ function SelectorCard({ n, onPick, onDismiss }) {
   const p = n.payload || {};
   const candidates = p.candidates || [];
   return (
-    <div style={cardStyle(COLORS.teal)}>
+    <div style={cardStyle(COLORS.ink)}>
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>📍 Near multiple customers</div>
       <div style={{ fontSize: 13, color: COLORS.text, marginBottom: 12 }}>
         Pick the one you're at:
@@ -412,13 +475,13 @@ function SelectorCard({ n, onPick, onDismiss }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 10 }}>
         {candidates.map((c, i) => (
           <button key={i} onClick={() => onPick(c)} style={{
-            textAlign: 'left', padding: 12, borderRadius: 8,
-            border: `1px solid ${COLORS.border}`, background: 'transparent',
+            textAlign: 'left', padding: 12, borderRadius: 4,
+            border: `0.5px solid ${COLORS.borderStrong}`, background: 'transparent',
             color: COLORS.text, cursor: 'pointer', fontSize: 13,
           }}>
-            <div style={{ fontWeight: 600 }}>{c.customer_name}</div>
+            <div style={{ fontWeight: 500 }}>{c.customer_name}</div>
             {c.address && <div style={{ color: COLORS.muted, fontSize: 12 }}>{c.address}</div>}
-            {c.service_type && <div style={{ color: COLORS.teal, fontSize: 11, marginTop: 2 }}>{c.service_type}</div>}
+            {c.service_type && <div style={{ color: COLORS.muted, fontSize: 11, marginTop: 2 }}>{c.service_type}</div>}
           </button>
         ))}
       </div>
@@ -447,18 +510,18 @@ function VisitCard({ n, onDismiss }) {
     lines.push(`${verb} ${p.actor}`);
   }
   return (
-    <div style={cardStyle(VISIT_ACCENT[n.type] || COLORS.teal)} data-testid="visit-notice">
+    <div style={cardStyle(VISIT_ACCENT[n.type] || COLORS.ink)} data-testid="visit-notice">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
         {VISIT_ICON[n.type]} {p.headline || 'Schedule change'}
       </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.text, marginBottom: 4 }}>
         {p.customer_name || 'Customer'}
       </div>
       <div style={{ fontSize: 13, color: COLORS.muted, marginBottom: 12, lineHeight: 1.4 }}>
         {lines.filter(Boolean).map((line, i) => (
           typeof line === 'string'
             ? <div key={i}>{line}</div>
-            : <div key={i} style={{ textDecoration: 'line-through', color: '#64748b' }}>{line.text}</div>
+            : <div key={i} style={{ textDecoration: 'line-through', color: COLORS.faint }}>{line.text}</div>
         ))}
       </div>
       <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
@@ -476,9 +539,9 @@ function VisitCard({ n, onDismiss }) {
 function PhotoCard({ n, onDismiss }) {
   const visitDate = formatETDateOnly(n.payload?.scheduled_date, { weekday: 'short', month: 'short', day: 'numeric' }) || null;
   return (
-    <div style={cardStyle(COLORS.teal)} data-testid="photo-notice">
+    <div style={cardStyle(COLORS.ink)} data-testid="photo-notice">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>📷 Photos from a customer</div>
-      <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text, marginBottom: visitDate ? 4 : 12 }}>
+      <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.text, marginBottom: visitDate ? 4 : 12 }}>
         {n.message || 'A customer sent photos for a visit on your route'}
       </div>
       {visitDate && (
@@ -498,11 +561,11 @@ function TextCard({ n, onDismiss }) {
   const p = n.payload || {};
   const media = Number(p.media_count || 0);
   return (
-    <div style={cardStyle(COLORS.teal)} data-testid="tech-line-text">
+    <div style={cardStyle(COLORS.ink)} data-testid="tech-line-text">
       <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>
         💬 {p.headline || 'Text on your line'}
       </div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.text, marginBottom: 4 }}>
         {p.customer_name || p.from || 'Unknown sender'}
       </div>
       <div style={{ fontSize: 14, color: COLORS.text, marginBottom: 12, lineHeight: 1.4, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
@@ -545,7 +608,7 @@ function TrackingCard({ n, onDismiss }) {
       {/* Same customer_name/when shape a VisitCard reads — identifies which
           stop this is about (codex P1: a tech with more than one open stop
           can't tell from the bare stage message alone). */}
-      <div style={{ fontSize: 16, fontWeight: 600, color: COLORS.text, marginBottom: 4 }}>
+      <div style={{ fontSize: 16, fontWeight: 500, color: COLORS.text, marginBottom: 4 }}>
         {p.customer_name || 'Customer'}
       </div>
       {p.when && (
@@ -561,11 +624,11 @@ function TrackingCard({ n, onDismiss }) {
 
 function InfoCard({ n, onDismiss }) {
   return (
-    <div style={cardStyle(COLORS.green)}>
+    <div style={cardStyle(COLORS.ink)}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
         <div>
           <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>✅ Timer auto-started</div>
-          <div style={{ fontSize: 15, fontWeight: 600, color: COLORS.text }}>{n.message}</div>
+          <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.text }}>{n.message}</div>
         </div>
         <button onClick={onDismiss} style={closeX}>✕</button>
       </div>
@@ -590,22 +653,21 @@ function StopToast({ n, onUndo, onDismiss }) {
 function cardStyle(accent) {
   return {
     background: COLORS.bg,
-    border: `1px solid ${COLORS.border}`,
+    border: `0.5px solid ${COLORS.borderStrong}`,
     borderLeft: `4px solid ${accent}`,
-    borderRadius: 10,
+    borderRadius: 6,
     padding: 14,
-    boxShadow: '0 10px 30px rgba(0,0,0,0.35)',
-    fontFamily: "'DM Sans', sans-serif",
+    fontFamily: "'Roboto', system-ui, sans-serif",
   };
 }
 
 const btnPrimary = {
-  flex: 1, padding: '10px 12px', borderRadius: 8, border: 'none',
-  background: COLORS.teal, color: '#fff', fontWeight: 600, fontSize: 14, cursor: 'pointer',
+  flex: 1, padding: '10px 12px', borderRadius: 4, border: 'none',
+  background: COLORS.ink, color: '#fff', fontWeight: 500, fontSize: 14, cursor: 'pointer',
 };
 
 const btnSecondary = {
-  padding: '10px 12px', borderRadius: 8, border: `1px solid ${COLORS.border}`,
+  padding: '10px 12px', borderRadius: 4, border: `0.5px solid ${COLORS.borderStrong}`,
   background: 'transparent', color: COLORS.text, fontWeight: 500, fontSize: 14, cursor: 'pointer',
 };
 
