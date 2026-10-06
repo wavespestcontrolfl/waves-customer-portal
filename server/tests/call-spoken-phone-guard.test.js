@@ -5,7 +5,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { rejectImpossibleSpokenPhones, dropImpossibleSecondaryPhones, persistableV2Extraction } = require('../services/call-spoken-phone-guard');
+const { rejectImpossibleSpokenPhones } = require('../services/call-spoken-phone-guard');
 const { isImpossibleNanpPhone } = require('../utils/phone');
 const {
   computeDeterministicTriageFlags,
@@ -28,12 +28,11 @@ const v2 = (caller = {}, over = {}) => ({
 });
 
 describe('isImpossibleNanpPhone', () => {
-  test('an area or exchange code starting 0 or 1 is impossible', () => {
+  test('an area code starting 0 or 1 is impossible; the exchange is not judged (same as isValidNanpNumber)', () => {
     expect(isImpossibleNanpPhone('+11733038616')).toBe(true);
     expect(isImpossibleNanpPhone('173-303-8616')).toBe(true);
     expect(isImpossibleNanpPhone('1 073 555 0123')).toBe(true);
-    expect(isImpossibleNanpPhone('(941) 155-0123')).toBe(true);
-    expect(isImpossibleNanpPhone('+19410550123')).toBe(true);
+    expect(isImpossibleNanpPhone('+15550100123')).toBe(false);
   });
 
   test('a +1 number with the wrong digit count is impossible', () => {
@@ -98,17 +97,17 @@ describe('impossible phones never reach a contact number', () => {
   });
 });
 
-describe('caller guard runs on each record independently', () => {
-  test('V1 only (V2 off or failed): the V1 caller phone is nulled', () => {
+describe('caller guard', () => {
+  test('a V1 caller phone is nulled too (belt and braces over the intake normalizer)', () => {
     const extracted = { first_name: 'Joyce', phone: '+11733038616' };
     expect(rejectImpossibleSpokenPhones({ extracted })).toEqual({ rejectedCaller: true });
     expect(extracted.phone).toBeNull();
   });
 
-  test('secondary contacts are not touched before identity reconciliation', () => {
-    const extracted = { first_name: 'Joyce', secondary_contact: { first_name: 'Quentrell', phone: '+11733038616' } };
-    rejectImpossibleSpokenPhones({ extracted });
-    expect(extracted.secondary_contact.phone).toBe('+11733038616');
+  test('secondary contacts are left to the slot writer', () => {
+    const v2Extraction = { caller: {}, secondary_contact: { first_name: 'Quentrell', phone_e164: '+11733038616' } };
+    rejectImpossibleSpokenPhones({ v2Extraction });
+    expect(v2Extraction.secondary_contact.phone_e164).toBe('+11733038616');
   });
 
   test('nothing to reject is a clean no-op', () => {
@@ -116,78 +115,31 @@ describe('caller guard runs on each record independently', () => {
   });
 });
 
-describe('persistableV2Extraction', () => {
-  test('the persisted copy has impossible secondary numbers nulled; the in-memory extraction keeps them', () => {
-    const ext = { caller: {}, secondary_contact: { first_name: 'Quentrell', phone_e164: '+11733038616' },
-      secondary_contacts: [{ first_name: 'Quentrell', phone_e164: '+11733038616' }, { first_name: 'Lorna', phone_e164: '+19415550123' }] };
-    const out = persistableV2Extraction(ext);
-    expect(out.secondary_contact.phone_e164).toBeNull();
-    expect(out.secondary_contacts[0].phone_e164).toBeNull();
-    expect(out.secondary_contacts[1].phone_e164).toBe('+19415550123');
-    expect(ext.secondary_contact.phone_e164).toBe('+11733038616');
+describe('secondary contacts: an impossible number is never saved or asked', () => {
+  const { onSiteOptinAskTrigger } = require('../services/call-recording-processor')._test;
+
+  test('the on-site opt-in ask never triggers on an impossible number', () => {
+    const contact = { first_name: 'Quentrell', phone: '+11733038616', on_site: true, role: 'tenant', on_site_role: 'tenant' };
+    expect(onSiteOptinAskTrigger(contact)).toBe(false);
+    expect(onSiteOptinAskTrigger({ ...contact, phone: '+19415550123' })).toBe(true);
   });
 
-  test('both enriched-blob writes persist the sanitized copy', () => {
-    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    expect(src).toMatch(/ai_extraction_enriched: v2Result\.extraction \? JSON\.stringify\(persistableV2Extraction\(v2Result\.extraction\)\)/);
-    expect(src).toMatch(/update\(\{ ai_extraction_enriched: JSON\.stringify\(persistableV2Extraction\(v2Extraction\)\) \}\)/);
-  });
-});
-
-describe('dropImpossibleSecondaryPhones (resolved contacts)', () => {
-  const { resolveCallSecondaryContacts } = require('../services/call-recording-processor')._test || {};
-
-  test('nulls an impossible number on a resolved contact and keeps the person', () => {
-    const contacts = [{ first_name: 'Quentrell', last_name: 'Varnum', phone: '+11733038616' }, { first_name: 'Lorna', phone: '+19415550123' }];
-    expect(dropImpossibleSecondaryPhones(contacts)).toBe(true);
-    expect(contacts).toHaveLength(2);
-    expect(contacts[0].phone).toBeNull();
-    expect(contacts[1].phone).toBe('+19415550123');
-  });
-
-  test('drops a contact whose only detail was the impossible number', () => {
-    const contacts = [{ phone: '+11733038616' }];
-    expect(dropImpossibleSecondaryPhones(contacts)).toBe(true);
-    expect(contacts).toHaveLength(0);
-  });
-
-  test('a valid resolved number reports nothing dropped', () => {
-    const contacts = [{ first_name: 'Lorna', phone: '+19415550123' }];
-    expect(dropImpossibleSecondaryPhones(contacts)).toBe(false);
-  });
-
-  test('the marker follows the RESOLVED contact: V1 kept on a phone conflict, its impossible number is dropped and reported', () => {
-    const v1 = { secondary_contact: { first_name: 'Quentrell', last_name: 'Varnum', phone: '+11733038616' } };
-    const v2Ext = { secondary_contact: { first_name: 'Quentrell', last_name: 'Varnum', phone_e164: '+19415550123' }, secondary_contacts: [] };
-    const contacts = resolveCallSecondaryContacts(v1, v2Ext);
-    const dropped = dropImpossibleSecondaryPhones(contacts);
-    const phones = contacts.map((c) => c.phone).filter(Boolean);
-    expect(phones).not.toContain('+11733038616');
-    expect(dropped).toBe(true);
-    expect(contacts[0].first_name).toBe('Quentrell');
+  test('the slot writer refuses the impossible number before anything else reads it', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const fn = src.indexOf('async function persistCallSecondaryContact(');
+    const refuse = src.indexOf('if (contact && contact.phone && isImpossibleNanpPhone(contact.phone)) contact = { ...contact, phone: null };', fn);
+    const onSite = src.indexOf('const onSiteOnly =', fn);
+    expect(refuse).toBeGreaterThan(fn);
+    expect(onSite).toBeGreaterThan(refuse);
   });
 });
 
 describe('processor wiring order', () => {
   const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
 
-  test('the V1 guard runs before the optional V2 branch', () => {
-    const v1Guard = src.indexOf('rejectImpossibleSpokenPhones({ extracted })');
-    const v2Branch = src.indexOf('if (CALL_EXTRACTION_V2_ENABLED) {', v1Guard);
-    expect(v1Guard).toBeGreaterThan(-1);
-    expect(v2Branch).toBeGreaterThan(v1Guard);
-  });
-
-  test('the secondary guard runs on the resolved contacts', () => {
-    const resolved = src.indexOf('const callSecondaryContacts = resolveCallSecondaryContacts(');
-    const guard = src.indexOf('dropImpossibleSecondaryPhones(callSecondaryContacts)', resolved);
-    expect(resolved).toBeGreaterThan(-1);
-    expect(guard).toBeGreaterThan(resolved);
-  });
-
-  test('the V2 guard runs before the ai_extraction_enriched write', () => {
-    const v2Guard = src.indexOf('rejectImpossibleSpokenPhones({\n            v2Extraction');
-    const write = src.indexOf('ai_extraction_enriched: v2Result.extraction ? JSON.stringify');
+  test('the V2 caller guard runs before the ai_extraction_enriched write', () => {
+    const v2Guard = src.indexOf('rejectImpossibleSpokenPhones({ v2Extraction: v2Result.extraction })');
+    const write = src.indexOf('ai_extraction_enriched: v2Result.extraction ? JSON.stringify', v2Guard);
     expect(v2Guard).toBeGreaterThan(-1);
     expect(write).toBeGreaterThan(v2Guard);
   });

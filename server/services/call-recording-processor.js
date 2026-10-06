@@ -24,11 +24,11 @@ function capitalizeName(name) {
   return properCase(name);
 }
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { rejectImpossibleSpokenPhones, dropImpossibleSecondaryPhones, persistableV2Extraction } = require('./call-spoken-phone-guard');
 const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers');
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164, isImpossibleNanpPhone } = require('../utils/phone');
+const { rejectImpossibleSpokenPhones } = require('./call-spoken-phone-guard');
 const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
@@ -116,7 +116,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty, isDialablePhone } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, spelledEmailSettled, dropUnneededCallCards, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -1108,10 +1108,9 @@ function isUsableContactPhone(value) {
   const v = String(value || '').trim();
   if (!v || PHONE_SENTINEL_WORDS.test(v)) return false;
   if (!isLikelyE164(v)) return false;
-  // A spoken number with an impossible NANP area/exchange code (173-..., 941-1xx)
+  // A spoken number with an impossible NANP area code (173-...)
   // is a mishearing, never a line: saving it as the contact number sent texts to
-  // a stranger (audited call 2026-10-01). The ANI fallback in firstExternalPhone
-  // takes over instead.
+  // a stranger (audited call 2026-10-01). The ANI fallback takes over instead.
   if (isImpossibleNanpPhone(v)) return false;
   const digits = v.replace(/\D/g, '');
   return !PHONE_SENTINELS.has(digits) && !PHONE_SENTINELS.has(digits.replace(/^1/, ''));
@@ -3344,6 +3343,10 @@ async function persistCallSecondaryContact(customerId, contact, { smsConsentExpl
   // An on-site contact the opt-in ask will actually go to (the caller's
   // onSiteAskEligible: trigger + no do-not-contact + live rail) is saved too,
   // unstamped: the slot is where the ask's phone and the later YES stamp live.
+  // A second person's number no NANP line can have is never saved (audited
+  // call 2026-10-01: a misheard +1 173-... sent the household's texts to a
+  // stranger). Refused here, at the one slot writer, like #6028's intake rule.
+  if (contact && contact.phone && isImpossibleNanpPhone(contact.phone)) contact = { ...contact, phone: null };
   const onSiteOnly = !!contact && contact.wants_notifications !== true && onSiteAskEligible && onSiteOptinAskTrigger(contact);
   if (!customerId || !contact || (contact.wants_notifications !== true && !onSiteOnly)) return 'skipped_no_intent';
   // Nobody asked for this person to get notifications: their opt-in covers
@@ -3767,6 +3770,7 @@ const ON_SITE_NOTIFY_ROLES = new Set(['spouse_partner', 'home_buyer', 'home_sell
 // caller and the opt-in service.
 function onSiteOptinAskTrigger(contact) {
   if (!contact || !String(contact.phone || '').trim()) return false;
+  if (isImpossibleNanpPhone(contact.phone)) return false;
   if (!ON_SITE_NOTIFY_ROLES.has(String(contact.on_site_role || contact.role || '').trim().toLowerCase())) return false;
   return contact.wants_appointment_texts === true || contact.on_site === true;
 }
@@ -10172,16 +10176,6 @@ const CallRecordingProcessor = {
 
     // ── Shadow v2 extraction (records alongside v1, no side effects) ──
     let v2Result = null;
-    // A spoken phone no NANP line can have (area or exchange code starting 0 or
-    // 1) is dropped from the V1 record BEFORE the optional V2 branch: V2 may be
-    // off or fail, and the V1 secondary contact still reaches a notification
-    // slot. Fail-open; the V2 extraction is sanitized after it succeeds below.
-    let spokenPhoneGuard = { rejectedCaller: false };
-    try {
-      spokenPhoneGuard = rejectImpossibleSpokenPhones({ extracted });
-    } catch (guardErr) {
-      logger.warn(`[call-proc] spoken-phone guard skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
-    }
     let v2AddressValidation = null;
     // The caller's own V2 service address, frozen BEFORE address validation and the
     // routing-path normalization rewrite v2Result.extraction (and `extracted`) with
@@ -10206,14 +10200,14 @@ const CallRecordingProcessor = {
           // the prompt's greeting rule needs it (codex #4618 r1 P1).
           callDirection: isOutboundCall(call) ? 'outbound' : 'inbound',
         });
-        // The V2 extraction gets the same impossible-phone rejection as the V1
-        // record above, before ai_extraction_enriched is serialized below: the
-        // booking-link sweep reads that persisted blob. Fail-open.
+        // An impossible spoken caller number (no NANP line has an area
+        // code starting 0 or 1) is dropped from the V2 extraction
+        // before ai_extraction_enriched is serialized below; the V1 record is
+        // already cleaned by its intake normalizer. Fail-open.
         try {
-          const v2Guard = rejectImpossibleSpokenPhones({
-            v2Extraction: v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction) ? v2Result.extraction : null,
-          });
-          spokenPhoneGuard.rejectedCaller = spokenPhoneGuard.rejectedCaller || v2Guard.rejectedCaller;
+          if (v2Result?.status === 'valid' && isV2Extraction(v2Result.extraction)) {
+            rejectImpossibleSpokenPhones({ v2Extraction: v2Result.extraction });
+          }
         } catch (guardErr) {
           logger.warn(`[call-proc] spoken-phone guard (V2) skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
         }
@@ -10241,7 +10235,7 @@ const CallRecordingProcessor = {
         }
         stageTimings.extraction_v2_ms = Date.now() - v2StartedAt;
         const v2Update = {
-          ai_extraction_enriched: v2Result.extraction ? JSON.stringify(persistableV2Extraction(v2Result.extraction)) : null,
+          ai_extraction_enriched: v2Result.extraction ? JSON.stringify(v2Result.extraction) : null,
           ai_extraction_validation_errors: v2Result.errors ? JSON.stringify(v2Result.errors) : null,
           ai_address_validation: v2AddressValidation ? JSON.stringify(v2AddressValidation) : null,
           v2_extraction_status: v2Result.status,
@@ -11534,7 +11528,7 @@ const CallRecordingProcessor = {
               // Token-fenced (post-Google-AV await): a superseded pass must
               // not re-persist ITS blob over the owning pass's.
               .where('processing_token', procToken)
-              .update({ ai_extraction_enriched: JSON.stringify(persistableV2Extraction(v2Extraction)) })
+              .update({ ai_extraction_enriched: JSON.stringify(v2Extraction) })
               .catch((e) => logger.warn(`[call-proc-v2] enriched-blob re-persist after AV adoption failed: ${e.code || e.name || 'db_error'}`));
           }
 
@@ -12185,15 +12179,6 @@ const CallRecordingProcessor = {
       resolveCallQuoteSignals(extracted, v2CanonicalExtraction);
     const callAgreedPrice = resolveCallAgreedPrice(v2CanonicalExtraction);
     const callSecondaryContacts = resolveCallSecondaryContacts(extracted, v2CanonicalExtraction);
-    // A second person's number no NANP line can have is dropped from the
-    // RESOLVED contacts (after V1/V2 identity reconciliation), never saved;
-    // the secondary_contact_captured card below says to ask again. Fail-open.
-    let secondaryPhoneRejected = false;
-    try {
-      secondaryPhoneRejected = dropImpossibleSecondaryPhones(callSecondaryContacts);
-    } catch (guardErr) {
-      logger.warn(`[call-proc] secondary phone guard skipped for ${maskSid(callSid)}: ${guardErr.name || 'error'}`);
-    }
     // The caller asked not to be contacted: no on-site opt-in ask for any
     // contact on this call (the slot may still be written).
     // Either extractor hearing a do-not-contact request blocks the on-site
@@ -12638,11 +12623,7 @@ const CallRecordingProcessor = {
     // contact info, but the office should confirm it before relying on it —
     // and when the persistence gate below is off, this triage item is the ONLY
     // surface carrying the second contact besides the lead's extracted_data.
-    // A second person's number the guard rejected as impossible (no NANP line
-    // starts an area/exchange code with 0 or 1) is dropped, never saved — this
-    // card is the "ask again" signal, so it files even when the number was the
-    // only thing said about that person.
-    if ((callSecondaryContact || secondaryPhoneRejected) && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
+    if (callSecondaryContact && !bridgeNeedsConfirmation.includes('secondary_contact_captured')) {
       bridgeNeedsConfirmation.push('secondary_contact_captured');
       try {
         const secondaryTriageItem = buildTriageItem({
@@ -12650,10 +12631,7 @@ const CallRecordingProcessor = {
           flag: 'secondary_contact_captured',
           extraction: v2Result?.extraction || { meta: { call_summary: extracted.call_summary || null } },
           severity: 'advisory',
-          extraPayload: {
-            secondary_contact: callSecondaryContact || null,
-            ...(secondaryPhoneRejected ? { secondary_phone_rejected: 'not_a_valid_us_number' } : {}),
-          },
+          extraPayload: { secondary_contact: callSecondaryContact },
         });
         // MERGE the payload (not ignore): in enforce mode the deterministic-
         // flags loop inserts this flag first with the V2 extraction's contact,
@@ -12666,27 +12644,6 @@ const CallRecordingProcessor = {
           .merge({ payload: secondaryTriageItem.payload, updated_at: new Date() });
       } catch (triageErr) {
         logger.warn(`[call-proc-bridge] secondary-contact triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
-      }
-    }
-
-    // V2 off or failed: no deterministic flags run, so a caller whose only
-    // spoken number was impossible (dropped above) and who has no dialable
-    // caller ID gets the caller_phone_missing card here — the ask-again task.
-    if (spokenPhoneGuard.rejectedCaller && !v2CanonicalExtraction && !isDialablePhone(contactPhone)
-        && !bridgeNeedsConfirmation.includes('caller_phone_missing')) {
-      bridgeNeedsConfirmation.push('caller_phone_missing');
-      try {
-        await db('triage_items')
-          .insert(buildTriageItem({
-            callLogId: call.id,
-            flag: 'caller_phone_missing',
-            extraction: { meta: { call_summary: extracted.call_summary || null } },
-            severity: 'advisory',
-          }))
-          .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-          .ignore();
-      } catch (triageErr) {
-        logger.warn(`[call-proc-bridge] caller-phone-missing triage insert failed for ${maskSid(callSid)}: ${triageErr.code || triageErr.name || 'db_error'}`);
       }
     }
 
@@ -16013,11 +15970,6 @@ const CallRecordingProcessor = {
           }
           if (bridgeNeedsConfirmation.length) {
             triageNotes.push(`⚠ CONFIRM BEFORE DISPATCH: ${bridgeNeedsConfirmation.map(describeConfirmReason).join('; ')}`);
-          }
-          // Only when the spoken-phone guard actually dropped a second person's
-          // impossible number (payload.secondary_phone_rejected on the card).
-          if (secondaryPhoneRejected) {
-            triageNotes.push("a second contact's number was not a valid US number and was dropped, not saved — ask for it again");
           }
           const triageDesc = triageNotes.length ? `${triageBase} — ${triageNotes.join(' — ')}` : triageBase;
           // codex #4919 round-9 P2: snapshot BEFORE the insert (a copy, not

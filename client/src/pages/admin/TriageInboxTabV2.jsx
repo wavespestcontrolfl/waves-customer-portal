@@ -136,9 +136,6 @@ export function ConfirmEvidence({ payload, reasonCode = null, openCustomerIds = 
   const rows = [
     firstNameCustomerIds.length > 0 && { label: "Add first name on", value: firstNameCustomerIds.length > 1 ? "the customers linked to this task" : "the customer linked to this task" },
     scValue && { label: "Second contact", value: scValue },
-    // The call guard drops a contact number that cannot be a real US line and
-    // marks the card — without this row the office never learns to ask again.
-    p.secondary_phone_rejected && { label: "Number dropped", value: "The number heard is not a real US number — ask for it again" },
     ...extraContacts.map((c, i) => ({ label: i === 0 ? "Also named" : `Also named (${i + 2})`, value: fmtContact(c) })),
     // 1.4.0 contract: this flag means a 4th+ party exists BEYOND the captured
     // three — without a row the card looks complete and nobody re-listens.

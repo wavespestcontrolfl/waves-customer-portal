@@ -124,18 +124,15 @@ function phoneIdentityKey(raw) {
   return isNanp ? digits.slice(-10) : `+${digits}`;
 }
 
-// A NANP-shaped value that can never be a real line, for the call pipeline's
-// write/send guard: everything nanpPhoneProblem rejects (an area code starting
-// 0 or 1, or a "+1" with the wrong digit count) plus an exchange (NXX) starting
-// 0 or 1. isValidNanpNumber leaves the exchange alone for other writers; a
-// SPOKEN number on a call is a mishearing when either part is impossible, and
-// a text sent to it reaches a stranger (audited call 2026-10-01). Anything
-// not NANP-shaped (international, fragments, non-phone text) returns false:
-// "not impossible" is not "valid".
+// A NANP-shaped value that can never be a real line: exactly what
+// nanpPhoneProblem rejects (an area code starting 0 or 1, or a "+1" with the
+// wrong digit count). The exchange is not judged, for the same reason as
+// isValidNanpNumber. A spoken "173-303-8616" is a mishearing, and a text sent
+// to it reaches a stranger (audited call 2026-10-01). Anything not NANP-shaped
+// (international, fragments, non-phone text) returns false: "not impossible"
+// is not "valid".
 function isImpossibleNanpPhone(raw) {
-  if (nanpPhoneProblem(raw) !== null) return true;
-  const ten = nanpNationalDigits(raw);
-  return !!ten && /^\d{3}[01]/.test(ten);
+  return nanpPhoneProblem(raw) !== null;
 }
 
 module.exports = {
