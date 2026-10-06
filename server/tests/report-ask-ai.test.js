@@ -625,6 +625,9 @@ describe('symptoms and exposure never reach the model', () => {
     'My partner swallowed some bait',
     'John swallowed some bait',
     'The bait was swallowed by John',
+    'john swallowed some bait',
+    'JOHN swallowed some bait',
+    'the bait was swallowed by john',
     'The ant bait was swallowed by John',
     'The rat poison was eaten by John',
     'Ants were nearby when John ate the bait',
@@ -846,7 +849,7 @@ describe('scripts/dev/report-ask-prompt.js', () => {
   };
   const camel = { serviceType: 'Quarterly Pest Control', scheduledDate: '2027-01-05', windowStart: '09:00:00' };
 
-  test('a bare report and a wrapped one read the same camelCase nextAppointment', () => {
+  test('a bare report and a wrapped one give the same prompt, with no appointment', () => {
     const bare = run({ serviceLine: 'pest', applications: [], nextAppointment: camel });
     const wrapped = run({ data: { serviceLine: 'pest', applications: [] }, nextAppointment: camel });
     // The prompt carries no appointment (next-visit questions keep the rule answer).
@@ -1181,6 +1184,7 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at 12 U S 41.', 'Ants at [number] U S 41.'],
     ['Ants at Twelve Main Street.', 'Ants at [number] Main Street.'],
     ['Ants at One Hundred Bay Drive.', 'Ants at [number] Bay Drive.'],
+    ['Ants at Twelve U S 41.', 'Ants at [number] U S 41.'],
     ['Ants at 12 S.R. 70.', 'Ants at [number] S.R. 70.'],
     ['Ants at 12/14 SR 70.', 'Ants at [number] SR 70.'],
     ['Ants at 12 1/2 FL-70.', 'Ants at [number] FL-70.'],

@@ -326,6 +326,9 @@ const SPELLED_HOUSE_NUMBER = new RegExp(`\\b${SPELLED_NUMBER}(?:[\\s-]+(?:and\\s
 // A numbered route has no suffix word: "12 SR 70", "12 FL-70", "12 N US 41",
 // "12 State Road 64" (Codex P1 #6016 r15).
 const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?:[-/]\d{1,6}[a-z]?)?(?:\s+\d\/\d)?(?=\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\.?\s+)?(?:fl|s\.?\s?r\.?|u\.?\s?s\.?|c\.?\s?r\.?|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
+// A spelled house number on a numbered route: "Twelve U S 41", "One Hundred SR 70"
+// (Codex P1 #6016 r36).
+const SPELLED_ROUTE_HOUSE_NUMBER = new RegExp(`\\b${SPELLED_NUMBER}(?:[\\s-]+(?:and\\s+)?${SPELLED_NUMBER})*(?=\\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\\.?\\s+)?(?:fl|s\\.?\\s?r\\.?|u\\.?\\s?s\\.?|c\\.?\\s?r\\.?|i|state\\s+(?:road|route|rd)|county\\s+(?:road|rd)|highway|hwy|route|rte)[\\s-]*\\d{1,4}\\b)`, 'gi');
 
 // "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
 // directly by a short value is a credential even with no "code" or "pin"
@@ -342,7 +345,7 @@ function scrubFreeText(value, max = Infinity) {
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, (match, box, gap, value) => (LOCKBOX_PROSE_WORDS.has(value.toLowerCase()) ? match : `${box}${gap}[redacted]`)))
+  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(SPELLED_HOUSE_NUMBER, '[number]').replace(ROUTE_HOUSE_NUMBER, '[number]').replace(SPELLED_ROUTE_HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, (match, box, gap, value) => (LOCKBOX_PROSE_WORDS.has(value.toLowerCase()) ? match : `${box}${gap}[redacted]`)))
     .replace(/\d{3,}/g, '[number]');
   return clipText(masked, max);
 }
@@ -1352,9 +1355,14 @@ const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\
 // Someone must be the eater: a name, a pronoun, a possessive person or a
 // listed person or pet, before the verb or after "by". "Was the bait
 // eaten?" names no one (Codex P1 #6016 r34).
-const QUESTION_WORDS = '(?!(?:Was|Were|Is|Are|Did|Does|Do|Has|Have|What|Why|How|When|Where|Which|Who|Will|Can|Could|Should|The|This|That|Some|Any)\\b)';
-const EATER = `(?:${QUESTION_WORDS}[A-Z][a-z]+|i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
-const EATER_ACTS = new RegExp(`(?:^|[^\\w])${EATER}\\s+(?:\\w+\\s+){0,2}?(?:swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\\b|\\bby\\s+${EATER}`);
+// A name in any case ("john", "JOHN"), right before the verb or after "by":
+// any word that is not a question word, article, pronoun, product or pest
+// word (Codex P1 #6016 r35).
+const NOT_A_NAME = '(?:was|were|is|are|did|does|do|has|have|had|be|been|got|what|why|how|when|where|which|who|will|can|could|should|the|this|that|these|those|some|any|it|its|a|an|and|or|but|then|also|just|bait\\w*|spray\\w*|products?|pesticides?|chemicals?|granules?|poison\\w*|gel|pellets?|powder|dust|treatment|insecticides?|herbicides?|fertilizer|nothing|everything|something|anything|ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)';
+const NAME = `(?!${NOT_A_NAME}\\b)[a-z][a-z'’-]+`;
+const PERSON = `(?:i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
+const INGEST = '(?:swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
+const EATER_ACTS = new RegExp(`(?:^|[^\\w])(?:${PERSON}\\s+(?:\\w+\\s+){0,2}?|${NAME}\\s+)${INGEST}\\b|\\bby\\s+(?:${PERSON}|${NAME})\\b`, 'i');
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence)
     && EATER_ACTS.test(sentence) && !PEST_EATING.test(sentence));

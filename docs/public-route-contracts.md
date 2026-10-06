@@ -2391,37 +2391,34 @@ stamp while the gate is on, so gate-off PDFs are never served after the flip
 for key) changes the content of the existing `reportV2.snapshot.seasonalNote`
 (lawn only, never tree & shrub; no new route, token, privacy or rate-limit
 surface): instead of the peak / shoulder / dormant note it is one calendar-based,
-tier-neutral sentence for the visit's month and grass (St. Augustine,
-Bermuda, Zoysia, Bahia; any other or missing grass takes a generic line) that
-says what the program focuses on that time of year, never what the visit
-applied. It is written from `server/config/protocols.json` months, and any step
-the protocol makes conditional (skipped, soil-test or weather gated, optional,
-or on request) is only stated with a qualifier such as "where the
-lawn needs it" or "when conditions allow". It is at most about 30 words, and
-never naming a product, an ordinance, a county, a blackout, a law, a clock time,
-plan tiers, or watering, rain or mowing guidance, and never ordinal or sequence
-wording (first, final, again, re-check) since a customer may join mid-year. While the line is in use the snapshot also
-carries `seasonalNoteSource: "program"` (the key is absent otherwise). The line
-is null, and the old note stays, for a visit that is not a recurring lawn plan
+tier-neutral sentence for the visit's month that says what the lawn program
+focuses on that time of year, never what the visit applied. It is the universal
+lawn program v13 month sentence (the same twelve sentences for every grass,
+written from `server/config/lawn-protocol-v13.json`), and any step the program makes
+conditional is only stated with a qualifier such as "where needed" or "where it
+fits the property". It is at most about 30 words, and never naming a product,
+an ordinance, a county, a blackout, a law, a clock time, plan tiers, a soil
+test, or watering, rain or mowing guidance, and never ordinal or sequence
+wording (first, final, again, re-check) since a customer may join mid-year.
+While the line is in use the snapshot also carries
+`seasonalNoteSource: "program"` (the key is absent otherwise). The line is
+null, and the old note stays, for a visit that is not a recurring lawn plan
 visit (the visit's catalog service identity must be a recurring lawn plan:
 one-time lawn jobs, callbacks and unresolved identities get no line; the
 WaveGuard tier is never the signal), for a visit with no assessment date, and
 for a June to September visit that may have applied nitrogen (the program
 applies none then): a catalog `analysis_n` above zero, a fertilizer-type row
 with no `analysis_n`, or any applied product the catalog cannot resolve.
-With `GATE_LAWN_V13` ALSO on (dark; read at call time), the sentence may instead
-be the universal v13 month sentence (the same twelve sentences for every grass,
-written from `server/config/lawn-protocol-v13.json`, same customer-copy rules as
-above), but only when the visit's RECORDED lawn protocol version is
-`2026.10-v13`: the version on the visit's completion ledger row, or, only when the
-visit has no completion row at all, the version pinned on its scheduled visit. A
-completion row whose version is empty (attribution `none`) is authoritative and
-takes the grass-specific legacy sentence, as does any visit with no recorded
-version (completed before protocol assignment existed), one pinned to an older
-version, and every visit while `GATE_LAWN_V13` is off; a visit whose record
-cannot be read gets no program line at all and keeps the old peak / shoulder /
-dormant note. A permanent past report is never rewritten with a program its visit did
-not run. `seasonalNoteSource` stays `"program"` either way; the payload shape
+The line also needs `GATE_LAWN_V13` on (read at call time) and the visit's
+RECORDED lawn protocol version to be `2026.10-v13`: the version on the visit's
+completion ledger row, or, only when the visit has no completion row at all,
+the version pinned on its scheduled visit. A completion row whose version is
+empty (attribution `none`) is authoritative and gets no line, as does any visit
+with no recorded version (completed before protocol assignment existed), one
+pinned to an older version, every visit while `GATE_LAWN_V13` is off, and a
+visit whose record cannot be read: each keeps the old peak / shoulder / dormant
+note. The retired per-grass sentences were removed, so a permanent past report
+is never rewritten with a program its visit did not run. The payload shape
 (keys, types, route, token, privacy, rate limit) is unchanged.
 The legacy lawn layout still renders `seasonalNote` in the snapshot hero. The
 lead layout (`GATE_LAWN_REPORT_LEAD`), which never rendered `seasonalNote`,

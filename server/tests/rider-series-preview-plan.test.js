@@ -298,7 +298,7 @@ describe('rider gaps per cadence on a monthly lawn host', () => {
     }
   });
 
-  test('a seasonal mosquito rider takes every Feb-Oct lawn date and none in Nov-Jan', () => {
+  test('a seasonal Feb-Oct cadence rider takes every Feb-Oct lawn date and none in Nov-Jan', () => {
     const month = (d) => Number(d.slice(5, 7));
     for (const start of starts) {
       const { hosts, wanted, plan } = ride(start, 'seasonal_feb_oct');

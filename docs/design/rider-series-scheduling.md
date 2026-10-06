@@ -5,6 +5,12 @@ customers with lawn every 6 weeks plus quarterly pest, pest should ride every
 other lawn visit (every ~12 weeks) instead of running its own independent
 quarterly series — one trip per lawn visit, no solo pest trips.
 
+**Superseded for pest (owner ruling 2026-10-05):** pest and lawn never share
+one stop (two stop groups, pest_stop / lawn_stop). `RIDER_PAIRINGS` now holds
+only tree & shrub riders; a pest, termite-bait or mosquito series walks its own
+cadence, and a linked pest series stops riding at its next extension (the
+preview returns `pairing_not_enabled`). The pest examples below are history.
+
 **This document covers the READ-ONLY PREVIEW only.** The write engine that
 would actually set `scheduled_services.rides_parent_id` and reschedule real
 visits is **PR #5268**, now a paused draft after five non-converging Codex
@@ -73,9 +79,8 @@ through the winter: a window that starts off season starts on the season's
 first day, and one that only ends off season stays open the same number of
 days into the next season. With no lawn date to take it stands alone on its
 own Feb–Oct walk date. A cadence with no row is planned with the quarterly
-gaps. Which host may carry which rider is `RIDER_PAIRINGS`; its `gated` rows
-(bi-monthly pest or tree & shrub, monthly pest, semiannual pest and seasonal
-mosquito, all on a monthly lawn) are open only while
+gaps. Which host may carry which rider is `RIDER_PAIRINGS`; its `gated` row
+(bi-monthly tree & shrub on a monthly lawn) is open only while
 `GATE_RIDER_PAIRS_MONTHLY_LAWN` is on.
 
 `planRiderDates` (pure, no DB) and `computeRiderHorizon` apply the SAME rule
@@ -387,7 +392,7 @@ report picking one. Output is ordered by customer id, then root id.
 `20260928220000_scheduled_services_rides_parent`) is nullable,
 self-referencing, `ON DELETE SET NULL`. It is written in ONE place: estimate
 accept, behind `GATE_PEST_RIDES_LAWN_AT_ACCEPT` (`rider-accept-seeding.js`).
-A quarterly rider (pest, tree & shrub, termite bait) accepted with a 6-week
+A quarterly tree & shrub rider (pest and termite bait until 2026-10-05) accepted with a 6-week
 or monthly lawn is seeded on lawn dates and linked only when every rider date
 is a real lawn date AND the two first visits group into one stop under the
 canonical visit-group rules. Nothing reads the link yet: series extension

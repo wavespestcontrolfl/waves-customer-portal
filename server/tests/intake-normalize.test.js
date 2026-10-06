@@ -35,6 +35,23 @@ describe('intake contact normalization', () => {
     expect(normalizePhoneForStorage(' 12345 ')).toBe('12345');
   });
 
+  test('an impossible US number (area code starting 0/1) is never fabricated into E.164', () => {
+    expect(normalizeNanpPhone('1035550123')).toBeNull();
+    expect(normalizeNanpPhone('(103) 555-0123')).toBeNull();
+    expect(normalizeNanpPhone('0035550123')).toBeNull();
+    expect(normalizeNanpPhone('2031550123')).toBe('+12031550123'); // exchange is not checked
+    expect(normalizePhoneForStorage('1035550123')).toBe('1035550123');
+    expect(normalizeNanpPhone('12035550123')).toBe('+12035550123');
+    expect(normalizeNanpPhone('(203) 555-0123')).toBe('+12035550123');
+  });
+
+  test('contactPhoneProblem refuses an impossible US number and accepts the rest', () => {
+    const { contactPhoneProblem } = require('../utils/intake-normalize');
+    expect(contactPhoneProblem('1035550123')).toMatch(/not a valid US phone number/);
+    expect(contactPhoneProblem(' (203) 555-0123 ')).toBeNull();
+    expect(contactPhoneProblem('')).toBeNull();
+  });
+
   test('website quote contact rejects non-string required values', () => {
     const contact = normalizeWebsiteQuoteContact({
       firstName: false,

@@ -13,7 +13,10 @@ jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((name, work) => w
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(),
   // The real done writer: a system close is done, not just read (read is not done).
-  _private: { doneColumns: (...args) => jest.requireActual('../services/notification-service')._private.doneColumns(...args) },
+  _private: {
+    doneColumns: (...args) => jest.requireActual('../services/notification-service')._private.doneColumns(...args),
+    openToCloser: (...args) => jest.requireActual('../services/notification-service')._private.openToCloser(...args),
+  },
 }));
 
 const knex = require('knex');

@@ -8328,6 +8328,15 @@ Return ONLY valid JSON.`;
 // response_schema ("too many states for serving"), so we use plain JSON mode and
 // embed the schema as prompt guidance. Correctness is guaranteed by the two-pass
 // ajv validation in finalizeV2Extraction — the model output is never trusted directly.
+// ET wall-clock time of the call's start ("1:12 PM"), or null when the start is
+// unknown or unparseable. No fallback to now: a reprocess must not tell the
+// model the call was made at the time of the reprocess.
+function callTimeETString(callStartedAt) {
+  if (!callStartedAt) return null;
+  const at = new Date(callStartedAt);
+  return Number.isNaN(at.getTime()) ? null : formatETTime(at);
+}
+
 // Shared by the live Gemini path and the OpenAI shadow so both send the identical prompt.
 function buildV2ExtractionPrompt(transcription, callerPhone, callDateET, promptOpts = {}) {
   return buildExtractionPrompt(transcription, callerPhone, callDateET, promptOpts)
@@ -8403,6 +8412,10 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
   const callDateET = etDateString(opts.callStartedAt || new Date());
   const prompt = buildV2ExtractionPrompt(transcription, callerPhone, callDateET, {
     bookableServiceNames: opts.bookableServiceNames,
+    // The call's own ET clock time, so a time agreed with no day ("I'll be
+    // there at three") can be judged against it: today when still ahead.
+    // Only from a real call start; never guessed from "now" on a reprocess.
+    callTimeET: callTimeETString(opts.callStartedAt),
     // Existing-customer hint — V1 has had this since the non-lead veto work;
     // without it V2 reads "still on for Tuesday at 10?" as a fresh confirmed
     // booking (the duplicate-appointment path).
@@ -23174,6 +23187,7 @@ CallRecordingProcessor._test = {
   emailPassEvidence,
   transcribeRecording,
   extractCallDataV2,
+  callTimeETString,
   CALL_EXTRACTION_ROUTE,
   normalizeOpenAISegments,
   convertCallLeadOnPhoneBooking,

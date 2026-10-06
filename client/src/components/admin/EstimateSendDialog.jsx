@@ -103,6 +103,9 @@ export default function EstimateSendDialog({ request, onClose }) {
 
   const locked = busy || !!attempt.current;
   const blocked = preview?.blockReason && !preview.requiresEngineReview;
+  // The saved phone is a US-shaped number that can never be texted: refuse here
+  // (the server refuses too), and point the operator at the contact to fix.
+  const smsBlocked = !!preview?.smsBlockReason && method !== "email";
   const stale = request.expectedEditVersion && preview?.editVersion && request.expectedEditVersion !== preview.editVersion;
   const notice = [request.warning, preview?.requiresEngineReview ? preview.blockReason : "", preview?.uncertainAttempt ? "An earlier send has an uncertain outcome. Check the conversation and email delivery records; another send could duplicate it." : ""].filter(Boolean).join(" ");
   const needsAcknowledgment = !!notice;
@@ -124,11 +127,12 @@ export default function EstimateSendDialog({ request, onClose }) {
             <a className="inline-flex items-center min-h-11 text-ink-primary underline u-focus-ring" href={preview.previewPath} target="_blank" rel="noopener noreferrer">Preview saved customer document</a>
             <p className="text-14">Recipient changes belong in Customer &amp; property, followed by Save draft.</p>
           </div>
+          {preview.smsBlockReason && <ActionFeedback error>{preview.smsBlockReason}</ActionFeedback>}
           {(blocked || stale) && <ActionFeedback error>{stale ? "This offer changed since the editor loaded. Reopen it and review the current version." : preview.blockReason}</ActionFeedback>}
           <fieldset disabled={locked} className="border-0 p-0 min-w-0">
             <legend className="font-medium mb-2">Choose delivery channel</legend>
             {Object.entries(CHANNEL_LABELS).map(([key, label]) => <label key={key} className="ui-choice-label flex items-center gap-3">
-              <Radio name="estimate-send-channel" value={key} checked={method === key} onChange={() => setMethod(key)} disabled={(key !== "email" && !preview.customerPhone) || (key !== "sms" && !preview.customerEmail)} />
+              <Radio name="estimate-send-channel" value={key} checked={method === key} onChange={() => setMethod(key)} disabled={(key !== "email" && (!preview.customerPhone || !!preview.smsBlockReason)) || (key !== "sms" && !preview.customerEmail)} />
               <span>{label}</span>
             </label>)}
             <p className="text-14 text-ink-secondary mt-2 break-words">Text: {preview.customerPhone || "No phone saved"}<br />Email: {preview.customerEmail || "No email saved"}</p>
@@ -148,7 +152,7 @@ export default function EstimateSendDialog({ request, onClose }) {
             {outcome.replayed && <p className="text-14">This is the recorded outcome of the earlier attempt. No new message was sent.</p>}
           </div>}
           <div className="ui-record-actions border-t border-zinc-200 pt-4">
-            {!outcome && <Button loading={busy} disabled={!method || busy || blocked || stale || (needsAcknowledgment && !acknowledged)} onClick={send}>{busy ? sendingLabel.current : submitLabel}</Button>}
+            {!outcome && <Button loading={busy} disabled={!method || busy || blocked || stale || smsBlocked || (needsAcknowledgment && !acknowledged)} onClick={send}>{busy ? sendingLabel.current : submitLabel}</Button>}
             {preview.customerUrl && <Button variant="secondary" onClick={async () => { try { await navigator.clipboard.writeText(preview.customerUrl); setCopied(true); } catch { setError("Copy failed. Open the saved preview to access the link."); } }}>{copied ? "Link copied" : "Copy secure estimate link"}</Button>}
             <Button variant="secondary" disabled={busy} onClick={() => onClose(outcome)}>{outcome ? "Done" : "Cancel"}</Button>
           </div>

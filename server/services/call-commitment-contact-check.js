@@ -68,7 +68,7 @@ const { STAFF_CALL_SOURCES, operatorReply, personCallBack, smsDelivered, smsCont
 const commitments = require('./call-commitments');
 
 const { associationFrom, evidenceBoundary, windowEnd, storedProof, refreshableVerdictSql, staleAiRowSql, speakerTurns, normalizeForMatch,
-  withoutProactiveDraft, PERSON_CONTACT_KIND, PERSON_CONTACT_BASIS, ASSOCIATION_WINDOW_DAYS } = commitments;
+  withoutProactiveDraft, otherPromiseMedia, PERSON_CONTACT_KIND, PERSON_CONTACT_BASIS, ASSOCIATION_WINDOW_DAYS } = commitments;
 
 // Bump on any change to the prompt, the schema or what counts as a witness:
 // it is part of the evidence hash, so every cached verdict is judged again.
@@ -189,16 +189,24 @@ function scrubRecords(records, failures) {
   }
 }
 
+// Which witness types may keep THIS promise: the one decision the resolver
+// makes (otherPromiseMedia, from the channel alone, the 'judge' column). A text
+// promise takes only texts, a call promise only calls, an unknown channel either,
+// and an email (or any other) channel none: a person closes it.
+function witnessTypesFor(commitment) {
+  return otherPromiseMedia(commitment || {}, 'judge').map((m) => (m === 'text' ? 'sms' : 'call'));
+}
+
 // Every admissible witness for one promise: { records, failures }. A record is
 // { ref, type: 'sms' | 'call', id, at, text }. Any failure — a source that
 // threw, more rows than the limit, a body past the cap, payment data that
 // could not be scrubbed cleanly — leaves the verdict uncertain.
-async function loadContactWitnesses(conn, { callId, customerId, from, until, now }) {
+async function loadContactWitnesses(conn, { callId, customerId, from, until, now, commitment = null }) {
   const to = new Date(Math.min(until.getTime(), now.getTime()));
   const sources = [
     ['sms', () => ordered(smsWitnessQuery(conn, { customerId, from, to }), 'os').limit(WITNESS_LIMIT + 1)],
     ['call', () => ordered(callWitnessQuery(conn, { customerId, callId, from, to }), 'cl').limit(WITNESS_LIMIT + 1)],
-  ];
+  ].filter(([type]) => witnessTypesFor(commitment).includes(type));
   const results = await Promise.allSettled(sources.map(([, query]) => query()));
   const records = [];
   const failures = [];
@@ -232,7 +240,10 @@ function promiseOf(commitment) {
 
 // What the model is told: the promise, and when the call it was made on ended.
 function obligationOf(commitment, call) {
-  return { ...promiseOf(commitment), made_on_call_ending_at: (callEnd(call) || new Date(call.created_at)).toISOString() };
+  // The channel is told to the model but kept out of promiseOf (and its md5): the
+  // medium rule is enforced on the witnesses themselves, so a stored close's
+  // promise stamp is unchanged.
+  return { ...promiseOf(commitment), channel: commitment.channel || null, made_on_call_ending_at: (callEnd(call) || new Date(call.created_at)).toISOString() };
 }
 
 // A close rests on the promise the model judged: a reprocess that rewrites
@@ -342,7 +353,7 @@ async function closeOnWitness(conn, commitment, call, verdict, evidenceHash, { n
     const from = associationFrom(commitment, after);
     if (now.getTime() >= until.getTime() || from.getTime() >= until.getTime()) return false;
     if (!await trx(table).where({ id: verdict.record_id }).forShare().skipLocked().first('id')) return false;
-    const evidence = await loadContactWitnesses(trx, { callId: commitment.call_log_id, customerId: call.customer_id, from, until, now });
+    const evidence = await loadContactWitnesses(trx, { callId: commitment.call_log_id, customerId: call.customer_id, from, until, now, commitment });
     if (fingerprint(commitment, lockedCall, evidence).evidenceHash !== evidenceHash) return false;
     const grounded = groundVerdict({ verdict: 'fulfilled', record_ref: `${TABLE_BY_RECORD_TYPE[verdict.record_type]}:${verdict.record_id}`, quote: verdict.quote }, evidence);
     if (grounded.verdict !== 'fulfilled') return false;
@@ -384,7 +395,7 @@ async function contactCloseStands(conn, commitment, call, prior) {
   // A missing stamp never equals the md5 computed now.
   if (prior.promise_md5 !== promiseMd5(commitment) || prior.judged_customer_id !== call?.customer_id) return false;
   const witness = WITNESS_BY_RECORD_TYPE[prior.record_type];
-  if (!witness || !UUID_RE.test(String(prior.record_id))) return false;
+  if (!witness || !witnessTypesFor(commitment).includes(witness.type) || !UUID_RE.test(String(prior.record_id))) return false;
   // The promise call's exact timing, read here (the caller's row may not carry it).
   const callRow = await conn('call_log').where({ id: commitment.call_log_id, customer_id: prior.judged_customer_id })
     .first('id', 'customer_id', ...CALL_TIMING);
@@ -427,7 +438,7 @@ async function checkOne(conn, row, { now, budget }) {
   const until = windowEnd(after);
   const from = associationFrom(row, after);
   if (now.getTime() >= until.getTime() || from.getTime() >= until.getTime()) return { outcome: 'skipped' };
-  const evidence = await loadContactWitnesses(conn, { callId: call.id, customerId: call.customer_id, from, until, now });
+  const evidence = await loadContactWitnesses(conn, { callId: call.id, customerId: call.customer_id, from, until, now, commitment: row });
   if (!evidence.records.length && !evidence.failures.length) return { outcome: 'nothing' };
   const { obligation, evidenceHash } = fingerprint(row, call, evidence);
   let verdict = cachedVerdict(row, evidenceHash, now);

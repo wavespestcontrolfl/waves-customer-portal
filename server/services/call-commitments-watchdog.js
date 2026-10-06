@@ -103,7 +103,9 @@ async function runInner({ now = new Date() } = {}) {
   // proof has lapsed (visit cancelled, skipped or moved, call relinked) are
   // judged again too — nothing open on the call would bring them here.
   // …and so are calls holding a promise the evidence close shut on a visit
-  // since cancelled or a customer no longer churned (PROMISE_EVIDENCE_CLOSE).
+  // since cancelled, a customer no longer churned, or evidence that does not
+  // match the promise's kind (a booking for an estimate, the customer phoning
+  // in for a callback; PROMISE_EVIDENCE_CLOSE).
   const callIds = [...new Set([...rows.map((r) => r.call_log_id), ...await commitments.listSlotKeptCallIds(db),
     ...await commitments.listLapsedEvidenceClosedCallIds(db)])];
   const unverifiedCalls = new Set();
