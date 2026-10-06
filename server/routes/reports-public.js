@@ -1923,8 +1923,8 @@ router.post('/:token/ask', async (req, res, next) => {
     }
     // A question that mentions spray and a person, pet or body part gets the
     // fixed Poison Control line before the answer (owner 2026-10-05, #6016).
-    const safetyLine = urgent ? null : exposureSafetyLine(question);
-    if (safetyLine) answer = `${safetyLine} ${answer}`;
+    // (null on a symptom question, which already got the full answer).
+    answer = [exposureSafetyLine(question), answer].filter(Boolean).join(' ');
     // The question's text is never stored — only its length and the topic
     // the answer came from (report-assistant.js REPORT_QUESTION_TOPICS), so
     // the engagement stats can say what customers ask about per report type.

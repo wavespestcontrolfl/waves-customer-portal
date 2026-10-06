@@ -447,6 +447,9 @@ describe('screenAskAnswer', () => {
     expect(screen('The technician arrives 1-5-2027.')).toBe('states_a_date');
     expect(screen('The technician arrives at two PM.')).toBe('states_a_date');
     expect(screen('The technician arrives tomorrow.')).toBe('states_a_date');
+    expect(screen('The technician arrives on the fifth.')).toBe('states_a_date');
+    expect(screen('The technician arrives the fifth of January.')).toBe('states_a_date');
+    expect(screen('The first application went around the exterior.')).toBeNull();
     expect(screen('The technician arrives at half past two.')).toBe('states_a_date');
     expect(screen('Activity often settles after the sun comes out.')).toBeNull();
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
@@ -593,7 +596,7 @@ describe('schedule questions keep the rule answer', () => {
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
-  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?'])('not schedule: %s', (question) => {
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(false);
   });
 });
@@ -651,6 +654,9 @@ describe('symptoms and exposure never reach the model', () => {
     'The technician sprayed my cousin',
     'You sprayed my coworker',
     'My snake was sprayed',
+    "I've been sprayed",
+    "We've been sprayed",
+    "She's been sprayed",
   ])('a safety line before the answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBeNull();
     expect(exposureSafetyLine(question)).toBe(EXPOSURE_SAFETY_LINE);
