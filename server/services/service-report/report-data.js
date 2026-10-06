@@ -3558,10 +3558,6 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
           // forever, and no future PDF request would retry the freeze.
           weekWeatherUnfrozen = true;
         }
-      } else if (weekWeather.noSource) {
-        // Settled empty: the paid Open-Meteo plan keeps 92 past days and MRMS
-        // has nothing for this week, so no later retry can fill it. Cacheable
-        // and not delivery-blocking; nothing is frozen (Codex #6052 r2).
       } else if (!hasCoordinates) {
         // No geocode YET. This is not settled — the hourly backstop sweep
         // (services/geocoder.js sweepUngeocodedCustomers) actively retries
