@@ -1489,3 +1489,15 @@ describe('answer screen, Codex round 34', () => {
     expect(ask('You can see the new growth near the fence.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 35', () => {
+  test('gulping a product is ingestion; ants gobbling bait is not', () => {
+    expect(medicalExposureAnswer('My dog gulped down the pesticide.')).toBeTruthy();
+    expect(medicalExposureAnswer('The ants gobbled the bait')).toBeNull();
+  });
+
+  test.each(['Daily watering is recommended.', 'A shorter mowing height is recommended.', 'Your lawn needs more water.'])('passive care advice is rejected: %s', (answer) => {
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    expect(screenAskAnswer(answer, { question: 'How can I help my lawn?', data, facts: buildReportAskFacts({ data }) })).toBe('own_instruction');
+  });
+});
