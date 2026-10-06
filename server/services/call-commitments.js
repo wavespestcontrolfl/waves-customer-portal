@@ -2783,8 +2783,8 @@ async function listLapsedEvidenceClosedCallIds(conn) {
           -- ... and, for an "other" promise a reprocess has since reworded or
           -- moved to another channel (otherPromiseMedia's SQL twin): a text
           -- that keeps only a text promise, a call that keeps only a call one.
-          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'sms_sent' AND NOT ${promiseMediumSql('text')})
-          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'outbound_call' AND NOT ${promiseMediumSql('call')})
+          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'sms_sent' AND (cc.fulfillment ->> 'basis') LIKE 'text\\_sent\\_to\\_caller%' AND NOT ${promiseMediumSql('text')})
+          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'outbound_call' AND (cc.fulfillment ->> 'basis') LIKE 'outbound\\_call\\_to\\_caller%' AND NOT ${promiseMediumSql('call')})
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           -- A close resting on a call (the customer phoning in): the evidence
