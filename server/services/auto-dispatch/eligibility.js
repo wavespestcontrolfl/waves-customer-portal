@@ -159,8 +159,12 @@ async function isRecurringPlanActive(service, db) {
  *     date protects the visit — so staff, the customer page, SMS and call
  *     flows, and any mover added later are protected without a list here;
  *   - the visit's own date-exception stamp (date_exception + _at + _source),
- *     which staff direct date edits write without a reschedule_log row.
- *     Backfill sources are not a person.
+ *     which staff direct date edits write without a reschedule_log row. The
+ *     rebooker stamps the mover's initiator as the source; only a human
+ *     source counts (HUMAN_EXCEPTION_SOURCES — backfills and generated
+ *     replacements such as cancel_reseed are not a person).
+ * A row that kept both the date and the window (a technician-only
+ * reassignment, e.g. tech_out_auto_move) chose no date and is ignored.
  * A visit never moved since it was generated has neither, and stays
  * optimizable. A windowless recurring due visit is never protected: it has
  * no promised time yet, and the run exists to place it.
@@ -170,6 +174,10 @@ async function isRecurringPlanActive(service, db) {
  */
 const AUTOMATIC_INITIATORS = new Set(['auto_dispatch', 'system', 'machine', 'weather_auto']);
 const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai', 'ai_call_pipeline']);
+const HUMAN_EXCEPTION_SOURCES = new Set([...CUSTOMER_INITIATORS,
+  'admin', 'admin_ib', 'admin_bulk', 'operator', 'tech', 'rider_onetime_move']);
+// A row records a chosen slot only when the date or the window changed.
+const SLOT_CHANGED_SQL = '(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)';
 
 function whoPlaced(initiator) {
   return CUSTOMER_INITIATORS.has(initiator) ? 'the customer' : 'staff';
@@ -177,7 +185,7 @@ function whoPlaced(initiator) {
 
 function personExceptionAt(service) {
   if (service.date_exception !== true || !service.date_exception_at) return null;
-  if (/^backfill/.test(String(service.date_exception_source || ''))) return null;
+  if (!HUMAN_EXCEPTION_SOURCES.has(String(service.date_exception_source || ''))) return null;
   const at = new Date(service.date_exception_at);
   return Number.isNaN(at.getTime()) ? null : at;
 }
@@ -190,6 +198,7 @@ async function isPersonPlacedVisit(service, db) {
     const newest = await db('reschedule_log')
       .where('scheduled_service_id', service.id)
       .whereNotNull('new_date')
+      .whereRaw(SLOT_CHANGED_SQL)
       .orderBy('created_at', 'desc')
       .first('created_at');
     const exceptionAt = personExceptionAt(service);
@@ -202,6 +211,7 @@ async function isPersonPlacedVisit(service, db) {
       .where('scheduled_service_id', service.id)
       .where('created_at', newest.created_at)
       .where('new_date', dateStr)
+      .whereRaw(SLOT_CHANGED_SQL)
       .select('initiated_by', 'series_move_id');
     const placement = rows.find((r) => !AUTOMATIC_INITIATORS.has(r.initiated_by));
     if (!placement) return { placed: false };

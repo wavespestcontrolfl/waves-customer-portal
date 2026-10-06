@@ -213,6 +213,11 @@ describe('isPersonPlacedVisit', () => {
       const chain = {
         where(key, value) { preds.push((r) => String(r[key]) === String(value)); return chain; },
         whereNotNull(key) { preds.push((r) => r[key] != null); return chain; },
+        whereRaw(sql) {
+          expect(sql).toBe('(original_date IS DISTINCT FROM new_date OR original_window IS DISTINCT FROM new_window)');
+          preds.push((r) => r.original_date !== r.new_date || r.original_window !== r.new_window);
+          return chain;
+        },
         orderBy() { ordered = true; return chain; },
         first: async () => rows()[0] || null,
         select: async () => rows(),
@@ -221,7 +226,7 @@ describe('isPersonPlacedVisit', () => {
     };
   }
   const T1 = '2026-10-06T00:49:58Z';
-  const row = (o = {}) => ({ id: 'l1', scheduled_service_id: 's1', series_move_id: 'm1', new_date: '2026-10-18', initiated_by: 'customer_self_serve', created_at: T1, ...o });
+  const row = (o = {}) => ({ id: 'l1', scheduled_service_id: 's1', series_move_id: 'm1', original_date: '2026-10-07', new_date: '2026-10-18', original_window: '13:00-14:00', new_window: '09:00-10:00', initiated_by: 'customer_self_serve', created_at: T1, ...o });
   const visit = { id: 's1', scheduled_date: '2026-10-18', window_start: '09:00:00' };
 
   test('placed when the customer moved the visit to its current date', async () => {
@@ -286,6 +291,23 @@ describe('isPersonPlacedVisit', () => {
   test('a backfill date-exception stamp is not a person', async () => {
     const backfilled = { ...visit, date_exception: true, date_exception_source: 'backfill_cadence', date_exception_at: '2026-10-05T15:00:00Z' };
     expect(await isPersonPlacedVisit(backfilled, fakeDb({ log: [] }))).toEqual({ placed: false });
+  });
+
+  test('generated replacements and unknown stamp sources are not a person', async () => {
+    for (const date_exception_source of ['cancel_reseed', 'backfill_preserved', 'something_new']) {
+      const v = { ...visit, date_exception: true, date_exception_source, date_exception_at: '2026-10-05T15:00:00Z' };
+      expect(await isPersonPlacedVisit(v, fakeDb({ log: [] }))).toEqual({ placed: false });
+    }
+    const rider = { ...visit, date_exception: true, date_exception_source: 'rider_onetime_move', date_exception_at: '2026-10-05T15:00:00Z' };
+    expect(await isPersonPlacedVisit(rider, fakeDb({ log: [] }))).toMatchObject({ placed: true });
+  });
+
+  test('a technician-only reassignment (same date and window) chose no date', async () => {
+    const techOnly = row({ initiated_by: 'admin', series_move_id: null, original_date: '2026-10-18', new_date: '2026-10-18', original_window: '09:00-10:00', new_window: '09:00-10:00' });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [techOnly] }))).toEqual({ placed: false });
+    // ...and a later one does not hide an earlier customer choice
+    const later = { ...techOnly, id: 'l2', created_at: '2026-10-07T12:00:00Z' };
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row(), later] }))).toMatchObject({ placed: true });
   });
 
   test('a windowless recurring due visit is never protected (the run must place it)', async () => {
