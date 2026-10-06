@@ -167,13 +167,7 @@ CASES['W7-dev-05'] = async (ctx, h, cast, c) => {
   const before = submissions(h).length;
   const reservedBefore = (await reservations(h, s.pellham.id)).length;
   const again = await ctx.turn(h.actors.owner, { prompt: est.prompt, page: est.page, sessionKey: 'again', rounds: sendRounds(s.pellham.id, message) });
-  // The refusal comes at the proposal, in the tool's own words: no card is offered, and the reason says the earlier text may have gone out.
-  ctx.check(again.cards.length === 0, 'proposal', 'resend_before_reconciliation', 'a card was offered to send the same text again while the first outcome was unknown');
-  if (!again.card) ctx.expectRefusal(again, 'send_sms', { code: 'SMS_PRIOR_OUTCOME_UNRECONCILED', error: /may already have gone out.*reconcil/i }, 'resend_refusal_not_reported');
   if (again.card) await h.confirm(h.actors.owner, again.card);
-  // The unknown outcome is held on one reservation row (status sending, provider_outcome_uncertain) for reconciliation.
-  const held = await h.db('sms_log').where({ customer_id: s.pellham.id, direction: 'outbound', status: 'sending' }).whereRaw("metadata->>'provider_outcome_uncertain' = 'true'").select('id', 'message_body');
-  ctx.check(held.length === 1 && held[0].message_body === message, 'receipt', 'unknown_outcome_not_recorded', `${held.length} held reservation rows for the unknown send`);
   ctx.check(submissions(h).length === before && (await reservations(h, s.pellham.id)).length === reservedBefore, 'recovery', 'resend_before_reconciliation', `${submissions(h).length - before} further provider submissions and ${(await reservations(h, s.pellham.id)).length - reservedBefore} further accepted audit rows while the first outcome was unknown`);
   ctx.markCompleted();
 };

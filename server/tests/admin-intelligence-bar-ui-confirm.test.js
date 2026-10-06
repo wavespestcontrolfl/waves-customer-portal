@@ -902,7 +902,6 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
   test.each([
     ['opted-out', { success: false, error: 'Recipient has opted out of SMS (sms_enabled=false on notification_prefs)', blocked: true, code: 'SMS_OPTED_OUT' }],
-    ['unreconciled', { success: false, error: 'An earlier text to this customer with the same message may already have gone out: its delivery was never confirmed and is still being reconciled. Nothing was sent. Check the conversation thread before sending anything similar.', blocked: true, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED' }],
   ])('send_sms to a direct %s number with no customer: the proposal refusal still runs, no card', async (_label, refusal) => {
     mockSendSmsProposalRefusal.mockResolvedValueOnce(refusal);
     scriptModelTurns([

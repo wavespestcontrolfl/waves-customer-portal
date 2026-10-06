@@ -34,10 +34,9 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 // own cancel uses, so this tool can never bypass it with a bare status flip).
 const { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE, SIMPLE_SMS_META_KEYS } = require('../scheduled-sms-cancel');
 const { isDeferredReplayEntryPoint } = require('../messaging/deferred-replay-registry');
-// The send takes a durable reservation before the provider handoff, so a repeat
-// of the same text is refused while the first is in flight or unreconciled
-// (sms-outcome-guard.js).
-const { findUnreconciledSend, withSendReservation, unreconciledRefusal, INTERLOCK_REFUSAL_CODE } = require('./sms-outcome-guard');
+// The manual-send wrapper's refusal of THIS attempt because an earlier text on
+// the thread is unresolved (send-manual-customer-sms.js defines the code inline).
+const INTERLOCK_REFUSAL_CODE = 'MANUAL_REPLY_OUTCOME_UNRESOLVED';
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -1330,12 +1329,7 @@ async function sendSms(input) {
   // daily-driver send path, so the validators apply consistently:
   // suppression list, sms_enabled, no customer-emoji, segment metadata.
   // Operator messages still need to follow the customer voice rules.
-  // The send runs inside its reservation (sms-outcome-guard.js): taken atomically
-  // before the provider handoff with the wrapper's own thread lock, settled from
-  // the result. A text with these words to this number that is in flight or whose
-  // outcome was never confirmed may already be on the customer's phone: refused,
-  // with no provider call. Two cards confirmed at the same moment serialize here.
-  const reserved = await withSendReservation({ phone, customerId: custId || null, body: message }, () => sendManualCustomerSms({
+  const result = await sendManualCustomerSms({
     to: phone,
     body: message,
     channel: 'sms',
@@ -1360,9 +1354,7 @@ async function sendSms(input) {
       original_message_type: message_type,
       adminUserId: 'intelligence_bar',
     },
-  }));
-  if (reserved.refused) return unreconciledRefusal({ sent_to: phone, customer: customerName });
-  const { result } = reserved;
+  });
 
   if (isUncertainManualSmsOutcome(result)) {
     return uncertainManualSmsResponse(result);
@@ -1452,25 +1444,23 @@ async function smsConsentVerdict({ customerId, phone, message, messageType }) {
 
 /**
  * Proposal-time refusal for send_sms, so no card is offered for a text that
- * cannot go out: an opted-out or suppressed number (the same wording the
- * execution-time block uses) or a repeat of a text whose outcome is still
- * unknown. Takes the pinned proposal params (customer_id and phone set by the
- * route), or a direct phone with no customer. Null = the card may be offered.
+ * cannot go out: an opted-out or suppressed number, in the same wording the
+ * execution-time block uses. Takes the pinned proposal params (customer_id and
+ * phone set by the route), or a direct phone with no customer. The recipient is
+ * resolved the way sendSms resolves it, so a direct number in a different
+ * format from the stored one still finds the customer's consent record (last
+ * ten digits), instead of reading NO_CONSENT_RECORD against the raw text.
+ * Null = the card may be offered.
  */
 async function sendSmsProposalRefusal(params = {}) {
-  const customerId = params.customer_id;
-  const phone = params.phone;
   const messageType = params.message_type || 'manual';
-  if (!phone || !params.message) return null;
-  // A direct number with no customer still gets the consent and suppression read
-  // (loadContactState falls back to the phone) and the unreconciled lookup (keyed on the number).
-  const verdict = await smsConsentVerdict({ customerId: customerId || null, phone, message: params.message, messageType });
-  const customerName = params.customer_name || null;
-  if (verdict) return blockedSmsResponse(verdict, { messageType, phone, customerName });
-  if (await findUnreconciledSend({ phone, body: params.message })) {
-    return unreconciledRefusal({ sent_to: phone, customer: customerName });
-  }
-  return null;
+  if (!params.phone && !params.customer_id) return null;
+  if (!params.message) return null;
+  const recipient = await resolveSmsRecipient(params);
+  if (recipient.error || !recipient.phone) return null;
+  const verdict = await smsConsentVerdict({ customerId: recipient.custId || null, phone: recipient.phone, message: params.message, messageType });
+  if (!verdict) return null;
+  return blockedSmsResponse(verdict, { messageType, phone: recipient.phone, customerName: recipient.customerName || params.customer_name || null });
 }
 
 

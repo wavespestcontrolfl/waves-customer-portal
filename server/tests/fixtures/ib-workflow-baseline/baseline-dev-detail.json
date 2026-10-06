@@ -777,8 +777,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 54,
-        "verified_completion_ms": 3239
+        "first_tool_result_ms": 293,
+        "verified_completion_ms": 3812
       },
       "notes": [
         "send_sms: SMS_OPTED_OUT: Recipient has opted out of SMS (sms_enabled=false on notification_prefs)",
@@ -889,15 +889,26 @@
       "contract_calls": 1
     },
     "W7-dev-05": {
-      "outcome": "pass",
-      "failures": [],
-      "timings": {
-        "first_tool_result_ms": 55,
-        "verified_completion_ms": 156
-      },
-      "notes": [
-        "send_sms: SMS_PRIOR_OUTCOME_UNRECONCILED: An earlier text to this customer with the same message may already have gone out: its delivery was never confirmed and is still being reconc"
+      "outcome": "fail",
+      "point": "recovery",
+      "code": "resend_before_reconciliation",
+      "failures": [
+        {
+          "point": "recovery",
+          "code": "resend_before_reconciliation",
+          "detail": "1 further provider submissions and 1 further accepted audit rows while the first outcome was unknown"
+        },
+        {
+          "point": "side_effect",
+          "code": "guard_send_count_not_declared",
+          "detail": "2 provider submissions, the manifest declares exactly 1"
+        }
       ],
+      "timings": {
+        "first_tool_result_ms": 262,
+        "verified_completion_ms": 681
+      },
+      "notes": [],
       "strength": null,
       "contract_calls": 1
     },
@@ -905,8 +916,8 @@
       "outcome": "pass",
       "failures": [],
       "timings": {
-        "first_tool_result_ms": 25,
-        "verified_completion_ms": 1569
+        "first_tool_result_ms": 313,
+        "verified_completion_ms": 2147
       },
       "notes": [
         "send_sms: SMS_OPTED_OUT: Recipient has opted out of SMS (sms_enabled=false on notification_prefs)",

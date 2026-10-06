@@ -32,8 +32,6 @@ jest.mock('../services/lead-attribution', () => ({
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn().mockResolvedValue({ sent: true, providerMessageId: 'SM-test' }),
-  // The send reservation (sms-outcome-guard.js) reads the real body normalizer and delivery classification.
-  canonicalSmsBody: jest.requireActual('../services/messaging/send-customer-message').canonicalSmsBody,
   classifyDeliveryCertainty: jest.requireActual('../services/messaging/send-customer-message').classifyDeliveryCertainty,
 }));
 jest.mock('../services/messaging/send-manual-customer-sms', () => ({
@@ -43,29 +41,6 @@ jest.mock('../services/messaging/send-manual-customer-sms', () => ({
   manualSmsDeliveryState: (value) => value?.manualSmsInterlock?.deliveryState || null,
 }));
 
-// The send reservation is Postgres-backed (a transaction and a thread lock); its own suites cover it.
-jest.mock('../services/intelligence-bar/sms-outcome-guard', () => {
-  const actual = jest.requireActual('../services/intelligence-bar/sms-outcome-guard');
-  const mocked = {
-    findUnreconciledSend: jest.fn(async () => null),
-    acquireSendReservation: jest.fn(async () => ({ id: 'reservation-1' })),
-    settleSendReservation: jest.fn(async () => undefined),
-    unreconciledRefusal: actual.unreconciledRefusal,
-    reservationState: actual.reservationState,
-    INTERLOCK_REFUSAL_CODE: actual.INTERLOCK_REFUSAL_CODE,
-  };
-  // The real lifecycle over the mocked acquire and settle, so the tests observe both.
-  mocked.withSendReservation = async ({ phone, customerId = null, body }, send) => {
-    const reservation = await mocked.acquireSendReservation({ phone, customerId, body });
-    if (reservation.refused) return { refused: true };
-    const settle = (state) => mocked.settleSendReservation(reservation.id, state, { phone, body });
-    let result;
-    try { result = await send(); } catch (err) { await settle(actual.reservationState(err, { thrown: true })); throw err; }
-    await settle(actual.reservationState(result));
-    return { result };
-  };
-  return mocked;
-});
 
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');

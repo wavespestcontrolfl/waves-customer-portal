@@ -23,8 +23,7 @@ jest.mock('../services/sendgrid-mail', () => ({
   // everything else (5xx, network) is ambiguous.
   isDefiniteRejection: (err) => [400, 401, 403, 404, 405, 413, 415, 422, 429].includes(Number(err?.status)),
 }));
-// The scheduler reads the real classifyDeliveryCertainty when it stamps an unknown outcome.
-jest.mock('../services/messaging/send-customer-message', () => ({ ...jest.requireActual('../services/messaging/send-customer-message'), sendCustomerMessage: jest.fn() }));
+jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 
 const knex = require('knex');
 const { randomUUID, createHash } = require('crypto');

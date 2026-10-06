@@ -289,21 +289,6 @@ function scheduledSmsAttemptSql() {
   `;
 }
 
-// The one durable sign that a scheduled text's provider handoff may have
-// happened with no confirmed outcome (classifyDeliveryCertainty 'unknown' on the
-// send result, or on the outcome a thrown error carries). Stamped on every
-// transition out of 'sending' that keeps or ends the row without proof either
-// way, so a same-text send elsewhere (the Intelligence Bar's reservation,
-// sms-outcome-guard.js) can refuse until it is reconciled. A result with no
-// provider outcome at all (a throw before the provider was contacted) stamps
-// nothing. The marker is the one sms-suggest-mode.js reservations already carry;
-// the timestamp is this transition's own time.
-function uncertainOutcomeStamp(outcome, at) {
-  const { classifyDeliveryCertainty } = require('./messaging/send-customer-message');
-  if (!outcome || !outcome.deliveryOutcome || classifyDeliveryCertainty(outcome) !== 'unknown') return '{}';
-  return JSON.stringify({ provider_outcome_uncertain: true, provider_outcome_uncertain_at: at.toISOString() });
-}
-
 async function holdFinalReviewUncertainty(msgId, meta, failedAt) {
   const safetyUntil = meta.review_delivery_safety_until
     ? new Date(meta.review_delivery_safety_until)
@@ -2513,6 +2498,22 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`LLM mention probe failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // DAILY 3:40AM + 3:00PM — AI Overview pinned-query captures (desktop +
+  // mobile, full overview text). No pinned query = no DataForSEO call. Paid
+  // job, so runExclusive keeps a deploy overlap from double-capturing.
+  for (const [cronExpr, pass] of [['40 3 * * *', 'am'], ['0 15 * * *', 'pm']]) {
+    cron.schedule(cronExpr, async () => {
+      if (!isEnabled('seoIntelligence')) return;
+      logger.info(`Running: AI Overview pinned captures (${pass})`);
+      try {
+        await runExclusive(`aio-pinned-capture-${pass}`, async () => {
+          const { runPinnedCaptures } = require('./seo/aio-pinned-capture');
+          await runPinnedCaptures({ pass });
+        });
+      } catch (err) { logger.error(`AI Overview pinned captures (${pass}) failed: ${err.message}`); }
+    }, { timezone: 'America/New_York' });
+  }
+
   // =========================================================================
   // MONTHLY, 1ST–7TH 6:20 AM ET — Annual rate review ranking batch (plan
   // annual-rate-review-2026-09-30 step 2). On the 1st it ranks every active
@@ -4019,6 +4020,24 @@ function initScheduledJobs() {
       await require('./email-template-automation-emitters').sweepMissedLifecycleEvents();
     } catch (err) {
       logger.error(`[email-template-automation] lifecycle sweep tick failed: ${scrubSentryText(err && err.message ? err.message : err)}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — Close payment-failed admin bells whose invoices are now
+  // paid. The paid-invoice hook (payment-failed-alert-close.js) runs inside the
+  // payment transaction; this repair pass re-judges from committed state, so a
+  // bell that raced the payment still closes within one tick. Read + admin
+  // bell state only: no charge, receipt or customer message.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await runExclusive('payment-failed-alert-sweep', async () => {
+        const closed = await require('./payment-failed-alert-close').sweepSettledPaymentFailedAlerts();
+        if (closed) logger.info(`[payment-failed-alert-close] repair sweep closed ${closed} bell(s)`);
+      });
+    } catch (err) {
+      logger.error(`Payment-failed alert sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -5730,7 +5749,7 @@ function initScheduledJobs() {
               status: 'scheduled',
               scheduled_for: retryAt,
               updated_at: completedAt,
-              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text) || ?::jsonb", [completedAt, smsResult.code || null, uncertainOutcomeStamp(smsResult, completedAt)]),
+              metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('provider_retry_at', ?::timestamptz, 'provider_retry_code', ?::text)", [completedAt, smsResult.code || null]),
             });
             logger.warn(`[scheduled-sms] Retryable failure on ${msg.id} (${smsResult.code}); retry at ${retryAt.toISOString()} (attempt ${Number(claimMeta.scheduled_sms_attempts) || 1}/${SCHEDULED_SMS_MAX_ATTEMPTS})`);
           } else {
@@ -5770,7 +5789,7 @@ function initScheduledJobs() {
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'blocked',
                   updated_at: completedAt,
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean) || ?::jsonb", [requiresTerminalHook(claimMeta.entry_point), uncertainOutcomeStamp(smsResult, completedAt)]),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(claimMeta.entry_point)]),
                 });
                 // A stale linked visit (the shared send step's LINKED_VISIT_ENDED) ends the row with its reason on it.
                 if (smsResult.code === 'LINKED_VISIT_ENDED') {
@@ -5846,7 +5865,6 @@ function initScheduledJobs() {
                   status: 'scheduled',
                   scheduled_for: new Date(Date.now() + 15 * 60 * 1000),
                   updated_at: failedAt,
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [uncertainOutcomeStamp(err.providerOutcome, failedAt)]),
                 });
                 logger.warn(`[scheduled-sms] Pre-accept exception on ${msg.id} — rescheduled for retry`);
               } else {
@@ -5856,7 +5874,7 @@ function initScheduledJobs() {
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'failed',
                   updated_at: failedAt,
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean) || ?::jsonb", [requiresTerminalHook(failedMeta.entry_point), uncertainOutcomeStamp(err.providerOutcome, failedAt)]),
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('terminal_pending', ?::boolean)", [requiresTerminalHook(failedMeta.entry_point)]),
                 });
                 if (failedMeta.entry_point) {
                   await runTerminalHookDurably(msg.id, failedMeta.entry_point, failedMeta);
