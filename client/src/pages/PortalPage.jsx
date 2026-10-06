@@ -4482,10 +4482,12 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const contactTextsFor = (entry) => (entry?.contactReportTexts === true
     ? 'appointment texts and, when your own visit-complete texts are on, a text with the service report link after each visit'
     : 'appointment texts');
-  // The report text never goes to a tenant, or to anyone at a rental a
-  // property manager runs (customer-contact.js slotWithheldFromReports).
+  // The report text never goes to a contact our records mark as a tenant, or
+  // to any contact on a property manager's account
+  // (customer-contact.js slotWithheldFromReports). A contact added here has
+  // no recorded role, so the copy promises only what the records decide.
   const contactReportExceptionFor = (entry) => (entry?.contactReportTexts === true
-    ? ' Tenants, and anyone at a rental a property manager runs, get appointment texts only.'
+    ? ' Contacts on a property manager\'s account, and contacts our records list as tenants, get appointment texts only.'
     : '');
   // The entries the contact card renders (one house, or the profile list).
   const contactCardEntries = perPropertyTexts

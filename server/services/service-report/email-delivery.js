@@ -555,7 +555,7 @@ async function sendServiceReportV1Email(recordId, {
   const prefs = await db('notification_prefs').where({ customer_id: service.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
   let reportCustomer;
   try {
-    reportCustomer = await withAccountContactRole({
+    const baseCustomer = {
       id: service.customer_id,
       first_name: service.first_name,
       last_name: service.last_name,
@@ -565,7 +565,12 @@ async function sendServiceReportV1Email(recordId, {
       account_id: service.account_id,
       is_primary_profile: service.is_primary_profile,
       ...Object.fromEntries(SERVICE_CONTACT_COLUMNS.map((column) => [column, service[column]])),
-    });
+    };
+    // An explicit opt-out (or unreadable prefs) already decides the send:
+    // the account role is read only when someone may still get the report.
+    reportCustomer = prefsUnavailable(prefs) || serviceReportEmailOptedOut(prefs)
+      ? baseCustomer
+      : await withAccountContactRole(baseCustomer);
   } catch (err) {
     // The account's role decides who may read the findings: retry, never guess.
     return { ok: false, transient: true, reason: 'account_role_unavailable', error: `Account role unavailable: ${err.message}` };

@@ -218,6 +218,19 @@ describe('service report email recipient delivery', () => {
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('an explicit opt-out is skipped as an opt-out even when the account primary is unreadable', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    withRecord({ contact_role: null, account_id: 'account-1', is_primary_profile: false }, new Error('fixture read failed'));
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'notification_prefs'
+      ? query({ customer_id: 'customer-1', service_completed: false })
+      : base(table)));
+    const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+    expect(result).toMatchObject({ ok: false, skipped: true });
+    expect(result.error).toMatch(/^Suppressed/);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test('a failed history read still delivers the report PDF without introduction', async () => {
     const { isFirstServiceVisit } = require('../services/customer-visit-history');
     const realHistory = jest.requireActual('../services/customer-visit-history');
