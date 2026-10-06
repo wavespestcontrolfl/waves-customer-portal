@@ -26,7 +26,8 @@ jest.mock('../services/messaging/send-manual-customer-sms', () => ({
 }));
 jest.mock('../services/intelligence-bar/sms-outcome-guard', () => ({
   findUnreconciledSend: jest.fn(async () => null),
-  recordUnreconciledSend: jest.fn(async () => 'held-row'),
+  acquireSendReservation: jest.fn(async () => ({ id: 'reservation-1' })),
+  settleSendReservation: jest.fn(async () => undefined),
   unreconciledRefusal: jest.requireActual('../services/intelligence-bar/sms-outcome-guard').unreconciledRefusal,
 }));
 jest.mock('../services/messaging/validators/consent', () => ({
@@ -61,13 +62,13 @@ beforeEach(() => {
   jest.clearAllMocks();
   db.mockImplementation(() => customerLookup());
   guard.findUnreconciledSend.mockResolvedValue(null);
-  guard.recordUnreconciledSend.mockResolvedValue('held-row');
+  guard.acquireSendReservation.mockResolvedValue({ id: 'reservation-1' });
   checkSuppression.mockResolvedValue({ ok: true });
   checkConsentForPurpose.mockResolvedValue({ ok: true });
 });
 
 describe('a send whose provider outcome is unknown', () => {
-  test('is recorded as unknown, not blocked, and held for reconciliation', async () => {
+  test('is recorded as unknown, not blocked, and its reservation is left held', async () => {
     sendManualCustomerSms.mockResolvedValueOnce({
       sent: false, deliveryOutcome: 'uncertain', code: 'PROVIDER_FAILURE', reason: 'timeout',
       manualSmsInterlock: { deliveryState: 'uncertain' },
@@ -79,10 +80,11 @@ describe('a send whose provider outcome is unknown', () => {
     expect(result.blocked).toBeUndefined();
     // The outcome class the confirm route and the receipt read.
     expect(executionOutcome(result)).toBe('outcome_unknown');
-    expect(guard.recordUnreconciledSend).toHaveBeenCalledWith({ phone: CUSTOMER.phone, customerId: CUSTOMER.id, body: SEND.message });
+    expect(guard.acquireSendReservation).toHaveBeenCalledWith({ phone: CUSTOMER.phone, customerId: CUSTOMER.id, body: SEND.message });
+    expect(guard.settleSendReservation).toHaveBeenCalledWith('reservation-1', 'uncertain', { phone: CUSTOMER.phone, body: SEND.message });
   });
 
-  test('a thrown unknown outcome is held and reported as unknown too', async () => {
+  test('a thrown unknown outcome leaves the reservation held and is reported as unknown too', async () => {
     sendManualCustomerSms.mockRejectedValueOnce(Object.assign(new Error('receipt unavailable'), {
       code: 'SMS_DELIVERY_UNCERTAIN',
       providerOutcome: { sent: false, deliveryOutcome: 'uncertain' },
@@ -91,10 +93,33 @@ describe('a send whose provider outcome is unknown', () => {
     const result = await executeCommsTool('send_sms', SEND);
 
     expect(executionOutcome(result)).toBe('outcome_unknown');
-    expect(guard.recordUnreconciledSend).toHaveBeenCalledTimes(1);
+    expect(guard.settleSendReservation).toHaveBeenCalledWith('reservation-1', 'uncertain', expect.anything());
   });
 
-  test('the wrapper interlock refusing THIS attempt is a refusal, and holds no new row', async () => {
+  test('an accepted send releases the reservation', async () => {
+    sendManualCustomerSms.mockResolvedValueOnce({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-test' });
+    const result = await executeCommsTool('send_sms', SEND);
+    expect(result).toMatchObject({ success: true, state: 'provider_accepted' });
+    expect(guard.settleSendReservation).toHaveBeenCalledWith('reservation-1', 'accepted', expect.anything());
+  });
+
+  test('a definite failure or block releases the reservation so a later send works', async () => {
+    sendManualCustomerSms.mockResolvedValueOnce({ sent: false, blocked: false, deliveryOutcome: 'not_sent', code: 'PROVIDER_FAILURE', reason: 'rejected' });
+    await executeCommsTool('send_sms', SEND);
+    sendManualCustomerSms.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: OPTED_OUT.code, reason: OPTED_OUT.reason });
+    await executeCommsTool('send_sms', SEND);
+    expect(guard.settleSendReservation.mock.calls.map((c) => c[1])).toEqual(['not_sent', 'not_sent']);
+  });
+
+  test('a thrown definite failure releases the reservation; a thrown error naming no outcome holds it', async () => {
+    sendManualCustomerSms.mockRejectedValueOnce(Object.assign(new Error('rejected'), { providerOutcome: { sent: false, deliveryOutcome: 'not_sent' } }));
+    await executeCommsTool('send_sms', SEND);
+    sendManualCustomerSms.mockRejectedValueOnce(new Error('something broke'));
+    await executeCommsTool('send_sms', SEND);
+    expect(guard.settleSendReservation.mock.calls.map((c) => c[1])).toEqual(['not_sent', 'uncertain']);
+  });
+
+  test('the wrapper interlock refusing THIS attempt is a refusal, and its reservation is released', async () => {
     sendManualCustomerSms.mockResolvedValueOnce({
       sent: false, blocked: true, code: 'MANUAL_REPLY_OUTCOME_UNRESOLVED', manualSmsInterlock: { deliveryState: 'uncertain' },
     });
@@ -102,18 +127,19 @@ describe('a send whose provider outcome is unknown', () => {
     const result = await executeCommsTool('send_sms', SEND);
 
     expect(executionOutcome(result)).toBe('blocked');
-    expect(guard.recordUnreconciledSend).not.toHaveBeenCalled();
+    expect(guard.settleSendReservation).toHaveBeenCalledWith('reservation-1', 'not_sent', expect.anything());
   });
 
-  test('a repeat of the same text while the first is unreconciled is refused at execution, and sends nothing', async () => {
-    guard.findUnreconciledSend.mockResolvedValueOnce({ id: 'held-row' });
+  test('a repeat of the same text while the first is in flight or unreconciled is refused at execution, and sends nothing', async () => {
+    guard.acquireSendReservation.mockResolvedValueOnce({ refused: true });
 
     const result = await executeCommsTool('send_sms', SEND);
 
     expect(result).toMatchObject({ success: false, blocked: true, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED', mayHaveSent: true, retry: false });
     expect(result.error).toBe('An earlier text to this customer with the same message may already have gone out: its delivery was never confirmed and is still being reconciled. Nothing was sent. Check the conversation thread before sending anything similar.');
-    expect(guard.findUnreconciledSend).toHaveBeenCalledWith({ phone: CUSTOMER.phone, body: SEND.message });
+    expect(guard.acquireSendReservation).toHaveBeenCalledWith({ phone: CUSTOMER.phone, customerId: CUSTOMER.id, body: SEND.message });
     expect(sendManualCustomerSms).not.toHaveBeenCalled();
+    expect(guard.settleSendReservation).not.toHaveBeenCalled();
   });
 });
 
@@ -193,7 +219,7 @@ describe('a customer who opts out between the card and the confirm', () => {
 
     expect(result).toMatchObject({ success: false, blocked: true, code: 'SMS_OPTED_OUT', error: OPTED_OUT.reason });
     expect(executionOutcome(result)).toBe('blocked');
-    expect(guard.recordUnreconciledSend).not.toHaveBeenCalled();
+    expect(guard.settleSendReservation).toHaveBeenCalledWith('reservation-1', 'not_sent', expect.anything());
   });
 });
 
@@ -230,16 +256,5 @@ describe('the reservation row for an unknown outcome', () => {
     expect(q.whereIn).toHaveBeenCalledWith('status', ['sending', 'scheduled']);
     expect(await real.findUnreconciledSend({ phone: CUSTOMER.phone, body: '' })).toBeNull();
     expect(await real.findUnreconciledSend({ phone: '', body: SEND.message })).toBeNull();
-  });
-
-  test('recordUnreconciledSend reuses an existing held row instead of adding a second', async () => {
-    const q = {};
-    for (const m of ['where', 'whereIn', 'whereRaw']) q[m] = jest.fn(() => q);
-    q.select = jest.fn(async () => [{ id: 'held', metadata: { provider_outcome_uncertain: true } }]);
-    q.insert = jest.fn();
-    db.mockImplementation(() => q);
-
-    expect(await real.recordUnreconciledSend({ phone: CUSTOMER.phone, customerId: CUSTOMER.id, body: SEND.message })).toBe('held');
-    expect(q.insert).not.toHaveBeenCalled();
   });
 });

@@ -421,11 +421,6 @@ const ALLOWLIST = [
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row. (also status-scoped in the same window).',
   },
   {
-    file: 'services/intelligence-bar/sms-outcome-guard.js',
-    snippet: 'const rows = await db(\'sms_log\')',
-    reason: 'not a "latest N messages" reader: it looks for the unresolved send reservation ITSELF (status sending or scheduled, same number and exact body, still carrying an unknown-outcome marker) so a repeat of that text can be refused; excluding reservations would defeat it.',
-  },
-  {
     file: 'services/invoice.js',
     // queuePendingChannelReplay takes its `database` handle as a param
     // (Codex round-3 P1/P2 #4963: runs under finalizeInvoiceAfterSms's own

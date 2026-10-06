@@ -40,6 +40,14 @@ jest.mock('../services/messaging/send-manual-customer-sms', () => ({
   manualSmsDeliveryState: (value) => value?.manualSmsInterlock?.deliveryState || null,
 }));
 
+// The send reservation is Postgres-backed (a transaction and a thread lock); its own suites cover it.
+jest.mock('../services/intelligence-bar/sms-outcome-guard', () => ({
+  findUnreconciledSend: jest.fn(async () => null),
+  acquireSendReservation: jest.fn(async () => ({ id: 'reservation-1' })),
+  settleSendReservation: jest.fn(async () => undefined),
+  unreconciledRefusal: jest.requireActual('../services/intelligence-bar/sms-outcome-guard').unreconciledRefusal,
+}));
+
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { sendManualCustomerSms } = require('../services/messaging/send-manual-customer-sms');

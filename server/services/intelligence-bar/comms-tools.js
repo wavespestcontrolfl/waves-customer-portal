@@ -33,9 +33,10 @@ const { ledgerCall, ledgerCallRejected } = require('../llm-dispatch-metrics');
 // own cancel uses, so this tool can never bypass it with a bare status flip).
 const { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE, SIMPLE_SMS_META_KEYS } = require('../scheduled-sms-cancel');
 const { isDeferredReplayEntryPoint } = require('../messaging/deferred-replay-registry');
-// An unknown provider outcome is held on a durable row so a repeat of the same
-// text is refused until it is reconciled (sms-outcome-guard.js).
-const { findUnreconciledSend, recordUnreconciledSend, unreconciledRefusal } = require('./sms-outcome-guard');
+// The send takes a durable reservation before the provider handoff, so a repeat
+// of the same text is refused while the first is in flight or unreconciled
+// (sms-outcome-guard.js).
+const { findUnreconciledSend, acquireSendReservation, settleSendReservation, unreconciledRefusal } = require('./sms-outcome-guard');
 
 // Admin phones to exclude from results
 const ADMIN_PHONE_RAW = '9415993489';
@@ -334,6 +335,18 @@ function uncertainManualSmsResponse(outcome) {
     retry: false,
     retryable: false,
   };
+}
+
+// What the send's reservation becomes: 'accepted' and 'not_sent' release it, 'uncertain'
+// leaves it as the held row. The wrapper's own interlock refusing THIS attempt sent nothing.
+// A thrown error that names no provider outcome could have crossed the handoff: held.
+function reservationState(outcome, { thrown = false } = {}) {
+  if (outcome?.sent === true || outcome?.providerOutcome?.sent === true) return 'accepted';
+  if (outcome?.code === INTERLOCK_REFUSAL_CODE) return 'not_sent';
+  if (isUncertainManualSmsOutcome(outcome)) return 'uncertain';
+  const certainty = outcome?.deliveryOutcome || outcome?.providerOutcome?.deliveryOutcome;
+  if (certainty === 'not_sent' || outcome?.blocked === true) return 'not_sent';
+  return thrown ? 'uncertain' : 'not_sent';
 }
 
 function isUncertainManualSmsOutcome(outcome) {
@@ -1324,19 +1337,20 @@ async function sendSms(input) {
 
   if (!phone) return { error: 'No phone number' };
 
-  // An earlier text with these exact words whose provider outcome was never
-  // confirmed may already be on the customer's phone: refuse a repeat until it
-  // is reconciled. Checked here as well as at the proposal because a second card
-  // can be pending, or the first outcome can turn unknown after the card.
-  if (await findUnreconciledSend({ phone, body: message })) {
-    return unreconciledRefusal({ sent_to: phone, customer: customerName });
-  }
+  // Reserve the send BEFORE the provider handoff, atomically (the wrapper's own
+  // thread lock and row writer). A text with these exact words to this number that
+  // is in flight or whose provider outcome was never confirmed may already be on
+  // the customer's phone: refuse, with no provider call. Two cards confirmed at
+  // the same moment serialize on this reservation; the proposal-time check alone
+  // could not stop them.
+  const reservation = await acquireSendReservation({ phone, customerId: custId || null, body: message });
+  if (reservation.refused) return unreconciledRefusal({ sent_to: phone, customer: customerName });
 
   // Routed through the customer-message middleware. This is Virginia's
   // daily-driver send path, so the validators apply consistently:
   // suppression list, sms_enabled, no customer-emoji, segment metadata.
   // Operator messages still need to follow the customer voice rules.
-  const holdUnknownOutcome = () => recordUnreconciledSend({ phone, customerId: custId || null, body: message });
+  const settleReservation = (state) => settleSendReservation(reservation.id, state, { phone, body: message });
   const result = await sendManualCustomerSms({
     to: phone,
     body: message,
@@ -1363,14 +1377,14 @@ async function sendSms(input) {
       adminUserId: 'intelligence_bar',
     },
   }).catch(async (err) => {
-    // A thrown unknown outcome is held like a returned one; executeCommsTool
-    // turns the throw into the same unknown response.
-    if (isUncertainManualSmsOutcome(err) && err?.code !== INTERLOCK_REFUSAL_CODE) await holdUnknownOutcome();
+    // A thrown outcome settles the reservation like a returned one;
+    // executeCommsTool turns the throw into the same response.
+    await settleReservation(reservationState(err, { thrown: true }));
     throw err;
   });
+  await settleReservation(reservationState(result));
 
   if (isUncertainManualSmsOutcome(result)) {
-    if (result?.code !== INTERLOCK_REFUSAL_CODE) await holdUnknownOutcome();
     return uncertainManualSmsResponse(result);
   }
 
