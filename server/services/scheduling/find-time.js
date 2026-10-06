@@ -785,27 +785,32 @@ function toPackingBoundAnchor(stop) {
 }
 
 // A capacity placement's neighbours in its simulated route: the stop before
-// the target (home base when first) and after it (home base when last), the
-// drive in as the simulation timed it, and GAP_LEGS for road re-pricing.
+// the target (for the first stop, the route's own origin: home base or
+// today's last completed visit, leaving at the route's start clock) and the
+// stop after it (home base when last), the drive in as the simulation timed
+// it, and GAP_LEGS for road re-pricing (Codex #6045 r3/r4).
 function capacityLegs({ fit, byId, target, durationMinutes }) {
   const arrivals = fit.arrivals || [];
   const at = arrivals.findIndex((row) => row.id === target.id);
   const none = { driveIn: null, fromHome: null, gap: undefined };
   if (at < 0 || !hasCoords(target)) return none;
   const pin = (row) => (row && hasCoords(row) ? { lat: Number(row.lat), lng: Number(row.lng) } : null);
-  const prevRow = at > 0 ? byId.get(arrivals[at - 1].id) : null;
+  const first = at === 0;
+  if (first && (!fit.origin || !Number.isFinite(fit.originDepartureMin))) return none;
+  const prevPin = first ? pin(fit.origin) : pin(byId.get(arrivals[at - 1].id));
+  const prevEndMin = first ? fit.originDepartureMin : timeToMinutes(arrivals[at - 1].departure);
   const nextRow = at < arrivals.length - 1 ? byId.get(arrivals[at + 1].id) : null;
-  const prevEndMin = at > 0 ? timeToMinutes(arrivals[at - 1].departure) : null;
   const arriveMin = timeToMinutes(arrivals[at].arrival);
-  const driveIn = at > 0 && prevEndMin != null && arriveMin != null ? Math.max(0, arriveMin - prevEndMin) : null;
+  const driveIn = prevPin && prevEndMin != null && arriveMin != null ? Math.max(0, arriveMin - prevEndMin) : null;
   return {
     driveIn,
-    fromHome: at === 0,
+    fromHome: first ? fit.origin.isHome === true : false,
     gap: {
-      prev: at > 0 ? pin(prevRow) : { lat: HQ.lat, lng: HQ.lng },
+      prev: prevPin,
       next: at < arrivals.length - 1 ? pin(nextRow) : { lat: HQ.lat, lng: HQ.lng },
       prevEndMin: prevEndMin ?? 0,
-      prevIsHome: at === 0,
+      // The departure is known exactly here, so no "leave just in time".
+      prevIsHome: false,
       newStop: { lat: Number(target.lat), lng: Number(target.lng) },
       durationMinutes,
     },

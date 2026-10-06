@@ -278,8 +278,9 @@ async function pickedByGap({ rawSlots, pickedWindow, pickedMin, pickedEndMin, sp
     fits: true,
     detour_minutes: gap.detour_minutes ?? null,
     drive_in_minutes: gap.drive_in_minutes ?? null,
-    from_home_base: !gap.insertion?.after_stop_id,
-    from_name: gap.insertion?.after_name || null,
+    // A capacity slot has no insertion; it carries its own origin labels.
+    from_home_base: gap.insertion ? !gap.insertion.after_stop_id : (gap.from_home_base ?? null),
+    from_name: gap.insertion?.after_name || gap.from_name || null,
     technician: gap.technician || null,
     // Not serialized: lets the route re-price this verdict on real roads.
     [GAP_LEGS]: gap[GAP_LEGS],

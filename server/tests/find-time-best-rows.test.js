@@ -218,12 +218,29 @@ describe('capacity-mode chips (Codex #6045 r3)', () => {
     expect(legs.gap).toMatchObject({ prev: PREV, next: NEXT, prevEndMin: 720, prevIsHome: false, durationMinutes: 30 });
   });
 
-  test('the first stop drives in from home base', () => {
-    const fit = { arrivals: [{ id: 't', arrival: '08:30', departure: '09:00' }, { id: 'a', arrival: '10:00', departure: '11:00' }] };
+  test('the first stop drives in from the route origin, leaving at its start clock (r4)', () => {
+    const fit = {
+      origin: { lat: 27.43, lng: -82.41, isHome: true }, originDepartureMin: 8 * 60,
+      arrivals: [{ id: 't', arrival: '08:31', departure: '09:00' }, { id: 'a', arrival: '10:00', departure: '11:00' }],
+    };
     const legs = capacityLegs({ fit, byId: rows, target, durationMinutes: 30 });
-    expect(legs.driveIn).toBeNull();
+    expect(legs.driveIn).toBe(31);
     expect(legs.fromHome).toBe(true);
-    expect(legs.gap.prevIsHome).toBe(true);
-    expect(legs.gap.next).toEqual(PREV);
+    expect(legs.gap).toMatchObject({ prev: { lat: 27.43, lng: -82.41 }, prevEndMin: 480, prevIsHome: false, next: PREV });
+  });
+
+  test("a first stop after today's completed visit starts from that visit, not home", () => {
+    const fit = {
+      origin: { lat: 27.40, lng: -82.45, isHome: false }, originDepartureMin: 13 * 60,
+      arrivals: [{ id: 't', arrival: '13:20', departure: '14:00' }],
+    };
+    const legs = capacityLegs({ fit, byId: rows, target, durationMinutes: 30 });
+    expect(legs).toMatchObject({ driveIn: 20, fromHome: false });
+    expect(legs.gap.next).toEqual({ lat: expect.any(Number), lng: expect.any(Number) });
+  });
+
+  test('no known origin: no drive in, no road legs', () => {
+    const fit = { arrivals: [{ id: 't', arrival: '08:30', departure: '09:00' }] };
+    expect(capacityLegs({ fit, byId: rows, target, durationMinutes: 30 })).toEqual({ driveIn: null, fromHome: null, gap: undefined });
   });
 });

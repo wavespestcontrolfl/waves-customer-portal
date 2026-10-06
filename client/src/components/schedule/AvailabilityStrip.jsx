@@ -59,6 +59,8 @@ export function drivePhrase(detourMinutes) {
 // "~" marks a straight-line estimate; a number Google priced on real roads
 // (driveSource 'google') carries none (Codex #6045 r1).
 const isEstimate = (hour) => hour.driveSource !== 'google';
+// A chip that shows a "~" number: a model drive-in or a model added drive.
+const showsEstimate = (hour) => isEstimate(hour) && (hour.driveInMinutes != null || Number(hour.detourMinutes) > 0);
 
 export function driveHerePhrase(hour) {
   const mins = Math.round(Number(hour.driveInMinutes));
@@ -333,9 +335,6 @@ function BestRows({ availability, currentDate, isCurrent, onPick }) {
           onPick={onPick}
         />
       )}
-      {[...best.day, ...best.week].some(isEstimate) ? (
-        <div style={{ marginTop: 6, color: '#52525B' }}>~ = straight-line estimate, not a road time.</div>
-      ) : null}
     </>
   );
 }
@@ -433,6 +432,16 @@ export default function AvailabilityStrip({ availability, currentDate, currentSt
           )}
         </div>
       )}
+      {displayedHours({ availability, verdict, viewed, showBest }).some(showsEstimate) ? (
+        <div style={{ color: '#52525B' }}>~ = straight-line estimate, not a road time.</div>
+      ) : null}
     </div>
   );
+}
+
+// Every chip on screen, so the "~" note shows whenever any of them carries
+// a model number, on every strip (Codex #6045 r4).
+function displayedHours({ availability, verdict, viewed, showBest }) {
+  const offers = showBest ? [...availability.best.day, ...availability.best.week] : verdict.offers;
+  return [...offers, ...(viewed?.hours || [])];
 }

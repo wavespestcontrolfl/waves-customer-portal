@@ -265,6 +265,11 @@ describe('best-times rows', () => {
     expect(v.detail).toBe('Drive here: 17 min from Stop A · estimated.');
   });
 
+  it('the "~" note shows on a strip without the rows too (Codex #6045 r4)', () => {
+    render(<AvailabilityStrip availability={answer({ start: '09:00', fits: false, reason: 'arrival_window' })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
+    expect(screen.getByText('~ = straight-line estimate, not a road time.')).toBeTruthy();
+  });
+
   it('without bestRows the strip keeps its closest offers', () => {
     render(<AvailabilityStrip availability={withBest({ start: '09:00', fits: false, reason: 'arrival_window' })} currentDate="2035-01-02" currentStart="09:00" onPick={() => {}} />);
     expect(screen.queryByTestId('best-row')).toBeNull();
