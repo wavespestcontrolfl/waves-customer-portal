@@ -388,6 +388,22 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
       v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: false } }),
       metadata: JSON.stringify({ relatedCallId: w.call.id, callback_policy: 'card', customer_leg: leg }), ...extra,
     }).returning('id').then(([r]) => { made.callIds.push(r.id); return r; });
+    // A card call placed for a SIBLING promise on the same source call (the callback card's own call) keeps it too.
+    const sib = await world({ kind: 'other', channel: 'call' });
+    const [callbackRow] = await db('call_commitments').insert({ call_log_id: sib.call.id, commitment_key: 'waves:callback', party: 'waves', kind: 'callback', description: 'Fixture callback', source: 'ai', last_seen_generation: 1, evidence: '[]', status: 'open' }).returning('id');
+    made.commitmentIds.push(callbackRow.id);
+    const sibCall = await cardCall(sib, { metadata: JSON.stringify({ relatedCommitmentId: callbackRow.id, relatedCallId: sib.call.id, callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 90 } }) });
+    await cc.refreshFulfillment(db, sib.call.id);
+    expect(await row(sib.commitment.id)).toMatchObject({ status: 'fulfilled', fulfillment: { kind: 'outbound_call', record_id: sibCall.id } });
+    // The callback it was placed for is kept by it directly, and the scan does not flap the other promise.
+    expect(await row(callbackRow.id)).toMatchObject({ status: 'fulfilled', fulfillment: { strength: 'direct' } });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).not.toContain(sib.call.id);
+    // A card call for ANOTHER call's promise is not this one's.
+    const other = await world({ kind: 'other', channel: 'call' });
+    const stranger = await world({ kind: 'callback' });
+    await cardCall(other, { metadata: JSON.stringify({ relatedCommitmentId: stranger.commitment.id, relatedCallId: stranger.call.id, callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 90 } }) });
+    await cc.refreshFulfillment(db, other.call.id);
+    expect(await row(other.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
     // Staff leg only (customer never picked up), a short customer leg, voicemail: none keeps it.
     for (const [extra, leg] of [[{}, { status: 'no-answer', duration_seconds: 0 }], [{}, { status: 'completed', duration_seconds: 30 }], [{ ai_extraction_enriched: JSON.stringify({ meta: { is_voicemail: true } }) }, undefined]]) {
       const w = await world({ kind: 'other', channel: 'call' });

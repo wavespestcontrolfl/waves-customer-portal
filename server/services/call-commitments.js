@@ -1826,7 +1826,7 @@ async function textToCaller(conn, { after, until = null, phone, customerId }) {
 async function callPlacedTo(conn, x, commitment) {
   if (!x.phone && !x.customerId) return null;
   const plain = await returnedOutboundCall(conn, x);
-  const card = commitment ? await cardConnectedCall(conn, commitment, x) : null;
+  const card = commitment ? await cardConnectedCall(conn, commitment, x, { siblings: true }) : null;
   const cardHit = card ? { id: card.id, at: cardCallAt(card) } : null;
   if (plain && cardHit) return new Date(plain.at).getTime() <= new Date(cardHit.at).getTime() ? plain : cardHit;
   return plain || cardHit;
@@ -2073,14 +2073,20 @@ async function resolveAppointmentConfirmation({ conn, commitment, phone, custome
 // by an "other" call promise, which the same Call Log action can return and
 // which, as an association proof, stays inside the 14-day window (`until`).
 // Answers the call row, or null.
-async function cardConnectedCall(conn, commitment, { after, until = null, phone, customerId }) {
+async function cardConnectedCall(conn, commitment, { after, until = null, phone, customerId }, { siblings = false } = {}) {
   if (!phone) return null;
   const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
   return conn('call_log').where('direction', 'outbound')
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
     .where('created_at', '>', after).where('v2_extraction_status', 'valid')
     .modify((b) => { if (until) b.where('created_at', '<=', until); })
-    .whereRaw(policyLink, [commitment.id, commitment.call_log_id])
+    .where(function linkedToThisPromise() {
+      this.whereRaw(policyLink, [commitment.id, commitment.call_log_id]);
+      // An "other" call promise is also kept by a card call placed for a SIBLING
+      // promise on the same source call (the callback card's own call): the
+      // customer was reached either way. The callback proof never takes it.
+      if (siblings) this.orWhereRaw("metadata->>'relatedCommitmentId' IN (SELECT id::text FROM call_commitments WHERE call_log_id = ? AND id <> ?)", [commitment.call_log_id, commitment.id]);
+    })
     .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
     .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
     .whereRaw("ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'")
