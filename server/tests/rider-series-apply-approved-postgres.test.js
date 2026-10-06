@@ -122,11 +122,11 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
         technician_id: techId,
       });
     }
-    const pestParent = await row({
+    const riderParent = await row({
       status: 'completed',
       recurring_ongoing: true,
       recurring_pattern: 'quarterly',
-      service_type: 'Quarterly Pest Control',
+      service_type: 'Tree and Shrub Quarterly',
       scheduled_date: ANCHOR,
       estimated_price: 100,
       create_invoice_on_complete: true,
@@ -136,11 +136,11 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     const kids = [];
     for (const off of [91, 182]) {
       kids.push(await row({
-        recurring_parent_id: pestParent.id,
+        recurring_parent_id: riderParent.id,
         recurring_ongoing: true,
         status: 'pending',
         recurring_pattern: 'quarterly',
-        service_type: 'Quarterly Pest Control',
+        service_type: 'Tree and Shrub Quarterly',
         scheduled_date: addDays(ANCHOR, off),
         estimated_price: 100,
         create_invoice_on_complete: true,
@@ -150,17 +150,17 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
         technician_id: pestTech,
       }));
     }
-    return { lawnParent, pestParent, kids };
+    return { lawnParent, riderParent, kids };
   }
 
-  async function approvedFor({ lawnParent, pestParent }) {
-    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+  async function approvedFor({ lawnParent, riderParent }) {
+    const preview = await previewRiderPair(trx, { riderParentId: riderParent.id, hostParentId: lawnParent.id });
     expect(preview.reasons).toEqual([]);
     expect(preview.eligible).toBe(true);
     return {
       generatedAt: new Date().toISOString(),
       results: [{
-        lawnParentId: lawnParent.id, pestParentId: pestParent.id, customerId, propertyId: null, extraReasons: [], ...preview,
+        lawnParentId: lawnParent.id, pestParentId: riderParent.id, customerId, propertyId: null, extraReasons: [], ...preview,
       }],
     };
   }
@@ -288,7 +288,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     const approved = await approvedFor(pair);
     const other = await database.transaction();
     try {
-      await other.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['recurring-series-maintenance', String(pair.pestParent.id)]);
+      await other.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['recurring-series-maintenance', String(pair.riderParent.id)]);
       const before = await snapshot();
       const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
       expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'pest_series_locked' });
@@ -467,7 +467,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
       const pair = await buildPair();
       const same = await propertyAt(SAME_ADDRESS);
       await stampChildren(pair.lawnParent.id, same);
-      await stampChildren(pair.pestParent.id, same);
+      await stampChildren(pair.riderParent.id, same);
       const approved = await approvedFor(pair);
       const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
       expect(res.pairs[0]).toMatchObject({ status: 'applied' });
@@ -520,7 +520,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     const pair = await buildPair();
     const approved = await approvedFor(pair);
     await row({
-      status: 'pending', recurring_ongoing: true, recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control',
+      status: 'pending', recurring_ongoing: true, recurring_pattern: 'quarterly', service_type: 'Tree and Shrub Quarterly',
       scheduled_date: addDays(ANCHOR, 30),
     });
     const before = await snapshot();
@@ -703,7 +703,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
       const [first] = approved.results[0].move;
       await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
       const moved = await trx('scheduled_services').where({ id: first.id }).first();
-      const rOpts = { ...recurrenceOrdinalOptions(pair.pestParent.scheduled_date, {}), intervalDays: null };
+      const rOpts = { ...recurrenceOrdinalOptions(pair.riderParent.scheduled_date, {}), intervalDays: null };
       expect(seriesExtendAnchor(moved, 'quarterly', rOpts)).toBe(first.from);
       // Without the stamp the lawn landing would have become the cadence position.
       expect(seriesExtendAnchor({ ...moved, date_exception: false, date_exception_cadence_date: null }, 'quarterly', rOpts)).toBe(first.to);
@@ -725,7 +725,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     test('the series root row is never moved', async () => {
       const pair = await buildPair();
       const approved = await approvedFor(pair);
-      const rootMove = { id: pair.pestParent.id, from: dateOnly(pair.pestParent.scheduled_date), to: approved.results[0].move[0].to };
+      const rootMove = { id: pair.riderParent.id, from: dateOnly(pair.riderParent.scheduled_date), to: approved.results[0].move[0].to };
       approved.results[0].move = [rootMove];
       const preview = require('../services/rider-series-preview');
       const real = preview.previewRiderPair;
@@ -746,7 +746,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
       await trx('technicians').insert({
         id: otherTech, name: 'Pinned synthetic tech', employment_status: 'active', field_dispatchable: true,
       });
-      await trx('scheduled_services').where({ id: pair.pestParent.id }).update({
+      await trx('scheduled_services').where({ id: pair.riderParent.id }).update({
         recurring_technician_id: otherTech, recurring_technician_override: true,
       });
       const approved = await approvedFor(pair);

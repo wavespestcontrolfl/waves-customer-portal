@@ -38,6 +38,21 @@ function capacityFromReservation(row) {
   return capacity;
 }
 
+// Two stop groups (owner ruling 2026-10-05): pest-group services share one
+// arrival hour and lawn-group services share another; pest and lawn never
+// share a stop. The group of the first selected service keeps the picked hour;
+// the other group starts on the first whole hour after the first group's work.
+const PEST_STOP_FAMILIES = new Set(['pest_control', 'mosquito', 'termite_bait', 'rodent_bait']);
+const stopGroupOf = (key) => (PEST_STOP_FAMILIES.has(key) ? 'pest' : 'lawn');
+
+function stopGroupOffsetMinutes(capacity, allowanceIndex) {
+  const firstGroup = stopGroupOf(capacity.services[0]);
+  if (stopGroupOf(capacity.services[allowanceIndex]) === firstGroup) return 0;
+  const firstGroupMinutes = capacity.services.reduce((sum, key, i) => (stopGroupOf(key) === firstGroup
+    ? sum + (capacity.version === 2 ? capacity.durations[i] : SERVICE_MINUTES) : sum), 0);
+  return Math.ceil(firstGroupMinutes / 60) * 60;
+}
+
 function windowForCapacityService(anchor, index, catalogServiceKey) {
   const capacity = capacityFromReservation(anchor);
   const start = parseHHMM(anchor.window_start);
@@ -48,18 +63,13 @@ function windowForCapacityService(anchor, index, catalogServiceKey) {
   const allowanceIndex = capacity.version === 2
     ? capacity.services.indexOf(serviceKeyFor({ service_key: catalogServiceKey })) : index;
   if (allowanceIndex < 0) throw capacityUnavailable();
+  const minutes = capacity.version === 2 ? capacity.durations[allowanceIndex] : SERVICE_MINUTES;
+  const arrival = start + stopGroupOffsetMinutes(capacity, allowanceIndex);
+  if (arrival + minutes > 24 * 60 - 1) throw capacityUnavailable();
   return {
-    ...(capacity.version === 2 ? {
-      // One whole-hour customer arrival anchor. The route evaluator groups
-      // members into one visit and advances their separate work internally.
-      window_start: minutesToHHMM(start),
-      window_end: minutesToHHMM(start + capacity.durations[allowanceIndex]),
-      estimated_duration_minutes: capacity.durations[allowanceIndex],
-    } : {
-    window_start: minutesToHHMM(start + index * SERVICE_MINUTES),
-    window_end: minutesToHHMM(start + (index + 1) * SERVICE_MINUTES),
-    estimated_duration_minutes: SERVICE_MINUTES,
-    }),
+    window_start: minutesToHHMM(arrival),
+    window_end: minutesToHHMM(arrival + minutes),
+    estimated_duration_minutes: minutes,
   };
 }
 

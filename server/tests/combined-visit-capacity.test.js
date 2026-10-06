@@ -231,16 +231,16 @@ describe('combined visit booking capacity', () => {
       .toThrow(expect.objectContaining({ code: 'COMBINED_VISIT_UNAVAILABLE' }));
   });
 
-  test('one held block becomes sequential on-the-hour service windows', () => {
+  test('one held block becomes one on-the-hour arrival per stop group: pest group first, lawn group after its work', () => {
     const anchor = {
       window_start: '09:00:00',
       reservation_service_mix: capacityForServices(services.map((service) => ({ service }))),
     };
     expect(services.map((_, index) => windowForCapacityService(anchor, index))).toEqual([
-      { window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 },
-      { window_start: '10:00', window_end: '11:00', estimated_duration_minutes: 60 },
-      { window_start: '11:00', window_end: '12:00', estimated_duration_minutes: 60 },
-      { window_start: '12:00', window_end: '13:00', estimated_duration_minutes: 60 },
+      { window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }, // pest
+      { window_start: '11:00', window_end: '12:00', estimated_duration_minutes: 60 }, // lawn
+      { window_start: '11:00', window_end: '12:00', estimated_duration_minutes: 60 }, // tree & shrub
+      { window_start: '09:00', window_end: '10:00', estimated_duration_minutes: 60 }, // mosquito
     ]);
     expect(() => windowForCapacityService(anchor, 4)).toThrow();
     expect(() => windowForCapacityService({ ...anchor, window_start: '09:30' }, 0)).toThrow();

@@ -6826,7 +6826,11 @@ const EstimateConverter = {
           reservation_service_mix: {
             ...combinedCapacity,
             scheduledDate: scheduledDateOnly(reservedStart.scheduled_date),
-            arrivalWindowStart: String(reservedStart.window_start).slice(0, 5),
+            // No arrivalWindowStart (owner ruling 2026-10-05, two stop groups):
+            // each stop group has its own arrival hour, so each member's own
+            // window_start is its arrival (reservation_arrival_start and
+            // flex-tier destinationArrival fall back to it). Older stamps
+            // keep their shared arrival.
             allocatedServiceIds: capacityMembers.map((row) => row.id),
           },
         };
