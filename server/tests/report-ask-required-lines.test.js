@@ -962,3 +962,44 @@ describe('answer screen, Codex round 12', () => {
     expect(ask('Your lawn health score is 82 out of 100.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 13', () => {
+  test.each(['The pesticide splashed my eyes', 'The product touched my skin'])('contact verbs get the full answer: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+
+  test.each(['Moisten the soil as needed.', 'Hydrate the turf.', 'Mist the beds in the morning.'])('while watering is held, %s is rejected', (sentence) => {
+    const data = lawnData();
+    const facts = buildReportAskFacts({ data });
+    expect(screenAskAnswer(`Do not water yet. ${sentence}`, { question: 'How is my lawn?', data, facts })).toBe('watering_during_hold');
+  });
+
+  test.each(['Let your pets back into the yard before it dries.', 'Pets are allowed back into the yard before it is dry.'])(
+    'passive and imperative permission beside a required line is rejected: %s',
+    (sentence) => {
+      const line = 'Keep pets off treated zones until fully dry.';
+      const data = pestData();
+      const facts = buildReportAskFacts({ data, requiredLines: [line] });
+      expect(screenAskAnswer(`${line} ${sentence}`, { question: 'Can my dog go out?', data, facts, requiredLines: [line] })).toBe('second_instruction');
+    },
+  );
+
+  test('a minus sign is part of the number', () => {
+    const data = lawnData({ reportV2: null, lawnAssessment: { scores: { overallScore: 5 }, snapshot: { summary: 'Thin turf.' } } });
+    const facts = buildReportAskFacts({ data });
+    expect(screenAskAnswer('Your overall health score is -5 out of 100.', { question: 'q', data, facts })).toBe('unstated_number');
+  });
+
+  test.each(['The crabgrass should disappear soon.', 'This should get rid of the crabgrass.', 'It is expected to clear up the weeds.'])(
+    'a modal result promise is rejected: %s',
+    (answer) => {
+      const data = lawnData({ reportV2: null });
+      expect(screenAskAnswer(answer, { question: 'Will crabgrass disappear?', data, facts: buildReportAskFacts({ data }) })).toBe('result promise');
+    },
+  );
+
+  test('catalog names lose their pack size and strength', () => {
+    const data = lawnData({ reportV2: null, applications: [{ product: { name: 'Dismiss 64 oz' } }, { product: { name: 'LESCO Stonewall 0.43% 1-0-1' } }] });
+    expect(buildReportAskFacts({ data }).products.map((product) => product.name)).toEqual(['Dismiss', 'LESCO Stonewall']);
+  });
+});

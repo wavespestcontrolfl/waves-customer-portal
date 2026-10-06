@@ -232,10 +232,15 @@ function readingOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+const PACK_OR_STRENGTH_RE = /\s+\d+(?:\.\d+)?\s*(?:%|(?:percent|fl\.?\s*oz|oz|ounces?|lbs?|pounds?|gal(?:lons?)?|qt|quarts?|pt|pints?|ml|l|liters?|kg|g)\b).*$/i;
+
 function productFacts(app = {}) {
   const product = app.product || {};
   const copy = product.report_copy || {};
-  const name = cleanText(product.name || app.productName || app.product_name);
+  // A catalog name may carry a pack size or a strength ("Dismiss 64 oz",
+  // "Copper Fungicide 27.15%"); the answer screen rejects amounts, so the
+  // customer-facing name stops before them (Codex P2 #5964 r13).
+  const name = cleanText(product.name || app.productName || app.product_name).replace(PACK_OR_STRENGTH_RE, '').trim();
   if (!name) return null;
   const whatItDoes = cleanText(copy.how_it_works)
     || cleanText(product.service_report_summary)
@@ -757,6 +762,9 @@ const INLINE_LIST_RE = /(?:^|[:.;]\s)1[.)]\s+\S.*\s2[.)]\s/;
 // that neither covers. Promises of a result are the owner's rule 1 of 2026-09-30
 // in a form the writer's own word list does not match.
 const ASK_EXTRA_BANNED = [
+  // Modal and expected results (Codex P1 #5964 r13): "should disappear",
+  // "this should get rid of the crabgrass", "is expected to clear up".
+  [/\b(?:should|ought\s+to|(?:is|are)\s+going\s+to|(?:is|are)\s+expected\s+to|expect\s+(?:it|them|the\s+\w+)\s+to|(?:is|are)\s+(?:likely|bound|sure)\s+to)\s+(?:\w+\s+)?(?:disappear|vanish|go\s+away|be\s+gone|get\s+rid\s+of|eliminate|kill\s+(?:all|every|the)|wipe\s+out|clear\s+(?:up|out)|stop|end|fix|solve|take\s+care\s+of)\b/i, 'result promise'],
   [/\bwill\s+(?:definitely\s+|certainly\s+|surely\s+|absolutely\s+)?(?:stop|get\s+rid\s+of|kill\s+(?:all|every)|eliminate)\b/i, 'result promise'],
   [/\b(?:you\s+will\s+not|you\s+won['’]?t|you\s+will\s+never|won['’]?t)\s+(?:\w+\s+)?see\s+(?:any|an?)\s+(?:more|further)\b/i, 'result promise'],
   [/\bno\s+more\s+(?:\w+\s+)?(?:pests?|bugs?|insects?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|mosquito(?:e?s)?|termites?|rodents?|mice|mouse|rats?|fleas?|ticks?|wasps?|flies|fly|beetles?)\b/i, 'result promise'],
@@ -914,7 +922,9 @@ function statesADate(text, { requiredLines }) {
 // of rain" fails when 3.5 is the mowing height). A number word before a unit
 // or the score scale counts too ("ninety-five out of 100"); "one product" is prose (Codex P1 #5964 r7-r9). Required lines
 // keep their own numbers.
-const NUMBER_RE = /\d+(?:\.\d+)?/g;
+// A minus sign belongs to the number ("-5 out of 100"), not a range dash ("10-14").
+const NUMBER_RE = /(?:(?<=^|[\s(])[-−])?\d+(?:\.\d+)?/g;
+const numberValue = (text) => Number(String(text).replace('−', '-'));
 const NUMBER_KINDS = [
   ['score', /^\s*(?:out\s+of\s+100|points?\b|\/\s*100)/i, /out_of_100|score/],
   ['inches', /^\s*(?:inch(?:es)?\b|in\.(?!\w)|["”])/i, /inches/],
@@ -949,7 +959,7 @@ function digitsForWords(text) {
 // Every number leaf of the sheet with the key path it sits under.
 function factNumbers(value, key = '', out = []) {
   if (typeof value === 'number') out.push({ value, key });
-  else if (typeof value === 'string') for (const n of value.match(NUMBER_RE) || []) out.push({ value: Number(n), key: '' });
+  else if (typeof value === 'string') for (const n of value.match(NUMBER_RE) || []) out.push({ value: numberValue(n), key: '' });
   else if (Array.isArray(value)) value.forEach((item) => factNumbers(item, key, out));
   else if (value && typeof value === 'object') Object.entries(value).forEach(([child, item]) => factNumbers(item, `${key}.${child}`, out));
   return out;
@@ -990,7 +1000,7 @@ function statesUnknownNumber(text, { facts, requiredLines }) {
   // mowing height was 3.5 inches"), not the whole sentence (Codex P1 r10).
   const clauses = splitSentences(own).flatMap((sentence) => sentence.split(/[,;:]\s*|\s+(?:and|but|while|whereas)\s+/i));
   return clauses.some((sentence) => [...sentence.matchAll(NUMBER_RE)].some((m) => {
-    const value = Number(m[0]);
+    const value = numberValue(m[0]);
     // "out of 100" names the scale, not a value.
     if (value === 100 && /out\s+of\s*$/i.test(sentence.slice(0, m.index))) return false;
     return !numberIsKnown(value, sentence.slice(m.index + m[0].length), sentence, known);
@@ -1020,12 +1030,12 @@ function statesLineAlone(sentences, line) {
 
 // Watering directives the shared predicate does not know ("keep the soil
 // moist", "run the hose") (Codex P1 #5964 r8).
-const WATERING_DIRECTIVE = /\b(?:keep\s+(?:the\s+|your\s+)?(?:soil|lawn|turf|grass|yard|beds?|plants?|roots?)\s+(?:\w+\s+)?(?:moist|wet|damp|watered|hydrated)|run\s+(?:the\s+|your\s+)?(?:hose|sprinklers?|irrigation|sprinkler\s+system|system)|(?:add|give)\s+(?:\w+\s+){0,2}(?:moisture|water|a\s+drink)|soak(?:s|ing)?\b|hose\s+(?:it\s+|them\s+)?(?:down|off|over)|hand[\s-]?water|sprinkle\s+(?:it|the|some))/i;
+const WATERING_DIRECTIVE = /\b(?:keep\s+(?:the\s+|your\s+)?(?:soil|lawn|turf|grass|yard|beds?|plants?|roots?)\s+(?:\w+\s+)?(?:moist|wet|damp|watered|hydrated)|run\s+(?:the\s+|your\s+)?(?:hose|sprinklers?|irrigation|sprinkler\s+system|system)|(?:add|give)\s+(?:\w+\s+){0,2}(?:moisture|water|a\s+drink)|soak(?:s|ing)?\b|hose\s+(?:it\s+|them\s+)?(?:down|off|over)|hand[\s-]?water|sprinkle\s+(?:it|the|some)|moisten\w*|mist(?:s|ing)?\b|hydrat\w*|drench\w*|dampen\w*|wet\s+(?:the|your|it|them))/i;
 
 const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:y|ies)|re-?ent\w*|go\s+(?:out|back|outside)|play\w*|water\w*|irrigat\w*|sprinkler\w*|rins\w*|hose\w*|wash\w*|dry|dried|wet)\b/i;
 // A grant of permission with no condition: "can go out", "right away", "no
 // need to wait". "Once it is dry" and "until" keep the instruction's terms.
-const UNCONDITIONAL_PERMISSION_RE = /\b(?:right\s+away|immediately|right\s+now|any\s*time|no\s+need\s+to\s+(?:wait|keep|stay)|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not)\s+(?:need|have)\s+to\s+(?:wait|keep|stay)|(?:can|may|could)\s+(?:go|play|return|use|come|walk|water|run)|(?:okay|ok|fine|free|good)\s+to|go\s+ahead)\b/i;
+const UNCONDITIONAL_PERMISSION_RE = /\b(?:right\s+away|immediately|right\s+now|any\s*time|no\s+need\s+to\s+(?:wait|keep|stay)|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not)\s+(?:need|have)\s+to\s+(?:wait|keep|stay)|(?:can|may|could)\s+(?:go|play|return|use|come|walk|water|run)|(?:okay|ok|fine|free|good)\s+to|go\s+ahead|(?:let|allow)\s+(?:your\s+|the\s+)?(?:pets?|dogs?|cats?|kids?|children|family|them|everyone)\s+(?:back|out|in|go|play|return|onto)|(?:allowed|permitted|cleared)\s+(?:back|out|to\s+(?:go|return|play|use))|(?:is|are)\s+(?:allowed|permitted|cleared|fine|okay|ok)\b)\b/i;
 // The condition must govern the restriction: drying, a wait in hours or
 // minutes, or the treatment settling ("once it is dry", "after 2 hours").
 // "After reading this" is no condition (Codex P1 #5964 r11).
@@ -1134,6 +1144,8 @@ const MEDICAL_CUES = [
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
+  // Contact verbs: "splashed my eyes", "touched my skin", "dripped on her face" (Codex P1 #5964 r13).
+  /\b(?:splash\w*|touch\w*|dripp?\w*|spill\w*|landed|blew|drift\w*|soaked|hit)\s+(?:on\s+|in\s+|into\s+|onto\s+)?(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+(?:eyes?|skin|face|mouth|nose|lips?)\b(?!\s+of\b)/i,
   // Body part first: "my eyes were sprayed", "the dog's skin got sprayed" (Codex P1 #6016 r14).
   /\b(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+(?:eyes?|skin|face|mouth|nose)\s+(?:was|were|got|get|gets|is|are|been|has\s+been|have\s+been)\s+(?:\w+\s+)?sprayed\b/i,
   // "On my skin", "in the baby's eyes", "on the cat's skin" (Codex P1 #5964 r10).

@@ -56,6 +56,8 @@ function main(argv) {
   const nextAppointment = nextAppointmentFor(wrapped ? parsed : data) || (wrapped ? nextAppointmentFor(data) : null);
   // Keep stdout pure JSON: the portal logger prints module-load warnings there.
   process.env.LOG_LEVEL = 'error';
+  // dotenv 17 prints a banner on stdout unless told to stay quiet (Codex P1 r13).
+  process.env.DOTENV_CONFIG_QUIET = 'true';
   const { buildReportAskPrompt, ruleAnswerReason } = require('../../server/services/service-report/report-ask-ai');
   const { routeServiceReportQuestion } = require('../../server/services/service-report/report-assistant');
   const routed = routeServiceReportQuestion({ question, data, nextAppointment });
