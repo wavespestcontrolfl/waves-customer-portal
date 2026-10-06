@@ -753,7 +753,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     ? buildProgramLine({ month: assessMonth, applications, nitrogenApplied, programVisit, protocolVersion })
     : null;
   const seasonalNote = programLine || buildSeasonalNote(lawnAssessment, grassLabel);
-  const seasonalDetail = buildProgramDetail({ month: assessMonth, programLine, aftercare });
+  const seasonalDetail = buildProgramDetail({ month: assessMonth, programLine, aftercare, weekPlan: water ? water.weekPlan : null });
 
   const snapshot = {
     overallScore,

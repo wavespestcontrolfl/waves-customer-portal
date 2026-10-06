@@ -247,7 +247,7 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
     watering: [DRY, 'April and May are usually the driest months, so check for thirst more often.'],
   }),
   5: Object.freeze({
-    whyNow: 'May, before the rains, is peak chinch bug season in sunny St. Augustine turf. The sunny turf gets an insect treatment, and we spot treat chinch bugs, weeds and dry spots elsewhere.',
+    whyNow: 'May, before the rains, is peak chinch bug season in sunny St. Augustine turf. The sunny turf gets an insect treatment where it fits the property, and we spot treat chinch bugs, weeds and dry spots elsewhere.',
     whatYouSee: 'The lawn should hold its color through the dry heat. Spots that stay yellow after watering are worth telling us about.',
     watering: [DRY, 'April and May are usually the driest months, so check for thirst more often.'],
   }),
@@ -290,12 +290,15 @@ const PROGRAM_DETAIL_V13 = Object.freeze({
 
 // The month's detail, only beside a v13 program line (same visits, same month)
 // and only while GATE_LAWN_PROGRAM_DETAIL is live. When the visit carries its
-// own label aftercare (a water-in or a hold), the seasonal watering lines step
+// own label aftercare (a water-in or a hold) or a weather-derived weekly water
+// plan, the seasonal watering lines step
 // aside so the report never gives two watering directions (codex #6091 r1).
-function buildProgramDetail({ month, programLine, aftercare = null } = {}) {
+function buildProgramDetail({ month, programLine, aftercare = null, weekPlan = null } = {}) {
   if (!programLine || typeof featureGates.lawnProgramDetailLive !== 'function' || !featureGates.lawnProgramDetailLive()) return null;
   const detail = PROGRAM_DETAIL_V13[Number(month)] || null;
-  const visitWatering = !!(aftercare && (aftercare.waterInRequired || aftercare.neutral === false));
+  // The weather-derived "Water This Week" plan is the report's watering
+  // direction when present; the seasonal lines never sit beside it (codex #6091 r2).
+  const visitWatering = !!(weekPlan || (aftercare && (aftercare.waterInRequired || aftercare.neutral === false)));
   return detail && visitWatering ? { whyNow: detail.whyNow, whatYouSee: detail.whatYouSee, watering: [] } : detail;
 }
 

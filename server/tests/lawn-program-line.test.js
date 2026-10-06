@@ -409,8 +409,15 @@ describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
     });
   });
 
-  test('barrier months keep the program line qualifier (codex #6091 r1)', () => {
-    for (const m of [1, 3, 6, 10]) expect(PROGRAM_DETAIL_V13[m].whyNow).toMatch(/where it fits the property/);
+  test('a weather-derived weekly water plan also takes over from the seasonal lines (codex #6091 r2)', () => {
+    withBoth('true', () => {
+      expect(buildProgramDetail({ month: 4, programLine: 'x', aftercare: { neutral: true }, weekPlan: { action: 'run' } }).watering).toEqual([]);
+      expect(buildProgramDetail({ month: 4, programLine: 'x', aftercare: { neutral: true }, weekPlan: null }).watering).toEqual(PROGRAM_DETAIL_V13[4].watering);
+    });
+  });
+
+  test('barrier months and the May insect step keep the program line qualifier (codex #6091 r1, r2)', () => {
+    for (const m of [1, 3, 5, 6, 10]) expect(PROGRAM_DETAIL_V13[m].whyNow).toMatch(/where it fits the property/);
   });
 
   test('gate off: no seasonalDetail key and the payload is unchanged', () => {

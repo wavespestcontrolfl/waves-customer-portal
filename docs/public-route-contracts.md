@@ -2419,8 +2419,10 @@ from the same v13 month step by category: never a product, brand, active
 ingredient or rate, and a conditional step (the weed barrier) keeps the "where
 it fits the property" qualifier. `watering[]` is seasonal guidance only and is
 EMPTY when the visit carries its own label aftercare (`reportV2.aftercare`
-water-in required or not neutral), so the report never shows two watering
-directions. The lead layout's "This time of year" card renders the three parts
+water-in required or not neutral) or a weather-derived weekly water plan
+(`reportV2.water.weekPlan`), so the report never shows two watering
+directions. Conditional steps (the weed barrier, the May sunny-turf insect
+treatment) keep "where it fits the property". The lead layout's "This time of year" card renders the three parts
 under the sentence; no other client reads the key.
 
 `GATE_LAWN_VISIT_MEMORY` (dark; gate off leaves the lawn payload unchanged, key
