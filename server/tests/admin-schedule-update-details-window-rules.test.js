@@ -33,6 +33,9 @@ const db = require('../models/db');
 const adminScheduleRouter = require('../routes/admin-schedule');
 
 const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+// POST / (the Schedule-screen create) lives in services/schedule-booking.js.
+const bookingSrc = fs.readFileSync(path.join(__dirname, '../services/schedule-booking.js'), 'utf8');
+const createPost = () => bookingSrc.slice(bookingSrc.indexOf('async function createScheduleBooking('));
 
 const STORED = { id: 'svc-1', scheduled_date: '2099-01-15', window_start: '10:00:00', window_end: '11:00:00' };
 
@@ -108,7 +111,7 @@ test('START-only half-hour edit → 422; a pre-8am on-the-hour start passes vali
 
 describe('rung-1 wiring (source-pattern guards)', () => {
   test('POST / locks the FULL planned date set (anchor + children + boosters) before the comms lock; the spawn loops consume the pre-trx plan', () => {
-    const post = src.slice(src.indexOf("router.post('/', requireAdmin"), src.indexOf("router.post('/bulk-action'"));
+    const post = createPost();
     const lockIdx = post.indexOf('await acquireOccupancyLocks(trx, [dateOnly(scheduledDate), ...plannedChildDates, ...plannedBoosterDates])');
     const commsIdx = post.indexOf('await lockCustomerComms(trx, customerId)');
     expect(lockIdx).toBeGreaterThan(-1);
@@ -340,8 +343,8 @@ describe('effective duration on end-less rows + submitted duration + CAS', () =>
     expect(res.status).toBe(422);
     expect(body.code).toBe('INVALID_APPOINTMENT_WINDOW');
     expect(db.transaction).not.toHaveBeenCalled();
-    const post = src.slice(src.indexOf("router.post('/', requireAdmin"), src.indexOf("router.post('/bulk-action'"));
-    expect(post).toMatch(/const createWindowIntake = windowIntakeFromBody\(req\.body\)/);
+    const post = createPost();
+    expect(post).toMatch(/const createWindowIntake = windowIntakeFromBody\(body\)/);
   });
 
   test('update-details DATE-ONLY move of a 19:00 end-less 120-min row → 422 (19:00-21:00 past the day end)', async () => {

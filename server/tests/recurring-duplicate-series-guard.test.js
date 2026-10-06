@@ -770,26 +770,29 @@ describe('the series creators consume the guard (source guards)', () => {
   });
 
   test('admin POST /admin/schedule: preflight 409 + in-transaction locked backstop + allowDuplicateSeries escape hatch', () => {
+    // POST /admin/schedule's body lives in services/schedule-booking.js.
+    const createSrc = fs.readFileSync(path.join(__dirname, '../services/schedule-booking.js'), 'utf8');
     // Route-entry preflight (fast, unlocked) still rejects the common case.
-    expect(scheduleSrc).toContain('findActiveRecurringSeries(db, {');
+    expect(createSrc).toContain('findActiveRecurringSeries(db, {');
     expect(scheduleSrc).toContain("code: 'duplicate_recurring_series'");
-    expect(scheduleSrc).toContain('req.body.allowDuplicateSeries === true');
-    expect(scheduleSrc).toContain('allowDuplicateSeries override');
-    expect(scheduleSrc).toContain('duplicate-series guard failed (booking proceeds)');
+    expect(createSrc).toContain('body.allowDuplicateSeries === true');
+    expect(createSrc).toContain('allowDuplicateSeries override');
+    expect(createSrc).toContain('duplicate-series guard failed (booking proceeds)');
     // Race-safe backstop: locked re-check INSIDE the series-creating
     // transaction, before the parent insert; the escape hatch bypasses it
     // exactly as it bypasses the preflight.
-    const backstop = scheduleSrc.indexOf('checkActiveSeriesLocked(trx, {');
+    const backstop = createSrc.indexOf('checkActiveSeriesLocked(trx, {');
     // The parent insert now takes the booking-contract-completed payload
     // (adminCreateInsert); the guard must still run before it.
-    const parentInsert = scheduleSrc.indexOf("[svc] = await trx('scheduled_services').insert(adminCreateInsert)");
+    const parentInsert = createSrc.indexOf("[svc] = await trx('scheduled_services').insert(adminCreateInsert)");
     expect(backstop).toBeGreaterThan(-1);
     expect(parentInsert).toBeGreaterThan(backstop);
-    expect(scheduleSrc).toContain('req.body.allowDuplicateSeries !== true');
-    expect(scheduleSrc).toContain('dupErr.duplicateRecurringSeries = matches;');
+    expect(createSrc).toContain('body.allowDuplicateSeries !== true');
+    expect(createSrc).toContain('dupErr.duplicateRecurringSeries = matches;');
     // The POST preflight, the POST backstop, AND the update-details spawn
     // backstop each present the SAME 409 payload.
-    expect((scheduleSrc.match(/res\.status\(409\)\.json\(duplicateSeriesConflictBody\(/g) || []).length).toBe(3);
+    expect((createSrc.match(/reply\(409, duplicateSeriesConflictBody\(/g) || []).length).toBe(2);
+    expect((scheduleSrc.match(/res\.status\(409\)\.json\(duplicateSeriesConflictBody\(/g) || []).length).toBe(1);
   });
 
   test('admin PUT /:id/update-details spawn: locked backstop inside the spawn trx, before the child insert, with the same escape hatch + 409', () => {

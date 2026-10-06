@@ -127,7 +127,9 @@ describe('seedFollowUpsForParent honors the saved weekday preference', () => {
 });
 
 describe('every consumer consults the preference LIVE (source pins)', () => {
-  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  // The create route's body lives in services/schedule-booking.js.
+  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8')
+    + fs.readFileSync(path.join(__dirname, '../services/schedule-booking.js'), 'utf8');
   test('all eight admin-schedule consult sites present', () => {
     // import + plan-helper fallback + create route + per-edit snapshot +
     // reconcile fallback + maintenance + annual-prepay weekend gate +
@@ -141,8 +143,8 @@ describe('every consumer consults the preference LIVE (source pins)', () => {
     // ranking/billability-probe approach with a direct reuse of the
     // canonical duplicate-series guard, findActiveRecurringSeries, which
     // has no weekend-preference concern of its own. Back to the 8
-    // pre-existing consult sites below.)
-    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(8);
+    // pre-existing consult sites below.) +1: schedule-booking.js's own import.
+    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(9);
     expect(src).toContain('(input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))');
     expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');
     expect(src).toContain('const editPrefNoWeekends = await customerPrefersNoWeekends(db, editPrefRow?.customer_id);');

@@ -162,7 +162,8 @@ describe('wiring', () => {
   // whose saved row already carries a technician; the rest were not ruled on
   // and stay tech-blind.
   test('admin create and series probes pass the row technician (advisory, gate-scoped in occupancy.js)', () => {
-    const src = read('routes/admin-schedule.js');
+    // The admin create (POST /) lives in services/schedule-booking.js.
+    const src = read('routes/admin-schedule.js') + read('services/schedule-booking.js');
     for (const pin of ['technicianId: insertData.technician_id || null', 'technicianId: childData.technician_id || null',
       'technicianId: boosterData.technician_id || null', 'technicianId: row.technician_id || null']) {
       expect(src).toContain(pin);

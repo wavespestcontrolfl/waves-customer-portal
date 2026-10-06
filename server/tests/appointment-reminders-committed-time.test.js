@@ -149,7 +149,9 @@ describe('registerAppointment({ fromCommittedRow: true }) resolves inside its ow
 });
 
 describe('admin-schedule registers spawned and created visits from the committed row', () => {
-  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  // The POST create path lives in services/schedule-booking.js.
+  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8')
+    + fs.readFileSync(path.join(__dirname, '../services/schedule-booking.js'), 'utf8');
 
   test('registerSpawnedVisitReminder opts into fromCommittedRow with a windowless-safe fallback', () => {
     const start = src.indexOf('async function registerSpawnedVisitReminder(');

@@ -234,7 +234,9 @@ describe('canonical recurring seeder (source)', () => {
 });
 
 describe('admin-schedule child-insert sites (source)', () => {
-  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+  // The POST create path lives in services/schedule-booking.js.
+  const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8')
+    + fs.readFileSync(path.join(__dirname, '../services/schedule-booking.js'), 'utf8');
 
   test('no child row copies parent.service_type verbatim any more', () => {
     expect(src).not.toMatch(/service_type:\s*parent\.service_type/);

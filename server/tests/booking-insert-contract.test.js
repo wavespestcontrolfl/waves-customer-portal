@@ -81,9 +81,13 @@ const CONTRACT_MODULE_CERTIFIED_WRITES = ['data.idempotency_key = idempotencyKey
 // the PR was in review): 26 sites, 14 files, keyed by fingerprint
 // multiset. Shrink-only.
 const FROZEN_LEGACY_INSERT_SITES_2026_09 = {
+  // POST /admin/schedule's two series inserts moved verbatim (no new site)
+  // into services/schedule-booking.js, which the Intelligence Bar shares.
+  'server/services/schedule-booking.js': [
+    "createScheduleBooking :: const [childRow] = await trx( scheduled_services').insert(childData",
+    "createScheduleBooking :: const [boosterRow] = await trx( scheduled_services').insert(boosterData",
+  ],
   'server/routes/admin-schedule.js': [
-    "post / :: const [childRow] = await trx( scheduled_services').insert(childData",
-    "post / :: const [boosterRow] = await trx( scheduled_services').insert(boosterData",
     "put /:id/update-details :: const [childRow] = await trx( scheduled_services').insert(childData",
     "reconcileRecurringSeriesVisitCount :: const [row] = await trx( scheduled_services').insert(data",
     "extendSeriesOnceLocked :: const [autoExtRow] = await conn( scheduled_services').insert(nextData",

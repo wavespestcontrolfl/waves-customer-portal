@@ -339,7 +339,9 @@ describe('retiredGateInputsForVisitEdit', () => {
   });
 
   test('the route hands every posted add-on line, with the stored pattern, to the helper', () => {
-    const source = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+    // POST / lives in services/schedule-booking.js.
+    const source = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8')
+      + require('fs').readFileSync(require.resolve('../services/schedule-booking'), 'utf8');
     // null when the save posted no add-ons (every stored line stays); an array is an explicit replacement (codex r25).
     expect(source).toMatch(/const postedAddons = Array\.isArray\(replaceAddons\) \? replaceAddons\.filter\(Boolean\) : null;/);
     expect(source).toMatch(/current, currentAddons, postedServiceId: updates\.service_id, postedAddons, serviceType, plansRetainedLines,/);
@@ -402,7 +404,8 @@ describe('retiredSaleKeysVouchedByAcceptedEstimate', () => {
   });
 
   test('POST / runs the gate after the linked estimate is loaded and filters the vouched rows', () => {
-    const source = require('fs').readFileSync(require.resolve('../routes/admin-schedule'), 'utf8');
+    // POST / lives in services/schedule-booking.js.
+    const source = require('fs').readFileSync(require.resolve('../services/schedule-booking'), 'utf8');
     const load = source.indexOf("linkedEstimate = await db('estimates')");
     const gate = source.indexOf('const vouchedByQuote = retiredSaleKeysVouchedByAcceptedEstimate(linkedEstimate);');
     expect(load).toBeGreaterThan(0);
