@@ -148,6 +148,21 @@ postgres('update_property_access keeps history and keeps community codes off the
     expect(preview.plan_hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  test('an older line that becomes current again goes back on top', async () => {
+    await mockDb('property_preferences').where({ customer_id: customerId }).update({ access_notes: '[bar] Use front door\n[bar] Use rear gate' });
+    await run({ access_notes: 'Use rear gate' });
+    expect((await prefs()).access_notes.split('\n')[0]).toBe('[bar] Use rear gate');
+  });
+
+  test('a replaced field another writer changed after the card is refused', async () => {
+    await mockDb('property_preferences').where({ customer_id: customerId }).update({ pet_details: '2 dogs' });
+    const preview = await executeTool('update_property_access', { customer_id: customerId, pet_details: 'No pets' });
+    await mockDb('property_preferences').where({ customer_id: customerId }).update({ pet_details: 'Aggressive dog in yard' });
+    const out = await run({ pet_details: 'No pets', _ib_property_plan_hash: preview.plan_hash });
+    expect(out).toMatchObject({ preview_changed: true });
+    expect((await prefs()).pet_details).toBe('Aggressive dog in yard');
+  });
+
   test('an empty field is simply filled', async () => {
     await run({ parking_notes: 'Park on the street' });
     expect((await prefs()).parking_notes).toBe('Park on the street');

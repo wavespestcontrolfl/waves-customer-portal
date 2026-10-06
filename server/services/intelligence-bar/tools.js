@@ -2173,12 +2173,12 @@ const sameCode = (a, b) => String(a || '').replace(/\s+/g, '').toLowerCase() ===
 // side_gate_access is varchar(200); the other note fields are text.
 const PROPERTY_ACCESS_NOTE_LIMITS = { side_gate_access: 200 };
 const noteWords = (text) => String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
-// A note is already there only as a whole line ("[bar]"-style tags aside):
-// "Park on street" is new next to "Do not park on street".
+// A note is already there only when it is the current (first) line, "[bar]"-
+// style tags aside: an older line that becomes current again is added back
+// on top, and "Park on street" is new next to "Do not park on street".
 function noteHas(had, add) {
-  const want = noteWords(add).replace(/[.\s]+$/, '');
-  return String(had || '').split('\n')
-    .some((line) => noteWords(line.replace(/^\s*\[[^\]]*\]\s*/, '')).replace(/[.\s]+$/, '') === want);
+  const plain = (line) => noteWords(String(line || '').replace(/^\s*\[[^\]]*\]\s*/, '')).replace(/[.\s]+$/, '');
+  return plain(String(had || '').split('\n')[0]) === plain(add);
 }
 
 // Is this code the community gate code the stop card already shows? Only the
@@ -2232,14 +2232,18 @@ async function planPropertyAccess(conn, customerId, requested, { lock = false } 
     updates.property_gate_code = null;
     kept.push('property_gate_code: cleared; the code on file there is the community gate code');
   }
-  return { updates, kept };
+  return { updates, kept, current };
 }
 
-// One hash of the full plan (keys in any order). The preview carries only
-// this hash and the new lines, never the stored notes: those can hold codes
-// and phone numbers, and the preview goes back to the model.
-const planHash = (o) => require('crypto').createHash('sha256')
-  .update(JSON.stringify(Object.keys(o || {}).sort().map((k) => [k, o[k] ?? null]))).digest('hex');
+// A keyed fingerprint of the plan AND of the stored values it replaces (keys
+// in any order). It is keyed with the server secret, so the model, which sees
+// the preview, cannot test guesses of a stored code against it; and it covers
+// the before-values, so a field another writer changed after the card was
+// shown makes the confirmed run refuse instead of overwriting it.
+const PLAN_KEY = process.env.JWT_SECRET || require('crypto').randomBytes(32).toString('hex');
+const planHash = (updates, current = {}) => require('crypto').createHmac('sha256', PLAN_KEY)
+  .update(JSON.stringify(Object.keys(updates || {}).sort().map((k) => [k, updates[k] ?? null, current[k] ?? null])))
+  .digest('hex');
 // What the preview shows: a note field as the line it adds, not the whole note.
 function previewOfPlan(updates, requested) {
   const out = { ...updates };
@@ -2272,7 +2276,7 @@ async function updatePropertyAccess(input) {
       customer_id: customerId,
       customer_name: customerName,
       would_update: previewOfPlan(plan.updates, requested),
-      plan_hash: planHash(plan.updates),
+      plan_hash: planHash(plan.updates, plan.current),
       ...(plan.kept.length ? { kept: plan.kept } : {}),
       note: 'PREVIEW ONLY — nothing was saved. These go on the property profile and show as labeled alerts on the tech\'s stop card. Notes are added as a new first line, never written over. After the operator approves, this commits via the confirmation card.',
     };
@@ -2288,7 +2292,7 @@ async function updatePropertyAccess(input) {
       const plan = await planPropertyAccess(trx, customerId, requested, { lock: true });
       // The card the operator approved pinned its plan; a different plan under
       // the lock (another writer got in between) is refused, not done.
-      if (input._ib_property_plan_hash && input._ib_property_plan_hash !== planHash(plan.updates)) {
+      if (input._ib_property_plan_hash && input._ib_property_plan_hash !== planHash(plan.updates, plan.current)) {
         const err = new Error('Property access changed since this action was prepared. Review a fresh proposal.');
         err.previewChanged = true;
         throw err;
