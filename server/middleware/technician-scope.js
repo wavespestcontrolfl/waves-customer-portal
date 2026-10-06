@@ -48,6 +48,9 @@ const TECHNICIAN_ALLOW_LIST = [
   // The dispatch facade's job list only (the route pins a technician to their
   // own visits); the route board and insights are admin-only.
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/dispatch\/jobs$/ },
+  // Access codes of one assigned visit (owner 2026-10-05); the route pins the
+  // technician to their own visit. Every other access-codes route is admin-only.
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/access-codes\/visits\/[^/]+$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/visit-closeouts(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/services(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/tech\/line(\/.*)?$/ },

@@ -5,7 +5,7 @@ require('../config/load-env')();
 
 const { parseArgs } = require('node:util');
 const db = require('../models/db');
-const protocols = require('../config/protocols.json');
+const { lawnProtocols } = require('../services/lawn-program');
 const { LAWN_MATERIAL_BUDGETS, MATERIAL_REFERENCE_SQFT } = require('@waves/lawn-cost-floor');
 const { unitDefinition } = require('../services/inventory-units');
 const { convertToOz, unitPriceBreakdown } = require('../services/product-costing');
@@ -16,6 +16,9 @@ const {
   parseVisitNutrientTargets,
   resolveProtocolItems,
   summarizeMaterialCost,
+  loadV13RowsForMonth,
+  v13RateOptions,
+  v13RowCalculates,
 } = require('../services/waveguard-plan-engine');
 
 const DEFAULT_LAWN_SQFT = Number(process.env.AUDIT_LAWN_SQFT || 10000);
@@ -78,17 +81,36 @@ async function getProtocolProducts() {
   }));
 }
 
-function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DEFAULT_LAWN_SQFT }) {
+// GATE_LAWN_V13: the staged v13 protocol's rows for every track and month, keyed
+// 'track|Mon' to a Map by catalog id; empty with the gate off. The audit prices
+// each line with the same stated rate or nutrient-target derivation the plan
+// uses, never the catalog default. Throws if the gate is on and a track has no
+// staged v13 protocol: a cost report for a different treatment plan is worse
+// than none.
+async function loadV13Rows(lawn = lawnProtocols()) {
+  const rows = new Map();
+  for (const [trackKey, track] of Object.entries(lawn || {})) {
+    for (const visit of track.visits || []) {
+      rows.set(`${trackKey}|${visit.month}`, await loadV13RowsForMonth(db, trackKey, visit.month));
+    }
+  }
+  return rows;
+}
+
+function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DEFAULT_LAWN_SQFT, v13Rows = new Map() }) {
+  const protocolRows = v13Rows.get(`${trackKey}|${visit.month}`);
+  const exactName = track?.exact_catalog_names === true;
   const lines = [
-    ...parseProtocolLines(visit.primary, 'base'),
-    ...parseProtocolLines(visit.secondary, 'conditional'),
+    ...parseProtocolLines(visit.primary, 'base', { exactName }),
+    ...parseProtocolLines(visit.secondary, 'conditional', { exactName }),
   ];
   const nutrientTargets = parseVisitNutrientTargets(visit.notes);
   const items = resolveProtocolItems(lines, products, options, {
     profile: { track_key: trackKey, lawn_sqft: lawnSqft },
     service: { waveguard_tier: options.plan || 'Platinum' },
   }).map((item) => {
-    const areaFactor = effectiveAreaFactor(item, {
+    const row = item.product ? protocolRows?.get(String(item.product.id)) : null;
+    const areaFactor = effectiveAreaFactor(row?.gates?.sunnyTurfOnly ? { ...item, sunnyTurfOnly: true } : item, {
       plan: options.plan || 'Platinum',
       weedPressure: options.weedPressure,
       conditionFlags: options.conditionFlags,
@@ -98,12 +120,14 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
     });
     return {
       ...item,
-      mix: item.product ? calculateProductAmount({
+      // A spot or label-rate v13 row has no area or rate to price: no amount, as in the plan.
+      mix: item.product && (!row || v13RowCalculates(row)) ? calculateProductAmount({
         product: item.product,
         lawnSqft,
         carrierGalPer1000: DEFAULT_CARRIER_GAL_PER_1000,
         areaFactor,
         ...nutrientTargets,
+        ...v13RateOptions(row),
       }) : null,
     };
   });
@@ -197,7 +221,7 @@ function analyzeVisit({ trackKey, track, visit, products, options, lawnSqft = DE
 // This is the existing exposure audit's allowance normalization, not a new
 // scheduler: enhanced flags 12 windows while the sold cadence is 9 applications.
 // Keep the catalog-selected subtotal separate from unselected conditional work.
-function buildCadenceReport(products, lawn = protocols.lawn) {
+function buildCadenceReport(products, lawn = lawnProtocols(), v13Rows = new Map()) {
   const rows = [];
   for (const trackKey of new Set([...Object.keys(lawn), ...Object.keys(LAWN_MATERIAL_BUDGETS)])) {
     const track = lawn[trackKey] || {};
@@ -206,7 +230,7 @@ function buildCadenceReport(products, lawn = protocols.lawn) {
     ]) {
       const visits = (track.visits || []).filter((visit) => visit.tiers?.[protocolTier]);
       const results = visits.map((visit) => analyzeVisit({
-        trackKey, track, visit, products, lawnSqft: MATERIAL_REFERENCE_SQFT,
+        trackKey, track, visit, products, lawnSqft: MATERIAL_REFERENCE_SQFT, v13Rows,
         options: { plan: tier, includePremiumOnly: tier === 'premium', isFirstYear: true, weedPressure: 'normal' },
       }));
       const issues = results.flatMap((result) => [
@@ -348,8 +372,9 @@ function printResults(results) {
 async function main() {
   const { values } = parseArgs({ options: { cadences: { type: 'boolean' }, json: { type: 'boolean' } } });
   const products = await getProtocolProducts();
+  const v13Rows = await loadV13Rows();
   if (values.cadences) {
-    const report = buildCadenceReport(products);
+    const report = buildCadenceReport(products, lawnProtocols(), v13Rows);
     if (values.json) console.log(JSON.stringify(report, null, 2));
     else {
       console.log(report.basis);
@@ -367,12 +392,12 @@ async function main() {
     isFirstYear: true,
     weedPressure: 'normal',
   };
-  const tracks = Object.entries(protocols.lawn || {});
+  const tracks = Object.entries(lawnProtocols() || {});
   const results = [];
 
   for (const [trackKey, track] of tracks) {
     for (const visit of track.visits || []) {
-      results.push(analyzeVisit({ trackKey, track, visit, products, options }));
+      results.push(analyzeVisit({ trackKey, track, visit, products, options, v13Rows }));
     }
   }
 
@@ -390,4 +415,4 @@ if (require.main === module) main()
   })
   .finally(() => db.destroy());
 
-module.exports = { analyzeVisit, buildCadenceReport };
+module.exports = { analyzeVisit, buildCadenceReport, loadV13Rows };

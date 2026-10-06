@@ -26,7 +26,7 @@ export default function TreeShrubReportV2Section({ data, print = false }) {
   return (
     <PrintContext.Provider value={print}>
       <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>
-        {data.snapshot ? <TreeShrubSnapshotHero snapshot={data.snapshot} /> : null}
+        {data.snapshot ? <TreeShrubSnapshotHero snapshot={data.snapshot} techParagraph={data.techParagraph} /> : null}
         {data.insights?.length ? <TreeShrubInsightCards insights={data.insights} /> : null}
         {data.diagnosis?.length ? <TreeShrubVisualDiagnosisBars categories={data.diagnosis} /> : null}
         {data.plantGroups?.length ? <PlantGroupStatusCards plantGroups={data.plantGroups} /> : null}

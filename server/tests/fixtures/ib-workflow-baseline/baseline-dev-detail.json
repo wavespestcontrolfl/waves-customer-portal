@@ -573,45 +573,15 @@
       "contract_calls": 0
     },
     "W5-dev-06": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "commercial_refusal_not_specific",
-      "failures": [
-        {
-          "point": "tool_result",
-          "code": "commercial_refusal_not_specific",
-          "detail": "create_appointment answered {\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"014a17e7-523e-4708-9e92-9832efe67f8b\",\"scheduled_date\":\"2026-10-12\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":\"8:00 AM\",\"price\":149; expected message /commercial/i"
-        },
-        {
-          "point": "proposal",
-          "code": "commercial_booking_carded",
-          "detail": "1 card(s) offered to book a commercial account: [{\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"014a17e7-523e-4708-9e92-9832efe67f8b\",\"scheduled_date\":\"2026-10-12\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":"
-        },
-        {
-          "point": "domain_rule",
-          "code": "commercial_account_booked_on_price",
-          "detail": "1 visit(s) booked for a commercial account; card 1; confirm 200"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_sent_a_text",
-          "detail": "1 SMS provider submissions for a case whose manifest says sends 0"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_outbound_row_added",
-          "detail": "a case whose manifest says sends 0: outbound sms rows 0 -> 0, messaging audit rows 0 -> 1"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 10,
-        "verified_completion_ms": 1655
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 949
       },
-      "notes": [
-        "undeclared create_appointment allowed: the naive booking of a commercial account on a stated price, which the domain must stop"
-      ],
+      "notes": [],
       "strength": null,
-      "contract_calls": 0
+      "contract_calls": 1
     },
     "W5-dev-07": {
       "outcome": "pass",
@@ -636,29 +606,11 @@
       "contract_calls": 3
     },
     "W5-dev-09": {
-      "outcome": "fail",
-      "point": "domain_rule",
-      "code": "taken_slot_double_booked",
-      "failures": [
-        {
-          "point": "domain_rule",
-          "code": "taken_slot_double_booked",
-          "detail": "the confirm 200 {\"success\":true,\"outcome\":\"partially_completed\",\"tool\":\"create_appointment\",\"result\":{\"success\":true,\"warning\":\"Heads up: this booking overlaps another appointment on the schedule on 2026-10-07 — both are kept on the cal; 1 row(s) saved on the taken slot"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_sent_a_text",
-          "detail": "1 SMS provider submissions for a case whose manifest says sends 0"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_outbound_row_added",
-          "detail": "a case whose manifest says sends 0: outbound sms rows 0 -> 0, messaging audit rows 0 -> 1"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
         "first_tool_result_ms": 14,
-        "verified_completion_ms": 1675
+        "verified_completion_ms": 1553
       },
       "notes": [],
       "strength": null,
@@ -1547,33 +1499,14 @@
       "contract_calls": 0
     },
     "W10-dev-06": {
-      "outcome": "fail",
-      "point": "target_resolution",
-      "code": "product_target_not_established",
-      "failures": [
-        {
-          "point": "target_resolution",
-          "code": "product_target_not_established",
-          "detail": "\"Received 2 of the Talak.\" names the product but the route asked \"Choose the exact product or restock request for this action.\""
-        },
-        {
-          "point": "tool_result",
-          "code": "missing_unit_not_clarified",
-          "detail": "adjust_stock answered {\"executed\":true,\"outcome\":\"completed\",\"result\":{\"success\":true,\"state\":\"completed\",\"product\":{\"id\":\"9b347fd7-48a3-4319-8cb0-9a29bc131e58\",\"name\":\"Talak\",\"category\":\"insecticide\",\"formulation\":\"SC\",\"sku\":\"IBWF-9b347fd7\",; expected message /unit/i"
-        },
-        {
-          "point": "side_effect",
-          "code": "stock_changed_without_a_unit",
-          "detail": "stock or ledger changed"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 14,
-        "verified_completion_ms": 35
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 18
       },
       "notes": [
-        "adjust_stock: target_clarification_required: Choose the exact product or restock request for this action.",
-        "undeclared adjust_stock allowed: the naive restock with no unit, which the writer must clarify",
+        "adjust_stock: unit_required: The unit is missing, so no stock was changed. Talak is counted in fl_oz (container size 96 fl oz). Ask the operator one short question about",
         "undeclared adjust_stock allowed: the naive restock with no unit, which the writer must clarify"
       ],
       "strength": null,

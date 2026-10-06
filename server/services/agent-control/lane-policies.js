@@ -198,6 +198,8 @@ const LANE_RUNTIME = {
   // SMS scheduling decide step (GATE_SMS_SCHEDULING_DECIDE, dark): shadow only — reads a customer's reply to a
   // recorded offer and records what it would book in sms_offer_decisions. Never a send, move or booking; a miss
   // records an error row and the text stays with staff. No queue, no fallback provider.
+  // report_ask: a public, token-scoped customer Q&A; the answer reaches the customer with no human step (a miss answers with the fixed-rule text), screened by the report copy guards.
+  report_ask: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3', expected_duration_ms: 8_000, heartbeat_interval_ms: 4_000, stall_after_ms: 16_000, hard_timeout_ms: 20_000, no_progress_after_ms: 16_000 },
   sms_scheduling_decide: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0' },
   // TypeSafe Jev typed decisions (GATE_TYPED_DECISIONS, dark): shadow-only yes/no/choice answers recorded for review,
   // never customer-visible and never a send. A miss leaves each caller on its existing path; no queue, no fallback provider.
@@ -261,6 +263,7 @@ const LANE_RUNTIME = {
   // M3 (Codex r21): buildTreatmentNarrative runs on report read with no staff step and caches the copy in service_report_ai_summaries.
   treatment_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M3' },
   lawn_tech_paragraph: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
+  ts_tech_paragraph: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },
   rodent_narrative: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report' },
   // M2 (Codex r20): both admin-projects AI-write endpoints return copy into the editable Recommendations field; delivery is a separate admin action.
   project_report: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'service_report', maturity: 'M2' },

@@ -923,7 +923,7 @@ describe('on-site contact opt-in ask', () => {
     // unreadable visit is NOT read as gone: 'unknown'.
     expect(gate).toContain("await require('./recipient-optin').visitAskState(svc.id, customerId)");
     expect(gate).toContain(".then((r) => r.state).catch(() => 'unknown')");
-    const block = src.slice(site, site + 6000);
+    const block = src.slice(site, site + 6400);
     // The ask quotes the booked visit's address.
     expect(block).toContain("const visitAddress = [svc.service_address_line1, svc.service_address_city].filter(Boolean).join(', ');");
     expect(block).toContain('propertyAddress: visitAddress ||');
@@ -939,7 +939,10 @@ describe('on-site contact opt-in ask', () => {
     expect(block).toContain("onSiteAskVisitState === 'wait' ? 'not_sent:awaiting_office_review' : 'not_sent:visit_check_retry'");
     expect(block).toContain("const requested = typeof outcome === 'number' ? outcome : Number(outcome?.requested || 0);");
     expect(block).toContain("return markOptinAsk(entry, requested > 0 ? 'sent' : 'not_sent:dispatch_failed');");
-    // No caller demotion and no booking marker in this PR (owner split 10-01).
+    // An already-confirmed phone gets no new ask: its follow-up is re-armed on this visit
+    // (the demotion itself lives in recipient-optin, driven by the row's visit_id; no
+    // booking marker on the customer row).
+    expect(block).toContain('rearmOnSiteFollowUp(customerId, phoneKey, svc.id)');
     expect(src).not.toContain('appointment_notify_primary: false');
     expect(src).not.toContain('demote_primary_on_optin');
     // The persistence loop no longer claims for the on-site path.

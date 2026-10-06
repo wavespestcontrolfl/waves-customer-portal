@@ -42,10 +42,33 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(source).toContain('post_install do |installer|\\n" + hook + "end');
     // A missing Homebrew wrapper must not end the script under pipefail.
     expect(source).toMatch(/POD_GEM_HOME="\$\(.*\|\| true\)"/);
+    // No GNU-only readlink -f as the first choice; CocoaPods' own Ruby runs the steps.
+    expect(source).toContain('realpath "$POD_BIN"');
+    expect(source).toContain('GEM_HOME="$POD_GEM_HOME" "$POD_RUBY" "$@"');
+    // A gem-installed CocoaPods (no Homebrew GEM_HOME) still runs the xcodeproj steps.
+    expect(source).not.toContain('if [ -n "$POD_GEM_HOME" ] && (cd ios/App');
     // The manual add step prints only when the automatic attach failed.
     expect(source).toContain('if [ "${PRIVACY_ATTACHED:-0}" != "1" ]; then');
     // The floor is raised before `npx cap sync ios`, which runs pod install.
     expect(source.indexOf('IOS_MIN="15.0"')).toBeLessThan(source.indexOf('\nnpx cap sync ios'));
+  });
+
+  test('bootstrap-ios adopts the UIScene life cycle that iOS 27 SDK builds require', () => {
+    const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-ios.sh'), 'utf8');
+    expect(source).toContain('class SceneDelegate: UIResponder, UIWindowSceneDelegate');
+    expect(source).toContain('ApplicationDelegateProxy.shared.application(UIApplication.shared, open: context.url');
+    expect(source).toContain('$(PRODUCT_MODULE_NAME).SceneDelegate');
+    expect(source).toContain('UISceneStoryboardFile string Main');
+    // A push tapped while the app was closed reaches Capacitor's push handler.
+    expect(source).toContain('connectionOptions.notificationResponse');
+    expect(source).toContain('router.userNotificationCenter(center, didReceive: response');
+    // The tap is kept until the handler exists: no attempt limit.
+    expect(source).toContain('private var pendingNotificationResponse: UNNotificationResponse?');
+    expect(source).not.toContain('attemptsLeft');
+    // CocoaPods' embed-frameworks script cannot run inside Xcode's user-script sandbox.
+    expect(source).toContain('s/ENABLE_USER_SCRIPT_SANDBOXING = YES;/ENABLE_USER_SCRIPT_SANDBOXING = NO;/g');
+    // The manifest is written only after the delegate is in the target.
+    expect(source.indexOf('target.source_build_phase')).toBeLessThan(source.indexOf('Add $SCENE_KEY dict'));
   });
 
   test('bootstrap-ios installs the tracked icon into a clean catalog repeatably', () => {

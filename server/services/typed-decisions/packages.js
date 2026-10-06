@@ -20,6 +20,10 @@
  * question answers a 0..1 probability that the statement is true.
  */
 const crypto = require('crypto');
+// call_judge.v3's appointment contract, FROZEN as asked (Codex #5994 r3): a
+// snapshot of auditAppointmentContract() taken when v3 was published. When the
+// production rules change, add call_judge.v4 with a new snapshot; never edit this file.
+const CALL_JUDGE_V3_APPOINTMENT_CONTRACT = require('fs').readFileSync(require('path').join(__dirname, 'call-judge-v3-appointment-contract.txt'), 'utf8');
 
 function deepFreeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -59,6 +63,21 @@ const CALL_JUDGE = {
     appointment_agreed: noul('Did both parties agree on a specific appointment (a date or day and a time or window)?'),
     quote_promised: noul('Did Waves staff promise to send or follow up with a quote/estimate/price later?'),
     complaint: noul('Does the caller express a complaint or dissatisfaction with Waves service?'),
+  },
+};
+
+// v3 (Codex #5994): appointment_agreed asks the production extractor's own
+// appointment_confirmed rules (prompts/appointment-confirmed-rules.js, frozen
+// as a snapshot below), the same text the Deep auditor grades by, so every call_judge answer, the auditor and
+// production share one label. v2 asked a looser question ("a day and a time or
+// window"); it stays registered so rows answered under it still resolve.
+const CALL_JUDGE_V3 = {
+  ...CALL_JUDGE,
+  id: 'call_judge.v3',
+  version: 3,
+  questions: {
+    ...CALL_JUDGE.questions,
+    appointment_agreed: noul(`Would the production call extractor set appointment_confirmed to true for this call under its own rules below? (The preferred_date_time and confirmed_start_at details do not apply.)\n${CALL_JUDGE_V3_APPOINTMENT_CONTRACT}`),
   },
 };
 
@@ -252,6 +271,7 @@ const PHOTO_PRIVACY = {
 
 const PACKAGES = deepFreeze({
   [CALL_JUDGE.id]: CALL_JUDGE,
+  [CALL_JUDGE_V3.id]: CALL_JUDGE_V3,
   [CALL_GATE_CHECKS.id]: CALL_GATE_CHECKS,
   [SMS_COURTESY.id]: SMS_COURTESY,
   [SMS_RESCHEDULE.id]: SMS_RESCHEDULE,

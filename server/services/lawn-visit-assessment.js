@@ -21,7 +21,10 @@ const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 // prompt plus the LIGHT block, and a light read on every photo's quality row, its
 // own prompt version). Off = the prompt, schema, stored run and return shape are
 // exactly what they were.
-async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false, lighting = lawnLightingLive() } = {}) {
+// timeoutMs (optional): the caller's remaining wall-clock budget for both legs
+// together (floored at a second: this is the visit's first and only read, so
+// it always runs); absent, the dispatcher's default chain budget applies.
+async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, shotList = false, lighting = lawnLightingLive(), timeoutMs } = {}) {
   const { error, zones } = validateVisitPhotos(photos, { shotList });
   if (error) throw Object.assign(new Error(error), { code: 'INVALID_VISIT_PHOTOS', statusCode: 400 });
   const context = visionContext || {};
@@ -41,11 +44,17 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
     jsonSchema: prompt.schema,
     maxTokens: MAX_OUTPUT_TOKENS,
     ...(thinkingLevel ? { thinkingLevel } : {}),
+    ...(timeoutMs != null ? { timeoutMs: Math.max(1000, timeoutMs) } : {}),
     reasoningEffort: 'medium',
     laneId: 'lawn_visit_assessment',
     promptVersion: prompt.version,
   };
-  const outcome = await dispatchWithFallback(policy, payload, { validate: (result) => validateAssessmentJson(result, photos.length, { lighting }) });
+  const outcome = await dispatchWithFallback(policy, payload, {
+    validate: (result) => validateAssessmentJson(result, photos.length, { lighting }),
+    // Under a caller budget (POST /assess) each leg gets its share, so a
+    // stalled Gemini leaves the OpenAI backup time to answer.
+    reserveFallbackBudget: true,
+  });
   // GATE_LAWN_ASSESSMENT_REFEREE (owner ruling 2026-09-29), read at call time.
   // Off: nothing below runs and the return shape is exactly what it always was.
   const refereeOn = lawnAssessmentRefereeLive();
@@ -78,6 +87,7 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel, sh
     } else {
       ({ json: assessed, referee } = await refereeVisit({
         policy, payload, geminiJson: outcome.json, visit: { photoCount: photos.length, images, context, lighting },
+        deadline: timeoutMs != null ? started + Math.max(1000, timeoutMs) : null,
       }));
       // The model-claimed findings after a settled tie-break (pre-normalization,
       // like `raw`), so the eval measures naming discipline on the final answer.

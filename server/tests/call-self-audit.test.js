@@ -18,12 +18,12 @@ const { recordDecisions } = require('../services/typed-decisions/shadow-recorder
 const { callSubjectHash } = require('../services/typed-decisions/subject-hash');
 const { runSelfAudit, stratifySample, OUTBOUND_DIRECTION_SQL, callDirectionBlock, gateCheckBaselines, shadowVoicemails } = require('../services/call-self-audit');
 
-// Each sampled call is asked call_judge.v2 and call_gate_checks.v1; these
+// Each sampled call is asked call_judge.v3 and call_gate_checks.v1; these
 // read one package's asks, records and tally.
 const asksFor = (id) => askPackage.mock.calls.filter((c) => c[0] === id);
 const recordsFor = (id) => recordDecisions.mock.calls.filter(([a]) => a.pkg.id === id);
-const judgeAsks = () => asksFor('call_judge.v2');
-const judgeRecords = () => recordsFor('call_judge.v2');
+const judgeAsks = () => asksFor('call_judge.v3');
+const judgeRecords = () => recordsFor('call_judge.v3');
 const judgeTally = ({ gateChecks, ...rest }) => rest;
 
 const SAMPLE = (over = {}) => ({
@@ -198,7 +198,7 @@ describe('Jev shadow', () => {
     expect(judgeTally(res.jev)).toEqual({ asked: 0, recorded: 0, failed: 0 });
   });
 
-  test('gate on: asks call_judge.v2 with the transcript and direction, records both baselines and the transcript digest', async () => {
+  test('gate on: asks call_judge.v3 with the transcript and direction, records both baselines and the transcript digest', async () => {
     typedDecisionsLive.mockReturnValue(true);
     const prodCall = SAMPLE({ id: 'call-9', direction: 'inbound', duration_seconds: 88, ai_extraction: JSON.stringify({ is_lead: true, appointment_confirmed: false, quote_promised: false }) });
     mockDb({ calls: [prodCall] });
@@ -206,7 +206,7 @@ describe('Jev shadow', () => {
 
     expect(judgeAsks()).toHaveLength(1);
     const [packageId, state] = judgeAsks()[0];
-    expect(packageId).toBe('call_judge.v2');
+    expect(packageId).toBe('call_judge.v3');
     expect(Object.keys(state).sort()).toEqual(['call_direction', 'duration_seconds', 'transcript']);
     expect(state.duration_seconds).toBe(88);
     expect(state.call_direction).toMatch(/^INBOUND/);
@@ -216,7 +216,7 @@ describe('Jev shadow', () => {
     const args = judgeRecords()[0][0];
     expect(args).toMatchObject({ capability: 'call_judge', subjectType: 'call_log', subjectId: 'call-9', result: JEV_OK, subjectHash: callSubjectHash(prodCall.transcription) });
     expect(args).not.toHaveProperty('outcomeEvidence');
-    expect(args.pkg.id).toBe('call_judge.v2');
+    expect(args.pkg.id).toBe('call_judge.v3');
     // production and deep judge side by side for the five shared fields
     expect(args.baselines.appointment_agreed).toEqual({ production: false, deep_judge: true });
     expect(args.baselines.is_lead).toEqual({ production: true, deep_judge: true });
@@ -284,7 +284,7 @@ describe('Clef shadow leg (second provider)', () => {
     mockDb({ calls: [SAMPLE()] });
     const res = await runSelfAudit({ createMessage: OK_DEEP });
     expect(judgeAsks()).toHaveLength(2);
-    expect(judgeAsks()[0][0]).toBe('call_judge.v2');
+    expect(judgeAsks()[0][0]).toBe('call_judge.v3');
     expect(judgeAsks()[0][1]).toEqual(judgeAsks()[1][1]); // identical state
     expect(judgeAsks()[1][2]).toEqual({ provider: 'cloudflare' });
     expect(judgeRecords()).toHaveLength(2);
@@ -365,7 +365,7 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     mockDb({ calls: [long] });
     const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
     expect(asksFor('call_gate_checks.v1')).toHaveLength(0);
-    expect(asksFor('call_judge.v2')).toHaveLength(1); // call_judge unchanged
+    expect(asksFor('call_judge.v3')).toHaveLength(1); // call_judge unchanged
     expect(res.jev.gateChecks).toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 1 });
   });
 
@@ -379,7 +379,7 @@ describe('dark-gate checks (call_gate_checks.v1: each gate\'s own decision besid
     mockDb({ calls: [call], promiseCallIds: ['call-7'] });
     const res = await runSelfAudit({ createMessage: async () => ({ content: [{ type: 'text', text: '{}' }] }) });
 
-    const [judge] = asksFor('call_judge.v2');
+    const [judge] = asksFor('call_judge.v3');
     const [gates] = asksFor('call_gate_checks.v1');
     expect(gates[1]).toEqual(judge[1]); // identical call state
     const [args] = recordsFor('call_gate_checks.v1')[0];
@@ -633,5 +633,35 @@ describe('voicemail triage evidence (voicemail.v1: every inbound voicemail besid
   test('a read failure is logged, never thrown', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(shadowVoicemails()).resolves.toEqual({ asked: 0, recorded: 0, failed: 0, skippedLong: 0 });
+  });
+});
+
+describe('AUDIT_PROMPT appointment definition', () => {
+  // The auditor grades production's appointment_confirmed, so it reads the
+  // extractor's own rule text, not a paraphrase (10-05 #5994: a paraphrase
+  // counted promised callbacks and existing-visit ETAs as appointments).
+  const { AUDIT_PROMPT } = require('../services/call-self-audit');
+  const { auditAppointmentContract, EXISTING_APPOINTMENT_RULE, RESCHEDULE_RULE } = require('../services/prompts/appointment-confirmed-rules');
+  const { PACKAGES } = require('../services/typed-decisions/packages');
+  test('carries the production appointment_confirmed rules verbatim', () => {
+    expect(AUDIT_PROMPT).toContain(auditAppointmentContract('the date the call took place'));
+  });
+  test('the typed judge asks the same contract (call_judge.v3)', () => {
+    // v3 is a frozen snapshot. If this fails, the production rules changed:
+    // publish call_judge.v4 with a new snapshot and point the self-audit at it.
+    expect(PACKAGES['call_judge.v3'].questions.appointment_agreed.instructions)
+      .toContain(auditAppointmentContract('the date the call took place'));
+  });
+  test('the extractor renders the shared rules, not its own copy', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain('${appointmentConfirmedRules(callDateET)}');
+    expect(src).not.toContain('- Only set appointment_confirmed to true if BOTH');
+  });
+  test('the contract keeps an existing visit out, with the V2 extractor\'s own lines', () => {
+    const v2 = require('../services/prompts/call-extraction-v1').buildExtractionPrompt('', '', '2026-10-05');
+    expect(v2).toContain(EXISTING_APPOINTMENT_RULE);
+    expect(v2).toContain(RESCHEDULE_RULE);
+    expect(AUDIT_PROMPT).toContain(EXISTING_APPOINTMENT_RULE);
+    expect(AUDIT_PROMPT).toContain(RESCHEDULE_RULE);
   });
 });

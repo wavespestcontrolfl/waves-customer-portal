@@ -16,6 +16,7 @@ Allow-list buckets: session, own-visits, own-time, own-texts, promises, document
 
 | Method | Path | Router |
 |---|---|---|
+| GET | `/api/admin/access-codes/visits/:visitId` | admin-access-codes |
 | POST | `/api/admin/auth/change-password` | admin-auth |
 | GET | `/api/admin/auth/me` | admin-auth |
 | GET | `/api/admin/call-recordings/blocked` | admin-call-recordings |

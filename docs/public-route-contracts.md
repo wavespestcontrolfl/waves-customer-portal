@@ -77,6 +77,20 @@ fallback until an approved manual primary-property change freezes it. Contact
 recipients, third-party Bill-To authority, amounts, and permanent receipt tokens
 are unchanged; snapshots remain authoritative when the rollout gate is off.
 
+Ask Waves AI answers (owner 2026-10-05): `POST /api/reports/:token/ask` keeps
+its request (`{ question }`, 500 characters), its reply (`{ answer }`), its
+headers, its limiter and its recorded event (`report_question_asked` with
+`question_length` and `topic` only). `GATE_REPORT_ASK_AI` (dark, off unless
+exactly `true`, read at call time) changes only who writes `answer`: Claude
+Sonnet 5.5 from a fact sheet of the report (no rates, totals, EPA numbers or
+per-product target pests; the question and all free text scrubbed of phones,
+emails, codes and street addresses, but a customer name written in prose is
+not detectable), screened, with the fixed-rule answer as the reply on
+any model miss
+(`server/services/service-report/report-ask-ai.js`). The AI answers Pest reports only (`data.serviceLine === 'pest'`). Lawn and tree & shrub reports keep the fixed-rule answer, which honors their aftercare (watering holds, water-in tasks). On pest reports the AI answers only the rule router's `applied`, `results`, `findings`, `summary`, `next_visit` and `unrouted` topics. The `reentry`, `watering` and `next_steps` topics keep the fixed-rule answer, which states recorded instructions word for word.
+
+Symptom and exposure questions (behavior change to the public route, owner review round 5, 2026-10-05): a question that reports a symptom or an exposure ("the spray made me dizzy", "my dog ate the bait", "got it in my eyes", "I can't breathe", a rash) gets one fixed `answer` on every report (pest, lawn, tree & shrub) **whether `GATE_REPORT_ASK_AI` is on or off**, and never reaches a model. The fixed-rule answers had no medical handling ("the spray made me dizzy" answered "No product applications were recorded"). The answer: call Poison Control at 1-800-222-1222 (free, confidential, 24/7), call 911 in a medical emergency, call a veterinarian or emergency animal hospital for a pet, then text or call Waves at (941) 297-5749. A deterministic cue list (`medicalExposureAnswer`, `report-ask-ai.js`) decides; the reply shape, the recorded event and its `topic` are unchanged.
+
 "From the Waves blog" (owner "ok go" 2026-10-01): on the service-report
 payload (`/api/reports/:token/data` and the renders that share
 `buildReportV1Data`), `GATE_REPORT_BLOG_POST` (dark, off unless exactly
@@ -145,7 +159,7 @@ when the card is present.
 `pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
 your treatment" card is gone from the pest report (live page and PDF) for good;
 `data.pestReportV2.expectations` carries at most `spiders` and `whatToExpect`,
-and the pest PDF key suffix stays `-pex3`. Already-frozen
+and the pest PDF key suffix is `-pex4` (2026-10-05: the Gentrol growth regulator line gained its label's 4-month duration). Already-frozen
 `structured_notes.pestWeekWeather` values are left in place, unread.
 The same day the live page changed two client-only lines from fields it
 already receives: "Today's result" on a routine Pest V2 visit (the
@@ -326,6 +340,46 @@ render (gate on or off, every service line) — `report-data.js`'s
 `expectationFactsOut` out-param that is never attached to the object the
 function returns, the same "server-internal, never on `data`" contract
 `completedProtocolActionLabels` uses.
+
+Tree & Shrub "From your technician" paragraph (owner 2026-10-05, go-ahead; fixed
+sentences; `GATE_TS_TECH_PARAGRAPH` — dark, strict `'true'`, read at call time,
+effective only while `GATE_TS_TECH_FINDINGS_COPY` is also live; off leaves the
+tree/shrub payload, the render, the PDF and its cache signature unchanged, key for
+key, with no model call and no read): on the tree/shrub service-report payload
+(`/api/reports/:token/data` and the PDF) the one new optional key is
+`reportV2.techParagraph`, a string made ONLY of the sentences in the code constant
+`TS_SENTENCES` (`tree-shrub-tech-paragraph.js`), in this fixed order: "Our technician
+saw {items}." (up to 3 closed-list conditions, each optionally "on the {plant}"),
+"There may be early signs of {labels}; we will keep an eye on it." (low-confidence
+kept photo findings the note does not cover, at most 2), "Our technician confirmed
+signs of {labels}." (findings the technician confirmed), "Today we applied
+{products}." (product display names only) and "Your landscape looked {excellent|good}
+today." (only when nothing else applies, the visit has NO technician note, and the
+technician rated the landscape Excellent or Good). No model text is ever printed. It is written ONCE, at completion
+(`freezeTreeShrubTechParagraph`, `tree-shrub-tech-paragraph-gate.js`), with at most
+one model call (lane `ts_tech_paragraph`, `TEXT_POLICIES.report`, one 15-second
+deadline across the whole step) that only EXTRACTS closed-list `{ condition, plant }`
+ids from the technician's note, each with `quote` (the technician's exact words) and
+a `seenToday` judgment. The model judges the language and the code only verifies
+(owner ruling 2026-10-05, the 2026-10-03 portal chat pattern): an item stays only
+when `seenToday` is true and the quote is word for word part of one note sentence
+that names the condition and no palm-banned term; the plant stays only when the
+quote names it. There is no sighting, negation or purpose word list; a failing item
+drops. Inputs: the note,
+the applied products' names, the kept photo findings (a finding the technician hid
+or rewrote never enters) and the technician's landscape rating. The seasonal watch
+list (`GATE_TS_WATCH_LIST`), the last visit, the report headline and a product's
+ingredient, targets and method are NOT inputs. The build used for the gather
+(`skipNarrativeGeneration`) never dispatches the treatment-narrative lane. The text
+freezes first-writer-wins under `structured_notes.treeShrubTechParagraph[assessmentId]`
+as `{ text, slots }`; a render only reads it from the record the build already
+loaded, and prints it only when the text equals the render of its slots under the
+current templates and passes the palm rules and the customer-copy screen. The key is
+absent when no sentence applied, the assessment is missing, the step timed out, or the
+stored entry fails the read-time check. The web report prints it under "What we
+applied today" as "From your technician"; the PDF prints the same text under the same
+label. The PDF cache signature gains `:tp=<hash of the text>` only while the gate is
+live AND a whole frozen entry exists; a failed lookup stamps a one-off sentinel.
 
 Tree & Shrub technician findings in the report (owner ruling 2026-10-02,
 lawn parity, `GATE_TS_TECH_FINDINGS_COPY` — dark, off unless exactly `'true'`,
@@ -5570,8 +5624,9 @@ content. Optional body field `intent` — one of `findings` / `treatment` /
 `recommendations` / `next_visit`, sent by the shipped prompt chips — selects
 that answer directly; any other value is ignored and the question is
 keyword-routed as before, so older clients are unaffected. The service-report
-`/api/reports/:token/ask` (deterministic `report-assistant.js` answers, no
-LLM) writes one `service_report_events` row, `report_question_asked`, with
+`/api/reports/:token/ask` (deterministic `report-assistant.js` answers; with
+`GATE_REPORT_ASK_AI` on, a model-written answer for the topics and lines
+described under that gate, with the deterministic answer as fallback) writes one `service_report_events` row, `report_question_asked`, with
 metadata `{ question_length, topic }` — never the question text or the answer
 (owner ruling 2026-09-28: topic only). `topic` is the answer family the
 question was routed to, one of `REPORT_QUESTION_TOPICS` (`reentry`, `watering`,

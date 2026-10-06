@@ -5,7 +5,7 @@
 // keep the long form exactly as before. The technician portal is not touched.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, Outlet, Route, Routes } from 'react-router-dom';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import DispatchPageV2 from './DispatchPageV2';
@@ -25,9 +25,10 @@ vi.mock('../../components/tech/FastCompleteTreeShrubSheet', () => ({
   default: ({ service }) => <div>Tree and shrub sheet for {service.id}</div>,
 }));
 vi.mock('../../components/tech/FastCompleteLawnSheet', () => ({
-  default: ({ service, catalog, onClose, onCompleted, onFullForm, onViewDetails }) => (
+  default: ({ service, operatorId, catalog, onClose, onCompleted, onFullForm, onViewDetails }) => (
     <div>
       Lawn sheet for {service.id} (catalog {catalog.length}, type {String(service.routedServiceType)})
+      <span data-testid="lawn-operator">{operatorId}</span>
       <button type="button" onClick={() => onClose()}>Sheet close</button>
       <button type="button" onClick={() => onClose({ refresh: true })}>Sheet close refresh</button>
       <button type="button" onClick={() => onCompleted()}>Sheet completed</button>
@@ -237,5 +238,27 @@ describe('shouldOpenLawnFastComplete', () => {
     for (const serviceKey of ['lawn_care_recurring', 'lawn_care_one_time', 'lawn_pest_knockdown', 'lawn_care_per_application']) {
       expect(isLawnFastCompleteEligible(visit('a', { completionProfile: { category: 'lawn_care', serviceKey, findingsType: serviceKey.includes('one_time') ? 'one_time_lawn_treatment' : null } }))).toBe(true);
     }
+  });
+});
+
+describe('Dispatch saved-completion scope (GitHub Codex P2 on #6001)', () => {
+  it('scopes the lawn sheet\'s saved attempts to the verified session, not only the stored profile copy', async () => {
+    localStorage.removeItem('waves_admin_user');
+    vi.mocked(adminFetch).mockImplementation(async (url) => (
+      url === '/admin/dispatch/products/catalog'
+        ? { products: [] }
+        : { services: [visit('svc-lawn-scope')], technicians: [], techSummary: [], products: [], types: [] }
+    ));
+    render(
+      <MemoryRouter initialEntries={['/admin/dispatch?date=2026-09-12']}>
+        <Routes>
+          <Route path="/admin" element={<Outlet context={{ user: { id: 'staff-verified', role: 'admin' } }} />}>
+            <Route path="dispatch" element={<DispatchPageV2 activeTab="board" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: 'Open mobile svc-lawn-scope' }));
+    expect(await screen.findByTestId('lawn-operator')).toHaveTextContent('staff-verified');
   });
 });

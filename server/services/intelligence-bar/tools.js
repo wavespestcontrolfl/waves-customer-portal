@@ -2901,6 +2901,39 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   };
 }
 
+// Owner 2026-10-05: an overlap that is NEW since the card was shown (another
+// visit took the slot between proposal and Confirm) books nothing, sends
+// nothing, and refuses with preview_changed so the operator sees a fresh
+// card. An overlap that already existed when the card was built keeps the
+// 2026-08-25 / #3486 rule (staff saves never block on a conflict: warn).
+const BOOKING_NEW_OVERLAP_ERROR = 'Another visit now overlaps this time. Nothing was booked and no text was sent. Confirm the new card to book it anyway, or pick another time.';
+
+// Proposal-time twin of the locked probe in createAppointment: does another
+// visit already overlap this date and window? The route pins the answer as
+// _booking_overlap so the executor can tell an overlap that already existed
+// from one that is new. Same date/window derivation and the same
+// probeSlotOverlap as the executor; the read is not fenced (a pin, not a
+// guard — the executor re-probes under the occupancy lock). Returns
+// true/false, or null when there is no timed window to probe (the executor
+// probes nothing then either). A read error THROWS so the proposal fails
+// closed; an invalid date or window returns null (the executor refuses it).
+async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+  const dateStr = validScheduleDate(scheduledDate);
+  if (!dateStr) return null;
+  const win = parseTimeWindowStart(timeWindow);
+  if (win.error || !win.start) return null;
+  let windowEnd = deriveWindowEnd(win.start, 60);
+  if (!windowEnd) return null;
+  try {
+    ({ window_end: windowEnd } = assertAdminAppointmentWindow({ windowStart: win.start, windowEnd, durationMinutes: 60 }));
+  } catch (err) {
+    if (err?.status === 422) return null;
+    throw err;
+  }
+  const overlap = await db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
+  return overlap.length > 0;
+}
+
 async function createAppointment(input, actionContext = {}) {
   const { customer_id, scheduled_date, service_type, technician_name, time_window, notes } = input;
 
@@ -3042,6 +3075,16 @@ async function createAppointment(input, actionContext = {}) {
     // on schedule conflicts): the booking commits with a warning.
     if (win.start && windowEnd) {
       const overlap = await probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd });
+      // A card that pinned "no overlap" approved a free slot (owner
+      // 2026-10-05): an overlap that appeared since is NEW. Throwing here
+      // rolls the transaction back before the insert, so nothing is booked
+      // and the post-commit confirmation text below never runs. A pinned
+      // "overlap existed", or no pin at all, keeps the advisory warning.
+      if (overlap.length && input._booking_overlap === false) {
+        const err = new Error('booking_overlap_new');
+        err.bookingOverlapNew = true;
+        throw err;
+      }
       if (overlap.length) overlapAdvisory = slotOverlapWarning(dateStr);
     }
     // Rung 6 — the same comms fence withCustomerCommsLock provided.
@@ -3200,6 +3243,9 @@ async function createAppointment(input, actionContext = {}) {
     }
     if (err && err.bookingPriceChanged) {
       return { error: BOOKING_PRICE_CHANGED_ERROR, preview_changed: true };
+    }
+    if (err && err.bookingOverlapNew) {
+      return { error: BOOKING_NEW_OVERLAP_ERROR, preview_changed: true };
     }
     if (err && err.previewChanged) {
       return {
@@ -4309,7 +4355,7 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal,
   // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.
