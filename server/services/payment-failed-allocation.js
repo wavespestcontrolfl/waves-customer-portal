@@ -54,8 +54,11 @@ async function invoicesAllSettled(conn, ids) {
 }
 
 async function isFailedAllocationSettled(conn, attempt) {
-  // A combined allocation that could not be read never auto-retires.
+  // A combined allocation that could not be read never auto-retires, and
+  // neither does one with any element that is no longer a UUID (a stored list
+  // that was altered must not shrink to "only the paid invoice").
   if (attempt?.allocationUnreadable) return false;
+  if (Array.isArray(attempt?.allocationInvoiceIds) && !attempt.allocationInvoiceIds.every((id) => isUuid(String(id)))) return false;
   return invoicesAllSettled(conn, await failedAllocationInvoiceIds(conn, attempt));
 }
 

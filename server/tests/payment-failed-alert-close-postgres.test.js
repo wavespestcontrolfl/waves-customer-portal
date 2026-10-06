@@ -201,6 +201,13 @@ postgres('payment_failed bells close when their invoice is paid', () => {
     expect(await state(alert)).toMatchObject({ done_by: 'payments' });
   });
 
+  test('an allocation list with an altered (non-UUID) element never auto-retires', async () => {
+    const { isFailedAllocationSettled } = require('../services/payment-failed-allocation');
+    await db('invoices').where({ id: invoiceA }).update({ status: 'paid', paid_at: new Date() });
+    expect(await isFailedAllocationSettled(db, { paymentIntentId: `pi_${randomUUID()}`, invoiceId: invoiceA,
+      allocationInvoiceIds: [invoiceA, '14f3d827-***2345'] })).toBe(false);
+  });
+
   test('an unreadable combined allocation is queued as such and never auto-retires', async () => {
     const { isFailedAllocationSettled } = require('../services/payment-failed-allocation');
     const piId = `pi_${randomUUID()}`;

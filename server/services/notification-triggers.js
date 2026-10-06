@@ -83,8 +83,9 @@ function sanitizeNotificationValue(value, key = '') {
   // Opaque row ids (emailId, callLogId, customer_id…) are not contact
   // details — masking `emailId` to '[email]' broke the reclaim dedupe that
   // looks the bell up by it (codex r6). Verbatim: the digit redactor would
-  // otherwise mangle a UUID's digit runs like a card number.
-  if (/(?:^|_)id$|Id$/.test(key)) return value;
+  // otherwise mangle a UUID's digit runs like a card number. A list of ids
+  // (allocationInvoiceIds, *_ids) passes each element with its parent key.
+  if (/(?:^|_)ids?$|Ids?$/.test(key)) return value;
   if (/phone/i.test(key)) return maskPhone(value);
   if (/email/i.test(key)) return maskEmail(value);
   if (/address/i.test(key)) return '[address]';
