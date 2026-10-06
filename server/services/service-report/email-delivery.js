@@ -15,7 +15,7 @@ const { shouldSendServiceReportV1Delivery } = require('./delivery');
 const { buildServiceReportDynamicContext } = require('./dynamic-context');
 const { safePdfRenderError } = require('./pdf-events');
 const { dateOnlyStamp, formatReadyTime } = require('./time-format');
-const { getServiceReportEmailRecipients, withAccountContactRole, serviceReportEmailOptedOut, prefsUnavailable, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
+const { getServiceReportEmailRecipients, withAccountPrimaryContactStrict, serviceReportEmailOptedOut, prefsUnavailable, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE } = require('../customer-contact');
 const { inspectionCreditReportNote } = require('../inspection-credit');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../../constants/business');
@@ -570,7 +570,7 @@ async function sendServiceReportV1Email(recordId, {
     // the account role is read only when someone may still get the report.
     reportCustomer = prefsUnavailable(prefs) || serviceReportEmailOptedOut(prefs)
       ? baseCustomer
-      : await withAccountContactRole(baseCustomer);
+      : await withAccountPrimaryContactStrict(baseCustomer);
   } catch (err) {
     // The account's role decides who may read the findings: retry, never guess.
     return { ok: false, transient: true, reason: 'account_role_unavailable', error: `Account role unavailable: ${err.message}` };

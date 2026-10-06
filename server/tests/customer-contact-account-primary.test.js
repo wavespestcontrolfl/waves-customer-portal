@@ -10,7 +10,7 @@ const {
   withAccountPrimaryFallback,
   loadAccountPrimaryRow,
   withAccountPrimaryContact,
-  withAccountContactRole,
+  withAccountPrimaryContactStrict,
 } = require('../services/customer-contact');
 
 const primary = { id: 'p1', first_name: 'Lana', phone: '+15551110000', email: 'lana@example.com' };
@@ -100,17 +100,17 @@ describe('account-primary contact fallback', () => {
     expect(own).toMatchObject({ contact_role: 'tenant', account_contact_role: 'property_manager' });
     expect(own.account_primary_fallback).toBeUndefined();
 
-    // Only the account role is added: the sender keeps its own recipient fields.
-    expect(await withAccountContactRole({ ...sec, phone: '', contact_role: 'tenant' }, { db: knexStub({ primaryRow: managerPrimary }) }))
-      .toEqual({ ...sec, phone: '', contact_role: 'tenant', account_contact_role: 'property_manager' });
+    // Blank contact fields take the primary's, like withAccountPrimaryContact.
+    expect(await withAccountPrimaryContactStrict({ ...sec, phone: '', contact_role: 'tenant' }, { db: knexStub({ primaryRow: managerPrimary }) }))
+      .toMatchObject({ ...sec, phone: '+15551110000', contact_role: 'tenant', account_contact_role: 'property_manager' });
     // A failed read throws: the report waits rather than reach an occupant.
-    await expect(withAccountContactRole(sec, { db: knexStub({ throwOnRead: true }) })).rejects.toThrow('boom');
+    await expect(withAccountPrimaryContactStrict(sec, { db: knexStub({ throwOnRead: true }) })).rejects.toThrow('boom');
     // A linked property whose primary is gone (archived) is not authorized.
-    await expect(withAccountContactRole(sec, { db: knexStub({ primaryRow: null }) })).rejects.toThrow('account primary profile not found');
+    await expect(withAccountPrimaryContactStrict(sec, { db: knexStub({ primaryRow: null }) })).rejects.toThrow('account primary profile not found');
     // A primary with no role resolves to '' (an owner account), never left unknown.
-    expect((await withAccountContactRole(sec, { db: knexStub() })).account_contact_role).toBe('');
+    expect((await withAccountPrimaryContactStrict(sec, { db: knexStub() })).account_contact_role).toBe('');
     // A primary row is never re-read.
     const prim = { id: 'p1', account_id: 'a1', is_primary_profile: true };
-    expect(await withAccountContactRole(prim, { db: knexStub({ throwOnRead: true }) })).toBe(prim);
+    expect(await withAccountPrimaryContactStrict(prim, { db: knexStub({ throwOnRead: true }) })).toBe(prim);
   });
 });

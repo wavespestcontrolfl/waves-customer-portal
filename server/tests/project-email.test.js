@@ -182,20 +182,30 @@ describe('resolveProjectEmailRecipient: the tenant report rule', () => {
   };
 
   test('the slot-1 contact gets the project email, as before, on an owner account', () => {
-    expect(ProjectEmail.resolveProjectEmailRecipient(base).email).toBe('riley@example.com');
+    expect(ProjectEmail.resolveProjectEmailRecipient(base, { applyReportRule: true }).email).toBe('riley@example.com');
   });
 
   test('a tenant, or an occupant on a manager account, never gets it: the account holder does', () => {
-    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, service_contact_role: 'tenant' }))
+    const rule = { applyReportRule: true };
+    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, service_contact_role: 'tenant' }, rule))
       .toMatchObject({ email: 'dana@example.com', role: 'primary' });
-    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, contact_role: 'property_manager' }).email).toBe('dana@example.com');
+    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, contact_role: 'property_manager' }, rule).email).toBe('dana@example.com');
     // A manager listed as the slot-1 contact still gets it.
-    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, contact_role: 'property_manager', service_contact_role: 'property_manager' }).email)
+    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, contact_role: 'property_manager', service_contact_role: 'property_manager' }, rule).email)
       .toBe('riley@example.com');
   });
 
-  test('prep mail with no findings still reaches the on-site tenant', () => {
-    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, service_contact_role: 'tenant' }, { applyReportRule: false }).email)
-      .toBe('riley@example.com');
+  test('prep mail with no findings (the default) still reaches the on-site tenant', () => {
+    expect(ProjectEmail.resolveProjectEmailRecipient({ ...base, service_contact_role: 'tenant' }).email).toBe('riley@example.com');
+  });
+
+  test('the report senders apply the rule; an explicit copy recipient is kept', async () => {
+    EmailTemplates.sendTemplate.mockResolvedValue({ sent: true, message: { id: 'm1' } });
+    const project = { id: 'p1', project_type: 'termite_inspection', title: 'Inspection' };
+    await ProjectEmail.sendProjectReportReady({ project, customer: { ...base, service_contact_role: 'tenant' }, reportUrl: 'https://portal.example/r' });
+    expect(EmailTemplates.sendTemplate.mock.calls.at(-1)[0].to).toBe('dana@example.com');
+    await ProjectEmail.sendProjectReportReady({ project, customer: { ...base, service_contact_role: 'tenant' }, reportUrl: 'https://portal.example/r',
+      recipient: { email: 'copy@example.com', name: 'there', role: 'report_copy' } });
+    expect(EmailTemplates.sendTemplate.mock.calls.at(-1)[0].to).toBe('copy@example.com');
   });
 });

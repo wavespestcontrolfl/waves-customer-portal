@@ -210,6 +210,16 @@ describe('service report email recipient delivery', () => {
     expect(EmailTemplateLibrary.sendTemplate.mock.calls.map(([args]) => args.to)).toEqual(['owner@example.com']);
   });
 
+  test('a property row with no email of its own: the report goes to the account primary, never the occupant', async () => {
+    const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+    EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+    withRecord({ customer_email: null, contact_role: null, account_id: 'account-1', is_primary_profile: false },
+      { id: 'primary-1', first_name: 'Morgan', email: 'manager@example.com', contact_role: 'property_manager' });
+    const result = await sendServiceReportV1Email('record-1', { token: 'token-1' });
+    expect(result).toMatchObject({ ok: true, recipientCount: 1 });
+    expect(EmailTemplateLibrary.sendTemplate.mock.calls.map(([args]) => args.to)).toEqual(['manager@example.com']);
+  });
+
   test('an unreadable account primary retries the report, never sends it', async () => {
     const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
     withRecord({ contact_role: null, account_id: 'account-1', is_primary_profile: false }, new Error('fixture read failed'));

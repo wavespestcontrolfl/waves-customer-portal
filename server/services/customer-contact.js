@@ -281,7 +281,7 @@ const REPORT_ALLOWED_ROLES_ON_MANAGED_ACCOUNT = new Set(['property_manager', 'la
 // is the account's. A property profile's contact_role describes that
 // property's contact (a tenant on a rental, say), so its account role is
 // account_contact_role, which withAccountPrimaryFallback /
-// withAccountContactRole copy from the account primary ('' when the primary
+// withAccountPrimaryContactStrict copy from the account primary ('' when the primary
 // has none). A property profile without that field has an unknown account
 // role (its primary is missing or unread) and counts as managed: withhold
 // rather than guess.
@@ -423,17 +423,17 @@ async function loadAccountPrimaryRow(row, { db = null, forShare = false, rethrow
   }
 }
 
-// The row with account_contact_role set from the account primary profile,
-// and nothing else changed. For senders that apply the report rule but keep
-// their own recipient fields. Requires account_id and
-// is_primary_profile on the row. A failed read throws: the caller retries
-// rather than send findings to an occupant of a managed rental.
-async function withAccountContactRole(row, { db = null, forShare = false } = {}) {
+// The strict form of withAccountPrimaryContact, for senders that apply the
+// report rule: the row with the primary's blank contact fields filled in and
+// account_contact_role set. Requires account_id and is_primary_profile on the
+// row. A failed read throws, and so does a linked property whose primary is
+// gone (archived): the caller retries rather than send findings to an
+// occupant of a managed rental.
+async function withAccountPrimaryContactStrict(row, { db = null, forShare = false } = {}) {
   if (!isSecondaryProfile(row)) return row;
   const primary = await loadAccountPrimaryRow(row, { db, rethrow: true, forShare });
-  // A linked property whose primary is gone (archived) cannot be authorized.
   if (!primary) throw new Error('account primary profile not found');
-  return { ...row, account_contact_role: clean(primary.contact_role) };
+  return withAccountPrimaryFallback(row, primary);
 }
 
 // One-call form: the row with the primary's contact fields filled in where
@@ -471,7 +471,7 @@ module.exports = {
   getServiceContactSlots,
   isServiceContactRole,
   slotWithheldFromReports,
-  withAccountContactRole,
+  withAccountPrimaryContactStrict,
   getBillingContact,
   getAppointmentContacts,
   getInvoiceEmailRecipients,

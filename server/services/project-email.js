@@ -128,9 +128,9 @@ function projectTitle(project = {}) {
 // contact when one has an email, unless the report is withheld from that
 // contact (a tenant, or an occupant on a property manager's account —
 // customer-contact.js slotWithheldFromReports): then the account holder.
-// `applyReportRule: false` is for mail that carries no findings (the
-// treatment-sequence prep guides an occupant needs).
-function resolveProjectEmailRecipient(customer = {}, { applyReportRule = true } = {}) {
+// Only the report senders pass `applyReportRule: true`; prep guides and other
+// mail with no findings still reach the on-site person who preps the property.
+function resolveProjectEmailRecipient(customer = {}, { applyReportRule = false } = {}) {
   const serviceEmail = clean(customer.service_contact_email);
   const slot1 = getServiceContactSlots(customer)[0];
   const withheld = applyReportRule && slot1 && slotWithheldFromReports(customer, slot1);
@@ -149,6 +149,12 @@ function resolveProjectEmailRecipient(customer = {}, { applyReportRule = true } 
     name: clean(primary.name) || clean(customer.first_name),
     role: primary.role || 'primary',
   };
+}
+
+// The recipient a report send uses: the explicit override (a report copy,
+// the payer or billing contact) or the customer recipient under the rule.
+function reportRecipient(customer, explicitRecipient) {
+  return explicitRecipient || resolveProjectEmailRecipient(customer, { applyReportRule: true });
 }
 
 function resolvePortalInviteRecipient(customer = {}) {
@@ -353,7 +359,7 @@ async function sendProjectReportReady({
   // resolution (service contact → primary) stays the customer recipient.
   recipient = null,
 } = {}) {
-  const payload = buildProjectPayload({ project, customer, reportUrl, recipient });
+  const payload = buildProjectPayload({ project, customer, reportUrl, recipient: reportRecipient(customer, recipient) });
   const suffix = isResend ? `resend:${new Date().toISOString()}` : `initial:${safeKey(project?.report_token || project?.id)}`;
   return sendProjectTemplate({
     project,
@@ -365,7 +371,7 @@ async function sendProjectReportReady({
     triggerEventId: `project_report.ready:${project?.id || 'unknown'}`,
     idempotencyKey: idempotencyKey || `project.report_ready:${project?.id || 'unknown'}:${suffix}`,
     attachments,
-    recipient,
+    recipient: reportRecipient(customer, recipient),
   });
 }
 
@@ -398,7 +404,7 @@ async function sendProjectReportWithInvoice({
     ? 'The official report PDF and your invoice PDF are attached to this email.'
     : 'Your invoice PDF is attached, and you can view your full report online using the link below.';
   const payload = {
-    ...buildProjectPayload({ project, customer, reportUrl, recipient }),
+    ...buildProjectPayload({ project, customer, reportUrl, recipient: reportRecipient(customer, recipient) }),
     invoice_url: payUrl || '',
     pay_url: payUrl || '',
     invoice_number: clean(invoice?.invoice_number),
@@ -418,7 +424,7 @@ async function sendProjectReportWithInvoice({
     idempotencyKey: idempotencyKey
       || `project.report_with_invoice:${project?.id || 'unknown'}:${safeKey(invoice?.id || invoice?.invoice_number)}:${sendAttemptKey()}`,
     attachments,
-    recipient,
+    recipient: reportRecipient(customer, recipient),
   });
 }
 
@@ -440,7 +446,7 @@ async function sendProjectInvoiceBeforeReport({
   recipient = null,
 } = {}) {
   const payload = {
-    ...buildProjectPayload({ project, customer, recipient }),
+    ...buildProjectPayload({ project, customer, recipient: reportRecipient(customer, recipient) }),
     invoice_url: payUrl || '',
     pay_url: payUrl || '',
     invoice_number: clean(invoice?.invoice_number),
@@ -459,7 +465,7 @@ async function sendProjectInvoiceBeforeReport({
     idempotencyKey: idempotencyKey
       || `project.invoice_before_report:${project?.id || 'unknown'}:${safeKey(invoice?.id || invoice?.invoice_number)}:${sendAttemptKey()}`,
     attachments,
-    recipient,
+    recipient: reportRecipient(customer, recipient),
   });
 }
 

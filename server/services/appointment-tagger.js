@@ -539,7 +539,7 @@ class AppointmentTagger {
       const { resolveProjectEmailRecipient } = require('./project-email');
       const customer = await db('customers').where({ id: service.customer_id }).first();
       const recipient = customer
-        ? resolveProjectEmailRecipient(customer, { applyReportRule: false })
+        ? resolveProjectEmailRecipient(customer)
         : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim() };
       if (!recipient.email) {
         logger.info(`[appointment-tagger] No valid email on file; ${templateKey} sequence enrollment skipped for service ${service.id}`);
@@ -681,7 +681,7 @@ class AppointmentTagger {
         ? await db('customers').where({ id: service.customer_id }).first()
         : null;
       const recipient = customer
-        ? resolveProjectEmailRecipient(customer, { applyReportRule: false })
+        ? resolveProjectEmailRecipient(customer)
         : { email: String(service.email || '').trim(), name: String(service.first_name || '').trim(), role: 'primary' };
       if (!recipient.email) {
         logger.info(`[appointment-tagger] No valid email on file; ${automationKey} prep email skipped for service ${service.id}`);
