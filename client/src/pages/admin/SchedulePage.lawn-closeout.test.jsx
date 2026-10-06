@@ -1489,6 +1489,22 @@ it.each([[true], [false]])('the test-patch line shows beside the Additional work
   else expect(screen.queryByText(line)).toBeNull();
 });
 
+it('the spray conditions of the bermuda removal mix show once each beside the selector, however many products carry them', async () => {
+  enableDefaults();
+  const notes = [
+    { key: 'activelyGrowingOnly', severity: 'required', text: 'Spray only when the bermuda is actively growing.' },
+    { key: 'morningUnderF', severity: 'required', text: 'Spray in the morning, with the temperature under 85°F.' },
+    { key: 'noRainOrIrrigationHours', severity: 'note', text: 'No rain or irrigation for 3 hours after the spray.' },
+    { key: 'noMowDaysBeforeAfter', severity: 'note', text: 'Do not mow for 2 days before or after the spray.' },
+  ];
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal', gateNotes: notes }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, gateNotes, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  await screen.findByRole('option', { name: 'Mix rec' });
+  for (const { text } of notes) expect(screen.getAllByText(text)).toHaveLength(1);
+});
+
 it('the bermuda removal mix options go on together and come off together', async () => {
   enableDefaults();
   const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal' }));
@@ -1514,6 +1530,29 @@ it('the bermuda removal mix options go on together and come off together', async
     expect(String(body.technicianNotes || '')).not.toContain(name);
     expect(JSON.stringify(body.actionScopes || body.protocolActionScopes || {})).not.toContain(name);
   }
+  expect((body.products || []).map((p) => p.productId)).not.toEqual(expect.arrayContaining(mix.map((m) => m.id)));
+});
+
+it('removing one bermuda removal pill after an AI draft removes all three labels and all three products', async () => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal' }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-fus' } });
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  fireEvent.click(screen.getAllByRole('button', { name: /generate ai/i })[0]);
+  const notes = screen.getByPlaceholderText(/Notes about this service/);
+  await waitFor(() => expect(notes.value).toContain('WHAT WE DID'));
+  // One pill per label; the x on ONE of them takes the whole mix.
+  for (const { name } of mix) await screen.findByRole('button', { name: `Remove protocol item: ${name}` });
+  fireEvent.click(screen.getByRole('button', { name: 'Remove protocol item: Mix fus' }));
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  for (const { name } of mix) expect(screen.queryByRole('button', { name: `Remove protocol item: ${name}` })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(submit).toHaveBeenCalledOnce());
+  const body = submit.mock.calls[0][1];
+  for (const { name } of mix) expect((body.protocolActionsCompleted || []).includes(name)).toBe(false);
   expect((body.products || []).map((p) => p.productId)).not.toEqual(expect.arrayContaining(mix.map((m) => m.id)));
 });
 

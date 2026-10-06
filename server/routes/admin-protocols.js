@@ -1085,6 +1085,13 @@ router.get('/lawn-mix', async (req, res, next) => {
     });
     const items = bermuda.decorate(builtItems);
     const selectedItems = items.filter((item) => item.selected);
+    // A mixing-order input: the line's recipe text, its catalog product, and the step marks.
+    const mixInput = (item) => ({
+      raw: item.raw,
+      bermudaStep: item.bermudaStep,
+      unavailable: item.unavailable,
+      product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
+    });
     const materialCostSummary = summarizeMaterialCost(selectedItems.map((item) => ({
       selected: item.selected,
       product: item.product,
@@ -1142,10 +1149,9 @@ router.get('/lawn-mix', async (req, res, next) => {
       materialCostSummary: seesPricing ? materialCostSummary : null,
       items: seesPricing ? items : items.map(stripLawnMixItemPricing),
       selectedItems: seesPricing ? selectedItems : selectedItems.map(stripLawnMixItemPricing),
-      mixingOrder: blocks.length ? [] : buildMixOrder(selectedItems.filter(bermuda.mixable).map((item) => ({
-        raw: item.raw,
-        product: products.find((p) => String(p.id) === String(item.product?.id)) || null,
-      })), limitCheck.capped),
+      mixingOrder: blocks.length ? [] : buildMixOrder(selectedItems.filter(bermuda.mixable).map(mixInput), limitCheck.capped),
+      // The backpack step's own order, apart from the base order, when it is selected.
+      ...bermuda.mixOrderField(selectedItems.map(mixInput), blocks.length > 0),
       warnings,
       blocks: [...blocks, ...limitCheck.blocks, ...settled.blocks],
     };

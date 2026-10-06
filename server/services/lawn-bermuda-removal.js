@@ -274,17 +274,24 @@ async function submittedStepProducts(knex, products) {
   return { recognition, fusilade, unconfigured: !!(recognition || fusilade) };
 }
 
-async function bermudaPairViolation(knex, products, { serviceId } = {}) {
-  if (!bermudaRemovalLive()) return null;
-  const { recognition, fusilade, unconfigured } = await submittedStepProducts(knex, products);
-  if (!unconfigured && Boolean(recognition) === Boolean(fusilade)) return null;
-  // One of the two alone: judged only when this visit carries the step. A completion reads
-  // the account STRICTLY: a read error fails the completion, never "not requested".
-  if (!(await stepVisitOf(knex, serviceId, { strict: true }))) return null;
+// The pair rule's message for the submitted step products, or null when they are a
+// complete pair (or none): shared by the preflight and the in-transaction recheck.
+function pairMessage({ recognition, fusilade, unconfigured }) {
   if (unconfigured) return NOT_CONFIGURED_MESSAGE;
+  if (Boolean(recognition) === Boolean(fusilade)) return null;
   return recognition
     ? 'Recognition goes on with Fusilade II in the bermuda removal mix. Add Fusilade II too, or take Recognition off this visit.'
     : 'Fusilade II is never applied without Recognition. Add Recognition too, or take Fusilade II off this visit.';
+}
+
+async function bermudaPairViolation(knex, products, { serviceId } = {}) {
+  if (!bermudaRemovalLive()) return null;
+  const submitted = await submittedStepProducts(knex, products);
+  if (!pairMessage(submitted)) return null;
+  // One of the two alone: judged only when this visit carries the step. A completion reads
+  // the account STRICTLY: a read error fails the completion, never "not requested".
+  if (!(await stepVisitOf(knex, serviceId, { strict: true }))) return null;
+  return pairMessage(submitted);
 }
 
 // Completion check, beside the pair check (fresh attempts only): a step spray on a
@@ -340,6 +347,10 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   // spray is in the history the cap counts. Fusilade II alone on a visit that does not carry
   // the step is bed or border work and consumes nothing.
   const stepVisit = await stepVisitOf(trx, serviceId, { strict: true });
+  // The visit carries the step as of NOW (a switch turned on after the preflight): the pair
+  // rule holds here too, on the same strict reads and transaction, before any cap.
+  const pairProblem = stepVisit ? pairMessage({ recognition, fusilade, unconfigured }) : null;
+  if (pairProblem) throw Object.assign(new Error(pairProblem), { code: 'lawn_bermuda_pair_required' });
   const sprayed = recognition ? [recognition, fusilade].filter(Boolean) : (stepVisit ? [fusilade] : []);
   if (!sprayed.length) return;
   const visit = stepVisit || await resolvedVisitOf(trx, serviceId, { strict: true });
@@ -396,9 +407,32 @@ function settleStep(items, usable) {
   };
 }
 
-// An unavailable step line is never a mixing-order input, selected or not; the base
-// visit's order is unchanged.
-const inMixingOrder = (item) => !(isStepLine(item) && item.unavailable);
+// The three step lines are a backpack spot mix of their own, never part of the visit's
+// base tank mix: the base mixing order leaves every step line out, selected or not.
+const inMixingOrder = (item) => !isStepLine(item);
+
+const WATER_STEP = {
+  productId: null, productName: 'Water', category: 'water',
+  instruction: 'Fill the backpack sprayer about half full with clean water.',
+};
+
+// The backpack mix order for the step, apart from the base order: water, Recognition,
+// Fusilade II, then the surfactant last. The recipe lists the lines in that order, so
+// the lines keep it. Only when the step is selected and available (every item given is a
+// selected one; an unavailable line, or `held` for a blocked mix, gives no order).
+// Returns { bermudaMixingOrder } or {} (a visit with no step has no such field).
+function mixOrderField(items, held = false) {
+  const lines = items.filter((item) => isStepLine(item) && item.product && !item.unavailable);
+  if (held || !lines.length) return {};
+  return {
+    bermudaMixingOrder: [WATER_STEP, ...lines.map((item) => ({
+      productId: item.product.id,
+      productName: item.product.name,
+      category: item.product.mixing_order_category || 'unclassified',
+      instruction: item.product.mixing_instructions || item.raw,
+    }))].map((step, index) => ({ step: index + 1, ...step })),
+  };
+}
 
 const EXCLUDED_CULTIVAR_WARNING = {
   code: 'lawn_bermuda_cultivar_excluded', severity: 'warning',
@@ -432,14 +466,31 @@ async function projectBermudaStep(items, { knex, rows, probeLimits, testPatch = 
   const capped = probe.length ? (await probeLimits(probe)).capped.size > 0 : false;
   const usable = ids.tagged && !capped && members.every((m) => m.product && m.product.active !== false && rows.get(String(m.product.id)));
   const settled = settleStep(items, usable);
-  return { ...settled, items: testPatch ? addTestPatchNote(settled.items) : settled.items };
+  const noted = withRowGateNotes(settled.items, rows);
+  return { ...settled, items: testPatch ? addTestPatchNote(noted) : noted };
 }
 
-// The test-patch note an option or action carries through a completion projection (the
-// plan's completion options, /completion-actions): the step line's own gate notes, as
-// the same { key, text } shape, nothing when there is none.
+// A step line that carries no gate notes of its own (the completion actions are built
+// from the recipe text, not from the staged rows) gets the notes its staged row states,
+// through the plan's own reader of a row's gates (only the spray conditions), so every
+// projection says the same.
+function withRowGateNotes(items, rows) {
+  const { v13GateNotes } = require('./waveguard-plan-engine');
+  return items.map((item) => (isStepLine(item) && !item.gateNotes && item.product
+    ? { ...item, ...optionNotes({ gateNotes: v13GateNotes(rows.get(String(item.product.id))?.gates) }) } : item));
+}
+
+// The spray conditions the tech must see before choosing the step, in the order they are
+// read out. Every projection that offers the step carries these from the staged rows.
+const OPTION_NOTE_KEYS = ['activelyGrowingOnly', 'morningUnderF', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter', 'testPatchFirst'];
+
+// The spray conditions an option or action carries through a completion projection (the
+// plan's completion options, /completion-actions): the step line's own gate notes for
+// active growth, the June morning limit, rain and irrigation, mowing and the test patch,
+// as the same { key, severity, text } shape, nothing when there is none.
 const optionNotes = (item) => {
-  const notes = (item?.gateNotes || []).filter((note) => note.key === 'testPatchFirst');
+  const notes = (item?.gateNotes || []).filter((note) => OPTION_NOTE_KEYS.includes(note.key))
+    .sort((a, b) => OPTION_NOTE_KEYS.indexOf(a.key) - OPTION_NOTE_KEYS.indexOf(b.key));
   return notes.length ? { gateNotes: notes } : {};
 };
 
@@ -486,6 +537,7 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
     // The three actions carry the group id and the mark the settlement reads.
     tagActions: (actions, lines) => (active ? actions.map((action, index) => (lines[index].bermudaStep ? { ...action, bermudaStep: true, group: BERMUDA_GROUP } : action)) : actions),
     mixable: inMixingOrder,
+    mixOrderField,
     info: { active, source: step.source },
   };
 }
@@ -495,6 +547,6 @@ module.exports = {
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
   markStepLines, isStepLine,
-  selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, effectivePropertyId, stepProductIds, inMixingOrder, optionNotes, EXCLUDED_CULTIVAR_WARNING,
+  selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, effectivePropertyId, stepProductIds, inMixingOrder, mixOrderField, optionNotes, EXCLUDED_CULTIVAR_WARNING,
   excludedCultivarSql, stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction,
 };

@@ -279,17 +279,17 @@ test('the bermuda removal step options share one group id in the completion proj
 
 // A CitraBlue or unconfirmed cultivar: the step lines carry the hard test-patch note, and it
 // rides each bermuda option through the completion projection (the same { key, text } shape).
-test('the test-patch note rides each bermuda option; other gate notes and other options carry none', () => {
+test('the spray conditions and the test-patch note ride each bermuda option; other notes and other options carry none', () => {
   const { plan, context } = fixture();
   const note = { key: 'testPatchFirst', severity: 'required', text: 'Test patch first: spray a 3 x 3 ft patch and watch it for 3 to 4 weeks before the full spot.' };
   const step = (id) => ({
     selected: false, role: 'conditional', bermudaStep: true,
-    gateNotes: [{ key: 'noMowDaysBeforeAfter', severity: 'note', text: 'Do not mow.' }, note],
+    gateNotes: [note, { key: 'noMowDaysBeforeAfter', severity: 'note', text: 'Do not mow.' }, { key: 'bermudaRemoval', severity: 'note', text: 'Recipe.' }, { key: 'skipCelsiusInBermudaArea', severity: 'note', text: 'Skip Celsius.' }, { key: 'morningUnderF', severity: 'required', text: 'Morning.' }],
     product: { id, name: id, active: true, labelVerifiedAt: '2026-01-01' }, mix: null,
   });
   plan.protocol.structured.products.push(...['rec', 'fus', 'nis'].map((productId) => ({ productId, defaultInPlan: false, applicationMode: 'spot', gates: {} })));
   plan.mixCalculator.conditionalOptions = [step('rec'), step('fus'), step('nis')];
   const { options } = buildLawnCompletionDefaults(plan, context);
-  for (const option of options.filter((o) => o.group === 'bermuda_removal')) expect(option.gateNotes).toEqual([note]);
+  for (const option of options.filter((o) => o.group === 'bermuda_removal')) expect(option.gateNotes.map((n) => n.key)).toEqual(['morningUnderF', 'noMowDaysBeforeAfter', 'testPatchFirst']);
   expect(options.find((o) => o.product.id === 'product')).not.toHaveProperty('gateNotes');
 });

@@ -12124,7 +12124,9 @@ function PestRecapCard({ serviceId }) {
 }
 
 // Shown beside the Additional work selector while the bermuda removal mix carries the
-// server's test-patch note (a CitraBlue or unconfirmed St. Augustine cultivar).
+// server's spray conditions; the test-patch line is the short wording for a CitraBlue or
+// unconfirmed St. Augustine cultivar.
+const BERMUDA_CONDITION_KEYS = ["activelyGrowingOnly", "morningUnderF", "noRainOrIrrigationHours", "noMowDaysBeforeAfter", "testPatchFirst"];
 const BERMUDA_TEST_PATCH_LINE = "Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot";
 
 export function CompletionPanel({
@@ -17297,6 +17299,22 @@ export function CompletionPanel({
       promoteTankOwner(prev.filter((p) => !removedIds.has(p.productId))),
     );
   }
+  // The x on a report pill. A label that belongs to a completion group (the bermuda
+  // removal mix) takes the whole group with it: every label, scope and note line, and
+  // every product row, the same as removing one of its product rows.
+  function removeSelectionPill(kind, label) {
+    if (generating) return;
+    const member = kind === "protocol"
+      ? protocolActions.find((a) => a.group && String(a.note || a.label || a.raw || "Completed protocol item") === label)
+      : null;
+    const groupProductId = member && protocolActions.find((a) => a.group === member.group && a.product?.id)?.product.id;
+    if (groupProductId) removeProduct(groupProductId);
+    else if (member) {
+      for (const mate of protocolActions.filter((a) => a.group === member.group)) {
+        removeSelectedLabel("protocol", String(mate.note || mate.label || mate.raw || "Completed protocol item"));
+      }
+    } else removeSelectedLabel(kind, label);
+  }
   function updateProduct(productId, field, value) {
     if (generating) return;
     lawnDefaultMixSeededRef.current = true;
@@ -18947,9 +18965,15 @@ export function CompletionPanel({
     selected: isProtocolActionSelected(action),
     action,
   }));
-  // The bermuda removal mix on a CitraBlue or unconfirmed cultivar carries the server's
-  // test-patch note: one short line beside the selector.
-  const bermudaTestPatch = effectiveProtocolActions.some((action) => action.group && action.gateNotes?.some((note) => note.key === "testPatchFirst"));
+  // The bermuda removal mix carries the server's spray conditions (active growth, the June
+  // morning limit, rain and irrigation, mowing, and the test patch on a CitraBlue or
+  // unconfirmed cultivar): one short line each beside the selector, the same line shown
+  // once however many of the three products carry it.
+  const bermudaConditionLines = [...new Set(effectiveProtocolActions
+    .filter((action) => action.group)
+    .flatMap((action) => action.gateNotes || [])
+    .filter((note) => BERMUDA_CONDITION_KEYS.includes(note.key))
+    .map((note) => (note.key === "testPatchFirst" ? BERMUDA_TEST_PATCH_LINE : note.text)))];
   const selectedProtocolActionCount = protocolActionSelectOptions.filter(
     (opt) => opt.selected,
   ).length;
@@ -20332,7 +20356,7 @@ export function CompletionPanel({
                     <button
                       type="button"
                       aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
-                      onClick={() => removeSelectedLabel(kind, label)}
+                      onClick={() => removeSelectionPill(kind, label)}
                       style={{
                         border: "none",
                         background: "transparent",
@@ -20441,11 +20465,11 @@ export function CompletionPanel({
                             </option>
                           ))}
                     </select>
-                    {bermudaTestPatch && (
-                      <div style={{ fontFamily: font, fontSize: 12, color: M.ink3, marginTop: 6 }}>
-                        {BERMUDA_TEST_PATCH_LINE}
+                    {bermudaConditionLines.map((line) => (
+                      <div key={line} style={{ fontFamily: font, fontSize: 12, color: M.ink3, marginTop: 6 }}>
+                        {line}
                       </div>
-                    )}
+                    ))}
                     {selectedProtocolActionCount > 0 && (
                       <div
                         style={{
@@ -22851,7 +22875,7 @@ export function CompletionPanel({
                   <button
                     type="button"
                     aria-label={`Remove ${prefix.toLowerCase()} item: ${label}`}
-                    onClick={() => removeSelectedLabel(kind, label)}
+                    onClick={() => removeSelectionPill(kind, label)}
                     style={{
                       border: "none",
                       background: "transparent",
@@ -22963,9 +22987,9 @@ export function CompletionPanel({
                           </option>
                         ))}
                   </select>
-                  {bermudaTestPatch && (
-                    <div style={{ fontSize: 11, color: D.muted }}>{BERMUDA_TEST_PATCH_LINE}</div>
-                  )}
+                  {bermudaConditionLines.map((line) => (
+                    <div key={line} style={{ fontSize: 11, color: D.muted }}>{line}</div>
+                  ))}
                   {selectedProtocolActionCount > 0 && (
                     <div style={{ fontSize: 11, color: D.muted }}>
                       {selectedProtocolActionCount} protocol action

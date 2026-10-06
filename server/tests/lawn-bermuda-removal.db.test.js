@@ -236,17 +236,23 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(result.status).not.toBe('blocked');
     });
 
-    test('a capped member with the group selected: the plan\'s mixing order has no bermuda products and is the base visit\'s order', async () => {
+    test('the plan\'s base mixing order never holds a step line; the step has its own order when selected and available', async () => {
       setGates();
       const f = await lawn({ date: '2026-06-16', bermuda: true });
+      const unselected = await plan(f.visit);
+      expect(unselected.bermudaMixingOrder).toBeUndefined();
       const clean = await plan(f.visit, { selectedConditionalProductIds: [rec.id] });
+      expect(JSON.stringify(clean.mixingOrder)).not.toMatch(/Recognition|Fusilade|Surfactant/);
+      expect(clean.mixingOrder).toEqual(unselected.mixingOrder);
+      expect(clean.bermudaMixingOrder.map((step) => step.productName)).toEqual(['Water', REC, FUS, NIS]);
+      // A capped member: the three lines are unavailable, so the step has no order.
       await history(f.customerId, rec, ['2026-06-01']);
       const capped = await plan(f.visit, { selectedConditionalProductIds: [rec.id] });
       expect(capped.mixCalculator.items.filter((item) => item.bermudaStep).every((item) => item.unavailable)).toBe(true);
+      expect(capped.bermudaMixingOrder).toBeUndefined();
       expect(JSON.stringify(capped.mixingOrder)).not.toMatch(/Recognition|Fusilade|Surfactant/);
       const noStep = await plan((await lawn({ date: '2026-06-16' })).visit);
       expect(capped.mixingOrder).toEqual(noStep.mixingOrder);
-      expect(clean.mixingOrder.length).toBeGreaterThanOrEqual(capped.mixingOrder.length);
     });
 
     test('a propertyless visit is judged for the sole active property: an old inactive property\'s sprays do not consume the quota (plan and sheet probe)', async () => {
@@ -592,6 +598,19 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       });
     });
 
+    test('the switch turned on after the preflight: the pair rule is enforced again in the transaction', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20' });
+      // Preflight: the visit does not carry the step yet, so a lone Fusilade II passes.
+      expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: f.visit.id })).toBeNull();
+      await knex('customer_turf_profiles').where({ customer_id: f.customerId, active: true }).update({ bermuda_removal: true });
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id })))
+        .rejects.toMatchObject({ code: 'lawn_bermuda_pair_required', message: expect.stringMatching(/without Recognition/) });
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id })))
+        .rejects.toMatchObject({ code: 'lawn_bermuda_pair_required', message: expect.stringMatching(/Recognition goes on with Fusilade II/) });
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
+    });
+
     describe('a step visit is a LAWN visit on the v13 program', () => {
       const V13 = '2026.10-v13';
       const asService = async (f, serviceType, pin = null) => {
@@ -632,7 +651,9 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
           expect(await bermudaPairViolation(knex, submitted(rec), { serviceId: f.visit.id })).toMatch(/with Fusilade II/);
           await spray(f, '2026-03-01');
           await spray(f, '2026-03-02');
-          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
+          // Fusilade II alone on a step visit is the pair rule's refusal; the complete pair meets the cap.
+          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).rejects.toMatchObject({ code: 'lawn_bermuda_pair_required' });
+          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
         }
       });
     });
@@ -656,9 +677,9 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         await spray(f, '2026-03-02'); // Recognition x2: the year's quota used (and < 42 days apart)
         await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id })))
           .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
-        // Fusilade II alone is capped on a step visit (it is bed work only where the step is not carried).
+        // Fusilade II alone on a step visit is the pair rule's refusal in the transaction (it is bed work only where the step is not carried).
         await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id })))
-          .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
+          .rejects.toMatchObject({ code: 'lawn_bermuda_pair_required' });
         expect(await bermudaLimitViolation(knex, submitted(fus), { serviceId: f.visit.id })).toMatch(/LIMIT REACHED|days since last app/);
       });
 

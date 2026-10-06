@@ -8237,9 +8237,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             code: 'service_reassigned',
           } });
         }
-        if (err && err.code === 'lawn_bermuda_limit_reached') {
+        if (err && (err.code === 'lawn_bermuda_limit_reached' || err.code === 'lawn_bermuda_pair_required')) {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
-          return ({ status: 400, body: { error: err.message, code: 'lawn_bermuda_limit_reached' } });
+          return ({ status: 400, body: { error: err.message, code: err.code } });
         }
         if (err && err.code === 'issued_invoice_not_reusable') {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);

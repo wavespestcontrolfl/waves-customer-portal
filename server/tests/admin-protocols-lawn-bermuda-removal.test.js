@@ -310,18 +310,27 @@ describe('the account decides, on the server', () => {
     expect(stepNames(await lawnMix({ month: '4', scheduledServiceId: SERVICE_ID }))).toEqual(all);
   });
 
-  test('an unavailable step member is never a mixing-order input: a capped Recognition with the group selected leaves the base order as it was', async () => {
+  test('the base mixing order never holds a step line; the step has its own order (water, Recognition, Fusilade II, surfactant last) only when selected and available', async () => {
     const orderText = (body) => JSON.stringify(body.mixingOrder);
+    // The base visit's own order is the order of a visit with no step at all.
+    account.profile.bermuda_removal = false;
+    const plain = await lawnMix({ scheduledServiceId: SERVICE_ID });
+    expect(plain.bermudaMixingOrder).toBeUndefined();
+    account.profile.bermuda_removal = true;
+    const unselected = await lawnMix({ scheduledServiceId: SERVICE_ID });
+    expect(unselected.bermudaMixingOrder).toBeUndefined();
+    expect(unselected.mixingOrder).toEqual(plain.mixingOrder);
     const clean = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'rec' });
-    expect(orderText(clean)).toMatch(/Recognition|Fusilade|Surfactant/); // available: the three are in the order
+    expect(orderText(clean)).not.toMatch(/Recognition|Fusilade|Surfactant/);
+    expect(clean.mixingOrder).toEqual(plain.mixingOrder);
+    expect(clean.bermudaMixingOrder.map((step) => [step.step, step.productName])).toEqual([[1, 'Water'], [2, REC], [3, FUS], [4, NIS]]);
+    // Capped Recognition with the group selected: the step is unavailable, so it has no order.
     applicationLimits.checkLimits.mockImplementation(async (_customer, productId) => (productId === 'rec'
       ? { blocks: [{ message: 'Limit reached.' }], warnings: [] } : { blocks: [], warnings: [] }));
     const capped = await lawnMix({ scheduledServiceId: SERVICE_ID, selectedConditionalProductIds: 'rec' });
     expect(capped.items.filter((item) => item.bermudaStep).every((item) => item.unavailable)).toBe(true);
     expect(orderText(capped)).not.toMatch(/Recognition|Fusilade|Surfactant/);
-    // The base visit's own order is the order of a visit with no step at all.
-    account.profile.bermuda_removal = false;
-    const plain = await lawnMix({ scheduledServiceId: SERVICE_ID });
+    expect(capped.bermudaMixingOrder).toBeUndefined();
     expect(capped.mixingOrder).toEqual(plain.mixingOrder);
     applicationLimits.checkLimits.mockImplementation(async () => ({ blocks: [], warnings: [] }));
   });
@@ -362,10 +371,10 @@ describe('the account decides, on the server', () => {
 
   describe('/completion-actions runs the plan\'s step limit check', () => {
     const completionActions = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
-    const actionsFor = async () => {
+    const actionsFor = async (month = '4') => {
       const res = { json: jest.fn(), status: jest.fn() };
       res.status.mockReturnValue(res);
-      await completionActions({ query: { serviceType: 'Lawn Care', track: 'st_augustine', month: '4', scheduledServiceId: SERVICE_ID } }, res, jest.fn());
+      await completionActions({ query: { serviceType: 'Lawn Care', track: 'st_augustine', month, scheduledServiceId: SERVICE_ID } }, res, jest.fn());
       return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
     };
     afterEach(() => applicationLimits.checkLimits.mockImplementation(async () => ({ blocks: [], warnings: [] })));
@@ -401,13 +410,29 @@ describe('the account decides, on the server', () => {
       const body = await actionsFor();
       const grouped = body.actions.filter((a) => a.group);
       expect(grouped).toHaveLength(3);
-      for (const action of grouped) expect(action.gateNotes).toEqual([expect.objectContaining({ key: 'testPatchFirst', severity: 'required', text: expect.stringMatching(/3 x 3 ft patch/) })]);
+      for (const action of grouped) expect(action.gateNotes.at(-1)).toMatchObject({ key: 'testPatchFirst', severity: 'required', text: expect.stringMatching(/3 x 3 ft patch/) });
       expect(body.actions.filter((a) => !a.group && a.gateNotes)).toEqual([]);
     });
 
-    test('an eligible cultivar carries no note; an excluded cultivar offers none of the three and says why', async () => {
+    // Every spray condition of the staged rows rides each of the three actions (and only those
+    // conditions: not the recipe note, the pairing note or the Celsius note), no test-patch note
+    // for an eligible cultivar. April has no morning limit; June adds it.
+    test.each([
+      ['4', ['activelyGrowingOnly', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter']],
+      ['6', ['activelyGrowingOnly', 'morningUnderF', 'noRainOrIrrigationHours', 'noMowDaysBeforeAfter']],
+    ])('month %s: each of the three actions carries the spray conditions %j', async (month, keys) => {
+      account.visitDate = month === '6' ? '2026-06-16' : '2026-04-14';
+      const withMorning = (gates) => (month === '6' ? { ...gates, morningUnderF: 85 } : gates);
+      stage(Object.values(ROWS).map((row) => (row.gates.bermudaRemoval ? { ...row, gates: withMorning(row.gates) } : row)));
+      const grouped = (await actionsFor(month)).actions.filter((a) => a.group);
+      expect(grouped).toHaveLength(3);
+      for (const action of grouped) expect(action.gateNotes.map((n) => n.key)).toEqual(keys);
+      expect(grouped[0].gateNotes.find((n) => n.key === 'noMowDaysBeforeAfter').text).toMatch(/2 days/);
+    });
+
+    test('an eligible cultivar carries no test-patch note; an excluded cultivar offers none of the three and says why', async () => {
       const ok = await actionsFor();
-      expect(ok.actions.filter((a) => a.group && a.gateNotes)).toEqual([]);
+      expect(ok.actions.filter((a) => a.group && a.gateNotes.some((n) => n.key === 'testPatchFirst'))).toEqual([]);
       account.profile.cultivar = 'ProVista';
       const excluded = await actionsFor();
       expect(excluded.actions.filter((a) => a.group)).toEqual([]);

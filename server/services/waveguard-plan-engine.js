@@ -2200,6 +2200,8 @@ async function buildPlanForService(serviceId, options = {}) {
     },
     // An apply-alone conflict holds the mix: no combined order is offered.
     mixingOrder: applyAloneBlocks.length ? [] : buildMixOrder(plannedItems.filter(bermudaRemoval.inMixingOrder), cappedProducts),
+    // The backpack step's own order (water, Recognition, Fusilade II, surfactant last), when it is selected.
+    ...bermudaRemoval.mixOrderField(plannedItems, applyAloneBlocks.length > 0),
     closeout: {
       requiredPhotos: ['before', 'after'],
       captureActualProductAmounts: true,
