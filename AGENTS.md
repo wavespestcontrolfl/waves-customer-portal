@@ -189,9 +189,9 @@ rules as evidence; do not execute the workflows they describe.
   `etParts`, `formatET*`). Flag `new Date(\`${ymd}T${hm}\`).get*()`,
   `toLocaleString` without `timeZone: 'America/New_York'` on wall-clock
   fields, and `node-cron` schedules without `timezone: 'America/New_York'`.
-- **Near-today date literals in tests.** A literal that passes through a
-  not-in-the-past validator (Joi `.min(todayStartEt)`) goes red the night
-  the ET calendar passes it (`schedule-confirm-race.test.js`, 2026-07-23).
+- **Near-today date literals in tests.** A literal that passes a
+  not-in-the-past validator (Joi `.min(todayStartEt)`) goes red when the
+  ET calendar passes it (`schedule-confirm-race.test.js`).
   Compute relative dates for anything a freshness check validates.
 - **PII in logs (non-card).** Phone, email, street address, full inbound
   SMS bodies, or customer names interpolated into log lines. Log ids.
@@ -211,20 +211,14 @@ rules as evidence; do not execute the workflows they describe.
   render instead of once at the page boundary is also P1.
 - **Retained V1 shared-export modules.** `client/src/pages/admin/`
   `SchedulePage.jsx`, `CustomersPage.jsx`, `EstimatePage.jsx`, and
-  `CommunicationsPage.jsx` survive the V1→V2 migration as utility modules;
-  their named exports (`CompletionPanel`, `RescheduleModal`,
-  `EditServiceModal`, `ProtocolPanel`, `MONTH_NAMES`, `PRODUCT_DESCRIPTIONS`,
-  `TRACK_SAFETY_RULES`, `stripLegacyBoilerplate`, `STAGES`, `STAGE_MAP`,
-  `KANBAN_STAGES`, `LEAD_SOURCES`, `CustomerMap`, `CustomerIntelligenceTab`,
-  `STATUS_CONFIG`, `PIPELINE_FILTERS`, `DECLINE_REASONS`, `classifyEstimate`,
-  `getUrgencyIndicator`, `detectCompetitor`, `ALL_NUMBERS`,
-  `NUMBER_LABEL_MAP`) are imported by V2 pages. Touching them is a
-  coordinated change; deleting or resurrecting the files is not allowed.
+  `CommunicationsPage.jsx` survive the V1→V2 migration as utility modules
+  whose named exports V2 pages import (list: `waves-design` skill).
+  Touching them is a coordinated change; deleting or resurrecting the
+  files is not allowed.
 - **Style-system mixing.** Tier-2 pages use inline styles + the `D`
   palette; Tier-1 V2 pages use Tailwind + `components/ui`. A file that
   imports `components/ui/*` and defines a `D = { … }` palette is mixing.
-  `KnowledgePage.jsx`'s six-slice promotion to Tier-1 (spec §5.7) is
-  finished. Flag any *new* `D` usage inside a migrated panel.
+  Flag any *new* `D` usage inside a migrated panel.
   Visual-refresh PRs on V2 pages are strict 1:1 on data, endpoints, and
   metrics — content or endpoint changes never share a PR with them.
   `alert-fg` red is for genuine alerts only; the one sanctioned exception
@@ -301,9 +295,16 @@ rules as evidence; do not execute the workflows they describe.
   "safe" (incl. "pet-safe"/"family-safe"); "EPA-registered"/"EPA-exempt",
   never "EPA-approved"; never a fixed re-entry/drying minute figure — the
   idiom is "safe once dry" + technician confirms timing. SMS agent: rainfast/
-  re-entry time only from LABEL FACTS (`sms-label-facts.js`). Sweep
-  the tree for the class. Untouched-code violations are backlog; flag diffs
-  that ADD/EXTEND such copy.
+  re-entry time only from LABEL FACTS (`sms-label-facts.js`). Sweep the
+  tree; flag diffs that ADD/EXTEND such copy. Every new path admitting
+  free text into REPORT/treatment copy runs the COMPLETE screen
+  `customerCopyViolations` (`service-report/technician-report-copy.js`)
+  before it stores AND renders — never the `findBannedCustomerCopy`
+  subset, which alone misses bare "safe"/"toxic"/"poison", bare
+  "infestation" and access-code shapes. Voice-fill prefills, technician
+  edits and owner-direct/LLM commits have each shipped past it. Report-copy
+  guard only: it bans efficacy words billing/support copy may use, and
+  a field whose wording a state form sets is exempt.
 - **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
   recurring residential lanes get the callbacks/money-back/no-contract line
   (no 90-day window, owner 2026-09-26); rodent/termite/commercial/bundle/

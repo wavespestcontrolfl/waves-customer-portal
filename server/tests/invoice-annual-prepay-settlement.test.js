@@ -81,6 +81,7 @@ describe('settleInvoiceAsAnnualPrepayCovered (full coverage only)', () => {
       .mockReturnValueOnce(chain({ first: undefined })) // in-txn payments check
       .mockReturnValueOnce(updateChain)                 // update
       .mockReturnValueOnce(chain({ first: { status: 'prepaid' } })) // helper's FOR UPDATE settlement recheck
+      .mockReturnValueOnce(chain())                     // payment_failed bell close (best-effort savepoint, same trx)
       .mockReturnValueOnce(plansChain)                  // payment-plan completion (same trx)
       .mockReturnValueOnce(chain());                    // plan-owned dunning-stop release (same trx)
     const res = await InvoiceService.settleInvoiceAsAnnualPrepayCovered('inv-1', 'term-1');

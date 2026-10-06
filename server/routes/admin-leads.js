@@ -17,6 +17,7 @@ const { getLeadStatusReconciliation, verifiedContactCallIds } = require('../serv
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
 const logger = require('../services/logger');
+const { nanpPhoneProblem } = require('../utils/phone');
 
 // Format/length validation for manual lead creation. Permissive by design — it
 // validates shape (email/phone format, string caps, types) without changing
@@ -900,6 +901,9 @@ router.post('/', async (req, res, next) => {
       builder_warranty_provider, builder_warranty_expires_on,
     } = validated;
 
+    const createPhoneProblem = nanpPhoneProblem(phone);
+    if (createPhoneProblem) return res.status(400).json({ error: createPhoneProblem, code: 'INVALID_PHONE' });
+
     const [lead] = await db('leads').insert({
       first_name, last_name,
       phone: leadAttribution.normalizePhone(phone),
@@ -1150,6 +1154,12 @@ router.put('/:id', async (req, res, next) => {
         return res.status(400).json({ error: 'builder_warranty_expires_on must be a real YYYY-MM-DD date' });
       }
       updates.builder_warranty_expires_on = expires || null;
+    }
+    // Only a number the operator is entering now is refused; an unchanged stored
+    // number echoed back by a full-form save is not a new write.
+    if (updates.phone && String(updates.phone).trim() !== String(existingLead.phone || '').trim()) {
+      const phoneProblem = nanpPhoneProblem(updates.phone);
+      if (phoneProblem) return res.status(400).json({ error: phoneProblem, code: 'INVALID_PHONE' });
     }
     if (updates.phone) updates.phone = leadAttribution.normalizePhone(updates.phone);
     // Codex round-6 P2: email_confirmed_at (below) is the sole provenance

@@ -582,6 +582,64 @@ describe('create_appointment — shared admin window rules (scheduling/window-ru
   });
 });
 
+describe('create_appointment — a start the window rule refuses gets a coded refusal at proposal, never a card (W5-dev-03)', () => {
+  test('a 2:30 PM start is refused with window_not_on_the_hour, names the nearest starts, and reads nothing', async () => {
+    const result = await ibBookingProposal('cust-1', 'Pest Control', undefined, undefined, '2:30 PM');
+    expect(result).toEqual({ error: 'Visits start on the hour. Use 2:00 PM or 3:00 PM.', code: 'window_not_on_the_hour' });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('the 24h spelling of a half-hour start is refused the same way', async () => {
+    const result = await ibBookingProposal('cust-1', 'Pest Control', undefined, undefined, '09:15');
+    expect(result).toEqual({ error: 'Visits start on the hour. Use 9:00 AM or 10:00 AM.', code: 'window_not_on_the_hour' });
+  });
+
+  test('a 7:30 PM start names only 7:00 PM — 8:00 PM would end past the day end (Codex r1 on #6023)', async () => {
+    const result = await ibBookingProposal('cust-1', 'Pest Control', undefined, undefined, '7:30 PM');
+    expect(result).toEqual({ error: 'Visits start on the hour. Use 7:00 PM.', code: 'window_not_on_the_hour' });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('an 8:30 PM start has no valid neighbor: the shared rule\'s own refusal, as invalid_appointment_window', async () => {
+    const result = await ibBookingProposal('cust-1', 'Pest Control', undefined, undefined, '8:30 PM');
+    expect(result).toMatchObject({ code: 'invalid_appointment_window', error: expect.stringMatching(/end by 20:00/) });
+    expect(result.error).not.toMatch(/Use /);
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('the executor refuses the same start with the same code', async () => {
+    const result = await executeTool('create_appointment', {
+      customer_id: 'cust-1', scheduled_date: '2099-01-15', service_type: 'Pest Control', time_window: '2:30 PM',
+    });
+    expect(result).toEqual({ error: 'Visits start on the hour. Use 2:00 PM or 3:00 PM.', code: 'window_not_on_the_hour' });
+  });
+
+  test('an 8:00 PM start (past the admin day end) is refused at proposal by the shared window rule', async () => {
+    const result = await ibBookingProposal('cust-1', 'Pest Control', undefined, undefined, '8:00 PM');
+    expect(result).toMatchObject({ code: 'invalid_appointment_window', error: expect.stringMatching(/end by 20:00/) });
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('an on-the-hour start still gets its proposal (the window rule adds no refusal)', async () => {
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) })],
+    });
+    const result = await ibBookingProposal('cust-1', 'Pest Control', undefined, undefined, '2:00 PM');
+    expect(db).toHaveBeenCalledWith('customers'); // past the window rule, into the price and billing verdict
+    expect(result?.code).not.toBe('window_not_on_the_hour');
+    expect(result?.code).not.toBe('invalid_appointment_window');
+  });
+
+  test('no time_window at all still gets its proposal', async () => {
+    wireDb({
+      customers: [chain({ first: jest.fn().mockResolvedValue({ id: 'cust-1', first_name: 'Ada', last_name: 'L', ...MEMBER_BILLING }) })],
+    });
+    const result = await ibBookingProposal('cust-1', 'Pest Control', undefined, undefined, undefined);
+    expect(db).toHaveBeenCalledWith('customers');
+    expect(result?.code).toBeUndefined();
+  });
+});
+
 describe('create_appointment — an overlap that is NEW since the card gets a fresh card (owner 2026-10-05)', () => {
   const clash = () => chain({
     whereNotIn: jest.fn().mockReturnThis(),
@@ -1443,6 +1501,20 @@ describe('reschedule_appointment', () => {
       appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '10:00', reason: 'customer asked',
     });
     expect(result.error).toMatch(/linked second treatment/);
+    expect(updateChain.update).not.toHaveBeenCalled();
+  });
+
+  test('an off-hour reschedule names only starts the visit\'s own duration allows (6:30 PM on a 90-minute visit offers 6:00 PM only)', async () => {
+    const updateChain = chain();
+    wireDb({
+      scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...baseAppt, window_start: '09:00', window_end: '10:30' }) }), chain(), updateChain],
+      customers: [chain({ first: jest.fn().mockResolvedValue({ first_name: 'Ada', last_name: 'Lovelace' }) })],
+    });
+    const result = await executeTool('reschedule_appointment', {
+      appointment_id: 'svc-1', new_date: '2099-01-15', new_time_window: '6:30 PM', reason: 'customer asked',
+    });
+    // 7:00–8:30 PM would end past the 8:00 PM day end, so 7:00 PM is not offered.
+    expect(result).toEqual({ error: 'Visits start on the hour. Use 6:00 PM.', code: 'window_not_on_the_hour' });
     expect(updateChain.update).not.toHaveBeenCalled();
   });
 

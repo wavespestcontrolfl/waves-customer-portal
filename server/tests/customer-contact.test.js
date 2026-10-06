@@ -310,6 +310,77 @@ describe('customer contact recipient routing', () => {
     expect(PREFS_UNAVAILABLE.sms_enabled).toBeUndefined();
   });
 
+  test('a tenant contact never gets the service report email', () => {
+    const tenantSlot = { ...customer, service_contact_role: 'tenant' };
+    expect(getServiceReportEmailRecipients(tenantSlot, {})).toEqual([
+      expect.objectContaining({ email: 'lana@example.com', role: 'primary' }),
+    ]);
+    // Role match ignores case and padding.
+    expect(getServiceReportEmailRecipients({ ...customer, service_contact_role: ' Tenant ' }, {}))
+      .toEqual([expect.objectContaining({ role: 'primary' })]);
+    // Appointment texts still reach the tenant: they open the door.
+    expect(getAppointmentContacts(tenantSlot, { appointment_notify_primary: false })).toEqual([
+      expect.objectContaining({ phone: '+15552220000', role: 'service_contact' }),
+    ]);
+  });
+
+  test('on a property-manager account, only a manager or landlord contact gets the report', () => {
+    const managed = {
+      ...customer,
+      contact_role: 'property_manager',
+      service_contact2_name: 'Pat Coordinator',
+      service_contact2_phone: '+15553330000',
+      service_contact2_email: 'pat@example.com',
+      service_contact2_role: 'property_manager',
+      service_contact3_name: 'Lee Landlord',
+      service_contact3_email: 'lee@example.com',
+      service_contact3_role: 'landlord',
+    };
+    // Slot 1 has no role (added by hand): treated as the occupant.
+    expect(getServiceReportEmailRecipients(managed, {}).map((r) => r.email)).toEqual([
+      'pat@example.com', 'lee@example.com', 'lana@example.com',
+    ]);
+    // The billing copy still goes out: it is the manager side.
+    expect(getServiceReportEmailRecipients(managed, {
+      service_report_notify_primary: false,
+      service_report_notify_billing: true,
+      billing_email: 'ap@example.com',
+    }).map((r) => r.email)).toEqual(['pat@example.com', 'lee@example.com', 'ap@example.com']);
+    // An owner account keeps today's rule: an unlabeled contact gets the report.
+    expect(getServiceReportEmailRecipients({ ...managed, contact_role: 'owner' }, {}).map((r) => r.email))
+      .toEqual(['terry@example.com', 'pat@example.com', 'lee@example.com', 'lana@example.com']);
+  });
+
+  test('a profile\'s own account holder always gets their own report; the account role governs its contacts', () => {
+    const property = { ...customer, account_id: 'acct-1', is_primary_profile: false };
+    // Holder marked tenant, owner account: the holder and the unlabeled contact get it.
+    expect(getServiceReportEmailRecipients({ ...property, contact_role: 'tenant', account_contact_role: '' }, {}).map((r) => r.email))
+      .toEqual(['terry@example.com', 'lana@example.com']);
+    // Manager account: the unlabeled contact is withheld, the holder is not.
+    expect(getServiceReportEmailRecipients({ ...property, contact_role: 'owner', account_contact_role: 'property_manager' }, {})
+      .map((r) => r.email)).toEqual(['lana@example.com']);
+    // A primary profile's own role is the account's.
+    expect(getServiceReportEmailRecipients({ ...customer, contact_role: 'tenant' }, {}).map((r) => r.email))
+      .toEqual(['terry@example.com', 'lana@example.com']);
+  });
+
+  test('deny wins: an email recorded on a tenant slot is withheld even when another slot repeats it', () => {
+    const dup = {
+      ...customer,
+      service_contact_role: 'tenant',
+      service_contact2_name: 'Terry Again', service_contact2_email: 'TERRY@example.com', service_contact2_role: 'home_buyer',
+    };
+    expect(getServiceReportEmailRecipients(dup, {}).map((r) => r.email)).toEqual(['lana@example.com']);
+  });
+
+  test('a property profile whose account role is unknown withholds every unlabeled contact', () => {
+    const unresolved = { ...customer, account_id: 'acct-1', is_primary_profile: false };
+    expect(getServiceReportEmailRecipients(unresolved, {}).map((r) => r.email)).toEqual(['lana@example.com']);
+    // Resolved to an owner account: today's rule.
+    expect(getServiceReportEmailRecipients({ ...unresolved, account_contact_role: '' }, {}).map((r) => r.email))
+      .toEqual(['terry@example.com', 'lana@example.com']);
+  });
+
   test('DISABLE_CONTACT_CONSENT_GATE=1 restores ungated fanout (kill switch)', () => {
     const unstamped = { ...customer, service_contacts_consent_at: null };
     process.env.DISABLE_CONTACT_CONSENT_GATE = '1';

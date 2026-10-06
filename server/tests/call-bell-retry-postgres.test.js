@@ -15,7 +15,7 @@ jest.mock('../services/notification-triggers', () => ({ triggerNotification: jes
 const { triggerNotification } = require('../services/notification-triggers');
 const logger = require('../services/logger');
 const { gates } = require('../config/feature-gates');
-const { ringMissedCallIfUnanswered, sweepMissedCalls } = require('../services/missed-call-bell');
+const { ringMissedCallIfUnanswered, sweepMissedCalls, retireCalledBackMissedCalls } = require('../services/missed-call-bell');
 const { ringRepeatCallerIfNeeded, sweepRepeatCallers } = require('../services/repeat-caller-bell');
 
 jest.setTimeout(30000);
@@ -149,6 +149,47 @@ jest.setTimeout(30000);
     await database('call_log').insert([earlier, missed, hangup]);
     expect(await ringMissedCallIfUnanswered(missed.twilio_call_sid)).toBe(true);
     expect(triggerNotification.mock.calls[0][1].callLogId).toBe(missed.id);
+  });
+
+  function bell(callRow, extra = {}) {
+    return {
+      id: randomUUID(), recipient_type: 'admin', category: 'missed_call', title: 'Missed call',
+      metadata: { triggerKey: 'customer_missed_call', payload: { callLogId: callRow.id } },
+      created_at: new Date(now - 5 * 60000), ...extra,
+    };
+  }
+
+  test('a missed-call bell retires once the caller gets through on a later call', async () => {
+    const customer = randomUUID();
+    const missed = call(30, { customer_id: customer });
+    await database('call_log').insert(missed);
+    const open = bell(missed);
+    const repeat = bell(missed, { metadata: { triggerKey: 'repeat_caller', payload: { callLogId: missed.id } } });
+    await database('notifications').insert([open, repeat]);
+    expect(await retireCalledBackMissedCalls()).toBe(0);
+    await database('call_log').insert(call(2, { customer_id: customer, status: 'completed', answered_by: 'human' }));
+    expect(await retireCalledBackMissedCalls()).toBe(1);
+    const row = await database('notifications').where({ id: open.id }).first();
+    expect(row.done_at).toBeTruthy();
+    expect(row.done_by).toBe('supersede');
+    expect(row.resolution).toBe('The caller got through on a later call');
+    expect((await database('notifications').where({ id: repeat.id }).first()).done_at).toBeNull();
+    expect(await retireCalledBackMissedCalls()).toBe(0);
+  });
+
+  test('a bell stays open after an un-alerted recording, an undialed callback, or past the 7-day window', async () => {
+    const customer = randomUUID();
+    const missed = call(30, { customer_id: customer });
+    const old = call(30, { customer_id: customer, from_phone: '+19415550109' });
+    await database('call_log').insert([missed, old,
+      call(20, { customer_id: customer, status: 'completed', answered_by: 'voicemail', recording_sid: `RE${randomUUID().replaceAll('-', '')}` }),
+      call(19, { direction: 'outbound', from_phone: '+19415559999', to_phone: '+19415550100', status: 'no-answer', answered_by: null }),
+      call(18, { customer_id: customer, from_phone: '+19415550109', status: 'completed', answered_by: 'human' }),
+    ]);
+    const stale = bell(old, { created_at: new Date(now - 8 * 24 * 60 * 60000) });
+    await database('notifications').insert([bell(missed), stale]);
+    expect(await retireCalledBackMissedCalls()).toBe(0);
+    expect((await database('notifications').where({ id: stale.id }).first()).done_at).toBeNull();
   });
 
   test('permanently ineligible calls are excluded before the missed-call page is loaded', async () => {
