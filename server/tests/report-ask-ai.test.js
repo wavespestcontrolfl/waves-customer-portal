@@ -620,7 +620,7 @@ describe('schedule questions keep the rule answer', () => {
     'When are you returning?', 'When will the technician return?', 'When are you coming again?',
     'Can I reschedule?', 'When is my next appointment?',
     'What time will you be here?', 'What day are you coming?',
-    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', 'Are we booked for tomorrow?', 'Am I booked tomorrow?', 'Are we still on for tomorrow?', 'When can I expect you?', "When's my service?", 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
+    'Will the technician visit tomorrow?', 'Is my service tomorrow?', 'When is my service?', 'Are we booked for tomorrow?', 'Are we confirmed for tomorrow?', 'Are we set for tomorrow?', 'Am I booked tomorrow?', 'Are we still on for tomorrow?', 'When can I expect you?', "When's my service?", 'When is my visit?', 'Will you come tomorrow?', 'Can you come tomorrow?', 'Are you able to come tomorrow?', 'Are you treating tomorrow?', 'Is there a visit tomorrow?', 'Are there any visits tomorrow?', 'When am I scheduled?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
@@ -695,6 +695,8 @@ describe('symptoms and exposure never reach the model', () => {
     'You sprayed my arm and hand',
     'What was sprayed on the arm chair?',
     'Can my dog go out after the spray?',
+    'Can I go out after the spray?',
+    'Can we go outside after you spray?',
     'The technician sprayed her',
     'She was sprayed',
     'You got sprayed',
