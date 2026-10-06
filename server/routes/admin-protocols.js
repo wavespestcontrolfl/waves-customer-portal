@@ -970,7 +970,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // dependent step (v13 April, 9x; ?visitsPerYear= overrides it) and its customer,
     // property and date decide the application limits. With no visit (the reference tab)
     // the sheet keeps the 12x step, warns, and checks no limits.
-    const scheduled = await loadVisitForPlan(db, req.query.scheduledServiceId);
+    const scheduled = await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q));
     const { visit, warnings: cadenceWarnings } = await visitForPlan(db, recipeVisit, scheduled, req.query.visitsPerYear);
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));

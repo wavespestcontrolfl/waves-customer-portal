@@ -1620,9 +1620,11 @@ async function visitForPlan(knex, recipeVisit, service, override = null) {
 
 // The booked visit a reader is opened from, by id (null for no id, a malformed id or an
 // unknown visit): the columns the cadence and the application limits read.
-async function loadVisitForPlan(knex, id) {
+// scope narrows the read to what the caller may see (a technician's current or recent
+// assignments); a visit outside it reads as no visit, so nothing of it is used.
+async function loadVisitForPlan(knex, id, scope = (q) => q) {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || ''))) return null;
-  return (await knex('scheduled_services').where({ id })
+  return (await scope(knex('scheduled_services').where({ 'scheduled_services.id': id }))
     .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days')) || null;
 }
 

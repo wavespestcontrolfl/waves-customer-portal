@@ -62,11 +62,11 @@ function readQuery(rows) {
   return query;
 }
 
-async function lawnMix(query) {
+async function lawnMix(query, reqExtra = {}) {
   const res = { json: jest.fn(), status: jest.fn() };
   res.status.mockReturnValue(res);
   const next = jest.fn();
-  await handler({ query: { track: 'bermuda', lawnSqft: '10000', ...query } }, res, next);
+  await handler({ query: { track: 'bermuda', lawnSqft: '10000', ...query }, ...reqExtra }, res, next);
   expect(next).not.toHaveBeenCalled();
   expect(res.json).toHaveBeenCalledTimes(1);
   return JSON.parse(JSON.stringify(res.json.mock.calls[0][0]));
@@ -204,6 +204,27 @@ describe('the April step follows the visit the sheet is opened from (?scheduledS
     visitRows = [{ service_id: null, service_type: 'Lawn Care', recurring_pattern: 'monthly', recurring_interval_days: null }];
     expect(selected(await lawnMix({ month: '4', scheduledServiceId: VISIT }))).toEqual([F24]);
     expect(selected(await lawnMix({ month: '4', scheduledServiceId: VISIT, visitsPerYear: '9' }))).toEqual([DIMENSION]);
+  });
+
+  test('a technician opening another technician\'s visit gets nothing from it: the read is scoped to their own assignments', async () => {
+    // Codex r6 on #5998: the visit read must apply technicianCurrentVisitFilter like the job card.
+    const row = { service_id: null, service_type: 'Lawn Care', recurring_pattern: 'every_6_weeks', recurring_interval_days: null, technician_id: 'tech-A' };
+    const scopedFirst = jest.fn();
+    db.mockImplementation((table) => {
+      if (table !== 'scheduled_services') return readQuery(table === 'products_catalog' ? CATALOG : table === 'equipment_calibrations as ec'
+        ? [{ id: 'cal', equipment_system_id: 'tank', system_name: 'Tank', system_type: 'tank', carrier_gal_per_1000: 1, tank_capacity_gal: 110, expires_at: '2099-01-01T00:00:00Z' }] : []);
+      const conds = [];
+      const q = { where: jest.fn((k, v) => { if (typeof k === 'string') conds.push([k, v]); return q; }), whereNotIn: jest.fn(() => q) };
+      q.first = scopedFirst.mockImplementation(async () => (conds.every(([k, v]) => k !== 'scheduled_services.technician_id' || row.technician_id === v) ? row : null));
+      return q;
+    });
+    const other = await lawnMix({ month: '4', scheduledServiceId: VISIT }, { techRole: 'technician', technicianId: 'tech-B' });
+    expect(selected(other)).toEqual([F24]);
+    expect(other.warnings.map((w) => w.code)).toContain('lawn_v13_plan_cadence_unknown');
+    const own = await lawnMix({ month: '4', scheduledServiceId: VISIT }, { techRole: 'technician', technicianId: 'tech-A' });
+    expect(selected(own)).toEqual([DIMENSION]);
+    const staff = await lawnMix({ month: '4', scheduledServiceId: VISIT });
+    expect(selected(staff)).toEqual([DIMENSION]);
   });
 
   test('a visit that states no plan, an unknown id and a malformed id all keep the 24-0-11 and warn', async () => {
