@@ -30,6 +30,9 @@ describe('withPassLinks', () => {
     expect(hrefOf('Show https://pass.example.com/v/abc.')).toBe('https://pass.example.com/v/abc');
     expect(hrefOf('Show https://pass.example.com/v/abc, then go in')).toBe('https://pass.example.com/v/abc');
     expect(hrefOf('(pass: https://pass.example.com/v/abc).')).toBe('https://pass.example.com/v/abc');
+    expect(hrefOf('Show https://pass.example.com/v/abc; then go in')).toBe('https://pass.example.com/v/abc');
+    expect(hrefOf('Pass https://pass.example.com/v/abc: tap it')).toBe('https://pass.example.com/v/abc');
+    expect(hrefOf('Got it at https://pass.example.com/v/abc?')).toBe('https://pass.example.com/v/abc');
   });
 
   it('leaves http, javascript and plain text alone', () => {

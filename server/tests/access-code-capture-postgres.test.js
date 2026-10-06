@@ -1929,6 +1929,23 @@ postgres('access codes section', () => {
       expect((await call('GET', `/?customerId=${home.id}`)).body.active.map((r) => r.instructions)).toEqual([`View your pass: ${LINK}`]);
     });
 
+    test('the suggested home shows its unit; a suggested home that is gone is never swapped for the home left', async () => {
+      const home = await customer({ properties: 2 });
+      await trx('customer_properties').where({ id: home.propertyIds[0] }).update({ address_line2: 'Apt 4' });
+      await text(null, PASS_TEXT, { from: SENDER });
+      await sweep(stub([passItem()]));
+      let res = await call('GET', '/found');
+      expect(res.body.items[0].suggestedCustomer).toMatchObject({ id: home.id, address: '4455 Example Lane, Apt 4, Lakewood Ranch' });
+      const id = res.body.items[0].id;
+      await trx('customer_properties').where({ id: home.propertyIds[0] }).update({ active: false });
+      res = await call('POST', `/${id}/link`, { customerId: home.id });
+      expect([res.status, res.body.accessCode.propertyId]).toEqual([200, null]);
+      res = await call('POST', `/${id}/accept`, {});
+      expect([res.status, res.body.code]).toEqual([400, 'property_required']);
+      res = await call('POST', `/${id}/accept`, { propertyId: home.propertyIds[1] });
+      expect([res.status, res.body.accessCode.propertyId]).toEqual([200, home.propertyIds[1]]);
+    });
+
     test('link refuses a missing customer, a bad id and a row that is not waiting', async () => {
       await text(null, PASS_TEXT, { from: SENDER });
       await sweep(stub([passItem()]));

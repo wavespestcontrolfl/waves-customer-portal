@@ -196,6 +196,24 @@ postgres('customer list search PostgreSQL behavior', () => {
     });
   });
 
+  test('finds the owner from a second home pasted as written, unit and state included', async () => {
+    await withCustomers(async (trx) => {
+      await trx.raw(`CREATE TEMP TABLE customer_properties (
+        customer_id uuid, active boolean, address_line1 text, address_line2 text, city text, state text, zip text
+      ) ON COMMIT DROP`);
+      await trx('customer_properties').insert({
+        customer_id: '00000000-0000-4000-8000-000000000010', active: true,
+        address_line1: '100 Sample Main St', address_line2: 'Apt 5', city: 'Sarasota', state: 'FL', zip: '34202',
+      });
+      expect(await matchingIds(trx, '100 Sample Main St, Apt 5, Sarasota, FL 34202')).toEqual([
+        '00000000-0000-4000-8000-000000000010',
+      ]);
+      expect(await matchingIds(trx, '100 Sample Main St, Apt 6, Sarasota')).toEqual([]);
+      await trx('customer_properties').update({ active: false });
+      expect(await matchingIds(trx, '100 Sample Main St, Apt 5')).toEqual([]);
+    });
+  });
+
   test('uses stable id page boundaries and preserves an explicit non-name primary sort', async () => {
     await withCustomers(async (trx) => {
       const firstPage = await applyCustomerNameOrder(

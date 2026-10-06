@@ -1140,7 +1140,7 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
     })
     .select('a.*', 'c.first_name', 'c.last_name', 'c.company_name',
       'sc.first_name as sc_first', 'sc.last_name as sc_last', 'sc.company_name as sc_company',
-      'sp.address_line1 as sc_address', 'sp.city as sc_city')
+      'sp.address_line1 as sc_address', 'sp.address_line2 as sc_address2', 'sp.city as sc_city')
     .orderBy('a.created_at', 'desc').orderBy('a.id').limit(limit).offset(offset);
   // The visit picker's choices for every row on the page, in one query: the
   // customer's live visits from today through 14 days after the code was sent.
@@ -1164,7 +1164,7 @@ async function listFound(conn, { limit = 50, offset = 0 } = {}) {
         suggestedCustomer: !r.customer_id && r.suggested_customer_id && nameOf(r.sc_first, r.sc_last, r.sc_company) ? {
           id: r.suggested_customer_id,
           name: nameOf(r.sc_first, r.sc_last, r.sc_company),
-          address: [r.sc_address, r.sc_city].filter(Boolean).join(', ') || null,
+          address: [r.sc_address, r.sc_address2, r.sc_city].filter(Boolean).join(', ') || null,
         } : null,
         propertyChoices: homes.get(r.customer_id) || [],
         visitChoices: visits.filter((v) => v.customer_id === r.customer_id && v.scheduled_date <= last)
@@ -1453,8 +1453,12 @@ async function link(conn, id, { customerId, adminUserId = null } = {}) {
       }
       if (await codeIsAddress(trx, customerId, row.code)) return fail(409, 'code_is_address');
       const homes = await trx('customer_properties').where({ customer_id: customerId, active: true }).pluck('id');
-      // The text's own home when it is one of this customer's; else the only home.
-      const home = homes.includes(row.property_id) ? row.property_id : (homes.length === 1 ? homes[0] : null);
+      // The text's own home when it is still one of this customer's active
+      // homes. A suggested home that is gone is never swapped for the home
+      // left: the office names it at accept. With no suggestion, the only home.
+      let home = null;
+      if (row.property_id) home = homes.includes(row.property_id) ? row.property_id : null;
+      else if (homes.length === 1) home = homes[0];
       const [updated] = await trx('customer_access_codes').where({ id }).update({
         customer_id: customerId, property_id: home, sender_phone: null,
         suggested_customer_id: null, updated_at: trx.fn.now(),
