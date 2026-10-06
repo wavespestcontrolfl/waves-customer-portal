@@ -246,77 +246,10 @@ async function getCachedLookup(address) {
     const { hash } = addressKey(address);
     const row = await db('property_lookups').where({ address_hash: hash }).first();
     if (!row || !row.property_record) return null;
-    // Older AI records inherited county authority from a claimed URL. Retry
-    // them through the corrected evidence rules instead of serving that trust.
-    if (hasUnconfirmedCountyEvidence(row.property_record)) return null;
-    if (!row.expires_at || new Date(row.expires_at).getTime() <= Date.now()) return null;
-    // Defense in depth vs. partial rows (saveLookup refuses to write them):
-    // no stored coordinates = no satellite regeneration = treat as a miss.
-    if (row.lat == null || row.lng == null) return null;
-    // A field verified AFTER the data was cached invalidates the hit: the
-    // stored aiAnalysis (turf, pool cage, pest pressure) was derived from the
-    // pre-correction facts. The live re-run folds the corrections into the
-    // vision pass and re-saves with a fresh data_saved_at, so hits resume.
-    if (overridesNewerThanData(row)) {
-      logger.info('[lookup-cache] cached data predates a verified override — treating as miss');
+    const reason = cachedRowMissReason(row);
+    if (reason) {
+      if (reason !== 'expired' && reason !== 'no_coordinates') logger.info(`[lookup-cache] ${reason} — treating as miss`);
       return null;
-    }
-    // Unassessed-vacant-parcel rows age out on the SHORT TTL even when their
-    // stored expires_at says otherwise — rows written before the short TTL
-    // shipped carry the base 180-day expiry, which would pin exactly the
-    // records this exists to refresh (codex P1). Rows without a data
-    // timestamp can't prove freshness — fail toward the live lookup.
-    // Stale-imagery-conflict rows (county assesses a home, vision measured
-    // an empty lot — see detectStaleImageryTurfConflict) get the same
-    // read-side short TTL for the same reason: fresher tiles are the only
-    // real fix, and the rows poisoned before this shipped carry the 180-day
-    // expiry.
-    // The vacant-roll bare-land imagery state joins them: when a listing or
-    // verified size fills the dimensions the vacant-parcel branch no longer
-    // fires, yet the roll/tiles catching up is still the only real fix.
-    const shortTtlReason = detectUnassessedVacantParcel(row.property_record)
-      ? 'vacant-parcel'
-      : detectStaleImageryTurfConflict(row.property_record, row.ai_analysis)
-        ? 'stale-imagery-conflict'
-        : detectVacantRollBareLandImagery(row.property_record, row.ai_analysis)
-          ? 'vacant-roll-bare-land-imagery'
-          : !hasCountyPricingCore(row.property_record) ? 'missing-pricing-dimensions' : null;
-    if (shortTtlReason) {
-      const savedAt = row.data_saved_at ? new Date(row.data_saved_at).getTime() : 0;
-      const maxAgeMs = vacantParcelTtlDays() * 24 * 60 * 60 * 1000;
-      if (!savedAt || Date.now() - savedAt > maxAgeMs) {
-        logger.info(`[lookup-cache] ${shortTtlReason} row past the short TTL — treating as miss`);
-        return null;
-      }
-    }
-    // Pre-marker park rows are invalidated OUTRIGHT, not short-TTL'd: their
-    // GIS parcel meta classifies as a mobile-home park but the record lacks
-    // the multiSitusParcel marker, meaning it was cached before the park
-    // guards shipped and can carry park-wide dimensions under a
-    // cadastral/hybrid source — a shape hasCountyEvidence counts as county
-    // evidence, so the roll-miss TTL below never touches it (codex P2 r3
-    // #3095). A live re-run rebuilds the record with the marker.
-    if (isPreMarkerParkRecord(row.property_record)) {
-      logger.info('[lookup-cache] pre-marker park-parcel row — treating as miss');
-      return null;
-    }
-    // Roll-miss rows (no county evidence) age out on the short TTL the same
-    // way — rows cached before the multi-situs situs-cell split are exactly
-    // the ones a re-run can now resolve against the roll (codex P2 #3095),
-    // and their stored expires_at still says 180 days.
-    if (!hasCountyEvidence(row.property_record)) {
-      // A roll-miss row failed under an OLDER matcher (or one from before
-      // the marker existed): a stale failure, re-run now (PR 3).
-      if (row.property_record._rollMatcherVersion !== ROLL_MATCHER_VERSION) {
-        logger.info('[lookup-cache] roll-miss row from an older county matcher — treating as miss');
-        return null;
-      }
-      const savedAt = row.data_saved_at ? new Date(row.data_saved_at).getTime() : 0;
-      const maxAgeMs = rollMissTtlDays() * 24 * 60 * 60 * 1000;
-      if (!savedAt || Date.now() - savedAt > maxAgeMs) {
-        logger.info('[lookup-cache] roll-miss row past the short TTL — treating as miss');
-        return null;
-      }
     }
     return row;
   } catch (err) {
@@ -327,6 +260,57 @@ async function getCachedLookup(address) {
     return null;
   }
 }
+
+// Why a stored row is NOT served, or null for a hit. One ordered list of
+// the cache-validity rules, each a sentence:
+//  - expired: the stored expires_at passed.
+//  - unconfirmed county evidence: an older AI record inherited county
+//    authority from a claimed URL; re-run through the corrected rules.
+//  - no coordinates: a partial row (saveLookup refuses to write them) has
+//    no satellite to regenerate.
+//  - override newer than data: a field verified AFTER the data was cached;
+//    the stored aiAnalysis (turf, pool cage, pest pressure) came from the
+//    pre-correction facts, and the live re-run folds the correction in.
+//  - short-TTL states past their window: unassessed vacant parcel, stale
+//    imagery conflict, vacant-roll bare-land imagery, missing pricing
+//    dimensions — "the roll / the tiles will catch up" windows, read-side
+//    so rows written with the 180-day expiry still age out at 21 days.
+//  - pre-marker park row: cached before the park guards, may carry
+//    park-wide dimensions under a county-looking source; outright.
+//  - roll-miss row (no county evidence): a stale failure when the county
+//    matcher that failed it is older than this process's
+//    (ROLL_MATCHER_VERSION; a newer marker from an overlapping deploy is
+//    accepted, no marker is older than every version), else the 21-day
+//    roll-miss TTL.
+// Rows without a data timestamp cannot prove freshness: miss.
+function cachedRowMissReason(row) {
+  const record = row.property_record;
+  if (hasUnconfirmedCountyEvidence(record)) return 'old AI record labeled as county evidence';
+  if (!row.expires_at || new Date(row.expires_at).getTime() <= Date.now()) return 'expired';
+  if (row.lat == null || row.lng == null) return 'no_coordinates';
+  if (overridesNewerThanData(row)) return 'cached data predates a verified override';
+  const ageMs = row.data_saved_at ? Date.now() - new Date(row.data_saved_at).getTime() : Infinity;
+  const shortTtl = shortTtlState(record, row.ai_analysis);
+  if (shortTtl && ageMs > vacantParcelTtlDays() * DAY_MS) return `${shortTtl} row past the short TTL`;
+  if (isPreMarkerParkRecord(record)) return 'pre-marker park-parcel row';
+  if (!hasCountyEvidence(record)) {
+    if (String(record._rollMatcherVersion || '') < ROLL_MATCHER_VERSION) return 'roll-miss row from an older county matcher';
+    if (ageMs > rollMissTtlDays() * DAY_MS) return 'roll-miss row past the short TTL';
+  }
+  return null;
+}
+
+// The short-TTL state a record is in, or null. Shared by the read rule
+// above and the write-side TTL choice, so the two never disagree.
+function shortTtlState(record, aiAnalysis) {
+  if (detectUnassessedVacantParcel(record)) return 'vacant-parcel';
+  if (detectStaleImageryTurfConflict(record, aiAnalysis)) return 'stale-imagery-conflict';
+  if (detectVacantRollBareLandImagery(record, aiAnalysis)) return 'vacant-roll-bare-land-imagery';
+  if (!hasCountyPricingCore(record)) return 'missing-pricing-dimensions';
+  return null;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Verified overrides are corrections, not cache: read them even when the
 // cache is disabled or the row's data slot has expired.
@@ -585,17 +569,13 @@ async function saveLookup(address, result, attemptId) {
     // mid-lookup wasn't applied to this result, and anchoring here makes it
     // compare as newer than the data so the next hit invalidates.
     const dataAsOf = result.meta?.timestamp ? new Date(result.meta.timestamp) : new Date();
-    const vacantParcel = Boolean(detectUnassessedVacantParcel(record));
-    // Stale-imagery conflicts share the vacant-parcel short TTL: both are
-    // "the imagery/roll will catch up" windows, not stable property facts.
-    const staleImagery = Boolean(detectStaleImageryTurfConflict(record, result.aiAnalysis));
-    const vacantBareLand = Boolean(detectVacantRollBareLandImagery(record, result.aiAnalysis));
+    // The TTL decision is the read rule's twin (shortTtlState): a short-TTL
+    // state or a roll miss gets the short window, everything else the base.
+    const shortTtl = shortTtlState(record, result.aiAnalysis);
     const rollMiss = !hasCountyEvidence(record);
-    // A roll-miss row remembers which matcher failed it (read-side rule above).
+    const ttlDays = shortTtl ? vacantParcelTtlDays() : rollMiss ? rollMissTtlDays() : cacheTtlDays();
+    // A roll-miss row remembers which matcher failed it (read rule above).
     const stored = rollMiss ? { ...record, _rollMatcherVersion: ROLL_MATCHER_VERSION } : record;
-    const ttlDays = (vacantParcel || staleImagery || vacantBareLand || !hasCountyPricingCore(record)) ? vacantParcelTtlDays()
-      : rollMiss ? rollMissTtlDays()
-      : cacheTtlDays();
     const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
     const payload = {
       address_hash: hash,
@@ -624,8 +604,7 @@ async function saveLookup(address, result, attemptId) {
       county: payload.county,
       hasParcel: Boolean(record._parcel),
       ttlDays,
-      vacantParcel: vacantParcel || undefined,
-      staleImageryConflict: staleImagery || undefined,
+      shortTtl: shortTtl || undefined,
     });
   } catch (err) {
     logger.warn('[lookup-cache] write failed', { code: err?.code || 'none' });

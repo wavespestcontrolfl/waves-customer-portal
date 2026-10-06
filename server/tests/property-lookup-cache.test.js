@@ -240,6 +240,9 @@ describe('getCachedLookup', () => {
     // An older matcher: miss.
     mockDbHandler = () => fakeTable({ row: { ...freshRow, property_record: { squareFootage: 1200, _source: 'ai', _rollMatcherVersion: '2026-09-01' }, data_saved_at: fresh } });
     expect(await getCachedLookup('100 Main St')).toBeNull();
+    // A NEWER matcher (an overlapping deploy wrote it): accepted, never ping-ponged.
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, property_record: { squareFootage: 1200, _source: 'ai', _rollMatcherVersion: '2099-01-01' }, data_saved_at: fresh } });
+    expect(await getCachedLookup('100 Main St')).toBeTruthy();
     // The current matcher: a hit inside the roll-miss TTL.
     mockDbHandler = () => fakeTable({ row: { ...freshRow, property_record: { squareFootage: 1200, _source: 'ai', _rollMatcherVersion: ROLL_MATCHER_VERSION }, data_saved_at: fresh } });
     expect(await getCachedLookup('100 Main St')).toBeTruthy();
