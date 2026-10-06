@@ -325,10 +325,10 @@ const SPELLED_NUMBER = '(?:one|two|three|four|five|six|seven|eight|nine|ten|elev
 const SPELLED_HOUSE_NUMBER = new RegExp(`\\b${SPELLED_NUMBER}(?:[\\s-]+(?:and\\s+)?(?:${SPELLED_NUMBER}|zero|oh))*(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
 // A numbered route has no suffix word: "12 SR 70", "12 FL-70", "12 N US 41",
 // "12 State Road 64" (Codex P1 #6016 r15).
-const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?:[-/]\d{1,6}[a-z]?)?(?:\s+\d\/\d)?(?=\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\.?\s+)?(?:fl|florida|s\.?\s?r\.?|u\.?\s?s\.?|c\.?\s?r\.?|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*\d{1,4}\b)/gi;
+const ROUTE_HOUSE_NUMBER = /\b\d{1,6}[a-z]?(?:[-/]\d{1,6}[a-z]?)?(?:\s+\d\/\d)?(?=\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\.?\s+)?(?:f\.?\s?l\.?|florida|s\.?\s?r\.?|u\.?\s?s\.?|c\.?\s?r\.?|i|state\s+(?:road|route|rd)|county\s+(?:road|rd)|highway|hwy|route|rte)[\s-]*(?:\d{1,4}\b|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred))*\b))/gi;
 // A spelled house number on a numbered route: "Twelve U S 41", "One Hundred SR 70"
 // (Codex P1 #6016 r36).
-const SPELLED_ROUTE_HOUSE_NUMBER = new RegExp(`\\b${SPELLED_NUMBER}(?:[\\s-]+(?:and\\s+)?(?:${SPELLED_NUMBER}|zero|oh))*(?=\\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\\.?\\s+)?(?:fl|florida|s\\.?\\s?r\\.?|u\\.?\\s?s\\.?|c\\.?\\s?r\\.?|i|state\\s+(?:road|route|rd)|county\\s+(?:road|rd)|highway|hwy|route|rte)[\\s-]*\\d{1,4}\\b)`, 'gi');
+const SPELLED_ROUTE_HOUSE_NUMBER = new RegExp(`\\b${SPELLED_NUMBER}(?:[\\s-]+(?:and\\s+)?(?:${SPELLED_NUMBER}|zero|oh))*(?=\\s+(?:(?:n|s|e|w|ne|nw|se|sw|north|south|east|west)\\.?\\s+)?(?:f\\.?\\s?l\\.?|florida|s\\.?\\s?r\\.?|u\\.?\\s?s\\.?|c\\.?\\s?r\\.?|i|state\\s+(?:road|route|rd)|county\\s+(?:road|rd)|highway|hwy|route|rte)[\\s-]*(?:\\d{1,4}\\b|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)(?:[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred))*\\b))`, 'gi');
 
 // "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
 // directly by a short value is a credential even with no "code" or "pin"
@@ -363,10 +363,14 @@ const NUMBER_WORD_DIGITS = {
   twenty: 2, thirty: 2, forty: 2, fifty: 2, sixty: 2, seventy: 2, eighty: 2, ninety: 2, hundred: 2, thousand: 3,
 };
 const NUMBER_WORD = `(?:${Object.keys(NUMBER_WORD_DIGITS).join('|')})`;
-const NUMBER_WORD_RUN = new RegExp(`\\b${NUMBER_WORD}(?:[\\s,.-]+(?:double\\s+|triple\\s+)?${NUMBER_WORD})+\\b`, 'gi');
+// Digit groups count too ("nine four one 55 five...") (Codex P1 #6038 r7).
+const NUMBER_TOKEN = `(?:${NUMBER_WORD}|\\d{1,4})`;
+const NUMBER_WORD_RUN = new RegExp(`\\b(?:(?:double|triple)\\s+)?${NUMBER_TOKEN}(?:[\\s,.-]+(?:and\\s+)?(?:double\\s+|triple\\s+)?${NUMBER_TOKEN})+\\b`, 'gi');
 function maskSpokenPhones(text) {
   return text.replace(NUMBER_WORD_RUN, (run) => {
-    const words = run.toLowerCase().split(/[\s,.-]+/).filter(Boolean);
+    const words = run.toLowerCase().split(/[\s,.-]+/).filter((word) => word && word !== 'and');
+    // A run of digits alone is left to redactContact and the 3-digit scrub.
+    if (!words.some((word) => NUMBER_WORD_DIGITS[word])) return run;
     // "twenty-five": a tens word joined to a digit word is one two-digit group.
     let digits = 0;
     words.forEach((word, i) => {
@@ -374,7 +378,8 @@ function maskSpokenPhones(text) {
       const joined = NUMBER_WORD_DIGITS[word] === 1 && prev && /^(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)$/.test(prev);
       // "double five" is two digits, "triple one" three (Codex P1 #6038 r5).
       const times = { double: 2, triple: 3 }[prev] || 1;
-      digits += joined || word === 'double' || word === 'triple' ? 0 : (NUMBER_WORD_DIGITS[word] || 0) * times;
+      const value = /^\d+$/.test(word) ? word.length : (NUMBER_WORD_DIGITS[word] || 0);
+      digits += joined || word === 'double' || word === 'triple' ? 0 : value * times;
     });
     return digits >= 7 ? '[phone]' : run;
   });
@@ -820,7 +825,7 @@ const INLINE_LIST_RE = /(?:^|[:.;]\s)1[.)]\s+\S.*\s2[.)]\s/;
 const ASK_EXTRA_BANNED = [
   // No-harm assurances in other words (Codex P1 #5964 r29): "poses no risk to
   // pets", "will not harm your children", "gentle around pets".
-  [/\b(?:no|zero|little|minimal|low)\s+(?:risk|danger|harm|threat|hazard)\b|\b(?:won['’]?t|will\s+not|does\s+not|doesn['’]?t|cannot|can['’]?t|wouldn['’]?t|would\s+not|isn['’]?t\s+going\s+to)\s+(?:\w+\s+)?(?:harm|hurt|affect|bother|endanger|injure|poison)\b|\b(?:not|never|unlikely\s+to|won['’]?t|will\s+not|does\s+not|doesn['’]?t|shouldn['’]?t|should\s+not|mustn['’]?t|couldn['’]?t|could\s+not|wouldn['’]?t|would\s+not)\s+(?:\w+\s+){0,2}?(?:harm|hurt|endanger|injure|poison|pose\s+(?:a|an|any)\s+(?:\w+\s+)?(?:risk|danger|threat|hazard))\b|\bgentle\b|\b(?:not|isn['’]?t|aren['’]?t)\s+(?:harmful|dangerous|toxic|a\s+(?:risk|danger|concern))\b|\bnothing\s+to\s+worry\b/i, 'safety claim'],
+  [/\b(?:no|zero|little|minimal|low)\s+(?:risk|danger|harm|threat|hazard)\b|\b(?:won['’]?t|will\s+not|does\s+not|doesn['’]?t|cannot|can['’]?t|wouldn['’]?t|would\s+not|isn['’]?t\s+going\s+to|shouldn['’]?t|should\s+not|mustn['’]?t|must\s+not|couldn['’]?t|could\s+not|never)\s+(?:\w+\s+){0,2}?(?:harm|hurt|affect|bother|endanger|injure|poison|irritate|pose\s+(?:a|an|any)\s+(?:\w+\s+)?(?:risk|danger|threat|hazard))\b|\b(?:not|never|unlikely\s+to|won['’]?t|will\s+not|does\s+not|doesn['’]?t|shouldn['’]?t|should\s+not|mustn['’]?t|couldn['’]?t|could\s+not|wouldn['’]?t|would\s+not)\s+(?:\w+\s+){0,2}?(?:harm|hurt|endanger|injure|poison|pose\s+(?:a|an|any)\s+(?:\w+\s+)?(?:risk|danger|threat|hazard))\b|\bgentle\b|\b(?:not|isn['’]?t|aren['’]?t)\s+(?:harmful|dangerous|toxic|a\s+(?:risk|danger|concern))\b|\bnothing\s+to\s+worry\b/i, 'safety claim'],
   // "You should see improvement", "the lawn should show improvement" (Codex P1 #5964 r20).
   [/\b(?:will|should|ought\s+to|(?:is|are)\s+going\s+to|expect\s+to)\s+(?:start\s+to\s+|begin\s+to\s+)?(?:see|notice|show|find)\s+(?:\w+\s+){0,3}?(?:improvement|results?|difference|progress|reduction|fewer|less|greener|better|healthier|thicker)\b/i, 'result promise'],
   // Modal, future and expected results (Codex P1 #5964 r13, r17): "should
@@ -1006,7 +1011,7 @@ const COMPACT_24H = /\b(?:at|around|about|by|after|before|until)\s+(?:[01]\d|2[0
 // A promised visit with no date ("We will be back soon", "the technician will
 // come back in the spring"): the model has no appointment to promise (Codex
 // P1 #5964 r25).
-const VISIT_PROMISE = /\b(?:we|we['’]ll|(?:the|a|an|your|our)\s+(?:tech|technician|team(?:\s+member)?|crew|specialist)|waves|someone|somebody)\s+(?:will|['’]ll|are\s+going\s+to|is\s+going\s+to|plans?\s+to)\s+(?:also\s+|then\s+|soon\s+|likely\s+|probably\s+)?(?:return|come\s+back|be\s+back|revisit|visit\s+again|stop\s+by|come\s+out|check\s+back|follow\s+up|schedule)\b|\b(?:we|(?:the|a|an|your|our)\s+(?:tech|technician|team(?:\s+member)?|crew|specialist)|waves|someone|somebody)\s+(?:will|['’]ll|are\s+going\s+to|is\s+going\s+to|plans?\s+to)\s+(?:\w+\s+)?(?:arrive|send\s+(?:\w+\s+){0,2}?out|dispatch|head\s+(?:out|over)|be\s+(?:there|here|out|over))\b|\b(?:(?:the|a|an|your|our)\s+(?:tech|technician|team(?:\s+member)?|crew|specialist)|someone|somebody)\s+(?:is|are)\s+(?:coming|heading|on\s+(?:the|their|his|her)\s+way)\b|\bin\s+a\s+fortnight\b|\b(?:next|another|follow[\s-]?up|return|second|future)\s+(?:service|visit|treatment|appointment|follow[\s-]?up|stop)s?\b(?![^.?!]*\b(?:not|never|was|were|last|already|completed|done|recorded)\b)[^.?!]*\b(?:will|['’]ll|planned|scheduled|coming(?:\s+up)?|soon|expected|due|is\s+(?:set|booked)|in\s+the\s+(?:spring|summer|fall|autumn|winter|new\s+year))\b|\b(?:a|the|your|our)\s+(?:next\s+)?follow[\s-]?up\s+(?:will\b|is\s+(?:soon|scheduled|planned|coming|set|due|booked)\b)|\bexpect\s+(?:another|a|your\s+next|the\s+next)\s+(?:visit|service|treatment|follow[\s-]?up)\b/i;
+const VISIT_PROMISE = /\b(?:we|(?:the|a|an|your|our)\s+(?:tech|technician|team(?:\s+member)?|crew|specialist)|waves|someone|somebody)(?:\s+(?:will|are\s+going\s+to|is\s+going\s+to|plans?\s+to)|['’]ll)\s+(?:also\s+|then\s+|soon\s+|likely\s+|probably\s+)?(?:return|come\s+back|be\s+back|revisit|visit\s+again|stop\s+by|come\s+out|check\s+back|follow\s+up|schedule)\b|\b(?:we|(?:the|a|an|your|our)\s+(?:tech|technician|team(?:\s+member)?|crew|specialist)|waves|someone|somebody)(?:\s+(?:will|are\s+going\s+to|is\s+going\s+to|plans?\s+to)|['’]ll)\s+(?:\w+\s+)?(?:arrive|send\s+(?:\w+\s+){0,2}?out|dispatch|head\s+(?:out|over)|be\s+(?:there|here|out|over))\b|\b(?:(?:the|a|an|your|our)\s+(?:tech|technician|team(?:\s+member)?|crew|specialist)|someone|somebody|we|waves)\s+(?:is|are|['’]re)\s+(?:coming|heading|on\s+(?:the|their|his|her|our)\s+way)\b|\b(?:we|waves|(?:the|a|an|your|our)\s+(?:tech|technician|team(?:\s+member)?|crew|specialist)|someone|somebody)(?:\s+(?:is|are)|['’]re|['’]s)\s+(?:scheduled|expected|planned|set|due|booked|slated)\s+to\s+(?:return|come|visit|be|stop|swing|head)\b|\bin\s+a\s+fortnight\b|\b(?:next|another|follow[\s-]?up|return|second|future)\s+(?:service|visit|treatment|appointment|follow[\s-]?up|stop)s?\b(?![^.?!]*\b(?:not|never|was|were|last|already|completed|done|recorded)\b)[^.?!]*\b(?:will|['’]ll|planned|scheduled|coming(?:\s+up)?|soon|expected|due|is\s+(?:set|booked)|in\s+the\s+(?:spring|summer|fall|autumn|winter|new\s+year))\b|\b(?:a|the|your|our)\s+(?:next\s+)?follow[\s-]?up\s+(?:will\b|is\s+(?:soon|scheduled|planned|coming|set|due|booked)\b)|\bexpect\s+(?:another|a|your\s+next|the\s+next)\s+(?:visit|service|treatment|follow[\s-]?up)\b/i;
 const MONTH_MAY = /\b(?<!\d\s)(?:in|on|by|until|since|next|early|late|mid)[\s-]+(?:May|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\b\.?|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
@@ -1057,8 +1062,19 @@ const NUMBER_WORD_RE = new RegExp(`\\b(?:(${TENS.join('|')})(?:[\\s-](${SMALL_NU
 // "zero" and "one" count before a unit, a time word or a count noun ("one week",
 // "one affected palm") (Codex P1 #5964 r16).
 const UNIT_AHEAD_RE = /^\s*(?:inch|in\.|["”]|out\s+of\s+(?:100|5)|points?\b|\/\s*(?:100|5)|(?:days?|weeks?|months?|years?|hours?|minutes?|visits?|treatments?|applications?)\b|(?:\w+\s+)?(?:palms?|plants?|trees?|shrubs?|areas?|spots?|stations?|nests?|mounds?|colonies|colony|rooms?|beds?|zones?|roach(?:es)?|ants?|rodents?|rats?|mice|insects?|pests?)\b)/i;
+// Fractions in words: "one and a half inches" -> 1.5, "half an inch" -> 0.5,
+// "a quarter inch" -> 0.25, "three quarters of an inch" -> 0.75 (Codex P1
+// #5964 r32).
+const FRACTION_WORDS = [
+  [/\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+and\s+a\s+half\b/gi, (m, n) => String(SMALL_NUMBERS.indexOf(n.toLowerCase()) + 0.5)],
+  [/\b(one|two|three|four|five|six|seven|eight|nine|ten)\s+and\s+a\s+quarter\b/gi, (m, n) => String(SMALL_NUMBERS.indexOf(n.toLowerCase()) + 0.25)],
+  [/\bthree[\s-]+quarters?(?:\s+of)?(?:\s+an?)?\b/gi, () => '0.75'],
+  [/\b(?:a\s+|one\s+)?half(?:\s+of)?(?:\s+an?)?\b(?=\s*(?:inch|in\.|["”]))/gi, () => '0.5'],
+  [/\b(?:a|one)\s+quarter(?:\s+of)?(?:\s+an?)?\b(?=\s*(?:inch|in\.|["”]))/gi, () => '0.25'],
+];
 function digitsForWords(text) {
-  return text.replace(NUMBER_WORD_RE, (match, tens, unit, small, hundred, offset, whole) => {
+  const withFractions = FRACTION_WORDS.reduce((rest, [re, to]) => rest.replace(re, to), text);
+  return withFractions.replace(NUMBER_WORD_RE, (match, tens, unit, small, hundred, offset, whole) => {
     if (hundred) return '100';
     if (small && /^(?:zero|one)$/i.test(small) && !UNIT_AHEAD_RE.test(whole.slice(offset + match.length))) return match;
     if (small) return String(SMALL_NUMBERS.indexOf(small.toLowerCase()));
@@ -1257,9 +1273,12 @@ const INGREDIENT_FILLER = new Set('water no none nothing only an a the same that
 const ingredientWords = (products) => new Set(products.flatMap((product) => normalizeKey(product.active_ingredient || '').split(' ')).filter(Boolean));
 function statesUnknownIngredient(text, { facts }) {
   const products = asArray(facts?.products).filter((product) => product?.name);
-  return splitSentences(matchForm(text)).some((sentence) => {
-    const named = products.filter((product) => mentions(sentence, product));
-    return claimsUnknownIngredient(sentence, ingredientWords(named.length ? named : products));
+  // Each clause on its own ("Alpine WSG contains fipronil; Taurus SC contains
+  // dinotefuran") (Codex P1 #5964 r32); "and" stays inside one claim's list.
+  const clauses = splitSentences(matchForm(text)).flatMap((sentence) => sentence.split(/\s*[;:]\s*|\s+(?:while|whereas|but)\s+/i));
+  return clauses.some((clause) => {
+    const named = products.filter((product) => mentions(clause, product));
+    return claimsUnknownIngredient(clause, ingredientWords(named.length ? named : products));
   });
 }
 function claimsUnknownIngredient(text, recorded) {
@@ -1321,6 +1340,8 @@ function keepsLineCondition(sentence, requiredLines) {
   if (!m || WEAKENED_CONDITION.test(sentence)) return false;
   const key = CONDITION_KEYS.find(([, re]) => re.test(m[0]));
   if (!key) return false;
+  // No required line: only the prompt's own dry-time guidance keeps it.
+  if (!requiredLines.length) return key[0] === 'dry';
   const lines = requiredLines.filter((line) => key[1].test(line));
   return lines.length > 0 && lines.every((line) => !STRONG_QUALIFIER.test(line) || STRONG_QUALIFIER.test(sentence));
 }
@@ -1339,8 +1360,9 @@ const ASK_CHECKS = [
   // permission on the same subjects (pets and kids, re-entry, watering,
   // rinsing): "However, pets can go out right away" after the dry line
   // contradicts it without any dismissal word (Codex P1 #5964 r10).
-  ['second_instruction', (text, { requiredLines }) => requiredLines.length > 0
-    && ownSentences(text, requiredLines).some((sentence) => REQUIRED_SUBJECT_RE.test(sentence)
+  // With no required lines too: "Your dog can go outside right away" when the
+  // report has no re-entry guidance (Codex P1 #5964 r32).
+  ['second_instruction', (text, { requiredLines }) => ownSentences(text, requiredLines).some((sentence) => REQUIRED_SUBJECT_RE.test(sentence)
       && UNCONDITIONAL_PERMISSION_RE.test(sentence) && !keepsLineCondition(sentence, requiredLines))],
   ['states_a_date', statesADate],
   // An inside or outside claim about a product must match its recorded
@@ -1492,7 +1514,7 @@ const EXPOSED_SOMEONE = new RegExp(`\\b(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_P
 // bait") (Codex P1 #6016 r32). No subject list can name every person.
 // A bite counts only on a product ("bit the bait"); "a little bit of bait" and
 // "mosquitoes bit me" do not (Codex P1 #6038 r1).
-const INGESTION_VERB = /\b(?:(?:bit|bites?|biting|bitten)(?!\s+of\b)\s+(?:into\s+|on\s+)?(?:the\s+|some\s+|a\s+|an\s+|that\s+|this\s+)?(?:\w+\s+)?(?:bait\w*|poison\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)|(?:bait\w*|poison\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)\s+(?:\w+\s+)?(?:was|were|got|been|is|are)\s+(?:\w+\s+)?bitten|(?:took|takes?|taking|taken|got|gets?|getting|had|has|have)\s+(?:\w+\s+){0,2}?(?:bites?|mouthfuls?|sips?|tastes?|licks?)\s+(?:of|out\s+of|from)\s+(?:the\s+|some\s+|a\s+|an\s+|that\s+|this\s+|my\s+|our\s+)?(?:\w+\s+)?(?:bait\w*|poison\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)|swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
+const INGESTION_VERB = /\b(?:(?:bit|bites?|biting|bitten)(?!\s+of\b)\s+(?:into\s+|on\s+)?(?:the\s+|some\s+|a\s+|an\s+|that\s+|this\s+)?(?:(?!(?:near|by|at|in|on|next|beside|behind|under|over|while|and|but|or|with|without|from|of|to|for|after|before|when|i|we|it|was|were|is|are)\b)\w+\s+){0,3}(?:bait\w*|poison\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)|(?:bait\w*|poison\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)\s+(?:\w+\s+)?(?:was|were|got|been|is|are)\s+(?:\w+\s+)?bitten|(?:took|takes?|taking|taken|got|gets?|getting|had|has|have)\s+(?:\w+\s+){0,4}?(?:bites?|mouthfuls?|sips?|tastes?|licks?)\s+(?:of|out\s+of|from)\s+(?:the\s+|some\s+|a\s+|an\s+|that\s+|this\s+|my\s+|our\s+)?(?:(?!(?:near|by|at|in|on|next|beside|behind|under|over|while|and|but|or|with|without|from|of|to|for|after|before|when|i|we|it|was|were|is|are)\b)\w+\s+){0,3}(?:bait\w*|poison\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)|swallow\w*|ingest\w*|consum(?:e|ed|es|ing)|ate|eaten|eating|drank|drunk|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)\b/i;
 const EXPOSURE_WORD = /\b(?:bait\w*|spray\w*|pesticides?|chemicals?|granules?|granular|poison\w*|insecticides?|herbicides?|fungicides?|rodenticides?|products?|gel|pellets?|powder|dust|treatment|fertilizer)\b/i;
 // The pest is the eater only as the subject of the eating verb ("the ants ate
 // the bait", "eaten by the roaches"); a pest word right before a product word
@@ -1509,7 +1531,7 @@ const PEST_EATING = new RegExp(`\\b${PEST_WORDS}\\b${PRODUCT_AFTER_PEST}\\s+(?:\
 const NOT_A_NAME = '(?:was|were|is|are|did|does|do|has|have|had|be|been|got|what|why|how|when|where|which|who|will|can|could|should|the|this|that|these|those|some|any|it|its|a|an|and|or|but|then|also|just|bait\\w*|spray\\w*|products?|pesticides?|chemicals?|granules?|poison\\w*|gel|pellets?|powder|dust|treatment|insecticides?|herbicides?|fertilizer|nothing|everything|something|anything|ants?|roach(?:es)?|rats?|mice|rodents?|pests?|bugs?|insects?|termites?)';
 const NAME = `(?!${NOT_A_NAME}\\b)[a-z][a-z'’-]+`;
 const PERSON = `(?:i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
-const INGEST = '(?:(?:bit|bites?|biting|bitten)(?!\\s+of\\b)\\s+(?:into\\s+|on\\s+)?(?:the\\s+|some\\s+|a\\s+|an\\s+|that\\s+|this\\s+)?(?:\\w+\\s+)?(?:bait\w*|poison\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)|(?:bait\w*|poison\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)\\s+(?:\\w+\\s+)?(?:was|were|got|been|is|are)\\s+(?:\\w+\\s+)?bitten|(?:took|takes?|taking|taken|got|gets?|getting|had|has|have)\\s+(?:\\w+\\s+){0,2}?(?:bites?|mouthfuls?|sips?|tastes?|licks?)\\s+(?:of|out\\s+of|from)\\s+(?:the\\s+|some\\s+|a\\s+|an\\s+|that\\s+|this\\s+|my\\s+|our\\s+)?(?:\\w+\\s+)?(?:bait\w*|poison\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)|swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
+const INGEST = '(?:(?:bit|bites?|biting|bitten)(?!\\s+of\\b)\\s+(?:into\\s+|on\\s+)?(?:the\\s+|some\\s+|a\\s+|an\\s+|that\\s+|this\\s+)?(?:(?!(?:near|by|at|in|on|next|beside|behind|under|over|while|and|but|or|with|without|from|of|to|for|after|before|when|i|we|it|was|were|is|are)\\b)\\w+\\s+){0,3}(?:bait\\w*|poison\\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)|(?:bait\\w*|poison\\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)\\s+(?:\\w+\\s+)?(?:was|were|got|been|is|are)\\s+(?:\\w+\\s+)?bitten|(?:took|takes?|taking|taken|got|gets?|getting|had|has|have)\\s+(?:\\w+\\s+){0,4}?(?:bites?|mouthfuls?|sips?|tastes?|licks?)\\s+(?:of|out\\s+of|from)\\s+(?:the\\s+|some\\s+|a\\s+|an\\s+|that\\s+|this\\s+|my\\s+|our\\s+)?(?:(?!(?:near|by|at|in|on|next|beside|behind|under|over|while|and|but|or|with|without|from|of|to|for|after|before|when|i|we|it|was|were|is|are)\\b)\\w+\\s+){0,3}(?:bait\\w*|poison\\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)|swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
 const EATER_ACTS = new RegExp(`(?:^|[^\\w])(?:${PERSON}\\s+(?:\\w+\\s+){0,2}?|${NAME}\\s+)${INGEST}\\b|\\bby\\s+(?:${PERSON}|${NAME})\\b`, 'i');
 function ingestsProduct(text) {
   return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence)
@@ -1528,7 +1550,9 @@ function medicalExposureAnswer(question) {
 function exposureSafetyLine(question) {
   const text = String(question == null ? '' : question).replace(/\s+/g, ' ');
   // A symptom question gets the full fixed answer instead (medicalExposureAnswer).
-  if (MEDICAL_CUES.some((cue) => cue.test(text))) return null;
+  // Any full medical answer (symptom cue or product ingestion) already covers
+  // it; no second emergency line (Codex P2 #5964 r32).
+  if (MEDICAL_CUES.some((cue) => cue.test(text)) || ingestsProduct(text)) return null;
   return SPRAY_WORD.test(text) && EXPOSED_SOMEONE.test(text) ? EXPOSURE_SAFETY_LINE : null;
 }
 

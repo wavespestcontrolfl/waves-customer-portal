@@ -14,6 +14,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const {
+  exposureSafetyLine,
   ruleAnswerReason,
   medicalExposureAnswer,
   SYSTEM_PROMPT,
@@ -1418,5 +1419,32 @@ describe('answer screen, Codex round 31', () => {
   test.each(['Mow the lawn shorter.', 'Water every day.', 'Apply fertilizer this week.'])('a care instruction of the model own is rejected: %s', (answer) => {
     const data = lawnData({ reportV2: { aftercare: {} } });
     expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('own_instruction');
+  });
+});
+
+describe('answer screen, Codex round 32', () => {
+  test('each ingredient clause is bound to its own product', () => {
+    const data = pestData({ applications: [
+      { product: { name: 'Alpine WSG', active_ingredient: 'Dinotefuran 40%' }, applicationArea: 'Outside', method: 'spray' },
+      { product: { name: 'Taurus SC', active_ingredient: 'Fipronil 9.1%' }, applicationArea: 'Outside', method: 'spray' },
+    ] });
+    const facts = buildReportAskFacts({ question: 'q', data });
+    expect(screenAskAnswer('Alpine WSG contains fipronil; Taurus SC contains dinotefuran.', { question: 'q', data, facts })).toBe('ingredient_claim');
+    expect(screenAskAnswer('Alpine WSG contains dinotefuran; Taurus SC contains fipronil.', { question: 'q', data, facts })).toBeNull();
+  });
+
+  test.each(['Rainfall was one and a half inches.', 'Rainfall was half an inch.'])('a fraction in words is grounded like digits: %s', (answer) => {
+    const data = lawnData({ reportV2: { aftercare: {}, water: { rainInches: 0.1, status: 'balanced' } } });
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('unstated_number');
+  });
+
+  test.each(['Your dog can go outside right away.', 'Pets may return immediately.'])('unconditional permission is rejected with no required line: %s', (answer) => {
+    const data = pestData();
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('second_instruction');
+  });
+
+  test('a full medical answer carries no second safety line', () => {
+    expect(medicalExposureAnswer('My dog took a mouthful of spray.')).toBeTruthy();
+    expect(exposureSafetyLine('My dog took a mouthful of spray.')).toBeNull();
   });
 });
