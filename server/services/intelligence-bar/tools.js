@@ -319,6 +319,7 @@ price: the visit price in dollars when the user states one. A stated price needs
         notes: { type: 'string' },
         customer_request: { type: 'string', description: 'Re-service visits only ("Pest Control Re-Service" / "Lawn Care Re-Service"): why the customer asked for it, as the user told you (e.g. "ants back in the kitchen since the weekend"). The technician sees it on the job card as why the visit was booked. Put the reason HERE, not in notes. Omit when the user gave no reason; never invent one.' },
         price: { type: 'number', exclusiveMinimum: 0, maximum: 100000, description: 'Visit price in dollars, only when the user states one' },
+        price_confirmed: { type: 'boolean', description: 'Set true ONLY after the user explicitly confirmed the stated price in reply to a price_read_back question (the stated price differed from the catalog price). Never set it on the first proposal.' },
       },
       required: ['customer_id', 'scheduled_date', 'service_type'],
     },
@@ -2928,9 +2929,22 @@ async function ibBookingProposal(customerId, serviceType, statedPrice, customerR
   const request = ibBookingCustomerRequest(customerRequest, booking.catalogRow);
   if (request?.error) return { error: request.error };
   const discount = booking.pricing?.primaryDiscount || null;
+  // A STATED price shows the catalog price for this customer beside it when
+  // the two differ (display only). Same helper, same inputs, no stated price;
+  // best effort: any failure just leaves the card without the comparison.
+  let catalogPrice = null;
+  if (booking.source === 'stated') {
+    try {
+      const catalog = await ibBookingPricing({ customer, serviceType });
+      if (!catalog.error && catalog.price != null && !sameBookingPrice(catalog.price, booking.price)) catalogPrice = catalog.price;
+    } catch (err) {
+      logger.warn(`[intelligence-bar] catalog price comparison unavailable: ${err.message}`);
+    }
+  }
   return {
     price: booking.price,
     source: booking.source,
+    catalogPrice,
     serviceId: booking.catalogRow?.id || null,
     serviceName: booking.catalogRow?.name || null,
     // The reason exactly as the insert will save it (trimmed, capped), so
@@ -2966,7 +2980,7 @@ const BOOKING_NEW_OVERLAP_ERROR = 'Another visit now overlaps this time. Nothing
 // true/false, or null when there is no timed window to probe (the executor
 // probes nothing then either). A read error THROWS so the proposal fails
 // closed; an invalid date or window returns null (the executor refuses it).
-async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+async function ibBookingOverlapRows(scheduledDate, timeWindow) {
   const dateStr = validScheduleDate(scheduledDate);
   if (!dateStr) return null;
   const win = parseTimeWindowStart(timeWindow);
@@ -2979,8 +2993,55 @@ async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
     if (err?.status === 422) return null;
     throw err;
   }
-  const overlap = await db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
-  return overlap.length > 0;
+  return db.transaction((trx) => probeSlotOverlap({ trx, date: dateStr, windowStart: win.start, windowEnd }));
+}
+
+async function ibBookingOverlapProposal(scheduledDate, timeWindow) {
+  const overlap = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  return overlap == null ? null : overlap.length > 0;
+}
+
+// "9:00 AM" from a stored "09:00:00" (card text only).
+function clockLabel(hhmmss) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(hhmmss || ''));
+  if (!m) return null;
+  const h = Number(m[1]);
+  return `${h % 12 || 12}:${m[2]} ${h >= 12 ? 'PM' : 'AM'}`;
+}
+
+// The facts the booking card shows about each overlapping visit: customer
+// name, service, date and window, with the visit id. ONE function builds them
+// for both the proposal (the card line and the pin) and the executor (the
+// commit-time comparison), so the pin and the check can never drift apart.
+// `fact` is the single string that is pinned and compared.
+async function bookingOverlapFacts(conn, rows, dateStr) {
+  const ids = (rows || []).map((r) => r.id).filter(Boolean);
+  const names = ids.length
+    ? await conn('scheduled_services')
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .whereIn('scheduled_services.id', ids)
+      .select('scheduled_services.id', 'customers.first_name', 'customers.last_name')
+    : [];
+  const nameById = new Map((Array.isArray(names) ? names : []).map((n) => [String(n.id), `${n.first_name || ''} ${n.last_name || ''}`.trim()]));
+  return (rows || []).map((r) => {
+    const start = clockLabel(r.window_start);
+    const end = clockLabel(r.window_end);
+    const id = r.id ? String(r.id) : null;
+    const customer = nameById.get(String(r.id)) || null;
+    const service = r.service_type || null;
+    const window = start && end ? `${start}-${end}` : (start || null);
+    return { id, customer, service, window, fact: [id, customer, service, dateStr, window].map((v) => v ?? '').join('|') };
+  });
+}
+
+// Who the overlapping visit(s) are, for the booking card's line, plus the
+// pinned `fact` of each (the executor refuses an overlapping visit whose fact
+// is not in the pinned set). Every overlapping visit is returned; [] when
+// there is no overlap or no timed window.
+async function ibBookingOverlapWho(scheduledDate, timeWindow) {
+  const rows = await ibBookingOverlapRows(scheduledDate, timeWindow);
+  if (!rows || !rows.length) return [];
+  return bookingOverlapFacts(db, rows, validScheduleDate(scheduledDate));
 }
 
 // Proposal-time window verdict for create_appointment (W5-dev-03): the SAME
@@ -3150,7 +3211,19 @@ async function createAppointment(input, actionContext = {}) {
       // rolls the transaction back before the insert, so nothing is booked
       // and the post-commit confirmation text below never runs. A pinned
       // "overlap existed", or no pin at all, keeps the advisory warning.
-      if (overlap.length && input._booking_overlap === false) {
+      // A card that named the overlapping visits pinned what it showed about
+      // each (id, customer, service, date, window): a visit not in that set,
+      // or one whose shown facts changed, is NEW too. An overlap that
+      // disappeared is fine; a card with nothing pinned (older cards, or a
+      // name lookup that failed) keeps the boolean rule only.
+      const pinnedFacts = Array.isArray(input._booking_overlap_facts) && input._booking_overlap_facts.length
+        ? new Set(input._booking_overlap_facts.map(String)) : null;
+      let unseenOverlap = false;
+      if (overlap.length && input._booking_overlap === true && pinnedFacts) {
+        const liveFacts = await bookingOverlapFacts(trx, overlap, dateStr);
+        unseenOverlap = liveFacts.some((f) => !pinnedFacts.has(f.fact));
+      }
+      if (overlap.length && (input._booking_overlap === false || unseenOverlap)) {
         const err = new Error('booking_overlap_new');
         err.bookingOverlapNew = true;
         throw err;
@@ -4427,7 +4500,7 @@ async function resolveActiveTechnicianById(id) {
 }
 
 module.exports = {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, UPDATABLE_FIELDS, ibBookingProposal, ibBookingOverlapProposal, ibBookingOverlapWho,
   // Shared with routes/admin-intelligence-bar.js's proposePendingWrite (PR B
   // of the ib-cancel-pinned-effects lane): the proposal-time refusal for a
   // non-simple visit reuses this exact wording rather than a second copy.
