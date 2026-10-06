@@ -245,7 +245,11 @@ describe('Codex r2 on #5970', () => {
     const { applyServiceMixChange } = require('../routes/estimate-public');
     expect(typeof applyServiceMixChange).toBe('function');
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
-    expect(src).toMatch(/oneTimeChoiceAmount: oneTimeChoiceAmountForEstimate\(\s*\n\s*\{ \.\.\.estimate, show_one_time_option: true, onetime_total: next\.onetimeTotal \},\s*\n\s*\{ \.\.\.parsedData, result: afterResult \},/);
+    // Gate on only, computed BEFORE the digest and bound into it (`g`), on the post-change result.
+    expect(src).toMatch(/const offerTierChoice = require\('\.\.\/services\/estimate-offer-tiers'\)\.offerTiersGateLive\(\)\s*\n\s*\? \(oneTimeChoiceAmountForEstimate\(\s*\n\s*\{ \.\.\.estimate, show_one_time_option: true, onetime_total: next\.onetimeTotal \},\s*\n\s*\{ \.\.\.parsedData, result: afterResult \},/);
+    expect(src).toMatch(/optOutPreviewDigest\(next, impact, offerTierChoice\)/);
+    expect(src).toMatch(/\.\.\.\(oneTimeChoice != null \? \{ g: oneTimeChoice \} : \{\}\),/);
+    expect(src).toMatch(/\.\.\.\(offerTierChoice != null \? \{ oneTimeChoiceAmount: offerTierChoice \} : \{\}\),/);
     delete process.env.GATE_ESTIMATE_OFFER_TIERS; delete process.env.GATE_ESTIMATE_SERVICE_OPT_OUT;
   });
 
@@ -282,5 +286,20 @@ describe('member judgement order for an unlinked estimate', () => {
     await expect(offerTierMemberBlock({ id: 'e1', customer_id: null, estimate_group_id: 'g1', customer_phone: '9415550100' }, database)).resolves.toBe(true);
     // A read error anywhere fails closed.
     await expect(offerTierMemberBlock({ id: 'e2', customer_id: null, estimate_group_id: 'g1' }, () => { throw new Error('db'); })).resolves.toBe(true);
+  });
+});
+
+describe('revising a parked row keeps its opt-out history', () => {
+  test('the write payload carries the ROW\'s serviceOptOut into a pest-only revision and keeps the mark; a revision that puts lawn back does not', async () => {
+    process.env.GATE_ESTIMATE_OFFER_TIERS = 'true'; process.env.GATE_ESTIMATE_SERVICE_OPT_OUT = 'true';
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/admin-estimate-persistence.js'), 'utf8');
+    expect(src).toMatch(/trustedEstimateData\.serviceOptOut = storedEstimateData\.serviceOptOut;\s*\n\s*trustedEstimateData\.offerTiersRequested = true;/);
+    expect(src).toMatch(/if \(newKeys\.length === 1 && newKeys\[0\] === 'pest_control'\)/);
+    // The predicate the write uses on the stored row.
+    const parked = pestLawnData();
+    parked.result.recurring.services = parked.result.recurring.services.filter((s) => s.service === 'pest_control');
+    recordServiceOptOutEvent(parked, { serviceKey: 'lawn_care', included: false, mode: 'remove', actor: 'staff', at: 'now', removedInputs: {} }, {});
+    expect(OfferTiers.offerTiersMarkedPestOnlyState(parked)).toBe(true);
+    delete process.env.GATE_ESTIMATE_OFFER_TIERS; delete process.env.GATE_ESTIMATE_SERVICE_OPT_OUT;
   });
 });

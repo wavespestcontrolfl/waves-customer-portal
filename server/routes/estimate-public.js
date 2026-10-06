@@ -17590,7 +17590,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // numbers. Both row-version reads pass through the same JS Date
     // millisecond truncation — never a JS ms date against the raw µs column.
     const rowBasis = estimate.updated_at ? new Date(estimate.updated_at).toISOString() : null;
-    const optOutPreviewDigest = (nextTotals, impactState) => crypto
+    const optOutPreviewDigest = (nextTotals, impactState, oneTimeChoice = null) => crypto
       .createHmac('sha256', process.env.JWT_SECRET || 'estimate-opt-out-preview')
       .update(JSON.stringify({
         rowBasis,
@@ -17602,6 +17602,9 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         a: nextTotals.annualTotal,
         o: nextTotals.onetimeTotal,
         w: nextTotals.waveGuardTier || null,
+        // The Good tile's figure (tier gate on only): a one-time floor or
+        // multiplier change between preview and commit must refuse too.
+        ...(oneTimeChoice != null ? { g: oneTimeChoice } : {}),
         // The DISPLAYED terms, not just the aggregates: a config change can
         // redistribute per-application prices among surviving lines while the
         // totals stay put (pre-push codex P0 on 2d9fd6e). Disclosures carry
@@ -17884,7 +17887,18 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
 
     // One digest for both directions: the dry run hands it out, the commit
     // re-derives it from its OWN recompute and refuses on any mismatch.
-    const previewDigest = optOutPreviewDigest(next, impact);
+    // Good / Better / Best (tier gate on only — off, the response and the
+    // digest are byte-identical to before): the one-time CHOICE the
+    // post-change row would offer, by acceptance's own resolver on the
+    // post-change result, bound into the digest.
+    const offerTierChoice = require('../services/estimate-offer-tiers').offerTiersGateLive()
+      ? (oneTimeChoiceAmountForEstimate(
+        { ...estimate, show_one_time_option: true, onetime_total: next.onetimeTotal },
+        { ...parsedData, result: afterResult },
+        null,
+      ) || 0)
+      : null;
+    const previewDigest = optOutPreviewDigest(next, impact, offerTierChoice);
     if (dryRun) {
       return { status: 200, body: ({
         success: true, dryRun: true, serviceKey, label, included, mode,
@@ -17893,15 +17907,7 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
         // Better / Best tiles read them; the disclosures say the same thing
         // in sentences).
         perApplication: impact.afterPerApplication,
-        // The one-time CHOICE amount the post-change row would offer and
-        // accept (the Good tile shows this in the as-quoted state): computed
-        // by the same resolver acceptance uses, on the post-change result,
-        // so a removal that reallocates a discount is already netted.
-        oneTimeChoiceAmount: oneTimeChoiceAmountForEstimate(
-          { ...estimate, show_one_time_option: true, onetime_total: next.onetimeTotal },
-          { ...parsedData, result: afterResult },
-          null,
-        ) || 0,
+        ...(offerTierChoice != null ? { oneTimeChoiceAmount: offerTierChoice } : {}),
         // Echo this back on the commit; the write refuses if the row, the
         // pricing config, or the membership verdict moved since this preview.
         previewBasis: previewDigest,
