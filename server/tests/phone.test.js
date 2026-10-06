@@ -108,3 +108,55 @@ describe('phoneIdentityKey — NANP-vs-international grouping (mirrors smsThread
     expect(phoneIdentityKey('anonymous')).toBeNull();
   });
 });
+
+describe('NANP validity (isValidNanpNumber / nanpPhoneProblem)', () => {
+  const { isValidNanpNumber, nanpPhoneProblem, nanpNationalDigits } = require('../utils/phone');
+
+  test('toE164 keeps its string contract for an 11-digit leading-1 number', () => {
+    expect(toE164('12035550123')).toBe('+12035550123');
+    expect(toE164('1 (203) 555-0123')).toBe('+12035550123');
+    expect(toE164('(203) 555-0123')).toBe('+12035550123');
+  });
+
+  test.each([
+    ['12035550123', true],
+    ['2035550123', true],
+    ['(203) 555-0123', true],
+    ['+12035550123', true],
+    ['1 203 555 0123', true],
+    ['1035550123', false], // area code starts with 1 (ten digits)
+    ['0035550123', false], // area code starts with 0
+    ['0205550123', false],
+    ['2031550123', false], // exchange starts with 1
+    ['2030550123', false], // exchange starts with 0
+    ['+11035550123', false], // stored E.164 of an impossible number
+    ['11035550123', false],
+    ['+442079460958', false], // not NANP
+    ['', false],
+    [null, false],
+  ])('isValidNanpNumber(%p) is %p', (input, expected) => {
+    expect(isValidNanpNumber(input)).toBe(expected);
+  });
+
+  test('nanpPhoneProblem names a NANP-shaped number that cannot exist', () => {
+    expect(nanpPhoneProblem('1035550123')).toMatch(/not a valid US phone number/);
+    expect(nanpPhoneProblem('+11035550123')).toMatch(/not a valid US phone number/);
+    expect(nanpPhoneProblem('+1103555012')).toMatch(/not a valid US phone number/);
+  });
+
+  test('nanpPhoneProblem is null for valid, empty, international and non-NANP-shaped input', () => {
+    expect(nanpPhoneProblem('2035550123')).toBeNull();
+    expect(nanpPhoneProblem('+12035550123')).toBeNull();
+    expect(nanpPhoneProblem('')).toBeNull();
+    expect(nanpPhoneProblem(null)).toBeNull();
+    expect(nanpPhoneProblem('+442079460958')).toBeNull();
+    expect(nanpPhoneProblem('anonymous')).toBeNull();
+  });
+
+  test('nanpNationalDigits returns the ten national digits only for NANP-shaped input', () => {
+    expect(nanpNationalDigits('+12035550123')).toBe('2035550123');
+    expect(nanpNationalDigits('12035550123')).toBe('2035550123');
+    expect(nanpNationalDigits('22035550123')).toBeNull();
+    expect(nanpNationalDigits('+442079460958')).toBeNull();
+  });
+});

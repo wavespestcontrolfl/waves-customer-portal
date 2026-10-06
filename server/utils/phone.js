@@ -44,6 +44,43 @@ function toE164(raw) {
   return '+1' + digits.slice(-10);
 }
 
+// NANP validity. toE164 keeps the LAST ten digits and never judges them, so a
+// ten-digit number whose area code or exchange starts with 0 or 1 (never
+// assignable; Twilio refuses it with 21211) used to come out as a well-formed
+// "+1..." string and fail only at the provider. toE164's contract stays (many
+// callers rely on a string); writers and senders gate on these two instead.
+//
+// nanpNationalDigits: the ten national digits when the input is NANP-shaped
+// (ten digits, 1 + ten digits, or +1 + ten digits), else null.
+function nanpNationalDigits(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : (typeof raw === 'number' ? String(raw) : '');
+  if (!text) return null;
+  const digits = text.replace(/\D/g, '');
+  if (text.startsWith('+')) return digits.length === 11 && digits[0] === '1' ? digits.slice(1) : null;
+  if (digits.length === 10) return digits;
+  return digits.length === 11 && digits[0] === '1' ? digits.slice(1) : null;
+}
+
+// True only for a NANP number whose area code and exchange start with 2-9.
+function isValidNanpNumber(raw) {
+  const ten = nanpNationalDigits(raw);
+  return !!ten && /^[2-9]\d{2}[2-9]\d{6}$/.test(ten);
+}
+
+// A readable reason when the input LOOKS like a US/Canada number but cannot be
+// one; null when it is valid, empty, or not NANP-shaped (international and
+// short junk are other validators' business, so they stay accepted here).
+// A "+1" prefix with the wrong digit count is NANP-shaped and counts as bad.
+function nanpPhoneProblem(raw) {
+  const text = typeof raw === 'string' ? raw.trim() : (typeof raw === 'number' ? String(raw) : '');
+  if (!text) return null;
+  const digits = text.replace(/\D/g, '');
+  const plusOne = text.startsWith('+') && digits[0] === '1';
+  if (!plusOne && nanpNationalDigits(text) === null) return null;
+  if (isValidNanpNumber(text)) return null;
+  return `${text} is not a valid US phone number. The area code and the next three digits cannot start with 0 or 1, and a US number has ten digits.`;
+}
+
 // toE164 returns the raw input on garbage (e.g. "anonymous", "client:foo"), so
 // callers that must NOT act on a non-phone value (set a Dial callerId, create a
 // lead) should gate on this: optional leading +, then 10–15 digits.
@@ -85,4 +122,5 @@ function phoneIdentityKey(raw) {
 
 module.exports = {
   toE164, normalizePhone: toE164, isLikelyE164, phoneMatchDigits, phoneIdentityKey,
+  nanpNationalDigits, isValidNanpNumber, nanpPhoneProblem,
 };

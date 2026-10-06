@@ -506,3 +506,16 @@ test('a bulk NON-address edit skips per-customer fanout (one transaction, no add
   expect(geocoder.regeocodeCustomerAddressGuarded).not.toHaveBeenCalled();
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled();
 });
+
+test('update_customer refuses an impossible US phone before any write', async () => {
+  db.__qb.first.mockResolvedValueOnce({ ...baseRow, phone: '+12035550123' }); // before
+
+  const result = await executeTool('update_customer', {
+    customer_id: CUSTOMER_ID,
+    updates: { phone: '(103) 555-0123' },
+  });
+
+  expect(result.error).toMatch(/not a valid US phone number/);
+  expect(db.transaction).not.toHaveBeenCalled();
+  expect(db.__qb.update).not.toHaveBeenCalled();
+});

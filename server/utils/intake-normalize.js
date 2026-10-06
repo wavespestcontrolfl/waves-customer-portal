@@ -1,5 +1,5 @@
 const { normalizeEmail, collapseWhitespace } = require('./contact-normalize');
-const { toE164 } = require('./phone');
+const { toE164, isValidNanpNumber, nanpPhoneProblem } = require('./phone');
 const { normalizeStreetLine, titleCaseWords, normalizeState, normalizeLeadAddress } = require('./address-normalizer');
 const { properCase } = require('./name-case');
 
@@ -56,9 +56,13 @@ function normalizeNanpPhone(value) {
   const raw = cleanText(value);
   if (!raw) return null;
   const digits = raw.replace(/\D/g, '');
-  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-  if (digits.length === 10) return `+1${digits}`;
-  return null;
+  // A number whose area code or exchange starts with 0 or 1 can never be
+  // dialed or texted; it is null here (not a fabricated "+1..." string), so
+  // callers keep the raw text and refuse to send to it.
+  let ten = null;
+  if (digits.length === 11 && digits.startsWith('1')) ten = digits.slice(1);
+  else if (digits.length === 10) ten = digits;
+  return ten && isValidNanpNumber(ten) ? `+1${ten}` : null;
 }
 
 function normalizePhoneForStorage(value) {
@@ -413,6 +417,12 @@ function normalizeContactPhone(value) {
   return cleaned ? normalizePhoneForStorage(cleaned) : value;
 }
 
+// A readable reason when a typed phone looks like a US number that cannot
+// exist (area code or exchange starting 0/1), else null. Writers refuse on it.
+function contactPhoneProblem(value) {
+  return nanpPhoneProblem(cleanText(value));
+}
+
 function normalizeContactStreet(value) {
   const cleaned = cleanText(value);
   return cleaned ? normalizeStreetLine(cleaned) : value;
@@ -522,6 +532,7 @@ module.exports = {
   normalizeContactName,
   normalizeContactEmail,
   normalizeContactPhone,
+  contactPhoneProblem,
   normalizeContactStreet,
   normalizeContactCity,
   normalizeContactStateField,
