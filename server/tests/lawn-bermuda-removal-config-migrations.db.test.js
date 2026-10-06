@@ -11,6 +11,9 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
   const db = require('../models/db');
   const wateringBackfill = require('../models/migrations/20261006220000_watering_rule_bermuda_removal_backfill');
   const watering = require('../models/migrations/20261006200000_watering_rule_bermuda_removal');
+  const recognitionIngredient = require('../models/migrations/20261006220400_bermuda_recognition_active_ingredient');
+  const { resolveWateringRule } = require('../services/service-report/lawn-watering-rule');
+  const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
   const surfactantToken = require('../models/migrations/20261006220300_bermuda_surfactant_unit_token');
   const unitToken = require('../models/migrations/20261006220200_bermuda_fusilade_unit_token');
   const RATE_UNITS = require('../../shared/rate-units.json');
@@ -154,6 +157,68 @@ describeDb('lawn bermuda removal config migrations (PostgreSQL)', () => {
         expect((await row()).rate_unit).toBe('fl oz');
         expect(await events(SEEDED)).toHaveLength(count);
       });
+    });
+  });
+
+  describe('20261006220400 Recognition active ingredient', () => {
+    const REC = 'Recognition Post Emergent Herbicide';
+    const SEEDED = 'migration:20261006220400_bermuda_recognition_active_ingredient:seeded';
+    const REVERTED = 'migration:20261006220400_bermuda_recognition_active_ingredient:reverted';
+
+    test('on a database built from migrations alone, the Recognition row carries its active ingredient', async () => {
+      const row = await db('products_catalog').where({ name: REC }).first('active_ingredient');
+      expect(row.active_ingredient).toBe('Trifloxysulfuron-sodium 20.4% + metcamifen (safener)');
+    });
+
+    test('fills only an empty field of the row 190400 created; append-only audit; down nulls only while unchanged', async () => {
+      await rolledBack(async (trx) => {
+        const value = async () => (await trx('products_catalog').where({ name: REC }).first('active_ingredient')).active_ingredient;
+        const events = (action) => trx('audit_log').where({ action });
+        const original = (await events(SEEDED)).map((event) => event.id);
+        await trx('products_catalog').where({ name: REC }).update({ active_ingredient: null });
+        await recognitionIngredient.up(trx);
+        expect(await value()).toBe(recognitionIngredient.ACTIVE_INGREDIENT);
+        const seeded = await events(SEEDED);
+        expect(seeded).toHaveLength(original.length + 1);
+        // Idempotent.
+        await recognitionIngredient.up(trx);
+        expect(await events(SEEDED)).toHaveLength(original.length + 1);
+        // Down appends a rollback event per original and leaves the originals as written.
+        await recognitionIngredient.down(trx);
+        expect(await value()).toBeNull();
+        const reverted = await events(REVERTED);
+        expect(reverted).toHaveLength(original.length + 1);
+        expect((await trx('audit_log').whereIn('id', seeded.map((event) => event.id)).select('action')).every((row) => row.action === SEEDED)).toBe(true);
+        await recognitionIngredient.down(trx);
+        expect(await events(REVERTED)).toHaveLength(original.length + 1);
+        // An admin-entered value is never overwritten by up, nor nulled by down.
+        await trx('products_catalog').where({ name: REC }).update({ active_ingredient: 'Verified by the office' });
+        await recognitionIngredient.up(trx);
+        expect(await value()).toBe('Verified by the office');
+        await recognitionIngredient.up(trx);
+        await recognitionIngredient.down(trx);
+        expect(await value()).toBe('Verified by the office');
+      });
+    });
+  });
+
+  describe('the three-product bermuda mix resolves a watering instruction on a migrations-only database', () => {
+    const NAMES = ['Recognition Post Emergent Herbicide', 'Fusilade II Post Emergent Liquid Herbicide', 'LESCO 90/10 Nonionic Surfactant'];
+
+    test('the surfactant has its v13 rule, every product resolves a rule, and the mix holds watering for 3 hours', async () => {
+      const rows = await db('products_catalog').whereIn('name', NAMES).select('*');
+      expect(rows).toHaveLength(3);
+      const rules = rows.map((row) => ({ name: row.name, rule: resolveWateringRule(row) }));
+      for (const entry of rules) expect(entry.rule).not.toBeNull();
+      // The surfactant's v13 rule (20261005235500): the herbicide in the mix sets the rule.
+      expect(rules.find((entry) => entry.name === NAMES[2]).rule).toMatchObject({ mode: 'none', source: 'owner' });
+      for (const name of NAMES.slice(0, 2)) expect(rules.find((entry) => entry.name === name).rule).toMatchObject({ mode: 'hold', hold_hours: 3 });
+      // One instruction for the whole mix: skip turf watering until completion + 3 hours.
+      const completedAt = '2026-06-16T14:00:00.000Z';
+      const instruction = buildWateringInstruction({ rules, completedAt });
+      expect(instruction.state).toBe('hold');
+      expect(new Date(instruction.holdUntil).getTime() - new Date(completedAt).getTime()).toBe(3 * 3600 * 1000);
+      expect(instruction.lines[0]).toMatch(/^Skip your turf watering until/);
     });
   });
 
