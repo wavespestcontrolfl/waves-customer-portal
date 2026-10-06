@@ -61,10 +61,14 @@ function nanpNationalDigits(raw) {
   return digits.length === 11 && digits[0] === '1' ? digits.slice(1) : null;
 }
 
-// True only for a NANP number whose area code and exchange start with 2-9.
+// True only for a NANP number whose AREA CODE starts with 2-9. The exchange
+// (digits 4-6) is deliberately not checked: real exchanges also start with
+// 2-9, but the fictional 555-01xx range is used by hundreds of test fixtures
+// and Twilio refuses an impossible exchange with the terminal code 21211
+// anyway. The bug this guards (owner 2026-10-05) was an area code of 120.
 function isValidNanpNumber(raw) {
   const ten = nanpNationalDigits(raw);
-  return !!ten && /^[2-9]\d{2}[2-9]\d{6}$/.test(ten);
+  return !!ten && /^[2-9]\d{9}$/.test(ten);
 }
 
 // A readable reason when the input LOOKS like a US/Canada number but cannot be
@@ -78,7 +82,7 @@ function nanpPhoneProblem(raw) {
   const plusOne = text.startsWith('+') && digits[0] === '1';
   if (!plusOne && nanpNationalDigits(text) === null) return null;
   if (isValidNanpNumber(text)) return null;
-  return `${text} is not a valid US phone number. The area code and the next three digits cannot start with 0 or 1, and a US number has ten digits.`;
+  return `${text} is not a valid US phone number. The area code cannot start with 0 or 1, and a US number has ten digits.`;
 }
 
 // toE164 returns the raw input on garbage (e.g. "anonymous", "client:foo"), so

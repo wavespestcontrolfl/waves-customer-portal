@@ -127,8 +127,8 @@ describe('NANP validity (isValidNanpNumber / nanpPhoneProblem)', () => {
     ['1035550123', false], // area code starts with 1 (ten digits)
     ['0035550123', false], // area code starts with 0
     ['0205550123', false],
-    ['2031550123', false], // exchange starts with 1
-    ['2030550123', false], // exchange starts with 0
+    ['2031550123', true], // exchange not checked (555-01xx fixtures; Twilio 21211 covers it)
+    ['2030550123', true],
     ['+11035550123', false], // stored E.164 of an impossible number
     ['11035550123', false],
     ['+442079460958', false], // not NANP

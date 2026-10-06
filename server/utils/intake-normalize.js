@@ -56,7 +56,7 @@ function normalizeNanpPhone(value) {
   const raw = cleanText(value);
   if (!raw) return null;
   const digits = raw.replace(/\D/g, '');
-  // A number whose area code or exchange starts with 0 or 1 can never be
+  // A number whose area code starts with 0 or 1 can never be
   // dialed or texted; it is null here (not a fabricated "+1..." string), so
   // callers keep the raw text and refuse to send to it.
   let ten = null;

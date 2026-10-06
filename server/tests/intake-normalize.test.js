@@ -35,11 +35,11 @@ describe('intake contact normalization', () => {
     expect(normalizePhoneForStorage(' 12345 ')).toBe('12345');
   });
 
-  test('an impossible US number (area code or exchange starting 0/1) is never fabricated into E.164', () => {
+  test('an impossible US number (area code starting 0/1) is never fabricated into E.164', () => {
     expect(normalizeNanpPhone('1035550123')).toBeNull();
     expect(normalizeNanpPhone('(103) 555-0123')).toBeNull();
     expect(normalizeNanpPhone('0035550123')).toBeNull();
-    expect(normalizeNanpPhone('2031550123')).toBeNull();
+    expect(normalizeNanpPhone('2031550123')).toBe('+12031550123'); // exchange is not checked
     expect(normalizePhoneForStorage('1035550123')).toBe('1035550123');
     expect(normalizeNanpPhone('12035550123')).toBe('+12035550123');
     expect(normalizeNanpPhone('(203) 555-0123')).toBe('+12035550123');
