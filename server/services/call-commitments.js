@@ -1847,19 +1847,34 @@ const EVIDENCE_BY_KIND = {
 // appointment options". A promise that names neither (an email to send, a
 // record to update) has no evidence the portal can read beyond a sent estimate;
 // the model-judged contact check or the office closes the rest.
-const TEXT_PROMISE_RE = /\b(?:text(?:s|ed|ing)?|sms)\b/i;
-function otherPromiseMedium(commitment) {
+// ONE wording table for a promise with no usable channel: read by
+// otherPromiseMedia (JS) and, as the same words in a POSIX regex, by the lapse
+// scan's legacy-close predicate, so the two can never disagree.
+const PROMISE_WORDS = Object.freeze({
+  text: ["text", "texts", "texted", "texting", "sms"],
+  call: ["call", "calls", "called", "calling", "phone", "phones", "phoned", "ring", "rings"],
+});
+const wordsRegexSource = (words) => `(${words.join("|")})`;
+const PROMISE_WORD_RES = Object.freeze({
+  text: new RegExp(`\\b${wordsRegexSource(PROMISE_WORDS.text)}\\b`, "i"),
+  call: new RegExp(`\\b${wordsRegexSource(PROMISE_WORDS.call)}\\b`, "i"),
+});
+// The same words for Postgres (~*): \m / \M are its word edges.
+const PROMISE_WORDS_SQL = `\\m${wordsRegexSource([...PROMISE_WORDS.text, ...PROMISE_WORDS.call])}\\M`;
+// The media a catch-all promise names: its channel, else its words. A promise
+// that names both ("call or text") is kept by either.
+function otherPromiseMedia(commitment) {
   const channel = commitment.channel || null;
-  if (channel === "sms") return "text";
-  if (channel === "call") return "call";
-  if (!channel || channel === "unknown") return TEXT_PROMISE_RE.test(String(commitment.description || "")) ? "text" : null;
-  return null;
+  if (channel === "sms") return ["text"];
+  if (channel === "call") return ["call"];
+  if (channel && channel !== "unknown") return [];
+  const description = String(commitment.description || "");
+  return ["text", "call"].filter((medium) => PROMISE_WORD_RES[medium].test(description));
 }
+const MEDIUM_EVIDENCE = { text: "text_sent", call: "call_placed" };
 function otherEvidence(commitment) {
-  const medium = otherPromiseMedium(commitment);
-  if (medium === "text") return ["text_sent"];
-  if (medium === "call") return ["call_placed"];
-  return ["estimate"];
+  const media = otherPromiseMedia(commitment);
+  return media.length ? media.map((m) => MEDIUM_EVIDENCE[m]) : ["estimate"];
 }
 const evidenceNamesFor = (commitment) => (commitment.kind === "other" ? otherEvidence(commitment) : (EVIDENCE_BY_KIND[commitment.kind] || []));
 
@@ -2720,11 +2735,11 @@ async function listLapsedEvidenceClosedCallIds(conn) {
           -- An estimate keeps an estimate promise, or an "other" promise that is
           -- not a text or a call to place; never a callback, nor a promise to
           -- text or call (read by the same channel / words rule as
-          -- otherPromiseMedium).
+          -- otherPromiseMedia, from the one PROMISE_WORDS table).
           OR ((cc.fulfillment ->> 'kind') = 'estimate_sent'
               AND (cc.kind = 'callback'
                 OR (cc.kind = 'other' AND (cc.channel IN ('sms', 'call')
-                  OR (COALESCE(cc.channel, 'unknown') = 'unknown' AND cc.description ~* '\\m(text|texts|texted|texting|sms)\\M')))))
+                  OR (COALESCE(cc.channel, 'unknown') = 'unknown' AND cc.description ~* '${PROMISE_WORDS_SQL}')))))
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           -- A close resting on a call (the customer phoning in): the evidence
