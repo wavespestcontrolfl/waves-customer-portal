@@ -2194,8 +2194,11 @@ async function resolveEstimateWritePayload({
     // /calculate-estimate result (pest alone is "no_lawn" there), so the mark
     // stays unless staff explicitly declined it (body.offerTiersDeclined);
     // elsewhere the mark follows the checkbox as before.
+    // ... and only while the one-time option stays ON: Good on the parked
+    // row IS that option, so a staff clear of "Offer one-time option" drops
+    // the mark too (a Good tile that cannot be taken is worse than none).
     const tiersOk = markedPestOnly
-      ? body.offerTiersDeclined !== true
+      ? (body.offerTiersDeclined !== true && showOneTimeOption)
       : (body.offerTiers === true && !showOneTimeOption
         && OfferTiers.offerTiersSaveEligibility({
           estData: trustedEstimateData,

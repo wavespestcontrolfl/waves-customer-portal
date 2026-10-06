@@ -310,7 +310,8 @@ describe('revising a parked row keeps its opt-out history', () => {
     expect(src).toMatch(/const storedParkedHistory = OfferTiers\.lawnParkedPestOnly\(storedEstimateData\);/);
     expect(src).toMatch(/const markedPestOnly = parkedNow && storedHadMark/);
     expect(src).toMatch(/if \(storedParkedHistory && newResultPestOnly && !trustedEstimateData\.serviceOptOut && storedEstimateData\?\.serviceOptOut\) \{\s*\n\s*trustedEstimateData\.serviceOptOut = storedEstimateData\.serviceOptOut;/);
-    expect(src).toMatch(/const tiersOk = markedPestOnly\s*\n\s*\? body\.offerTiersDeclined !== true/);
+    // On a parked row the mark needs the one-time option ON as well: Good is that option.
+    expect(src).toMatch(/const tiersOk = markedPestOnly\s*\n\s*\? \(body\.offerTiersDeclined !== true && showOneTimeOption\)/);
     // The predicates the write uses on the stored row.
     const parked = pestLawnData();
     parked.result.recurring.services = parked.result.recurring.services.filter((s) => s.service === 'pest_control');
