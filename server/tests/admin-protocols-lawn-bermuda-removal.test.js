@@ -49,6 +49,7 @@ const freshAccount = () => ({
   estimates: [],
   properties: [{ id: 'prop-1', is_primary: true }],
   visitProperty: 'prop-1',
+  visitDate: '2026-04-14',
 });
 
 const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/lawn-mix' && layer.route.methods.get).route.stack[0].handle;
@@ -90,7 +91,7 @@ beforeEach(() => {
     }
     if (table === 'products_catalog') return readQuery(CATALOG);
     if (table === 'product_aliases') return readQuery([]);
-    if (table === 'scheduled_services') return readQuery(account.customerId ? [{ id: SERVICE_ID, customer_id: account.customerId, property_id: account.visitProperty, scheduled_date: '2026-04-14' }] : []);
+    if (table === 'scheduled_services') return readQuery(account.customerId ? [{ id: SERVICE_ID, customer_id: account.customerId, property_id: account.visitProperty, scheduled_date: account.visitDate }] : []);
     if (table === 'customer_turf_profiles') return readQuery(account.profile ? [account.profile] : []);
     if (table === 'estimates') return readQuery(account.estimates);
     if (table === 'customer_properties') return readQuery(account.properties);
@@ -101,6 +102,7 @@ afterEach(() => { delete process.env.GATE_LAWN_V13; delete process.env.GATE_LAWN
 
 test.each([['st_augustine', '4'], ['zoysia', '6']])('%s month %s: the three spot lines show with the label rate and no amount; the loader asks for the bermuda rows', async (track, month) => {
   account.profile.grass_type = track;
+  account.visitDate = month === '6' ? '2026-06-16' : '2026-04-14';
   const body = await lawnMix({ track, month, scheduledServiceId: SERVICE_ID });
   expect(operatingLayer.getProtocolWindowContext).toHaveBeenCalledWith(db, expect.objectContaining({ includeBermudaRemoval: true }));
   for (const name of [REC, FUS, NIS]) {
@@ -273,6 +275,34 @@ describe('the account decides, on the server', () => {
     expect(stepNames(await lawnMix({ scheduledServiceId: SERVICE_ID }))).toEqual([]);
     account.estimates = [{ ...estimate, property_id: 'prop-1' }];
     expect(stepNames(await lawnMix({ scheduledServiceId: SERVICE_ID }))).toEqual(all);
+  });
+
+  test('the step month is the VISIT\'s: a June request on an October visit opens nothing on the sheet or the actions; an April visit asked as June or June as April neither', async () => {
+    const completionActions = adminProtocolsRouter.stack.find((layer) => layer.route?.path === '/completion-actions' && layer.route.methods.get).route.stack[0].handle;
+    const actionGroups = async (month) => {
+      const res = { json: jest.fn(), status: jest.fn() };
+      res.status.mockReturnValue(res);
+      await completionActions({ query: { serviceType: 'Lawn Care', track: 'st_augustine', month, scheduledServiceId: SERVICE_ID } }, res, jest.fn());
+      return JSON.parse(JSON.stringify(res.json.mock.calls[0][0])).actions.filter((a) => a.group);
+    };
+    account.visitDate = '2026-10-12';
+    expect(stepNames(await lawnMix({ month: '6', scheduledServiceId: SERVICE_ID }))).toEqual([]);
+    expect(await actionGroups('6')).toEqual([]);
+    expect(await actionGroups('4')).toEqual([]);
+    account.visitDate = '2026-04-14';
+    expect(stepNames(await lawnMix({ month: '6', scheduledServiceId: SERVICE_ID }))).toEqual([]);
+    expect(await actionGroups('6')).toEqual([]);
+    expect(stepNames(await lawnMix({ month: '4', scheduledServiceId: SERVICE_ID }))).toEqual(all);
+    expect(await actionGroups('4')).toHaveLength(3);
+    account.visitDate = '2026-06-16';
+    expect(stepNames(await lawnMix({ month: '4', scheduledServiceId: SERVICE_ID }))).toEqual([]);
+    expect(stepNames(await lawnMix({ month: '6', scheduledServiceId: SERVICE_ID }))).toEqual(all);
+  });
+
+  test('the visit month is read as an Eastern calendar day (a late-evening UTC instant stays that ET day)', async () => {
+    // 2026-05-01 03:00 UTC is April 30 in Eastern time: an April visit.
+    account.visitDate = new Date('2026-05-01T03:00:00Z');
+    expect(stepNames(await lawnMix({ month: '4', scheduledServiceId: SERVICE_ID }))).toEqual(all);
   });
 
   test('a malformed visit id reads nothing and shows no step', async () => {

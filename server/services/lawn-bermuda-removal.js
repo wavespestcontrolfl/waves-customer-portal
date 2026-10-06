@@ -69,6 +69,17 @@ const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9
 const FUSILADE_KEY = normalize(FUSILADE);
 const RECOGNITION_KEY = normalize(RECOGNITION);
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// The visit's own month, from its scheduled date as an Eastern calendar day (the
+// canonical datetime-et helper), or null.
+function visitMonthOf(visit) {
+  if (!visit?.scheduled_date) return null;
+  const day = require('../utils/datetime-et').etCalendarDayOf(visit.scheduled_date);
+  return MONTH_ABBR[Number(String(day).slice(5, 7)) - 1] || null;
+}
+
 function bermudaRemovalLive() {
   return featureGates.lawnBermudaRemovalLive?.() === true;
 }
@@ -155,6 +166,9 @@ async function accountWantsBermudaRemoval(knex, { customerId, profile, trackKey,
 async function stepForVisit(knex, visit, { trackKey, month }) {
   const off = { active: false, excluded: false, source: null, cultivar: null, addOn: null };
   if (!bermudaRemovalVisit({ trackKey, month }) || !visit?.customer_id) return off;
+  // The month is the VISIT's, never the request's: a request month that is not the
+  // visit's own month opens nothing.
+  if (visitMonthOf(visit) !== month) return off;
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
   const wants = await accountWantsBermudaRemoval(knex, { customerId: visit.customer_id, profile, trackKey, propertyId: visit.property_id });
   if (!wants.requested) return off;
@@ -175,16 +189,13 @@ const BERMUDA_GROUP = 'bermuda_removal';
 // Fusilade II alone on bed or border work, tree and shrub, or an unflagged lawn
 // completes normally. `products` is the submitted completion product list; `serviceId`
 // the visit. Returns the refusal message, or null. Gate off: always null.
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 // The visit when it carries the step (the checks above), else null.
 async function stepVisitOf(knex, serviceId) {
   if (featureGates.lawnV13Live?.() !== true || !UUID_RE.test(String(serviceId || ''))) return null;
   const visit = await knex('scheduled_services').where({ id: serviceId }).first('id', 'customer_id', 'property_id', 'scheduled_date');
   if (!visit?.customer_id || !visit.scheduled_date) return null;
   const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first('grass_type');
-  const month = MONTH_ABBR[Number(require('../utils/datetime-et').etCalendarDayOf(visit.scheduled_date).slice(5, 7)) - 1];
-  const step = await stepForVisit(knex, visit, { trackKey: profileTrack(profile), month });
+  const step = await stepForVisit(knex, visit, { trackKey: profileTrack(profile), month: visitMonthOf(visit) });
   return step.active ? visit : null;
 }
 
@@ -231,6 +242,28 @@ async function bermudaLimitViolation(knex, products, { serviceId } = {}) {
     if (result.blocks.length) return `${result.blocks[0].message} Bermuda removal cannot be recorded on this visit.`;
   }
   return null;
+}
+
+// Inside the completion transaction, right before the visit's application rows are
+// written: when the visit carries the step and a step product is being recorded, take a
+// transaction-scoped advisory lock keyed by the property (the customer when the visit
+// has none; the repo's pg_advisory_xact_lock(hashtext, hashtext) idiom, as triage-locks),
+// then re-run the limit check on the SAME transaction. Two completions for one property
+// serialize here, so the second sees the first's committed spray; a violation throws
+// code lawn_bermuda_limit_reached and the transaction rolls back. The preflight
+// (bermudaLimitViolation, before any write) stays; this closes the race after it.
+// A fresh attempt only (the caller skips a resume). Gate off or no step: nothing.
+const LOCK_NAMESPACE = 'bermuda-removal-step';
+async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {}) {
+  if (!bermudaRemovalLive()) return;
+  const { recognition, fusilade } = await submittedStepProducts(trx, products);
+  if (!recognition && !fusilade) return;
+  const visit = await stepVisitOf(trx, serviceId);
+  if (!visit) return;
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+    [LOCK_NAMESPACE, visit.property_id ? `property:${visit.property_id}` : `customer:${visit.customer_id}`]);
+  const message = await bermudaLimitViolation(trx, products, { serviceId });
+  if (message) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
 }
 
 // The step's lines are marked when the recipe lines are parsed, so every later
@@ -287,5 +320,5 @@ module.exports = {
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
   markStepLines, isStepLine, isRecognitionLine, isFusiladeLine,
   selectStepAtomically, settleStep,
-  stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation,
+  stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction,
 };

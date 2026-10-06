@@ -13,7 +13,7 @@ const { LAWN_V13_VERSION } = require('../services/lawn-program');
 const rowsMigration = require('../models/migrations/20261006190100_lawn_bermuda_removal_rows');
 const programMigration = require('../models/migrations/20261006190300_lawn_bermuda_removal_limit_program');
 const auditMigration = require('../models/migrations/20261006190200_lawn_bermuda_removal_audit');
-const { bermudaPairViolation, bermudaLimitViolation } = require('../services/lawn-bermuda-removal');
+const { bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction } = require('../services/lawn-bermuda-removal');
 
 const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
 const GATES = ['GATE_LAWN_V13', 'GATE_LAWN_BERMUDA_REMOVAL', 'GATE_LAWN_COMPLETION_DEFAULTS', 'GATE_LAWN_PROPERTY_HISTORY'];
@@ -527,6 +527,84 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
     });
   });
 
+  describe('the step limits inside the completion transaction (20261006 r6)', () => {
+    const submitted = (...items) => items.map((item) => ({ productId: item.id }));
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const ledger = async (trx, f, visit, date) => {
+      const [record] = await trx('service_records').insert({ customer_id: f.customerId, scheduled_service_id: visit.id, service_date: date, service_type: 'Lawn fixture' }).returning('*');
+      await trx('property_application_history').insert({ customer_id: f.customerId, product_id: rec.id, application_date: date, service_record_id: record.id });
+    };
+    const priorSpray = async (f, date) => {
+      const [visit] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: f.property.id, scheduled_date: date, service_type: 'Lawn fixture' }).returning('*');
+      await ledger(knex, f, visit, date);
+    };
+
+    test('two concurrent completions for one property when history allows ONE more spray: exactly one commits', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await priorSpray(f, '2026-03-01'); // 1 of 2 used
+      const [second] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: f.property.id, scheduled_date: '2026-06-20', service_type: 'Lawn fixture' }).returning('*');
+      // Both preflights pass: neither spray is on the ledger yet.
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: second.id })).toBeNull();
+      const run = (visit) => knex.transaction(async (trx) => {
+        await enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: visit.id });
+        await sleep(300); // hold the transaction open: the other must wait on the property lock
+        await ledger(trx, f, visit, '2026-06-20');
+        return visit.id;
+      });
+      const results = await Promise.allSettled([run(f.visit), run(second)]);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      const rejected = results.find((r) => r.status === 'rejected');
+      expect(rejected.reason.code).toBe('lawn_bermuda_limit_reached');
+      expect(rejected.reason.message).toMatch(/LIMIT REACHED|days since last app/);
+      const sprays = await knex('property_application_history').where({ customer_id: f.customerId, product_id: rec.id });
+      expect(sprays).toHaveLength(2); // the prior one plus exactly one of the two
+    });
+
+    test('the in-transaction check sees a spray committed AFTER the preflight', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await priorSpray(f, '2026-03-01');
+      expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toBeNull();
+      await priorSpray(f, '2026-04-20'); // a concurrent completion commits its spray
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id })))
+        .rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached', message: expect.stringMatching(/2\/2 applications this year — LIMIT REACHED/) });
+    });
+
+    test('different properties of one customer do not serialize or block each other; a visit with no step, no step product, gate off and v13 off are untouched', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await priorSpray(f, '2026-03-01');
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(nis), { serviceId: f.visit.id }))).resolves.toBeUndefined();
+      const unflagged = await lawn({ date: '2026-06-20' });
+      await priorSpray(unflagged, '2026-03-01');
+      await priorSpray(unflagged, '2026-04-20');
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: unflagged.visit.id }))).resolves.toBeUndefined();
+      await priorSpray(f, '2026-04-20');
+      setGates({ removal: false });
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
+      setGates({ v13: false });
+      await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
+    });
+
+    test('control: without the property lock the same two completions BOTH pass (the lock is what serializes them)', async () => {
+      setGates();
+      const f = await lawn({ date: '2026-06-20', bermuda: true });
+      await priorSpray(f, '2026-03-01');
+      const [second] = await knex('scheduled_services').insert({ customer_id: f.customerId, property_id: f.property.id, scheduled_date: '2026-06-20', service_type: 'Lawn fixture' }).returning('*');
+      const unlocked = (visit) => knex.transaction(async (trx) => {
+        const message = await bermudaLimitViolation(trx, submitted(rec, fus), { serviceId: visit.id });
+        if (message) throw new Error(message);
+        await sleep(300);
+        await ledger(trx, f, visit, '2026-06-20');
+      });
+      const results = await Promise.allSettled([unlocked(f.visit), unlocked(second)]);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+    });
+  });
+
   describe('application limits: the bermuda removal rows (20261006190300)', () => {
     const limits = require('../services/application-limits');
     const rowsFor = (product) => knex('product_limits').where({ product_id: product.id });
@@ -708,6 +786,16 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect((await step(f.visit)).active).toBe(false);
       await knex('customer_properties').where({ id: second.id }).update({ active: false });
       expect((await step(f.visit)).active).toBe(true);
+    });
+
+    test('the step month is the visit\'s own: a June request on an October visit opens nothing', async () => {
+      setGates();
+      const october = await lawn({ date: '2026-10-12', bermuda: true });
+      expect((await step(october.visit, 'st_augustine', 'Jun')).active).toBe(false);
+      expect((await step(october.visit, 'st_augustine', 'Oct')).active).toBe(false); // the step runs April and June only
+      const june = await lawn({ date: '2026-06-16', bermuda: true });
+      expect((await step(june.visit, 'st_augustine', 'Jun')).active).toBe(true);
+      expect((await step(june.visit, 'st_augustine', 'Apr')).active).toBe(false);
     });
 
     test('the plan follows the same rule: a visit at the second property gets no step', async () => {

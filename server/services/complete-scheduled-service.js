@@ -7783,6 +7783,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // durable-completion resumes and retries never duplicate rows.
         // Incomplete visits are included on purpose — any product logged
         // was physically applied regardless of the visit outcome.
+        // GATE_LAWN_BERMUDA_REMOVAL: the step's limits again, under a property advisory lock
+        // on this transaction, before the application rows are written (a fresh attempt
+        // only; the preflight above cannot see a spray a concurrent completion commits).
+        if (!resumingCommittedCompletion && insertedServiceProducts.length) {
+          await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
+        }
         if (insertedServiceProducts.length) {
           const ComplianceService = require('../services/compliance');
           await ComplianceService.createComplianceRecords(record.id, { trx });
@@ -8221,6 +8227,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             error: 'This visit was reassigned to another technician while it was being completed. Reload and try again.',
             code: 'service_reassigned',
           } });
+        }
+        if (err && err.code === 'lawn_bermuda_limit_reached') {
+          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
+          return ({ status: 400, body: { error: err.message, code: 'lawn_bermuda_limit_reached' } });
         }
         if (err && err.code === 'issued_invoice_not_reusable') {
           await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
