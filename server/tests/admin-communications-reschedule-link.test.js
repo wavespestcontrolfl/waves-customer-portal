@@ -131,8 +131,7 @@ function makeServicesBuilder(pages = [[]]) {
   b.limit = jest.fn(() => b);
   b.offset = jest.fn((v) => { b.calls.offset.push(v); return b; });
   b.select = jest.fn(() => Promise.resolve(queue.length ? queue.shift() : []));
-  // The office move approval (approveOfficeMove / revokeOfficeMove):
-  // update() stamps or clears it; updateCount 0 = the row moved in between.
+  // The office move approval (approveOfficeMove): update() stamps it; updateCount 0 = the row moved in between.
   b.whereRaw = jest.fn((...a) => { b.calls.whereRaw = [...(b.calls.whereRaw || []), a]; return b; });
   b.first = jest.fn(() => Promise.resolve(null));
   b.update = jest.fn((patch) => { b.calls.update = patch; return Promise.resolve(b.updateCount ?? 0); });
@@ -670,13 +669,12 @@ describe('POST /admin/communications/reschedule-link', () => {
     // 1 PM ET on 2099-08-04 (EDT): the refused snapshot's start, pinned by
     // the snapshot's own date and start (codex P1 #6039 r1).
     expect(services.calls.update).toEqual({ office_move_approved_for: new Date('2099-08-04T17:00:00.000Z') });
-    expect(services.calls.where).toContainEqual([{ id: 'svc-soon', window_start: '13:00:00' }]);
+    expect(services.calls.where).toContainEqual([{ id: 'svc-soon', window_start: '13:00:00', status: 'confirmed' }]);
     expect(services.calls.whereRaw).toContainEqual(['scheduled_date = ?::date', ['2099-08-04']]);
-    expect(services.first).not.toHaveBeenCalled();
-    expect(buildRescheduleLink).toHaveBeenCalledTimes(2);
+    expect(buildRescheduleLink).toHaveBeenNthCalledWith(2, 'svc-soon', { customerId: CUSTOMER_UUID, officeApproving: true });
   });
 
-  test('a rebuild that yields no link revokes the exact approval it stamped, then 404s', async () => {
+  test('no usable link for the approving build: nothing is stamped, the 409 stays', async () => {
     const customers = soloCustomer();
     const services = makeServicesBuilder([[SOON_VISIT]]);
     services.updateCount = 1;
@@ -684,11 +682,9 @@ describe('POST /admin/communications/reschedule-link', () => {
     buildRescheduleLink.mockResolvedValueOnce(TOO_SOON).mockResolvedValueOnce({ url: null, line: '' });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { phone: '9415551234' });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(409);
     });
-    const approvedFor = new Date('2099-08-04T17:00:00.000Z');
-    expect(services.calls.where).toContainEqual([{ id: 'svc-soon', office_move_approved_for: approvedFor }]);
-    expect(services.update).toHaveBeenLastCalledWith({ office_move_approved_for: null });
+    expect(services.update).not.toHaveBeenCalled();
   });
 
   test('409 (not 404) when the visit moved before the approval landed — a distinct reason from "no link"', async () => {
@@ -696,7 +692,7 @@ describe('POST /admin/communications/reschedule-link', () => {
     const services = makeServicesBuilder([[SOON_VISIT]]);
     services.updateCount = 0;
     wireDb({ customers, services });
-    buildRescheduleLink.mockResolvedValue(TOO_SOON);
+    buildRescheduleLink.mockResolvedValueOnce(TOO_SOON).mockResolvedValueOnce(GOOD_LINK);
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(409);
