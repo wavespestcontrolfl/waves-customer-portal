@@ -610,11 +610,18 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       await run();
       expect((await row(byText.commitment.id)).status).toBe('fulfilled');
 
-      // Wording decides when the channel is unknown, as the resolver reads it.
-      const worded = await world({ commitmentExtra: { channel: 'unknown', description: `Call the customer back with the answer ${Date.now()}` } });
-      await addSms(worded);
+      // The words never decide: an email channel takes no witness at all, whatever it says.
+      const mail = await world({ commitmentExtra: { channel: 'email', description: `Text and call the customer ${Date.now()}` } });
+      await addSms(mail);
+      await addCall(mail);
       await run();
-      expect(asked(worded)).toHaveLength(0);
+      expect(asked(mail)).toHaveLength(0);
+      expect((await row(mail.commitment.id)).status).toBe('open');
+      // ... and neither does an unknown channel's wording: it takes both.
+      const unknownWorded = await world({ commitmentExtra: { channel: 'unknown', description: `Call the customer back ${Date.now()}` } });
+      await addSms(unknownWorded);
+      await run();
+      expect(asked(unknownWorded)).toHaveLength(1);
 
       const both = await world();
       await addSms(both);
@@ -627,8 +634,9 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
     test.each([
       ['an sms close on a promise now channelled call', 'sms', { channel: 'call' }],
       ['a call close on a promise now channelled sms', 'call', { channel: 'sms' }],
-      ['an sms close on a promise reworded to a call', 'sms', { channel: 'unknown', description: 'Phone the customer with the answer' }],
-      ['a call close on a promise reworded to a text', 'call', { channel: null, description: 'Text the customer the answer' }],
+      ['an sms close on a promise now channelled email', 'sms', { channel: 'email' }],
+      ['a call close on a promise now channelled email', 'call', { channel: 'email' }],
+      ['an sms close on a promise now channelled in_person', 'sms', { channel: 'in_person' }],
     ])('%s: the lapse scan lists it and the re-judge reopens the promise', async (_name, kind, patch) => {
       const w = await closedBy(kind);
       expect(await lapsed()).not.toContain(w.call.id);
@@ -636,16 +644,23 @@ maybeDescribe('model-judged close of "other" promises (live Postgres)', () => {
       expect(await lapsed()).toContain(w.call.id);
       expect((await cc.refreshFulfillment(db, w.call.id)).reopened).toBe(1);
       expect((await row(w.commitment.id)).status).toBe('open');
+      // The next tick never offers an email promise a witness.
+      if (patch.channel === 'email' || patch.channel === 'in_person') {
+        await run();
+        expect((await row(w.commitment.id)).status).toBe('open');
+      }
     });
 
-    test('a close on the medium the promise names (or on either, when it names both) stays', async () => {
+    test('a close on the medium the promise names (or on either, when its channel is unknown) stays', async () => {
       const text = await closedBy('sms');
       await db('call_commitments').where({ id: text.commitment.id }).update({ channel: 'sms' });
-      const both = await closedBy('call');
-      await db('call_commitments').where({ id: both.commitment.id }).update({ channel: 'unknown', description: 'Call or text the customer the answer' });
+      const call = await closedBy('call');
+      await db('call_commitments').where({ id: call.commitment.id }).update({ channel: 'unknown' });
+      const unknownText = await closedBy('sms');
+      await db('call_commitments').where({ id: unknownText.commitment.id }).update({ channel: null });
       const ids = await lapsed();
-      expect(ids).not.toContain(text.call.id);
-      expect(ids).not.toContain(both.call.id);
+      for (const w of [text, call, unknownText]) expect(ids).not.toContain(w.call.id);
+
     });
 
     test('a close another writer stored (a report text) is not taken for a model-judged one by the lapse scan', async () => {

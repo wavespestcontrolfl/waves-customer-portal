@@ -1834,7 +1834,6 @@ async function callPlacedTo(conn, x, commitment) {
 // name → how to look, and what the proof is called.
 const EVIDENCE = {
   visit_done: { find: completedVisit, kind: "visit_completed", type: "scheduled_service", basis: `visit_completed_for_same_customer_${WITHIN}` },
-  estimate: { find: (conn, x) => (x.customerId ? estimateSentTo(conn, x) : null), kind: "estimate_sent", type: "estimate", basis: `estimate_sent_to_same_customer_${WITHIN}` },
   report_text: { find: reportTextTo, kind: "sms_sent", type: "sms_log", basis: `service_report_text_to_caller_${WITHIN}` },
   report_email: { find: reportEmailTo, kind: "email_sent", type: "email_message", basis: `service_report_email_to_customer_${WITHIN}` },
   text_sent: { find: textToCaller, kind: "sms_sent", type: "sms_log", basis: `text_sent_to_caller_${WITHIN}` },
@@ -1854,47 +1853,33 @@ const EVIDENCE_BY_KIND = {
   send_paperwork: ["report_text", "report_email"],
 };
 
-// A catch-all ("other") promise says what it is only through its channel and
-// its words: a text to send, or a call to place. Such a promise is kept ONLY by
-// that text or call: an unrelated estimate sent meanwhile does not keep "text
-// appointment options". A promise that names neither (an email to send, a
-// record to update) has no evidence the portal can read beyond a sent estimate;
-// the model-judged contact check or the office closes the rest.
-// ONE wording table for a promise with no usable channel: read by
-// otherPromiseMedia (JS) and, as the same words in a POSIX regex, by the lapse
-// scan's legacy-close predicate, so the two can never disagree.
-const PROMISE_WORDS = Object.freeze({
-  text: ["text", "texts", "texted", "texting", "sms"],
-  call: ["call", "calls", "called", "calling", "phone", "phones", "phoned", "ring", "rings"],
+// A catch-all ("other") promise is kept only through its CHANNEL (owner audit
+// 2026-10-05; the free-text wording is never read: rounds of wording edges never
+// converged). ONE channel table, read by the resolver and the contact check (JS)
+// and, as the same table in SQL, by the lapse scan:
+//   proof: media a record alone keeps (no model): sms -> a text sent to the
+//     caller, call -> a call placed to the caller (a card-policy leg included).
+//     An unknown channel has none: any text or call would keep "link them into
+//     the email list", so only the contact check's grounded model judgment can.
+//   judge: media the contact check may offer as witnesses: sms -> texts,
+//     call -> calls, unknown / absent -> either. email, in_person and any other
+//     channel: nothing automatic, a person closes it.
+// An estimate never keeps an "other" promise (send_estimate keeps estimates).
+const CHANNEL_MEDIA = Object.freeze({
+  sms: { proof: ["text"], judge: ["text"] },
+  call: { proof: ["call"], judge: ["call"] },
+  unknown: { proof: [], judge: ["text", "call"] },
 });
-const wordsRegexSource = (words) => `(${words.join("|")})`;
-const PROMISE_WORD_RES = Object.freeze({
-  text: new RegExp(`\\b${wordsRegexSource(PROMISE_WORDS.text)}\\b`, "i"),
-  call: new RegExp(`\\b${wordsRegexSource(PROMISE_WORDS.call)}\\b`, "i"),
-});
-// The same words for Postgres (~*): \m / \M are its word edges. The SQL twin
-// of otherPromiseMedia over a call_commitments alias: the channel names the
-// medium, else (channel absent or unknown) the words do.
-const promiseWordsSql = (medium) => `\\m${wordsRegexSource(PROMISE_WORDS[medium])}\\M`;
-const promiseMediumSql = (medium, cc = "cc") => {
-  const channelOf = { text: "sms", call: "call" }[medium];
-  return `(COALESCE(${cc}.channel, 'unknown') = '${channelOf}' OR (COALESCE(${cc}.channel, 'unknown') = 'unknown' AND COALESCE(${cc}.description, '') ~* '${promiseWordsSql(medium)}'))`;
+const channelKey = (channel) => String(channel || "unknown");
+const otherPromiseMedia = (commitment, use = "proof") => CHANNEL_MEDIA[channelKey(commitment?.channel)]?.[use] || [];
+// The SQL twin over a call_commitments alias: whether the promise's current
+// channel allows this medium for that use, from the same table.
+const promiseMediumSql = (medium, use = "proof", cc = "cc") => {
+  const channels = Object.keys(CHANNEL_MEDIA).filter((key) => CHANNEL_MEDIA[key][use].includes(medium));
+  return channels.length ? `(COALESCE(${cc}.channel, 'unknown') IN (${channels.map((c) => `'${c}'`).join(", ")}))` : "FALSE";
 };
-// The media a catch-all promise names: its channel, else its words. A promise
-// that names both ("call or text") is kept by either.
-function otherPromiseMedia(commitment) {
-  const channel = commitment.channel || null;
-  if (channel === "sms") return ["text"];
-  if (channel === "call") return ["call"];
-  if (channel && channel !== "unknown") return [];
-  const description = String(commitment.description || "");
-  return ["text", "call"].filter((medium) => PROMISE_WORD_RES[medium].test(description));
-}
 const MEDIUM_EVIDENCE = { text: "text_sent", call: "call_placed" };
-function otherEvidence(commitment) {
-  const media = otherPromiseMedia(commitment);
-  return media.length ? media.map((m) => MEDIUM_EVIDENCE[m]) : ["estimate"];
-}
+const otherEvidence = (commitment) => otherPromiseMedia(commitment, "proof").map((m) => MEDIUM_EVIDENCE[m]);
 const evidenceNamesFor = (commitment) => (commitment.kind === "other" ? otherEvidence(commitment) : (EVIDENCE_BY_KIND[commitment.kind] || []));
 
 // The kinds an association closes (every other kind keeps it as a hint): a
@@ -2777,24 +2762,21 @@ async function listLapsedEvidenceClosedCallIds(conn) {
           OR ((cc.fulfillment ->> 'kind') IN ('appointment_booked', 'visit_completed')
               AND cc.kind NOT IN ('schedule_visit', 'technician_follow_up'))
           OR ((cc.fulfillment ->> 'kind') = 'inbound_call' AND cc.kind IS DISTINCT FROM 'call_back')
-          -- An estimate keeps an estimate promise, or an "other" promise that is
-          -- not a text or a call to place; never a callback, nor a promise to
-          -- text or call (read by the same channel / words rule as
-          -- otherPromiseMedia, from the one PROMISE_WORDS table).
-          OR ((cc.fulfillment ->> 'kind') = 'estimate_sent'
-              AND (cc.kind = 'callback' OR (cc.kind = 'other' AND (${promiseMediumSql('text')} OR ${promiseMediumSql('call')}))))
-          -- ... and, for an "other" promise a reprocess has since reworded or
-          -- moved to another channel (otherPromiseMedia's SQL twin): a text
-          -- that keeps only a text promise, a call that keeps only a call one.
-          -- A model-judged person-contact close (the contact check) rests on a text
-          -- or a call; a promise now naming only the OTHER medium (or one the
-          -- close was never allowed on) is reopened, the same medium rule.
+          -- An estimate keeps an estimate promise only: never a callback, never an
+          -- "other" promise.
+          OR ((cc.fulfillment ->> 'kind') = 'estimate_sent' AND cc.kind IN ('callback', 'other'))
+          -- An "other" promise's close rests on a text or a call (deterministic
+          -- proof or a model-judged person contact); the promise's CURRENT channel
+          -- must still allow that medium (otherPromiseMedia's SQL twin), so a
+          -- reprocess to email, or to the other medium, reopens it.
+          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'sms_sent' AND (cc.fulfillment ->> 'basis') LIKE 'text\\_sent\\_to\\_caller%'
+              AND NOT ${promiseMediumSql('text', 'proof')})
+          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'outbound_call' AND (cc.fulfillment ->> 'basis') LIKE 'outbound\\_call\\_to\\_caller%'
+              AND NOT ${promiseMediumSql('call', 'proof')})
           OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'sms_log'
-              AND ${promiseMediumSql('call')} AND NOT ${promiseMediumSql('text')})
+              AND NOT ${promiseMediumSql('text', 'judge')})
           OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'call_log'
-              AND ${promiseMediumSql('text')} AND NOT ${promiseMediumSql('call')})
-          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'sms_sent' AND (cc.fulfillment ->> 'basis') LIKE 'text\\_sent\\_to\\_caller%' AND NOT ${promiseMediumSql('text')})
-          OR (cc.kind = 'other' AND (cc.fulfillment ->> 'kind') = 'outbound_call' AND (cc.fulfillment ->> 'basis') LIKE 'outbound\\_call\\_to\\_caller%' AND NOT ${promiseMediumSql('call')})
+              AND NOT ${promiseMediumSql('call', 'judge')})
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
           -- A close resting on a call (the customer phoning in): the evidence

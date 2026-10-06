@@ -190,12 +190,11 @@ function scrubRecords(records, failures) {
 }
 
 // Which witness types may keep THIS promise: the one decision the resolver
-// makes (otherPromiseMedia). A promise naming a text takes only texts, one
-// naming a call only calls, and one naming neither (or both) is the contact
-// check's own to judge across both.
+// makes (otherPromiseMedia, from the channel alone, the 'judge' column). A text
+// promise takes only texts, a call promise only calls, an unknown channel either,
+// and an email (or any other) channel none: a person closes it.
 function witnessTypesFor(commitment) {
-  const media = otherPromiseMedia(commitment || {});
-  return media.length ? media.map((m) => (m === 'text' ? 'sms' : 'call')) : ['sms', 'call'];
+  return otherPromiseMedia(commitment || {}, 'judge').map((m) => (m === 'text' ? 'sms' : 'call'));
 }
 
 // Every admissible witness for one promise: { records, failures }. A record is
