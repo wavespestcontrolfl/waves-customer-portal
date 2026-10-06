@@ -313,7 +313,9 @@ async function sweepOne(row) {
     os: 'iOS',
     load_async_ai_overview: true,
   }], 1);
-  if (data == null) return { status: 'request_error', error: 'DataForSEO request failed', aio_shown: null };
+  // A dropped connection can still be a billed task: book one call's estimate
+  // so repeated failures cannot run past the cap at zero recorded cost.
+  if (data == null) return { status: 'request_error', error: 'DataForSEO request failed', aio_shown: null, cost_usd: EST_CALL_COST_USD };
 
   const task = data.tasks?.[0];
   const cost = Number(task?.cost) || 0;

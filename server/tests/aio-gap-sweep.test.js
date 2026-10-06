@@ -299,6 +299,15 @@ describe('processSweepChunk', () => {
     expect(dataforseo.request).not.toHaveBeenCalled();
   });
 
+  test('a failed request books one call estimate, so failures cannot run past the cap', async () => {
+    openRun({ max_cost_usd: 0.02 });
+    for (let i = 0; i < 10; i += 1) pendingRow(`q${i}`, { impressions_90d: 100 - i });
+    dataforseo.request.mockResolvedValue(null);
+    await sweep.processSweepChunk({ chunkSize: 10 });
+    expect(dataforseo.request.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(mockState.runs[0].cost_usd).toBeLessThanOrEqual(0.02);
+  });
+
   test('a row is claimed as running before its paid call', async () => {
     openRun();
     pendingRow('q');
@@ -350,7 +359,7 @@ describe('processSweepChunk', () => {
 
     expect(out).toMatchObject({ processed: 5, shown: 1, none: 1, errors: 3, status: 'done' });
     expect(mockState.runs[0]).toMatchObject({ status: 'done', attempted: 5 });
-    expect(mockState.runs[0].cost_usd).toBeCloseTo(0.004 + 0.004 + 0.002, 6);
+    expect(mockState.runs[0].cost_usd).toBeCloseTo(0.004 + 0.004 + 0.002 + 0.006, 6); // the null request books one estimate
     expect(mockState.runs[0].finished_at).toBeDefined();
   });
 

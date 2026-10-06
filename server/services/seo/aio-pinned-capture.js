@@ -66,7 +66,8 @@ function parseSerp(items) {
     .map((e) => ({
       title: e.title || null,
       text: e.text || e.markdown || '',
-      urls: [...arr(e.references), ...arr(e.links)].map((r) => r?.url).filter(Boolean),
+      // A video element cites its video in its own url field.
+      urls: [...arr(e.references), ...arr(e.links), ...(e.type === 'ai_overview_video_element' ? [e] : [])].map((r) => r?.url).filter(Boolean),
     }))
     .filter((e) => e.text || e.urls.length);
   const references = arr(aio.references).map((r) => ({
