@@ -214,8 +214,90 @@ function buildProgramLine({ month = null, applications = [], nitrogenApplied = n
   return PROGRAM_LINES_V13[m].line;
 }
 
+
+// GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06: "add more detail here ... use the
+// labels, seasonality"): under the v13 month sentence, why this month's step
+// fits the season, what the customer will see, and seasonal watering guidance.
+// Each line restates the v13 month step (server/config/lawn-protocol-v13.json)
+// by category, never a product name or rate, plus Southwest Florida seasons:
+// dry season Nov-May, rainy season Jun-Sep, summer nitrogen limits Jun-Sep.
+// Watering here is general seasonal guidance only; a product's own water-in
+// or hold step comes from its label rule in the report's watering section.
+const DRY = 'Water about \u00be inch only when the lawn shows thirst (blades fold or footprints stay). Water early in the morning, on your county\u2019s allowed watering days.';
+const RAIN = 'Summer rain usually covers the lawn. Turn irrigation down or off in weeks with regular rain, and water only when the lawn shows thirst. Extra water now invites fungus.';
+const PROGRAM_DETAIL_V13 = Object.freeze({
+  1: Object.freeze({
+    whyNow: 'January is the coolest stretch of the year. Winter weeds are sprouting while the grass grows slowly, so the weed barrier is renewed and a micronutrient feeding keeps the color up without pushing growth the grass cannot use in the cold. Cool, damp spells can bring large patch, so we treat any active spots.',
+    whatYouSee: 'Color holds steady and growth stays slow, so mowing is light. A few weeds that sprouted earlier may still show; we spot treat them.',
+    watering: [DRY, 'In cool weather the lawn needs water less often than in spring.'],
+  }),
+  2: Object.freeze({
+    whyNow: 'As the days lengthen in February, the lawn starts to green up. A feeding supports that green-up, and we spot treat weeds while they are small.',
+    whatYouSee: 'Green-up builds as the weather warms, and mowing picks up toward the end of the month.',
+    watering: [DRY],
+  }),
+  3: Object.freeze({
+    whyNow: 'In March the soil warms and summer weeds such as crabgrass start to sprout. The spring weed barrier goes down now, ahead of them, with a micronutrient feeding for color. Spring is also when the root disease take-all can show, so mapped trouble areas get a treatment.',
+    whatYouSee: 'The weed barrier is invisible: it works by stopping new weeds before they start. Color deepens and growth speeds up.',
+    watering: [DRY],
+  }),
+  4: Object.freeze({
+    whyNow: 'April warms quickly and the grass is growing hard, so it gets a light feeding. Chinch bugs start to wake up in hot, sunny spots, and we check for them and treat where we find them.',
+    whatYouSee: 'Thicker, faster growth and weekly mowing. Dry, yellowing patches in sunny areas near pavement are worth telling us about.',
+    watering: [DRY, 'April and May are usually the driest months, so check for thirst more often.'],
+  }),
+  5: Object.freeze({
+    whyNow: 'May, before the rains, is peak chinch bug season in sunny St. Augustine turf. The sunny turf gets an insect treatment, and we spot treat chinch bugs, weeds and dry spots elsewhere.',
+    whatYouSee: 'The lawn should hold its color through the dry heat. Spots that stay yellow after watering are worth telling us about.',
+    watering: [DRY, 'April and May are usually the driest months, so check for thirst more often.'],
+  }),
+  6: Object.freeze({
+    whyNow: 'The rainy season starts in June, and local summer fertilizer rules limit nitrogen until fall. The lawn gets iron and micronutrients for color instead, plus a weed barrier for summer weeds. Heat and rain bring gray leaf spot and chinch bugs, which we spot treat.',
+    whatYouSee: 'Color from the micronutrients shows without extra top growth. Growth is fast with the rain, so mowing stays weekly.',
+    watering: [RAIN],
+  }),
+  7: Object.freeze({
+    whyNow: 'July is a scouting visit. Summer fertilizer limits mean no whole-lawn feeding, so we inspect the whole lawn and treat problem spots only, such as caterpillars, leaf spot or chinch bugs.',
+    whatYouSee: 'Summer rain keeps the lawn growing. Chewed or ragged patches can mean caterpillars and are worth telling us about.',
+    watering: [RAIN],
+  }),
+  8: Object.freeze({
+    whyNow: 'Late summer heat and rain continue. A micronutrient feeding keeps the color up, and we treat leaf spot or caterpillar spots where we find them.',
+    whatYouSee: 'Steady color through the heat, with fast growth and weekly mowing.',
+    watering: [RAIN],
+  }),
+  9: Object.freeze({
+    whyNow: 'September is the end of the rainy season. A micronutrient feeding keeps the color up, mapped take-all areas get their first fall treatment, and we watch for caterpillars.',
+    whatYouSee: 'Growth starts to slow as the month goes on.',
+    watering: [RAIN, 'As the rains taper off, turn irrigation back up only as the lawn needs it.'],
+  }),
+  10: Object.freeze({
+    whyNow: 'As the soil cools in October, winter weeds like annual bluegrass and chickweed start to sprout. The weed barrier goes down now, with a fall feeding, so it is in place before they come up. Cooler, damp nights also bring large patch, a fungus that shows as tan or orange rings, so we check for it and treat any spots.',
+    whatYouSee: 'The feeding greens the lawn as it settles in. Growth slows as the days get shorter, so you will mow less. The weed barrier is invisible: it works by stopping new weeds before they start.',
+    watering: [DRY, 'Wet grass overnight invites large patch, so water in the morning only.'],
+  }),
+  11: Object.freeze({
+    whyNow: 'November is cool and dry. The lawn gets a feeding to carry it into winter, mapped large patch areas are treated, and sedge spots are treated if they come back.',
+    whatYouSee: 'Growth slows and color holds.',
+    watering: [DRY, 'Wet grass overnight invites large patch, so water in the morning only.'],
+  }),
+  12: Object.freeze({
+    whyNow: 'December brings the first cool spells. A light feeding keeps the color up, and we treat any large patch and weed spots.',
+    whatYouSee: 'Slow growth and light mowing through the holidays.',
+    watering: [DRY, 'In cool weather the lawn needs water less often than in spring.'],
+  }),
+});
+
+// The month's detail, only beside a v13 program line (same visits, same month).
+function buildProgramDetail({ month, programLine } = {}) {
+  if (!programLine) return null;
+  return PROGRAM_DETAIL_V13[Number(month)] || null;
+}
+
 module.exports = {
   buildProgramLine,
+  buildProgramDetail,
+  PROGRAM_DETAIL_V13,
   PROGRAM_LINES_V13,
   QUALIFIERS,
   NO_NITROGEN_MONTHS,

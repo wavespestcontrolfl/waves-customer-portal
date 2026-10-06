@@ -371,3 +371,44 @@ describe('resolveProgramVisit: only recurring lawn plan visits get the line', ()
     });
   });
 });
+
+describe('GATE_LAWN_PROGRAM_DETAIL (owner 2026-10-06)', () => {
+  const { PROGRAM_DETAIL_V13, buildProgramDetail } = require('../services/service-report/lawn-program-line');
+  const withBoth = (detail, fn) => withEnv({ [GATE]: 'true', GATE_LAWN_V13: 'true', GATE_LAWN_PROGRAM_DETAIL: detail }, fn);
+
+  test('every month has why-now, what-you-will-see and watering lines', () => {
+    for (let m = 1; m <= 12; m += 1) {
+      const d = PROGRAM_DETAIL_V13[m];
+      expect(d.whyNow).toEqual(expect.any(String));
+      expect(d.whatYouSee).toEqual(expect.any(String));
+      expect(d.watering.length).toBeGreaterThan(0);
+    }
+  });
+
+  test('the copy names no product, brand, active ingredient or rate', () => {
+    const all = JSON.stringify(PROGRAM_DETAIL_V13);
+    expect(all).not.toMatch(/LESCO|Stonewall|Dimension|Celsius|Certainty|Artavia|Velista|Arena|Acelepryn|Tetrino|Dylox|Gravex|Dismiss|Nutra|prodiamine|dithiopyr|azoxystrobin|\bper 1,000\b|\blb\b|fl oz/i);
+  });
+
+  test('no detail without a program line', () => {
+    expect(buildProgramDetail({ month: 10, programLine: null })).toBeNull();
+    expect(buildProgramDetail({ month: 10, programLine: 'x' })).toBe(PROGRAM_DETAIL_V13[10]);
+  });
+
+  test('gate off: no seasonalDetail key and the payload is unchanged', () => {
+    const off = withBoth(undefined, () => v13Report());
+    expect(off.snapshot).not.toHaveProperty('seasonalDetail');
+    expect(JSON.stringify(withBoth('false', () => v13Report()))).toBe(JSON.stringify(off));
+  });
+
+  test('gate on: the v13 month detail rides beside the program line', () => {
+    const on = withBoth('true', () => v13Report());
+    expect(on.snapshot.seasonalNoteSource).toBe('program');
+    expect(on.snapshot.seasonalDetail).toEqual(PROGRAM_DETAIL_V13[10]);
+  });
+
+  test('gate on without the program line (expectations off): no detail', () => {
+    const on = withEnv({ [GATE]: undefined, GATE_LAWN_V13: 'true', GATE_LAWN_PROGRAM_DETAIL: 'true' }, () => v13Report());
+    expect(on.snapshot).not.toHaveProperty('seasonalDetail');
+  });
+});

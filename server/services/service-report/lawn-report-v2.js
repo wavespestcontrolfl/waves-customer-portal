@@ -17,7 +17,7 @@ const { buildLawnInsightCards, issueRestatesAftercare } =require('./lawn-report-
 const { buildTreatmentSummary } = require('./treatment-summary');
 const featureGates = require('../../config/feature-gates');
 const { lawnReportLeadLive } = featureGates;
-const { buildProgramLine } = require('./lawn-program-line');
+const { buildProgramLine, buildProgramDetail } = require('./lawn-program-line');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely, approvedSeasonalDipRow } = require('./lawn-seasonality');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const { filterByCardStatus } = require('./lawn-photo-findings');
@@ -762,6 +762,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     rootCause,
     seasonalNote,
     ...(programLine ? { seasonalNoteSource: 'program' } : {}),
+    // GATE_LAWN_PROGRAM_DETAIL: the month's detail lines under the program line.
+    ...(programLine && typeof featureGates.lawnProgramDetailLive === 'function' && featureGates.lawnProgramDetailLive()
+      ? (() => { const d = buildProgramDetail({ month: assessMonth, programLine }); return d ? { seasonalDetail: d } : {}; })()
+      : {}),
     todaysFocus: treatment ? treatment.focus : [],
     // Plain-language applied-solutions sentence for the hero card (owner
     // 2026-07-21 — the summary must say what was applied, not just tags).
