@@ -2072,6 +2072,16 @@ describe('staff-work rules (quote_sent_to_customer / staff_booked_after_card / s
     expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak Street', service_address_zip: '34205' }), prop)).toBe(true);
     expect(visitAtSoleProperty(visit({ service_address_line1: '99 Elm St', service_address_zip: '34205' }), prop)).toBe(false);
     expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak St', service_address_zip: '34211' }), prop)).toBe(false);
+    // Locality must be carried and agree, whichever side lacks a ZIP; a conflicting stamp beats a matching property_id.
+    const noZip = { ...prop, zip: null, city: 'Bradenton' };
+    expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak St', service_address_city: 'Bradenton' }), noZip)).toBe(true);
+    expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak St', service_address_city: 'Sarasota' }), noZip)).toBe(false);
+    expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak St', service_address_zip: '34205' }), noZip)).toBe(false);
+    expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak St', service_address_city: 'Sarasota' }), { ...prop, zip: '34205' })).toBe(false);
+    expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak St' }), prop)).toBe(false);
+    expect(visitAtSoleProperty(visit({ property_id: 'p1', service_address_line1: '10 Oak St', service_address_city: 'Sarasota' }), noZip)).toBe(false);
+    expect(visitAtSoleProperty(visit({ property_id: 'p1', service_address_line1: '10 Oak St', service_address_zip: '34211' }), prop)).toBe(false);
+    expect(visitAtSoleProperty(visit({ property_id: 'p1', service_address_line1: '10 Oak St', service_address_zip: '34205' }), prop)).toBe(true);
     expect(visitAtSoleProperty(visit({ service_address_line1: '10 Oak St', service_address_line2: 'Apt 4' }), prop)).toBe(false);
     expect(visitAtSoleProperty(visit({ service_address_line1: 'Main Street' }), prop)).toBe(false);
     expect(visitAtSoleProperty(visit(), null)).toBe(false);

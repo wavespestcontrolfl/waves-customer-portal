@@ -509,11 +509,14 @@ maybeDescribe('triage auto-resolve sweep (live Postgres)', () => {
     await seedHandVisit(otherZip.customerId, { ageMin: 10 });
     const noSnapshot = await seedStaffCall(SID.replace(/e2$/, 'd7'), { ...opts, onFile: null });
     await seedHandVisit(noSnapshot.customerId, { ageMin: 10 });
+    // A stamp on the same street in another ZIP loses even with property_id pointing at the property.
+    const conflictingStamp = await seedStaffCall(SID.replace(/e2$/, 'd8'), opts);
+    await seedHandVisit(conflictingStamp.customerId, { ageMin: 10, propertyId: conflictingStamp.propertyId, address: { service_address_line1: '1234 Fixture Ave', service_address_zip: '34211' } });
     await sweep.runTriageAutoResolve({ now: new Date() });
     const okRow = await cardRow(ok.calls[0].cardId);
     expect(okRow.status).toBe('resolved');
     expect(okRow.resolution_rule).toBe('staff_booked_at_account_address');
     expect((await cardRow(atProperty.calls[0].cardId)).status).toBe('resolved');
-    for (const c of [elsewhere, multi, otherUnit, otherZip, noSnapshot]) expect((await cardRow(c.calls[0].cardId)).status).toBe('open');
+    for (const c of [elsewhere, multi, otherUnit, otherZip, noSnapshot, conflictingStamp]) expect((await cardRow(c.calls[0].cardId)).status).toBe('open');
   });
 });

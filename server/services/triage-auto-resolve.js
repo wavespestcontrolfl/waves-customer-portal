@@ -2352,15 +2352,20 @@ function filedAgainstProperty(item, property) {
 // Is a booking at the account's ONLY active property: pointing at it, or
 // pointing at nothing (staff booked the account's one address by hand) —
 // and in either case never STAMPED to another address. A stamp that cannot
-// be keyed (no house number) or names another street, ZIP or unit is not
+// be keyed (no house number) or names another street, locality or unit is not
 // evidence of this property.
 function visitAtSoleProperty(visit, property) {
   if (!property) return false;
   if (visit.service_address_line1) {
     const key = addressKey(visit.service_address_line1);
     if (!key || key !== addressKey(property.address_line1)) return false;
+    // The stamp must CARRY a locality and agree with the property's: both
+    // ZIPs when either side has one, else the city. A street-only stamp, or
+    // one naming another city, loses even when property_id points here.
     const zip = zip5(visit.service_address_zip);
-    if (zip && zip5(property.zip) && zip !== zip5(property.zip)) return false;
+    if (zip || zip5(property.zip)) {
+      if (zip !== zip5(property.zip)) return false;
+    } else if (!cityKey(visit.service_address_city) || cityKey(visit.service_address_city) !== cityKey(property.city)) return false;
     if (unitOf(visit.service_address_line1, visit.service_address_line2) !== unitOf(property.address_line1, property.address_line2)) return false;
   }
   if (visit.property_id) return String(visit.property_id) === String(property.id);
