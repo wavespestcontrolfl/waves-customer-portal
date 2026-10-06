@@ -486,32 +486,8 @@ async function attachThread(ids, threadId, turnSeq, requestedBy) {
     .update({ thread_id: threadId, thread_turn_seq: turnSeq, updated_at: db.fn.now() });
 }
 
-/**
- * The stored params of the cards this server built, on this thread and for
- * this actor, for `toolName` and `productId` in the last `withinHours`,
- * newest first. Any status counts (pending, confirmed, cancelled, expired):
- * an expired card still proves the server resolved that target. Only cards
- * attached at or before `maxTurnSeq` (the requesting tab's observed thread
- * turn) count. The params are the ones the route stored after its own target
- * resolution, never client history or model text.
- */
-async function threadCardParamsForProduct({ threadId, requestedBy, toolName, productId, maxTurnSeq, withinHours = 24 }) {
-  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  if (!UUID.test(String(threadId || '')) || !requestedBy || !toolName || !productId || !Number.isInteger(maxTurnSeq)) return [];
-  const rows = await db('ib_pending_actions')
-    .where({ thread_id: threadId, requested_by: String(requestedBy), tool_name: toolName })
-    .where('thread_turn_seq', '<=', maxTurnSeq)
-    .where('created_at', '>=', new Date(Date.now() - withinHours * 60 * 60 * 1000))
-    .whereRaw("params->>'product_id' = ?", [String(productId)])
-    .orderBy('created_at', 'desc')
-    .limit(5)
-    .select('params');
-  return rows.map(row => (typeof row.params === 'string' ? JSON.parse(row.params) : row.params) || {});
-}
-
 module.exports = {
   actionReceipt,
-  threadCardParamsForProduct,
   TTL_MINUTES,
   paramsHash,
   stepKey,

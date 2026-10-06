@@ -1499,99 +1499,10 @@ function operationMatches(toolName, texts, preview) {
 
 const TARGET_UNAVAILABLE = Object.freeze({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
 
-// `established` (from resolveInventoryWriteTarget) answers whether the
-// server itself already established the preview's product (see
-// serverEstablishedTarget). It is asked only when the operator's words named
-// NO product at all (`silent`): never over a name that conflicts, names two
-// products, or names a different product.
-async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null, toolName = null, established = null } = {}) {
+async function resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq = null, toolName = null } = {}) {
   const grounded = await groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName });
   if (grounded?.productId) return { productId: grounded.productId };
-  if (grounded?.silent && established && await established()) return { productId: preview.product.id };
   return grounded?.mismatch ? { ...TARGET_UNAVAILABLE, code: 'target_relationship_mismatch' } : TARGET_UNAVAILABLE;
-}
-
-// The bar's own catalog readers, and the input field each takes its search
-// term from. A lookup with no search term never establishes a product.
-const LOOKUP_TERM_FIELDS = { query_stock: 'search', query_products: 'search', get_stock_movements: 'product_name' };
-const normalizeTerm = value => String(value || '').toLowerCase().replace(/[^a-z0-9%]+/g, ' ').trim();
-
-// Did a lookup in an EARLIER round of this request establish `productId`?
-// `results` are the route's own server-side tool results with the input each
-// read ran with; the route passes only rounds before the proposing one, so a
-// read in the same round (not yet seen by the model) never counts. A lookup
-// counts only when (a) it ran with a search term, (b) that term (normalized,
-// 3+ characters) appears as words in the operator's own request, and (c) the
-// term matches exactly one catalog product in total, re-counted here with no
-// limit (a result shortened by a model-supplied `limit` proves nothing), and
-// that product is the preview's and was in the result the model saw.
-async function lookupEstablishes(productId, prompt, results = []) {
-  const words = ` ${normalizeTerm(prompt)} `;
-  for (const { name, input, result } of results) {
-    const field = LOOKUP_TERM_FIELDS[name];
-    if (!field || !result || typeof result !== 'object' || result.error) continue;
-    const raw = String(input?.[field] || '').trim();
-    const term = normalizeTerm(raw);
-    if (term.length < 3 || !words.includes(` ${term} `)) continue;
-    const shown = Array.isArray(result.products) ? result.products : result.product ? [result.product] : [];
-    if (!shown.some(product => String(product?.id) === productId)) continue;
-    const literal = raw.replace(/[\\%_]/g, '\\$&');
-    const matches = await db('products_catalog')
-      .where(function () { this.whereILike('name', `%${literal}%`).orWhereILike('active_ingredient', `%${literal}%`); })
-      .limit(2).select('id');
-    if (matches.length === 1 && String(matches[0].id) === productId) return true;
-  }
-  return false;
-}
-
-// Does the current message state an amount of its own? A digit, a spoken
-// number, or "a/an <unit>" ("a jug") all do, read with the same number words
-// and units the noun-position reader uses. Such a message is a new
-// instruction, never "show me that card again".
-const STATED_NUMBER_RE = new RegExp(`\\d|\\b(?:${PERCENT_NUMBER_WORD_ALT}|hundred|dozen|half)\\b|\\b(?:a|an)\\s+(?:${NOUN_POSITION_UNITS})\\b`, 'i');
-const statesAmount = text => STATED_NUMBER_RE.test(String(text || ''));
-
-// The fields that make two adjust_stock proposals the same stock change.
-const SAME_CARD_FIELDS = ['movement_type', 'quantity', 'set_total', 'unit'];
-const cardField = value => (value == null || value === '' ? null : String(value).trim().toLowerCase());
-const sameStockChange = (stored, proposed) => SAME_CARD_FIELDS.every(key => cardField(stored?.[key]) === cardField(proposed?.[key]));
-
-// "Re-propose the same card": the server built an adjust_stock card for this
-// product on this thread, for this actor, in the last 24 hours, at or before
-// the requesting tab's observed turn, and the new proposal is exactly that
-// stock change (movement type, amount, unit). With no observed sequence
-// there is no prior-card grounding (a stale tab never borrows a card it never
-// saw). An unreadable card history grounds nothing (fail closed).
-async function sameCardAgain(productId, proposedParams, actorId, threadId, observedSeq) {
-  if (!Number.isInteger(observedSeq)) return false;
-  try {
-    const cards = await require('./pending-actions').threadCardParamsForProduct({
-      threadId, requestedBy: actorId, toolName: 'adjust_stock', productId, maxTurnSeq: observedSeq,
-    });
-    return cards.some(stored => sameStockChange(stored, proposedParams));
-  } catch (err) {
-    logger.warn(`[intelligence-bar:procurement] prior card read failed: ${err.message}`);
-    return false;
-  }
-}
-
-// One narrow exception, for adjust_stock only (always carded, owner
-// 2026-10-05): may the preview's product stand in where the operator's words
-// name no product the catalog can read? Only when the prompt is an
-// instruction and the server itself already established that product:
-//   - a qualifying lookup in this request (lookupEstablishes), when the
-//     operator's words ask for this operation (operationMatches), so order or
-//     request language never grounds a stock write; or
-//   - the same card again (owner IB history 09-25: "Yes" / "OK I didn't see
-//     the confirm button" after a card expired unseen): the message states no
-//     amount of its own and the proposal equals an earlier card's stored
-//     stock change exactly. The earlier card already fixed the operation.
-async function serverEstablishedTarget({ toolName, prompt, preview, actorId, threadId, threadSeq, priorToolResults, proposedParams }) {
-  if (toolName !== 'adjust_stock' || !preview?.product?.id || isNotAnInstruction(prompt)) return false;
-  const productId = String(preview.product.id);
-  if (operationMatches(toolName, [prompt], preview) && await lookupEstablishes(productId, prompt, priorToolResults)) return true;
-  if (statesAmount(prompt)) return false;
-  return sameCardAgain(productId, proposedParams, actorId, threadId, threadSeq);
 }
 
 async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { observedSeq, toolName }) {
@@ -1619,14 +1530,10 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
   const current = await productsNamedIn(prompt);
   // A prompt that names anything (or carries a conflict) stands on its own.
   if (current.conflict || current.named.size) return decide(current, [prompt]);
-  // The operator's words named no product anywhere this look-back reads: the
-  // caller may ask whether the server already established the target
-  // (resolveByOperatorGrounding's `established`).
-  const silent = () => ({ silent: true });
   // A stale tab never grounds off turns it never saw (two tabs on one
   // thread): observedSeq is the requesting tab's own tail seq, from the
   // route's thread_seq. Without one there is no prior-turn grounding at all.
-  if (!isBareFollowUp(prompt) || !Number.isInteger(observedSeq)) return silent();
+  if (!isBareFollowUp(prompt) || !Number.isInteger(observedSeq)) return null;
   const IbThreads = require('./threads');
   // Newest first and resolved ONE AT A TIME, never concatenated: a turn
   // ending "...Demand" and the next-older turn beginning "CS..." must never
@@ -1646,27 +1553,46 @@ async function groundOperatorNamedProduct(prompt, preview, actorId, threadId, { 
     if (!isBareFollowUp(turn)) return null;
     skipped.push(turn);
   }
-  return silent();
+  return null;
+}
+
+// Words that never identify a product in an operator's product phrase:
+// containers, units, amounts and fillers ("the new jug of", "some more").
+const PHRASE_FILLER_WORDS = new Set([
+  'a', 'an', 'the', 'of', 'some', 'more', 'new', 'another', 'our', 'my', 'this', 'that', 'these', 'those', 'stuff',
+  'gallon', 'gallons', 'gal', 'gals', 'oz', 'fl', 'ounce', 'ounces', 'qt', 'qts', 'quart', 'quarts', 'pint', 'pints',
+  'lb', 'lbs', 'pound', 'pounds', 'bottle', 'bottles', 'jug', 'jugs', 'bag', 'bags', 'case', 'cases', 'box', 'boxes',
+  'container', 'containers', 'can', 'cans', 'pail', 'pails', 'bucket', 'buckets', 'thing', 'things', 'unit', 'units',
+]);
+const phraseWords = text => String(text || '').toLowerCase().match(/[a-z0-9]+(?:\.[0-9]+)?%?/g) || [];
+
+// The operator's own product phrase resolves to a catalog product when every
+// significant word of the phrase appears as a whole word in that product's
+// name and exactly one ACTIVE product satisfies this ("the Guard" for
+// "Synthetic Guard CS"). A word is significant unless it is a filler,
+// container or unit word; formulation codes and anything with a digit
+// ("SC", "10%") count, so a qualifier never drops out. A phrase with an
+// unknown word ("Unlisted Guard Chemical") or a word several products share
+// resolves to nothing. Only the operator's words are read: no model-chosen
+// id or search term is involved.
+async function resolveByPhraseWords(phrase) {
+  const significant = [...new Set(phraseWords(phrase).filter(word => !PHRASE_FILLER_WORDS.has(word) && (word.length >= 2 || /\d/.test(word))))];
+  if (!significant.length) return null;
+  const products = await db('products_catalog').where({ active: true }).select('id', 'name');
+  const matches = products.filter(product => {
+    const nameWords = new Set(phraseWords(product.name));
+    return significant.every(word => nameWords.has(word));
+  });
+  if (matches.length !== 1) return null;
+  const product = await db('products_catalog').where('id', matches[0].id).first();
+  return product ? { product } : null;
 }
 
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
-//
-// One narrow exception, for adjust_stock only (always carded, owner
-// 2026-10-05): when the operator's words name no product the catalog can
-// read (a short name the grammar's lookup misses, or free phrasing naming
-// nothing), the preview's product stands when serverEstablishedTarget says
-// the server already established it: a lookup in this request whose search
-// term the operator said and which matched that one product, or the same
-// card again (an earlier adjust_stock card on this thread with exactly this
-// stock change, for a message that states no amount of its own). Both are
-// server records, so a model-invented id is still refused. Neither overrides
-// a name that matched several products, a different product, a page
-// reference, or a question.
-async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq, priorToolResults = [], proposedParams = {} }) {
+async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, preview, actorId, threadId, threadSeq }) {
   const { targetClause, UUID_RE } = require('./task-context');
-  const established = () => serverEstablishedTarget({ toolName, prompt, preview, actorId, threadId, threadSeq, priorToolResults, proposedParams });
   // A colon/quote can be part of a catalog identity. Never turn a qualified
   // product into the shorter base product by applying the contact-body split.
   // The anchored inventory grammar below excludes communication/note intents.
@@ -1724,7 +1650,7 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // No pattern matched at all, so the operator named no target the grammar
   // can read: this is the one place the free-phrasing fallback runs (and,
   // for a bare follow-up like "1 bottle", recent operator turns).
-  if (!selected) return resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName, established });
+  if (!selected) return resolveByOperatorGrounding(prompt, preview, actorId, threadId, { observedSeq: threadSeq, toolName });
   // A trailing destination ("… to inventory", "… into our stock") names
   // where the stock goes, not the product: "add two bottles of Taurus SC to
   // inventory" must look up "Taurus SC" (the grammar captured the whole
@@ -1754,14 +1680,12 @@ async function resolveInventoryWriteTarget({ toolName, prompt, pageData = {}, pr
   // clarify; the free-phrasing fallback never substitutes another mention
   // ("Restock Unlisted Chemical instead of Taurus SC").
   if (deictic && !selector.product_id) return unavailable;
-  const resolved = literal || await resolveProduct(selector);
-  // A named product the catalog does not find ("the Guard" for "Synthetic
-  // Guard CS") may stand on the bar's own lookup; a name that matched
-  // several products (candidates) stays a question for the operator.
-  if (resolved.error) {
-    return !resolved.candidates && !selector.product_id && await established() ? { productId: preview.product.id }
-      : { ...resolved, code: 'target_clarification_required' };
-  }
+  let resolved = literal || await resolveProduct(selector);
+  // A short name the catalog search does not find ("the Guard" for
+  // "Synthetic Guard CS") may still name exactly one active product word for
+  // word; a name that matched several products stays a question.
+  if (resolved.error && !resolved.candidates && !selector.product_id) resolved = await resolveByPhraseWords(name) || resolved;
+  if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
   if (resolved.product.id !== preview.product?.id) return { ...unavailable, code: 'target_relationship_mismatch' };
   return { productId: resolved.product.id };
 }

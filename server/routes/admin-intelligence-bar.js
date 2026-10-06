@@ -1135,7 +1135,7 @@ function confirmationDisplayParams(toolName, params, preview) {
  * response's pendingActions array. Model-supplied confirmed/confirm booleans
  * are stripped before anything is stored or previewed.
  */
-async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null, priorToolResults = [] }) {
+async function proposePendingWrite({ toolUse, req, context, selectedLeadId = null, task = null, taskContext = null, ownerDirectVerdict = null, requestStartedAt = null }) {
   const params = { ...(toolUse.input || {}) };
   delete params.confirmed;
   delete params.confirm;
@@ -1837,12 +1837,6 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // same parse as the optimistic-append check below — so a stale tab
       // never grounds off turns appended by another tab it never saw.
       threadSeq: Number.isInteger(req.body.thread_seq) ? req.body.thread_seq : null,
-      // This route's own tool results (with the input each ran with) from
-      // earlier rounds of this request: server-held, never client history.
-      priorToolResults,
-      // The proposal's own stock change: the same-card-again source compares
-      // it with an earlier card's stored params.
-      proposedParams: params,
     });
     // A refused target leaves no card and writes nothing; the model is told so
     // in plain words, so its reply can never read as a recorded change.
@@ -3281,8 +3275,6 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               task: activeTask,
               taskContext,
               requestStartedAt,
-              // Results the model had already received: earlier rounds only.
-              priorToolResults: toolResults.filter(entry => entry.round < round),
               // Three or more same-tool edits that would run direct: refused
               // as a set, pointing at the bulk tool (one card). Judged on the
               // finished preview, so an edit the preview cards still reaches
@@ -3400,7 +3392,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
 
         toolCalls.push({ name: toolUse.name, input: loggableInput });
         persistedToolCalls.push({ name: toolUse.name, fields: Object.keys(toolUse.input || {}) });
-        toolResults.push({ name: toolUse.name, input: executionInput, result, round });
+        toolResults.push({ name: toolUse.name, result });
         if (toolUse.name === 'search_field_intelligence' && !failed && isEmptyKnowledgeSearch(result)) knowledgeMisses.add(result.query);
         // A clarification stays open until the same operation succeeds in a
         // later round; an unrelated or sibling call succeeding does not answer it.

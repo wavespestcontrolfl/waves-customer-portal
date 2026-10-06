@@ -1,13 +1,9 @@
 /**
- * adjust_stock target from the bar's own lookup (owner IB history 2026-10-06):
- * the operator used a short product name, query_stock found the product,
- * adjust_stock was proposed with that id, and the proposal was refused, so
- * the stock was never written. The route now hands
- * resolveInventoryWriteTarget its OWN tool results, with the input each read
- * ran with, from EARLIER rounds of this request only (a read in the same
- * round had not reached the model yet). A refusal tells the model nothing was
- * written and leaves no card; an accepted target still shows the card with
- * the product and on hand before and after (owner 2026-10-05).
+ * adjust_stock proposals through the route (owner IB history 2026-10-06): a
+ * resolved target still shows the confirm card naming the product and on
+ * hand before and after (owner 2026-10-05), and a refused target leaves no
+ * card and tells the model plainly that nothing was written, so a refusal
+ * can never read as a recorded change.
  *
  * Harness mirrors admin-intelligence-bar-phantom-card.test.js.
  */
@@ -47,8 +43,8 @@ jest.mock('../services/intelligence-bar/tools', () => ({
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/seo-tools', () => ({ SEO_TOOLS: [], executeSeoTool: jest.fn() }));
-// Real tool definitions; the reads, the preview and the target rule are
-// scripted so the test watches only what the route hands the rule.
+// Real tool definitions; the preview and the target rule are scripted so the
+// test watches only what the route does with their answers.
 const mockExecuteProcurementTool = jest.fn();
 const mockResolveInventoryWriteTarget = jest.fn();
 jest.mock('../services/intelligence-bar/procurement-tools', () => {
@@ -127,7 +123,6 @@ const PREVIEW = {
   preview: true, tool: 'adjust_stock', product: { id: PRODUCT_ID, name: 'Synthetic Guard CS' }, movement_type: 'restock',
   stock_before: 62, change: 256, stock_after: 318, unit: 'fl_oz', entered_quantity: 2, entered_unit: 'gal', _version: 'v1',
 };
-const lookup = (id = 'tu_lookup') => ({ type: 'tool_use', id, name: 'query_stock', input: { search: 'guard' } });
 const adjust = (id = 'tu_adjust') => ({ type: 'tool_use', id, name: 'adjust_stock', input: { product_id: PRODUCT_ID, movement_type: 'restock', quantity: 2, unit: 'gal' } });
 
 beforeEach(() => {
@@ -135,40 +130,21 @@ beforeEach(() => {
   mockCreatePendingAction.mockResolvedValue({
     id: PENDING_ID, tool_name: 'adjust_stock', summary: 'adjust_stock', expires_at: new Date(Date.now() + 600000).toISOString(),
   });
-  mockExecuteProcurementTool.mockImplementation(async (name) => (name === 'query_stock'
-    ? { products: [{ id: PRODUCT_ID, name: 'Synthetic Guard CS', on_hand: 62 }], total: 1 }
-    : PREVIEW));
+  mockExecuteProcurementTool.mockResolvedValue(PREVIEW);
 });
 
 const modelSaw = () => mockMessagesCreate.mock.calls.map(([request]) => JSON.stringify(request.messages)).join('\n');
 
-test('a lookup in an earlier round reaches the target rule, and the card names the product and on hand before and after', async () => {
+test('a resolved target shows the card naming the product and on hand before and after', async () => {
   mockResolveInventoryWriteTarget.mockResolvedValue({ productId: PRODUCT_ID });
-  scriptModelTurns([[lookup()], [adjust()], [{ type: 'text', text: 'Confirm the card to add it.' }]]);
+  scriptModelTurns([[adjust()], [{ type: 'text', text: 'Confirm the card to add it.' }]]);
   await withServer(async (baseUrl) => {
     const { status, body } = await postQuery(baseUrl, { prompt: 'Add 2 gallons of the Guard to inventory', context: 'procurement', pageData: { route: '/admin/inventory' } });
     expect(status).toBe(200);
-    const [args] = mockResolveInventoryWriteTarget.mock.calls[0];
-    expect(args.priorToolResults).toHaveLength(1);
-    expect(args.priorToolResults[0]).toMatchObject({ name: 'query_stock', input: { search: 'guard' }, round: 0 });
-    expect(args.priorToolResults[0].result.products[0].id).toBe(PRODUCT_ID);
-    expect(args.threadSeq).toBeNull();
-    expect(args.proposedParams).toMatchObject({ product_id: PRODUCT_ID, movement_type: 'restock', quantity: 2, unit: 'gal' });
     expect(body.pendingActions).toHaveLength(1);
     const labels = (body.pendingActions[0].contract?.effects || []).map((effect) => effect.label);
     expect(labels).toContain('Synthetic Guard CS: restock 2 gal; on hand 62 → 318 fl_oz');
     expect(mockCreatePendingAction.mock.calls[0][0].params.product_id).toBe(PRODUCT_ID);
-  });
-});
-
-test('a lookup in the SAME round as the proposal does not count (the model had not seen it)', async () => {
-  mockResolveInventoryWriteTarget.mockResolvedValue({ error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' });
-  scriptModelTurns([[lookup(), adjust()], [{ type: 'text', text: 'Which product?' }]]);
-  await withServer(async (baseUrl) => {
-    const { status } = await postQuery(baseUrl, { prompt: 'Add 2 gallons of the Guard to inventory', context: 'procurement', pageData: { route: '/admin/inventory' } });
-    expect(status).toBe(200);
-    const [args] = mockResolveInventoryWriteTarget.mock.calls[0];
-    expect(args.priorToolResults).toEqual([]);
   });
 });
 

@@ -559,46 +559,13 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
   // that legitimately resolves does so directly, and a grammar match that
   // legitimately fails (e.g. a typo-mangled name) genuinely reaches the
   // fallback under test rather than an artifact of a dumb pass-through mock.
-  // `cards` are stored ib_pending_actions rows: { thread_id, requested_by,
-  // tool_name, created_at, params: { product_id } }. The builder applies the
-  // same filters threadCardParamsForProduct issues.
-  function cardsBuilder(cards) {
-    let rows = [...cards];
-    const api = {
-      where(cond, op, value) {
-        if (cond && typeof cond === 'object') rows = rows.filter((r) => Object.entries(cond).every(([k, v]) => r[k] === v));
-        else if (cond === 'created_at' && op === '>=') rows = rows.filter((r) => r.created_at >= value);
-        else if (cond === 'thread_turn_seq' && op === '<=') rows = rows.filter((r) => Number.isInteger(r.thread_turn_seq) && r.thread_turn_seq <= value);
-        return api;
-      },
-      whereRaw(sql, params) {
-        if (/params->>'product_id' = \?/.test(sql)) rows = rows.filter((r) => r.params?.product_id === params[0]);
-        return api;
-      },
-      orderBy() { return api; },
-      limit(n) { rows = rows.slice(0, n); return api; },
-      select: async () => rows.map((r) => ({ params: r.params })),
-    };
-    return api;
-  }
-
-  function setGroundingDb({ products = [], aliases = [], cards = [] } = {}) {
+  function setGroundingDb({ products = [], aliases = [] } = {}) {
     function catalogBuilder() {
       let rows = [...products];
       let single = false;
       const api = {
         where(condOrCol, val) {
-          if (typeof condOrCol === 'function') {
-            // An OR group of ILIKE predicates (the lookup re-count).
-            const needles = [];
-            const group = {
-              whereILike(col, pattern) { needles.push([col, pattern]); return group; },
-              orWhereILike(col, pattern) { needles.push([col, pattern]); return group; },
-            };
-            condOrCol.call(group);
-            const contains = (value, pattern) => String(value || '').toLowerCase().includes(String(pattern || '').replace(/^%|%$/g, '').replace(/\\(.)/g, '$1').toLowerCase());
-            rows = rows.filter((p) => needles.some(([col, pattern]) => contains(p[col], pattern)));
-          } else if (condOrCol && typeof condOrCol === 'object') {
+          if (condOrCol && typeof condOrCol === 'object') {
             rows = rows.filter((p) => Object.entries(condOrCol).every(([k, v]) => p[k] === v));
           } else if (arguments.length === 2) {
             rows = rows.filter((p) => p[condOrCol] === val);
@@ -626,7 +593,6 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     }
     dbMock.mockImplementation((table) => {
       if (table === 'products_catalog') return catalogBuilder();
-      if (table === 'ib_pending_actions') return cardsBuilder(cards);
       if (table === 'product_aliases as pa') {
         return {
           join: () => ({
@@ -1823,165 +1789,58 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     });
   });
 
-  // Owner IB history 2026-10-06: the operator used a short name, the bar's own
-  // query_stock found the product, adjust_stock was proposed with that id,
-  // and the proposal was refused, so the stock was never written. A lookup
-  // from an earlier round of the request now establishes the target only when
-  // it ran with a search term the operator said and that term matches exactly
-  // one catalog product in total (re-counted with no limit).
-  describe('the bar\'s own lookup grounds an adjust_stock target the operator named by a short name', () => {
+  // Owner IB history 2026-10-06: the operator named a product by a short
+  // phrase ("the Guard"), the catalog search missed it, and adjust_stock was
+  // refused, so the stock was never written. The operator's own phrase now
+  // resolves when every significant word of it is a whole word of exactly one
+  // active product's name. No model-chosen id or search term is involved.
+  describe('the operator\'s short product phrase resolves word for word to one active product', () => {
     const GUARD = { id: 'p-guard', name: 'Synthetic Guard CS', active: true };
     const OTHER = { id: 'p-other', name: 'Synthetic Other WSG', active: true };
-    const SHORT_NAME = 'Add 2 gallons of the Guard to inventory';
     const restock = product => ({ product: { id: product.id, name: product.name }, movement_type: 'restock' });
-    const lookup = (search, shown, extra = {}) => ({ name: 'query_stock', input: { search, ...extra }, result: { products: shown.map(({ id, name }) => ({ id, name })), total: shown.length }, round: 0 });
-    const propose = (prompt, priorToolResults, preview = restock(GUARD), toolName = 'adjust_stock') => resolveInventoryWriteTarget({ toolName, prompt, preview, priorToolResults });
+    const propose = (prompt, preview = restock(GUARD), toolName = 'adjust_stock') => resolveInventoryWriteTarget({ toolName, prompt, preview });
 
-    test('reproduction: the short name alone (no lookup) is refused, exactly as the owner hit it', async () => {
+    test('"Add 2 gallons of the Guard to inventory" resolves to the one product whose name has "Guard"', async () => {
       setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose(SHORT_NAME, [])).toMatchObject({ code: 'target_clarification_required' });
+      expect(await propose('Add 2 gallons of the Guard to inventory')).toEqual({ productId: GUARD.id });
     });
 
-    test('the short name stands when a lookup for a word the operator said matched that one product', async () => {
-      setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose(SHORT_NAME, [lookup('guard', [GUARD])])).toEqual({ productId: GUARD.id });
-    });
-
-    test('the real shape: "We just bought a thing of Taurus ... 78 ounces" after a lookup for "Taurus" with one match gets a card', async () => {
+    test('the real "We just bought a thing of Taurus ... 78 ounces" shape still gets a card', async () => {
       setGroundingDb({ products: [TAURUS, ALPINE] });
-      const result = await resolveInventoryWriteTarget({
-        toolName: 'adjust_stock', prompt: "We just bought a thing of Taurus as to add this to your inventory I think it's 78 ounces",
-        preview: restock(TAURUS), priorToolResults: [lookup('Taurus', [TAURUS])],
-      });
-      expect(result).toEqual({ productId: TAURUS.id });
+      expect(await propose("We just bought a thing of Taurus as to add this to your inventory I think it's 78 ounces", restock(TAURUS))).toEqual({ productId: TAURUS.id });
     });
 
-    test('a lookup cut to one row by a model-supplied limit is refused (the term matches two products in total)', async () => {
+    test('Codex r3: a known word inside a longer unknown name is refused ("Unlisted Guard Chemical")', async () => {
+      setGroundingDb({ products: [GUARD, OTHER] });
+      expect(await propose('Add 2 gallons of Unlisted Guard Chemical to inventory')).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('Codex r3: an amount-free reply that names nothing ("Yes", "Actually use the other one") is refused', async () => {
+      setGroundingDb({ products: [GUARD, OTHER] });
+      expect(await propose('Yes')).toMatchObject({ code: 'target_clarification_required' });
+      expect(await propose('Actually use the other one')).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('a word that two active products share stays a question', async () => {
       const GUARD_TWO = { id: 'p-guard-2', name: 'Synthetic Guard Plus', active: true };
       setGroundingDb({ products: [GUARD, GUARD_TWO] });
-      expect(await propose('We got the new guard jug, add it to stock', [lookup('guard', [GUARD], { limit: 1 })])).toMatchObject({ code: 'target_clarification_required' });
+      expect(await propose('Add 2 gallons of the Guard to inventory')).toMatchObject({ code: 'target_clarification_required' });
     });
 
-    test('a lookup whose search term the operator never said is refused', async () => {
+    test('a formulation or percent qualifier must match too ("Guard WP" never resolves to "Synthetic Guard CS")', async () => {
       setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose('We got the new jug in today, add it to stock', [lookup('Synthetic Guard CS', [GUARD])])).toMatchObject({ code: 'target_clarification_required' });
+      expect(await propose('Add 2 gallons of the Guard WP to inventory')).toMatchObject({ code: 'target_clarification_required' });
+      expect(await propose('Add 2 gallons of Guard 20% to inventory')).toMatchObject({ code: 'target_clarification_required' });
     });
 
-    test('an unknown product name after a lookup for another product is refused', async () => {
+    test('an inactive product never resolves by phrase words', async () => {
+      setGroundingDb({ products: [{ ...GUARD, active: false }, OTHER] });
+      expect(await propose('Add 2 gallons of the Guard to inventory')).toMatchObject({ code: 'target_clarification_required' });
+    });
+
+    test('the phrase resolving to a different product than the preview is a mismatch', async () => {
       setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose('Add 2 gallons of Unlisted Chemical to inventory', [lookup('Synthetic Guard', [GUARD])])).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('a lookup with no search term, or a failed lookup, establishes nothing', async () => {
-      setGroundingDb({ products: [GUARD] });
-      const listAll = { name: 'query_stock', input: { low_stock_only: true }, result: { products: [{ id: GUARD.id }], total: 1 }, round: 0 };
-      const failed = { name: 'query_stock', input: { search: 'guard' }, result: { error: 'failed', products: [{ id: GUARD.id }] }, round: 0 };
-      expect(await propose(SHORT_NAME, [listAll])).toMatchObject({ code: 'target_clarification_required' });
-      expect(await propose(SHORT_NAME, [failed])).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('an id the lookup never returned is refused (a model-invented id never stands)', async () => {
-      setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose(SHORT_NAME, [lookup('guard', [OTHER])])).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('"request 2 gallons of the Guard" after a lookup never grounds a stock write', async () => {
-      setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose('request 2 gallons of the Guard', [lookup('guard', [GUARD])])).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('a name that matches several products, a different product, or a question never falls back to the lookup', async () => {
-      const GUARD_TWO = { id: 'p-guard-2', name: 'Synthetic Guard CS 2', active: true };
-      setGroundingDb({ products: [GUARD, GUARD_TWO, OTHER] });
-      const looked = [lookup('guard', [GUARD])];
-      const several = await propose('Add 2 gallons of Synthetic Guard to inventory', looked);
-      expect(several).toMatchObject({ code: 'target_clarification_required' });
-      expect(several.candidates).toHaveLength(2);
-      expect(await propose('We got the Synthetic Other WSG in today', looked)).toMatchObject({ code: 'target_relationship_mismatch' });
-      expect(await propose('Did we add the guard to stock?', looked)).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('only adjust_stock (always carded) takes the lookup; create_restock_request does not', async () => {
-      setGroundingDb({ products: [GUARD, OTHER] });
-      expect(await propose('request 2 gallons of the Guard', [lookup('guard', [GUARD])], { product: { id: GUARD.id, name: GUARD.name } }, 'create_restock_request'))
-        .toMatchObject({ code: 'target_clarification_required' });
-    });
-  });
-
-  // Owner IB history 09-25: the bar built an adjust_stock card for one
-  // product, the card expired unseen, and the owner's "Yes" / "OK I didn't
-  // see the confirm button" in a LATER request was refused. The prior-card
-  // source is "re-propose the same card" only: the message states no amount
-  // of its own, and the proposal equals the stored stock change of a card the
-  // server built for that product on the same thread, for the same actor, in
-  // the last 24 hours, at or before the requesting tab's observed turn.
-  describe('the same adjust_stock card again, after it expired unseen', () => {
-    const GUARD = { id: 'p-guard', name: 'Synthetic Guard CS', active: true };
-    const OTHER = { id: 'p-other', name: 'Synthetic Other WSG', active: true };
-    const OTHER_THREAD = '22222222-2222-2222-2222-222222222222';
-    const CHANGE = { movement_type: 'restock', quantity: 2, unit: 'gal' };
-    const card = (over = {}, params = {}) => ({ thread_id: THREAD_ID, thread_turn_seq: 4, requested_by: 'actor-1', tool_name: 'adjust_stock',
-      status: 'expired', created_at: new Date(Date.now() - 2 * 60 * 60 * 1000), params: { product_id: GUARD.id, ...CHANGE, ...params }, ...over });
-    const repropose = (prompt, { proposed = {}, product = GUARD, ...extra } = {}) => resolveInventoryWriteTarget({
-      toolName: 'adjust_stock', prompt, preview: { product: { id: product.id, name: product.name }, movement_type: proposed.movement_type || 'restock' },
-      proposedParams: { product_id: product.id, ...CHANGE, ...proposed },
-      actorId: 'actor-1', threadId: THREAD_ID, threadSeq: 6, ...extra,
-    });
-
-    test.each(['OK I didn\'t see the confirm button', 'Yes'])('the real 09-25 reply gets the same card again: "%s"', async (prompt) => {
-      setGroundingDb({ products: [GUARD, OTHER], cards: [card()] });
-      expect(await repropose(prompt)).toEqual({ productId: GUARD.id });
-    });
-
-    test('without that card the same reply is refused (the 09-25 failure)', async () => {
-      setGroundingDb({ products: [GUARD, OTHER], cards: [] });
-      expect(await repropose('OK I didn\'t see the confirm button')).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('Codex r2: "Add 2 gallons of Unlisted Chemical to inventory" after a card for another product is refused', async () => {
-      setGroundingDb({ products: [GUARD, OTHER], cards: [card()] });
-      expect(await repropose('Add 2 gallons of Unlisted Chemical to inventory')).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('a message with its own amount ("yes but make it 3 gallons") never uses the prior card', async () => {
-      setGroundingDb({ products: [GUARD, OTHER], cards: [card({}, { quantity: 3 })] });
-      expect(await repropose('yes but make it 3 gallons', { proposed: { quantity: 3 } })).toMatchObject({ code: 'target_clarification_required' });
-      expect(await repropose('yes, add a jug', { proposed: { quantity: 1, unit: 'jug' } })).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('a different movement type, amount, or unit than the stored card is refused', async () => {
-      setGroundingDb({ products: [GUARD, OTHER], cards: [card()] });
-      expect(await repropose('Yes', { proposed: { movement_type: 'correction' } })).toMatchObject({ code: 'target_clarification_required' });
-      expect(await repropose('Yes', { proposed: { quantity: 3 } })).toMatchObject({ code: 'target_clarification_required' });
-      expect(await repropose('Yes', { proposed: { unit: 'qt' } })).toMatchObject({ code: 'target_clarification_required' });
-      expect(await repropose('Yes', { proposed: { quantity: undefined, set_total: 2 } })).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('a card after the observed turn is refused; at or before it stands; no observed turn grounds nothing', async () => {
-      setGroundingDb({ products: [GUARD, OTHER], cards: [card({ thread_turn_seq: 7 })] });
-      expect(await repropose('Yes')).toMatchObject({ code: 'target_clarification_required' });
-      setGroundingDb({ products: [GUARD, OTHER], cards: [card({ thread_turn_seq: 6 })] });
-      expect(await repropose('Yes')).toEqual({ productId: GUARD.id });
-      expect(await repropose('Yes', { threadSeq: null })).toMatchObject({ code: 'target_clarification_required' });
-    });
-
-    test('a card on another thread, for another actor, older than 24 hours, for another product, or another tool is refused', async () => {
-      for (const other of [
-        card({ thread_id: OTHER_THREAD }),
-        card({ requested_by: 'actor-2' }),
-        card({ created_at: new Date(Date.now() - 25 * 60 * 60 * 1000) }),
-        card({}, { product_id: OTHER.id }),
-        card({ tool_name: 'create_restock_request' }),
-      ]) {
-        setGroundingDb({ products: [GUARD, OTHER], cards: [other] });
-        expect(await repropose('Yes')).toMatchObject({ code: 'target_clarification_required' });
-      }
-    });
-
-    test('the prior card never overrides a different named product or a question', async () => {
-      setGroundingDb({ products: [GUARD, OTHER], cards: [card()] });
-      expect(await repropose('We got the Synthetic Other WSG in today')).toMatchObject({ code: 'target_relationship_mismatch' });
-      expect(await repropose('Did you add it?')).toMatchObject({ code: 'target_clarification_required' });
+      expect(await propose('Add 2 gallons of the Guard to inventory', restock(OTHER))).toMatchObject({ code: 'target_relationship_mismatch' });
     });
   });
 });
