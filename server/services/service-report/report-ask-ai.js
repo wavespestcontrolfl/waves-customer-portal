@@ -296,8 +296,10 @@ const STREET_SUFFIX = `(?:${[
   'loop', 'run', 'cove', 'cv', 'point', 'pointe', 'pt', 'crossing', 'xing', 'square', 'sq', 'row', 'path', 'alley',
   'bend', 'glen', 'ridge', 'trace', 'plaza', 'plz', 'turnpike', 'tpke', 'pike', 'expressway', 'expy', 'causeway',
   'cswy', 'creek', 'grove', 'heights', 'hts', 'hollow', 'landing', 'manor', 'mews', 'oaks', 'shores', 'vista', 'villas',
+  'pass', 'view', 'walk', 'green', 'park', 'commons', 'harbor', 'isle', 'key', 'cay', 'bay', 'gardens', 'hill', 'hills',
+  'lake', 'lakes', 'meadow', 'meadows', 'woods', 'springs', 'station', 'estates', 'club', 'reserve', 'preserve', 'chase',
 ].join('|')})`;
-const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){0,3}?${STREET_SUFFIX}\\b\\.?`, 'gi');
+const STREET_ADDRESS = new RegExp(`\\b\\d{1,6}\\s+(?:[a-z0-9'.-]+\\s+){0,3}${STREET_SUFFIX}\\b\\.?`, 'gi');
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
@@ -524,12 +526,36 @@ const ASK_CHECKS = [
   ['banned_copy', (text) => require('./activity-indicators').findBannedCustomerCopy(text).length > 0],
   ['compliance', (text) => require('../social-media').complianceLanguageIssues(text, { impliedTreatmentContext: true }).length > 0],
   ['target_list', leaksTargetList],
+  ['date_not_in_facts', datesNotInFacts],
 ];
 
 /**
  * Returns null when the answer may be shown, else a short reason string.
  * `context.data` lets the screen catch a product's target pest list leaking.
  */
+// The shared screen skips its date/time rules (an answer must be able to say
+// the next visit), so a date, weekday or clock time in the answer must be one
+// the facts give (service date, next visit, arrival window): a plausible but
+// wrong appointment never reaches the customer (Codex P1 #5964).
+const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec';
+const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\\b`, 'gi');
+function datesNotInFacts(text, { facts }) {
+  const tokens = text.match(DATE_TOKEN) || [];
+  if (!tokens.length) return false;
+  const known = [facts?.service_date, facts?.next_visit?.date, facts?.next_visit?.arrival_window]
+    .filter(Boolean).join(' ').toLowerCase().replace(/(\d)(st|nd|rd|th)\b/g, '$1');
+  const norm = (token) => token.toLowerCase().replace(/\./g, '').replace(/(\d)(st|nd|rd|th)\b/, '$1').replace(/\s+/g, ' ');
+  const longMonth = (token) => token.replace(new RegExp(`^(${MONTHS})\\b`), (m) => ({
+    jan: 'january', feb: 'february', mar: 'march', apr: 'april', jun: 'june', jul: 'july', aug: 'august',
+    sep: 'september', sept: 'september', oct: 'october', nov: 'november', dec: 'december',
+  })[m] || m);
+  const clock = (token) => token.replace(/^(\d{1,2})\s*(am|pm)$/, '$1:00 $2').replace(/^(\d{1,2}:\d{2})(am|pm)$/, '$1 $2');
+  return tokens.some((token) => {
+    const t = clock(longMonth(norm(token)));
+    return !known.replace(/\./g, '').includes(t);
+  });
+}
+
 function screenAskAnswer(answer, { question = '', data = {}, facts } = {}) {
   const raw = String(answer == null ? '' : answer);
   const text = cleanText(raw);
@@ -569,7 +595,8 @@ const MEDICAL_CUES = [
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
-  /\bsprayed\s+(?:on\s+)?(?:me|him|her|us|them|my\s+\w+)\b/i,
+  // A person, pet or body part only: "sprayed my lawn" is a report question.
+  new RegExp(`\\bsprayed\\s+(?:on\\s+|in\\s+)?(?:me|him|her|us|them|(?:my|our|his|her|their|the)\\s+(?:${PATIENT_NOUNS.slice(3, -1)}|eyes?|skin|face|hands?|arms?|legs?|mouth))\\b`, 'i'),
 ];
 
 /**

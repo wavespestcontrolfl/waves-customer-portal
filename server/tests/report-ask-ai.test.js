@@ -335,7 +335,7 @@ describe('buildReportAskPrompt', () => {
 
 describe('screenAskAnswer', () => {
   const data = reportData();
-  const facts = buildReportAskFacts({ data, now: NOW });
+  const facts = buildReportAskFacts({ data, nextAppointment, now: NOW });
   const screen = (answer, question = 'What was done?') => screenAskAnswer(answer, { question, data, facts });
 
   test('passes a plain grounded answer', () => {
@@ -855,5 +855,29 @@ describe('POST /reports/:token/ask with GATE_REPORT_ASK_AI', () => {
       const { body } = await ask(baseUrl, QUESTION);
       expect(body).toEqual({ answer: rulesAnswer });
     });
+  });
+});
+
+describe('report Ask hotfix (Codex on #5964 against live #5957 code)', () => {
+  const m = require('../services/service-report/report-ask-ai');
+  it('a question about what was sprayed on the lawn is a report question, not an exposure', () => {
+    expect(m.medicalExposureAnswer('What was sprayed on my lawn?')).toBeNull();
+    expect(m.medicalExposureAnswer('What did you spray on my bushes?')).toBeNull();
+    expect(m.medicalExposureAnswer('They sprayed my dog')).toBeTruthy();
+    expect(m.medicalExposureAnswer('It got sprayed in my eyes')).toBeTruthy();
+  });
+  it('masks two-digit addresses on Pass, View and Walk streets', () => {
+    for (const address of ['18 Bay Pass', '7 Harbor View', '22 Palm Walk']) {
+      expect(m.buildReportAskPrompt({ question: `I live at ${address}`, data: { serviceLine: 'pest', applications: [] } }).user).not.toContain(address);
+    }
+  });
+  it('rejects a date, weekday or time the facts do not give', () => {
+    const facts = { service_date: 'Sunday, October 4, 2026', next_visit: { date: 'Monday, January 4, 2027', arrival_window: 'between 9:00 AM and 11:00 AM' } };
+    const screen = (a) => m.screenAskAnswer(a, { question: 'q', data: {}, facts });
+    expect(screen('Your next visit is January 8 at 2 PM.')).toBe('date_not_in_facts');
+    expect(screen('Your next visit is Friday.')).toBe('date_not_in_facts');
+    expect(screen('Your next visit is Monday, January 4, 2027, between 9:00 AM and 11:00 AM.')).toBeNull();
+    expect(screen('Your next visit is Jan 4.')).toBeNull();
+    expect(screen('It keeps working for weeks.')).toBeNull();
   });
 });
