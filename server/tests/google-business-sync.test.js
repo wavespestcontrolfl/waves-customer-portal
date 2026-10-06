@@ -63,6 +63,15 @@ function createDbMock(initialRows = {}) {
     const meta = row => (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata || {});
     if (sql.includes("metadata->>'reason' = 'reviews_missing'")) return row => meta(row).reason === 'reviews_missing';
     if (sql.includes("metadata->>'locationId' = ?")) return row => meta(row).locationId === bindings[0];
+    if (sql.includes("jsonb_exists_any(metadata->'reviewIds', ?::text[])")) {
+      const restored = bindings[0];
+      return row => Array.isArray(meta(row).reviewIds) && meta(row).reviewIds.some(id => restored.includes(id));
+    }
+    // ...and none of the reviews it names is still missing right now (a review
+    // with no row counts as not missing).
+    if (sql.includes('NOT EXISTS (SELECT 1 FROM jsonb_array_elements_text(metadata->\'reviewIds\')')) {
+      return row => !(meta(row).reviewIds || []).some(id => (state.rows.google_reviews.find(g => String(g.id) === String(id)) || {}).missing_since != null);
+    }
     if (sql.includes("?::jsonb @> (metadata->'reviewIds')")) {
       const covering = JSON.parse(bindings[0]);
       return row => Array.isArray(meta(row).reviewIds) && meta(row).reviewIds.every(id => covering.includes(id));
@@ -1683,6 +1692,36 @@ describe('Google Business review sync', () => {
       gbpFeed([feedRow]);
       await service.syncAllReviews();
       expect(removals().every(isOpen)).toBe(true);
+    });
+
+    test('a removal row [A, B] stays open while A is back and B is not, then closes when B comes back in a later cycle', async () => {
+      seedSyncedReview({
+        id: 'gone-2',
+        google_review_id: 'accounts/1/locations/2/reviews/rev-gone-2',
+        gbp_review_name: 'accounts/1/locations/2/reviews/rev-gone-2',
+        reviewer_name: 'Other Olive',
+        review_created_at: '2026-04-02T12:00:00Z',
+      });
+      const feedRow2 = { ...feedRow, name: 'accounts/1/locations/2/reviews/rev-gone-2', reviewer: { displayName: 'Other Olive' } };
+      const staleBoth = () => db.__state.rows.google_reviews.forEach((r) => { r.synced_at = new Date(Date.now() - 60 * 60 * 1000).toISOString(); });
+      gbpFeed([]);
+      await service.syncAllReviews();
+      expect(removals()).toHaveLength(1);
+      expect(JSON.parse(removals()[0].metadata).reviewIds.sort()).toEqual(['flap-1', 'gone-2']);
+
+      // Cycle 1: only A returns. Its restored set is [A]; B is still missing, so the row stays open.
+      staleBoth();
+      gbpFeed([feedRow]);
+      await service.syncAllReviews();
+      expect(isOpen(removals()[0])).toBe(true);
+
+      // Cycle 2: B returns. This cycle's restored set is [B] alone, yet nothing the row names
+      // is missing any more, so it closes.
+      staleBoth();
+      gbpFeed([feedRow, feedRow2]);
+      await service.syncAllReviews();
+      expect(removals()).toHaveLength(1);
+      expect(removals()[0]).toMatchObject({ done_by: 'supersede', resolution: 'The reviews are back on Google' });
     });
   });
 
