@@ -1172,3 +1172,22 @@ describe('answer screen, Codex round 20', () => {
     expect(ask('Merit was applied outside.')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 21', () => {
+  const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside' }] });
+  const facts = buildReportAskFacts({ question: 'What was applied?', data });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'What was applied?', data, facts });
+
+  test('a product name the report does not record is rejected', () => {
+    expect(ask('Roundup was applied outside.')).toBe('unrecorded_product');
+    expect(ask('Alpine WSG was applied outside.')).toBeNull();
+  });
+
+  test.each(['It was applied inside.', 'The product was applied indoors.'])('a pronoun scope claim must match the record: %s', (answer) => {
+    expect(ask(answer)).toBe('scope_claim');
+  });
+
+  test('a pronoun claim that matches the record passes', () => {
+    expect(ask('It was applied around the outside of the home.')).toBeNull();
+  });
+});

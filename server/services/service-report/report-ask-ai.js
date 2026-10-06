@@ -1097,18 +1097,48 @@ function ownSentences(text, requiredLines) {
 
 const SAYS_INSIDE = /\b(?:inside|indoors|interior|in\s+the\s+(?:home|house|kitchen|bathroom|garage))\b/i;
 const SAYS_OUTSIDE = /\b(?:outside|outdoors|exterior|perimeter|around\s+the\s+(?:home|house|outside))\b/i;
+const APPLICATION_VERB = /\b(?:applied|applying|used|using|sprayed|spraying|put\s+down|spread|treated|went|placed|baited)\b/i;
+const wrongPlace = (sentence, where) => (SAYS_INSIDE.test(sentence) && !/inside|garage|entry/.test(where))
+  || (SAYS_OUTSIDE.test(sentence) && !/outside|entry/.test(where));
+function mentions(sentence, product) {
+  const name = normalizeKey(product.name);
+  const said = ` ${normalizeKey(sentence)} `;
+  const first = name.split(' ')[0];
+  return said.includes(` ${name} `) || (first.length >= 4 && said.includes(` ${first} `));
+}
+// A sentence that names a product must match its applied_where; one that
+// says where something was applied without a name ("It was applied inside")
+// must match some recorded product (Codex P1 #5964 r20-r21).
 function statesWrongScope(text, { facts }) {
   const products = asArray(facts?.products).filter((product) => product?.name);
-  return splitSentences(matchForm(text)).some((sentence) => products.some((product) => {
-    const name = normalizeKey(product.name);
-    const said = ` ${normalizeKey(sentence)} `;
-    const first = name.split(' ')[0];
-    if (!said.includes(` ${name} `) && !(first.length >= 4 && said.includes(` ${first} `))) return false;
-    const where = String(product.applied_where || '');
-    if (SAYS_INSIDE.test(sentence) && !/inside|garage|entry/.test(where)) return true;
-    return SAYS_OUTSIDE.test(sentence) && !/outside|entry/.test(where);
-  }));
+  if (!products.length) return false;
+  return splitSentences(matchForm(text)).some((sentence) => {
+    const named = products.filter((product) => mentions(sentence, product));
+    if (named.length) return named.some((product) => wrongPlace(sentence, String(product.applied_where || '')));
+    return APPLICATION_VERB.test(sentence) && products.every((product) => wrongPlace(sentence, String(product.applied_where || '')));
+  });
 }
+
+// A capitalized name in a sentence about applying or using something must be
+// a recorded product ("Roundup was applied outside" on an Alpine-only report)
+// (Codex P1 #5964 r21).
+const SENTENCE_WORDS = new Set(('the we it its your our this that these those a an today yes no they he she you i '
+  + 'waves pest control lawn care technician tech after before once until when if and but so then also').split(' '));
+function namesUnrecordedProduct(text, { facts }) {
+  const known = new Set(asArray(facts?.products).flatMap((product) => normalizeKey(product.name).split(' ')));
+  for (const word of normalizeKey(facts?.technician_first_name || '').split(' ')) known.add(word);
+  return splitSentences(matchForm(text)).some((sentence) => {
+    if (!APPLICATION_VERB.test(sentence)) return false;
+    // The opening word is a name only as the subject ("Roundup was applied");
+    // otherwise it is just capitalized ("Keep pets off...").
+    const opensOnSubject = /^[A-Z][\w-]*(?:\s+[A-Z][\w-]*)*\s+(?:was|were|is|are|went|got)\b/.test(sentence);
+    return [...sentence.matchAll(/\b[A-Z][a-zA-Z0-9-]{2,}\b/g)]
+      .filter((m) => m.index > 0 || opensOnSubject)
+      .map((m) => m[0].toLowerCase())
+      .some((word) => !SENTENCE_WORDS.has(word) && !known.has(word) && !MONTH_OR_DAY_WORD.test(word));
+  });
+}
+const MONTH_OR_DAY_WORD = /^(?:mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/;
 
 const ASK_CHECKS = [
   ...LENGTH_CHECKS,
@@ -1131,6 +1161,7 @@ const ASK_CHECKS = [
   // An inside or outside claim about a product must match its recorded
   // applied_where (Codex P1 #5964 r20).
   ['scope_claim', statesWrongScope],
+  ['unrecorded_product', namesUnrecordedProduct],
   ['unstated_number', statesUnknownNumber],
   // While the aftercare holds watering, no sentence of the model's own may
   // tell the customer to water (Codex P1 #5964 r7): a required line states
@@ -1217,7 +1248,7 @@ const MEDICAL_CUES = [
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b)\b/i,
   // Passive: "the bait was eaten by my dog" (Codex P1 #5964 r19).
-  new RegExp(`\\b(?:was|were|got|been|has\\s+been|have\\s+been)\\s+(?:\\w+\\s+)?(?:eaten|swallowed|ingested|consumed|licked|chewed|drunk|sucked|lapped(?:\\s+up)?|mouthed|nibbled|gnawed)\\s+(?:on\\s+)?by\\s+(?:my|our|his|her|their|the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS}\\b`, 'i'),
+  new RegExp(`\\b(?:was|were|got|been|has\\s+been|have\\s+been)\\s+(?:\\w+\\s+)?(?:eaten|swallowed|ingested|consumed|licked|chewed|drunk|sucked|lapped(?:\\s+up)?|mouthed|nibbled|gnawed)\\s+(?:on\\s+)?by\\s+(?:${PATIENT}|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})\\b`, 'i'),
   // A sentence that opens on the verb has an understood "I": "Accidentally
   // swallowed some bait" (Codex P1 #6016 r21).
   /(?:^|[.!?]\s+)(?:(?:accidentally|just|i\s+think\s+(?:i\s+)?|i\s+)\s*)*(?:swallow(?:ed)?|ingest(?:ed)?|consumed|ate|drank|inhaled|licked)\b/i,
@@ -1286,7 +1317,7 @@ function defaultCallModel(payload, options) {
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|booked|book(?:ing)?\s+(?:a|an|the|my|our)?\s*(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|we|i|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|(?:am|are|is)\s+(?:i|we|it|my\s+\w+)\s+booked|booked\s+(?:for|on)\s+(?:tomorrow|tonight|today|next|this|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|book(?:ing)?\s+(?:a|an|another|my|our)\s+(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)(?!\s+of\s+(?:the\s+)?(?:year|day|season))|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|somebody|anyone|anybody|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody|anyone|anybody|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }
