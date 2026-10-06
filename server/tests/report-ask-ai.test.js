@@ -475,6 +475,13 @@ describe('screenAskAnswer', () => {
     expect(screen('Your follow-up is soon.')).toBe('states_a_date');
     expect(screen('A technician will return soon.')).toBe('states_a_date');
     expect(screen('Your technician will return soon.')).toBe('states_a_date');
+    // Past or negative facts about a follow-up are no promise.
+    expect(screen('Your follow-up was completed today.')).toBeNull();
+    expect(screen('A follow-up was not recorded on this report.')).toBeNull();
+    // No-harm assurances in other words.
+    expect(screen('The treatment poses no risk to pets.')).toBe('safety claim');
+    expect(screen('It will not harm your children.')).toBe('safety claim');
+    expect(screen('It is gentle around pets.')).toBe('safety claim');
     expect(screen('The gate code is BLUE.')).toBe('banned_copy');
     expect(screen('We will return two days from now.')).toBe('states_a_date');
     expect(screen('Your next visit is three weeks from now.')).toBe('states_a_date');
@@ -687,6 +694,9 @@ describe('symptoms and exposure never reach the model', () => {
     'My dog bites the bait',
     'The bait was bitten by my dog',
     'My dog took two bites of bait',
+    'My dog took 4 bites of bait',
+    'My child took 1 sip of pesticide',
+    'My dog took another bite of bait',
     'My child took a mouthful of pesticide.',
     'The rat poison was eaten by John',
     'Ants were nearby when John ate the bait',
@@ -803,6 +813,7 @@ describe('symptoms and exposure never reach the model', () => {
     'Was the bait eaten?',
     'Was there a little bit of bait left?',
     'Mosquitoes bit me after the treatment',
+    'My child took a bite of lunch while I checked the bait',
     'Was the rodent bait eaten?',
     'Was any bait consumed?',
     'Was the rat poisoned?',
@@ -1131,6 +1142,8 @@ describe('street-address scrub keeps prose', () => {
     ['Ants at Twelve Main Street.', 'Ants at [number] Main Street.'],
     ['Ants at One Hundred Bay Drive.', 'Ants at [number] Bay Drive.'],
     ['Ants at Twelve U S 41.', 'Ants at [number] U S 41.'],
+    ['Call me at nine four one five five five one two three four.', 'Call me at [phone].'],
+    ['I saw two or three ants.', 'I saw two or three ants.'],
     ['Ants at Twelve U.S. 41.', 'Ants at [number] U.S. 41.'],
     ['Ants at One Hundred SR 70.', 'Ants at [number] SR 70.'],
     ['Ants at 12 S.R. 70.', 'Ants at [number] S.R. 70.'],
