@@ -1213,3 +1213,21 @@ describe('answer screen, Codex round 22', () => {
     expect(screenAskAnswer(answer, { question: 'q', data: lawn, facts: buildReportAskFacts({ data: lawn }) })).toBe('target_list');
   });
 });
+
+describe('answer screen, Codex round 23', () => {
+  const data = pestData({ applications: [{ product: { name: 'Alpine WSG' }, applicationArea: 'Outside' }] });
+
+  test.each(['Was Roundup applied?', 'Was roundup sprayed outside?'])('a passive question about an unrecorded product keeps the rule answer: %s', (question) => {
+    expect(ruleAnswerReason(data, [], 'applied', question)).toBe('unrecorded_product');
+  });
+
+  test.each(['We treated with roundup outside.', 'We put roundup down outside.'])('treated-with phrasing is checked: %s', (answer) => {
+    const facts = buildReportAskFacts({ question: 'What was applied?', data });
+    expect(screenAskAnswer(answer, { question: 'What was applied?', data, facts })).toBe('unrecorded_product');
+  });
+
+  test('spelled house numbers are masked', () => {
+    const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Meet me at Twelve Main Street or One Hundred Bay Drive.' }) });
+    expect(facts.customer_concern).toBe('Meet me at [number] Main Street or [number] Bay Drive.');
+  });
+});
