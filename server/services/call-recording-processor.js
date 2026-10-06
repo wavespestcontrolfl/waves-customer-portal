@@ -1250,53 +1250,20 @@ function slotElapsedAtBookingTime(scheduledDate, windowStart = null) {
 }
 
 // Spelled-email trust (owner ruling 2026-10-05) applies only to an address no
-// OTHER contact already owns — the same ownership gate the decoder adopt and
-// the domain-typo adopt use. An address the primary extractor captured
+// customer record already holds — the ownership gate the decoder adopt and
+// the domain-typo adopt use, with no customer exempted. An address the primary extractor captured
 // itself never went through those adopt paths, so it is checked here before
 // the read-back card (and with it the first-touch hold) is dropped. Fails
 // closed: a failed lookup keeps the card.
-async function spelledEmailTrusted({ call, contactPhone, extracted, dictationEmailPayload, correctedEmail }) {
+async function spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail }) {
   if (!spelledEmailSettled(dictationEmailPayload, extracted.email, correctedEmail)) return false;
-  const ownCustomerId = call.customer_id
-    || (await findCustomerForCallContact(contactPhone, extracted).catch(() => null))?.id
-    || null;
-  const ownedElsewhere = await require('./email-bounce-recovery')
-    .correctedAddressOwnedByOther(String(extracted.email).trim().toLowerCase(), ownCustomerId)
+  // No customer is exempt: the canonical customer is not known yet (Step 3
+  // can still reassign a shared-phone call), so ANY record already holding
+  // the address keeps the read-back card.
+  const ownedByAnyone = await require('./email-bounce-recovery')
+    .correctedAddressOwnedByOther(String(extracted.email).trim().toLowerCase(), null)
     .catch(() => true);
-  return !ownedElsewhere;
-}
-
-// Retires the OPEN cards an earlier pass filed for reasons this pass's
-// dropUnneededCallCards found unneeded (force-reprocess convergence). Same
-// shape as fileSkippedBookingCard: its own transaction, the shared per-call
-// triage lock first, then the processing-token fence, then the
-// review_status aggregate. in_progress (human-claimed) cards are never
-// touched. Best-effort: a failure leaves the old cards, as before.
-async function retireUnneededCallCards({ call, procToken, reasons, callSid }) {
-  if (!reasons.length) return;
-  try {
-    await db.transaction(async (trx) => {
-      await lockTriageCall(trx, call.id);
-      const stillOwner = await trx('call_log').where({ id: call.id, processing_token: procToken }).forUpdate().first('id');
-      if (!stillOwner) return;
-      const now = new Date();
-      const retired = await trx('triage_items')
-        .where({ call_log_id: call.id, status: 'open' })
-        .whereIn('reason_code', reasons)
-        .update({
-          status: 'dismissed',
-          resolution_source: 'auto',
-          resolution_rule: 'unneeded_card',
-          resolution_note: 'Reprocess: nothing for the office to do on this call',
-          resolved_at: now,
-          updated_at: now,
-        })
-        .returning('id');
-      if (retired.length) await syncCallReviewStatus(trx, call.id);
-    });
-  } catch (e) {
-    logger.warn(`[call-proc] unneeded-card retire skipped for ${maskSid(callSid)}: ${e.message}`);
-  }
+  return !ownedByAnyone;
 }
 
 // codex #4919 round-9 P2: start_before_call and slot_elapsed_at_booking_time
@@ -11360,10 +11327,10 @@ const CallRecordingProcessor = {
           const unneededCards = new Set(dropUnneededCallCards(finalFlags, v2Extraction).dropped);
           if (unneededCards.size) {
             logger.info(`[call-proc] No card for ${maskSid(callSid)}: ${[...unneededCards].join(', ')} (nothing for the office to do)`);
-            // A force-reprocess must converge to the new card set: an OPEN
-            // card an earlier pass filed for a reason this pass finds
-            // unneeded is retired (human-claimed in_progress cards stay).
-            await retireUnneededCallCards({ call, procToken, reasons: [...unneededCards], callSid });
+            // Only cards this pass would file are skipped. Cards an earlier
+            // pass filed keep their filing-time snapshot of the ask and are
+            // left to the evidence sweep — the rolling extraction can change
+            // under them.
           }
           // Implied consent (GATE_CALL_INBOUND_IMPLIED_CONSENT): an inbound
           // caller who booked has implied consent for the transactional
@@ -11797,7 +11764,7 @@ const CallRecordingProcessor = {
         }
         // Spelled-email trust (owner ruling 2026-10-05): one spelling heard,
         // and it is the address being saved — no read-back card, no hold.
-        if (await spelledEmailTrusted({ call, contactPhone, extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail: normalizedEmail })) {
           const at = needsConfirmation.indexOf('email_unverified');
           if (at !== -1) needsConfirmation.splice(at, 1);
         }
@@ -12012,7 +11979,7 @@ const CallRecordingProcessor = {
         }
         // Spelled-email trust (owner ruling 2026-10-05) — same rule as the
         // shadow branch.
-        if (await spelledEmailTrusted({ call, contactPhone, extracted, dictationEmailPayload, correctedEmail })) {
+        if (await spelledEmailTrusted({ extracted, dictationEmailPayload, correctedEmail })) {
           const at = emailReasons.indexOf('email_unverified');
           if (at !== -1) emailReasons.splice(at, 1);
         }

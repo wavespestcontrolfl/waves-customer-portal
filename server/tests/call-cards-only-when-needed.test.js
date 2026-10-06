@@ -41,12 +41,21 @@ describe('dropUnneededCallCards', () => {
     expect(r.flags).toEqual(['existing_appointment_coordination']);
   });
 
-  test('address cards drop on a status call that asks for no visit or quote', () => {
+  test('no-street address cards drop on a status call that asks for no visit or quote', () => {
     const r = dropUnneededCallCards(
       ['address_unverifiable', 'missing_service_address', 'address_unverified', 'low_confidence_address'],
       ext({ status: 'none', intent: 'follow_up_existing_service' }),
     );
-    expect(r.flags).toEqual([]);
+    // address_unverified / low_confidence_address judge a STATED address the
+    // record backfill could copy; they always keep their card.
+    expect(r.flags).toEqual(['address_unverified', 'low_confidence_address']);
+  });
+
+  test('a stated street keeps every address card even on a status call', () => {
+    const e = ext({ status: 'none', intent: 'follow_up_existing_service' });
+    e.property = { service_address: { street_line_1: '100 Sample Palm Dr' } };
+    const flags = ['address_unverifiable', 'missing_service_address'];
+    expect(dropUnneededCallCards(flags, e).flags).toEqual(flags);
   });
 
   test('address cards stay on a new-service ask, a quote, or any time asked', () => {

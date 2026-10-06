@@ -710,11 +710,15 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
 //      late", "what should I move before the treatment". The tech settled it
 //      live. Promises made on such a call ("Adam will let you know when")
 //      are tracked by call_commitments, which owns that follow-through.
-//   3. Address cards on a call that asks for no visit and no quote: a
-//      status check, a cancellation, a support question. An unverifiable or
-//      missing address there blocks nothing and is nobody's work. A new
-//      service ask (any other service_intent), a quote, or any time asked,
-//      offered or confirmed keeps them. out_of_service_area is never touched.
+//   3. Address cards on a call that asks for no visit and no quote (a
+//      status check, a cancellation, a support question) AND states no
+//      street: missing_service_address, and the model's address_unverifiable
+//      when the call named no street. With no stated street nothing can be
+//      backfilled onto the record, so the card is nobody's work. A stated
+//      street keeps every address card (Step 3's backfill can copy it onto
+//      an empty record, and only the card gets it reviewed). A new service
+//      ask, a quote, or any time asked, offered or confirmed keeps them all.
+//      out_of_service_area is never touched.
 //   4. caller_not_authorized on a call that asked for no visit time (status
 //      none / canceled) from a caller the owner treats as authorized: a
 //      family member (owner ruling 2026-09-28), a client's own employee, or a
@@ -728,7 +732,7 @@ const CANONICAL_WRITE_BLOCKING_FLAGS = new Set([
 //      members and "other" keep the card.
 const SCHEDULING_NO_ASK_STATUSES = new Set(['none', 'canceled']);
 const EXISTING_SERVICE_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback', 'cancellation_request']);
-const NO_ASK_ADDRESS_CARDS = new Set(['address_unverifiable', 'missing_service_address', 'address_unverified', 'low_confidence_address']);
+const NO_ASK_ADDRESS_CARDS = new Set(['address_unverifiable', 'missing_service_address']);
 const AUTHORIZED_THIRD_PARTY_RELATIONSHIPS = new Set(['family_member', 'employee']);
 
 function callMakesNoServiceAsk(extraction) {
@@ -751,7 +755,8 @@ function dropUnneededCallCards(flags, extraction) {
   }
   const status = String(extraction?.scheduling?.status || 'none');
   if (status === 'none') dropped.add('existing_appointment_coordination');
-  if (callMakesNoServiceAsk(extraction)) {
+  const statedStreet = String(extraction?.property?.service_address?.street_line_1 || '').trim();
+  if (callMakesNoServiceAsk(extraction) && !statedStreet) {
     for (const f of NO_ASK_ADDRESS_CARDS) dropped.add(f);
   }
   const relationship = String(extraction?.caller?.relationship_to_property || '').trim().toLowerCase();
