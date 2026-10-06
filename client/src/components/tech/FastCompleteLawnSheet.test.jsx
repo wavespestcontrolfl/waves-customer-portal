@@ -1908,8 +1908,30 @@ describe('header and customer block, as on the full form\'s Complete service pag
     const maps = screen.getByRole('link', { name: '123 Main St, Bradenton, FL 34205' });
     expect(maps.getAttribute('href')).toBe('https://www.google.com/maps/dir/?api=1&destination=123%20Main%20St%2C%20Bradenton%2C%20FL%2034205');
     expect(maps.getAttribute('target')).toBe('_blank');
-    expect(screen.getByRole('link', { name: '+19415550100' }).getAttribute('href')).toBe('tel:+19415550100');
+    // The phone is the Waves call bridge, not a tel: link (owner 2026-10-06).
+    expect(screen.queryByRole('link', { name: '+19415550100' })).toBeNull();
+    const call = screen.getByRole('button', { name: 'Call Pat Jones' });
+    expect(call.textContent).toBe('+19415550100');
+    // No inline font/color: the contact block's CSS sizes it like the other links.
+    expect(call.getAttribute('style') || '').not.toMatch(/font|color/);
     expect((await screen.findByRole('link', { name: 'pat@example.com' })).getAttribute('href')).toBe('mailto:pat@example.com');
+  });
+
+  test('tapping the phone asks Waves to ring the caller first, never dials from the handset', async () => {
+    await openSheet({ props: { service: { ...SERVICE, customerId: 'cust-1', customerPhone: '+19415550100' } } });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true }) });
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Call Pat Jones' }));
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      const [url, init] = fetchSpy.mock.calls[0];
+      expect(url).toMatch(/\/admin\/communications\/call$/);
+      expect(JSON.parse(init.body)).toMatchObject({ to: '+19415550100', customerIdHint: 'cust-1' });
+      expect(confirmSpy.mock.calls[0][0]).toMatch(/Waves will call your phone first/);
+    } finally {
+      confirmSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
   });
 
   test('the bottom pill reads Complete service when ready, and the page\'s own wording while off', async () => {
