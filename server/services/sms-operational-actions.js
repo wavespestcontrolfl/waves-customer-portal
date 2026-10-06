@@ -969,6 +969,23 @@ function obligationWords(row, message) {
   return quoted || row.description || message.message_body || '';
 }
 
+// The words the bell's headline quotes. One message can hold several
+// obligations, each with the same evidence quote (prod 2026-10-06: two promises
+// in one staff text rang two bells with the same first sentence). When the
+// obligation's own description appears in the quote as whole words, quote that
+// slice of the quote itself, so each bell names its own promise and every word
+// shown is the sender's. Otherwise the quote's first sentence, as before.
+function headlineWords(quote, description, redact) {
+  const compose = require('./admin-alert-compose');
+  const part = typeof description === 'string' ? redact(description.trim()).replace(/[.!?]+$/, '') : '';
+  if (/\w/.test(part)) {
+    const escaped = part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+    const found = new RegExp(`(?<!\\w)${escaped}(?!\\w)`, 'i').exec(quote);
+    if (found) return found[0];
+  }
+  return compose.firstSentence(quote).replace(/[.!?]+$/, '');
+}
+
 // Owner ruling 2026-09-28: a staff promise kept late rings the bell, then
 // clears. The deadline tick normally rings before the late record lands; when
 // verification runs only after both (Codex #5248 r3), the late record rings
@@ -982,7 +999,6 @@ function keptLate(row, verdict) {
 // headline, their quoted words in the why, the whole story in `detail`.
 function overdueBellCopy({ row, message, verdict, customerName, channelWord }) {
   const names = require('./admin-alert-names');
-  const compose = require('./admin-alert-compose');
   const when = new Date(message.created_at).toLocaleString('en-US', {
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
@@ -1003,7 +1019,7 @@ function overdueBellCopy({ row, message, verdict, customerName, channelWord }) {
     spec: {
       area: alert.area,
       action: names.fitAction(alert.area, customerName || 'the customer', [alert.action]),
-      why: names.whyWithQuote({ lead: promised ? 'We said ' : '', quote: quote && compose.firstSentence(quote).replace(/[.!?]+$/, ''),
+      why: names.whyWithQuote({ lead: promised ? 'We said ' : '', quote: quote && headlineWords(quote, row.description, names.redactedWords),
         tail: `${day ? ` (${day})` : ''} — ${status}.` }),
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(message.customer_id)}&tab=comms`,

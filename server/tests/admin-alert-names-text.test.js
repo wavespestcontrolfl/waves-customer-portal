@@ -112,6 +112,37 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(opts.metadata.verification).toBe('kept_late');
   });
 
+  test('two promises from one text each quote their own words, not the same first sentence', async () => {
+    const quote = 'Sure, we can switch the spray day to Friday. Also I will mail the receipt to the new billing address';
+    const bodies = [];
+    for (const description of ['switch the spray day to Friday', 'mail the receipt']) {
+      await ring({ row: { kind: 'other', description, evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+      const [, , body, opts] = lastCall();
+      bodies.push(body);
+      expect(opts.detail).toContain(quote);
+    }
+    expect(bodies[0]).toBe('We said “switch the spray day to Friday” (Sep 29) — nothing on record shows it done.');
+    expect(bodies[1]).toBe('We said “mail the receipt” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('short descriptions are quoted too, as the sender wrote them', async () => {
+    const quote = "OK, I'll Call and Refund today";
+    await ring({ row: { kind: 'other', description: 'call', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Call” (Sep 29) — nothing on record shows it done.');
+    await ring({ row: { kind: 'other', description: 'refund', evidence: [{ quote }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Refund” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a description found only inside another word keeps the first sentence', async () => {
+    await ring({ row: { kind: 'other', description: 'change address', evidence: [{ quote: 'We can exchange address labels tomorrow. Thanks!' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “We can exchange address labels tomorrow” (Sep 29) — nothing on record shows it done.');
+  });
+
+  test('a description that is not in the quote keeps the first sentence', async () => {
+    await ring({ row: { kind: 'other', description: 'reschedule the visit', evidence: [{ quote: 'Gonna knock out your quarterly spray tomorrow. Thanks!' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “Gonna knock out your quarterly spray tomorrow” (Sep 29) — nothing on record shows it done.');
+  });
+
   test('an uncertain verdict says the agent cannot tell', async () => {
     await ring({ row: { kind: 'callback', evidence: [{ quote: 'please call me back about the gate' }] }, verdict: { verdict: 'uncertain' } });
     const [, title, body] = lastCall();
