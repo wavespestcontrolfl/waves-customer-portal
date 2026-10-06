@@ -124,6 +124,7 @@ describe('the tile block on /data', () => {
     }],
   };
   // The rail's dry run for "remove lawn": pest at Bronze, the $99 solo setup.
+  const notMember = async () => false;
   const removeDryRun = async ({ body }) => ({ status: 200, body: {
     success: true, dryRun: true, serviceKey: body.serviceKey, included: body.included,
     next: { monthlyTotal: 35.67, annualTotal: 428, onetimeTotal: 99, waveGuardTier: 'Bronze' },
@@ -135,7 +136,7 @@ describe('the tile block on /data', () => {
     process.env[GATE] = 'true'; process.env[OPT_OUT_GATE] = 'true';
     const calls = [];
     const block = await buildOfferTiersBlock({
-      estimate: estimate(), estData: pestLawnData(), pricingBundle: bundle,
+      estimate: estimate(), estData: pestLawnData(), pricingBundle: bundle, memberBlock: notMember,
       mixChange: async (args) => { calls.push(args.body); return removeDryRun(args); },
     });
     expect(calls).toEqual([{ serviceKey: 'lawn_care', included: false, dryRun: true }]);
@@ -165,7 +166,7 @@ describe('the tile block on /data', () => {
     const calls = [];
     const block = await buildOfferTiersBlock({
       estimate: estimate({ show_one_time_option: true, onetime_total: 99, waveguard_tier: 'Bronze' }),
-      estData: removed, pricingBundle: pestBundle,
+      estData: removed, pricingBundle: pestBundle, memberBlock: notMember,
       mixChange: async (args) => {
         calls.push(args.body);
         return { status: 200, body: { dryRun: true, next: { onetimeTotal: 0, waveGuardTier: 'Silver' },
@@ -180,7 +181,7 @@ describe('the tile block on /data', () => {
   });
 
   test('no picker when a gate is off, the row is unmarked, a draft preview, accepted, or the rail refuses', async () => {
-    const args = () => ({ estimate: estimate(), estData: pestLawnData(), pricingBundle: bundle, mixChange: removeDryRun });
+    const args = () => ({ estimate: estimate(), estData: pestLawnData(), pricingBundle: bundle, mixChange: removeDryRun, memberBlock: notMember });
     delete process.env[GATE]; process.env[OPT_OUT_GATE] = 'true';
     await expect(buildOfferTiersBlock(args())).resolves.toBeNull();
     process.env[GATE] = 'true'; delete process.env[OPT_OUT_GATE];
@@ -195,8 +196,11 @@ describe('the tile block on /data', () => {
     const withMosquito = pestLawnData();
     withMosquito.result.recurring.services.push({ name: 'Mosquito Control', service: 'mosquito', mo: 79, perTreatment: 79, visitsPerYear: 12 });
     await expect(buildOfferTiersBlock({ ...args(), estData: withMosquito })).resolves.toBeNull();
-    // A linked customer whose membership cannot be read (no database here) fails closed.
-    await expect(buildOfferTiersBlock({ ...args(), estimate: estimate({ customer_id: '00000000-0000-0000-0000-000000000001' }) })).resolves.toBeNull();
+    // A member — linked, OR an unlinked estimate whose phone matches one — gets no picker; an unreadable judgement fails closed.
+    await expect(buildOfferTiersBlock({ ...args(), memberBlock: async () => true })).resolves.toBeNull();
+    await expect(buildOfferTiersBlock({ ...args(), memberBlock: async () => { throw new Error('db'); } })).resolves.toBeNull();
+    // The default judge with no database behind it fails closed too.
+    await expect(buildOfferTiersBlock({ ...args(), memberBlock: undefined, estimate: estimate({ customer_id: '00000000-0000-0000-0000-000000000001' }) })).resolves.toBeNull();
   });
 });
 
@@ -204,5 +208,46 @@ describe('send path: a marked estimate leads with pest', () => {
   test('the lead-service park keeps pest and parks lawn on a row marked for tiers, whatever the selection order', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-estimates.js'), 'utf8');
     expect(src).toMatch(/offerTiersRequested\(estData\)\s*\n\s*&& recurringKeys\.includes\('pest_control'\)\s*\n\s*\? 'pest_control'/);
+  });
+});
+
+describe('Codex r2 on #5970', () => {
+  test('the Good tile is priced by the acceptance breakdown: pest visit plus a preserved one-time add-on', async () => {
+    process.env.GATE_ESTIMATE_OFFER_TIERS = 'true'; process.env.GATE_ESTIMATE_SERVICE_OPT_OUT = 'true';
+    const future = new Date(Date.now() + 7 * 86400000).toISOString();
+    const withRoach = pestLawnData();
+    withRoach.result.oneTime = { total: 218, membershipFee: 99, items: [{ service: 'pest_initial_roach', name: 'Initial Roach Knockdown', price: 119 }] };
+    const bundle = {
+      waveGuardTier: 'Silver',
+      services: [{ key: 'pest_control', isRecurring: true, frequencies: [{ key: 'quarterly' }] }, { key: 'lawn_care', isRecurring: true, frequencies: [{ key: 'enhanced' }] }],
+      frequencies: [{ key: 'quarterly', perServiceTreatments: [
+        { service: 'pest_control', perTreatment: 107, displayPrice: 96.3, visitsPerYear: 4 },
+        { service: 'lawn_care', perTreatment: 77, displayPrice: 69.3, visitsPerYear: 9 },
+      ] }],
+      oneTimeBreakdown: { total: 218, items: [{ service: 'pest_initial_roach', label: 'Initial Roach Knockdown', amount: 119 }, { service: 'waveguard_setup', label: 'WaveGuard setup', amount: 99 }] },
+    };
+    const block = await buildOfferTiersBlock({
+      estimate: { id: 'g', status: 'sent', category: 'RESIDENTIAL', expires_at: future, onetime_total: 218, waveguard_tier: 'Silver', show_one_time_option: false },
+      estData: withRoach, pricingBundle: bundle, memberBlock: async () => false,
+      mixChange: async () => ({ status: 200, body: { dryRun: true, next: { onetimeTotal: 218, waveGuardTier: 'Bronze' }, perApplication: [{ s: 'pest_control', pa: 107 }] } }),
+    });
+    // 107 x 2.2 = 235.4 → 235, plus the preserved $119 roach row the one-time choice carries.
+    expect(block.good.oneTimeTotal).toBe(354);
+    delete process.env.GATE_ESTIMATE_OFFER_TIERS; delete process.env.GATE_ESTIMATE_SERVICE_OPT_OUT;
+  });
+
+  test('a marked row already on the pest plan keeps its mark and its office checkbox', () => {
+    const parked = pestLawnData();
+    parked.result.recurring.services = parked.result.recurring.services.filter((s) => s.service === 'pest_control');
+    recordServiceOptOutEvent(parked, { serviceKey: 'lawn_care', included: false, mode: 'remove', actor: 'staff', at: 'now', removedInputs: {} }, {});
+    expect(OfferTiers.offerTiersMarkedPestOnlyState(parked)).toBe(true);
+    expect(OfferTiers.offerTiersSaveEligibility({ gateOn: true, railGateOn: true, estData: parked }).reason).toBe('no_lawn');
+    expect(OfferTiers.offerTiersMarkedPestOnlyState(pestLawnData())).toBe(false);
+    expect(OfferTiers.offerTiersMarkedPestOnlyState(pestLawnData({ offerTiersRequested: undefined }))).toBe(false);
+  });
+
+  test('the lead-service send overrides the lead only while the tier gate is live', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/admin-estimates.js'), 'utf8');
+    expect(src).toMatch(/OfferTiersForSend\.offerTiersGateLive\(\)\s*\n\s*&& OfferTiersForSend\.offerTiersRequested\(estData\)/);
   });
 });

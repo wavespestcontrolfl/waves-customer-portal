@@ -119,7 +119,27 @@ function oneTimeOptionUpdateForMixChange({
   return optionError ? {} : { show_one_time_option: true };
 }
 
+/**
+ * A marked row that already moved to the pest plan (lawn removed through
+ * the rail, by the customer or the send-time park). Its stored rows no longer
+ * say "pest + lawn", but the row is in the model's own second state, so the
+ * mark stays valid: the office reopening it must still see (and keep) the
+ * Good / Better / Best choice.
+ */
+function offerTiersMarkedPestOnlyState(estData) {
+  if (!offerTiersRequested(estData)) return false;
+  try {
+    const OptOut = require('./estimate-service-opt-out');
+    if (!OptOut.currentlyOptedOutKeys(estData).includes(COMPANION_KEY)) return false;
+    const keys = storedRecurringKeys(estData);
+    return keys.length === 1 && keys[0] === 'pest_control';
+  } catch (_) {
+    return false;
+  }
+}
+
 module.exports = {
+  offerTiersMarkedPestOnlyState,
   optOutRailGateLive,
   oneTimeOptionUpdateForMixChange,
   COMPANION_KEY,

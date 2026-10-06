@@ -2145,11 +2145,16 @@ async function resolveEstimateWritePayload({
   {
     const OfferTiers = require('./estimate-offer-tiers');
     const { isCommercialEstimateData } = require('./estimate-delivery-options');
-    const tiersOk = body.offerTiers === true && !showOneTimeOption
-      && OfferTiers.offerTiersSaveEligibility({
-        estData: trustedEstimateData,
-        commercial: isCommercialEstimateData(trustedEstimateData),
-      }).eligible === true;
+    // A row already in the pest-only state (lawn removed through the rail) is
+    // the model's own second state: the mark stays, and there the one-time
+    // option legitimately rides along (the rail turned it on).
+    const markedPestOnly = OfferTiers.offerTiersMarkedPestOnlyState(trustedEstimateData);
+    const tiersOk = body.offerTiers === true
+      && (markedPestOnly || (!showOneTimeOption
+        && OfferTiers.offerTiersSaveEligibility({
+          estData: trustedEstimateData,
+          commercial: isCommercialEstimateData(trustedEstimateData),
+        }).eligible === true));
     if (tiersOk) trustedEstimateData.offerTiersRequested = true;
     else delete trustedEstimateData.offerTiersRequested;
   }

@@ -17415,6 +17415,24 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
   return { disclosures, wouldChargeBundled, afterPerApplication };
 }
 
+// Who is a "member" for the tier picker: the linked customer_id when there is
+// one, otherwise the prospective PHONE match the accept lands on
+// (matchAcceptCustomerByPhone) — an unlinked estimate whose phone belongs to
+// a member must not see new-customer tier prices. Strict and fail-closed:
+// any read error reads as "member".
+async function offerTierMemberBlock(estimate, database = db) {
+  if (!estimate) return true;
+  try {
+    if (estimate.customer_id) {
+      return !!(await isActivePlanCustomer(database, estimate.customer_id, { strict: true }));
+    }
+    const { match } = await matchAcceptCustomerByPhone(estimate, database);
+    return !!match && match.active !== false && isMembershipCustomerRow(match);
+  } catch (_) {
+    return true;
+  }
+}
+
 // Good / Better / Best tiles for the customer page (GATE_ESTIMATE_OFFER_TIERS).
 // A VIEW over the rail below: the row is in one of two ordinary states —
 // 'best' (pest + lawn, as quoted) or 'pest_only' (lawn removed through the
@@ -17423,7 +17441,7 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
 // live accept-active surface for a row the office marked, when the rail
 // itself would allow the move (its resolvers decide). null = no picker, the
 // page renders exactly as today.
-async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDraftPreview = false, mixChange = applyServiceMixChange }) {
+async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDraftPreview = false, mixChange = applyServiceMixChange, memberBlock = offerTierMemberBlock }) {
   const OfferTiers = require('../services/estimate-offer-tiers');
   if (!OfferTiers.offerTiersGateLive() || !serviceOptOutGateOn()) return null;
   if (adminDraftPreview || !OfferTiers.offerTiersRequested(estData)) return null;
@@ -17431,14 +17449,15 @@ async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDra
   const OptOut = require('../services/estimate-service-opt-out');
   const key = OfferTiers.COMPANION_KEY;
   const sections = Array.isArray(pricingBundle?.services) ? pricingBundle.services : [];
-  // A linked customer who became an active member after the save gets no
-  // picker (strict, fail-closed): the rail's commit would refuse them, and
-  // the dry run would show new-customer prices they cannot take.
-  if (estimate.customer_id) {
-    let activeMember = true;
-    try { activeMember = !!(await isActivePlanCustomer(db, estimate.customer_id, { strict: true })); }
-    catch (_) { activeMember = true; }
-    if (activeMember) return null;
+  // A customer who is an active member gets no picker — judged the way the
+  // accept resolves the customer: the linked customer_id, else the
+  // prospective phone match (strict, fail-closed on any read error). The
+  // rail's commit would refuse them, and the dry run would show
+  // new-customer prices they cannot take.
+  try {
+    if (await memberBlock(estimate, db)) return null;
+  } catch (_) {
+    return null;
   }
   // The CURRENT mix must be exactly the model's: pest + lawn, or pest alone
   // with lawn removed. A line added since the mark (the priced-add rail's
@@ -17502,9 +17521,16 @@ async function buildOfferTiersBlock({ estimate, estData, pricingBundle, adminDra
   if (!better.rows.length || best.rows.length < 2) return null;
   // Good: the one-time pest visit, priced the way the one-time option prices
   // it — from the pest plan's own per-application list price.
-  const goodTotal = (state === 'pest_only' && estimate.show_one_time_option
-    ? resolveAcceptOneTimeTotal(estimate, pricingBundle)
-    : 0) || oneTimePestChoiceAmountFromResultStats(estData) || 0;
+  // Good is priced by the SAME one-time-choice breakdown acceptance uses
+  // (the pest visit from the plan's list price PLUS any preserved one-time
+  // add-on, e.g. a roach treatment), judged as if the option were on.
+  const goodBreakdown = pricingBundle?.oneTimeBreakdown || normalizeOneTimeBreakdown(estData);
+  const goodPest = oneTimePestChoiceAmountForEstimate({ ...estimate, show_one_time_option: true }, estData, pricingBundle) || 0;
+  const goodAddOns = goodPest > 0
+    ? preservedOneTimeAddOnRowsFromBreakdown(goodBreakdown, manualDiscountForChoiceBreakdown(goodBreakdown, estData))
+      .reduce((sum, item) => Math.round((sum + Number(item.price || 0)) * 100) / 100, 0)
+    : 0;
+  const goodTotal = goodPest > 0 ? Math.round((goodPest + goodAddOns) * 100) / 100 : 0;
   return {
     state,
     companionKey: key,
