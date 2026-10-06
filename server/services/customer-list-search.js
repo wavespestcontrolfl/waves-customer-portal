@@ -68,7 +68,9 @@ const searchableColumns = [
   'profile_label',
 ];
 
-function applyCustomerSearchFilter(query, value) {
+// `homes`: also match any active home of the customer (office searches only:
+// a technician's search must not reveal a customer's other homes).
+function applyCustomerSearchFilter(query, value, { homes = false } = {}) {
   const search = normalizedSearch(value);
   if (!search) return query;
 
@@ -114,7 +116,7 @@ function applyCustomerSearchFilter(query, value) {
     // Every word of the search must be a whole word of one home's address, so
     // a pasted "100 Main St, Apt 5, Sarasota, FL 34202" finds it as written and
     // "Apt 5" never matches the 5 in another home's ZIP or unit 52.
-    const home = homeMatch(search);
+    const home = homes ? homeMatch(search) : null;
     if (home) this.orWhereRaw(`EXISTS (SELECT 1 FROM customer_properties cp WHERE ${home.sql})`, home.bindings);
   });
 }
@@ -134,8 +136,8 @@ function homeMatch(value) {
 // The address of the home the search matched, so a customer found through a
 // second home shows that home, not the address on the customer row. The
 // primary home first; NULL when no home matched or there is no search.
-function matchedHomeAddressSql(knex, value) {
-  const home = value ? homeMatch(value) : null;
+function matchedHomeAddressSql(knex, value, { homes = false } = {}) {
+  const home = homes === true && value ? homeMatch(value) : null;
   if (!home) return knex.raw('NULL::text as matched_home_address');
   return knex.raw(`(SELECT CONCAT_WS(', ', cp.address_line1, NULLIF(cp.address_line2, ''), cp.city)
     FROM customer_properties cp WHERE ${home.sql}

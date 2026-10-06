@@ -142,8 +142,8 @@ async function withCustomers(work) {
   });
 }
 
-async function matchingIds(trx, search) {
-  const query = applyCustomerSearchFilter(trx('customers').select('customers.id'), search);
+async function matchingIds(trx, search, { homes = true } = {}) {
+  const query = applyCustomerSearchFilter(trx('customers').select('customers.id'), search, { homes });
   return (await applyCustomerNameOrder(query, search)).map((row) => row.id);
 }
 
@@ -210,8 +210,10 @@ postgres('customer list search PostgreSQL behavior', () => {
       expect(await matchingIds(trx, '100 Sample Main St, Apt 5, Sarasota, FL 34202')).toEqual([
         '00000000-0000-4000-8000-000000000010',
       ]);
+      // A technician's search (homes off) never finds a customer by another home.
+      expect(await matchingIds(trx, '100 Sample Main St, Apt 5, Sarasota, FL 34202', { homes: false })).toEqual([]);
       // The result names the home that matched, not the customer row's address.
-      const [row] = await trx('customers').select('customers.id', matchedHomeAddressSql(trx, '100 Sample Main St Apt 5'))
+      const [row] = await trx('customers').select('customers.id', matchedHomeAddressSql(trx, '100 Sample Main St Apt 5', { homes: true }))
         .where('customers.id', '00000000-0000-4000-8000-000000000010');
       expect(row.matched_home_address).toBe('100 Sample Main St, Apt 5, Sarasota');
       expect(await matchingIds(trx, '100 Sample Main St, Apt 6, Sarasota')).toEqual([]);

@@ -74,6 +74,8 @@ const TECH_LIST_STRIPPED_FIELDS = [
   'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
   'landingPageUrl', 'lastContactDate', 'lastContactType', 'nextFollowUp',
   'lastRating', 'tags',
+  // The address of the customer's other home a search matched.
+  'matchedHomeAddress',
   // Account pricing is office-only — the field flows that search customers
   // never render plan price, and the server-priced estimate builder doesn't
   // take it from directory rows.
@@ -1361,8 +1363,8 @@ function compactServiceContactSlots(updates, before = {}) {
 }
 
 function applyCustomerListFilters(query, filters, healthColumns) {
-  const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited } = filters;
-  if (search) query = applyCustomerSearchFilter(query, search);
+  const { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited, searchHomes } = filters;
+  if (search) query = applyCustomerSearchFilter(query, search, { homes: searchHomes === true });
   if (stage) query = query.where('pipeline_stage', stage);
   if (tier === 'none') query = query.whereNull('waveguard_tier');
   else if (tier) query = query.where('waveguard_tier', tier);
@@ -2495,7 +2497,9 @@ router.get('/', async (req, res, next) => {
       .filter((key) => req.query[key] !== undefined).map((key) => [key, req.query[key]]));
     const healthValidation = customerHealthFilterSchema.validate(isTechRequest ? {} : healthInput);
     if (healthValidation.error) return res.status(400).json({ error: 'Invalid health or retention filter' });
-    const allFilters = { search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited, ...healthValidation.value, retentionSince: new Date(Date.now() - 30 * 86400000) };
+    // searchHomes: an office search also matches a customer's other homes;
+    // techSafeListFilters drops it (a tech must not see sibling homes).
+    const allFilters = { searchHomes: true, search, stage, tier, tag, source, area, city, cards, hasBalance, lastVisited, ...healthValidation.value, retentionSince: new Date(Date.now() - 30 * 86400000) };
     const filters = isTechRequest ? techSafeListFilters(allFilters) : allFilters;
     const effectiveSort = isTechRequest ? techSafeSort(sort) : sort;
     const healthColumns = await getHealthScoreColumns();
@@ -2552,7 +2556,7 @@ router.get('/', async (req, res, next) => {
     const offset = (page - 1) * limit;
     // A customer found through a second home shows that home (the access-code
     // link picker names the address the text gave).
-    query = query.select(matchedHomeAddressSql(db, filters.search));
+    query = query.select(matchedHomeAddressSql(db, filters.search, { homes: filters.searchHomes }));
     const customers = await query.limit(limit).offset(offset);
 
     // Pipeline counts
