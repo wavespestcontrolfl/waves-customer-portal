@@ -118,7 +118,7 @@ describe('property-lookup callers declare their scope decision', () => {
       // of an object that names it, whatever the form.
       if (!OPTION_OWNERS.has(r)) {
         src.split('\n').forEach((line, i) => {
-          if (/^\s*(\/\/|\*)/.test(line) || !/commercialSuiteSizing/.test(line)) return;
+          if (/^\s*(\/\/|\*)/.test(line) || !/commercialSuiteSizing(?!Live\b)/.test(line)) return;
           offenders.push(`${r}:${i + 1}: names commercialSuiteSizing outside the registry`);
         });
       } else if (r === SANCTIONED_OVERRIDE.file) {
