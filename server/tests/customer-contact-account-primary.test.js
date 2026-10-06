@@ -105,6 +105,10 @@ describe('account-primary contact fallback', () => {
       .toEqual({ ...sec, phone: '', contact_role: 'tenant', account_contact_role: 'property_manager' });
     // A failed read throws: the report waits rather than reach an occupant.
     await expect(withAccountContactRole(sec, { db: knexStub({ throwOnRead: true }) })).rejects.toThrow('boom');
+    // A linked property whose primary is gone (archived) is not authorized.
+    await expect(withAccountContactRole(sec, { db: knexStub({ primaryRow: null }) })).rejects.toThrow('account primary profile not found');
+    // A primary with no role resolves to '' (an owner account), never left unknown.
+    expect((await withAccountContactRole(sec, { db: knexStub() })).account_contact_role).toBe('');
     // A primary row is never re-read.
     const prim = { id: 'p1', account_id: 'a1', is_primary_profile: true };
     expect(await withAccountContactRole(prim, { db: knexStub({ throwOnRead: true }) })).toBe(prim);

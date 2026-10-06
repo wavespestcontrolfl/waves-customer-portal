@@ -572,10 +572,11 @@ describe('summarySmsRecipient: who gets the combined-stop summary text', () => {
       .toBe('(941) 555-0123');
   });
 
-  test('a property profile whose own contact is a tenant on a manager account gets no summary text', async () => {
-    expect((await summarySmsRecipient({ ...CUSTOMER, contact_role: 'tenant', account_contact_role: 'property_manager' })).phone).toBe('');
+  test('a property profile whose own contact is a tenant gets no summary text, on any account', async () => {
+    const tenantProperty = { ...CUSTOMER, account_id: 'acct-1', is_primary_profile: false, contact_role: 'tenant', account_contact_role: '' };
+    expect((await summarySmsRecipient(tenantProperty)).phone).toBe('');
     delete process.env.GATE_CONTACT_REPORT_TEXT;
-    expect((await summarySmsRecipient({ ...CUSTOMER, contact_role: 'tenant', account_contact_role: 'property_manager' })).phone).toBe('');
+    expect((await summarySmsRecipient({ ...tenantProperty, account_contact_role: 'property_manager' })).phone).toBe('');
     expect(resolveServiceContactSmsRecipient).not.toHaveBeenCalled();
   });
 });
