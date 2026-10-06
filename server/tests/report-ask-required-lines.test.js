@@ -1124,3 +1124,20 @@ describe('answer screen, Codex round 18', () => {
     expect(ruleAnswerReason(data, [], 'applied', 'What did you spray outside?')).toBeNull();
   });
 });
+
+describe('answer screen, Codex round 19', () => {
+  test('every named product is checked', () => {
+    const data = pestData({ applications: [{ product: { name: 'Alpine WSG' } }] });
+    expect(ruleAnswerReason(data, [], 'applied', 'Did you use Roundup or Alpine?')).toBe('unrecorded_product');
+    expect(ruleAnswerReason(data, [], 'applied', 'Did you use anything inside or outside?')).toBeNull();
+  });
+
+  test.each(['The bait was eaten by my dog', 'Some pesticide was swallowed by my child'])('passive ingestion gets the full answer: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+
+  test.each(['The treatment will work.', 'The treatment should work.', 'Your lawn will get better.'])('a generic promise is rejected: %s', (answer) => {
+    const data = lawnData({ reportV2: null });
+    expect(screenAskAnswer(answer, { question: 'q', data, facts: buildReportAskFacts({ data }) })).toBe('result promise');
+  });
+});

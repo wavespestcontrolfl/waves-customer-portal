@@ -775,7 +775,7 @@ const ASK_EXTRA_BANNED = [
   // Modal, future and expected results (Codex P1 #5964 r13, r17): "should
   // disappear", "will disappear soon",
   // "this should get rid of the crabgrass", "is expected to clear up".
-  [/\b(?:will|(?:is|are)\s+gonna|should|ought\s+to|(?:is|are)\s+going\s+to|(?:is|are)\s+expected\s+to|expect\s+(?:it|them|the\s+\w+)\s+to|(?:is|are)\s+(?:likely|bound|sure)\s+to)\s+(?:\w+\s+)?(?:disappear|vanish|go\s+away|be\s+gone|get\s+rid\s+of|eliminate|kill\s+(?:all|every|the)|wipe\s+out|clear\s+(?:up|out)|stop|end|fix|solve|take\s+care\s+of|improve|recover|bounce\s+back|heal|fill\s+(?:in|back\s+in)|green\s+up|thicken|thrive|come\s+back\s+(?:green|thick|healthy)|look\s+(?:better|great|healthy|green)|be\s+(?:healthy|fine|green|better))\b/i, 'result promise'],
+  [/\b(?:will|(?:is|are)\s+gonna|should|ought\s+to|(?:is|are)\s+going\s+to|(?:is|are)\s+expected\s+to|expect\s+(?:it|them|the\s+\w+)\s+to|(?:is|are)\s+(?:likely|bound|sure)\s+to)\s+(?:\w+\s+)?(?:disappear|vanish|go\s+away|be\s+gone|get\s+rid\s+of|eliminate|kill\s+(?:all|every|the)|wipe\s+out|clear\s+(?:up|out)|stop|end|fix|solve|take\s+care\s+of|work|do\s+the\s+trick|get\s+better|improve|recover|bounce\s+back|heal|fill\s+(?:in|back\s+in)|green\s+up|thicken|thrive|come\s+back\s+(?:green|thick|healthy)|look\s+(?:better|great|healthy|green)|be\s+(?:healthy|fine|green|better))\b/i, 'result promise'],
   [/\bwill\s+(?:definitely\s+|certainly\s+|surely\s+|absolutely\s+)?(?:stop|get\s+rid\s+of|kill\s+(?:all|every)|eliminate)\b/i, 'result promise'],
   [/\b(?:you\s+will\s+not|you\s+won['’]?t|you\s+will\s+never|won['’]?t)\s+(?:\w+\s+)?see\s+(?:any|an?)\s+(?:more|further)\b/i, 'result promise'],
   [/\bno\s+more\s+(?:\w+\s+)?(?:pests?|bugs?|insects?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|mosquito(?:e?s)?|termites?|rodents?|mice|mouse|rats?|fleas?|ticks?|wasps?|flies|fly|beetles?)\b/i, 'result promise'],
@@ -929,7 +929,7 @@ const HOUR_WORDS = '(?:\\d{1,2}(?::\\d{2})?|one|two|three|four|five|six|seven|ei
 const HOUR_RANGE = new RegExp(`\\b(?:between|from)\\s+${HOUR_WORDS}\\s+(?:and|to|-|–)\\s+${HOUR_WORDS}\\b(?!\\s*(?:%|inch|in\\b|out\\s+of|points?|days?|weeks?|months?|hours?|hrs?|minutes?|mins?|products?|areas?|spots?|stations?|times?|feet|ft|yards?))`, 'i');
 // A relative offset: "in two days", "in a few weeks", "later this month",
 // "end of the week" (Codex P1 #6016 r19). "This week" alone stays.
-const RELATIVE_OFFSET = /\b(?:in\s+(?:a\s+(?:few|couple(?:\s+of)?)\s+|\d+\s+|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+|a\s+)(?:days?|weeks?|months?)|later\s+(?:this|next)\s+(?:week|month)|this\s+month|(?:end|beginning|start|middle)\s+of\s+(?:the|this|next)\s+(?:week|month))\b/i;
+const RELATIVE_OFFSET = /\b(?:(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|a\s+few|a\s+couple(?:\s+of)?)\s+(?:days?|weeks?|months?)\s+from\s+(?:now|today)|in\s+(?:a\s+(?:few|couple(?:\s+of)?)\s+|\d+\s+|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+|a\s+)(?:days?|weeks?|months?)|later\s+(?:this|next)\s+(?:week|month)|this\s+month|(?:end|beginning|start|middle)\s+of\s+(?:the|this|next)\s+(?:week|month))\b/i;
 // A year on its own: "in 2027" (Codex P1 #6016 r22). An answer has no use
 // for a four-digit year.
 const YEAR = /\b(?:19|20)\d{2}\b/;
@@ -1192,6 +1192,8 @@ const MEDICAL_CUES = [
   /\b(?:feel|feeling|felt)\s+(?:\w+\s+){0,2}?(?:sick|ill|unwell|weak|woozy|off|strange)\b/i,
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b)\b/i,
+  // Passive: "the bait was eaten by my dog" (Codex P1 #5964 r19).
+  new RegExp(`\\b(?:was|were|got|been|has\\s+been|have\\s+been)\\s+(?:\\w+\\s+)?(?:eaten|swallowed|ingested|consumed|licked|chewed|drunk|sucked|lapped(?:\\s+up)?|mouthed|nibbled|gnawed)\\s+(?:on\\s+)?by\\s+(?:my|our|his|her|their|the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS}\\b`, 'i'),
   // A sentence that opens on the verb has an understood "I": "Accidentally
   // swallowed some bait" (Codex P1 #6016 r21).
   /(?:^|[.!?]\s+)(?:(?:accidentally|just|i\s+think\s+(?:i\s+)?|i\s+)\s*)*(?:swallow(?:ed)?|ingest(?:ed)?|consumed|ate|drank|inhaled|licked)\b/i,
@@ -1260,7 +1262,7 @@ function defaultCallModel(payload, options) {
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:booked|book(?:ing)?\s+(?:a|an|the|my|our)?\s*(?:visit|service|appointment|treatment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|we|i|they|tech|technician|someone|waves|team)\b[^.?!]{0,30}\b(?:tomorrow|tonight)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:you|y'all|we|they|tech|technician|someone|waves|team)\b|make\s+it\s+(?:tomorrow|tonight|today|out)|(?:when|what)\b[^.?!]{0,25}\bfollow[\s-]?up|follow[\s-]?up\s+(?:date|visit|time|appointment)|(?:confirmed|set|good|all\s+set|still\s+on|on)\s+for\s+(?:tomorrow|tonight|today|next|this\s+(?:week|weekend)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|booked|book(?:ing)?\s+(?:a|an|the|my|our)?\s*(?:visit|service|appointment|treatment)|expect\s+(?:you|y'all|them|the\s+(?:tech|technician|team)|someone|waves)|(?:still|we)\s+on\s+for|when(?:\s+(?:is|will\s+be|are)|['’]s)\s+(?:my|our|the)\s+(?:next\s+)?(?:service|visit|treatment|appointment)s?|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }
@@ -1276,13 +1278,18 @@ const PRODUCT_QUESTION_RE = /\b(?:use|used|using|apply|applied|applying|spray|sp
 const GENERIC_PRODUCT_WORDS = new Set(('it this that anything something any some the a an pesticide pesticides chemical chemicals product products '
   + 'spray sprays treatment treatments bait baits granules liquid insecticide herbicide fungicide fertilizer outside inside today '
   + 'there here on in around near for at my our your what which').split(' '));
+// Every product the question names is checked: "Roundup or Alpine" on an
+// Alpine-only report still names an unrecorded one (Codex P1 #5964 r19).
 function asksAboutUnrecordedProduct(question, data = {}) {
-  const m = PRODUCT_QUESTION_RE.exec(String(question || ''));
+  const text = String(question || '');
+  const m = PRODUCT_QUESTION_RE.exec(text);
   if (!m) return false;
-  const name = m[1].split(/\s+/)[0].toLowerCase();
-  if (GENERIC_PRODUCT_WORDS.has(name)) return false;
   const products = asArray(data.applications).map(productFacts).filter(Boolean);
-  return !productsNamedIn(question, products).length;
+  const named = text.slice(m.index + m[0].length - m[1].length).split(/[.?!]/)[0];
+  return named.split(/\s*(?:,|\bor\b|\band\b|\bnor\b|\/)\s*/i)
+    .map((part) => part.trim())
+    .filter((part) => part && !GENERIC_PRODUCT_WORDS.has(part.split(/\s+/)[0].toLowerCase()))
+    .some((part) => !productsNamedIn(part, products).length);
 }
 
 function ruleAnswerReason(data = {}, requiredLines = [], topic = null, question = '') {
