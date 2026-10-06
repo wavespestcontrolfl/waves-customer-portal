@@ -359,73 +359,90 @@ function parseMarkerLine(line) {
   const match = String(line || "").trim().match(MARKER_LINE_RX);
   return match ? { tag: match[1].toLowerCase(), text: match[2].trim() } : null;
 }
-// Dictated words join the notes box's last line, except a tagged chip line
-// ([Protocol] Web sweep, [Found] …): joined there, the spoken note would be
-// read back as part of that completed action / finding at submit, and a
-// normal-length note trips the 240-character entry cap.
-export function appendDictatedText(notes, text) {
-  if (!notes) return text;
-  const lastLine = notes.slice(notes.lastIndexOf("\n") + 1);
-  return parseMarkerLine(lastLine) ? `${notes.trimEnd()}\n${text}` : `${notes} ${text}`;
+// Picked chip labels by the marker tags they ride under, as the server files
+// them: actions under [Protocol] / [Protocol optional] / [Action],
+// observations under [Found], recommendations under [Next]. A label only
+// marks a chip line under its own tags.
+export function chipLabelsByTag({ actions = [], observations = [], recommendations = [] } = {}) {
+  const keys = (labels) => new Set((labels || []).map((label) => String(label || "").trim().toLowerCase()).filter(Boolean));
+  const actionKeys = keys(actions);
+  return { protocol: actionKeys, "protocol optional": actionKeys, action: actionKeys, found: keys(observations), next: keys(recommendations) };
 }
-// Typing onto a chip line works the same way: words typed (or pasted) after
-// a space at the end of a "[Tag] Label" chip line move to their own line, so
-// the label stays selected and the words stay a note. Only a line that was
-// exactly a picked chip label before this edit splits; a tech-typed
-// "[Found] Ants by the lanai" or an edit inside the label itself is left
-// alone. Returns the caret shifted by the characters the split changed.
-export function splitTypedChipLineTails(prevNotes, nextNotes, labels, caret = null) {
-  const picked = new Set((labels || []).map((label) => String(label || "").trim().toLowerCase()).filter(Boolean));
-  const chipLines = String(prevNotes || "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => picked.has(parseMarkerLine(line)?.text.toLowerCase()))
-    .sort((a, b) => b.length - a.length);
-  if (!chipLines.length) return { notes: nextNotes, caret };
-  let offset = 0;
-  let nextCaret = caret;
-  const lines = String(nextNotes || "").split("\n").map((line) => {
-    const start = offset;
-    offset += line.length + 1;
-    const lead = line.length - line.trimStart().length;
-    const body = line.slice(lead);
-    const chip = chipLines.find((candidate) => (
-      body.length > candidate.length
-      && body.slice(0, candidate.length).toLowerCase() === candidate.toLowerCase()
-      && /^\s+\S/.test(body.slice(candidate.length))
-    ));
-    if (!chip) return line;
-    const gapStart = start + lead + chip.length;
-    const gap = body.slice(chip.length).match(/^\s+/)[0].length;
-    if (nextCaret !== null && nextCaret > gapStart) nextCaret += 1 - Math.min(gap, nextCaret - gapStart);
-    return `${line.slice(0, lead)}${chip}\n${body.slice(chip.length + gap)}`;
-  });
-  return { notes: lines.join("\n"), caret: nextCaret };
+function isPickedChipLine(line, labelsByTag) {
+  const entry = parseMarkerLine(line);
+  return Boolean(entry && labelsByTag?.[entry.tag]?.has(entry.text.toLowerCase()));
 }
-// A draft saved before the split above can still hold a glued chip line
-// ("[Protocol] Web sweep treated the yard"). On restore, a marker line whose
-// text is a picked label plus more words splits back into the chip line and
-// a note line. It is left alone when the notes already hold that chip line
-// on its own, since the longer line is then the tech's own typed marker.
-export function splitGluedChipLines(notes, labels) {
-  const picked = [...new Set((labels || []).map((label) => String(label || "").trim()).filter(Boolean))]
-    .sort((a, b) => b.length - a.length);
-  const lines = String(notes || "").split("\n");
-  if (!picked.length) return String(notes || "");
-  const whole = new Set(lines.map((line) => line.trim().toLowerCase()));
-  return lines.map((line) => {
-    const entry = parseMarkerLine(line);
-    if (!entry) return line;
-    const label = picked.find((candidate) => (
+// A chip line with more words after it: where the chip ends in the line and
+// how much whitespace separates the words, or null.
+function gluedChipSplit(line, labelsByTag) {
+  const entry = parseMarkerLine(line);
+  const labels = entry ? labelsByTag?.[entry.tag] : null;
+  if (!labels?.size) return null;
+  const label = [...labels]
+    .sort((x, y) => y.length - x.length)
+    .find((candidate) => (
       entry.text.length > candidate.length
-      && entry.text.slice(0, candidate.length).toLowerCase() === candidate.toLowerCase()
+      && entry.text.slice(0, candidate.length).toLowerCase() === candidate
       && /^\s+\S/.test(entry.text.slice(candidate.length))
     ));
-    if (!label) return line;
-    const head = line.slice(0, line.toLowerCase().indexOf(entry.text.toLowerCase()) + label.length).trimStart();
-    if (whole.has(head.toLowerCase())) return line;
-    const lead = line.slice(0, line.length - line.trimStart().length);
-    return `${lead}${head}\n${entry.text.slice(label.length).trim()}`;
+  if (!label) return null;
+  const afterTag = line.indexOf("]") + 1;
+  const textStart = afterTag + (line.slice(afterTag).length - line.slice(afterTag).trimStart().length);
+  const chipEnd = textStart + label.length;
+  return { chipEnd, gap: line.slice(chipEnd).match(/^\s+/)[0].length };
+}
+// Dictated words join the notes box's last line, except a picked chip line
+// ([Protocol] Web sweep, [Found] Ants): joined there, the spoken note would
+// be read back as part of that completed action / finding at submit, and a
+// normal-length note trips the 240-character entry cap. labelsByTag is null
+// once an AI draft detached the chip lines (markers left are the tech's own).
+export function appendDictatedText(notes, text, labelsByTag = null) {
+  if (!notes) return text;
+  const lastLine = notes.slice(notes.lastIndexOf("\n") + 1);
+  return isPickedChipLine(lastLine, labelsByTag) ? `${notes.trimEnd()}\n${text}` : `${notes} ${text}`;
+}
+// Typing onto a chip line works the same way: when the edited line was a
+// picked chip line before this edit and now has words after a space, the
+// words move to their own line, so the label stays selected and the words
+// stay a note. Every other line, a tech-typed "[Found] Ants by the lanai",
+// and an edit inside the label itself are left alone. Returns the caret
+// shifted by the characters the split changed.
+export function splitTypedChipLineTails(prevNotes, nextNotes, labelsByTag, caret = null) {
+  const prev = String(prevNotes || "");
+  const next = String(nextNotes || "");
+  if (!labelsByTag) return { notes: next, caret };
+  let edit = 0;
+  while (edit < prev.length && edit < next.length && prev[edit] === next[edit]) edit += 1;
+  const start = next.lastIndexOf("\n", edit - 1) + 1;
+  const prevEnd = prev.indexOf("\n", start);
+  const prevLine = prev.slice(start, prevEnd < 0 ? prev.length : prevEnd);
+  if (!isPickedChipLine(prevLine, labelsByTag)) return { notes: next, caret };
+  const nextEnd = next.indexOf("\n", start);
+  const line = next.slice(start, nextEnd < 0 ? next.length : nextEnd);
+  const split = gluedChipSplit(line, labelsByTag);
+  if (!split || line.slice(0, split.chipEnd).trim().toLowerCase() !== prevLine.trim().toLowerCase()) {
+    return { notes: next, caret };
+  }
+  const gapStart = start + split.chipEnd;
+  let nextCaret = caret;
+  if (nextCaret !== null && nextCaret > gapStart) nextCaret += 1 - Math.min(split.gap, nextCaret - gapStart);
+  return { notes: `${next.slice(0, gapStart)}\n${next.slice(gapStart + split.gap)}`, caret: nextCaret };
+}
+// A draft saved before the splits above can still hold a glued chip line
+// ("[Protocol] Web sweep treated the yard"). On restore (chip lines still
+// attached), a marker line that is a picked label for its own tag plus more
+// words splits back into the chip line and a note line. It is left alone
+// when the notes already hold that chip line on its own, since the longer
+// line is then the tech's own typed marker.
+export function splitGluedChipLines(notes, labelsByTag) {
+  const lines = String(notes || "").split("\n");
+  const whole = new Set(lines.map((line) => line.trim().toLowerCase()));
+  return lines.map((line) => {
+    const split = gluedChipSplit(line, labelsByTag);
+    if (!split) return line;
+    const chip = line.slice(0, split.chipEnd);
+    if (whole.has(chip.trim().toLowerCase())) return line;
+    return `${chip.trimEnd()}\n${line.slice(split.chipEnd + split.gap)}`;
   }).join("\n");
 }
 function markerLines(notes) {
@@ -12226,6 +12243,10 @@ export function CompletionPanel({
   const [notes, setNotes] = useState("");
   const [completionPricing, setCompletionPricing] = useState(null);
   const [pricingReloadKey, setPricingReloadKey] = useState(0);
+  // The picked chip labels by marker tag (chipLabelsByTag), or null once an AI
+  // draft detached the chip lines. Set each render below, read by the notes
+  // mic and the notes textareas so a chip line keeps only its label.
+  const chipLabelsRef = useRef(null);
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
   // taps the mic again to stop. (Phase 2: the single notes box is the tech's
   // only free-text input — the AI report copy is generated from it + photos.)
@@ -12236,7 +12257,7 @@ export function CompletionPanel({
   const dictation = useSpeechDictation(
     (text) => {
       if (generating) return;
-      setNotes((b) => appendDictatedText(b, text));
+      setNotes((b) => appendDictatedText(b, text, chipLabelsRef.current));
     },
     // GATE_TECH_DICTATION_UPLOAD: where the browser has no SpeechRecognition
     // (iOS home-screen PWA) the mic records a clip and the server transcribes
@@ -13321,6 +13342,11 @@ export function CompletionPanel({
   // arrays are authoritative and selections render as removable pills instead
   // of tagged lines inside the report text. Persisted with the draft.
   const [chipLinesDetached, setChipLinesDetached] = useState(false);
+  chipLabelsRef.current = chipLinesDetached ? null : chipLabelsByTag({
+    actions: selectedProtocolActionLabels,
+    observations: selectedObservationLabels,
+    recommendations: selectedRecommendationLabels,
+  });
   // Lane voice fill (GATE_LANE_VOICE_FILL): what the last Generate filled
   // from the notes (each field's words) and the groups it left for a person.
   const [laneHeard, setLaneHeard] = useState(null);
@@ -15699,11 +15725,12 @@ export function CompletionPanel({
       ? Object.fromEntries(Object.entries(savedDraft.lawnRemovedDefaultNames).filter(([, name]) => typeof name === 'string' && name.trim()))
       : {};
     setLawnDefaultsSeedSuppressed(savedDraft.lawnDefaultsSeedSuppressed === true || !Object.hasOwn(savedDraft, "lawnRemovedDefaultIds"));
-    setNotes(splitGluedChipLines(savedDraft.notes || "", [
-      ...(Array.isArray(savedDraft.selectedProtocolActionLabels) ? savedDraft.selectedProtocolActionLabels : []),
-      ...(Array.isArray(savedDraft.selectedObservationLabels) ? savedDraft.selectedObservationLabels : []),
-      ...(Array.isArray(savedDraft.selectedRecommendationLabels) ? savedDraft.selectedRecommendationLabels : []),
-    ]));
+    const savedNotes = savedDraft.notes || "";
+    setNotes(savedDraft.chipLinesDetached === true ? savedNotes : splitGluedChipLines(savedNotes, chipLabelsByTag({
+      actions: Array.isArray(savedDraft.selectedProtocolActionLabels) ? savedDraft.selectedProtocolActionLabels : [],
+      observations: Array.isArray(savedDraft.selectedObservationLabels) ? savedDraft.selectedObservationLabels : [],
+      recommendations: Array.isArray(savedDraft.selectedRecommendationLabels) ? savedDraft.selectedRecommendationLabels : [],
+    })));
     // A draft restored while the plan request has already failed carries the
     // suggestions saved under an earlier plan, and the reconcile effect stays
     // off during a plan error — withdraw them exactly as the failed request
@@ -16323,7 +16350,7 @@ export function CompletionPanel({
     const { notes: nextNotes, caret } = splitTypedChipLineTails(
       notes,
       el.value,
-      [...selectedProtocolActionLabels, ...selectedObservationLabels, ...selectedRecommendationLabels],
+      chipLabelsRef.current,
       el.selectionStart,
     );
     setNotes(nextNotes);

@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   appendDictatedText,
+  chipLabelsByTag,
   buildPhotoRecoveryOutcome,
   splitTypedChipLineTails,
   splitGluedChipLines,
@@ -145,88 +146,93 @@ describe("completionReportRulesPrompt", () => {
   });
 });
 
+const tags = chipLabelsByTag({ actions: ["Web sweep"], observations: ["Ants"], recommendations: ["Seal gaps"] });
+
 describe("appendDictatedText", () => {
   it("starts an empty notes box with the spoken words", () => {
-    expect(appendDictatedText("", "Treated the perimeter.")).toBe("Treated the perimeter.");
+    expect(appendDictatedText("", "Treated the perimeter.", tags)).toBe("Treated the perimeter.");
   });
 
   it("joins plain note text on the same line", () => {
-    expect(appendDictatedText("Treated the perimeter.", "Ants by the lanai.")).toBe("Treated the perimeter. Ants by the lanai.");
+    expect(appendDictatedText("Treated the perimeter.", "Ants by the lanai.", tags)).toBe("Treated the perimeter. Ants by the lanai.");
   });
 
-  it("puts spoken words on a new line after a tagged chip line", () => {
-    for (const tag of ["Protocol", "Protocol optional", "Action", "Found", "Next"]) {
-      expect(appendDictatedText(`Note.\n[${tag}] Web sweep`, "Treated the perimeter.")).toBe(`Note.\n[${tag}] Web sweep\nTreated the perimeter.`);
+  it("puts spoken words on a new line after a picked chip line, under each of its tags", () => {
+    for (const line of ["[Protocol] Web sweep", "[Protocol optional] Web sweep", "[Action] Web sweep", "[Found] Ants", "[Next] Seal gaps", "[Protocol]Web sweep  "]) {
+      expect(appendDictatedText(`Note.\n${line}`, "Treated.", tags)).toBe(`Note.\n${line.trimEnd()}\nTreated.`);
     }
-    expect(appendDictatedText("[Protocol]Web sweep  ", "Treated.")).toBe("[Protocol]Web sweep\nTreated.");
   });
 
   it("keeps later chunks on the spoken line", () => {
-    const first = appendDictatedText("[Protocol] Web sweep", "Treated the perimeter.");
-    expect(appendDictatedText(first, "Ants by the lanai.")).toBe("[Protocol] Web sweep\nTreated the perimeter. Ants by the lanai.");
+    const first = appendDictatedText("[Protocol] Web sweep", "Treated the perimeter.", tags);
+    expect(appendDictatedText(first, "Ants by the lanai.", tags)).toBe("[Protocol] Web sweep\nTreated the perimeter. Ants by the lanai.");
+  });
+
+  it("joins a tech-typed marker, a label under another tag, or detached notes", () => {
+    expect(appendDictatedText("[Found] Roaches", "in the garage", tags)).toBe("[Found] Roaches in the garage");
+    expect(appendDictatedText("[Next] Ants", "by the garage", tags)).toBe("[Next] Ants by the garage");
+    expect(appendDictatedText("[Found] Ants", "by the lanai", null)).toBe("[Found] Ants by the lanai");
   });
 });
 
 describe("splitTypedChipLineTails", () => {
-  const labels = ["Web sweep", "Ants"];
-
   it("moves words typed after a picked chip line to their own line", () => {
     const prev = "Note.\n[Protocol] Web sweep ";
     const next = "Note.\n[Protocol] Web sweep T";
-    expect(splitTypedChipLineTails(prev, next, labels, next.length)).toEqual({ notes: "Note.\n[Protocol] Web sweep\nT", caret: next.length });
+    expect(splitTypedChipLineTails(prev, next, tags, next.length)).toEqual({ notes: "Note.\n[Protocol] Web sweep\nT", caret: next.length });
   });
 
   it("splits pasted text and shifts the caret by the whitespace removed", () => {
     const prev = "[Found] Ants\nLast line";
     const next = "[Found] Ants   by the lanai\nLast line";
     const caret = "[Found] Ants   by the lanai".length;
-    expect(splitTypedChipLineTails(prev, next, labels, caret)).toEqual({ notes: "[Found] Ants\nby the lanai\nLast line", caret: caret - 2 });
-  });
-
-  it("leaves a caret before the split where it was", () => {
-    const prev = "Hi\n[Protocol] Web sweep";
-    const next = "Hi\n[Protocol] Web sweep treated";
-    expect(splitTypedChipLineTails(prev, next, labels, 1).caret).toBe(1);
+    expect(splitTypedChipLineTails(prev, next, tags, caret)).toEqual({ notes: "[Found] Ants\nby the lanai\nLast line", caret: caret - 2 });
   });
 
   it("keeps a trailing space until words follow it", () => {
     const next = "[Protocol] Web sweep ";
-    expect(splitTypedChipLineTails("[Protocol] Web sweep", next, labels, next.length).notes).toBe(next);
+    expect(splitTypedChipLineTails("[Protocol] Web sweep", next, tags, next.length).notes).toBe(next);
+  });
+
+  it("splits only the edited line, never another marker that starts with the label", () => {
+    const prev = "[Found] Ants\n[Found] Ants by the sink\nNote";
+    const next = "[Found] Ants\n[Found] Ants by the sink\nNotes";
+    expect(splitTypedChipLineTails(prev, next, tags, next.length).notes).toBe(next);
   });
 
   it("leaves a tech-typed marker line alone while it is being typed", () => {
-    const prev = "[Found] Ants by ";
-    const next = "[Found] Ants by t";
-    expect(splitTypedChipLineTails(prev, next, labels, next.length).notes).toBe(next);
-    expect(splitTypedChipLineTails("[Found] Roaches", "[Found] Roaches in garage", labels).notes).toBe("[Found] Roaches in garage");
+    expect(splitTypedChipLineTails("[Found] Roaches", "[Found] Roaches in garage", tags).notes).toBe("[Found] Roaches in garage");
+    expect(splitTypedChipLineTails("[Next] Ants", "[Next] Ants by the garage", tags).notes).toBe("[Next] Ants by the garage");
   });
 
   it("leaves an edit inside the label itself alone", () => {
-    expect(splitTypedChipLineTails("[Protocol] Web sweep", "[Protocol] Web sweeps", labels).notes).toBe("[Protocol] Web sweeps");
+    expect(splitTypedChipLineTails("[Protocol] Web sweep", "[Protocol] Web sweeps", tags).notes).toBe("[Protocol] Web sweeps");
   });
 
-  it("does nothing when no chip label is picked", () => {
-    expect(splitTypedChipLineTails("[Protocol] Web sweep", "[Protocol] Web sweep done", []).notes).toBe("[Protocol] Web sweep done");
+  it("does nothing once the chip lines are detached", () => {
+    expect(splitTypedChipLineTails("[Found] Ants", "[Found] Ants by the lanai", null).notes).toBe("[Found] Ants by the lanai");
   });
 });
 
 describe("splitGluedChipLines", () => {
-  const labels = ["Web sweep", "Ants"];
-
   it("splits a saved glued chip line back into the chip line and a note", () => {
-    expect(splitGluedChipLines("Note.\n[Protocol] Web sweep treated the yard", labels)).toBe("Note.\n[Protocol] Web sweep\ntreated the yard");
-    expect(splitGluedChipLines("[protocol]web sweep   treated", labels)).toBe("[protocol]web sweep\ntreated");
+    expect(splitGluedChipLines("Note.\n[Protocol] Web sweep treated the yard", tags)).toBe("Note.\n[Protocol] Web sweep\ntreated the yard");
+    expect(splitGluedChipLines("[protocol]web sweep   treated", tags)).toBe("[protocol]web sweep\ntreated");
   });
 
   it("leaves a typed marker line alone when its chip line is also present", () => {
     const notes = "[Found] Ants\n[Found] Ants by the lanai";
-    expect(splitGluedChipLines(notes, labels)).toBe(notes);
+    expect(splitGluedChipLines(notes, tags)).toBe(notes);
+  });
+
+  it("keeps a label to its own tags", () => {
+    expect(splitGluedChipLines("[Next] Ants by the garage", tags)).toBe("[Next] Ants by the garage");
   });
 
   it("leaves plain chip lines, other markers and unpicked labels alone", () => {
     const notes = "[Protocol] Web sweep\n[Found] Roaches in garage\nAnts by the lanai";
-    expect(splitGluedChipLines(notes, labels)).toBe(notes);
-    expect(splitGluedChipLines("[Protocol] Web sweeps done", labels)).toBe("[Protocol] Web sweeps done");
-    expect(splitGluedChipLines("[Protocol] Web sweep done", [])).toBe("[Protocol] Web sweep done");
+    expect(splitGluedChipLines(notes, tags)).toBe(notes);
+    expect(splitGluedChipLines("[Protocol] Web sweeps done", tags)).toBe("[Protocol] Web sweeps done");
+    expect(splitGluedChipLines("[Protocol] Web sweep done", chipLabelsByTag())).toBe("[Protocol] Web sweep done");
   });
 });
