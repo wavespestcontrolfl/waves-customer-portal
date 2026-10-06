@@ -71,6 +71,11 @@ const BED_DENSITY = {
 // manual review (bed_area_at_or_above_8000); the old v2 clamp underpriced
 // big landscapes by up to ~43% (typed 14,000 priced as 8,000).
 const BED_AREA_REVIEW_SQFT = 8000;
+// Owner ruling 2026-10-05: a T&S quote with no bed area at all (no typed
+// area, no lot to infer from) prices a 1,200 sq ft bed (was 2,000) and stays
+// on the manual-review lane. Replay of an already-quoted fallback line reads
+// its stamped pricingKnobs.fallbackBedSqFt (see estimate-tree-shrub-knob-replay).
+const TREE_SHRUB_FALLBACK_BED_SQFT = 1200;
 
 // ── Turf Complexity Score → Factor ────────────────────────────
 // Score built from: pool(+2), cage(+2), shrubs(+1/+2),
@@ -2372,7 +2377,7 @@ const INSPECTION_CREDIT = {
 
 module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
-  HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_REVIEW_SQFT, TURF_FACTORS,
+  HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, TURF_FACTORS,
   PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,

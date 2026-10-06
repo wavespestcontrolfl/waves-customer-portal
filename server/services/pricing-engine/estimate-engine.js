@@ -952,6 +952,9 @@ function generateEstimate(input) {
         // Of those, the admin estimate's large palms (canopy wider than
         // ~15 ft) — each prices as TREE_SHRUB largePalmFactor palms.
         largePalmCount: services.treeShrub.largePalmCount,
+        // Call pipeline: no stated or trusted lookup palm count (draft-builder
+        // sets it); a zero-palm line then routes to review.
+        palmCountUnverified: services.treeShrub.palmCountUnverified === true,
         // Quote-time knob snapshot replayed from a stored estimate (see
         // estimate-public#savedFloorReplayOverrides). Absent on fresh
         // quotes, which resolve the live pricing_config values.

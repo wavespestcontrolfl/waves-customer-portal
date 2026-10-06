@@ -133,11 +133,12 @@ The 6-visit Standard program is the mandated default and the pre-selected/auto-r
 **Bed area confidence:**
 - `explicit` → high confidence, auto-price.
 - `estimated` → medium confidence, generated from estimate fields or `lotSqFt × basePct + complexAdd` (heavy 25%, moderate 18%, light 10%).
-- `fallback` → low confidence, uses 2,000 sqft and requires manual review.
+- `fallback` → low confidence, uses 1,200 sqft (owner ruling 2026-10-05; 2,000 sqft before) and requires manual review. The size is stamped as `pricingKnobs.fallbackBedSqFt`, so a replayed quote keeps the size it was sent with (an unstamped or pre-change line replays 2,000).
 
 Estimated bed area is priced in full. Manual review is required for fallback
 bed area, bed area at or above 8,000 sqft, tree count 15+, or difficult access
 with bed area 4,000 sqft+; the 8,000-sqft threshold does not clamp priced area.
+The call pipeline (`estimator-engine/draft-builder.js`) puts a trusted lookup palm count on the T&S service line only (never on `property.palmCount`, which palm injection reads). With no trusted count it sets `services.treeShrub.palmCountUnverified`, and a line that priced zero palms then carries the `palm_count_unverified` review reason (count the palms on the aerial photo before sending).
 
 **Recommendation logic:** The 6-visit Standard plan is the mandated default and is always the recommended tier. Light (4x) is RETIRED for new sales (owner directive 2026-09-24) — legacy/grandfathered-only, priceable but never offered or auto-recommended to a new customer. `recommendationReasons` (bed area 2,000 sqft+, heavy shrub density, moderate/complex landscaping, tree count 8+, difficult access, known pest/disease pressure) are advisory signals that the property warrants the full 6-visit program (originally: reasons not to downsell to the now-retired Light tier); they no longer change the recommended tier.
 
