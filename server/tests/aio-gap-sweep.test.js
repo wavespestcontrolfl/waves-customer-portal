@@ -169,6 +169,11 @@ describe('mergeCandidates', () => {
     expect(out.map((c) => c.query)).toEqual(['high', 'gap only', 'managed only']);
   });
 
+  test('managed brand rows (the entity cohort) are left out', () => {
+    const out = sweep.mergeCandidates({ managedRows: [{ query: 'owner name pest control exampleville', service: 'brand' }, { query: 'ant control exampleville', service: 'pest control' }] });
+    expect(out.map((c) => c.query)).toEqual(['ant control exampleville']);
+  });
+
   test('a city followed by punctuation is found, and a managed row keeps its stored city', () => {
     const out = sweep.mergeCandidates({
       gscRows: [{ query: 'best pest control company in Bradenton, Florida', impressions: 50 }],
@@ -308,17 +313,19 @@ describe('processSweepChunk', () => {
 
   test('waves_cited counts element URLs only; a Waves URL in the references is waves_in_references; naming and organic rank', async () => {
     openRun();
-    for (const q of ['element cite', 'reference only', 'named only']) pendingRow(q);
+    for (const q of ['element cite', 'reference only', 'named only', 'sound waves']) pendingRow(q);
     dataforseo.request.mockImplementation(async (_p, body) => {
       const kw = body[0].keyword;
       if (kw === 'element cite') return serp([aioItem([element([wavesUrl])], [wavesUrl], 'Waves Pest Control is a local option.'), ...organic(['https://rival.example/', wavesUrl])]);
       if (kw === 'reference only') return serp([aioItem([element(['https://rival.example/a'])], [wavesUrl], 'Ants are common.'), ...organic(['https://rival.example/'])]);
-      return serp([aioItem([element(['https://rival.example/a'])], [], 'Locals like Waves for ants.')]);
+      if (kw === 'sound waves') return serp([aioItem([element(['https://rival.example/a'])], [], 'Ultrasonic sound waves may repel rodents.')]);
+      return serp([aioItem([element(['https://rival.example/a'])], [], 'Locals like Waves Pest Control for ants.')]);
     });
     await sweep.processSweepChunk({ chunkSize: 10 });
     expect(rowOf('element cite')).toMatchObject({ waves_cited: true, waves_in_references: true, waves_named: true, waves_organic_rank: 2 });
     expect(rowOf('reference only')).toMatchObject({ waves_cited: false, waves_in_references: true, waves_named: false, waves_organic_rank: null });
     expect(rowOf('named only')).toMatchObject({ waves_cited: false, waves_in_references: false, waves_named: true });
+    expect(rowOf('sound waves')).toMatchObject({ waves_named: false });
   });
 
   test('stores jsonb columns as JSON strings, not arrays', async () => {
@@ -376,6 +383,16 @@ describe('processSweepChunk', () => {
     await sweep.processSweepChunk();
     expect(rowOf('q')).toMatchObject({ status: 'request_error', error: 'result could not be stored' });
     expect(mockState.runs[0]).toMatchObject({ attempted: 1, cost_usd: 0.004 });
+  });
+
+  test('when the fallback write also fails, the chunk stops making calls', async () => {
+    openRun();
+    for (let i = 0; i < 10; i += 1) pendingRow(`q${i}`, { impressions_90d: 100 - i });
+    mockState.failResultUpdates = 1000;
+    dataforseo.request.mockResolvedValue(serp([]));
+    await sweep.processSweepChunk({ chunkSize: 10 });
+    expect(dataforseo.request.mock.calls.length).toBeLessThanOrEqual(4);
+    expect(mockState.runs[0].status).toBe('open');
   });
 
   test('a failure log names the row id, never the search text', async () => {

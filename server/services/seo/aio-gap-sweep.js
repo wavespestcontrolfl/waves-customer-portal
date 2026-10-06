@@ -17,6 +17,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const { parseSerp } = require('./aio-pinned-capture');
+const { WAVES_RE } = require('./llm-mention-companies');
 const { isOwnedUrl } = require('./aeo-measurement');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
@@ -117,6 +118,8 @@ function mergeCandidates({ gscRows = [], gapRows = [], managedRows = [], minImpr
     if (c) c.cityLabels.push(r.city);
   }
   for (const r of arr(managedRows)) {
+    // The entity cohort ('brand') asks about Waves itself, not a customer search.
+    if (r.service === 'brand') continue;
     const c = touch(r.query, 'managed');
     if (c) c.cityLabels.push(r.city);
   }
@@ -166,7 +169,7 @@ async function buildCandidates({ minImpressions = DEFAULT_MIN_IMPRESSIONS, max =
     .whereNotNull('query')
     .select('query', 'city');
 
-  const managedRows = await db('seo_llm_mention_queries').where({ active: true }).select('query', 'city');
+  const managedRows = await db('seo_llm_mention_queries').where({ active: true }).select('query', 'city', 'service');
 
   return mergeCandidates({ gscRows, gapRows, managedRows, minImpressions, max });
 }
@@ -275,7 +278,7 @@ async function sweepOne(row) {
     citation_kind: citationKindOf(parsed.elements),
     waves_cited: parsed.wavesCited,
     waves_in_references: arr(parsed.references).some((r) => r.url && isOwnedUrl(r.url)),
-    waves_named: /\bwaves\b/i.test(parsed.markdown || ''),
+    waves_named: WAVES_RE.test(parsed.markdown || ''),
     answer_markdown: parsed.markdown,
     elements: json(parsed.elements),
     aio_references: json(parsed.references),
@@ -329,8 +332,9 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
     .limit(chunkSize);
 
   let next = 0;
+  let aborted = false;
   const worker = async () => {
-    while (next < rows.length && runCost < maxCost) {
+    while (!aborted && next < rows.length && runCost < maxCost) {
       const row = rows[next];
       next += 1;
       // A cancel (or a budget stop) mid-chunk must stop new paid calls; the
@@ -361,7 +365,10 @@ async function processSweepChunk({ chunkSize = DEFAULT_CHUNK_SIZE } = {}) {
         try {
           await storeResult(run.id, row.id, { status: 'request_error', error: 'result could not be stored', captured_at: db.fn.now() }, cost);
         } catch (err2) {
-          logger.error(`[aio-sweep] could not mark result ${row.id}: ${err2.message}`);
+          // The paid call is not booked and the row is still pending: stop the
+          // chunk so no more calls run on a ledger that cannot be written.
+          aborted = true;
+          logger.error(`[aio-sweep] could not mark result ${row.id}, chunk stopped: ${err2.message}`);
         }
       }
     }
