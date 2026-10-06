@@ -975,12 +975,20 @@ function obligationWords(row, message) {
 // obligation's own description appears in the quote as whole words, quote that
 // slice of the quote itself, so each bell names its own promise and every word
 // shown is the sender's. Otherwise the quote's first sentence, as before.
+// Unicode-aware (any script). Scripts written without spaces (Han, kana,
+// Thai, ...) have no word edges, so an edge character from one of them needs
+// no boundary there.
+const LETTER = /[\p{L}\p{N}]/u;
+const UNSPACED = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
 function headlineWords(quote, description, redact) {
   const compose = require('./admin-alert-compose');
-  const part = typeof description === 'string' ? redact(description.trim()).replace(/[.!?]+$/, '') : '';
-  if (/\w/.test(part)) {
+  const part = typeof description === 'string' ? redact(description.trim()).replace(/[.!?。！？]+$/u, '') : '';
+  if (LETTER.test(part)) {
     const escaped = part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
-    const found = new RegExp(`(?<!\\w)${escaped}(?!\\w)`, 'i').exec(quote);
+    const edge = (ch) => LETTER.test(ch) && !UNSPACED.test(ch);
+    const lead = edge([...part][0]) ? '(?<![\\p{L}\\p{N}_])' : '';
+    const tail = edge([...part].pop()) ? '(?![\\p{L}\\p{N}_])' : '';
+    const found = new RegExp(`${lead}${escaped}${tail}`, 'iu').exec(quote);
     if (found) return found[0];
   }
   return compose.firstSentence(quote).replace(/[.!?]+$/, '');

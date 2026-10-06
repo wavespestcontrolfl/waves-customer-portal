@@ -138,6 +138,18 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(lastCall()[2]).toBe('We said “We can exchange address labels tomorrow” (Sep 29) — nothing on record shows it done.');
   });
 
+  test('descriptions in any script are matched, with word edges where the script has them', async () => {
+    const arabic = 'نعم سنغير موعد الرش. سأرسل الفاتورة غدا';
+    await ring({ row: { kind: 'other', description: 'سأرسل الفاتورة', evidence: [{ quote: arabic }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “سأرسل الفاتورة” (Sep 29) — nothing on record shows it done.');
+    const chinese = '好的，我们明天改喷洒时间。我也会寄发票给您';
+    await ring({ row: { kind: 'other', description: '寄发票', evidence: [{ quote: chinese }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “寄发票” (Sep 29) — nothing on record shows it done.');
+    // an Arabic description found only inside a longer word keeps the first sentence
+    await ring({ row: { kind: 'other', description: 'سأرسل', evidence: [{ quote: 'وسأرسلها غدا' }], sms_context: { basis: 'promise' } } });
+    expect(lastCall()[2]).toBe('We said “وسأرسلها غدا” (Sep 29) — nothing on record shows it done.');
+  });
+
   test('a description that is not in the quote keeps the first sentence', async () => {
     await ring({ row: { kind: 'other', description: 'reschedule the visit', evidence: [{ quote: 'Gonna knock out your quarterly spray tomorrow. Thanks!' }], sms_context: { basis: 'promise' } } });
     expect(lastCall()[2]).toBe('We said “Gonna knock out your quarterly spray tomorrow” (Sep 29) — nothing on record shows it done.');
