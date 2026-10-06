@@ -17426,12 +17426,14 @@ function optOutImpact({ beforeResult, afterResult, beforeData, afterData, label,
 // only then the unambiguous phone match. Throws on a read error (callers
 // fail closed); null when nothing resolves.
 async function resolveProspectiveOwnerId(estimate, database = db) {
-  if (!estimate || estimate.customer_id) return estimate?.customer_id || null;
-  const { resolveGroupedEstimateOwnerId } = require('../services/recurring-card-on-file');
-  const groupedOwnerId = await resolveGroupedEstimateOwnerId(estimate, database, { throwOnError: true });
-  if (groupedOwnerId) return groupedOwnerId;
-  const { match } = await matchAcceptCustomerByPhone(estimate, database, { authoritative: true });
-  return match?.id || null;
+  if (!estimate) return null;
+  // ONE resolver with the accept's policy readers (recurring-card-on-file):
+  // linked → grouped sibling → authoritative phone match. A failed lookup
+  // there is a thrown error here, so every caller fails closed.
+  const { resolveProspectiveAcceptCustomer } = require('../services/recurring-card-on-file');
+  const { customerId, lookupFailed } = await resolveProspectiveAcceptCustomer(estimate, database, { authoritative: true });
+  if (lookupFailed) throw new Error('prospective_owner_lookup_failed');
+  return customerId || null;
 }
 
 async function offerTierMemberBlock(estimate, database = db) {

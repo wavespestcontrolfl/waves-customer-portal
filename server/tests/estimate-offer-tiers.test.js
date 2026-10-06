@@ -290,7 +290,10 @@ describe('member judgement order for an unlinked estimate', () => {
     const { resolveProspectiveOwnerId } = require('../routes/estimate-public');
     await expect(resolveProspectiveOwnerId({ id: 'e1', customer_id: null, estimate_group_id: 'g1' }, database)).resolves.toBe('m1');
     await expect(resolveProspectiveOwnerId({ id: 'e3', customer_id: 'linked' }, database)).resolves.toBe('linked');
-    await expect(resolveProspectiveOwnerId({ id: 'e4', customer_id: null, estimate_group_id: 'g9' }, () => { throw new Error('db'); })).rejects.toThrow('db');
+    await expect(resolveProspectiveOwnerId({ id: 'e4', customer_id: null, estimate_group_id: 'g9' }, () => { throw new Error('db'); })).rejects.toThrow('prospective_owner_lookup_failed');
+    // One resolver with the accept's policy readers.
+    const src2 = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    expect(src2).toMatch(/resolveProspectiveAcceptCustomer\(estimate, database, \{ authoritative: true \}\)/);
     // The sibling owner counts only while its customer row is live; a soft-deleted owner falls through to the phone match (pinned).
     const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
     expect(src).toMatch(/resolveGroupedEstimateOwnerId\(estimate, database, \{ throwOnError: true \}\)/);
