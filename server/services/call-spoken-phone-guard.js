@@ -57,4 +57,18 @@ function dropImpossibleSecondaryPhones(contacts) {
   return dropped;
 }
 
-module.exports = { rejectImpossibleSpokenPhones, dropImpossibleSecondaryPhones };
+// The V2 extraction as it may be PERSISTED (ai_extraction_enriched): a copy
+// with impossible secondary numbers nulled, so readers of the stored blob (the
+// Intelligence Bar comms drilldown and others) never see them. The in-memory
+// extraction keeps the original values for V1/V2 identity reconciliation.
+function persistableV2Extraction(v2Extraction) {
+  if (!v2Extraction || typeof v2Extraction !== 'object') return v2Extraction;
+  const copy = JSON.parse(JSON.stringify(v2Extraction));
+  const people = [copy.secondary_contact, ...(Array.isArray(copy.secondary_contacts) ? copy.secondary_contacts : [])];
+  for (const person of people) {
+    if (person && typeof person === 'object' && person.phone_e164 && isImpossibleNanpPhone(person.phone_e164)) person.phone_e164 = null;
+  }
+  return copy;
+}
+
+module.exports = { rejectImpossibleSpokenPhones, dropImpossibleSecondaryPhones, persistableV2Extraction };

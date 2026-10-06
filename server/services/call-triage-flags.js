@@ -15,16 +15,13 @@ const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte']);
 // require at least 10 digits before treating an ANI as a real callback number.
 // An impossible NANP number (a spoken "173-303-8616") has the digits but no
 // line behind it: it is never dialable, so a spoken callback like that never
-// counts as a way to reach the caller. A non-NANP E.164 number ("+" and a
-// country code other than 1) follows E.164 length (8-15 digits) — some
-// international numbers are shorter than ten digits.
+// counts as a way to reach the caller. The ten-digit floor matches the shared
+// phone utilities (toE164, isLikelyE164, comparablePhoneKey): a number they
+// cannot normalize must not count as reachable here either.
 function isDialablePhone(value) {
   if (!value) return false;
   if (isImpossibleNanpPhone(value)) return false;
-  const text = String(value).trim();
-  const digits = text.replace(/\D/g, '');
-  if (text.startsWith('+') && digits[0] !== '1') return digits.length >= 8 && digits.length <= 15;
-  return digits.length >= 10;
+  return String(value).replace(/\D/g, '').length >= 10;
 }
 
 // Pure predicate: did THIS caller disclaim the ANI as not their own with no

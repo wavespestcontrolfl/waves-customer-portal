@@ -24,7 +24,7 @@ function capitalizeName(name) {
   return properCase(name);
 }
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
-const { rejectImpossibleSpokenPhones, dropImpossibleSecondaryPhones } = require('./call-spoken-phone-guard');
+const { rejectImpossibleSpokenPhones, dropImpossibleSecondaryPhones, persistableV2Extraction } = require('./call-spoken-phone-guard');
 const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers');
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
@@ -10241,7 +10241,7 @@ const CallRecordingProcessor = {
         }
         stageTimings.extraction_v2_ms = Date.now() - v2StartedAt;
         const v2Update = {
-          ai_extraction_enriched: v2Result.extraction ? JSON.stringify(v2Result.extraction) : null,
+          ai_extraction_enriched: v2Result.extraction ? JSON.stringify(persistableV2Extraction(v2Result.extraction)) : null,
           ai_extraction_validation_errors: v2Result.errors ? JSON.stringify(v2Result.errors) : null,
           ai_address_validation: v2AddressValidation ? JSON.stringify(v2AddressValidation) : null,
           v2_extraction_status: v2Result.status,
@@ -11534,7 +11534,7 @@ const CallRecordingProcessor = {
               // Token-fenced (post-Google-AV await): a superseded pass must
               // not re-persist ITS blob over the owning pass's.
               .where('processing_token', procToken)
-              .update({ ai_extraction_enriched: JSON.stringify(v2Extraction) })
+              .update({ ai_extraction_enriched: JSON.stringify(persistableV2Extraction(v2Extraction)) })
               .catch((e) => logger.warn(`[call-proc-v2] enriched-blob re-persist after AV adoption failed: ${e.code || e.name || 'db_error'}`));
           }
 

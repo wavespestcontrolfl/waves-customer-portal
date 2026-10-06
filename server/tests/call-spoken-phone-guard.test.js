@@ -5,7 +5,7 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { rejectImpossibleSpokenPhones, dropImpossibleSecondaryPhones } = require('../services/call-spoken-phone-guard');
+const { rejectImpossibleSpokenPhones, dropImpossibleSecondaryPhones, persistableV2Extraction } = require('../services/call-spoken-phone-guard');
 const { isImpossibleNanpPhone } = require('../utils/phone');
 const {
   computeDeterministicTriageFlags,
@@ -52,9 +52,9 @@ describe('isImpossibleNanpPhone', () => {
 });
 
 describe('impossible phones never reach a contact number', () => {
-  test('isDialablePhone accepts a short international E.164 callback (8-15 digits)', () => {
+  test('isDialablePhone keeps the shared ten-digit floor and refuses a short +1 number', () => {
     expect(isDialablePhone('+35312345678')).toBe(true);
-    expect(isDialablePhone('+3531234')).toBe(false);
+    expect(isDialablePhone('+33123456')).toBe(false);
     expect(isDialablePhone('+1941555012')).toBe(false);
   });
 
@@ -113,6 +113,24 @@ describe('caller guard runs on each record independently', () => {
 
   test('nothing to reject is a clean no-op', () => {
     expect(rejectImpossibleSpokenPhones({})).toEqual({ rejectedCaller: false });
+  });
+});
+
+describe('persistableV2Extraction', () => {
+  test('the persisted copy has impossible secondary numbers nulled; the in-memory extraction keeps them', () => {
+    const ext = { caller: {}, secondary_contact: { first_name: 'Quentrell', phone_e164: '+11733038616' },
+      secondary_contacts: [{ first_name: 'Quentrell', phone_e164: '+11733038616' }, { first_name: 'Lorna', phone_e164: '+19415550123' }] };
+    const out = persistableV2Extraction(ext);
+    expect(out.secondary_contact.phone_e164).toBeNull();
+    expect(out.secondary_contacts[0].phone_e164).toBeNull();
+    expect(out.secondary_contacts[1].phone_e164).toBe('+19415550123');
+    expect(ext.secondary_contact.phone_e164).toBe('+11733038616');
+  });
+
+  test('both enriched-blob writes persist the sanitized copy', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src).toMatch(/ai_extraction_enriched: v2Result\.extraction \? JSON\.stringify\(persistableV2Extraction\(v2Result\.extraction\)\)/);
+    expect(src).toMatch(/update\(\{ ai_extraction_enriched: JSON\.stringify\(persistableV2Extraction\(v2Extraction\)\) \}\)/);
   });
 });
 
