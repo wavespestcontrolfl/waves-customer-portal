@@ -425,10 +425,10 @@ describe('screenAskAnswer', () => {
     expect(screen(answer)).toBe(reason);
   });
 
-  test('shared screen: a local absence, recorded re-entry words, a timeframe, a date and a product name pass', () => {
+  test('shared screen: a local absence, recorded re-entry words, a timeframe and a product name pass', () => {
     expect(screen('None were seen at the dishwasher today.')).toBeNull();
     expect(screen('Keep pets off the treated areas until they are dry.', 'Can my dog go out?')).toBeNull();
-    expect(screen('Activity can stay up for a few days, and your next visit is Tuesday, January 5, 2027.')).toBeNull();
+    expect(screen('Activity can stay up for a few days, then it drops off.')).toBeNull();
     expect(screen('Alpine WSG with dinotefuran went on the outside of the home.', 'Why was Alpine WSG used?')).toBeNull();
   });
 
@@ -871,13 +871,18 @@ describe('report Ask hotfix (Codex on #5964 against live #5957 code)', () => {
       expect(m.buildReportAskPrompt({ question: `I live at ${address}`, data: { serviceLine: 'pest', applications: [] } }).user).not.toContain(address);
     }
   });
-  it('rejects a date, weekday or time the facts do not give', () => {
+  it('rejects any date, weekday or clock time in an AI answer', () => {
     const facts = { service_date: 'Sunday, October 4, 2026', next_visit: { date: 'Monday, January 4, 2027', arrival_window: 'between 9:00 AM and 11:00 AM' } };
     const screen = (a) => m.screenAskAnswer(a, { question: 'q', data: {}, facts });
-    expect(screen('Your next visit is January 8 at 2 PM.')).toBe('date_not_in_facts');
-    expect(screen('Your next visit is Friday.')).toBe('date_not_in_facts');
-    expect(screen('Your next visit is Monday, January 4, 2027, between 9:00 AM and 11:00 AM.')).toBeNull();
-    expect(screen('Your next visit is Jan 4.')).toBeNull();
+    for (const bad of ['Your next visit is January 8 at 2 PM.', 'Your next visit is Friday.', 'Your next visit is Monday, January 4, 2028.', 'Your next visit is Sunday, January 4, 2027.', 'We arrive at 1:00 AM.']) {
+      expect(screen(bad)).toBe('states_a_date');
+    }
     expect(screen('It keeps working for weeks.')).toBeNull();
+    expect(m.AI_ASK_TOPICS.has('next_visit')).toBe(false);
+  });
+  it('a pet or child word that names a place is not an exposure; any body part is', () => {
+    expect(m.medicalExposureAnswer('They sprayed on the dog run')).toBeNull();
+    expect(m.medicalExposureAnswer("They sprayed the child's room")).toBeNull();
+    for (const q of ['They sprayed my foot', 'They sprayed my back', 'They sprayed my neck']) expect(m.medicalExposureAnswer(q)).toBeTruthy();
   });
 });

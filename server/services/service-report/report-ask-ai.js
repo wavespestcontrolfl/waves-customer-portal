@@ -219,7 +219,9 @@ function petPrecautionFact(data = {}) {
 
 // Rule-router topics the AI may answer. Re-entry, watering and next steps
 // stay on the fixed rules: they carry recorded instructions word for word.
-const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'next_visit', 'unrouted']);
+// next_visit stays on the rule answer: it states the scheduled date and
+// window exactly, and the AI never states a date (Codex P1s on #6020).
+const AI_ASK_TOPICS = new Set(['applied', 'results', 'findings', 'summary', 'unrouted']);
 
 // A pressure reading, or null for a missing one: Number(null) is 0, and a
 // made-up zero would contradict the report (pre-push audit P1).
@@ -526,35 +528,19 @@ const ASK_CHECKS = [
   ['banned_copy', (text) => require('./activity-indicators').findBannedCustomerCopy(text).length > 0],
   ['compliance', (text) => require('../social-media').complianceLanguageIssues(text, { impliedTreatmentContext: true }).length > 0],
   ['target_list', leaksTargetList],
-  ['date_not_in_facts', datesNotInFacts],
+  ['states_a_date', (text) => DATE_TOKEN.test(text)],
 ];
 
 /**
  * Returns null when the answer may be shown, else a short reason string.
  * `context.data` lets the screen catch a product's target pest list leaking.
  */
-// The shared screen skips its date/time rules (an answer must be able to say
-// the next visit), so a date, weekday or clock time in the answer must be one
-// the facts give (service date, next visit, arrival window): a plausible but
-// wrong appointment never reaches the customer (Codex P1 #5964).
+// The shared screen skips its date/time rules, so an AI answer may not state
+// a calendar date, a weekday or a clock time at all: a recombined or
+// mistyped appointment can never reach the customer (Codex P1s on #6020).
+// Next-visit questions keep the rule answer, which states the schedule.
 const MONTHS = 'january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec';
-const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\\b`, 'gi');
-function datesNotInFacts(text, { facts }) {
-  const tokens = text.match(DATE_TOKEN) || [];
-  if (!tokens.length) return false;
-  const known = [facts?.service_date, facts?.next_visit?.date, facts?.next_visit?.arrival_window]
-    .filter(Boolean).join(' ').toLowerCase().replace(/(\d)(st|nd|rd|th)\b/g, '$1');
-  const norm = (token) => token.toLowerCase().replace(/\./g, '').replace(/(\d)(st|nd|rd|th)\b/, '$1').replace(/\s+/g, ' ');
-  const longMonth = (token) => token.replace(new RegExp(`^(${MONTHS})\\b`), (m) => ({
-    jan: 'january', feb: 'february', mar: 'march', apr: 'april', jun: 'june', jul: 'july', aug: 'august',
-    sep: 'september', sept: 'september', oct: 'october', nov: 'november', dec: 'december',
-  })[m] || m);
-  const clock = (token) => token.replace(/^(\d{1,2})\s*(am|pm)$/, '$1:00 $2').replace(/^(\d{1,2}:\d{2})(am|pm)$/, '$1 $2');
-  return tokens.some((token) => {
-    const t = clock(longMonth(norm(token)));
-    return !known.replace(/\./g, '').includes(t);
-  });
-}
+const DATE_TOKEN = new RegExp(`\\b(?:(?:${MONTHS})\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?|\\d{1,2}\\/\\d{1,2}(?:\\/\\d{2,4})?|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|(?:mon|tues|wednes|thurs|fri|satur|sun)day)\\b`, 'i');
 
 function screenAskAnswer(answer, { question = '', data = {}, facts } = {}) {
   const raw = String(answer == null ? '' : answer);
@@ -581,6 +567,8 @@ const MEDICAL_EXPOSURE_ANSWER = `Please call Poison Control at ${POISON_CONTROL_
 // A person or pet as the subject: "I", "my dog", "the baby", "our son".
 const PATIENT_NOUNS = '(?:dogs?|cats?|pets?|puppy|puppies|kittens?|birds?|horses?|rabbits?|child(?:ren)?|kids?|bab(?:y|ies)|toddlers?|sons?|daughters?|wife|husband|mom|mother|dad|father|grand(?:ma|pa|mother|father|son|daughter|kids?|children)|sisters?|brothers?|nephews?|nieces?|friends?|neighbou?rs?|guests?)';
 const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS})`;
+const BODY_PARTS = 'eyes?|skin|face|hands?|fingers?|arms?|legs?|feet|foot|toes?|back|neck|head|hair|ears?|nose|lips?|mouth|chest|stomach|belly|body|shoulders?|knees?|ankles?|wrists?|clothes|clothing|shirt|paws?|fur|coat';
+const PLACE_AFTER_PATIENT = 'run|room|rooms|bed|beds|area|house|door|bowl|bowls|crate|yard|pen|toys?|play\\s*set|playground|swing';
 const MEDICAL_CUES = [
   // Symptoms, said with or without a subject.
   /\b(?:dizz(?:y|iness)|light[\s-]?headed|nause(?:a|ous|ated)|vomit\w*|throw(?:ing|n)?\s+up|threw\s+up|diarrh?ea|faint(?:ed|ing)?|passed\s+out|pass(?:ing)?\s+out|seizures?|convuls\w*|numb(?:ness)?|tingl\w*|wheez\w*|rash(?:es)?|blisters?|swell(?:ing|en)|swollen|headaches?|migraines?|drool\w*|lethargic|disoriented|short(?:ness)?\s+of\s+breath|chest\s+(?:pain|tight\w*))\b/i,
@@ -595,8 +583,10 @@ const MEDICAL_CUES = [
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?)\b/i,
-  // A person, pet or body part only: "sprayed my lawn" is a report question.
-  new RegExp(`\\bsprayed\\s+(?:on\\s+|in\\s+)?(?:me|him|her|us|them|(?:my|our|his|her|their|the)\\s+(?:${PATIENT_NOUNS.slice(3, -1)}|eyes?|skin|face|hands?|arms?|legs?|mouth))\\b`, 'i'),
+  // A person, pet or body part, standing alone ("sprayed my dog", "sprayed
+  // my foot"); a place is a report question ("my lawn", "the dog run", "the
+  // child's room") (Codex P1s on #6020).
+  new RegExp(`\\bsprayed\\s+(?:on\\s+|in\\s+|onto\\s+)?(?:me|him|her|us|them|myself|(?:my|our|his|her|their|the)\\s+(?:${PATIENT_NOUNS.slice(3, -1)}|${BODY_PARTS}))\\b(?!['’]s|\\s+(?:${PLACE_AFTER_PATIENT})\\b)`, 'i'),
 ];
 
 /**
