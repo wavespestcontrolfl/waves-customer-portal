@@ -25,6 +25,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
 import { useAutoGrowTextarea } from "../../hooks/useAutoGrowTextarea";
 import DictationButton from "../tech/DictationButton";
+import useDictationPending from "../../hooks/dictationPending";
 import PendingActionsCard from "./PendingActionsCard";
 import IntelligenceTaskCard from "./IntelligenceTaskCard";
 import { createRequestIdentity, definitiveFailure, ibSessionId } from "../../utils/ibSession";
@@ -342,6 +343,11 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const identityRef = useRef(null);
   if (!identityRef.current) identityRef.current = createRequestIdentity(sessionIdRef.current);
   const submittingRef = useRef(false);
+  // A mic still recording or transcribing (server dictation): its words are on
+  // the way, so Ask waits for them instead of sending what was typed so far.
+  const dictationPending = useDictationPending();
+  const dictationPendingRef = useRef(false);
+  dictationPendingRef.current = dictationPending;
   // GATE_IB_TOOL_ACTIVITY: operator-facing lines for what this exchange ran.
   const [toolActivity, setToolActivity] = useState([]);
   // Knowledge searches that came back empty (payload knowledgeMisses):
@@ -607,7 +613,7 @@ function GlobalCommandPalette({ user, onNavigate }, ref) {
   const submit = useCallback(
     async (text, selectedTarget) => {
       const q = (text || prompt).trim();
-      if (!q || loading || submittingRef.current || attachmentsLoadingRef.current) return;
+      if (!q || loading || submittingRef.current || attachmentsLoadingRef.current || dictationPendingRef.current) return;
       submittingRef.current = true;
       threadEpochRef.current += 1; // invalidate any inflight thread resume
       const epoch = threadEpochRef.current;
@@ -1342,6 +1348,7 @@ function MobileSheet({
 }) {
   const fileInputRef = useRef(null);
   useAutoGrowTextarea(inputRef, prompt, COMPOSER_MAX_HEIGHT.mobile);
+  const dictationPending = useDictationPending();
   return (
     <>
       {/* Backdrop */}
@@ -1537,18 +1544,18 @@ function MobileSheet({
             {" "}
             <button
               onClick={() => submit()}
-              disabled={!prompt.trim() || loading || attachmentsLoading}
+              disabled={!prompt.trim() || loading || attachmentsLoading || dictationPending}
               style={{
                 flex: 1,
                 padding: "12px 16px",
                 minHeight: 44,
                 borderRadius: 10,
                 border: "none",
-                background: prompt.trim() && !loading && !attachmentsLoading ? "#18181B" : "#E4E4E7",
-                color: prompt.trim() && !loading && !attachmentsLoading ? "#FFFFFF" : "#A1A1AA",
+                background: prompt.trim() && !loading && !attachmentsLoading && !dictationPending ? "#18181B" : "#E4E4E7",
+                color: prompt.trim() && !loading && !attachmentsLoading && !dictationPending ? "#FFFFFF" : "#A1A1AA",
                 fontSize: 14,
                 fontWeight: 500,
-                cursor: prompt.trim() && !loading && !attachmentsLoading ? "pointer" : "not-allowed",
+                cursor: prompt.trim() && !loading && !attachmentsLoading && !dictationPending ? "pointer" : "not-allowed",
                 fontFamily: "Roboto, Arial, sans-serif",
                 letterSpacing: "0.06em",
                 textTransform: "uppercase",

@@ -11,7 +11,7 @@ import { installStaffSessionGuard } from './lib/staffSessionGuard';
 // A staff session the server refuses anywhere in the app (admin pages too)
 // deletes the offline route copy and offline pass, so a later no-signal
 // reopen of /tech cannot show customer data from a refused session.
-installStaffSessionGuard({ getToken: getAdminAuthToken, onRejected: clearStaffDeviceData });
+installStaffSessionGuard({ getToken: getAdminAuthToken, onRejected: clearStaffDeviceData, onEnrollmentRequired: clearStaffDeviceData });
 
 // Stale-chunk healing for tabs that live across a deploy: Vite's dependency
 // preloader throws a plain Error that lazyWithRetry's chunk-message regex never

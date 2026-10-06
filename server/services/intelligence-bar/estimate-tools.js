@@ -852,7 +852,9 @@ async function lookupProperty({ address }) {
   if (!address) return { error: 'address required' };
 
   try {
-    const lookup = await performPropertyLookup(address);
+    // Scope decision: lookup-callers.js (intelligence_bar_lookup: no answer surface).
+    const { lookupOptionsFor } = require('../property-lookup/lookup-callers');
+    const lookup = await performPropertyLookup(address, lookupOptionsFor('intelligence_bar_lookup'));
     const raw = lookup.propertyRecord || lookup.rentcast || null;
     const property = raw ? {
       formatted_address: raw.formattedAddress || raw.addressLine1 || address,

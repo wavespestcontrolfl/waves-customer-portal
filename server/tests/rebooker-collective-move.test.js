@@ -1484,7 +1484,7 @@ describe('caller wiring (source)', () => {
     expect(body).toContain('&& occurrence.conflicted !== true && !!occurrence.windowStart);');
     // The text and the close are separate recorded steps: customer_notified is written BEFORE the close is attempted, a failed close leaves notified_at NULL, and a retry with the text already out redoes ONLY the close.
     expect(body).toContain('await recordCustomerNotified();\n            await closeSeriesReminders();');
-    expect(body).toContain('} else if (notify && markers.customer_notified === true) {');
+    expect(body).toContain('} else if (text.send && markers.customer_notified === true) {');
     expect(body).toContain('const closed = await markRescheduleReminderNotified(closeIds, guardsByServiceId ? { guardsByServiceId } : {});');
     expect(body).toContain("if (!closed) {");
     expect(disp.slice(disp.indexOf('async function markRescheduleReminderNotified('), disp.indexOf('// Snapshot the reminder rows THIS request just synced'))).toContain('return outcome !== null && outcome !== undefined;');

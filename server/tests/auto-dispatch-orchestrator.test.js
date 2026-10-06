@@ -6,6 +6,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
+  isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
 }));
 jest.mock('../services/auto-dispatch/preferences', () => ({
   getCustomerSchedulingPreferences: jest.fn(async () => ({
@@ -14,7 +15,7 @@ jest.mock('../services/auto-dispatch/preferences', () => ({
   })),
 }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ findValidCandidateSlots: jest.fn() }));
-jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })) }));
+jest.mock('../services/auto-dispatch/apply', () => ({ applyAutoDispatchMove: jest.fn(), unitMoveSize: jest.fn(async () => 1), revalidatePlacement: jest.fn(async () => ({ ok: true })), previewGroupMove: jest.fn(async () => null) }));
 jest.mock('../services/geocoder', () => ({ ensureCustomerGeocoded: jest.fn() }));
 jest.mock('../services/auto-dispatch/audit', () => ({
   startRun: jest.fn(async () => 'run1'),
@@ -236,6 +237,30 @@ test('does not spend geocode budget on an inactive recurring plan', async () => 
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled(); // plan checked first → no geocode
   expect(res).toMatchObject({ skipped: 1, geocode_attempts: 0 });
   expect(lastDecision('skipped').reason_code).toBe('RECURRING_PLAN_INACTIVE');
+});
+
+test('a visit a person put on its date is skipped before scoring, in every mode', async () => {
+  eligibility.isPersonPlacedVisit.mockResolvedValueOnce({ placed: true, reason_code: 'PERSON_PLACED', reason_description: 'Date chosen by the customer (series move m1)' });
+  const res = await runAutoDispatch({ mode: 'apply' });
+  expect(res).toMatchObject({ skipped: 1, evaluated: 0, changed: 0 });
+  expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+  expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+  expect(lastDecision('skipped').reason_code).toBe('PERSON_PLACED');
+});
+
+test('an unreadable move history skips the visit and marks the run degraded, not completed', async () => {
+  eligibility.isPersonPlacedVisit.mockResolvedValueOnce({ placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: 'x' });
+  const res = await runAutoDispatch({ mode: 'apply' });
+  expect(res).toMatchObject({ skipped: 1, changed: 0, status: 'completed_with_errors' });
+  expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+});
+
+test('a grouped sibling refusal suppresses a dry-run recommendation outside flex mode too', async () => {
+  candidateSlots.findValidCandidateSlots.mockResolvedValue({ current: CURRENT, candidates: [CAND_BIG] });
+  apply.previewGroupMove.mockResolvedValueOnce({ code: 'GROUP_MEMBER_GUARD', description: 'sibling placed by a person' });
+  const res = await runAutoDispatch({ mode: 'dry_run' });
+  expect(res).toMatchObject({ recommended: 0 });
+  expect(apply.previewGroupMove).toHaveBeenCalled();
 });
 
 test('ineligible service is skipped before candidate generation', async () => {
