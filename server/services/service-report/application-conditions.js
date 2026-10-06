@@ -813,7 +813,9 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
       ? Math.round((mrmsWeek - omWeek) * 100) / 100
       : null;
     logger.info(`[rain-engine] mode=${mode} mrms=${mrmsWeek ?? 'unavailable'} om=${omWeek ?? 'unavailable'} delta=${delta ?? 'n/a'} source=${merged ? merged.rainSource : 'open_meteo_only'} loc=${loc} end=${range.end}`);
-    if (merged && mode === 'live') value = merged;
+    // A week past Open-Meteo's reach has no model to shadow against: MRMS
+    // is its only rain, in shadow mode too (Codex #6052 r3).
+    if (merged && (mode === 'live' || !omCovers)) value = merged;
     if (!merged && mode === 'live') {
       logger.warn(`[rain-engine] mode=live but MRMS unusable for ${range.start}..${range.end} loc=${loc} — Open-Meteo fallback`);
     }

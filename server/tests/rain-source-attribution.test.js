@@ -93,6 +93,27 @@ describe('Open-Meteo service week — archive first, forecast as fallback', () =
     }
   });
 
+  test('MRMS shadow mode: a week past the paid reach uses MRMS rain, not a settled blank (Codex #6052 r3)', async () => {
+    process.env.OPEN_METEO_API_KEY = 'fixture-key';
+    const OLD_MRMS = process.env.GATE_RAIN_MRMS;
+    process.env.GATE_RAIN_MRMS = 'shadow';
+    try {
+      const serviceMs = Date.now() - 200 * 86400000;
+      const serviceDate = new Date(serviceMs).toISOString().slice(0, 10);
+      const data = [];
+      for (let i = -12; i <= 2; i += 1) data.push({ date: new Date(serviceMs + i * 86400000).toISOString().slice(0, 10), mrms_precip_in: 0.1 });
+      const urls = [];
+      global.fetch = jest.fn(async (url) => { urls.push(String(url)); return { ok: true, json: async () => ({ data }) }; });
+      const out = await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate });
+      expect(urls.some((u) => u.includes('open-meteo.com'))).toBe(false);
+      expect(out.rainInches).toBeGreaterThan(0);
+      expect(out.noSource).toBeUndefined();
+    } finally {
+      delete process.env.OPEN_METEO_API_KEY;
+      if (OLD_MRMS === undefined) delete process.env.GATE_RAIN_MRMS; else process.env.GATE_RAIN_MRMS = OLD_MRMS;
+    }
+  });
+
   test('an unusable archive window falls back to the forecast endpoint, not to nothing', async () => {
     const urls = [];
     global.fetch = jest.fn(async (url) => {
