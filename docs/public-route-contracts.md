@@ -159,7 +159,7 @@ when the card is present.
 `pestWeekWeatherPendingReason` markers are no longer emitted.** The "Rain and
 your treatment" card is gone from the pest report (live page and PDF) for good;
 `data.pestReportV2.expectations` carries at most `spiders` and `whatToExpect`,
-and the pest PDF key suffix stays `-pex3`. Already-frozen
+and the pest PDF key suffix is `-pex4` (2026-10-05: the Gentrol growth regulator line gained its label's 4-month duration). Already-frozen
 `structured_notes.pestWeekWeather` values are left in place, unread.
 The same day the live page changed two client-only lines from fields it
 already receives: "Today's result" on a routine Pest V2 visit (the

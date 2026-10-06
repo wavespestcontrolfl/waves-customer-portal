@@ -408,12 +408,12 @@ describe('pestReportV2PdfSignature — expectations gate suffix', () => {
   const ORIGINAL = process.env.GATE_PEST_REPORT_EXPECTATIONS;
   afterEach(() => { process.env.GATE_PEST_REPORT_EXPECTATIONS = ORIGINAL; });
 
-  it('appends -pex3 to the pest-line key when the gate is on, independent of PEST_REPORT_V2', () => {
+  it('appends -pex4 to the pest-line key when the gate is on, independent of PEST_REPORT_V2', () => {
     process.env.GATE_PEST_REPORT_EXPECTATIONS = 'true';
     const ORIGINAL_V2 = process.env.PEST_REPORT_V2;
     delete process.env.PEST_REPORT_V2;
     try {
-      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex3-noarea1');
+      expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pex4-noarea1');
     } finally {
       process.env.PEST_REPORT_V2 = ORIGINAL_V2;
     }
