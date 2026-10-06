@@ -1503,6 +1503,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "start_program": {
+    "module": "customer-lifecycle-tools.js",
+    "domain": "customers",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "move_stops_to_day": {
     "module": "schedule-tools.js",
     "domain": "schedule",

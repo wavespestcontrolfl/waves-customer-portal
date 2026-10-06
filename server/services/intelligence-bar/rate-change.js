@@ -145,4 +145,4 @@ async function rateChangeProposal(customerId, newRate, rateService) {
   };
 }
 
-module.exports = { rateChangeProposal, ledgerPin, lineLabel, money, UNCHANGED, customersWithBill };
+module.exports = { rateChangeProposal, ledgerPin, lineLabel, money, UNCHANGED, customersWithBill, resolveFamily };

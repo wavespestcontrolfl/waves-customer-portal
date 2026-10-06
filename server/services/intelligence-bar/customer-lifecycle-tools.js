@@ -17,6 +17,10 @@
  * validated by the executor UNDER its row locks, never in a caller-side
  * preflight; the final duplicate-queue eligibility decision runs there too.
  *
+ * start_program: start a recurring program for an existing monthly-plan
+ * customer (series + tier + monthly bill, one card) — start-program.js,
+ * dark behind GATE_IB_START_PROGRAM.
+ *
  * archive_customer (retire a record outright) was split out of this module:
  * it ships separately on a shared archive service with the DELETE
  * /api/admin/customers/:id route and cancellation-eligibility as a blocker.
@@ -25,6 +29,9 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
+// start_program (owner 2026-10-06): series + tier + monthly bill in one card;
+// the implementation lives in start-program.js.
+const { START_PROGRAM_TOOL, startProgram, startProgramLive } = require('./start-program');
 
 // Default-off capability gate (codex #4348 r14 P1): merge_customers is an
 // irreversible admin write and must not go live in every admin context the
@@ -394,12 +401,14 @@ The first call returns a PREVIEW naming both customers (name, phone, email) and 
       additionalProperties: false,
     },
   },
+  START_PROGRAM_TOOL,
 ];
 
 async function executeCustomerLifecycleTool(toolName, input, actionContext = {}) {
   try {
     switch (toolName) {
       case 'merge_customers': return await mergeCustomers(input, actionContext);
+      case 'start_program': return await startProgram(input, actionContext);
       default:
         return { error: `Unknown tool: ${toolName}` };
     }
@@ -412,6 +421,7 @@ async function executeCustomerLifecycleTool(toolName, input, actionContext = {})
 module.exports = {
   CUSTOMER_LIFECYCLE_TOOLS,
   mergeCustomersEnabled,
+  startProgramLive,
   executeCustomerLifecycleTool,
   // exported for tests
   _test: { customerName },

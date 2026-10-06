@@ -73,9 +73,11 @@ beforeAll(() => {
   process.env.GATE_CANCEL_FLOW_V2 = 'true';
   process.env.GATE_IB_PLATFORM = 'true';
   process.env.GATE_IB_MERGE_CUSTOMERS = 'true';
+  process.env.GATE_IB_START_PROGRAM = 'true';
 });
 afterAll(() => {
   delete process.env.GATE_IB_MERGE_CUSTOMERS;
+  delete process.env.GATE_IB_START_PROGRAM;
   if (ORIGINAL_PLATFORM_GATE === undefined) delete process.env.GATE_IB_PLATFORM;
   else process.env.GATE_IB_PLATFORM = ORIGINAL_PLATFORM_GATE;
   if (ORIGINAL_DRIVE_GATE === undefined) delete process.env.GATE_DRIVE_TIME_CALIBRATION;
@@ -88,7 +90,7 @@ afterAll(() => {
 // Helpers in services/intelligence-bar/ that are not tool modules. A new
 // non-tool helper added to the directory must be listed here explicitly —
 // otherwise the suite fails, which is the safe default.
-const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js']);
+const NON_TOOL_FILES = new Set(['circuit-breaker.js', 'estimate-detail.js', 'tool-events.js', 'write-gates.js', 'pending-actions.js', 'threads.js', 'authorization-contract.js', 'proposal-pins.js', 'action-registry.js', 'agent-estimate-policy.js', 'outcomes.js', 'task-context.js', 'tasks.js', 'tool-definition.js', 'scope-policy.js', 'pii-tools.js', 'ib-access.js', 'outside-write-pins.js', 'owner-direct.js', 'price-read-back.js', 'rate-change.js', 'start-program.js']);
 
 function isToolShaped(entry) {
   return entry && typeof entry === 'object'
@@ -154,6 +156,7 @@ const WRITE_TWO_STEP = [
   'remove_saved_payment_method',
   'correct_invoice_address',
   'update_lead_contact',
+  'start_program',
   // Outside-service writes (IB scope expansion item 1, owner ruling
   // 2026-09-28) — full-access-only (write-gates.js
   // FULL_ACCESS_TWO_STEP_TOOL_NAMES, enforced by the route), PREVIEW ONLY:
@@ -601,6 +604,23 @@ describe('two-step writes do not mutate without confirmed (behavioral)', () => {
         { id: '00000000-0000-0000-0000-00000000a001', first_name: 'Real', last_name: 'Winner', phone: '9415550100', email: 'winner@example.com', deleted_at: null },
         { id: '00000000-0000-0000-0000-00000000a002', first_name: 'Unknown', last_name: '', phone: '9415550100', email: null, deleted_at: null },
       ],
+    }],
+    // start_program: a dues-billed customer with one earlier (unsplit) rate,
+    // no saved address, no series and no open estimate, so the preview
+    // reaches its confirmation gate.
+    ['customer-lifecycle-tools', 'executeCustomerLifecycleTool', 'start_program', {
+      customer_id: '00000000-0000-0000-0000-00000000e001', service: 'Lawn Care', cadence: 'monthly',
+      monthly: 61.33, tier: 'Silver', first_date: '2099-03-02', time_window: '9:00 AM',
+      technician_id: '00000000-0000-0000-0000-00000000e0aa',
+    }, {
+      customers: [{
+        id: '00000000-0000-0000-0000-00000000e001', first_name: 'Dana', last_name: 'Example', version: 'v1',
+        monthly_rate: '41.33', billing_mode: 'monthly_membership', waveguard_tier: 'Bronze', payer_id: null, deleted_at: null,
+      }],
+      services: [{ id: 'svc-lawn', name: 'Lawn Care', service_key: 'lawn_care', is_active: true, default_duration_minutes: 60 }],
+      technicians: [{ id: '00000000-0000-0000-0000-00000000e0aa', name: 'Sam Tech' }],
+      scheduled_services: [],
+      estimates: [],
     }],
     // cancel_plan's preview needs the customer to EXIST (create_customer's
     // duplicate check needs it to be missing), so it carries its own seed —

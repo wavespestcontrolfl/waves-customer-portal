@@ -17,6 +17,7 @@
  *   GATE_ONSITE_CALLER_DEMOTE=true (when the on-site person a caller booked for answers YES to the opt-in text for that visit, the caller's appointment texts switch off account-wide (only when that person is the account's only service contact) and the on-site person gets the booking confirmation they missed; owner rulings 2026-09-30 and 2026-10-02. Read at call time via onSiteCallerDemoteLive(), dark by default; needs the recipient double opt-in rail on. Off, a YES still records consent and nothing else changes; rollback = unset)
  *   GATE_CONTACT_REPORT_TEXT=true (when the account holder's visit-complete text goes out, each confirmed on-location contact gets one plain text with the report link: no pay link, no review ask; the combined-stop summary text then goes to the account holder, not Contact 1; owner ruling 2026-10-03. Read at call time via contactReportTextLive(), dark by default; off = no contact text is queued, a queued one is dropped at its recheck, and the summary recipient is unchanged. The gate is the only supported switch: the contact_report_ready sms template row must stay active while it is on.)
  *   GATE_IB_STAFF_AUTOPAY_OFF=true (the Intelligence Bar's remove_saved_payment_method may turn a customer's Auto Pay off as the first step of one confirm card, then remove the card Auto Pay was using; owner ruling 2026-10-03. The off step is the portal's own disable (services/autopay-disable.js), so the customer gets the gated Auto Pay-off and payment-method-removed emails exactly as the portal sends them. Read at call time via ibStaffAutopayOffLive(), strict 'true', dark by default; off = the bar still removes a method Auto Pay is NOT using, and for one Auto Pay uses it answers that Auto Pay can't be turned off from the bar yet, changing nothing.)
+ *   GATE_IB_START_PROGRAM=true (the Intelligence Bar's start_program write tool, owner 2026-10-06: one confirm card books a recurring series through the Schedule screen's own handler, sets the WaveGuard tier and adds the service to the monthly bill for a customer already on a monthly plan bill. Read at call time via ibStartProgramLive(), strict 'true', dark by default; off = the tool is not offered and refuses every call, changing nothing.)
  *   GATE_SERIES_MOVE_CARRIES_VISIT=true (staff whole-schedule moves carry each grouped visit partner to the new stop in the same transaction instead of refusing with VISIT_SERIES_MOVE_UNSUPPORTED; read at call time via seriesMoveCarriesVisitLive(), dark by default; customer self-serve moves unchanged; frozen visits still refuse)
  *   GATE_SERIES_MOVE_TEXT_COALESCE=true (when staff move a recurring series from the board or the edit modal, the customer text waits 3 minutes and only the newest move's date is sent; an older move's text is dropped when a newer staff move covers the same visit; reminders and other move effects stay immediate; read at call time via seriesMoveTextCoalesceLive(), dark by default; customer-facing)
  *   GATE_PACKAGE_FOLLOWUP_AUTOBOOK=true (booking visit 1 of a two-treatment package — catalog cockroach_control, flea_tick or bed_bug_treatment — also books visit 2 in the same transaction: 14 days later (the catalog row's follow-up interval), same technician and window, confirmed with no office confirm step, $0 included, linked to visit 1 so a date move of visit 1 shifts it by the same days until the customer confirms or moves it (its time of day is kept) and a cancel, skip or no-show of visit 1 always retires it; owner rulings 2026-10-04. Covers admin Schedule create, estimate acceptance, the Leads page, the call pipeline (its visit 2 is written confirmed too); voice-agent and outbound-callback bookings are not covered yet. Off = visit 2 is booked only from the closeout card or a call that discussed it. Read at call time via packageFollowupAutobookLive(), dark by default; kill = unset. No confirmation text for visit 2; reminders arm through the self-heal sweep; the customer can reschedule it.)
@@ -4543,6 +4544,13 @@ function ibStaffAutopayOffLive() {
   return process.env.GATE_IB_STAFF_AUTOPAY_OFF === 'true';
 }
 
+// GATE_IB_START_PROGRAM read at CALL time — strict `=== 'true'`, dark. The
+// Intelligence Bar's start_program tool (services/intelligence-bar/
+// start-program.js): offered and executable only while on. Kill: unset.
+function ibStartProgramLive() {
+  return process.env.GATE_IB_START_PROGRAM === 'true';
+}
+
 // GATE_DUPLICATES_SAME_ADDRESS read at REQUEST time — strict `=== 'true'`, dark.
 // Adds the "Same address, different phone" section to the admin Duplicates
 // review queue (customer-dedupe.js findSameAddressGroups). Review-only: the
@@ -5922,3 +5930,5 @@ module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 module.exports.lawnV13Live = lawnV13Live;
 // GATE_SERVER_DICTATION reader, on its own line so gate PRs never conflict.
 module.exports.serverDictationLive = serverDictationLive;
+// GATE_IB_START_PROGRAM reader, on its own line so gate PRs never conflict.
+module.exports.ibStartProgramLive = ibStartProgramLive;

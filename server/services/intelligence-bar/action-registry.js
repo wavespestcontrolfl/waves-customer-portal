@@ -11,7 +11,7 @@ const {
   FULL_ACCESS_TWO_STEP_TOOL_NAMES,
 } = require('./write-gates');
 const { threadsEnabled } = require('./threads');
-const { mergeCustomersEnabled } = require('./customer-lifecycle-tools');
+const { mergeCustomersEnabled, startProgramLive } = require('./customer-lifecycle-tools');
 const AGENT_ESTIMATE_TOOL_NAMES = require('./agent-estimate-policy');
 const apiToolDefinition = require('./tool-definition');
 const { validScope } = require('./scope-policy');
@@ -122,6 +122,7 @@ function allowed(action, { role, context, fullAccess } = {}) {
   if (context === 'tech') return action.role === 'technician_or_admin';
   if (action.id === 'search_ib_history' && !threadsEnabled()) return false;
   if (action.id === 'merge_customers' && !mergeCustomersEnabled()) return false;
+  if (action.id === 'start_program' && !startProgramLive()) return false;
   // The dedicated lead-drafting rail has its own per-user gate and narrower
   // business contract. The global assistant uses the ordinary estimate path.
   if (action.id === 'create_agent_estimate_draft' && context !== 'agent_estimate') return false;
@@ -190,7 +191,7 @@ function initialTools(context, scope) {
   const common = new Set(['query_customers', 'get_customer_detail', 'get_schedule_view', 'query_leads', 'list_gap_reports', 'needs_me', ...EVERY_PAGE_TOOL_NAMES]);
   const discovery = scope.role === 'admin' && !['tech', 'agent_estimate'].includes(context) ? [DISCOVERY_TOOL] : [];
   return [...discovery, ...[...actions.values()]
-    .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain))
+    .filter(a => allowed(a, { ...scope, context }) && a.approval !== 'confirmed_endpoint' && (context === 'agent_estimate' || common.has(a.id) || a.domain === domain || (a.id === 'start_program' && ['dashboard', 'schedule', 'dispatch'].includes(context))))
     .map(a => a.definition)];
 }
 
