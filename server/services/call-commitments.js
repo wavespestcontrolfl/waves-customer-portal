@@ -1436,6 +1436,18 @@ async function directEstimatesSentAfter(conn, probes) {
     .select(cols);
   for (const r of stamped) consider(r.stamped_call_id, r, "estimate_stamped_with_this_call");
 
+  // customerWide probes (the triage staff-work rule): ANY estimate of the
+  // probe's customer handed off after its boundary, linked to the call or
+  // not. Same witness, owner fence and scope test as the routes above —
+  // only the call link is waived, and the proof says so in its basis.
+  const wide = probes.filter((p) => p.customerWide && p.customerId);
+  if (wide.length) {
+    const wideRows = await handedOffWithin(conn("estimates").whereIn("customer_id", [...new Set(wide.map((p) => p.customerId))]), minAfter).select(cols);
+    for (const r of wideRows) {
+      for (const p of wide) if (String(r.customer_id) === String(p.customerId)) consider(p.callId, r, "estimate_sent_to_call_customer");
+    }
+  }
+
   const probeBySid = new Map(probes.filter((p) => p.twilioCallSid).map((p) => [p.twilioCallSid, p]));
   if (!probeBySid.size) return judge();
   const leads = (await conn("leads")
