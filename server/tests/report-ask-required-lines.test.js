@@ -576,7 +576,8 @@ describe('answerReportQuestionWithAI with required lines', () => {
 
   test('no required lines: unchanged behavior', async () => {
     const callModel = jest.fn().mockResolvedValue(ok('We treated the outside of the home.'));
-    const out = await answerReportQuestionWithAI({ question: 'What did you do?', data: pestData() }, { callModel });
+    const data = pestData({ applications: [{ product: { name: 'Test Insecticide' }, applicationArea: 'Outside' }] });
+    const out = await answerReportQuestionWithAI({ question: 'What did you do?', data }, { callModel });
     expect(out.answer).toBe('We treated the outside of the home.');
     expect(callModel.mock.calls[0][0].maxTokens).toBe(400);
   });
@@ -1229,5 +1230,19 @@ describe('answer screen, Codex round 23', () => {
   test('spelled house numbers are masked', () => {
     const facts = buildReportAskFacts({ data: pestData({ customerConcern: 'Meet me at Twelve Main Street or One Hundred Bay Drive.' }) });
     expect(facts.customer_concern).toBe('Meet me at [number] Main Street or [number] Bay Drive.');
+  });
+});
+
+describe('answer screen, Codex round 24', () => {
+  const data = pestData({ applications: [] });
+  const facts = buildReportAskFacts({ question: 'Was anything applied?', data });
+  const ask = (answer) => screenAskAnswer(answer, { question: 'Was anything applied?', data, facts });
+
+  test.each(['Yes, a treatment was applied outside.', 'We sprayed the outside.'])('no recorded product: an application claim is rejected: %s', (answer) => {
+    expect(ask(answer)).toBe('scope_claim');
+  });
+
+  test('no recorded product: saying none was applied passes', () => {
+    expect(ask('The report shows no product applications for this visit.')).toBeNull();
   });
 });

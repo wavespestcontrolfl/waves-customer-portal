@@ -1106,6 +1106,9 @@ function ownSentences(text, requiredLines) {
 // Rooms are inside; yard features are outside (Codex P1 #5964 r22).
 const SAYS_INSIDE = /\b(?:inside|indoors?|interior|in\s+the\s+(?:home|house)|kitchen|bathrooms?|bedrooms?|living\s+room|dining\s+room|family\s+room|attic|basement|closets?|pantry|laundry|hallways?|cabinets?|baseboards?|under\s+the\s+sink)\b/i;
 const SAYS_OUTSIDE = /\b(?:outside|outdoors?|exterior|perimeter|around\s+the\s+(?:home|house|outside)|yard|lawn|garden|flower\s+beds?|landscape\s+beds?|lanai|patio|pool\s+(?:cage|deck|area)|fence(?:\s+line)?|driveway|eaves|soffits?|mulch|shrubs?|hedges?|trees?|palms?|turf)\b/i;
+const NEGATION_RE = /\b(?:no|not|never|none|nothing|without|wasn['’]?t|weren['’]?t|didn['’]?t|isn['’]?t|aren['’]?t)\b/i;
+// A claim that something was applied: "treated areas" and "went from 70" are not.
+const APPLICATION_CLAIM = /\b(?:applied|sprayed|spread|put\s+down|baited|dusted|fogged|misted)\b|\b(?:we|they|i|technician|tech|[A-Z][a-z]+|was|were|been|got)\s+(?:\w+\s+)?(?:treated|used)\b/;
 const APPLICATION_VERB = /\b(?:applied|applying|used|using|sprayed|spraying|put\s+down|spread|treated|went|placed|baited)\b/i;
 const wrongPlace = (sentence, where) => (SAYS_INSIDE.test(sentence) && !/inside|garage|entry/.test(where))
   || (SAYS_OUTSIDE.test(sentence) && !/outside|entry/.test(where));
@@ -1120,7 +1123,12 @@ function mentions(sentence, product) {
 // must match some recorded product (Codex P1 #5964 r20-r21).
 function statesWrongScope(text, { facts }) {
   const products = asArray(facts?.products).filter((product) => product?.name);
-  if (!products.length) return false;
+  // No recorded application: an answer may not say one happened ("We
+  // sprayed the outside") unless it says none did (Codex P1 #5964 r24).
+  if (!products.length) {
+    if (!facts) return false;
+    return splitSentences(matchForm(text)).some((sentence) => APPLICATION_CLAIM.test(sentence) && !NEGATION_RE.test(sentence));
+  }
   return splitSentences(matchForm(text)).some((sentence) => {
     const named = products.filter((product) => mentions(sentence, product));
     if (named.length) return named.some((product) => wrongPlace(sentence, String(product.applied_where || '')));
