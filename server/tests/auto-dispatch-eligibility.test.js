@@ -205,16 +205,17 @@ describe('isPersonPlacedVisit', () => {
       if (table !== 'reschedule_log') throw new Error(`unexpected table ${table}`);
       const preds = [];
       let ordered = false;
+      const rows = () => {
+        if (fail) throw new Error('connection reset');
+        const out = log.filter((r) => preds.every((p) => p(r)));
+        return ordered ? [...out].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)) : out;
+      };
       const chain = {
         where(key, value) { preds.push((r) => String(r[key]) === String(value)); return chain; },
-        whereIn(key, values) { preds.push((r) => values.includes(r[key])); return chain; },
+        whereNotNull(key) { preds.push((r) => r[key] != null); return chain; },
         orderBy() { ordered = true; return chain; },
-        first: async () => {
-          if (fail) throw new Error('connection reset');
-          let rows = log.filter((r) => preds.every((p) => p(r)));
-          if (ordered) rows = [...rows].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-          return rows[0] || null;
-        },
+        first: async () => rows()[0] || null,
+        select: async () => rows(),
       };
       return chain;
     };
@@ -228,21 +229,26 @@ describe('isPersonPlacedVisit', () => {
       .toMatchObject({ placed: true, reason_code: 'PERSON_PLACED', reason_description: 'Date chosen by the customer (series move m1)' });
   });
 
-  test('a staff single-visit move counts (no series move id)', async () => {
+  test('a staff single-visit move counts', async () => {
     expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by: 'admin', series_move_id: null })] })))
-      .toMatchObject({ placed: true, reason_description: 'Date chosen by staff (single-visit move)' });
+      .toMatchObject({ placed: true, reason_description: 'Date chosen by staff (move by admin)' });
   });
 
-  test('customer text replies read as the customer', async () => {
-    for (const initiated_by of ['customer_sms', 'sms_offer_ai', 'customer', 'customer_portal']) {
+  test('customer text and call flows read as the customer', async () => {
+    for (const initiated_by of ['customer_sms', 'sms_offer_ai', 'customer', 'customer_portal', 'ai_call_pipeline']) {
       expect((await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by })] }))).reason_description).toContain('the customer');
     }
   });
 
-  test('automatic and unknown movers never protect a visit', async () => {
-    for (const initiated_by of ['auto_dispatch', 'system', 'machine', 'weather_auto', 'something_new']) {
+  test('only known automatic movers leave a moved visit optimizable; an unknown mover protects', async () => {
+    for (const initiated_by of ['auto_dispatch', 'system', 'machine', 'weather_auto']) {
       expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by })] }))).toEqual({ placed: false });
     }
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by: 'some_new_flow' })] }))).toMatchObject({ placed: true });
+  });
+
+  test('a never-moved visit is optimizable', async () => {
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [] }))).toEqual({ placed: false });
   });
 
   test('a grouped partner the move carried is protected by its own row', async () => {
@@ -255,15 +261,31 @@ describe('isPersonPlacedVisit', () => {
     expect(await isPersonPlacedVisit(visit, fakeDb({ log: [sameTx, row()] }))).toMatchObject({ placed: true });
   });
 
-  test('not placed after a later move, even one that returned the visit to the same date', async () => {
+  test('a later audit-only row (no new_date, e.g. a no-show record) does not shadow the move', async () => {
+    const noshow = row({ id: 'l2', initiated_by: 'system', series_move_id: null, created_at: '2026-10-07T12:00:00Z', new_date: null });
+    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ initiated_by: 'admin' }), noshow] }))).toMatchObject({ placed: true });
+  });
+
+  test('not placed after a later automatic move, even one that returned the visit to the same date', async () => {
     const later = row({ id: 'l2', initiated_by: 'auto_dispatch', series_move_id: null, created_at: '2026-10-06T08:10:19Z', new_date: '2026-10-19' });
     const back = row({ id: 'l3', initiated_by: 'auto_dispatch', series_move_id: null, created_at: '2026-10-07T08:10:19Z', new_date: '2026-10-18' });
     expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row(), later, back] }))).toEqual({ placed: false });
   });
 
-  test('not placed when the visit left the chosen date or has no history', async () => {
+  test('not placed when the visit left the chosen date', async () => {
     expect(await isPersonPlacedVisit({ ...visit, scheduled_date: '2026-10-19' }, fakeDb({ log: [row()] }))).toEqual({ placed: false });
-    expect(await isPersonPlacedVisit(visit, fakeDb({ log: [row({ scheduled_service_id: 's9' })] }))).toEqual({ placed: false });
+  });
+
+  test('a staff direct date edit (date-exception stamp, no log row) protects; a later automatic move ends it', async () => {
+    const edited = { ...visit, date_exception: true, date_exception_source: 'admin', date_exception_at: '2026-10-05T15:00:00Z' };
+    expect(await isPersonPlacedVisit(edited, fakeDb({ log: [] }))).toMatchObject({ placed: true, reason_description: 'Date chosen by staff (date edit)' });
+    const autoAfter = row({ initiated_by: 'auto_dispatch', created_at: '2026-10-06T08:10:00Z' });
+    expect(await isPersonPlacedVisit(edited, fakeDb({ log: [autoAfter] }))).toEqual({ placed: false });
+  });
+
+  test('a backfill date-exception stamp is not a person', async () => {
+    const backfilled = { ...visit, date_exception: true, date_exception_source: 'backfill_cadence', date_exception_at: '2026-10-05T15:00:00Z' };
+    expect(await isPersonPlacedVisit(backfilled, fakeDb({ log: [] }))).toEqual({ placed: false });
   });
 
   test('a windowless recurring due visit is never protected (the run must place it)', async () => {

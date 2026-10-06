@@ -150,25 +150,37 @@ async function isRecurringPlanActive(service, db) {
  * visit breaks that promise silently (prod 10-06: a customer picked Sun 9 AM
  * at 8:49 PM; the 4:10 AM run moved it to Mon 3 PM; nobody told them).
  *
- * Evidence is the visit's OWN newest reschedule_log row. Every mover writes
- * one: a series move one row per visit it moves (anchor and each carried
- * grouped partner), a single-visit move one row, auto-dispatch one row
- * through the rebooker. The visit is person-placed when that newest row was
- * written by a person (PERSON_INITIATORS — an allowlist, so automatic and
- * unknown movers never freeze a visit) and landed it on the date it holds
- * now. Any later row, from any mover, ends the protection.
- *
- * A windowless recurring due visit is never protected: it has no promised
- * time yet, and the run exists to place it (index.js loadEligibleServices).
+ * Protection is the DEFAULT for a moved visit; only a known automatic mover
+ * leaves it optimizable. Two kinds of evidence, newest wins:
+ *   - the newest reschedule_log PLACEMENT row (new_date set; audit-only rows
+ *     such as a no-show record never shadow a move). Every rebooker move
+ *     writes one per visit it moves, grouped partners included. Unless every
+ *     row of that move is AUTOMATIC_INITIATORS, a placement on the current
+ *     date protects the visit — so staff, the customer page, SMS and call
+ *     flows, and any mover added later are protected without a list here;
+ *   - the visit's own date-exception stamp (date_exception + _at + _source),
+ *     which staff direct date edits write without a reschedule_log row.
+ *     Backfill sources are not a person.
+ * A visit never moved since it was generated has neither, and stays
+ * optimizable. A windowless recurring due visit is never protected: it has
+ * no promised time yet, and the run exists to place it.
  *
  * Fails CLOSED and DEGRADED: a read error skips the visit for this run and
  * marks the result degraded so the run does not report as healthy.
  */
-const PERSON_INITIATORS = new Set([
-  'admin', 'admin_ib', 'admin_bulk', 'operator', 'tech',
-  'customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai',
-]);
-const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai']);
+const AUTOMATIC_INITIATORS = new Set(['auto_dispatch', 'system', 'machine', 'weather_auto']);
+const CUSTOMER_INITIATORS = new Set(['customer', 'customer_self_serve', 'customer_portal', 'customer_sms', 'sms_offer_ai', 'ai_call_pipeline']);
+
+function whoPlaced(initiator) {
+  return CUSTOMER_INITIATORS.has(initiator) ? 'the customer' : 'staff';
+}
+
+function personExceptionAt(service) {
+  if (service.date_exception !== true || !service.date_exception_at) return null;
+  if (/^backfill/.test(String(service.date_exception_source || ''))) return null;
+  const at = new Date(service.date_exception_at);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
 
 async function isPersonPlacedVisit(service, db) {
   const dateStr = toDateStr(service.scheduled_date);
@@ -177,21 +189,24 @@ async function isPersonPlacedVisit(service, db) {
   try {
     const newest = await db('reschedule_log')
       .where('scheduled_service_id', service.id)
+      .whereNotNull('new_date')
       .orderBy('created_at', 'desc')
       .first('created_at');
+    const exceptionAt = personExceptionAt(service);
+    if (exceptionAt && (!newest || exceptionAt > new Date(newest.created_at))) {
+      return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${whoPlaced(service.date_exception_source)} (date edit)` };
+    }
     if (!newest) return { placed: false };
-    // Rows one move writes share its transaction's created_at; a person row
-    // among them is the placement.
-    const placement = await db('reschedule_log')
+    // Rows one move writes share its transaction's created_at.
+    const rows = await db('reschedule_log')
       .where('scheduled_service_id', service.id)
       .where('created_at', newest.created_at)
       .where('new_date', dateStr)
-      .whereIn('initiated_by', [...PERSON_INITIATORS])
-      .first('initiated_by', 'series_move_id');
+      .select('initiated_by', 'series_move_id');
+    const placement = rows.find((r) => !AUTOMATIC_INITIATORS.has(r.initiated_by));
     if (!placement) return { placed: false };
-    const who = CUSTOMER_INITIATORS.has(placement.initiated_by) ? 'the customer' : 'staff';
-    const how = placement.series_move_id ? `series move ${placement.series_move_id}` : 'single-visit move';
-    return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${who} (${how})` };
+    const how = placement.series_move_id ? `series move ${placement.series_move_id}` : `move by ${placement.initiated_by || 'unknown'}`;
+    return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${whoPlaced(placement.initiated_by)} (${how})` };
   } catch (err) {
     return { placed: true, degraded: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: `Could not read the move history: ${err.message}` };
   }
