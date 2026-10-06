@@ -322,3 +322,11 @@ describe('revising a parked row keeps its opt-out history', () => {
     delete process.env.GATE_ESTIMATE_OFFER_TIERS; delete process.env.GATE_ESTIMATE_SERVICE_OPT_OUT;
   });
 });
+
+describe('the plain opt-out rail for an unlinked prospective member', () => {
+  test('the write refuses before pricing and /data stamps no removable control', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    expect(src).toMatch(/if \(!estimate\.customer_id\) \{\s*\n\s*let prospectiveMember = true;\s*\n\s*try \{ prospectiveMember = !!\(await offerTierMemberBlock\(estimate, db\)\); \} catch \(_\) \{ prospectiveMember = true; \}\s*\n\s*if \(prospectiveMember\) return \{ status: 409, body: \(\{ error: 'reprice_unavailable' \}\) \};/);
+    expect(src).toMatch(/if \(unlinkedMemberHidesMixChange\) return \{\};/);
+  });
+});

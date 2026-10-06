@@ -6557,7 +6557,11 @@ one-time floor or multiplier change between preview and commit refuses the
 commit) as data. The
 picker's member judgement follows the accept's own order for an unlinked
 estimate: the shared `resolveGroupedEstimateOwnerId` (an accepted sibling's
-live customer) first, then the phone match; strict and fail-closed. The commit sets `show_one_time_option` on a marked row from the lawn
+live customer) first, then the phone match; strict and fail-closed. The same
+judgement applies to the plain service opt-out rail for an UNLINKED
+estimate: `/data` stamps no `removable` and the write answers 409
+`reprice_unavailable` when the prospective owner is an active member (a
+linked member keeps the rail's own live check). The commit sets `show_one_time_option` on a marked row from the lawn
 line: on when lawn is removed (customer, or the staff send-time park) and
 the delivery validator allows the option on the repriced row; always off
 when lawn is added back, with the gate on or off — the one-time option never

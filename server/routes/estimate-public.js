@@ -17766,6 +17766,15 @@ async function applyServiceMixChange({ estimate, body = {}, actor = 'customer' }
     // as a new customer here while counting as a member there (pre-push
     // codex P0). `priors` above is gathered separately only because the
     // recompute needs the list itself.
+    // An UNLINKED estimate whose prospective owner (grouped sibling, then
+    // phone match — the accept's own order) is an active member: nothing
+    // here may price new-customer terms onto a member plan, and the accept
+    // would link that member. Strict and fail-closed, same 409 as below.
+    if (!estimate.customer_id) {
+      let prospectiveMember = true;
+      try { prospectiveMember = !!(await offerTierMemberBlock(estimate, db)); } catch (_) { prospectiveMember = true; }
+      if (prospectiveMember) return { status: 409, body: ({ error: 'reprice_unavailable' }) };
+    }
     const memberEvidence = OptOut.memberEvidenceInEstimateData(parsedData) || priors.length > 0;
     // STRICT verification before member pricing can be WRITTEN (pre-push
     // codex P0 on e77857d): reconcileFrozenMembershipSnapshot never throws —
@@ -29998,6 +30007,17 @@ async function composeEstimateDataPayload(estimate, {
       catch (_) { addStampBlockedByMembership = true; }
     }
 
+    // An UNLINKED estimate whose prospective owner (grouped sibling, then
+    // phone match — the accept's own order) is an active member gets no
+    // service-removal control either: the rail's write refuses it below
+    // (strict, fail-closed), and a control that can only fail is worse
+    // than none. A linked member is handled by the rail's own live check.
+    let unlinkedMemberHidesMixChange = false;
+    if (serviceOptOutGateOn() && !adminDraftPreview && !estimate.customer_id) {
+      try { unlinkedMemberHidesMixChange = !!(await offerTierMemberBlock(estimate, db)); }
+      catch (_) { unlinkedMemberHidesMixChange = true; }
+    }
+
     // Good / Better / Best tiles (GATE_ESTIMATE_OFFER_TIERS): null unless
     // the office marked this row and the opt-out rail would allow the move.
     const offerTiersBlock = await buildOfferTiersBlock({
@@ -30467,6 +30487,7 @@ async function composeEstimateDataPayload(estimate, {
         ...((() => {
           if (!serviceOptOutGateOn() || adminDraftPreview) return {};
           if (!isEstimateAcceptActive(estimate) || estimate.price_locked_at) return {};
+          if (unlinkedMemberHidesMixChange) return {};
           const sections = Array.isArray(pricingBundle.services) ? pricingBundle.services : [];
           if (!sections.length) return {};
           const { serviceOptOutRemovableKeys } = require('../services/estimate-service-opt-out');
