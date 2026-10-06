@@ -1741,6 +1741,24 @@ describe('Google Business review sync', () => {
       expect(removals()).toHaveLength(1);
       expect(isOpen(removals()[0])).toBe(true);
     });
+
+    test('a failed removal close rolls back the restored bell too', async () => {
+      gbpFeed([]);
+      await service.syncAllReviews();
+      expect(removals()).toHaveLength(1);
+      const real = service._closeRemovalAlerts.bind(service);
+      const spy = jest.spyOn(service, '_closeRemovalAlerts').mockImplementation(async (conn, locationId, opts) => {
+        if (opts && opts.restored) throw new Error('transient db error');
+        return real(conn, locationId, opts);
+      });
+      staleSync();
+      gbpFeed([feedRow]);
+      await service.syncAllReviews();
+      spy.mockRestore();
+      const restoredRows = db.__state.rows.notifications.filter((n) => /restored at/.test(n.title));
+      expect(restoredRows).toHaveLength(0);
+      expect(isOpen(removals()[0])).toBe(true);
+    });
   });
 
   test('Places fallback clears missing_since when the sample confirms the review is live again', async () => {
