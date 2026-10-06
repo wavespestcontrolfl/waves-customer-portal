@@ -118,9 +118,9 @@ describe('spelledEmailSettled', () => {
     expect(spelledEmailSettled(one('quentrell.w@example.com'), 'Quentrell.W@example.com')).toBe(true);
   });
 
-  test('an adopt or adopt_with_confirmation arbiter with one spelling settles it', () => {
+  test('a decisive adopt with one spelling settles it; adopt_with_confirmation keeps the card', () => {
     expect(spelledEmailSettled(one('q@example.com', { arbiter: { verdict: 'adopt' } }), 'q@example.com')).toBe(true);
-    expect(spelledEmailSettled(one('q@example.com', { arbiter: { verdict: 'adopt_with_confirmation' } }), 'q@example.com')).toBe(true);
+    expect(spelledEmailSettled(one('q@example.com', { arbiter: { verdict: 'adopt_with_confirmation' } }), 'q@example.com')).toBe(false);
   });
 
   test('two spellings, a disagreement, or a review/reject verdict keep the card', () => {

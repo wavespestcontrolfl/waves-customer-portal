@@ -2597,8 +2597,8 @@ const BASIC_EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
  * ONE spelling and that spelling is the address being saved: no read-back
  * card, so no first-touch hold either. The card stays when there is any
  * doubt the letters themselves carry — two spellings heard (decoder
- * candidates, or the V1/V2 disagreement payload), an arbiter that sent the
- * address to review or rejected it, a domain-typo correction that would
+ * candidates, or the V1/V2 disagreement payload), an arbiter verdict short of
+ * a decisive adopt (adopt_with_confirmation, review, reject), a domain-typo correction that would
  * change the saved value, or a value that is not email-shaped. A bounce
  * later still files its own card through the bounce-recovery lane.
  *
@@ -2611,8 +2611,12 @@ function spelledEmailSettled(dictationEmailPayload, savedEmail, correctedEmail =
   if (!p || p.email_disagreement) return false;
   const candidates = Array.isArray(p.email_candidates) ? p.email_candidates : [];
   if (candidates.length !== 1) return false;
+  // Only a decisive arbiter adopt (or no arbiter at all — the decoders
+  // agreed) settles it. adopt_with_confirmation is the arbiter saying the
+  // evidence is circumstantial and the read-back must stay open
+  // (contact-quarantine-arbiter.js).
   const verdict = p.arbiter?.verdict;
-  if (verdict && verdict !== 'adopt' && verdict !== 'adopt_with_confirmation') return false;
+  if (verdict && verdict !== 'adopt') return false;
   const saved = String(savedEmail || '').trim().toLowerCase();
   if (!saved || !BASIC_EMAIL_SHAPE.test(saved)) return false;
   if (String(candidates[0]?.value || '').trim().toLowerCase() !== saved) return false;
