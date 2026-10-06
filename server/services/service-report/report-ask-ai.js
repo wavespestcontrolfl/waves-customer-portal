@@ -607,7 +607,10 @@ const PATIENT_NOUNS = '(?:dogs?|cats?|pets?|puppy|puppies|kittens?|birds?|horses
 // Any "my/our/his/her/their <noun>" counts as the one affected ("my partner",
 // "my cousin"): a list of relationships never ends (Codex P1 #6016 r26).
 // "The ants" stays out.
-const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS}|(?:my|our|his|her|their)\\s+[\\w-]+)`;
+// Plants, places and pests are never the one affected: "my lawn is sick" is
+// a lawn question (Codex P1 #6016 r27).
+const NOT_PATIENT_NOUNS = '(?:lawn|lawns|grass|turf|yard|yards|sod|palms?|trees?|shrubs?|bush(?:es)?|hedges?|plants?|garden|gardens|flowers?|roses?|beds?|mulch|soil|house|home|roof|garage|fence|pool|patio|lanai|deck|porch|driveway|sidewalk|siding|foundation|kitchen|bathroom|attic|ants?|roach(?:es)?|spiders?|termites?|fleas?|ticks?|mosquito(?:e?s)?|weeds?|crabgrass|ficus|hibiscus|ixora|crotons?|oaks?|citrus)';
+const PATIENT = `(?:i|we|he|she|they|me|(?:(?:my|our|his|her|their|the)\\s+)?${PATIENT_NOUNS}|(?:my|our|his|her|their)\\s+(?!${NOT_PATIENT_NOUNS}\\b)[\\w-]+)`;
 const MEDICAL_CUES = [
   // Symptoms, said with or without a subject.
   /\b(?:dizz(?:y|iness)|light[\s-]?headed|nause(?:a|ous|ated)|vomit\w*|throw(?:ing|n)?\s+up|threw\s+up|diarrh?ea|faint(?:ed|ing)?|passed\s+out|pass(?:ing)?\s+out|seizures?|convuls\w*|numb(?:ness)?|tingl\w*|wheez\w*|rash(?:es)?|blisters?|swell(?:ing|en)|swollen|headaches?|migraines?|drool\w*|lethargic|disoriented|short(?:ness)?\s+of\s+breath|chest\s+(?:pain|tight\w*))\b/i,
