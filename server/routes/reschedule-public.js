@@ -865,6 +865,22 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         });
       }
     };
+    // The office move approval, re-read on the LOCKED row (codex #6039 r3
+    // P1): `svc` was read before any lock, so a staff move away and back
+    // (which clears the approval) could leave this request holding a stale
+    // one while the expect fence still matches. The rebooker calls
+    // moveGuard inside its transaction right before this row's own lock
+    // and CAS, so the lock here holds the row steady until the write.
+    const officeApprovalRecheck = async ({ trx }) => {
+      if (elig.missed) return;
+      const locked = await trx('scheduled_services').where({ id: svc.id }).forUpdate()
+        .first('scheduled_date', 'window_start', 'office_move_approved_for');
+      if (visitInsideMoveNoticeWindow(locked)) {
+        throw Object.assign(new Error('This visit starts too soon to move online — call (941) 297-5749 and our team can help.'), {
+          statusCode: 409, isOperational: true, code: 'SELF_SERVE_NOTICE',
+        });
+      }
+    };
     let result;
     try {
       result = reanchor
@@ -890,6 +906,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             // The confirmation is the series pass's durable text (below).
             notifyRequested: true,
             beforeMove: noticeRecheck,
+            moveGuard: officeApprovalRecheck,
           }
         )
         : await SmartRebooker.reschedule(
@@ -911,6 +928,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             capacityPlacement: true,
             expect: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             beforeMove: noticeRecheck,
+            moveGuard: officeApprovalRecheck,
             // No arrivalGraceMinutes (owner ruling 2026-09-28, scope cut
             // Codex r1 P1 #5314): this page's own commit runs a STRICT
             // pre-verify travel probe that a grace-kept slot would fail

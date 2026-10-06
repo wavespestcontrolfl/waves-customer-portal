@@ -1051,6 +1051,20 @@ describe('POST commit re-checks the notice window INSIDE the rebooker transactio
     // a missed visit's only guard, since it skips the current-visit check.
     expect(recheck).toMatch(/violatesSelfServeNotice\(\{ date, startTime: newWindow\.start \}\)/);
   });
+
+  test('both movers re-read the office move approval on the LOCKED row (moveGuard), missed visits exempt (codex #6039 r3)', () => {
+    const singleIdx = src.indexOf('await SmartRebooker.reschedule(');
+    const seriesIdx = src.indexOf('await SmartRebooker.rescheduleSeries(');
+    expect(src.slice(singleIdx, singleIdx + 1400)).toMatch(/moveGuard: officeApprovalRecheck/);
+    expect(src.slice(seriesIdx, singleIdx)).toMatch(/moveGuard: officeApprovalRecheck/);
+    const guardIdx = src.indexOf('const officeApprovalRecheck = async ({ trx }) => {');
+    expect(guardIdx).toBeGreaterThan(-1);
+    const guard = src.slice(guardIdx, guardIdx + 700);
+    expect(guard).toMatch(/if \(elig\.missed\) return;/);
+    expect(guard).toMatch(/\.forUpdate\(\)\s*\.first\('scheduled_date', 'window_start', 'office_move_approved_for'\)/);
+    expect(guard).toMatch(/visitInsideMoveNoticeWindow\(locked\)/);
+    expect(guard).toMatch(/code: 'SELF_SERVE_NOTICE'/);
+  });
 });
 
 describe('withSelfServeNotice (self-serve notice window, owner ruling 2026-09-23)', () => {
