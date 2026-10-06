@@ -1028,3 +1028,21 @@ describe('answer screen, Codex round 14', () => {
     expect(text).not.toMatch(/\b12 Secret/);
   });
 });
+
+describe('answer screen, Codex round 15', () => {
+  test.each(['Were the ants poisoned by the bait?', 'Was the rat poisoned?'])('a pest result is not a medical exposure: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+  });
+
+  test.each(['My dog consumed the bait', 'My child consumed some pesticide', 'My dog was poisoned'])('ingestion gets the full answer: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+
+  test('the 0-to-5 pressure scale is its own kind', () => {
+    const data = pestData({ pressureIndex: 3 });
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'How bad is it?', data, facts });
+    expect(ask('The pressure score is 3 out of 5.')).toBeNull();
+    expect(ask('The pressure score is 4 out of 5.')).toBe('unstated_number');
+  });
+});

@@ -923,12 +923,15 @@ const BARE_HOUR = /\b(?:at|around|about|by|after|before|until)\s+(?:\d{1,2}|one|
 // A clock range: "between 2 and 4", "from two to four" (Codex P1 #6016 r18).
 const HOUR_WORDS = '(?:\\d{1,2}(?::\\d{2})?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)';
 const HOUR_RANGE = new RegExp(`\\b(?:between|from)\\s+${HOUR_WORDS}\\s+(?:and|to|-|–)\\s+${HOUR_WORDS}\\b(?!\\s*(?:%|inch|in\\b|out\\s+of|points?|days?|weeks?|months?|hours?|hrs?|minutes?|mins?|products?|areas?|spots?|stations?|times?|feet|ft|yards?))`, 'i');
+// A relative offset: "in two days", "in a few weeks", "later this month",
+// "end of the week" (Codex P1 #6016 r19). "This week" alone stays.
+const RELATIVE_OFFSET = /\b(?:in\s+(?:a\s+(?:few|couple(?:\s+of)?)\s+|\d+\s+|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+|a\s+)(?:days?|weeks?|months?)|later\s+(?:this|next)\s+(?:week|month)|this\s+month|(?:end|beginning|start|middle)\s+of\s+(?:the|this|next)\s+(?:week|month))\b/i;
 const MONTH_MAY = /\b(?:in|on|by|until|since|next|early|late|mid)[\s-]+May\b|\bMay\s+\d/;
 const WEEKDAY_ABBR = /\b(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\b\.?/;
 
 function statesADate(text, { requiredLines }) {
   const own = requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text));
-  return [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, MONTH_MAY].some((re) => re.test(own));
+  return [DATE_TOKEN, WEEKDAY_ABBR, RELATIVE_DATE, BARE_HOUR, HOUR_RANGE, RELATIVE_OFFSET, MONTH_MAY].some((re) => re.test(own));
 }
 
 // Every number the model writes itself must be a number the fact sheet holds,
@@ -942,7 +945,9 @@ function statesADate(text, { requiredLines }) {
 const NUMBER_RE = /(?:(?<=^|[\s(])[-−])?\d+(?:\.\d+)?/g;
 const numberValue = (text) => Number(String(text).replace('−', '-'));
 const NUMBER_KINDS = [
-  ['score', /^\s*(?:out\s+of\s+100|points?\b|\/\s*100)/i, /out_of_100|score/],
+  // The pest pressure gauge is 0 to 5 (pressureFact, score_out_of_5) (Codex P2 #5964 r15).
+  ['pressure', /^\s*(?:out\s+of\s+5\b|\/\s*5\b)/i, /out_of_5/],
+  ['score', /^\s*(?:out\s+of\s+100|points?\b|\/\s*100)/i, /out_of_100|score(?!_out_of_5)/],
   ['inches', /^\s*(?:inch(?:es)?\b|in\.(?!\w)|["”])/i, /inches/],
 ];
 // Words in the sentence that name one measurement, and the fact keys it may
@@ -1028,7 +1033,7 @@ function statesUnknownNumber(text, { facts, requiredLines }) {
   return clauses.some((sentence) => [...sentence.matchAll(NUMBER_RE)].some((m) => {
     const value = numberValue(m[0]);
     // "out of 100" names the scale, not a value.
-    if (value === 100 && /out\s+of\s*$/i.test(sentence.slice(0, m.index))) return false;
+    if ((value === 100 || value === 5) && /out\s+of\s*$/i.test(sentence.slice(0, m.index))) return false;
     return !numberIsKnown(value, sentence.slice(m.index + m[0].length), sentence, known);
   }));
 }
@@ -1168,10 +1173,12 @@ const MEDICAL_CUES = [
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,1}?(?:feel(?:s|ing)?|got|gets|getting|became|is|are|was|were|am|seem(?:s|ed)?)\\s+(?:\\w+\\s+){0,2}?(?:sick|ill|unwell|weak|woozy|dizzy)\\b`, 'i'),
   /\b(?:feel|feeling|felt)\s+(?:\w+\s+){0,2}?(?:sick|ill|unwell|weak|woozy|off|strange)\b/i,
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
-  /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
-  new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
+  /\b(?:inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b)\b/i,
+  // Swallowing, eating and poisoning need a person or pet as the one: "were
+  // the ants poisoned by the bait?" is a report question (Codex P1 #5964 r15).
+  new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|swallow(?:ed|ing|s)?|ingest(?:ed|ing|s)?|consum(?:e|ed|es|ing)|poisoned|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
   // Contact verbs: "splashed my eyes", "touched my skin", "dripped on her face" (Codex P1 #5964 r13).
-  /\b(?:splash\w*|touch\w*|dripp?\w*|spill\w*|landed|blew|drift\w*|soaked|hit)\s+(?:on\s+|in\s+|into\s+|onto\s+)?(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+(?:eyes?|skin|face|mouth|nose|lips?)\b(?!\s+of\b)/i,
+  /\b(?:splash\w*|touch\w*|dripp?\w*|spill\w*|landed|blew|drift\w*|soaked|hit)\s+(?:(?:me|him|her|us|them|you)\s+)?(?:(?:on|in|into|onto)\s+(?:(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+)?|(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+)(?:eyes?|skin|face|mouth|nose|lips?)\b(?!\s+of\b)/i,
   // Body part first: "my eyes were sprayed", "the dog's skin got sprayed" (Codex P1 #6016 r14).
   /\b(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+(?:eyes?|skin|face|mouth|nose)\s+(?:was|were|got|get|gets|is|are|been|has\s+been|have\s+been)\s+(?:\w+\s+)?sprayed\b/i,
   // "On my skin", "in the baby's eyes", "on the cat's skin" (Codex P1 #5964 r10).
@@ -1232,7 +1239,7 @@ function defaultCallModel(payload, options) {
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,3}?(?:come\b(?!\s+(?:from|back))|be\s+(?:here|there|out|over|back)\b)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:treat\w*|spray\w*|servic\w*)\b[^.?!]{0,20}\b(?:tomorrow|tonight|next\s+(?:week|time|month)|again)|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|coming(?!\s+(?:back|from))|arriv\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|show\s+up|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|(?:upcoming|future|another|new)\s+appointments?|appointment\s+(?:time|date|window)|(?:when|what\s+time)\s+is\s+(?:my|the|our)\s+(?:next\s+)?appointment|(?:re)?schedul(?:e|ing)\b|(?:re)?scheduled\s+(?:for|on|at)\b|(?:am|are|is)\s+(?:i|we|you|it|my\s+\w+)\s+(?:re)?scheduled|(?:services?|visits?|treatments?|appointments?|technician|tech)\b[^.?!]{0,30}\b(?:tomorrow|tonight|next\s+week)|(?:tomorrow|tonight)\b[^.?!]{0,30}\b(?:services?|visits?|treatments?|appointments?)|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }
