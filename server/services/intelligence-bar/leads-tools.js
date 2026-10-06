@@ -12,7 +12,7 @@ const logger = require('../logger');
 const { bridgeLeadFunnelStage, bridgeLeadsFunnelStage } = require('../lead-funnel-bridge');
 const { toE164 } = require('../../utils/phone');
 const { cleanValidEmailOrNull } = require('../../utils/intake-normalize');
-const { parseRawAddress, formatAddress } = require('../../utils/address-normalizer');
+const { parseRawAddress, formatAddress, UNIT_DESIGNATORS } = require('../../utils/address-normalizer');
 const leadAttribution = require('../lead-attribution');
 const { scopeToProspects, unlessHandledSince } = require('../lead-statuses');
 
@@ -734,20 +734,47 @@ function normalizeLeadContactField(field, raw) {
 const ADDRESS_FIELDS = ['address', 'city', 'zip'];
 const COMPOSED_REFUSAL = "This lead's address is stored as one line (street, city, ZIP). Give the whole corrected address in one message.";
 
+// A parsed city that can be a real place: it has a letter and is not a unit or
+// floor token ("2", "2B", "#4", "Unit 4", "Fl 2"). parseRawAddress reads
+// "123 Main St, Fl 2" as state FL + city "2" (Codex r5 P1), so this check, not
+// the shared parser, decides whether a parse carries locality data.
+function plausibleCity(city) {
+  const text = String(city || '').trim();
+  if (!text || !/[A-Za-z]/.test(text)) return false;
+  if (/^#/.test(text)) return false;
+  const tokens = text.split(/\s+/);
+  if (UNIT_DESIGNATORS.has(tokens[0].replace(/[.,]/g, '').toLowerCase()) && tokens.length <= 2) return false;
+  return !/^\d+[A-Za-z]?$/.test(text);
+}
+
+// A parse carries locality data when it has a ZIP (with no city or a plausible
+// one), or a state accompanied by a ZIP or a plausible city. A state beside a
+// numeric or empty city and no ZIP is floor notation, not a place.
+function carriesLocality(parts) {
+  const cityOk = plausibleCity(parts.city);
+  if (parts.zip) return !parts.city || cityOk;
+  return Boolean(parts.state) && cityOk;
+}
+
+// A whole replacement: street, plausible city, state and ZIP all present.
+function wholeAddress(parts) {
+  return Boolean(parts && parts.line1 && parts.state && parts.zip && plausibleCity(parts.city));
+}
+
 // What the stored address is: 'bare' (a street only), 'composed' (parts in
 // `parts`) or 'opaque' (a one-line address that names the lead's city but that
 // the parser cannot split, so a partial edit is not safe). Every value goes
 // through parseRawAddress, commas or not (Codex r3 P1: "100 Main St Sarasota FL
-// 34236" is a legacy comma-free line). A row is composed when the parser finds a
-// state, or a ZIP that equals the lead's zip column: the parser reads any
-// trailing five digits as a ZIP, so a bare "100 Main St Apt 34236" with a
+// 34236" is a legacy comma-free line). A row is composed when the parse carries
+// locality data, or finds a ZIP equal to the lead's zip column: the parser reads
+// any trailing five digits as a ZIP, so a bare "100 Main St Apt 34236" with a
 // different zip column is not called composed on the unit number alone.
 function readStoredAddress(lead) {
   const stored = String(lead.address || '').trim();
   if (!stored) return { kind: 'bare' };
   const parts = parseRawAddress(stored);
   const zipColumn = String(lead.zip || '').trim();
-  if (parts.state || (parts.zip && parts.zip === zipColumn)) return { kind: 'composed', parts };
+  if (carriesLocality(parts) || (parts.zip && parts.zip === zipColumn)) return { kind: 'composed', parts };
   const city = String(lead.city || '').trim().toLowerCase();
   const namesCity = city && (
     (parts.city || '').toLowerCase() === city
@@ -757,18 +784,18 @@ function readStoredAddress(lead) {
 }
 
 // The operator's own address text, when it carries more than a street.
-// A state or a ZIP makes it a whole address. A street plus a city only (Codex r4
-// P2: "12 Oak Ave, Sarasota") is accepted when that city is the lead's own city
-// (the column or the stored line), case-insensitively, so the stored state and
-// ZIP complete it; a DIFFERENT city with no ZIP on a composed row is ambiguous
-// and refuses unless the city field is given explicitly. On a bare row a
-// comma-free or city-only text stays the plain street. Returns parts, null (a
-// plain street) or { error }.
+// Locality data (see carriesLocality) makes it a whole address. A street plus a
+// city only (Codex r4 P2: "12 Oak Ave, Sarasota") is accepted when that city is
+// the lead's own city (the column or the stored line), case-insensitively, so
+// the stored state and ZIP complete it; a DIFFERENT city with no ZIP on a
+// composed row is ambiguous and refuses unless the city field is given
+// explicitly. A text whose parsed city is not plausible ("123 Main St, Fl 2")
+// is a plain street line. Returns parts, null (a plain street) or { error }.
 function readGivenAddress(requested, lead, stored) {
   if (typeof requested.address !== 'string') return null;
   const parts = parseRawAddress(requested.address);
-  if (parts.state || parts.zip) return parts;
-  if (!parts.city) return null;
+  if (carriesLocality(parts)) return parts;
+  if (!plausibleCity(parts.city)) return null;
   const known = [lead.city, stored.parts && stored.parts.city]
     .map(c => String(c || '').trim().toLowerCase()).filter(Boolean);
   if (known.includes(parts.city.toLowerCase())) return parts;
@@ -831,9 +858,13 @@ function syncedColumns(given, requested) {
 function rebuildLeadAddress(lead, requested) {
   if (!ADDRESS_FIELDS.some(f => f in requested)) return { requested };
   const stored = readStoredAddress(lead);
-  if (stored.kind === 'opaque' && !ADDRESS_FIELDS.every(f => f in requested)) return { error: COMPOSED_REFUSAL };
   const given = readGivenAddress(requested, lead, stored);
   if (given && given.error) return { error: given.error };
+  // An opaque line takes a whole replacement (Codex r5 P2) or all three fields;
+  // a partial correction refuses.
+  if (stored.kind === 'opaque' && !wholeAddress(given) && !ADDRESS_FIELDS.every(f => f in requested)) {
+    return { error: COMPOSED_REFUSAL };
+  }
   if (stored.kind !== 'composed' && !given) return { requested };
   const fieldError = synthesizedFieldError(given);
   if (fieldError) return { error: fieldError };
