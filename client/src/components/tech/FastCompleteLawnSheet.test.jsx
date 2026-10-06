@@ -1908,8 +1908,30 @@ describe('header and customer block, as on the full form\'s Complete service pag
     const maps = screen.getByRole('link', { name: '123 Main St, Bradenton, FL 34205' });
     expect(maps.getAttribute('href')).toBe('https://www.google.com/maps/dir/?api=1&destination=123%20Main%20St%2C%20Bradenton%2C%20FL%2034205');
     expect(maps.getAttribute('target')).toBe('_blank');
-    expect(screen.getByRole('link', { name: '+19415550100' }).getAttribute('href')).toBe('tel:+19415550100');
+    // The phone is the Waves call bridge, not a tel: link (owner 2026-10-06).
+    expect(screen.queryByRole('link', { name: '+19415550100' })).toBeNull();
+    const call = screen.getByRole('button', { name: 'Call Pat Jones' });
+    expect(call.textContent).toBe('+19415550100');
+    // No inline font/color: the contact block's CSS sizes it like the other links.
+    expect(call.getAttribute('style') || '').not.toMatch(/font|color/);
     expect((await screen.findByRole('link', { name: 'pat@example.com' })).getAttribute('href')).toBe('mailto:pat@example.com');
+  });
+
+  test('tapping the phone asks Waves to ring the caller first, never dials from the handset', async () => {
+    await openSheet({ props: { service: { ...SERVICE, customerId: 'cust-1', customerPhone: '+19415550100' } } });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true }) });
+    try {
+      fireEvent.click(screen.getByRole('button', { name: 'Call Pat Jones' }));
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1));
+      const [url, init] = fetchSpy.mock.calls[0];
+      expect(url).toMatch(/\/admin\/communications\/call$/);
+      expect(JSON.parse(init.body)).toMatchObject({ to: '+19415550100', customerIdHint: 'cust-1' });
+      expect(confirmSpy.mock.calls[0][0]).toMatch(/Waves will call your phone first/);
+    } finally {
+      confirmSpy.mockRestore();
+      fetchSpy.mockRestore();
+    }
   });
 
   test('the bottom pill reads Complete service when ready, and the page\'s own wording while off', async () => {
@@ -1982,5 +2004,49 @@ describe('time on-site card look', () => {
     expect(digits).toContain('line-height: 1.15');
     expect(digits).toContain('tabular-nums');
     expect(rule('.tech-lawn-sheet .tech-visit-section-title')).toMatch(/letter-spacing: 0\.3px; text-transform: uppercase/);
+  });
+});
+
+describe('"Also in this month\'s protocol": the plan\'s opt-in products', () => {
+  const ADD_ONS = [
+    {
+      productId: P_GRANULE, name: 'Green Granules', applicationMethod: 'granular_broadcast', amount: 20, amountUnit: 'lb', treatedSqft: 5000, areaUnit: 'sqft',
+      ratePer1000: 4, rateUnit: 'lb', line: 'If thin turf: Green Granules', substituteFor: 'Old Feed', gateNotes: ['Granular product: apply on a spreader visit, not from the hose pass.'],
+      approvedForReport: true, wateringRule: null, wateringSummary: 'Water in', mowHoldDays: null,
+    },
+    // On the sheet already (a planned row): read as such.
+    { productId: P_TALAK, name: 'Talak 7.9%', applicationMethod: 'spot_treatment', amount: null, amountUnit: 'fl_oz', line: null, substituteFor: null, gateNotes: [] },
+    // Not in the sheet's catalog (inactive): cannot be built into a row, so not offered.
+    { productId: 'aaaaaaaa-0000-4000-8000-000000000099', name: 'Ghost', applicationMethod: 'spot_treatment', amount: null, amountUnit: 'oz', line: null, substituteFor: null, gateNotes: [] },
+  ];
+  const withAddOns = () => context({ plannedProducts: { source: 'plan', items: [PLANNED[0]], addOns: ADD_ONS, month: 10 } });
+  const addons = () => screen.getByRole('group', { name: 'Also in October’s protocol' });
+
+  test('each offered product reads the plan\'s own words: substitute, protocol line, gate notes, method and rate', async () => {
+    await openSheet({ request: makeRequest({ ctx: withAddOns() }) });
+    const row = addons();
+    expect(within(row).getByText('In place of Old Feed · If thin turf: Green Granules · Granular product: apply on a spreader visit, not from the hose pass. · Granular broadcast · 4 lb per 1,000 sq ft')).toBeTruthy();
+    expect(within(row).getByRole('button', { name: 'Talak 7.9% is on the sheet' }).disabled).toBe(true);
+    expect(within(row).queryByText('Ghost')).toBeNull();
+  });
+
+  test('a tapped add-on opens with the plan\'s amount and method, marked from the protocol, sends the plan rate, and is never a skipped plan product', async () => {
+    await openSheet({ request: makeRequest({ ctx: withAddOns() }) });
+    fireEvent.click(within(addons()).getByRole('button', { name: 'Add Green Granules' }));
+    const granules = editorFor('Green Granules');
+    expect(within(granules).getByText(/from the protocol/)).toBeTruthy();
+    expect(pressedMethod(granules)).toBe('Granular broadcast');
+    expect(within(granules).getByLabelText('Green Granules').value).toBe('20');
+    expect(within(addons()).getByRole('button', { name: 'Green Granules is on the sheet' }).disabled).toBe(true);
+    await analyze();
+    await submit();
+    const body = completeCalls()[0].body;
+    expect(body.products.find((p) => p.productId === P_GRANULE)).toMatchObject({ applicationMethod: 'granular_broadcast', totalAmount: 20, amountUnit: 'lb', rate: 4, rateUnit: 'lb', areaValue: 5000 });
+    expect(body.lawnProtocolCompletion).toBeUndefined();
+  });
+
+  test('no add-ons, no row', async () => {
+    await openSheet();
+    expect(screen.queryByRole('group', { name: /protocol$/ })).toBeNull();
   });
 });

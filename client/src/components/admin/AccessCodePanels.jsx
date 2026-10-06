@@ -10,7 +10,7 @@
  * Staff-only. Codes are shown to the office as typed; nothing here logs or
  * stores one.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { addETDays, etDateString, formatETDateOnly } from "../../lib/timezone";
 import { ActionFeedback, Badge, Button, Input, Select, Textarea, cn } from "../ui";
 
@@ -50,6 +50,13 @@ export function lifeLabel(row) {
   if (row.life !== "visit") return "Always";
   const day = fmtDay(dayKey(row.scheduledDate));
   return day ? `This visit: ${day}` : "One visit only";
+}
+
+// "+19415550188" as "(941) 555-0188"; anything else as it came.
+export function phoneLabel(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  const ten = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+  return ten.length === 10 ? `(${ten.slice(0, 3)}) ${ten.slice(3, 6)}-${ten.slice(6)}` : String(value || "");
 }
 
 export function sourceLabel(row) {
@@ -251,15 +258,91 @@ export function ActiveCodeRow({ row, homes = [], onRetire }) {
   );
 }
 
+const customerLabel = (c) => {
+  const name = [c.firstName, c.lastName].filter(Boolean).join(" ").trim() || c.companyName || c.email || c.phone || "Customer";
+  // The home the search matched (a second home), else the customer's address.
+  return [name, c.matchedHomeAddress || c.address, c.phone].filter(Boolean).join(" · ");
+};
+
+// A code texted from a number with no customer record: the office links it to
+// a customer (one tap on the suggested home, or a search) before it can be
+// saved. `onSearch(term)` resolves to customers { id, firstName, lastName,
+// companyName, address, phone }; `onLink(customerId)` links the code.
+function LinkToCustomer({ row, onLink, onSearch, busy, run }) {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  useEffect(() => {
+    const term = query.trim();
+    // Results from an earlier term are gone at once, so no click can link to a customer the new term did not find.
+    setResults([]);
+    if (term.length < 2) { setSearching(false); return undefined; }
+    let cancelled = false;
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const list = await onSearch(term);
+        if (!cancelled) setResults(Array.isArray(list) ? list : []);
+      } catch {
+        if (!cancelled) setResults([]);
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    }, 250);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [query]);
+  const link = (customerId) => run(() => onLink(customerId), "Could not link the code");
+  const suggested = row.suggestedCustomer;
+  return (
+    <div className="grid gap-2">
+      <div className="text-ui-label text-ink-secondary">
+        {row.senderPhone ? `From ${phoneLabel(row.senderPhone)}, a number with no customer record.` : "From a number with no customer record."}
+        {" "}Link it to a customer to save it.
+      </div>
+      {suggested && (
+        <div>
+          <Button size="sm" disabled={busy} onClick={() => link(suggested.id)}>{`Link to ${suggested.name}`}</Button>
+          {suggested.address && <span className="ml-2 text-ui-label text-ink-secondary">{suggested.address}</span>}
+        </div>
+      )}
+      <label className="block">
+        <Label>Find a customer</Label>
+        <Input
+          id={`link-${row.id}`}
+          value={query}
+          onChange={(event) => { setResults([]); setQuery(event.target.value); }}
+          placeholder="Name, phone or address"
+          autoComplete="off"
+          disabled={busy}
+        />
+      </label>
+      {searching && <div className="text-ui-label text-ink-secondary">Searching…</div>}
+      {results.length > 0 && (
+        <ul className="grid gap-1" aria-label="Matching customers">
+          {results.map((c) => (
+            <li key={c.id}>
+              <Button size="sm" variant="secondary" className="h-auto w-full justify-start whitespace-normal text-left" disabled={busy || searching} onClick={() => link(c.id)}>
+                {customerLabel(c)}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 // A code found in a text, waiting for the office. `visits` is the customer's
 // upcoming visits; `renderHeading` names the customer on the page that lists
-// every customer's codes.
-export function FoundCodeCard({ row, visits, homes = null, onSave, onDismiss, renderHeading = null }) {
+// every customer's codes. A row with no customer yet (`row.customerId` null)
+// shows the link step in place of the editor: `onLink` and `onSearch` serve it.
+export function FoundCodeCard({ row, visits, homes = null, onSave, onDismiss, renderHeading = null, onLink = null, onSearch = null }) {
   const homeList = homes || row.propertyChoices || [];
   const choices = visitChoices(visits, row.sourceAt, undefined, homeList);
   const [draft, setDraft] = useState(() => draftFromRow(row, choices));
   const { busy, error, run } = useGuarded();
   const typed = draft.code.trim() || draft.instructions.trim();
+  const unlinked = !row.customerId;
   return (
     <div className="grid gap-2 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-3">
       {renderHeading && <div className="text-ui-body font-medium text-zinc-900">{renderHeading(row)}</div>}
@@ -269,12 +352,22 @@ export function FoundCodeCard({ row, visits, homes = null, onSave, onDismiss, re
         </blockquote>
       )}
       <div className="text-ui-label text-ink-secondary">{sourceLabel(row)}</div>
-      <CodeFields idPrefix={`found-${row.id}`} draft={draft} setDraft={setDraft} choices={choices} busy={busy} homes={homeList} needHome={!homeList.some((h) => h.id === row.propertyId)} />
+      {unlinked ? (
+        <>
+          {row.code && <div className="font-mono u-nums break-all text-ui-body font-medium text-zinc-900">{row.code}</div>}
+          {row.instructions && <div className="break-words whitespace-pre-line text-ui-label text-zinc-900">{row.instructions}</div>}
+          {onLink && onSearch && <LinkToCustomer row={row} onLink={(customerId) => onLink(row, customerId)} onSearch={onSearch} busy={busy} run={run} />}
+        </>
+      ) : (
+        <CodeFields idPrefix={`found-${row.id}`} draft={draft} setDraft={setDraft} choices={choices} busy={busy} homes={homeList} needHome={!homeList.some((h) => h.id === row.propertyId)} />
+      )}
       {error && <ActionFeedback error>{error}</ActionFeedback>}
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" disabled={busy || !typed} onClick={() => run(() => onSave(row, bodyFromDraft(draft, row)), "Could not save the code")}>
-          Save
-        </Button>
+        {!unlinked && (
+          <Button size="sm" disabled={busy || !typed} onClick={() => run(() => onSave(row, bodyFromDraft(draft, row)), "Could not save the code")}>
+            Save
+          </Button>
+        )}
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => run(() => onDismiss(row), "Could not dismiss the code")}>
           Dismiss
         </Button>
