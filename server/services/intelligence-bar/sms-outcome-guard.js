@@ -22,7 +22,10 @@
  * the same number therefore serialize: the second finds the first's row and is
  * refused with no provider call. The row is then settled from the result with
  * the wrapper's own settle function: accepted or not sent releases it, an
- * unknown outcome leaves it as the held row.
+ * unknown outcome leaves it as the held row. The row carries
+ * provider_handoff_reservation from acquisition, so a crash between the handoff
+ * and settlement leaves a row reconcileAutoSendClaims keeps for the 24-hour
+ * hold (then releases) instead of its 30-minute orphan sweep.
  *
  * The row has status 'sending' and no scheduled_for, so the scheduler's
  * stale-claim recovery never re-sends it. Nothing here sends a text or
@@ -111,6 +114,12 @@ async function acquireSendReservation({ phone, customerId = null, body }) {
       // lifecycle active the wrapper takes its own reservation next and must not
       // find this one. It is flagged only if the outcome stays unknown (settle).
       manualWrapperReservation: false,
+      // The provider-handoff marker from the start: if the process dies after the
+      // handoff and before settlement, reconcileAutoSendClaims keeps the row for
+      // the 24-hour hold (it deletes a bare manual reservation after 30 minutes),
+      // so the same text still cannot be resent. The wrapper's own interlock reads
+      // manual_wrapper_reservation only, so this does not refuse its path.
+      providerHandoff: true,
     });
     return { id };
   });

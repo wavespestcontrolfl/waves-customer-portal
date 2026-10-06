@@ -109,7 +109,7 @@ suite('send_sms reservation on isolated Postgres', () => {
     const rows = await heldRows(message);
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe('sending');
-    expect(rows[0].metadata).toMatchObject({ manual_send_reservation: true, manual_wrapper_reservation: true, provider_outcome_uncertain: true });
+    expect(rows[0].metadata).toMatchObject({ manual_send_reservation: true, manual_wrapper_reservation: true, provider_handoff_reservation: true, provider_outcome_uncertain: true });
 
     const again = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
     expect(again).toMatchObject({ success: false, blocked: true, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED' });
@@ -136,6 +136,59 @@ suite('send_sms reservation on isolated Postgres', () => {
 
     await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
 
+    expect(await heldRows(message)).toHaveLength(0);
+  });
+
+  test('a crash after the handoff and before settlement: the row survives the 30-minute reservation sweep, still blocks a resend, and is released after the 24-hour hold', async () => {
+    const guard = require('../services/intelligence-bar/sms-outcome-guard');
+    const { reconcileAutoSendClaims } = require('../services/sms-auto-send');
+    const phone = newPhone();
+    const message = newBody('crash');
+    // Acquire and never settle: the process died between the provider handoff and the settle.
+    const reservation = await guard.acquireSendReservation({ phone, body: message });
+    expect(reservation.id).toBeTruthy();
+    const rows = await heldRows(message);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata).toMatchObject({ manual_send_reservation: true, provider_handoff_reservation: true, provider_outcome_uncertain: true });
+    expect(rows[0].metadata.manual_wrapper_reservation).toBeUndefined();
+
+    // 31 minutes later the ungated five-minute scheduler runs the reservation sweep.
+    const thirtyOne = new Date(Date.now() - 31 * 60 * 1000);
+    await db('sms_log').where({ id: reservation.id }).update({ created_at: thirtyOne, updated_at: thirtyOne });
+    await reconcileAutoSendClaims();
+    expect(await heldRows(message)).toHaveLength(1);
+    const again = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
+    expect(again).toMatchObject({ success: false, blocked: true, code: 'SMS_PRIOR_OUTCOME_UNRECONCILED' });
+    expect(sendManualCustomerSms).not.toHaveBeenCalled();
+
+    // Past the 24-hour hold the same sweep releases it, and the text can be sent again.
+    const dayAgo = new Date(Date.now() - (24 * 60 + 1) * 60 * 1000);
+    await db('sms_log').where({ id: reservation.id }).update({ created_at: dayAgo, updated_at: dayAgo });
+    await reconcileAutoSendClaims();
+    expect(await heldRows(message)).toHaveLength(0);
+    sendManualCustomerSms.mockResolvedValueOnce(accepted());
+    const later = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
+    expect(later).toMatchObject({ success: true, state: 'provider_accepted' });
+  });
+
+  test('with a manual-reply lifecycle active, the wrapper interlock does not refuse the send because of our in-flight row (sends once)', async () => {
+    const phone = newPhone();
+    const message = newBody('lifecycle');
+    // While our row is in flight, the wrapper's own interlock lookup finds nothing: the in-flight row
+    // carries provider_handoff_reservation but not manual_wrapper_reservation.
+    sendManualCustomerSms.mockImplementationOnce(async () => {
+      const identity = require('../utils/phone').phoneIdentityKey(phone);
+      const live = await db('sms_log').where({ direction: 'outbound', status: 'sending' })
+        .whereRaw("metadata->>'manual_send_reservation' = 'true'")
+        .whereRaw("metadata->>'manual_wrapper_reservation' = 'true'")
+        .whereRaw(`${require('../services/sms-response-policy').phoneIdentitySql("BTRIM(COALESCE(to_phone, ''))")} = ?`, [identity])
+        .first('id');
+      expect(live).toBeUndefined();
+      return accepted();
+    });
+    const result = await executeCommsTool('send_sms', { phone, message, message_type: 'manual' });
+    expect(result).toMatchObject({ success: true });
+    expect(sendManualCustomerSms).toHaveBeenCalledTimes(1);
     expect(await heldRows(message)).toHaveLength(0);
   });
 

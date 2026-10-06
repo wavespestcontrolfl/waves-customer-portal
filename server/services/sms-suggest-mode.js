@@ -908,16 +908,23 @@ async function parkThreadSuggestions({ phoneLast10, excludeDecisionId }, dbh = d
  * orphan from a send whose outcome still needs reconciliation, even while the
  * auto-send gate is off.
  */
+// The reservation's kind marker. A manual reservation taken BEFORE a provider
+// handoff (the Intelligence Bar's send) also carries the handoff marker:
+// reconcileAutoSendClaims keeps an uncertain row with it for the 24-hour hold
+// instead of the 30-minute orphan sweep, so a crash between the handoff and
+// settlement cannot free a resend.
+function reservationMarkers(reservationKind, providerHandoff) {
+  if (reservationKind === 'provider_handoff') return { provider_handoff_reservation: true };
+  return { [`${reservationKind}_send_reservation`]: true, ...(providerHandoff ? { provider_handoff_reservation: true } : {}) };
+}
+
 async function createReplyHoldingReservation(dbh, {
   to, customerId = null, fromNumber, body, adminUserId = null,
   agentDecisionId = null, parkedDecisionIds = [], reservationKind = 'manual', uncertain = false,
-  manualWrapperReservation = false, messageType = null,
+  manualWrapperReservation = false, messageType = null, providerHandoff = false,
 }) {
-  const reservationMarker = reservationKind === 'provider_handoff'
-    ? 'provider_handoff_reservation'
-    : `${reservationKind}_send_reservation`;
   const metadata = {
-    [reservationMarker]: true,
+    ...reservationMarkers(reservationKind, providerHandoff),
     ...(uncertain ? { provider_outcome_uncertain: true } : {}),
     ...(manualWrapperReservation ? { manual_wrapper_reservation: true } : {}),
     ...(agentDecisionId ? { agent_decision_id: agentDecisionId } : {}),
