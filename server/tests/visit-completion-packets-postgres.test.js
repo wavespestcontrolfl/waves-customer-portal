@@ -2036,7 +2036,12 @@ postgres('visit completion packet records on PostgreSQL', () => {
     ]);
     // A competing claim can still hold the stop when the owner reaches its
     // invoice lock. NOWAIT releases that attempt for the existing retry path.
-    expect(attempts.every((result) => ['prepaid', 'payment_pending'].includes(result.state))).toBe(true);
+    // The attempt that lost the claim reports payment_pending, or payment_needed
+    // when it read the owner's claim as taken (visit-completion-payment.js); under
+    // load either can win the race, so both are the same "retry" outcome here, and
+    // the retry below must still settle the invoice as prepaid.
+    expect(attempts.every((result) => ['prepaid', 'payment_pending', 'payment_needed'].includes(result.state))).toBe(true);
+    expect(attempts.some((result) => ['prepaid', 'payment_pending'].includes(result.state))).toBe(true);
     if (attempts.every((result) => result.state === 'payment_pending')) {
       expect(await mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'visit_payment' }).first())
         .toMatchObject({ status: 'failed', last_error: 'payment_pending' });
