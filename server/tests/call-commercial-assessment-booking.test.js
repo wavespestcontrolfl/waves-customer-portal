@@ -440,10 +440,11 @@ describe('GATE_CALL_COMMERCIAL_ASSESSMENT_BOOKING: the processor predicate, the 
   const Processor = require('../services/call-recording-processor');
   const { buildFailOpenRoutingContext } = Processor;
   const { commercialAssessmentBookingActive, commercialAssessmentRoutingOptions, commercialDictatedBookingActive } = Processor._test;
-  const gatesOf = ({ agentCommit = true, trusted = true, assessment = true, commercial = false } = {}) => ({
-    isEnabled: (g) => ({ callAgentCommitBooking: agentCommit, callAgentCommitTrustedLabels: trusted }[g] === true),
+  const gatesOf = ({ agentCommit = true, trusted = true, assessment = true, commercial = false, outboundBooking = true, v2Routing = true } = {}) => ({
+    isEnabled: (g) => ({ callAgentCommitBooking: agentCommit, callAgentCommitTrustedLabels: trusted, callOutboundBooking: outboundBooking }[g] === true),
     assessmentLive: () => assessment,
     commercialLive: () => commercial,
+    v2Routing,
   });
   const outbound = { direction: 'outbound', metadata: { type: 'lead_auto_bridge' }, transcription: OUTBOUND, created_at: CALL_STARTED_AT };
   const inbound = { direction: 'inbound', transcription: OUTBOUND, created_at: CALL_STARTED_AT };
@@ -671,5 +672,97 @@ describe('codex #6046 round 2', () => {
     expect(grounded(extraction({ scheduling: { moved_appointment_date: '2026-09-25' } })).reason).toBe('moves_existing_visit');
     // control: the same call with none of them books
     expect(grounded(extraction({ scheduling: { moved_appointment_date: null, moved_appointment_words: null, moved_appointment_relative_date_used: false } })).ok).toBe(true);
+  });
+});
+
+describe('codex #6046 round 3', () => {
+  const Processor = require('../services/call-recording-processor');
+  const { commercialAssessmentBookingActive, outboundAutoBookingEnabled, commercialAssessmentRoutingOptions } = Processor._test;
+  const gatesOf = ({ outboundBooking = true, v2Routing = true, assessment = true } = {}) => ({
+    isEnabled: (g) => ({ callAgentCommitBooking: true, callAgentCommitTrustedLabels: true, callOutboundBooking: outboundBooking }[g] === true),
+    assessmentLive: () => assessment, v2Routing,
+  });
+  const bridge = { direction: 'outbound', metadata: { type: 'lead_auto_bridge' } };
+  const inbound = { direction: 'inbound' };
+
+  test('outbound needs outbound booking creation too: either prerequisite off holds the lane inactive', () => {
+    expect(commercialAssessmentBookingActive(bridge, gatesOf())).toBe(true);
+    expect(commercialAssessmentBookingActive(bridge, gatesOf({ outboundBooking: false }))).toBe(false); // GATE_CALL_OUTBOUND_BOOKING off
+    expect(commercialAssessmentBookingActive(bridge, gatesOf({ v2Routing: false }))).toBe(false); // V2 routing not enforced
+    expect(commercialAssessmentBookingActive(bridge, gatesOf({ outboundBooking: false, v2Routing: false }))).toBe(false);
+    // the new gate never authorizes outbound creation by itself
+    expect(outboundAutoBookingEnabled(gatesOf({ assessment: true, outboundBooking: false }))).toBe(false);
+    expect(outboundAutoBookingEnabled(gatesOf())).toBe(true);
+    // the options (so routing) follow the same predicate
+    const never = () => { throw new Error('built'); };
+    expect(commercialAssessmentRoutingOptions(bridge, never, gatesOf({ outboundBooking: false }))).toEqual({});
+    expect(commercialAssessmentRoutingOptions(bridge, never, gatesOf({ v2Routing: false }))).toEqual({});
+  });
+
+  test('inbound does not need the outbound prerequisites', () => {
+    expect(commercialAssessmentBookingActive(inbound, gatesOf({ outboundBooking: false, v2Routing: false }))).toBe(true);
+  });
+
+  test('the creation path reads the SAME predicate, and the audit builder follows it', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src).toContain('const outboundAutoBooking = isOutboundCall(call) && outboundAutoBookingEnabled();');
+    const at = src.indexOf('function outboundAutoBookingEnabled');
+    const body = src.slice(at, src.indexOf('\n}\n', at));
+    expect(body).toContain("enabled('callOutboundBooking')");
+    expect(body).toContain('CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED');
+    const { buildFailOpenRoutingContext } = Processor;
+    const build = (gates) => buildFailOpenRoutingContext({ call: { ...bridge, transcription: 'Agent: x', created_at: CALL_STARTED_AT }, customer: null, contactPhone: '+19415550100', failOpenEnabled: false, gates }).options;
+    expect(build(gatesOf()).commercialAssessmentBooking).toBe(true);
+    expect(build(gatesOf({ outboundBooking: false })).commercialAssessmentBooking).toBeUndefined();
+  });
+
+  describe('the gated prompt: one unambiguous rule for the agent-proposed shape', () => {
+    const { buildExtractionPrompt } = require('../services/prompts/call-extraction-v1');
+    const on = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-09-23', { agentProposedSlotCommitment: true });
+    const off = buildExtractionPrompt('Agent: hi', '+19415550100', '2026-09-23', {});
+    const fieldRule = (text) => text.slice(text.indexOf('- agent_committed_booking:'), text.indexOf('- caller_accepted_slot:'));
+    const evidenceRule = (text) => text.slice(text.indexOf('- definite_commitment:'), text.indexOf('- relative_date_used:'));
+
+    test('gate on: the field rule lists a THIRD exception and every "null" / "state both" line defers to it', () => {
+      const rule = fieldRule(on);
+      expect(rule).toContain('THREE EXCEPTIONS');
+      expect(rule).not.toContain('TWO EXCEPTIONS');
+      expect(rule).toContain('(3) An agent-proposed slot');
+      // each instruction that would send this shape to null or to a day-and-time quote carries the exception
+      expect(rule).toContain('not a bare acknowledgment (except in the exceptions listed below)');
+      expect(rule).toContain('leave agent_committed_booking null (except in the exceptions listed below)');
+      expect(rule.indexOf('(3) An agent-proposed slot')).toBeGreaterThan(rule.indexOf('leave agent_committed_booking null'));
+    });
+
+    test('gate on: the commitment-quote rule allows the bare commitment sentence for that shape', () => {
+      const rule = evidenceRule(on);
+      expect(rule).toContain("the agent's bare commitment sentence from the turn after the caller's yes");
+      expect(rule).toContain('holds no day or time');
+      expect(rule).toContain('MUST be the WHOLE clause that holds the day, date and time'); // the base rule still governs every other shape
+    });
+
+    test('gate off: none of it renders and the base rules read as before', () => {
+      expect(off).not.toContain('THREE EXCEPTIONS');
+      expect(off).not.toContain('(except in the exceptions listed below)');
+      expect(off).not.toContain('(3) An agent-proposed slot');
+      expect(off).not.toContain('bare commitment sentence from the turn after');
+      expect(fieldRule(off)).toContain('TWO EXCEPTIONS');
+      expect(fieldRule(off)).toContain('leave agent_committed_booking null (the booking can still be confirmed;');
+      expect(buildExtractionPrompt('Agent: hi', '+19415550100', '2026-09-23', { agentProposedSlotCommitment: false })).toBe(off);
+      // removing exactly the gated additions from the gate-on prompt gives the gate-off prompt back
+      const stripped = on
+        .replace(/\nAGENT-PROPOSED SLOT[\s\S]*?\n(?=\n)/, '')
+        .replaceAll(' (except in the exceptions listed below)', '')
+        .replace('THREE EXCEPTIONS', 'TWO EXCEPTIONS')
+        .replace(/ \(3\) An agent-proposed slot[^\n]*?(?=\n)/, '')
+        .replace(/ For that agent-proposed shape the commitment quote[^\n]*?(?= null when no slot was agreed)/, '');
+      expect(stripped).toBe(off);
+    });
+
+    test('the -aps cohort suffix covers the rule edits (one switch renders the block and the rules)', () => {
+      const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
+      expect(extractionPromptVersion([], { agentProposedSlotCommitment: true })).toMatch(/-aps$/);
+      expect(on).not.toBe(off);
+    });
   });
 });

@@ -172,9 +172,21 @@ function commercialAssessmentBookingActive(call = {}, gates = {}) {
   const enabled = gates.isEnabled || isEnabled;
   const live = gates.assessmentLive || (() => require('../config/feature-gates').callCommercialAssessmentBookingLive?.());
   // Inbound is always eligible; outbound only for the lead callback bridge (the
-  // server-written metadata.type 'lead_auto_bridge'), never another outbound call.
+  // server-written metadata.type 'lead_auto_bridge') AND only when outbound booking
+  // creation itself is enabled (outboundAutoBookingEnabled), never another outbound call.
   return enabled('callAgentCommitBooking') === true && live() === true
-    && (!isOutboundCall(call) || isLeadCallbackBridge(call));
+    && (!isOutboundCall(call) || (isLeadCallbackBridge(call) && outboundAutoBookingEnabled(gates)));
+}
+// What an OUTBOUND call needs before the processor may create its appointment at all
+// (GATE_CALL_OUTBOUND_BOOKING and V2 routing in enforce mode: outside it the confidence,
+// address and HOA-commercial gates never run). The creation path below and the assessment
+// lane read THIS one predicate, so routing never clears a hold for a call whose booking
+// creation would skip, and the audits agree with production (codex #6046 r3 P1). The new
+// gate never authorizes outbound creation by itself.
+function outboundAutoBookingEnabled(gates = {}) {
+  const enabled = gates.isEnabled || isEnabled;
+  const v2Enforced = typeof gates.v2Routing === 'boolean' ? gates.v2Routing : (CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED);
+  return !!enabled('callOutboundBooking') && v2Enforced === true;
 }
 // The outbound call is the form-lead callback bridge: its server-written metadata
 // (the same record resolveCallContactPhone reads) says type 'lead_auto_bridge'.
@@ -17047,8 +17059,7 @@ const CallRecordingProcessor = {
     // so a call those gates would have vetoed books live — containment the
     // removed review hold used to provide (Codex #3361 r4 P1). Shadow/legacy
     // routing keeps the pre-gate behavior: outbound bookings stay manual.
-    const outboundAutoBooking = isOutboundCall(call) && isEnabled('callOutboundBooking')
-      && CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED;
+    const outboundAutoBooking = isOutboundCall(call) && outboundAutoBookingEnabled();
     // The v2 TCPA verdict is only computed in ENFORCE routing mode — but
     // outbound consent is never implied UNLESS this outbound call cleared
     // the return-message eligibility gate above (owner ruling 2026-09-26,
@@ -23381,6 +23392,7 @@ CallRecordingProcessor._test = {
   buildFailOpenRoutingContext,
   commercialDictatedBookingActive,
   commercialAssessmentBookingActive,
+  outboundAutoBookingEnabled,
   commercialAssessmentRoutingOptions,
   commercialAssessmentBookableFor,
   commercialQuoteBookableFor,
