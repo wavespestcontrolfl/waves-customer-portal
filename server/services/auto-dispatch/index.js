@@ -15,7 +15,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { getAutoDispatchConfig } = require('./config');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
-const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('./eligibility');
+const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('./eligibility');
 const { getCustomerSchedulingPreferences } = require('./preferences');
 const { findValidCandidateSlots, SCORE_CAP } = require('./candidate-slots');
 const { scoreAppointmentPlacement } = require('./scoring');
@@ -616,6 +616,9 @@ async function evaluateServiceForRun(service, run) {
   // Plan-active gate (reuse the result if the geo self-heal already computed it).
   const planCheck = gate.planCheck || await isRecurringPlanActive(service, db);
   if (!planCheck.active) return logSkip(run, service, planCheck);
+
+  const personPlaced = await isPersonPlacedVisit(service, db);
+  if (personPlaced.placed) return logSkip(run, service, personPlaced);
 
   const prefs = await getCustomerSchedulingPreferences(service.customer_id, service.service_type);
   if (config.requirePortalPreferences && !prefs.has_explicit_prefs) {

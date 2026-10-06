@@ -6,6 +6,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
+  isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
 }));
 jest.mock('../services/auto-dispatch/preferences', () => ({
   getCustomerSchedulingPreferences: jest.fn(async () => ({
@@ -236,6 +237,15 @@ test('does not spend geocode budget on an inactive recurring plan', async () => 
   expect(geocoder.ensureCustomerGeocoded).not.toHaveBeenCalled(); // plan checked first → no geocode
   expect(res).toMatchObject({ skipped: 1, geocode_attempts: 0 });
   expect(lastDecision('skipped').reason_code).toBe('RECURRING_PLAN_INACTIVE');
+});
+
+test('a visit a person put on its date is skipped before scoring, in every mode', async () => {
+  eligibility.isPersonPlacedVisit.mockResolvedValueOnce({ placed: true, reason_code: 'PERSON_PLACED', reason_description: 'Date chosen by the customer (series move m1)' });
+  const res = await runAutoDispatch({ mode: 'apply' });
+  expect(res).toMatchObject({ skipped: 1, evaluated: 0, changed: 0 });
+  expect(candidateSlots.findValidCandidateSlots).not.toHaveBeenCalled();
+  expect(apply.applyAutoDispatchMove).not.toHaveBeenCalled();
+  expect(lastDecision('skipped').reason_code).toBe('PERSON_PLACED');
 });
 
 test('ineligible service is skipped before candidate generation', async () => {

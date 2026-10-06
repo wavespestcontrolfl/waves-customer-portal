@@ -1,4 +1,4 @@
-const { isEligibleForAutoDispatch, isRecurringPlanActive } = require('../services/auto-dispatch/eligibility');
+const { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit } = require('../services/auto-dispatch/eligibility');
 
 // today=2026-06-18, lock boundary = today+14 = 2026-07-02 (inclusive lock)
 const CTX = { today: '2026-06-18', lockBoundary: '2026-07-02', lockWindowDays: 14 };
@@ -194,5 +194,54 @@ describe('GATE_AUTO_DISPATCH_FLEX_TIER ctx', () => {
       .toMatchObject({ eligible: false, reason_code: 'CUSTOMER_INACTIVE' });
     expect(isEligibleForAutoDispatch(svc({ status: 'cancelled' }), FLEX_CTX))
       .toMatchObject({ eligible: false, reason_code: 'CANCELLED' });
+  });
+});
+
+describe('isPersonPlacedVisit', () => {
+  // Rows are filtered by the same predicates the query sends, so a wrong
+  // column, status or date in the query makes the test miss the row.
+  function fakeDb(rows, { fail = false } = {}) {
+    return (table) => {
+      if (table !== 'series_moves') throw new Error(`unexpected table ${table}`);
+      const preds = [];
+      return {
+        where(key, value) {
+          if (typeof key === 'object') Object.entries(key).forEach(([k, v]) => preds.push((r) => r[k] === v));
+          else preds.push((r) => r[key] === value);
+          return this;
+        },
+        whereNull(key) { preds.push((r) => r[key] == null); return this; },
+        orderBy() { return this; },
+        first: async () => {
+          if (fail) throw new Error('connection reset');
+          return rows.find((r) => preds.every((p) => p(r))) || null;
+        },
+      };
+    };
+  }
+  const move = (o = {}) => ({ id: 'm1', anchor_service_id: 's1', status: 'committed', reverted_at: null, new_date: '2026-10-18', initiated_by: 'customer_self_serve', ...o });
+  const visit = { id: 's1', scheduled_date: '2026-10-18' };
+
+  test('placed when the customer moved the visit to its current date', async () => {
+    expect(await isPersonPlacedVisit(visit, fakeDb([move()]))).toMatchObject({ placed: true, reason_code: 'PERSON_PLACED', reason_description: expect.stringContaining('the customer') });
+  });
+
+  test('placed when staff moved it', async () => {
+    expect(await isPersonPlacedVisit(visit, fakeDb([move({ initiated_by: 'admin' })]))).toMatchObject({ placed: true, reason_description: expect.stringContaining('staff') });
+  });
+
+  test('not placed when the visit has since left the chosen date, or the move was reverted or not committed', async () => {
+    expect(await isPersonPlacedVisit({ ...visit, scheduled_date: '2026-10-19' }, fakeDb([move()]))).toEqual({ placed: false });
+    expect(await isPersonPlacedVisit(visit, fakeDb([move({ reverted_at: '2026-10-06T00:00:00Z' })]))).toEqual({ placed: false });
+    expect(await isPersonPlacedVisit(visit, fakeDb([move({ status: 'superseded' })]))).toEqual({ placed: false });
+    expect(await isPersonPlacedVisit(visit, fakeDb([move({ anchor_service_id: 's2' })]))).toEqual({ placed: false });
+  });
+
+  test('a Date scheduled_date compares as its calendar date', async () => {
+    expect(await isPersonPlacedVisit({ id: 's1', scheduled_date: new Date('2026-10-18T04:00:00Z') }, fakeDb([move()]))).toMatchObject({ placed: true });
+  });
+
+  test('fails closed on a read error', async () => {
+    expect(await isPersonPlacedVisit(visit, fakeDb([], { fail: true }))).toMatchObject({ placed: true, reason_code: 'PERSON_PLACED_UNKNOWN' });
   });
 });

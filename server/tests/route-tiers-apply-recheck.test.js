@@ -8,6 +8,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/auto-dispatch/eligibility', () => ({
   isEligibleForAutoDispatch: jest.fn(() => ({ eligible: true })),
   isRecurringPlanActive: jest.fn(async () => ({ active: true })),
+  isPersonPlacedVisit: jest.fn(async () => ({ placed: false })),
 }));
 jest.mock('../services/auto-dispatch/preferences', () => ({
   getCustomerSchedulingPreferences: jest.fn(async () => ({

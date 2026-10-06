@@ -143,4 +143,34 @@ async function isRecurringPlanActive(service, db) {
   return { active: true, reason_code: null, reason_description: null };
 }
 
-module.exports = { isEligibleForAutoDispatch, isRecurringPlanActive, VALID_STATUSES };
+/**
+ * Did a person put this visit on its current date? A committed, unreverted
+ * series move (staff edit modal / quick move / dispatch board, or the
+ * customer's own reschedule page) anchored on this visit whose new_date is
+ * still the visit's date means a person chose it — and the text that move
+ * sends says "visits already on your calendar won't change unless we talk
+ * with you first". Auto-dispatch never sends a text (apply.js), so moving
+ * such a visit breaks that promise silently (prod 10-06: a customer picked
+ * Sun 9 AM at 8:49 PM; the 4:10 AM run moved it to Mon 3 PM; nobody told them).
+ *
+ * Fails CLOSED: a read error skips the visit for this run.
+ */
+async function isPersonPlacedVisit(service, db) {
+  const dateStr = toDateStr(service.scheduled_date);
+  if (!service.id || !dateStr) return { placed: false };
+  try {
+    const move = await db('series_moves')
+      .where({ anchor_service_id: service.id, status: 'committed' })
+      .whereNull('reverted_at')
+      .where('new_date', dateStr)
+      .orderBy('created_at', 'desc')
+      .first('id', 'initiated_by');
+    if (!move) return { placed: false };
+    const who = move.initiated_by === 'customer_self_serve' ? 'the customer' : 'staff';
+    return { placed: true, reason_code: 'PERSON_PLACED', reason_description: `Date chosen by ${who} (series move ${move.id})` };
+  } catch (err) {
+    return { placed: true, reason_code: 'PERSON_PLACED_UNKNOWN', reason_description: `Could not read series moves: ${err.message}` };
+  }
+}
+
+module.exports = { isEligibleForAutoDispatch, isRecurringPlanActive, isPersonPlacedVisit, VALID_STATUSES };
