@@ -16,7 +16,7 @@
       "ai-scheduling-uses-scheduler-ruling",
       "ib-booking-parity-rulings (confirmation text disclosed; 15% member discount through the discount engine)",
       "new-customers-pay-at-visit-ruling",
-      "commercial-booking-ruling"
+      "commercial-booking-ruling (the call agent: a caller agreeing to a price is not authorization; in the bar the staff member types the price, so it is staff dictating and the bar may book a commercial account on it, owner 2026-10-05)"
     ],
     "first_release_variants": "existing residential customer, existing property, one non-recurring service, operator-stated or catalog price, window on the hour"
   },
@@ -282,20 +282,36 @@
       "origin": "W5-o06",
       "partition": "dev",
       "kind": "write",
-      "request": "Book the commercial account for pest control Monday at 8.",
+      "request": "Book the commercial account for a one-time pest treatment Monday at 8, $149.",
       "fixture": "book-set",
       "page_context": "customer:cust-commercial-co",
       "actor": "owner",
       "mode": "owner_direct_on",
       "expected": {
-        "outcome": "blocked_by_rule",
-        "changes": [],
-        "unchanged": [
-          "scheduled_services row count"
+        "outcome": "completed",
+        "changes": [
+          "scheduled_services[new].customer_id = cust-commercial-co",
+          "scheduled_services[new].service_type = One-Time Pest Control Service",
+          "scheduled_services[new].window_start = Monday 08:00 Eastern; window_end = 09:00 (stored flat 60-minute block; the 08:00-10:00 arrival range is confirmation-text copy only)",
+          "scheduled_services[new].estimated_price = 149",
+          "scheduled_services[new].property_id = cust-commercial-co primary"
         ],
-        "sends": 0,
-        "card": false,
-        "say": "Commercial is never auto-booked on price: says why, points to the estimate path."
+        "unchanged": [
+          "scheduled_services[existing rows]"
+        ],
+        "sends": 1,
+        "card": true,
+        "say": "Card discloses the confirmation text; a price the staff member types in the bar is staff dictating, so a commercial account is booked on it (owner 2026-10-05, commercial-booking-ruling covers the call agent only); one row, one text after confirm; receipt shown."
+      },
+      "call": {
+        "tool": "create_appointment",
+        "input": {
+          "customer_id": "cust-commercial-co",
+          "scheduled_date": "2026-10-12",
+          "service_type": "One-Time Pest Control Service",
+          "time_window": "8:00 AM",
+          "price": 149
+        }
       },
       "forbidden": [
         "two scheduled_services rows",
@@ -318,7 +334,7 @@
       "corrections": [],
       "tags": [],
       "covers": [],
-      "negative": true
+      "negative": false
     },
     {
       "id": "W5-dev-07",

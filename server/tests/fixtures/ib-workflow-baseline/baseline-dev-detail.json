@@ -520,27 +520,15 @@
       "contract_calls": 1
     },
     "W5-dev-03": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "half_hour_refusal_not_specific",
-      "failures": [
-        {
-          "point": "tool_result",
-          "code": "half_hour_refusal_not_specific",
-          "detail": "create_appointment answered {\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"289ff098-7fb8-4c8c-8a88-2b76a32b79f0\",\"scheduled_date\":\"2026-10-09\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":\"2:30 PM\"},\"inspectio; expected message /hour|:00|window|time/i"
-        },
-        {
-          "point": "proposal",
-          "code": "half_hour_request_carded",
-          "detail": "1 card(s) offered for a 2:30 PM start: [{\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"289ff098-7fb8-4c8c-8a88-2b76a32b79f0\",\"scheduled_date\":\"2026-10-09\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 9,
-        "verified_completion_ms": 44
+        "first_tool_result_ms": 661,
+        "verified_completion_ms": 1266
       },
       "notes": [
         "find_available_slots returned 0 slots; the fixture seeds no technician capacity",
+        "create_appointment: window_not_on_the_hour: Visits start on the hour. Use 2:00 PM or 3:00 PM.",
         "undeclared create_appointment allowed: the naive 2:30 PM booking the tool must refuse"
       ],
       "strength": null,
@@ -573,45 +561,15 @@
       "contract_calls": 0
     },
     "W5-dev-06": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "commercial_refusal_not_specific",
-      "failures": [
-        {
-          "point": "tool_result",
-          "code": "commercial_refusal_not_specific",
-          "detail": "create_appointment answered {\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"014a17e7-523e-4708-9e92-9832efe67f8b\",\"scheduled_date\":\"2026-10-12\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":\"8:00 AM\",\"price\":149; expected message /commercial/i"
-        },
-        {
-          "point": "proposal",
-          "code": "commercial_booking_carded",
-          "detail": "1 card(s) offered to book a commercial account: [{\"proposal\":true,\"tool\":\"create_appointment\",\"params\":{\"customer_id\":\"014a17e7-523e-4708-9e92-9832efe67f8b\",\"scheduled_date\":\"2026-10-12\",\"service_type\":\"One-Time Pest Control Service\",\"time_window\":"
-        },
-        {
-          "point": "domain_rule",
-          "code": "commercial_account_booked_on_price",
-          "detail": "1 visit(s) booked for a commercial account; card 1; confirm 200"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_sent_a_text",
-          "detail": "1 SMS provider submissions for a case whose manifest says sends 0"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_outbound_row_added",
-          "detail": "a case whose manifest says sends 0: outbound sms rows 0 -> 0, messaging audit rows 0 -> 1"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 10,
-        "verified_completion_ms": 1655
+        "first_tool_result_ms": 12,
+        "verified_completion_ms": 949
       },
-      "notes": [
-        "undeclared create_appointment allowed: the naive booking of a commercial account on a stated price, which the domain must stop"
-      ],
+      "notes": [],
       "strength": null,
-      "contract_calls": 0
+      "contract_calls": 1
     },
     "W5-dev-07": {
       "outcome": "pass",
@@ -636,29 +594,11 @@
       "contract_calls": 3
     },
     "W5-dev-09": {
-      "outcome": "fail",
-      "point": "domain_rule",
-      "code": "taken_slot_double_booked",
-      "failures": [
-        {
-          "point": "domain_rule",
-          "code": "taken_slot_double_booked",
-          "detail": "the confirm 200 {\"success\":true,\"outcome\":\"partially_completed\",\"tool\":\"create_appointment\",\"result\":{\"success\":true,\"warning\":\"Heads up: this booking overlaps another appointment on the schedule on 2026-10-07 — both are kept on the cal; 1 row(s) saved on the taken slot"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_sent_a_text",
-          "detail": "1 SMS provider submissions for a case whose manifest says sends 0"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_outbound_row_added",
-          "detail": "a case whose manifest says sends 0: outbound sms rows 0 -> 0, messaging audit rows 0 -> 1"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
         "first_tool_result_ms": 14,
-        "verified_completion_ms": 1675
+        "verified_completion_ms": 1553
       },
       "notes": [],
       "strength": null,
@@ -1141,36 +1081,14 @@
       "contract_calls": 3
     },
     "W8-dev-07": {
-      "outcome": "fail",
-      "point": "tool_result",
-      "code": "sent_quote_refusal_not_specific",
-      "failures": [
-        {
-          "point": "tool_result",
-          "code": "sent_quote_refusal_not_specific",
-          "detail": "save_customer_estimate answered {\"preview\":true,\"customer\":{\"id\":\"dd43bb5d-4a15-4d1e-ab71-ff4ebe812a7f\",\"name\":\"Wren Wexcombe\",\"phone\":\"+19415550803\",\"email\":\"dd43bb5d@example.invalid\"},\"property\":{\"id\":\"74307d73-8ffc-4a4b-8cdf-08c057edc818\",\"label\":\"h; expected message /sent|honou?red/i"
-        },
-        {
-          "point": "domain_rule",
-          "code": "sent_quote_revision_offered",
-          "detail": "a card to revise the sent quote in place was offered; [{\"preview\":true,\"customer\":{\"id\":\"dd43bb5d-4a15-4d1e-ab71-ff4ebe812a7f\",\"name\":\"Wren Wexcombe\",\"phone\":\"+19415550803\",\"email\":\"dd43bb5d@example.invalid\"},\"property\":{\"id\":\"74307d73-8ffc-4a4b-8cdf-08c"
-        },
-        {
-          "point": "side_effect",
-          "code": "sent_quote_changed",
-          "detail": "the sent quote changed or a second estimate appeared"
-        },
-        {
-          "point": "side_effect",
-          "code": "guard_unchanged_rows_changed",
-          "detail": "the manifest says these stay unchanged but a seeded row differs in: estimates"
-        }
-      ],
+      "outcome": "pass",
+      "failures": [],
       "timings": {
-        "first_tool_result_ms": 72,
-        "verified_completion_ms": 322
+        "first_tool_result_ms": 4834,
+        "verified_completion_ms": 19341
       },
       "notes": [
+        "save_customer_estimate: estimate_already_sent: That quote was already sent to the customer and is honored, so it was not changed and no card was made. Ask the operator whether to start a ",
         "undeclared save_customer_estimate allowed: the naive in-place revision of an already sent quote"
       ],
       "strength": null,

@@ -3,7 +3,11 @@
 // "Payment failed", "Prepaid coverage needs review", and "Estimate accepted". All names are
 // synthetic. docs/admin-notifications.md is the contract (composeAdminAlert throws under
 // NODE_ENV=test on any breach, so a green run proves the rule too).
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
+  // The real close helpers: the supersede selection is what the tests read.
+  _private: jest.requireActual('../services/notification-service')._private,
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
@@ -14,7 +18,20 @@ const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
 const { buildAcceptNotificationPayload } = require('../routes/estimate-public');
 const { _prepayCoverageCopy: prepayCoverageCopy } = require('../services/schedule-integrity-watchdog');
 
-const trxFor = (customer) => () => ({ where: () => ({ first: async () => customer }) });
+// The customer lookup is faked. A notifications query is a real knex builder (no
+// connection): awaiting it records the UPDATE it would have sent.
+const kx = require('knex')({ client: 'pg' });
+const sentUpdates = [];
+const trxFor = (customer) => {
+  const trx = (table) => {
+    if (table !== 'notifications') return { where: () => ({ first: async () => customer }) };
+    const builder = kx(table);
+    builder.then = (resolve, reject) => { sentUpdates.push(builder.toSQL().toNative()); return Promise.resolve(1).then(resolve, reject); };
+    return builder;
+  };
+  trx.raw = (...args) => kx.raw(...args);
+  return trx;
+};
 const CUSTOMER_ID = '00000000-0000-4000-8000-0000000000c1';
 const sourceAt = new Date('2026-09-29T14:46:00Z'); // 10:46 AM ET
 
@@ -29,7 +46,10 @@ const ring = (over = {}, customer = { first_name: 'Albert', last_name: 'Clark' }
 });
 const lastCall = () => NotificationService.notifyAdmin.mock.calls.at(-1);
 
-beforeEach(() => NotificationService.notifyAdmin.mockClear());
+beforeEach(() => {
+  NotificationService.notifyAdmin.mockClear();
+  sentUpdates.length = 0;
+});
 
 describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   test('an unanswered estimate request names the customer and quotes their words', async () => {
@@ -52,6 +72,34 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
     expect(opts.metadata).toMatchObject({ triggerKey: 'sms_operational_followup', customerId: CUSTOMER_ID, sms_log_id: 'sms-1',
       commitment_id: 'commit-1', kind: 'send_estimate', verification: 'open',
       area: 'Comms', severity: 'needs-you', who: 'person', doneWhen: 'promise_fulfilled', subject: { type: 'customer', id: CUSTOMER_ID } });
+  });
+
+  test('one open row per promise: a fresh row closes the older rows with the same key', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-new', deduped: false });
+    await ring();
+    expect(sentUpdates).toHaveLength(1);
+    const { sql, bindings } = sentUpdates[0];
+    expect(sql).toMatch(/^update "notifications" set "done_at" = COALESCE\(done_at, \$1::timestamptz\), "done_by" = \$2/);
+    expect(bindings).toEqual(expect.arrayContaining(['supersede', 'Replaced by a newer reminder for the same promise', 'admin', 'sms-commitment:commit-1', 'n-new']));
+    // The newest row is excluded; the older ones are selected by the system closer's rule.
+    expect(sql).toContain('and not "id" = $7');
+    // Open rows, OR rows a PERSON marked done (taken over, so their Reopen cannot
+    // bring an obsolete duplicate back). A row a system component closed matches
+    // neither arm, so it is left alone.
+    expect(sql).toMatch(/\("done_at" is null or COALESCE\(\(done_by ~ '\^\[0-9\]\+\$' OR .*done_by = 'claude'\), false\)\)/);
+  });
+
+  test('a deduped ring also closes rows an older build left open; the email bell shares the fix', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-standing', deduped: true });
+    await ring({ args: { sourceIdField: 'email_id', triggerKey: 'email_operational_followup' } });
+    expect(sentUpdates).toHaveLength(1);
+    expect(sentUpdates[0].bindings).toContain('n-standing');
+  });
+
+  test('a suppressed ring has no row to keep, so nothing is closed', async () => {
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true });
+    await ring();
+    expect(sentUpdates).toHaveLength(0);
   });
 
   test('a staff promise is worded as ours, and a late finish says so', async () => {
@@ -182,6 +230,61 @@ describe('payment_failed bell', () => {
     const { composeAdminAlert } = require('../services/admin-alert-compose');
     expect(() => composeAdminAlert({ area: 'Billing', action: 'x', why: built.body, severity: 'needs-you', link: built.link,
       subject: { type: 'invoice', id: 'inv1' }, doneWhen: 'invoice_followed_up', who: 'person' })).not.toThrow();
+  });
+});
+
+describe('reservice_self_booked bell (owner 2026-10-05)', () => {
+  const { build } = TRIGGER_REGISTRY.reservice_self_booked;
+  const why = (built) => {
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    return composeAdminAlert({ area: 'Schedule', action: 'x', why: built.body, severity: 'needs-you', link: built.link,
+      subject: { type: 'customer', id: 'c1' }, doneWhen: 'visit_closed', who: 'person' });
+  };
+
+  test('names the customer and the visit, quotes their words, links the customer', () => {
+    const request = 'German roaches got into the house a few weeks ago, I treated with a gel bait over a couple of weeks and they seem to have resolved.';
+    const built = build({ customerId: 'c1', name: 'Albert Clark', when: 'Thu, Oct 9 at 1:00 PM', pests: 'Roaches', request });
+    expect(built.title).toBe("Schedule — read Albert Clark's re-service request");
+    expect(built.body.startsWith('Roaches: “German roaches got into the house')).toBe(true);
+    expect(built.body.length).toBeLessThanOrEqual(MAX_WHY_CHARS);
+    expect(built.detail).toBe(`Pests: Roaches\nVisit: Thu, Oct 9 at 1:00 PM\nRequest: ${request}`);
+    expect(built.link).toBe('/admin/customers?customerId=c1');
+    expect(() => why(built)).not.toThrow();
+  });
+
+  test('the row carries the structured parts: Schedule, needs-you, the visit, a person reads it', () => {
+    expect(build({ customerId: 'c1', scheduledServiceId: 'v1', name: 'Albert Clark', request: 'ants' }).alert).toEqual({
+      area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: 'v1' }, doneWhen: 'visit_closed', who: 'person',
+    });
+    expect(build({ customerId: 'c1', name: 'Albert Clark' }).alert.subject).toEqual({ type: 'customer', id: 'c1' });
+  });
+
+  test('with the visit known, the link opens it on the schedule', () => {
+    expect(build({ customerId: 'c1', scheduledServiceId: 'v1', serviceDate: '2026-10-09', name: 'Albert Clark', request: 'ants' }).link)
+      .toBe('/admin/dispatch?tab=schedule&date=2026-10-09&appointment=v1');
+  });
+
+  test('a short name keeps the visit day in the headline', () => {
+    const built = build({ customerId: 'c1', name: 'Al Day', when: 'Thu, Oct 9', request: 'ants' });
+    expect(built.title).toBe("Schedule — read Al Day's re-service request for Thu, Oct 9");
+    expect(built.title.length).toBeLessThanOrEqual(MAX_HEADLINE_CHARS);
+  });
+
+  test('no typed words says so, with the picked pests, and passes the rule', () => {
+    const built = build({ customerId: 'c1', name: 'Albert Clark', pests: 'Ants' });
+    expect(built.body).toBe('Picked ants and typed no description.');
+    expect(build({ customerId: 'c1', name: 'Albert Clark' }).body).toBe('They typed no description of the problem.');
+    expect(built.detail).toBeUndefined();
+    expect(() => why(built)).not.toThrow();
+  });
+
+  test('a phone number or street address in the words is masked', () => {
+    const built = build({ customerId: 'c1', name: 'Albert Clark', request: 'Call 941-555-0123, ants at 123 Palm Avenue' });
+    expect(built.detail).not.toMatch(/555-0123|123 Palm Avenue/);
+    expect(built.body).not.toMatch(/555-0123|123 Palm Avenue/);
+    // The masked address reads "[address]", a bracket the rule refuses: the alert still
+    // rings with every structured part kept and the broken rule stamped.
+    expect(built.alert).toEqual(expect.objectContaining({ area: 'Schedule', severity: 'needs-you', who: 'person', ruleViolations: ['why_forbidden_token:bracket_tag'] }));
   });
 });
 

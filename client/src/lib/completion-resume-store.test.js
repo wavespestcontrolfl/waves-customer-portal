@@ -122,6 +122,8 @@ describe("completion resume store (IndexedDB)", () => {
     expect(hasFastCompletionMarker("svc-m", "tech-other")).toBe(false);
     expect(listFastCompletionMarkers("tech-m")).toEqual(["svc-m"]);
     expect(listFastCompletionMarkers("tech-other")).toEqual([]);
+    expect(await putFastCompletionAttempt("svc-m", "tech-m", { body, summary: "Marked", expectedBody: body, sheet: "lawn_visit" })).toBe(true);
+    expect((await getFastCompletionAttempt("svc-m", "tech-m")).attempt.sheet).toBe("lawn_visit");
     expect(await deleteFastCompletionAttempt("svc-m", "tech-m", { ...body, technicianNotes: "Other" })).toBe(false);
     expect(hasFastCompletionMarker("svc-m", "tech-m")).toBe(true);
     expect(await deleteFastCompletionAttempt("svc-m", "tech-m", body)).toBe(true);

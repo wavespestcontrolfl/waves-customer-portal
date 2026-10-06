@@ -112,6 +112,7 @@ const {
 } = require('../services/lawn-protocol-completion');
 const { freezeTechFindings, rejectedTechFindingEdits } = require('./service-report/tree-shrub-tech-findings');
 const { freezeWatchItems, visitWatchMonth } = require('./tree-shrub-watch-items');
+const { freezePestCheck } = require('./tree-shrub-pest-check');
 const { validateTreeShrubCloseout, validateTreeShrubTypedCompliance, deriveTreeShrubTreatments } = require('../services/tree-shrub-closeout');
 const { scoreAndStoreTreeShrubAssessment, storeTreeShrubAssessmentFromReview, treeShrubReviewSignature, treeShrubPhotosHash } = require('../services/tree-shrub-assessment');
 const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../services/service-completion-profiles');
@@ -601,8 +602,8 @@ function advisorySafeMessage(text) {
 // Advisory messages recorded on a completion, flattened for the closeout
 // success view — the operator must see a recorded overrun/exception at
 // completion time, not only later in Customer 360.
-function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory }) {
-  return [blackout, nLimit, manager, calibration, inventory]
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit }) {
+  return [blackout, nLimit, manager, calibration, inventory, limit]
     .filter((record) => record && record.advisory)
     .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
     .map((block) => block && block.message)
@@ -3000,6 +3001,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     let waveguardManagerApproval = null;
     let waveguardCalibrationAdvisory = null;
     let waveguardInventoryAdvisory = null;
+    // A yearly cap shared across formulations (prodiamine) that this visit's products
+    // crossed: an advisory in the response and one dispatch alert. The work is done;
+    // the completion is never blocked.
+    let applicationLimitAdvisory = null;
     let waveguardCalibrationCleared = false;
     let waveguardTankCleanout = null;
     let waveguardPlan = null;
@@ -3998,6 +4003,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ? freezeWatchItems(completionInput.body?.treeShrubReview, {
         month: visitWatchMonth(backfillPlan.active ? backfillPlan.serviceDate : svc.scheduled_date),
       })
+      : null;
+    // T&S live-insect check (GATE_TS_PEST_CHECK): the technician's "Live insects
+    // found?" answer and insect types, validated against the enum and frozen
+    // the same way. Tech-facing storage only; gate off or no valid answer =
+    // null = nothing written.
+    const treeShrubPestCheckFreeze = (reportServiceLine === 'tree_shrub' || typedFindingsType === 'tree_shrub')
+      ? freezePestCheck(completionInput.body?.treeShrubReview)
       : null;
     // A Waves blog post the completion picked (GATE_REPORT_BLOG_POST): the id
     // is checked against the one link rule (report-blog-post.js) and its
@@ -6487,6 +6499,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             } : {}),
             ...(treeShrubTechFindingsFreeze || {}),
             ...(treeShrubWatchItemsFreeze || {}),
+            ...(treeShrubPestCheckFreeze || {}),
             inventoryDeductions,
             protocolActionsCompleted: reportProtocolActions,
             protocolActionScopesCompleted: reportProtocolActionScopes,
@@ -8881,6 +8894,62 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // in the same MOA group; we only fire one alert per MOA group per
     // job. Without this guard a 3-product completion in the same
     // violating group would create 3 identical cards.
+    // Shared active-ingredient yearly cap (prodiamine across formulations): its own
+    // step, because the work is already done and ledgered whatever the outcome. It
+    // runs for an incomplete visit that applied product and again on a resume of a
+    // committed completion, reading the products from the ledger rows this record
+    // wrote (not the request body). The advisory is rebuilt from the computed
+    // violation every time, so a retry response still carries it; the dispatch alert
+    // is deduped durably per job and ingredient. Never blocks, never messages a customer.
+    if (record?.id) {
+      const reportSharedCap = async (trx = null) => {
+        const connection = trx || db;
+        if (packetEffects) {
+          const item = await connection('visit_completion_packet_items')
+            .where({ id: packetContext.itemId, service_record_id: record.id }).forUpdate().first('id');
+          if (!item) throw new Error('Visit member completion record changed');
+        }
+        const ledgered = await connection('property_application_history')
+          .where({ service_record_id: record.id }).whereNull('retracted_at').whereNotNull('product_id').distinct('product_id');
+        if (!ledgered.length) return;
+        const LimitChecker = require('../services/application-limits');
+        const { createAlert } = require('../services/dispatch-alerts');
+        const capDate = svc.scheduled_date instanceof Date ? svc.scheduled_date : new Date(`${svc.scheduled_date}T12:00:00`);
+        const reported = new Set();
+        for (const { product_id: productId } of ledgered) {
+          const { blocks } = await LimitChecker.checkLimits(svc.customer_id, productId, capDate, connection, { propertyId: svc.property_id || null });
+          for (const v of blocks.filter((b) => b.type === 'annual_max_rate' && b.matchType === 'active_ingredient')) {
+            if (reported.has(v.matchValue)) continue;
+            reported.add(v.matchValue);
+            applicationLimitAdvisory = {
+              advisory: true,
+              blocks: [...(applicationLimitAdvisory?.blocks || []), { code: 'application_limit_active_ingredient', message: v.message }],
+            };
+            if (await connection('dispatch_alerts').where({ type: 'application_limit', job_id: svc.id })
+              .whereRaw("payload->>'active_ingredient' = ?", [v.matchValue]).first('id')) continue;
+            const capProduct = await connection('products_catalog').where({ id: productId }).first();
+            try {
+              await createAlert({
+                type: 'application_limit', severity: 'critical', techId: svc.technician_id, jobId: svc.id,
+                payload: { limit_type: v.type, active_ingredient: v.matchValue, product_name: capProduct?.name || null, current: v.current, max: v.max, message: v.message },
+                trx,
+              });
+            } catch (alertErr) {
+              if (packetEffects) throw alertErr;
+              logger.error(`[dispatch] application_limit createAlert failed: ${alertErr.message}`);
+            }
+          }
+        }
+      };
+      try {
+        if (packetEffects) await db.transaction(reportSharedCap);
+        else await reportSharedCap();
+      } catch (err) {
+        if (packetEffects) throw err;
+        logger.error(`[dispatch] shared-cap check failed (non-blocking): ${err.message}`);
+      }
+    }
+
     if (!isIncompleteVisit && (!resumingCommittedCompletion || packetEffects) && products?.length) {
       const writeMoaAlerts = async (trx = null) => {
         const connection = trx || db;
@@ -8918,11 +8987,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
             ...result.warnings.map((v) => ({ ...v, alertSeverity: 'warn' })),
           ];
           for (const v of violations) {
-            // Only the MOA-rotation family of limit violations
-            // produces moa_violation alerts. Other limit types
-            // (annual_max_apps, seasonal_blackout, etc.) are
-            // operationally distinct and would belong to other
-            // alert kinds.
+            // The shared active-ingredient yearly cap has its own step below.
+            if (v.matchType === 'active_ingredient') continue;
+            // Only the MOA-rotation family of limit violations produces moa_violation alerts.
             if (!['moa_rotation_max', 'consecutive_use_max'].includes(v.type)) continue;
             const productCatalog = await connection('products_catalog').where({ id: p.productId }).first();
             const moaGroup = productCatalog?.moa_group;
@@ -9321,6 +9388,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           manager: waveguardManagerApproval,
           calibration: waveguardCalibrationAdvisory,
           inventory: waveguardInventoryAdvisory,
+          limit: applicationLimitAdvisory,
         }),
         ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
         ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -13511,6 +13579,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
           });
         }
       } catch { /* best-effort — render-time reconciliation still applies */ }
+      // Tree & shrub "From your technician" paragraph (GATE_TS_TECH_PARAGRAPH): ONE
+      // model call here, frozen first-writer-wins under its own key. Same posture as
+      // the lawn paragraph above: best-effort, a miss stores nothing, and the gate off
+      // returns before any read or call. It uses the completion's own report token and
+      // mints none (no token, no paragraph). Fold the freeze back so the later
+      // sending/sent writes (which spread recordStructuredNotes) don't clobber it.
+      try {
+        const { freezeTreeShrubTechParagraph } = require('../services/service-report/tree-shrub-tech-paragraph-gate');
+        const tsParagraph = await freezeTreeShrubTechParagraph({ service: record, knex: db, reportToken });
+        if (tsParagraph) recordStructuredNotes.treeShrubTechParagraph = { ...(recordStructuredNotes.treeShrubTechParagraph || {}), ...tsParagraph };
+      } catch { /* best-effort — a miss prints no paragraph */ }
     }
 
     // Separate lawn watering text (GATE_LAWN_WATERING_SMS, owner 2026-09-30):
@@ -15102,6 +15181,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         manager: waveguardManagerApproval,
         calibration: waveguardCalibrationAdvisory,
         inventory: waveguardInventoryAdvisory,
+        limit: applicationLimitAdvisory,
       }),
       ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
       ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),

@@ -138,6 +138,23 @@ describe('queueContactReportTexts', () => {
     expect(JSON.parse(rows[1].metadata).contact_report_first_name).toBe('Morgan');
   });
 
+  test('a tenant contact, or an unlabeled contact on a property-manager account, gets no report text', async () => {
+    queueReads({ ...CUSTOMER, service_contact_role: 'tenant' });
+    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(1);
+    expect(inserts().map((r) => r.to_phone)).toEqual(['941-555-0456']);
+
+    db.mockState.calls = [];
+    queueReads({ ...CUSTOMER, contact_role: 'property_manager', service_contact2_role: 'property_manager' });
+    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(1);
+    expect(inserts().map((r) => r.to_phone)).toEqual(['941-555-0456']);
+  });
+
+  test('deny wins: a phone recorded on a tenant slot gets no report text even through another slot', async () => {
+    queueReads({ ...CUSTOMER, service_contact_role: 'tenant', service_contact2_phone: '941.555.0123', service_contact2_role: 'home_buyer' });
+    expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(0);
+    expect(inserts()).toEqual([]);
+  });
+
   test('each contact is greeted by their own first name; a nameless contact is never greeted by the account holder\'s', async () => {
     queueReads({ ...CUSTOMER, service_contact2_name: null });
     expect(await ContactReportText.queueContactReportTexts(ARGS)).toBe(2);
@@ -547,6 +564,18 @@ describe('summarySmsRecipient: who gets the combined-stop summary text', () => {
     const opts = { dbh: {} };
     expect((await summarySmsRecipient(CUSTOMER, opts)).phone).toBe('(941) 555-0123');
     expect(resolveServiceContactSmsRecipient).toHaveBeenCalledWith(CUSTOMER, opts);
+  });
+
+  test('a slot-1 tenant, or a slot-1 occupant on a manager account, never gets the summary: the holder does', async () => {
+    delete process.env.GATE_CONTACT_REPORT_TEXT;
+    expect(await summarySmsRecipient({ ...CUSTOMER, service_contact_role: 'tenant' }))
+      .toMatchObject({ phone: '+19415550100', role: 'primary' });
+    // Gate on but no holder phone: no text at all, never the tenant.
+    process.env.GATE_CONTACT_REPORT_TEXT = 'true';
+    expect((await summarySmsRecipient({ ...CUSTOMER, phone: null, contact_role: 'property_manager' })).phone).toBe('');
+    // A slot-1 manager on a manager account still gets it.
+    expect((await summarySmsRecipient({ ...CUSTOMER, phone: null, contact_role: 'property_manager', service_contact_role: 'property_manager' })).phone)
+      .toBe('(941) 555-0123');
   });
 });
 

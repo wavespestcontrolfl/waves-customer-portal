@@ -209,6 +209,12 @@ const DEFAULTS = Object.freeze({
   // alone 10/13 right, 1 wrong; Opus 5.5 alone 10/13, 2 wrong. A route so a
   // second model can be added later. Shadow only behind GATE_SMS_SCHEDULING_DECIDE.
   SMS_SCHEDULING_DECIDE: 'claude-sonnet-5-5',
+  // Service report "Ask Waves" answer writer (owner 2026-10-05, "use sonnet
+  // 5.5"): writes the answer to a customer's typed question from the report's
+  // own facts. Customer-facing generated text, so it rides the two-provider
+  // TEXT_POLICIES.reportAsk (this model first, OpenAI backup). Dark behind
+  // GATE_REPORT_ASK_AI; override with MODEL_REPORT_ASK.
+  REPORT_ASK: 'claude-sonnet-5-5',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
   // App lawn + tree/shrub/palm Photo ID (owner 2026-10-02, "same as pest"):
   // the model for photoIdPlantV2's one Gemini read; set from the 27-photo eval.
@@ -347,6 +353,8 @@ const LAWN_ASSESSMENT_REFEREE = process.env.MODEL_LAWN_ASSESSMENT_REFEREE || DEF
 const ADS_ADVISOR          = process.env.MODEL_ADS_ADVISOR         || DEFAULTS.ADS_ADVISOR;
 // SMS scheduling decide step (owner ruling 2026-10-02) — its own selector.
 const SMS_SCHEDULING_DECIDE = process.env.MODEL_SMS_SCHEDULING_DECIDE || DEFAULTS.SMS_SCHEDULING_DECIDE;
+// Service report Ask Waves answer writer (owner 2026-10-05) — its own selector.
+const REPORT_ASK           = process.env.MODEL_REPORT_ASK          || DEFAULTS.REPORT_ASK;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 const GEMINI_PHOTO_ID_PLANT = process.env.MODEL_GEMINI_PHOTO_ID_PLANT || DEFAULTS.GEMINI_PHOTO_ID_PLANT;
 const GEMINI_PHOTO_ID_PEST = process.env.MODEL_GEMINI_PHOTO_ID_PEST || DEFAULTS.GEMINI_PHOTO_ID_PEST;
@@ -553,6 +561,16 @@ const TEXT_POLICIES = Object.freeze({
   routineAnswer: Object.freeze({
     name: 'routineAnswer',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ROUTINE, ...(ROUTINE_EFFORT ? { effort: ROUTINE_EFFORT } : {}) }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
+  // Service report "Ask Waves" answers (owner 2026-10-05, "use sonnet 5.5";
+  // report-ask-ai.js, GATE_REPORT_ASK_AI): Claude Sonnet 5.5 on the Anthropic
+  // leg at low effort (a one-to-four sentence answer on a page the customer is
+  // waiting on), the report-writer OpenAI model as the backup. A miss on both
+  // legs falls to the report's fixed-rule answer, never to an empty reply.
+  reportAsk: Object.freeze({
+    name: 'reportAsk',
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: REPORT_ASK, effort: 'low' }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
   adsAdvisor: Object.freeze({
@@ -763,6 +781,7 @@ module.exports = {
   LAWN_ASSESSMENT_REFEREE,
   ADS_ADVISOR,
   SMS_SCHEDULING_DECIDE,
+  REPORT_ASK,
   TYPESAFE_JEV,
   CLOUDFLARE_CLEF,
   OPENAI_SMS_DRAFT,

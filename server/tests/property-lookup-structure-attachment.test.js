@@ -366,6 +366,35 @@ describe('mergeAiAnalyses + profile — palm-count trust (owner ruling 2026-08-1
     expect(close._palmCountConfidence).toBe(92);
   });
 
+  test('an observed zero is stamped with its confidence; divergence zeroes it; an absent read is not stamped', () => {
+    if (!merge) return;
+    expect(merge([{ provider: 'claude', analysis: { confidenceScore: 90, estimatedPalmCount: 0 } }])._palmCountConfidence).toBe(90);
+    expect(merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 0 } },
+      { provider: 'openai', analysis: { confidenceScore: 80, estimatedPalmCount: 0 } },
+    ])._palmCountConfidence).toBe(92);
+    // Primary says 0, a lower-confidence provider says 9: conflict, stamp zeroed.
+    const conflict = merge([
+      { provider: 'claude', analysis: { confidenceScore: 92, estimatedPalmCount: 0 } },
+      { provider: 'openai', analysis: { confidenceScore: 80, estimatedPalmCount: 9 } },
+    ]);
+    expect(conflict._palmCountConfidence).toBe(0);
+    expect((conflict.aiDivergences || []).some((d) => d.field === 'estimatedPalmCount')).toBe(true);
+    // No provider returned a count at all: nothing to stamp.
+    expect(merge([{ provider: 'claude', analysis: { confidenceScore: 90 } }])._palmCountConfidence).toBeUndefined();
+  });
+
+  test('a stamped zero attaches no palmCountTrusted verdict (the prefill contract is unchanged)', () => {
+    if (!buildProfile) return;
+    const zero = buildProfile(null, { confidenceScore: 88, _palmCountConfidence: 88, estimatedPalmCount: 0 }, 27.1, -82.4);
+    expect(zero.palmCountConfidence).toBe(88);
+    expect(zero.palmCountTrusted).toBeUndefined();
+    // No AI at all: the synthetic zero carries no stamp and no verdict.
+    const noAi = buildProfile(null, null, 27.1, -82.4);
+    expect(noAi.palmCountConfidence).toBeUndefined();
+    expect(noAi.palmCountTrusted).toBeUndefined();
+  });
+
   test('the profile carries palmCountTrusted so the estimator prefill reads ONE server-side verdict', () => {
     if (!buildProfile) return;
     const trusted = buildProfile(null, {

@@ -17,7 +17,7 @@ const router = express.Router();
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const {
-  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal,
+  TOOLS, executeTool, resolveTechnicianByName, resolveActiveTechnicianById, ibBookingProposal, ibBookingOverlapProposal,
   CARD_CANCEL_REFUSED_MESSAGE,
 } = require('../services/intelligence-bar/tools');
 const crypto = require('crypto');
@@ -1287,12 +1287,13 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       // (ADMIN-BUG-R12) gets no card. Fail closed on a read error.
       let booking;
       try {
-        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price, params.customer_request);
+        booking = await ibBookingProposal(String(params.customer_id), params.service_type, params.price, params.customer_request, params.time_window);
       } catch {
         return { failed: true, modelResult: { error: 'Could not work out this visit\'s price or how this customer is billed — try again in a moment. Nothing was changed.' } };
       }
       if (!booking) return { failed: true, modelResult: { error: 'No customer matches that id — nothing was proposed.' } };
-      if (booking.error) return { failed: true, modelResult: { error: booking.error } };
+      // A refusal may carry a stable code (window_not_on_the_hour, W5-dev-03); the model sees it, and no card is made.
+      if (booking.error) return { failed: true, modelResult: { error: booking.error, ...(booking.code ? { code: booking.code } : {}) } };
       // Server pins, set unconditionally so a model-supplied value can never
       // stand in for them. The discount identity/terms (Codex r2 on #5093,
       // P1) ride alongside the net price and service id: the card shows the
@@ -1312,8 +1313,28 @@ async function proposePendingWrite({ toolUse, req, context, selectedLeadId = nul
       params._booking_discount_name = booking.discountName;
       params._booking_discount_type = booking.discountType;
       params._booking_discount_amount = booking.discountAmount;
+      // Whether another visit already overlaps this time when the card is
+      // built (owner 2026-10-05). The executor books through an overlap that
+      // already existed (warning only) but refuses one that is NEW since
+      // this card, so the operator sees a fresh card first. Set
+      // unconditionally: a model-supplied value can never stand in. A
+      // windowless or invalid-window booking has nothing to probe: no pin;
+      // neither does one whose probe could not be read.
+      let overlapNow = null;
+      try {
+        overlapNow = await ibBookingOverlapProposal(params.scheduled_date, params.time_window);
+      } catch (err) {
+        // A transient read error is less than a conflict, and a staff save
+        // never blocks on a conflict (owner 2026-08-25): no pin, so the
+        // executor keeps the warn-only behavior.
+        logger.warn(`[intelligence-bar] booking overlap pin unavailable for customer ${params.customer_id}: ${err.message}`);
+        overlapNow = null;
+      }
+      if (overlapNow == null) delete params._booking_overlap;
+      else params._booking_overlap = overlapNow;
       preview = {
         ...preview,
+        ...(overlapNow ? { slot_overlap: { already_overlaps: true } } : {}),
         pinned_price: {
           amount: booking.price,
           source: booking.source,

@@ -520,6 +520,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
     // booking is always approved as credit-free and the executor verifies
     // that inside the booking transaction.
     if (preview?.inspection_credit) push('billing', 'No inspection credit is redeemed by this booking (no open credit; re-verified at commit under the credit lock offer creation shares)');
+    // Another visit already overlaps this time (pinned at proposal, owner
+    // 2026-10-05): the booking still goes through, as a warning. An overlap
+    // that appears AFTER this card refuses the confirm and shows a new card.
+    if (preview?.slot_overlap?.already_overlaps) push('operational', 'Another visit already overlaps this time. Both stay on the calendar and Confirm warns, as on the Schedule screen');
     // A booking with a time texts the booking confirmation exactly as a
     // Schedule-screen booking does (owner 2026-09-27); a windowless one
     // registers a non-delivering placeholder: its confirmation is marked

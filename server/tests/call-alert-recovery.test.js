@@ -59,12 +59,14 @@ describe('finding 4 — missed-call bell for unknown callers (GATE_MISSED_CALL_U
     expect(missedCallEligible(clean, Date.now(), on)).toBe(true);
   });
 
-  test('gate on → an unknown caller rings only after waiting 25s or more (owner ruling 2026-09-24); customers ring at any duration', () => {
+  test('gate on → an unknown caller rings only after waiting 15s or more (owner ruling 2026-10-05, replaces the 2026-09-24 25s rule); customers ring at any duration', () => {
     const on = { unknownCallers: true };
     const { UNKNOWN_CALLER_MIN_SECONDS } = require('../services/missed-call-bell');
-    expect(UNKNOWN_CALLER_MIN_SECONDS).toBe(25);
-    expect(missedCallEligible({ ...base, duration_seconds: 24 }, Date.now(), on)).toBe(false);
-    expect(missedCallEligible({ ...base, duration_seconds: 25 }, Date.now(), on)).toBe(true);
+    expect(UNKNOWN_CALLER_MIN_SECONDS).toBe(15);
+    expect(missedCallEligible({ ...base, duration_seconds: 14 }, Date.now(), on)).toBe(false);
+    expect(missedCallEligible({ ...base, duration_seconds: 15 }, Date.now(), on)).toBe(true);
+    expect(missedCallEligible({ ...base, duration_seconds: 20 }, Date.now(), on)).toBe(true);
+    expect(missedCallEligible({ ...base, duration_seconds: 24 }, Date.now(), on)).toBe(true);
     expect(missedCallEligible({ ...base, duration_seconds: '47' }, Date.now(), on)).toBe(true);
     expect(missedCallEligible({ ...base, duration_seconds: null }, Date.now(), on)).toBe(false);
     expect(missedCallEligible({ ...base, duration_seconds: undefined }, Date.now(), on)).toBe(false);

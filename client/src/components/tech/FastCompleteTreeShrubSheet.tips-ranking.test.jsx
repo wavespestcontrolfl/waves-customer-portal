@@ -70,7 +70,7 @@ async function openSheet(context) {
   const request = makeRequest(context);
   render(<FastCompleteTreeShrubSheet service={SERVICE} request={request} onClose={() => {}} />);
   await screen.findByRole('button', { name: /^Chelated Iron Plus/ });
-  await screen.findByText('Search tips');
+  await screen.findByLabelText('Search tips');
   return request;
 }
 
@@ -105,7 +105,8 @@ describe('tip ranking by seen watch items', () => {
     expect(tipButtons()).toEqual(['Black film tip', 'Fresh mulch weeds tip', 'Mulch tip', 'Water tip', 'Bloom tip', 'Cold tip']);
     // nothing is picked for the tech
     expect(document.querySelectorAll('.tech-visit-tip[aria-pressed="true"]')).toHaveLength(0);
-    expect(screen.getByText('Pick 1 (optional)')).toBeTruthy();
+    // No pick, so no count line (the quiet section shows none until a pick).
+    expect(screen.queryByText('1 picked')).toBeNull();
     expect(request.calls.some((c) => c.path.endsWith('/complete'))).toBe(false);
   });
 

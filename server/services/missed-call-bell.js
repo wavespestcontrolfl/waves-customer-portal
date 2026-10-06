@@ -14,7 +14,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { isSentinelPhone, PHONE_SENTINELS } = require('./external-phone');
-const { whereNotBlockedCall } = require('../middleware/spam-block');
+const { whereNotBlockedCall, phoneKeySql } = require('../middleware/spam-block');
 
 const UNANSWERED = new Set(['missed', 'voicemail', 'unknown']);
 // A row with NO answered_by (the Studio-flow status_callback fallback in
@@ -36,13 +36,14 @@ function outcomeUnanswered(row) {
 }
 
 // An unknown number that hung up inside the first seconds (a misdial, a
-// robodialer probing the line) is not a lead. Owner ruling 2026-09-24: an
-// unknown caller who waited 25 seconds or more and left no message counts
-// as a missed call someone should return. Customers on file ring regardless
-// of duration, as before. In the 30 days to 2026-09-24, 41 of 63 unknown
-// voicemail-path callers hung up under 25s; the floor keeps the bell to
-// roughly one ring a day.
-const UNKNOWN_CALLER_MIN_SECONDS = 25;
+// robodialer probing the line) is not a lead. Owner ruling 2026-10-05
+// (replaces the 2026-09-24 25-second rule): an unknown caller who waited 15
+// seconds or more and left no message counts as a missed call someone should
+// return. Customers on file ring regardless of duration, as before. In the 7
+// days to 2026-10-05, nine unknown callers hung up between 20 and 24 s with
+// no recording and got neither the alert nor the text-back. The missed-call
+// text-back lane reads this same constant, so one value sets both.
+const UNKNOWN_CALLER_MIN_SECONDS = 15;
 
 // Unknown prospects share the missed-call lease; withheld IDs, quick
 // hang-ups and Nomorobo spam stay silent.
@@ -113,6 +114,22 @@ function missedCallEligible(row, now = Date.now(), opts = {}) {
   return true;
 }
 
+// The caller already got through on a later call: a person or Sandy
+// answered it, the voicemail lane rang for it, or we called back and their
+// leg was dialed (bridged_at). A redial seconds later is the common case
+// (2026-10-03 and 10-05: the redial was answered, the first attempt still
+// rang). A recording alone is not proof: a dead-air voicemail rings nothing.
+// Excluded in both the claim and the sweep, so such a call is never offered.
+const LATER_KEY = phoneKeySql('later.from_phone');
+const CALLER_KEY = phoneKeySql('call_log.from_phone');
+const CALLED_BACK_SQL = 'NOT EXISTS (SELECT 1 FROM call_log later'
+  + ' WHERE later.id <> call_log.id AND later.created_at >= call_log.created_at'
+  + " AND COALESCE(later.source, '') <> 'voice_relay_sandbox'"
+  + ` AND ((later.direction = 'outbound' AND later.bridged_at IS NOT NULL AND ${phoneKeySql('later.to_phone')} = ${CALLER_KEY})`
+  + ` OR (later.direction = 'inbound' AND ${LATER_KEY} = ${CALLER_KEY}`
+  + " AND (later.answered_by IN ('human', 'ai_agent') OR later.call_outcome IN ('ai_handled', 'ai_transferred')"
+  + ' OR later.voicemail_callback_alerted_at IS NOT NULL))))';
+
 function parseMeta(meta) {
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
   return meta && typeof meta === 'object' ? meta : {};
@@ -145,6 +162,7 @@ async function ringMissedCallIfUnanswered(callSid) {
       .whereNull('voicemail_callback_alerted_at')
       .whereRaw("COALESCE(call_outcome,'') NOT IN ('ai_handled', 'ai_transferred')")
       .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
+      .whereRaw(CALLED_BACK_SQL)
       .update({ metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('missed_call_notified_at', ?::text)", [token]) });
     if (!claimed) return false;
     // Every later write is fenced on the token: a stale owner waking up
@@ -169,10 +187,11 @@ async function ringMissedCallIfUnanswered(callSid) {
     const { triggerNotification } = require('./notification-triggers');
     // Is this call still the missed-call lane's? False once a recording
     // persisted or the voicemail lane claimed it.
-    const stillMissed = async () => {
-      const cur = await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall).first('recording_sid', 'recording_url', 'voicemail_callback_alerted_at');
-      return Boolean(cur) && !cur.recording_sid && !cur.recording_url && !cur.voicemail_callback_alerted_at;
-    };
+    // False too once a later call got through (CALLED_BACK_SQL).
+    const stillMissed = async () => Boolean(await db('call_log').where({ id: row.id }).modify(whereNotBlockedCall)
+      .whereNull('recording_sid').whereNull('recording_url').whereNull('voicemail_callback_alerted_at')
+      .whereRaw(CALLED_BACK_SQL)
+      .first('id'));
     let stats = null;
     try {
       stats = await triggerNotification('customer_missed_call', {
@@ -188,6 +207,9 @@ async function ringMissedCallIfUnanswered(callSid) {
         // SMS bell): a recording that landed while the badge was computing
         // must not produce a contradictory missed-call push (hook P1).
         beforePush: stillMissed,
+        // And right before the bell row is written: a redial answered while
+        // preferences loaded must not leave a missed-call bell.
+        shouldContinue: stillMissed,
       });
     } finally {
       const delivered = Boolean(stats && !stats.error
@@ -254,6 +276,7 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
       .whereRaw("COALESCE(call_outcome, '') NOT IN ('ai_handled', 'ai_transferred')")
       .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
       .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
+      .whereRaw(CALLED_BACK_SQL)
       // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
       .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
       .where('created_at', '>', new Date(now - 24 * 60 * 60 * 1000))
@@ -281,7 +304,41 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
   return rung;
 }
 
+// How far back an open missed-call bell is still retired when the caller
+// gets through later. Older bells are the office's to close by hand.
+const RETIRE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Retire open missed-call bells whose caller got through AFTER the bell rang
+ * (owner 2026-10-05): a later answered call, an alerted voicemail, or our
+ * dialed callback — the same CALLED_BACK_SQL that keeps a bell from ringing.
+ * Runs on the 2-minute call-alert cron; idempotent (a done bell is not
+ * selected again). Never re-opens: a retired bell stays done.
+ */
+async function retireCalledBackMissedCalls({ limit = 100 } = {}) {
+  const rows = await db('notifications')
+    .join('call_log', db.raw("call_log.id::text = notifications.metadata->'payload'->>'callLogId'"))
+    .where({ 'notifications.recipient_type': 'admin', 'notifications.category': 'missed_call' })
+    .whereRaw("notifications.metadata->>'triggerKey' = 'customer_missed_call'")
+    .whereNull('notifications.done_at')
+    .where('notifications.created_at', '>', new Date(Date.now() - RETIRE_WINDOW_MS))
+    .whereRaw(`NOT ${CALLED_BACK_SQL}`)
+    .distinct('call_log.id')
+    .limit(limit);
+  if (!rows.length) return 0;
+  const NotificationService = require('./notification-service');
+  let retired = 0;
+  for (const { id } of rows) {
+    retired += Number(await NotificationService.supersedeMissedCallAdmin({
+      callLogId: id,
+      resolution: 'The caller got through on a later call',
+    })) || 0;
+  }
+  return retired;
+}
+
 module.exports = {
+  retireCalledBackMissedCalls,
   missedCallEligible,
   missedCallShapeEligible,
   isEmptyVoicemailRecording,

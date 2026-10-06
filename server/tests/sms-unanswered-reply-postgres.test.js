@@ -82,7 +82,12 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
     await trx.raw('SET LOCAL search_path TO ??, public', [schema]);
     db.connection = trx;
     customerId = randomUUID();
-    await trx('customers').insert({ id: customerId, first_name: 'Synthetic', last_name: 'Tester', phone: CUSTOMER_PHONE, active: true });
+    // A fixed time before the inbound text: a database-default now() would read
+    // as "customer changed" once the real clock passes NOW (2026-10-06 18:00Z).
+    const FIXTURE_AT = at('2026-10-06T12:00:00Z');
+    await trx('customers').insert({
+      id: customerId, first_name: 'Synthetic', last_name: 'Tester', phone: CUSTOMER_PHONE, active: true, created_at: FIXTURE_AT, updated_at: FIXTURE_AT,
+    });
     jest.spyOn(graduation, 'evaluateJudgeBackstop').mockResolvedValue({ clear: true, blockers: [] });
     jest.spyOn(gratitudeContext, 'gratitudeRolloutSettled').mockReturnValue(true);
     sendCustomerMessage.mockReset();
@@ -403,7 +408,10 @@ postgres('unanswered-text reply sweep on PostgreSQL', () => {
 
   test('an estimate that expires later, untouched since the facts, does not block', async () => {
     await waitingSuggestion({ inboundText: 'Is the proposal still available?' });
-    await trx('estimates').insert({ id: randomUUID(), customer_id: customerId, expires_at: at('2026-10-20T17:00:00Z'), updated_at: at('2026-10-06T14:00:00Z') });
+    // created_at too: a database-default now() would read as changed after NOW.
+    await trx('estimates').insert({
+      id: randomUUID(), customer_id: customerId, expires_at: at('2026-10-20T17:00:00Z'), created_at: at('2026-10-06T14:00:00Z'), updated_at: at('2026-10-06T14:00:00Z'),
+    });
     expect((await sweep()).sent).toBe(1);
   });
 

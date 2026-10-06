@@ -43,7 +43,7 @@ import {
   Suspense,
 } from "react";
 import { createPortal } from "react-dom";
-import { useSearchParams } from "react-router-dom";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import { Plus } from "lucide-react";
 import {
   CompletionPanel,
@@ -94,11 +94,13 @@ import {
   mergePostPaymentService,
   shouldOpenTreeShrubFastComplete,
   shouldOpenLawnFastComplete,
+  shouldOpenPestFastComplete,
   shouldReopenCompletionAfterPayment,
   TERMINAL_VISIT_STATUSES,
 } from "../../lib/dispatchCompletionRouting";
 import FastCompleteTreeShrubSheet from "../../components/tech/FastCompleteTreeShrubSheet";
 import FastCompleteLawnSheet from "../../components/tech/FastCompleteLawnSheet";
+import FastCompleteSheet from "../../components/tech/FastCompleteSheet";
 import { shortAddress } from "../tech/visitBrief";
 import { serviceWindowLabel } from "../tech/routeStops";
 import { requestDispatchSync } from "../../lib/dispatchSync";
@@ -374,6 +376,16 @@ function MobileScheduleSheet({ children, serviceCount, completedCount }) {
   );
 }
 
+// The signed-in user scopes the Fast Complete attempts this device saves, as
+// Tech Home scopes them (staffIdForDevice), so either page finds them: the
+// profile AdminLayout verified, the stored copy only as a fallback (a failed
+// cache write can leave it missing; GitHub Codex P2 on #6001).
+function fastCompleteOperatorOf(outlet) {
+  const verified = outlet?.user;
+  const user = verified?.id ? verified : getAdminUser();
+  return String(user?.id || "");
+}
+
 export default function DispatchPageV2({
   activeTab: controlledActiveTab,
   setOpenCreateHandler,
@@ -447,6 +459,11 @@ export default function DispatchPageV2({
   // an eligible visit opens instead of CompletionPanel.
   const [treeShrubFastService, setTreeShrubFastService] = useState(null);
   const [lawnFastService, setLawnFastService] = useState(null);
+  // Pest Fast Complete (GATE_FAST_COMPLETE_REPORT, owner 2026-10-05): the
+  // one-screen report-flow sheet a regular pest visit opens here, as it does
+  // on the technician home page.
+  const [pestFastService, setPestFastService] = useState(null);
+  const fastCompleteOperatorId = fastCompleteOperatorOf(useOutletContext());
   const [closingVisitId, setClosingVisitId] = useState(null);
   const [projectService, setProjectService] = useState(null);
   // In-place project editor (owner ask 2026-07-13): a project-backed visit's
@@ -615,7 +632,7 @@ export default function DispatchPageV2({
   const [treatmentPlanService, setTreatmentPlanService] = useState(null);
   const [auditContext, setAuditContext] = useState(null);
   const [selectedScheduleService, setSelectedScheduleService] = useState(null);
-  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || treeShrubFastService || lawnFastService || continueProjectService;
+  const ibSelectedService = detailService || selectedScheduleService || editingService || rescheduleService || completingService || treeShrubFastService || lawnFastService || pestFastService || continueProjectService;
   usePublishIntelligenceBarPageData({
     viewed_date: date,
     appointment_id: ibSelectedService?.id,
@@ -898,6 +915,13 @@ export default function DispatchPageV2({
     }
     if (!fullForm && shouldOpenLawnFastComplete(service)) {
       setLawnFastService(service);
+      return;
+    }
+    // Owner 2026-10-05: a regular pest visit or pest re-service opens the
+    // one-screen sheet the technician home uses; its "Full form" button comes
+    // back here with fullForm: true.
+    if (!fullForm && shouldOpenPestFastComplete(service)) {
+      setPestFastService(service);
       return;
     }
     setCompletingService(service);
@@ -1921,6 +1945,7 @@ export default function DispatchPageV2({
             routedAddress: typeof treeShrubFastService.address === "string" ? treeShrubFastService.address : null,
           }}
           request={adminFetch}
+          operatorId={fastCompleteOperatorId}
           onClose={(options) => {
             setTreeShrubFastService(null);
             if (options?.refresh) {
@@ -1975,6 +2000,7 @@ export default function DispatchPageV2({
             routedCatalogServiceId: lawnFastService.catalogServiceId || null,
           }}
           request={adminFetch}
+          operatorId={fastCompleteOperatorId}
           catalog={products}
           onClose={(options) => {
             setLawnFastService(null);
@@ -2003,6 +2029,61 @@ export default function DispatchPageV2({
             const service = lawnFastService;
             setLawnFastService(null);
             setDetailService(service);
+          }}
+        />
+      )}
+      {pestFastService && (
+        <FastCompleteSheet
+          key={pestFastService.id}
+          service={{
+            id: pestFastService.id,
+            customerName: pestFastService.customer_name || pestFastService.customerName,
+            serviceType: pestFastService.service_type || pestFastService.serviceType,
+            address: shortAddress(pestFastService.address) || pestFastService.address || "",
+            timeLabel: serviceWindowLabel(pestFastService) || "",
+            // The visit the user opened, checked against the live context
+            // (same fields TechHomePage routes the sheet with).
+            routedCustomerId: pestFastService.customerId || pestFastService.customer_id || null,
+            routedScheduledDate: pestFastService.scheduledDate || pestFastService.scheduled_date || null,
+            routedPropertyId: "propertyId" in pestFastService ? pestFastService.propertyId : undefined,
+            routedAddress: typeof pestFastService.address === "string" ? pestFastService.address : null,
+            routedServiceType: pestFastService.serviceTypeRaw ?? null,
+            routedServiceKey: pestFastService.completionProfile?.serviceKey || null,
+            // Only an exact true turns the customer recap on (see the sheet).
+            recapEnabled: pestFastService.fastCompleteRecapEnabled === true,
+            // The report flow, with what its trace step needs from the row (a
+            // lane or typed visit never gets here: shouldOpenPestFastComplete).
+            reportFlow: true,
+            traceEligible: pestFastService.traceEligible !== false,
+            noteBoxPhotosEnabled: pestFastService.noteBoxPhotosEnabled === true,
+            technicianName: pestFastService.technicianName || pestFastService.technician_name || null,
+            lat: pestFastService.lat ?? null,
+            lng: pestFastService.lng ?? null,
+          }}
+          request={adminFetch}
+          operatorId={fastCompleteOperatorId}
+          voiceFillEnabled={pestFastService.fastCompleteVoiceFillEnabled === true}
+          onClose={(options) => {
+            setPestFastService(null);
+            if (options?.refresh) {
+              setScheduleRefreshKey((k) => k + 1);
+              void fetchSchedule(date, { silent: true });
+            }
+          }}
+          onCompleted={() => {
+            // The sheet sends the response nowhere, so only the bookkeeping
+            // that needs none runs: flip the row to completed, invalidate the
+            // mobile week cache, refetch.
+            const service = pestFastService;
+            setPestFastService(null);
+            applyCompletionResult(service.id, null, null, service);
+            void fetchSchedule(date, { silent: true });
+          }}
+          // The sheet's "Full form" button: the long form for this visit.
+          onFullForm={() => {
+            const service = pestFastService;
+            setPestFastService(null);
+            handleComplete(service, { fullForm: true });
           }}
         />
       )}

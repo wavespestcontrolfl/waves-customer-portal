@@ -32,6 +32,7 @@ const CustomerCredit = require('../services/customer-credit');
 const {
   normalizeContactName,
   normalizeContactPhone,
+  contactPhoneProblem,
   normalizeContactEmail,
   normalizeContactRecord,
   clearLineTypeOnPhoneChange,
@@ -2351,6 +2352,8 @@ router.post('/quick-add', requireAdmin, async (req, res, next) => {
     if (!firstName || !phone) {
       return res.status(400).json({ error: 'firstName and phone required' });
     }
+    const quickAddPhoneProblem = contactPhoneProblem(phone);
+    if (quickAddPhoneProblem) return res.status(400).json({ error: quickAddPhoneProblem, code: 'INVALID_PHONE' });
     const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
     if (normalizedAddress.unitConflict) {
       return res.status(400).json({ error: 'Address unit conflicts with the unit included in Address Line 1' });
@@ -3702,6 +3705,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { firstName, lastName, phone, email, address, addressLine1, addressLine2, city, state, zip, tier, monthlyRate, billingMode, leadSource, pipelineStage, tags, notes, companyName, propertyType, profileLabel, contactRole } = req.body;
     if (!firstName || !phone) return res.status(400).json({ error: 'First name and phone required' });
+    const createPhoneProblem = contactPhoneProblem(phone);
+    if (createPhoneProblem) return res.status(400).json({ error: createPhoneProblem, code: 'INVALID_PHONE' });
     const normalizedAddress = normalizeAdminAddressInput({ address, addressLine1, addressLine2, city, state, zip });
     if (normalizedAddress.unitConflict) {
       return res.status(400).json({ error: 'Address unit conflicts with the unit included in Address Line 1' });
@@ -4078,6 +4083,12 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     // and applied before the cross-account conflict check so dedup compares the
     // stored format.
     Object.assign(updates, normalizeContactRecord(updates));
+    // An unchanged stored number echoed by a full-form save is not a new write;
+    // only a number the operator is entering now is refused.
+    if (updates.phone && updates.phone !== before.phone) {
+      const phoneProblem = contactPhoneProblem(updates.phone);
+      if (phoneProblem) return res.status(400).json({ error: phoneProblem, code: 'INVALID_PHONE' });
+    }
     if (req.body.addressLine1 !== undefined || req.body.addressLine2 !== undefined) {
       const normalizedAddress = normalizeAdminAddressInput({
         addressLine1: req.body.addressLine1 !== undefined ? req.body.addressLine1 : before.address_line1,

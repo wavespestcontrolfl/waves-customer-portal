@@ -3934,6 +3934,18 @@ async function lawnNextVisitAtProperty(service, afterIso, knex, readFailures) {
   return row ? { state: 'scheduled', row } : noneOrUnknown();
 }
 
+// The lawn protocol version a completed visit's plan RECORDED: its completion ledger
+// row when one exists (a row with no version, attribution 'none', is authoritative:
+// nothing was followed), else the scheduled visit's pin only when there is no
+// completion row at all. null = no recorded version. Throws on a failed read.
+async function resolveRecordedProtocolVersion(knex, service) {
+  const completion = await knex('lawn_protocol_service_completions').where({ service_record_id: service.id }).first('protocol_version');
+  if (completion) return completion.protocol_version || null;
+  if (!service.scheduled_service_id) return null;
+  const scheduled = await knex('scheduled_services').where({ id: service.scheduled_service_id }).first('lawn_protocol_version');
+  return scheduled?.lawn_protocol_version || null;
+}
+
 async function buildReportV1Data(joinedService, token, knex = db, options = {}) {
   // Identity facts frozen at completion (report-identity-snapshot.js)
   // overlay the live customer/schedule/technician join; pre-snapshot
@@ -5540,12 +5552,26 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           loadProfile: (row) => require('../service-completion-profiles').resolveCompletionProfileForScheduledService(row, knex, { strict: true }),
         });
       }
+      // GATE_LAWN_V13: the program line's v13 sentences are for a visit whose plan
+      // resolved the staged v13 version only. The version the closeout recorded
+      // (completion ledger row, else the scheduled visit's pin) rides in; a visit
+      // with neither (completed before protocol assignment existed, or never
+      // attributed) passes none and keeps the legacy sentences. An unreadable
+      // record means no line.
+      let pinnedProtocolVersion = null;
+      if (programVisit && typeof featureGates.lawnV13Live === 'function' && featureGates.lawnV13Live()) {
+        try {
+          pinnedProtocolVersion = await resolveRecordedProtocolVersion(knex, service);
+        // read-failure-exempt: only the program line depends on the pin; an unreadable pin drops it (old season note), no treatment-memory input.
+        } catch { programVisit = false; }
+      }
       reportV2 = buildLawnReportV2({
         lawnAssessment,
         wateringInstruction,
         mowingHeight,
         applications,
         ...(nitrogenApplied === null ? {} : { nitrogenApplied, programVisit }),
+        ...(pinnedProtocolVersion ? { protocolVersion: pinnedProtocolVersion } : {}),
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
         customerConcern: structuredCustomerConcern(structured),
         waterSnapshot,
@@ -5707,6 +5733,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           findingsText: lawnAssessment.observations || lawnAssessment.customerSummary || '',
           photoSummary: reportV2.photoSummary || '',
           knex,
+          skipGeneration: opts.skipNarrativeGeneration === true,
         });
         reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
         treatmentNarrativeRenderedSignature = narrative?.signature || null;
@@ -6048,6 +6075,19 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           // (undefined while dark: the builder output is unchanged).
           ...(tsCopyFindings ? { techFindings: tsCopyFindings } : {}),
         });
+        // GATE_TS_TECH_PARAGRAPH: the "From your technician" paragraph written once
+        // at completion and frozen (tree-shrub-tech-paragraph.js). A render only
+        // READS it, from the record this build already loaded: no new query and no
+        // model call. A frozen entry that fails the read-time screens, or any read
+        // error, prints nothing. The PDF key follows the same read
+        // (treeShrubTechParagraphPdfSignature), so a cached PDF never lacks text
+        // the page shows. Absent key = nothing renders.
+        if (reportV2 && featureGates.tsTechParagraphLive()) {
+          try {
+            const techParagraph = require('./tree-shrub-tech-paragraph').readFrozenTechParagraph(service.structured_notes, treeShrubAssessment.assessmentId);
+            if (techParagraph) reportV2.techParagraph = techParagraph;
+          } catch { /* a missing paragraph prints nothing */ }
+        }
         // AI "What we applied today" narrative (owner 2026-07-21): why each
         // product, what it does, the benefit — cached per input hash; the
         // deterministic template stands in when generation misses.
@@ -6063,6 +6103,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
             findingsText: reportV2.photoSummary || '',
             photoSummary: reportV2.photoSummary || '',
             knex,
+            skipGeneration: opts.skipNarrativeGeneration === true,
           });
           reportV2.snapshot.treatmentSummary = narrative?.text || reportV2.snapshot.treatmentSummary;
           // Signature of the EXACT text rendered — PDF stores key off this,
@@ -7419,6 +7460,7 @@ function termiteStationPinsFlag({ stationMap, mode, gateValue = process.env.GATE
 
 module.exports = {
   buildReportV1Data,
+  resolveRecordedProtocolVersion,
   termiteStationPinsFlag,
   resolveApplicatorFdacsId,
   resolveProjectApplicatorTechnician,

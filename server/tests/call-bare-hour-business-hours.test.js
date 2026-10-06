@@ -34,8 +34,9 @@ function extraction(scheduling) {
 }
 
 const V2_PROMPT = buildExtractionPrompt(BARE_HOUR_WDO_TRANSCRIPT, '+19415550100', '2026-09-29');
-const processorSrc = fs.readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-const V1_PROMPT = processorSrc.slice(processorSrc.indexOf('- ARRIVAL WINDOW EXCEPTION:'), processorSrc.indexOf('- If the agent says "I\'ll text you"'));
+// extractCallData renders its appointment rules from the shared module (#5994).
+const V1_RULES = require('../services/prompts/appointment-confirmed-rules').appointmentConfirmedRules('2026-09-29');
+const V1_PROMPT = V1_RULES.slice(V1_RULES.indexOf('- ARRIVAL WINDOW EXCEPTION:'), V1_RULES.indexOf('- If the agent says "I\'ll text you"'));
 
 describe.each([
   ['V2 prompt (call-extraction-v1.js)', V2_PROMPT, 'confirmed_start_at null'],
@@ -138,8 +139,8 @@ describe('routing accepts the extraction the contract produces for the bare-hour
 
 describe('version stamps', () => {
   test('prompt v20 and decision v2-1.50.0 are new, listed and current', () => {
-    expect(PROMPT_VERSION).toBe('v21');
-    expect(PROMPT_HASH).toMatch(/^v21-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v22');
+    expect(PROMPT_HASH).toMatch(/^v22-[a-f0-9]{12}$/);
     expect(V2_DECISION_VERSION).toBe('v2-1.50.0');
     expect(V2_DECISION_VERSIONS).toContain('v2-1.50.0');
     expect(V2_DECISION_VERSIONS.indexOf('v2-1.50.0')).toBeGreaterThan(V2_DECISION_VERSIONS.indexOf('v2-1.49.0'));

@@ -30,6 +30,8 @@ const mockResolveTechnicianById = jest.fn();
 // 2026-09-27): unpriced and billable by default, so these proposals reach
 // their card; the priced and refusal cases set their own.
 const mockIbBookingProposal = jest.fn(async () => ({ price: null, source: null, serviceId: null, serviceName: null }));
+// Whether another visit already overlaps the time (owner 2026-10-05): no timed window = no pin by default.
+const mockIbBookingOverlapProposal = jest.fn(async () => null);
 const mockResolveLeadForUpdate = jest.fn();
 const mockPreviewBulkLeadUpdate = jest.fn();
 
@@ -65,6 +67,7 @@ jest.mock('../services/intelligence-bar/tools', () => ({
   resolveTechnicianByName: (...args) => mockResolveTechnician(...args),
   resolveActiveTechnicianById: (...args) => mockResolveTechnicianById(...args),
   ibBookingProposal: (...args) => mockIbBookingProposal(...args),
+  ibBookingOverlapProposal: (...args) => mockIbBookingOverlapProposal(...args),
 }));
 jest.mock('../services/intelligence-bar/schedule-tools', () => ({ SCHEDULE_TOOLS: [], executeScheduleTool: jest.fn() }));
 jest.mock('../services/intelligence-bar/dashboard-tools', () => ({ DASHBOARD_TOOLS: [], executeDashboardTool: jest.fn() }));
@@ -932,6 +935,24 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
     });
   });
 
+  test('create_appointment with a 2:30 PM start: the window refusal and its code reach the model, no pending action (W5-dev-03)', async () => {
+    mockIbBookingProposal.mockResolvedValueOnce({ error: 'Visits start on the hour. Use 2:00 PM or 3:00 PM.', code: 'window_not_on_the_hour' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Quarterly Pest Control Service', time_window: '2:30 PM' } }],
+      [{ type: 'text', text: 'Visits start on the hour.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book it at 2:30', context: 'schedule' });
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Quarterly Pest Control Service', undefined, undefined, '2:30 PM');
+      expect(mockCreatePendingAction).not.toHaveBeenCalled();
+      expect(body.pendingActions).toEqual([]);
+      const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
+      const toolResult = JSON.parse(secondCallMessages[secondCallMessages.length - 1].content[0].content);
+      expect(toolResult).toMatchObject({ error: 'Visits start on the hour. Use 2:00 PM or 3:00 PM.', code: 'window_not_on_the_hour' });
+    });
+  });
+
   test('create_appointment ambiguous tech name: no pending action, ambiguity error to the model', async () => {
     mockResolveTechnician.mockResolvedValue({
       error: 'Multiple technicians match that name. Ask the operator which one, then retry with technician_id.',
@@ -965,7 +986,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book a termite liquid treatment', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Termite Liquid Treatment Service', undefined, undefined);
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Termite Liquid Treatment Service', undefined, undefined, undefined);
       expect(mockCreatePendingAction).not.toHaveBeenCalled();
       expect(body.pendingActions).toEqual([]);
 
@@ -1005,7 +1026,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book a re-service, ants back in the kitchen', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Pest Control Re-Service', undefined, '  ants back in the kitchen  ');
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Pest Control Re-Service', undefined, '  ants back in the kitchen  ', undefined);
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params.customer_request).toBe('ants back in the kitchen');
       expect(body.pendingActions).toHaveLength(1);
@@ -1065,7 +1086,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book flea control for $180', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Flea Control Service', 180, undefined);
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Flea Control Service', 180, undefined, undefined);
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._booking_price).toBe(180);
       expect(stored.params._booking_service_id).toBeNull();
@@ -1108,6 +1129,75 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
       // A timed booking texts its confirmation — the contract says so.
       const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
       expect(labels).toContainEqual(expect.stringMatching(/^Customer is sent a booking confirmation unless their appointment-confirmation setting is off or they were already confirmed for another visit at the same time, as on the Schedule screen: by text, email or both/));
+    });
+  });
+
+  test('create_appointment pins whether the time already overlaps another visit (owner 2026-10-05); a model-supplied pin never survives', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingOverlapProposal.mockResolvedValueOnce(false);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM', _booking_overlap: true } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book pest at 10', context: 'schedule' });
+      expect(mockIbBookingOverlapProposal).toHaveBeenCalledWith('2099-01-05', '10:00 AM');
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._booking_overlap).toBe(false);
+      const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
+      expect(labels.some((l) => /already overlaps this time/.test(l))).toBe(false);
+      expect(Object.keys(body.pendingActions[0].params).filter((k) => k.startsWith('_'))).toEqual([]);
+    });
+  });
+
+  test('create_appointment on a time another visit already holds: the pin is true and the fresh card says so', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingOverlapProposal.mockResolvedValueOnce(true);
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM' } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book pest at 10', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params._booking_overlap).toBe(true);
+      const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
+      expect(labels).toContainEqual(expect.stringMatching(/^Another visit already overlaps this time\./));
+    });
+  });
+
+  test('create_appointment with no timed window: no overlap pin, and a model-supplied one is dropped', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', _booking_overlap: false } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      await postQuery(baseUrl, { prompt: 'book pest', context: 'schedule' });
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params).not.toHaveProperty('_booking_overlap');
+    });
+  });
+
+  test('create_appointment: an unreadable schedule pins nothing and still shows a normal card (a staff save never blocks)', async () => {
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingOverlapProposal.mockRejectedValueOnce(new Error('connection terminated'));
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'Pest Control', time_window: '10:00 AM', _booking_overlap: false } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book pest at 10', context: 'schedule' });
+      expect(mockCreatePendingAction).toHaveBeenCalledTimes(1);
+      const stored = mockCreatePendingAction.mock.calls[0][0];
+      expect(stored.params).not.toHaveProperty('_booking_overlap');
+      expect(body.pendingActions).toHaveLength(1);
+      const labels = (body.pendingActions[0].contract?.effects || []).map((e) => e.label);
+      expect(labels.some((l) => /already overlaps this time/.test(l))).toBe(false);
     });
   });
 

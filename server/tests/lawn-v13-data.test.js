@@ -38,7 +38,8 @@ describe('the v13 recipe', () => {
       expect(v13[grass].notes).toEqual(v13.st_augustine.notes);
       expect(v13[grass].safety_rules.length).toBeGreaterThan(0);
       for (const visit of v13[grass].visits) {
-        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit']);
+        // April alone carries the 9x plan step (cadenceVariants); every other visit is the plain shape.
+        expect(Object.keys(visit).sort()).toEqual(['month', 'notes', 'primary', 'secondary', 'tiers', 'visit', ...(visit.month === 'Apr' ? ['cadenceVariants'] : [])].sort());
         expect(Object.values(visit.tiers)).toEqual([true, true, true, true]);
       }
     }
@@ -84,6 +85,42 @@ describe('the v13 recipe', () => {
     expect(tools).toEqual([
       [N.STW, N.NT], [N.F24], [N.DIM, N.NT], [N.F24], [N.TET], [N.NT, N.DIM], [], [N.NT], [N.NT], [N.STW15], [N.F24], [N.F24],
     ]);
+  });
+});
+
+// ── The 9x April step ────────────────────────────────────────────────────────
+describe('the 9x plan April step (recipe file and staged rows agree)', () => {
+  const april = require('../models/migrations/20261006150000_lawn_v13_april_9x_branch');
+  const { visitForCadence } = require('../services/lawn-program');
+
+  test('April carries one 9x variant naming the Dimension 0.21% catalog row the fix migration inserts; no other visit has one', () => {
+    for (const grass of GRASSES) {
+      const variants = v13[grass].visits.filter((v) => v.cadenceVariants);
+      expect(variants.map((v) => v.month)).toEqual(['Apr']);
+      expect(Object.keys(variants[0].cadenceVariants)).toEqual(['9']);
+      const [line, ...rest] = lines(variants[0].cadenceVariants['9'].primary);
+      expect(rest).toEqual([]);
+      expect(nameOfLine(line)).toBe(april.DIMENSION);
+      expect(line).toMatch(/2\.78 lb per 1,000 sq ft \(0\.5 lb N\), spreader$/);
+    }
+    expect(fixMigration.PRODUCTS.map((p) => p.name)).toContain(april.DIMENSION);
+  });
+
+  test('the variant is the same whole-lawn spreader step as the 12x one: one tool, same N target, no scope word the engine reads', () => {
+    const [april12] = engine.parseProtocolLines(visitFor(4).primary, 'base', { exactName: true });
+    const [april9] = engine.parseProtocolLines(visitFor(4).cadenceVariants['9'].primary, 'base', { exactName: true });
+    expect(april9).toMatchObject({ scope: april12.scope, conditional: false, exactName: true });
+    expect(engine.parseVisitNutrientTargets(visitFor(4).notes).targetNPer1000).toBe(0.5);
+  });
+
+  test('visitForCadence: 9 takes the variant, 12 / 6 keep the visit, unknown keeps it and names the variant', () => {
+    const visit = visitFor(4);
+    expect(visitForCadence(visit, 9)).toMatchObject({ branch: '9', unknownCadence: null });
+    expect(visitForCadence(visit, 9).visit.primary).toBe(visit.cadenceVariants['9'].primary);
+    for (const visits of [12, 6]) expect(visitForCadence(visit, visits)).toEqual({ visit, branch: null, unknownCadence: null });
+    expect(visitForCadence(visit, null)).toEqual({ visit, branch: null, unknownCadence: { variantProducts: [april.DIMENSION], cadences: ['9'] } });
+    // A visit with no variants is returned as it is, whatever the cadence.
+    expect(visitForCadence(visitFor(5), 9)).toEqual({ visit: visitFor(5), branch: null, unknownCadence: null });
   });
 });
 

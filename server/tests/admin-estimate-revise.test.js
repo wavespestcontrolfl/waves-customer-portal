@@ -493,6 +493,25 @@ describe('reviseAdminEstimate', () => {
     })).rejects.toMatchObject({ statusCode: 404 });
   });
 
+  test('a newly entered impossible US phone refuses the revise with 400 INVALID_PHONE and no write', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    await expect(reviseAdminEstimate({
+      database, estimateId: 'est-1', technicianId: 'tech-2', recompute: noRecompute, now: fixedNow,
+      body: { ...reviseBody, customerPhone: '(103) 555-0102' },
+    })).rejects.toMatchObject({ statusCode: 400, code: 'INVALID_PHONE', message: expect.stringMatching(/not a valid US phone number/) });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('a revise that echoes an unchanged impossible stored phone still saves', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: { ...sentEstimate, customer_phone: '+11035550102' } });
+    await reviseAdminEstimate({
+      database, estimateId: 'est-1', technicianId: 'tech-2', recompute: noRecompute, now: fixedNow,
+      body: { ...reviseBody, customerPhone: '+11035550102' },
+    });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].customer_phone).toBe('+11035550102');
+  });
+
   test('409s on an accepted estimate without writing', async () => {
     const { database, updates } = makeReviseDatabase({
       estimate: { ...sentEstimate, status: 'accepted', price_locked_at: '2026-07-09T15:00:00Z' },

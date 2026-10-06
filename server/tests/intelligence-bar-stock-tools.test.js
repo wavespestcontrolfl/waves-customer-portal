@@ -442,6 +442,63 @@ describe('update_restock_request', () => {
     expect(mutations.some(m => m.table === 'admin_alerts')).toBe(false);
   });
 
+  describe('receive with an amount and no unit (the bar never assumes the request unit)', () => {
+    const GAL_REQUEST = { ...OPEN_REQUEST, requested_quantity: 2, unit: 'gal' };
+
+    test('a quantity with no unit refuses with unit_required, names the request amount and unit, writes nothing, builds no card', async () => {
+      const mutations = useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [GAL_REQUEST] });
+      for (const extra of [{}, { confirmed: true }]) {
+        const result = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', quantity: 3, ...extra });
+        expect(result).toMatchObject({ success: false, code: 'unit_required' });
+        expect(result.preview).toBeUndefined();
+        expect(result.error).toMatch(/unit is missing/i);
+        expect(result.error).toContain('The request is for 2 gal.');
+      }
+      // The server-side confirmed path with a valid approval is refused the same way: no execution on an assumed unit.
+      const direct = await executeRaw('update_restock_request', { request_id: 'req-1', action: 'receive', quantity: 3, _verified_inventory_version: 'any' },
+        { confirmed: true, isAdmin: true, technicianId: 'actor-1' });
+      expect(direct).toMatchObject({ success: false, code: 'unit_required' });
+      expect(mutations).toEqual([]);
+    });
+
+    test('a blank or whitespace unit counts as no unit', async () => {
+      const mutations = useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [GAL_REQUEST] });
+      for (const unit of ['', '   ']) {
+        const result = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', quantity: 3, unit });
+        expect(result.code).toBe('unit_required');
+      }
+      expect(mutations).toEqual([]);
+    });
+
+    test('a quantity with a unit previews and writes as before', async () => {
+      const mutations = useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [GAL_REQUEST] });
+      const preview = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', quantity: 1, unit: 'gal' });
+      expect(preview).toMatchObject({ preview: true, adds: 128, entered_quantity: 1, entered_unit: 'gal' });
+      expect(mutations).toEqual([]);
+      const done = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', quantity: 1, unit: 'gal', confirmed: true });
+      expect(done).toMatchObject({ success: true, added: 128, stock_after: 192 });
+      const movement = mutations.find(m => m.table === 'product_inventory_movements' && m.op === 'insert');
+      expect(movement.args[0].metadata).toMatchObject({ enteredQuantity: 1, enteredUnit: 'gal' });
+    });
+
+    test('receive with no quantity still takes the requested amount in the request unit (deliberate, unchanged)', async () => {
+      const mutations = useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [OPEN_REQUEST] });
+      const preview = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive' });
+      expect(preview).toMatchObject({ preview: true, adds: 128, entered_quantity: 128, entered_unit: 'fl_oz' });
+      const done = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action: 'receive', confirmed: true });
+      expect(done).toMatchObject({ success: true, added: 128, stock_after: 192 });
+      expect(mutations.some(m => m.table === 'product_inventory_movements' && m.op === 'insert')).toBe(true);
+    });
+
+    test('mark_ordered and cancel never ask for a unit', async () => {
+      useDb({ products_catalog: [TRACKED_PRODUCT], product_restock_requests: [GAL_REQUEST] });
+      for (const action of ['mark_ordered', 'cancel']) {
+        const result = await executeProcurementTool('update_restock_request', { request_id: 'req-1', action });
+        expect(result.code).not.toBe('unit_required');
+      }
+    });
+  });
+
   test('mark_ordered and cancel only touch the request row', async () => {
     const mutations = useDb({
       products_catalog: [TRACKED_PRODUCT],
