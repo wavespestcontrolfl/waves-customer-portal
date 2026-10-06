@@ -354,6 +354,27 @@ const LAWN_PRICING_V2 = {
   },
 };
 
+// Bermuda removal add-on cost (GATE_LAWN_BERMUDA_REMOVAL, owner 2026-10-06):
+// what the two yearly sprays cost to do, for margin REPORTING only (never a
+// cost floor: add-on revenue must not satisfy floors, and these dollars never
+// raise one). Per spray: product $/1,000 sq ft x the whole lawn (a conservative
+// worst case: the real mix goes on mapped areas plus a 3 ft border) plus labor
+// at LAWN_PRICING_V2.laborRateLoaded for laborMinutesBase + laborMinutesPer1000Sqft
+// x lawn sq ft / 1,000.
+// Product prices are owner-provided, dated 2026-10-06, NOT read from
+// products_catalog (priceLawnCare is synchronous and database-free; the
+// pre-slab catalog link in db-bridge is the pattern if a live link is wanted):
+//   Recognition 0.03 oz/1,000: SiteOne $183.30 per 1.95 oz bottle = $94.00/oz = $2.82
+//   Fusilade II 0.55 fl oz/1,000: DoMyOwn $93.88 per 32 fl oz = $2.934/fl oz = $1.61
+//     (owner's pick; the SiteOne quart is $135.29 and the 2.5 gal jug $4.63/fl oz)
+//   LESCO 90/10 surfactant 0.32 fl oz/1,000: about $0.07
+const LAWN_BERMUDA_REMOVAL_COST = {
+  spraysPerYear: 2,
+  productPer1000Sqft: 4.50,
+  laborMinutesBase: 10,
+  laborMinutesPer1000Sqft: 2.5,
+};
+
 const LAWN_FREQS = [6, 9, 12];
 const LAWN_TABLE_MAX_SQFT = 20000;
 
@@ -2382,7 +2403,7 @@ const INSPECTION_CREDIT = {
 module.exports = {
   GLOBAL, URGENCY, PROPERTY_TYPE_ADJ,
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, TURF_FACTORS,
-  PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
+  PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, LAWN_BERMUDA_REMOVAL_COST, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
   GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,

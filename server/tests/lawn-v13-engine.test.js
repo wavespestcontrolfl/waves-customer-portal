@@ -58,7 +58,37 @@ describe('gate and loader', () => {
 
   test('gate off hands every reader protocols.json lawn itself; on hands v13', () => {
     expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
-    expect(withGate('true', () => lawnProtocols())).toBe(v13);
+    // Gate on, bermuda removal gate off: v13 without the per-visit addOns blocks.
+    const stripped = Object.fromEntries(Object.entries(v13).map(([track, program]) => [track, { ...program, visits: program.visits.map(({ addOns, ...visit }) => visit) }]));
+    expect(withGate('true', () => lawnProtocols())).toEqual(stripped);
+    expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
+  });
+
+  test('the bermuda removal addOns reach the shared reader only while GATE_LAWN_BERMUDA_REMOVAL is on', () => {
+    const saved = process.env.GATE_LAWN_BERMUDA_REMOVAL;
+    try {
+      process.env.GATE_LAWN_BERMUDA_REMOVAL = 'true';
+      expect(withGate('true', () => lawnProtocols())).toBe(v13);
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).toContain('addOns');
+      // The removal gate cannot surface the add-on while v13 itself is off.
+      expect(withGate(undefined, () => lawnProtocols())).toBe(protocolsJson.lawn);
+      delete process.env.GATE_LAWN_BERMUDA_REMOVAL;
+      expect(JSON.stringify(withGate('true', () => lawnProtocols()))).not.toContain('addOns');
+    } finally {
+      if (saved === undefined) delete process.env.GATE_LAWN_BERMUDA_REMOVAL; else process.env.GATE_LAWN_BERMUDA_REMOVAL = saved;
+    }
+  });
+
+  test('gate off: the protocol reader and the engine see no addOns anywhere', () => {
+    withGate('true', () => {
+      expect(JSON.stringify(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }))).not.toContain('addOns');
+      for (const grass of GRASSES) {
+        for (const month of [4, 6]) {
+          const got = engine.selectProtocolVisit({ track_key: grass }, new Date(Date.UTC(2026, month - 1, 15, 16)));
+          expect(got.visit).not.toHaveProperty('addOns');
+        }
+      }
+    });
   });
 
   test('a feature-gates mock without the reader reads as off', () => {
@@ -121,7 +151,7 @@ describe('gate off is byte-identical for the readers', () => {
         expect(got.visit.primary).toContain('LESCO 24-0-11 with PolyPlus OPTI');
         expect(got.track.name).toContain('v13');
       }
-      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toBe(v13.zoysia);
+      expect(protocolReader.getProtocol({ service_type: 'lawn', lawn_track: 'zoysia' }).protocol).toEqual({ ...v13.zoysia, visits: v13.zoysia.visits.map(({ addOns, ...visit }) => visit) });
     });
   });
 });

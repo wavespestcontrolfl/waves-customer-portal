@@ -13,6 +13,7 @@ const {
 } = require('./lawn-protocol-operating-layer');
 const { describeInventoryConversion } = require('./inventory-units');
 const { resolveAddressCounty } = require('../config/address-county');
+const bermudaRemoval = require('./lawn-bermuda-removal');
 const { lawnCompletionDefaultsEnabled, loadLawnCompletionContext, buildLawnCompletionDefaults, matchesLawnCompletionProtocol, archivedLawnRecipeMatches } = require('./lawn-completion-defaults');
 
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -525,6 +526,14 @@ const V13_GATE_NOTES = [
   { key: 'paleTurfRate', text: (rate) => `Pale turf rate: ${rate}.` },
   { key: 'rateRange', text: (range) => `Label rate range ${range}.` },
   { key: 'sunnyTurfOnly', text: () => 'Sunny turf only; the amount covers the sunny share of the lawn.' },
+  // Bermuda removal step (GATE_LAWN_BERMUDA_REMOVAL; rows tagged gates.bermudaRemoval).
+  { key: 'bermudaRemoval', text: () => 'Bermuda removal: Recognition, Fusilade II and the surfactant go in one mix, mapped bermuda areas plus a 3 ft border.' },
+  { key: 'requiresProduct', text: (product) => `Apply only together with ${product}.` },
+  { key: 'activelyGrowingOnly', required: true, text: () => 'Spray only when the bermuda is actively growing.' },
+  { key: 'morningUnderF', required: true, text: (degrees) => `Spray in the morning, with the temperature under ${degrees}°F.` },
+  { key: 'noRainOrIrrigationHours', text: (hours) => `No rain or irrigation for ${hours} hours after the spray.` },
+  { key: 'noMowDaysBeforeAfter', text: (days) => `Do not mow for ${days} days before or after the spray.` },
+  { key: 'skipCelsiusInBermudaArea', text: () => 'Skip the Celsius weed spot in the bermuda area today.' },
 ];
 
 function v13GateNotes(gates, context = {}) {
@@ -569,10 +578,10 @@ function v13ApplyAloneBlocks(selectedItems) {
 // track and month, read from the database. Empty with the gate off. With the gate
 // on and no staged v13 protocol it throws (code lawn_v13_protocol_missing): the v13
 // recipe must never be priced or mixed at catalog-default rates.
-async function loadV13RowsForMonth(knex, trackKey, monthName) {
+async function loadV13RowsForMonth(knex, trackKey, monthName, { includeBermudaRemoval = false } = {}) {
   if (featureGates.lawnV13Live?.() !== true) return new Map();
   const serviceDate = new Date(Date.UTC(2026, MONTH_ABBR.indexOf(monthName), 15, 16));
-  const summary = summarizeProtocolContext(await getProtocolWindowContext(knex, { serviceDate, grassTrack: trackKey, strict: true, planning: true }));
+  const summary = summarizeProtocolContext(await getProtocolWindowContext(knex, { serviceDate, grassTrack: trackKey, strict: true, planning: true, ...(includeBermudaRemoval ? { includeBermudaRemoval: true } : {}) }));
   if (summary?.version !== LAWN_V13_VERSION) {
     throw Object.assign(new Error(`GATE_LAWN_V13 is on but the staged ${LAWN_V13_VERSION} protocol is missing for ${trackKey}`), { code: 'lawn_v13_protocol_missing' });
   }
@@ -1552,6 +1561,7 @@ function planLineFields(item) {
     areaFactorBroadcast: item.areaFactorBroadcast,
     selectionReason: item.selectionReason,
     selected: item.selected,
+    ...(item.bermudaStep ? { bermudaStep: true } : {}),
   };
 }
 
@@ -1777,6 +1787,13 @@ async function buildPlanForService(serviceId, options = {}) {
   const nutrientLedger = await calculateNutrientLedger(knex, service.customer_id, products, profile?.lawn_sqft, serviceDate, { strict });
 
   const calendarProtocol = selectProtocolVisit(profile, serviceDate, service.lawn_type, { requireKnownGrass: completionDefaultsEnabled });
+  // GATE_LAWN_BERMUDA_REMOVAL: a St. Augustine or Zoysia lawn the account asked
+  // bermuda removal for (accepted estimate or the staff switch) reads the extra
+  // staged rows. Gate off or any other lawn: no read, the call below is unchanged.
+  const bermudaWanted = lawnV13On && bermudaRemoval.bermudaRemovalLive()
+    && bermudaRemoval.BERMUDA_REMOVAL_TRACKS.includes(calendarProtocol.trackKey)
+    ? await bermudaRemoval.accountWantsBermudaRemoval(knex, { customerId: service.customer_id, profile, strict })
+    : { requested: false, source: null };
   // GATE_LAWN_V13 resolves the visit's pinned assignment whatever the completion-
   // default gates say: a pinned older visit must be seen as pinned, never as
   // unpinned (which would resolve the staged v13 version for it).
@@ -1785,6 +1802,7 @@ async function buildPlanForService(serviceId, options = {}) {
     grassTrack: calendarProtocol.trackKey || TRACK_BY_GRASS[profile?.grass_type] || 'st_augustine',
     region: 'swfl',
     planning: true,
+    ...(bermudaWanted.requested && bermudaRemoval.cultivarState(calendarProtocol.trackKey, profile?.cultivar) !== 'excluded' ? { includeBermudaRemoval: true } : {}),
     ...(completionDefaultsEnabled ? {
       strict: true, windowKey: service.lawn_protocol_window_key,
       protocolKey: service.lawn_protocol_key, protocolVersion: service.lawn_protocol_version,
@@ -1809,13 +1827,26 @@ async function buildPlanForService(serviceId, options = {}) {
   const structuredProtocol = summarizeProtocolContext(structuredProtocolContext);
   const exactName = track?.exact_catalog_names === true;
   const baseLines = parseProtocolLines(visit?.primary, 'base', { exactName });
-  const conditionalLines = parseProtocolLines(visit?.secondary, 'conditional', { exactName });
+  // The April and June bermuda removal step: its three spot lines join the visit's
+  // secondary list (opt-in lines, like every other spot product).
+  const bermudaVisit = bermudaWanted.requested && structuredProtocol?.version === LAWN_V13_VERSION
+    && bermudaRemoval.bermudaRemovalVisit({ trackKey, month });
+  // St. Augustine cultivar policy: an excluded cultivar never gets the step.
+  const bermudaCultivar = bermudaRemoval.cultivarState(trackKey, profile?.cultivar);
+  const bermudaAddOn = bermudaVisit ? bermudaRemoval.stepAddOn(trackKey, month) : null;
+  const bermudaActive = !!bermudaAddOn && bermudaCultivar !== 'excluded';
+  const conditionalLines = [
+    ...parseProtocolLines(visit?.secondary, 'conditional', { exactName }),
+    ...(bermudaActive ? bermudaRemoval.markStepLines(parseProtocolLines(bermudaAddOn.secondary, 'conditional', { exactName })) : []),
+  ];
   const nutrientTargets = parseVisitNutrientTargets(visit?.notes);
-  const candidateItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
+  const resolvedItems = resolveProtocolItems([...baseLines, ...conditionalLines], products, options, {
     profile,
     service,
     stressFlags,
   });
+  // The three step lines are one selection: any selected selects all.
+  const candidateItems = bermudaActive ? bermudaRemoval.selectStepAtomically(resolvedItems) : resolvedItems;
   const plannedCandidateItems = candidateItems.filter((item) => item.selected);
 
   // A rig the visit names (assignment or explicit request) is the visit's;
@@ -1863,7 +1894,7 @@ async function buildPlanForService(serviceId, options = {}) {
   // An apply-alone product selected beside any other product holds the mix: the plan
   // blocks and withholds the selection's quantities (as the tank sheet does).
   const applyAloneBlocks = v13SelectionBlocks(candidateItems, (item) => v13LineOf(item)?.row, gateContext);
-  const planItems = candidateItems.map((item) => {
+  let planItems = candidateItems.map((item) => {
     const line = v13LineOf(item);
     // One product per line: the approved substitute when one is on the visit, else the
     // matched catalog row. A v13 line never takes a substitute (it keeps its protocol
@@ -1891,6 +1922,33 @@ async function buildPlanForService(serviceId, options = {}) {
   // An archived assignment cannot silently borrow a later field recipe or
   // catalog rate. Keep its stored protocol visible, but offer no calculated
   // products when the old recipe cannot be reproduced from the current inputs.
+  // The step is whole or absent: when any of its three lines cannot be applied (a
+  // limit on Recognition or Fusilade II, no staged row linked, an inactive catalog
+  // row), none of the three is offered. The limit read covers both limited products
+  // even when nobody selected them yet.
+  const bermudaBlocks = [];
+  const bermudaWarnings = [];
+  if (bermudaVisit && bermudaCultivar === 'excluded') {
+    bermudaWarnings.push({ code: 'lawn_bermuda_cultivar_excluded', severity: 'warning', message: 'Bermuda removal is off for this lawn: the St. Augustine cultivar on file (ProVista, Captiva or Seville) is not eligible.' });
+  }
+  if (bermudaActive && v13Active) {
+    const stepItems = planItems.filter(bermudaRemoval.isStepLine);
+    const limitProbe = stepItems.filter((item) => item.product?.id && (bermudaRemoval.isRecognitionLine(item) || bermudaRemoval.isFusiladeLine(item)))
+      .map((item) => ({ selected: true, product: { id: item.product.id, name: item.product.name } }));
+    const limited = limitProbe.length
+      ? (await v13Limits(knex, service, serviceDate, limitProbe, { strict })).capped.size > 0
+      : false;
+    const usable = stepItems.length > 0 && !limited
+      && stepItems.every((item) => item.product && item.product.active !== false && item.spot);
+    const dropped = bermudaRemoval.dropUnusableStep(planItems, usable);
+    planItems = dropped.items;
+    bermudaBlocks.push(...dropped.blocks);
+    // A lawn with a CitraBlue or unconfirmed cultivar gets the step with a hard note.
+    if (bermudaCultivar === 'test_patch') {
+      planItems = planItems.map((item) => (bermudaRemoval.isStepLine(item)
+        ? { ...item, gateNotes: [...(item.gateNotes || []), { key: 'testPatchFirst', severity: 'required', text: bermudaRemoval.TEST_PATCH_NOTE }] } : item));
+    }
+  }
   const archivedRecipeUnavailable = completionDefaultsEnabled && !archivedLawnRecipeMatches(structuredProtocol, planItems);
   // GATE_LAWN_V13 with no staged v13 protocol for this visit: no calculated products
   // either (the block below says why), never amounts from catalog defaults.
@@ -1924,7 +1982,9 @@ async function buildPlanForService(serviceId, options = {}) {
   // product holds the mix.
   warnings.push(...v13SelectedGateWarnings(plannedItems));
   if (unknownCadence && v13Active) warnings.push(unknownCadenceWarning(unknownCadence));
+  warnings.push(...bermudaWarnings);
   blocks.push(...applyAloneBlocks);
+  blocks.push(...bermudaBlocks);
   if (v13Active) {
     const notices = v13LineNotices(planItems, cappedProducts, new Set(substitutions.keys()));
     blocks.push(...notices.blocks);
@@ -2138,6 +2198,8 @@ async function buildPlanForService(serviceId, options = {}) {
     },
     equipmentCalibration: calibrationSummary,
     inventory: inventorySummary,
+    // Gate off, or not a bermuda removal visit: no field, the payload is the old one.
+    ...(bermudaActive ? { bermudaRemoval: { active: true, source: bermudaWanted.source, mix: bermudaAddOn.summary } } : {}),
     appointmentAssignment: {
       protocolKey: service.lawn_protocol_key || null,
       protocolVersion: service.lawn_protocol_version || null,

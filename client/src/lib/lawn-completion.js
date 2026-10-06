@@ -186,6 +186,8 @@ export function lawnPlanActionOptions(items = []) {
     label: item.product.name, note: item.product.name,
     product: { id: item.product.id, name: item.product.name, ...(item.applicationMethod ? { applicationMethod: item.applicationMethod } : {}) },
     scope: 'exterior', treatmentApplied: true,
+    // Options that go on together (the bermuda removal mix) share one group id.
+    ...(item.group ? { group: item.group } : {}),
   }));
 }
 

@@ -567,7 +567,7 @@ function mapV1ToLegacyShape(v1Result) {
         programMinimumMonthly: t.programMinimumMonthly ?? null,
         bermudaSuppressionPerApp: t.bermudaSuppressionPerApp ?? null,
         margin: t.costFloorDetails && Number(t.annual) > 0
-          ? Math.round((1 - t.costFloorDetails.annualCost / t.annual) * 1000) / 1000
+          ? Math.round((1 - (t.costFloorDetails.annualCost + (Number(t.bermudaRemovalAnnualCost) || 0)) / t.annual) * 1000) / 1000
           : null,
       },
     }));

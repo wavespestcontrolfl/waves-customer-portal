@@ -1242,7 +1242,13 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
         ? { status: 'explicit', totalPerVisit: 0, lines: [], warnings: [], fixedCost: raw.explicitCogsCost }
         : inventoryCostFromRows(raw.serviceKey, dimensions, inventory, raw.cogsServiceTypes, raw.cogsServiceTypeFixedMultipliers));
     const visits = visitsFor(raw, result);
-    const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0));
+    // Bermuda removal add-on (GATE_LAWN_BERMUDA_REMOVAL): its two yearly sprays are
+    // not in the lawn inventory registry, so the quote's own cost line joins the
+    // lawn COGS. Absent (gate off, no add-on) = 0.
+    const bermudaRemovalCost = raw.serviceKey === 'lawn_care'
+      ? Number(result?.results?.lawnMeta?.costs?.annualBermudaRemoval ?? result?.lawnMeta?.costs?.annualBermudaRemoval) || 0
+      : 0;
+    const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0) + bermudaRemovalCost);
     const grossProfit = money(raw.price - estimatedCost);
     const margin = raw.price > 0 ? Math.round((grossProfit / raw.price) * 1000) / 1000 : null;
     const warnings = [
@@ -1253,7 +1259,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     lines.push({
       ...raw,
       protocol,
-      cogs: { ...cogs, visitsPerYear: visits, estimatedCost },
+      cogs: { ...cogs, visitsPerYear: visits, estimatedCost, ...(bermudaRemovalCost > 0 ? { bermudaRemovalCost } : {}) },
       grossProfit,
       margin,
       status: warnings.length ? 'warning' : 'ok',

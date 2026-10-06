@@ -39,6 +39,7 @@ const {
   lockDraftProtocol,
 } = require('../services/lawn-protocol-operating-layer');
 const { lawnProtocols } = require('../services/lawn-program');
+const bermudaRemoval = require('../services/lawn-bermuda-removal');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -978,11 +979,22 @@ router.get('/lawn-mix', async (req, res, next) => {
     const products = await getProtocolProducts();
     const exactName = track.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
-    const conditionalLines = parseProtocolLines(visit.secondary, 'conditional', { exactName });
+    // GATE_LAWN_BERMUDA_REMOVAL: a sheet opened for a visit (`scheduledServiceId`)
+    // carries the April / June bermuda removal step when that visit's account asked
+    // for it (staff switch or accepted estimate, then the cultivar policy): the
+    // server decides, no client names the step. Gate off, another track or month, or
+    // no visit: nothing is read and the sheet is the old one.
+    const bermudaStep = await bermudaRemoval.stepForVisit(db, scheduled, { trackKey, month });
+    const bermudaAddOn = bermudaStep.active && lawnV13On() ? bermudaStep.addOn : null;
+    const bermudaOn = !!bermudaAddOn;
+    const conditionalLines = [
+      ...parseProtocolLines(visit.secondary, 'conditional', { exactName }),
+      ...(bermudaOn ? bermudaRemoval.markStepLines(parseProtocolLines(bermudaAddOn.secondary, 'conditional', { exactName })) : []),
+    ];
     const allLines = [...baseLines, ...conditionalLines];
     const nutrientTargets = parseVisitNutrientTargets(visit.notes);
 
-    const resolvedLines = resolveProtocolItems(allLines, products, {
+    let resolvedLines = resolveProtocolItems(allLines, products, {
       selectedConditionalProductIds: req.query.selectedConditionalProductIds,
       selectedConditionalProductNames: req.query.selectedConditionalProductNames,
       selectedConditionalRaw: req.query.selectedConditionalRaw,
@@ -997,7 +1009,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     // nutrient-target derivation, as the plan does; no staged protocol = no sheet.
     let v13Rows;
     try {
-      v13Rows = await loadV13RowsForMonth(db, trackKey, month);
+      v13Rows = await loadV13RowsForMonth(db, trackKey, month, bermudaOn ? { includeBermudaRemoval: true } : undefined);
     } catch (err) {
       if (err.code === 'lawn_v13_protocol_missing') return res.status(409).json({ error: 'The v13 lawn protocol is not loaded for this track', code: err.code });
       throw err;
@@ -1018,7 +1030,24 @@ router.get('/lawn-mix', async (req, res, next) => {
     // first, so the sheet withholds every quantity of the selected products and
     // offers no combined mixing order (the plan does the same).
     const v13Active = lawnV13On();
-    const blocks = v13SelectionBlocks(resolvedLines, (line) => v13Rows.get(String(line.product.id)), gateContext);
+    // The step is one selection and whole or absent: selecting one line selects all
+    // three; when any line has no staged row, none of the three is on the sheet.
+    const bermudaBlocks = [];
+    if (bermudaOn) {
+      resolvedLines = bermudaRemoval.selectStepAtomically(resolvedLines);
+      const stepLines = resolvedLines.filter(bermudaRemoval.isStepLine);
+      // Limits on Recognition or Fusilade II are read even when nobody selected them
+      // yet, so a limited product takes the whole step off the sheet.
+      const probe = await v13VisitLimits(db, scheduled,
+        stepLines.filter((line) => bermudaRemoval.isRecognitionLine(line) || bermudaRemoval.isFusiladeLine(line)).map((line) => ({ ...line, selected: true })), v13Rows);
+      const dropped = bermudaRemoval.dropUnusableStep(
+        resolvedLines,
+        stepLines.length > 0 && probe.capped.size === 0 && stepLines.every((line) => line.product && v13Rows.get(String(line.product.id))),
+      );
+      resolvedLines = dropped.items;
+      bermudaBlocks.push(...dropped.blocks);
+    }
+    const blocks = bermudaBlocks.concat(v13SelectionBlocks(resolvedLines, (line) => v13Rows.get(String(line.product.id)), gateContext));
     // The plan's own application-limit decision for a sheet opened from a visit: a capped
     // product gets no amount and its limit message (a block beside the apply-alone ones, not
     // holding the rest of the mix), a warning-level limit a sheet warning.
@@ -1066,6 +1095,13 @@ router.get('/lawn-mix', async (req, res, next) => {
         plannedFullTankMix,
       };
     });
+    // A CitraBlue or unconfirmed St. Augustine cultivar: a hard test-patch note on
+    // each step line, as on the plan.
+    if (bermudaOn && bermudaStep.cultivar === 'test_patch') {
+      for (const item of items) {
+        if (item.bermudaStep) item.gateNotes = [...(item.gateNotes || []), { key: 'testPatchFirst', severity: 'required', text: bermudaRemoval.TEST_PATCH_NOTE }];
+      }
+    }
     const selectedItems = items.filter((item) => item.selected);
     const materialCostSummary = summarizeMaterialCost(selectedItems.map((item) => ({
       selected: item.selected,
@@ -1073,6 +1109,9 @@ router.get('/lawn-mix', async (req, res, next) => {
       mix: item.jobMix,
     })));
     const warnings = [];
+    if (bermudaStep.excluded) {
+      warnings.push({ code: 'lawn_bermuda_cultivar_excluded', severity: 'warning', message: 'Bermuda removal is off for this lawn: the St. Augustine cultivar on file (ProVista, Captiva or Seville) is not eligible.' });
+    }
     if (!calibration) {
       warnings.push({
         code: 'missing_calibration',
@@ -1195,13 +1234,29 @@ router.get('/completion-actions', async (req, res, next) => {
 
     const exactName = program.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
-    const conditionalLines = parseProtocolLines(visit.secondary, 'conditional', { exactName });
-    const actions = buildCompletionActions({
-      lines: [...baseLines, ...conditionalLines],
+    // GATE_LAWN_BERMUDA_REMOVAL: with `scheduledServiceId`, a visit whose account asked
+    // for bermuda removal gets the April / June step's three lines (the server reads
+    // the account, as the plan does). Gate off or no visit: the old actions.
+    const bermudaStep = programKey === 'lawn' && lawnV13On()
+      ? await bermudaRemoval.stepForVisit(db, await loadVisitForPlan(db, req.query.scheduledServiceId, (q) => technicianCurrentVisitFilter(req, q)), { trackKey: track, month })
+      : null;
+    const bermudaAddOn = bermudaStep?.active ? bermudaStep.addOn : null;
+    const conditionalLines = [
+      ...parseProtocolLines(visit.secondary, 'conditional', { exactName }),
+      ...(bermudaAddOn ? bermudaRemoval.markStepLines(parseProtocolLines(bermudaAddOn.secondary, 'conditional', { exactName })) : []),
+    ];
+    const actionLines = [...baseLines, ...conditionalLines];
+    const builtActions = buildCompletionActions({
+      lines: actionLines,
       products,
       programKey,
       visit,
     });
+    // The step's three actions share one group id, so the client adds and removes
+    // them together (actions are built one per line, in line order).
+    const actions = bermudaAddOn
+      ? builtActions.map((action, index) => (actionLines[index].bermudaStep ? { ...action, group: bermudaRemoval.BERMUDA_GROUP } : action))
+      : builtActions;
     // GATE_LAWN_V13: this fallback never sizes a lawn product from the catalog defaults
     // (January Nutra-TECH is 6 fl oz in the v13 program, not the catalog's 12; spot
     // products have no amount). Amounts come from the visit plan's completion defaults,

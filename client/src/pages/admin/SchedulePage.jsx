@@ -14936,6 +14936,8 @@ export function CompletionPanel({
       const track = protocolTrackForLawnType(service.lawnType);
       if (track) params.set("track", track);
       if (service.lawnType) params.set("lawnType", service.lawnType);
+      // The server reads the visit's account (bermuda removal) itself.
+      if (service.id) params.set("scheduledServiceId", service.id);
     }
     // Lawn and month-keyed programs (tree & shrub) pick the visit for the
     // appointment's month; the server ignores it for 'Any'-month programs.
@@ -17275,8 +17277,13 @@ export function CompletionPanel({
       setProtocolCompletionDefaultsRemovedIds((ids) => [...new Set([...ids, String(productId)])]);
     }
     invalidateGeneratedReportOnTypedEdit();
+    // Products that share a completion group (the bermuda removal mix) come off together.
+    const group = protocolActions.find((a) => a.group && a.product?.id === productId)?.group;
+    const removedIds = new Set([productId, ...(group
+      ? protocolActions.filter((a) => a.group === group && a.product?.id).map((a) => a.product.id)
+      : [])]);
     setSelectedProducts((prev) =>
-      promoteTankOwner(prev.filter((p) => p.productId !== productId)),
+      promoteTankOwner(prev.filter((p) => !removedIds.has(p.productId))),
     );
   }
   function updateProduct(productId, field, value) {
@@ -19013,6 +19020,12 @@ export function CompletionPanel({
         }
       }
       applyProtocolAction(option.action, { conflictLabels: conflicts || [] });
+      // Options that share a group (the bermuda removal mix) go on together.
+      if (option.action.group) {
+        for (const mate of effectiveProtocolActions) {
+          if (mate !== option.action && mate.group === option.action.group) applyProtocolAction(mate);
+        }
+      }
     }
   }
   // The "Swept eaves and webs" box on a regular pest visit (owner 2026-10-05).

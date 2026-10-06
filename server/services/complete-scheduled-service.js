@@ -2783,6 +2783,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (lawnSkippedProductsError) {
       return { status: 400, body: { error: 'skippedProducts must list removed plan defaults as { productId (uuid), productName, reason? }, each product at most once.', code: 'lawn_skipped_products_invalid' } };
     }
+    // GATE_LAWN_BERMUDA_REMOVAL: Recognition and Fusilade II go on together. A
+    // submission with one and not the other is refused before any write (the
+    // surfactant is optional). Gate off: no read, no refusal.
+    const bermudaPairMessage = await require('./lawn-bermuda-removal').bermudaPairViolation(db, products);
+    if (bermudaPairMessage) {
+      return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
+    }
     if (offerInspectionCredit !== true && offerInspectionCredit !== false) {
       return ({ status: 400, body: { error: 'offerInspectionCredit must be a boolean' } });
     }

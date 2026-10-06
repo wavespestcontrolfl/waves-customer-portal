@@ -75,7 +75,7 @@ beforeEach(async () => {
         data.plan.mixCalculator.items = items;
         data.plan.completionDefaults = { enabled: true, serviceId: visitId, propertyId: 'property-a', lawnSqft: sqft,
           // Optional protocol rows reach the client as id/name only (server options), never as defaults.
-          items, options: [...items, ...optionalOptions.map(({ applicationMethod, ...product }) => ({ product: { id: product.id, name: product.name }, applicationMethod }))], propertyMatchesProfile: true,
+          items, options: [...items, ...optionalOptions.map(({ applicationMethod, group, ...product }) => ({ product: { id: product.id, name: product.name }, applicationMethod, ...(group ? { group } : {}) }))], propertyMatchesProfile: true,
           history: { available: true, rows: [baseline, previous], current: null, baseline, previous, progress: { baselineDelta: 21 } } };
       }
     }
@@ -1474,6 +1474,20 @@ it('an "Additional work" protocol option is built from the catalog product, not 
   expect(selects.slice(0, 3).map((select) => select.value)).toEqual(['fl_oz', 'fl_oz', 'broadcast_spray']);
   expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('6');
   expect(totals()[2].value).toBe('30');
+});
+
+it('the bermuda removal mix options go on together and come off together', async () => {
+  enableDefaults();
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal' }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  // Picking ONE option adds all three rows.
+  fireEvent.change(screen.getByText('Add protocol action...').parentElement, { target: { value: 'lawn-plan-test-fus' } });
+  await waitFor(() => expect(totals()).toHaveLength(5));
+  // Removing ONE row removes all three.
+  fireEvent.click(screen.getAllByRole('button', { name: /remove/i }).at(-1));
+  await waitFor(() => expect(totals()).toHaveLength(2));
 });
 
 it.each([

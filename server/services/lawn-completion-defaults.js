@@ -2,6 +2,7 @@
  * No application record, profile update, inventory write or delivery occurs here.
  */
 const { gateEnvValue } = require('../config/feature-gates');
+const { BERMUDA_GROUP } = require('./lawn-bermuda-removal');
 const { addressKey } = require('./customer-properties');
 const history = require('./lawn-assessment-history');
 const { etCalendarDayOf } = require('../utils/datetime-et');
@@ -242,7 +243,7 @@ function buildLawnCompletionDefaults(plan, context) {
     // would be an action that cannot be completed (Codex r12 P2).
     options: eligible ? [...plan.mixCalculator.items, ...plan.mixCalculator.conditionalOptions]
       .filter(item => protocolProductFor(item) && item.product?.active !== false)
-      .map(item => ({ product: { id: item.product.id, name: item.product.name }, applicationMethod: completionMethod(item, protocolProductFor(item)) })) : [],
+      .map(item => ({ product: { id: item.product.id, name: item.product.name }, applicationMethod: completionMethod(item, protocolProductFor(item)), ...(item.bermudaStep ? { group: BERMUDA_GROUP } : {}) })) : [],
     message: !context.propertyMatchesProfile ? 'The saved turf profile could not be matched to this property. Enter the actual work.'
       : !programApplies ? 'No assigned lawn plan for this visit. Add the products actually applied.'
         : !protocolMatches ? 'The appointment protocol could not be resolved. Enter the actual work.'

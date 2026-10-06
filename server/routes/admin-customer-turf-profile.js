@@ -20,7 +20,9 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const featureGates = require('../config/feature-gates');
+const { BERMUDA_REMOVAL_TRACKS, cultivarState } = require('../services/lawn-bermuda-removal');
 const { technicianServicesCustomer } = require('../services/technician-visit-scope');
 const logger = require('../services/logger');
 const { COUNTY_CONFIRMED_FIELD, confirmIrrigationFields } = require('../services/irrigation-schedule-confirmation');
@@ -53,6 +55,17 @@ const PROFILE_COLUMNS = [
   'known_chinch_history', 'known_disease_history', 'known_drought_stress',
   'annual_n_budget_target', 'active',
 ];
+
+// GATE_LAWN_BERMUDA_REMOVAL: the staff switch's columns ride the profile row only
+// while the gate is on, so a gate-off response is the old payload. Only the
+// dedicated PUT below writes them (never PROFILE_COLUMNS).
+const BERMUDA_COLUMNS = ['bermuda_removal', 'bermuda_removal_set_by', 'bermuda_removal_set_at'];
+// Admins only: a technician never sees the switch or its columns.
+const showsBermudaRemoval = (req) => featureGates.lawnBermudaRemovalLive?.() === true && req.techRole === 'admin';
+function profileForResponse(profile, req) {
+  if (!profile || showsBermudaRemoval(req)) return profile;
+  return Object.fromEntries(Object.entries(profile).filter(([key]) => !BERMUDA_COLUMNS.includes(key)));
+}
 
 function pickProfileFields(body) {
   const out = {};
@@ -144,7 +157,12 @@ router.get('/:customerId/turf-profile', async (req, res, next) => {
     // Freshness token for the PUT (codex #3565 gh-r44): the panel echoes the
     // move stamp it was rendered against, so a save that races a primary-
     // address change cannot confirm the former home's county/grass.
-    res.json({ profile: profile || null, irrigation_home_changed_at: prefs?.irrigation_home_changed_at || null });
+    res.json({
+      profile: profileForResponse(profile, req) || null,
+      irrigation_home_changed_at: prefs?.irrigation_home_changed_at || null,
+      // Gate on and an admin only: tells the editor to show the bermuda removal switch.
+      ...(showsBermudaRemoval(req) ? { bermudaRemovalAvailable: true } : {}),
+    });
   } catch (err) {
     next(err);
   }
@@ -252,6 +270,57 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
     });
 
     logger.info?.(`[turf-profile] saved customer=${customerId} by tech=${req.technicianId}`);
+    res.json({ profile: profileForResponse(saved, req) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// The role check resolves at request time, so suites that mock admin-auth with a
+// partial factory still load this router.
+const adminOnly = (req, res, next) => requireAdmin(req, res, next);
+
+// =========================================================================
+// PUT /:customerId/turf-profile/bermuda-removal — the staff switch
+// (GATE_LAWN_BERMUDA_REMOVAL). Admin only. Gate off: 404, as if the route did
+// not exist. Turning it ON needs an existing active profile whose grass is St.
+// Augustine or Zoysia (any other grass never gets the step); turning it OFF is
+// always allowed. Stamps who and when, and moves updated_at so a completion
+// built on the older profile re-reads it.
+// =========================================================================
+router.put('/:customerId/turf-profile/bermuda-removal', adminOnly, async (req, res, next) => {
+  try {
+    if (featureGates.lawnBermudaRemovalLive?.() !== true) return res.status(404).json({ error: 'Not found' });
+    const { customerId } = req.params;
+    const enabled = (req.body || {}).enabled;
+    if (typeof enabled !== 'boolean') return res.status(400).json({ error: 'enabled must be true or false' });
+    const customer = await db('customers').where({ id: customerId }).first('id');
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+    const profile = await db('customer_turf_profiles').where({ customer_id: customerId }).first('id', 'grass_type', 'cultivar', 'active');
+    if (!profile) return res.status(400).json({ error: 'Create the turf profile first' });
+    if (enabled) {
+      if (profile.active !== true) return res.status(400).json({ error: 'The turf profile is inactive; reactivate it first' });
+      if (!BERMUDA_REMOVAL_TRACKS.includes(profile.grass_type)) {
+        return res.status(400).json({ error: 'Bermuda removal runs on St. Augustine and Zoysia lawns only' });
+      }
+      if (cultivarState(profile.grass_type, profile.cultivar) === 'excluded') {
+        return res.status(400).json({ error: 'This St. Augustine cultivar (ProVista, Captiva or Seville) never gets bermuda removal' });
+      }
+    }
+    // Turning it on re-checks the active profile and the eligible grass inside the
+    // UPDATE itself, so a profile edit that lands between the read and the write wins.
+    const query = db('customer_turf_profiles').where({ customer_id: customerId });
+    if (enabled) query.where({ active: true }).whereIn('grass_type', BERMUDA_REMOVAL_TRACKS);
+    const [saved] = await query
+      .update({
+        bermuda_removal: enabled,
+        bermuda_removal_set_by: String(req.technicianId || '').slice(0, 80) || null,
+        bermuda_removal_set_at: new Date(),
+        updated_at: new Date(),
+      })
+      .returning('*');
+    if (!saved) return res.status(409).json({ error: 'The turf profile changed; reload and try again' });
+    logger.info?.(`[turf-profile] bermuda_removal=${enabled} customer=${customerId} by=${req.technicianId}`);
     res.json({ profile: saved });
   } catch (err) {
     next(err);

@@ -1,0 +1,184 @@
+/**
+ * Lawn bermuda removal (GATE_LAWN_BERMUDA_REMOVAL, owner 2026-10-06).
+ *
+ * A lawn is a "bermuda removal" lawn when (a) the customer's accepted estimate
+ * carries the bermuda-suppression add-on, or (b) staff switched it on for the
+ * account (customer_turf_profiles.bermuda_removal). Grass: St. Augustine and
+ * Zoysia only; every other grass never gets it. The estimate add-on itself is
+ * St. Augustine only; Zoysia reaches the step through the staff switch alone.
+ *
+ * For such a lawn under lawn v13 the April and June visits carry a backpack
+ * SPOT step: Recognition + Fusilade II + nonionic surfactant on the mapped
+ * bermuda areas plus a 3 ft border. The step's text lives in
+ * server/config/lawn-protocol-v13.json (visit.addOns.bermudaRemoval, read here);
+ * the staged protocol rows are migration 20261006190100's, tagged
+ * gates.bermudaRemoval = true, and the protocol reader leaves them out of every
+ * other lawn (lawn-protocol-operating-layer.js getProtocolWindowContext). The
+ * rows are spot rows: the plan never computes an amount, the label rate is shown
+ * and the technician enters the area and the amount used.
+ *
+ * The three products are ONE selection: selecting any selects all three, and when
+ * any of them cannot be applied (limited, no staged row, inactive catalog row)
+ * all three leave the plan and the tank sheet, so Fusilade II is never planned
+ * without Recognition and Recognition never goes out alone.
+ *
+ * St. Augustine cultivar (customer_turf_profiles.cultivar), the estimate copy's
+ * own policy: ProVista, Captiva and Seville never get the step; Floratam,
+ * Palmetto, Raleigh and SunClipse do; CitraBlue or an unknown cultivar gets the
+ * step with a test-patch-first note. Zoysia has no cultivar rule.
+ *
+ * Limits (2 sprays a calendar year, 42 days apart, Recognition label annual
+ * maximum) are product_limits rows read by application-limits.checkLimits, the
+ * same path every other v13 line takes.
+ */
+const featureGates = require('../config/feature-gates');
+
+const RECOGNITION = 'Recognition Post Emergent Herbicide';
+const FUSILADE = 'Fusilade II Post Emergent Liquid Herbicide';
+const SURFACTANT = 'LESCO 90/10 Nonionic Surfactant';
+
+// Grass tracks the step can run on.
+const BERMUDA_REMOVAL_TRACKS = ['st_augustine', 'zoysia'];
+// Visit months that carry the step (the April spreader visit and the June hose visit).
+const BERMUDA_REMOVAL_MONTHS = ['Apr', 'Jun'];
+
+const v13Recipe = require('../config/lawn-protocol-v13.json');
+// The step's recipe block for a track and month, or null.
+function stepAddOn(trackKey, month) {
+  return v13Recipe[trackKey]?.visits?.find((visit) => visit.month === month)?.addOns?.bermudaRemoval || null;
+}
+
+// St. Augustine cultivar policy (estimate-service-details.js: "our policy, stricter
+// than the label").
+const EXCLUDED_CULTIVARS = ['provista', 'captiva', 'seville'];
+const ELIGIBLE_CULTIVARS = ['floratam', 'palmetto', 'raleigh', 'sunclipse'];
+const TEST_PATCH_NOTE = 'Test patch first: spray a 3 x 3 ft patch and watch it for 3 to 4 weeks before the full spot. The cultivar is CitraBlue or not confirmed.';
+
+// 'excluded' = never the step; 'test_patch' = the step with the test-patch note;
+// 'ok'. Fails closed on the excluded list and treats anything it does not
+// recognize as unknown.
+function cultivarState(trackKey, cultivar) {
+  if (trackKey !== 'st_augustine') return 'ok';
+  const text = normalize(cultivar).replace(/ /g, '');
+  if (EXCLUDED_CULTIVARS.some((name) => text.includes(name))) return 'excluded';
+  if (ELIGIBLE_CULTIVARS.some((name) => text.includes(name))) return 'ok';
+  return 'test_patch';
+}
+
+const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const FUSILADE_KEY = normalize(FUSILADE);
+const RECOGNITION_KEY = normalize(RECOGNITION);
+
+function bermudaRemovalLive() {
+  return featureGates.lawnBermudaRemovalLive?.() === true;
+}
+
+// Does this visit (gate on, v13 resolved, an eligible grass, an April or June
+// month) call for the step before the account is looked at?
+function bermudaRemovalVisit({ trackKey, month }) {
+  return bermudaRemovalLive()
+    && BERMUDA_REMOVAL_TRACKS.includes(trackKey)
+    && BERMUDA_REMOVAL_MONTHS.includes(month);
+}
+
+// Is the account a bermuda removal lawn? Staff switch first (no read), then the
+// customer's accepted estimates, which count only while the CURRENT turf profile
+// grass is St. Augustine (the estimate add-on is St. Augustine only; a lawn
+// reclassified to Zoysia needs the staff switch). A failed read throws under
+// `strict` (the job card fails closed) and otherwise reads as "not requested".
+async function accountWantsBermudaRemoval(knex, { customerId, profile, strict = false }) {
+  if (profile?.bermuda_removal === true) return { requested: true, source: 'staff' };
+  if (!customerId || profile?.grass_type !== 'st_augustine') return { requested: false, source: null };
+  const { estimateDataCarriesBermudaSuppression } = require('./pricing-engine/v1-legacy-mapper');
+  const { savepointRead } = require('../utils/savepoint-read');
+  let rows;
+  try {
+    rows = await savepointRead(knex, (k) => k('estimates')
+      .where({ customer_id: customerId, status: 'accepted' })
+      .whereNull('archived_at')
+      .select('estimate_data'));
+  } catch (err) {
+    if (strict) throw err;
+    return { requested: false, source: null };
+  }
+  return rows.some((row) => estimateDataCarriesBermudaSuppression(row.estimate_data))
+    ? { requested: true, source: 'estimate' }
+    : { requested: false, source: null };
+}
+
+// The step for a booked visit, for readers that have the visit but not the plan (the
+// tank sheet, the completion actions). `visit` is the row the caller already loaded
+// (admin-protocols' loadVisitForPlan, technician-scoped): the same account reader
+// the plan uses (staff switch or accepted estimate), then the cultivar policy.
+// Returns { active, excluded, source, cultivar, addOn }. Gate off, another track or
+// month, or no visit reads as inactive with no read at all.
+async function stepForVisit(knex, visit, { trackKey, month }) {
+  const off = { active: false, excluded: false, source: null, cultivar: null, addOn: null };
+  if (!bermudaRemovalVisit({ trackKey, month }) || !visit?.customer_id) return off;
+  const profile = await knex('customer_turf_profiles').where({ customer_id: visit.customer_id, active: true }).first();
+  const wants = await accountWantsBermudaRemoval(knex, { customerId: visit.customer_id, profile });
+  if (!wants.requested) return off;
+  const cultivar = cultivarState(trackKey, profile?.cultivar);
+  if (cultivar === 'excluded') return { ...off, excluded: true, source: wants.source, cultivar };
+  return { active: true, excluded: false, source: wants.source, cultivar, addOn: stepAddOn(trackKey, month) };
+}
+
+// The three step lines carry one group id in every completion projection (the plan's
+// completion options and /completion-actions), so a client adds and removes them
+// together.
+const BERMUDA_GROUP = 'bermuda_removal';
+
+// Completion check: Recognition or Fusilade II recorded without the other is refused
+// (the surfactant is optional). `products` is the submitted completion product list.
+// Returns the refusal message, or null. Gate off: always null.
+async function bermudaPairViolation(knex, products) {
+  if (!bermudaRemovalLive() || !Array.isArray(products)) return null;
+  const ids = [...new Set(products.map((p) => p?.productId).filter(Boolean).map(String))];
+  if (!ids.length) return null;
+  const rows = await knex('products_catalog').whereIn('id', ids).select('name');
+  const names = new Set(rows.map((row) => normalize(row.name)));
+  const hasRecognition = names.has(RECOGNITION_KEY);
+  const hasFusilade = names.has(FUSILADE_KEY);
+  if (hasRecognition === hasFusilade) return null;
+  return hasRecognition
+    ? 'Recognition goes on with Fusilade II in the bermuda removal mix. Add Fusilade II too, or take Recognition off this visit.'
+    : 'Fusilade II is never applied without Recognition. Add Recognition too, or take Fusilade II off this visit.';
+}
+
+// The step's lines are marked when the recipe lines are parsed, so every later
+// decision reads the mark, never a product name.
+const markStepLines = (lines) => lines.map((line) => ({ ...line, bermudaStep: true }));
+const isStepLine = (item) => item?.bermudaStep === true;
+const isRecognitionLine = (item) => normalize(item?.product?.name || item?.raw).includes(RECOGNITION_KEY);
+const isFusiladeLine = (item) => normalize(item?.product?.name || item?.raw).includes(FUSILADE_KEY);
+
+// One selection: when any step line is selected, all of them are. Applied to the
+// resolved candidate lines before limits are read.
+function selectStepAtomically(items) {
+  if (!items.some((item) => isStepLine(item) && item.selected)) return items;
+  return items.map((item) => (isStepLine(item) && !item.selected
+    ? { ...item, selected: true, selectionReason: 'bermuda_step_selected_together' } : item));
+}
+
+// When the step cannot be applied as a whole, none of it is offered. `usable` says
+// whether the step's lines can all be applied; the caller knows the plan's or the
+// sheet's own line states.
+function dropUnusableStep(items, usable) {
+  if (usable || !items.some(isStepLine)) return { items, blocks: [] };
+  return {
+    items: items.filter((item) => !isStepLine(item)),
+    blocks: [{
+      code: 'lawn_bermuda_step_unavailable', severity: 'block',
+      message: 'Bermuda removal is not available on this visit: Recognition, Fusilade II and the surfactant go together, and one of them is blocked or has no planned row. Enter the actual work.',
+    }],
+  };
+}
+
+module.exports = {
+  RECOGNITION, FUSILADE, SURFACTANT, TEST_PATCH_NOTE,
+  BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
+  bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, stepAddOn, cultivarState,
+  markStepLines, isStepLine, isRecognitionLine, isFusiladeLine,
+  selectStepAtomically, dropUnusableStep,
+  stepForVisit, BERMUDA_GROUP, bermudaPairViolation,
+};

@@ -202,3 +202,52 @@ it("uses comfortable shared controls for turf profile editing and preserves save
     ].every((control) => control.classList.contains("ui-control")),
   ).toBe(true);
 });
+
+// GATE_LAWN_BERMUDA_REMOVAL: the staff switch sits in the turf profile editor
+// for St. Augustine and Zoysia, only while the server reports it available, and
+// saves on its own (never inside the general profile save).
+const bermudaProfileFetch = ({ available, grass, bermuda = false }) =>
+  vi.fn(async (url, options = {}) => {
+    if (url.endsWith("/admin/lawn-assessment/customers")) {
+      return response({ customers: [customer] });
+    }
+    if (url.endsWith("/admin/customers/customer-1/turf-profile/bermuda-removal")) {
+      return response({ profile: { id: "profile-1", grass_type: grass, bermuda_removal: JSON.parse(options.body).enabled } });
+    }
+    if (url.endsWith("/admin/customers/customer-1/turf-profile")) {
+      return response({
+        irrigation_home_changed_at: null,
+        ...(available ? { bermudaRemovalAvailable: true } : {}),
+        profile: { id: "profile-1", grass_type: grass, bermuda_removal: bermuda },
+      });
+    }
+    throw new Error(`Unexpected request: ${options.method || "GET"} ${url}`);
+  });
+
+it.each(["st_augustine", "zoysia"])("shows the bermuda removal switch for %s and saves it on its own", async (grass) => {
+  vi.stubGlobal("fetch", bermudaProfileFetch({ available: true, grass }));
+  render(<LawnAssessmentPanel embedded />);
+  fireEvent.click(await screen.findByRole("button", { name: "Profile" }));
+  const box = await screen.findByLabelText(/Bermuda removal add-on/);
+  expect(box.checked).toBe(false);
+  fireEvent.click(box);
+  await waitFor(() => {
+    const call = fetch.mock.calls.find(([url]) => String(url).endsWith("/turf-profile/bermuda-removal"));
+    expect(call).toBeTruthy();
+    expect(call[1].method).toBe("PUT");
+    expect(JSON.parse(call[1].body)).toEqual({ enabled: true });
+  });
+  await waitFor(() => expect(screen.getByLabelText(/Bermuda removal add-on/).checked).toBe(true));
+});
+
+it.each([
+  ["gate off (no availability flag)", { available: false, grass: "zoysia" }],
+  ["Bermuda grass", { available: true, grass: "bermuda" }],
+  ["Bahia grass", { available: true, grass: "bahia" }],
+])("hides the bermuda removal switch: %s", async (_label, options) => {
+  vi.stubGlobal("fetch", bermudaProfileFetch(options));
+  render(<LawnAssessmentPanel embedded />);
+  fireEvent.click(await screen.findByRole("button", { name: "Profile" }));
+  await screen.findByRole("heading", { name: /Turf Profile/ });
+  expect(screen.queryByLabelText(/Bermuda removal add-on/)).toBeNull();
+});

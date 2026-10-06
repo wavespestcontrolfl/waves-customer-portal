@@ -254,3 +254,23 @@ test.each([
   expect(lawnPlanAttributesVisit(plan)).toBe(expected);
   expect(lawnPlanAttributesVisit(null)).toBe(false);
 });
+
+// GATE_LAWN_BERMUDA_REMOVAL: the bermuda removal step's three options carry one
+// group id so the client adds and removes them together; no other option has one.
+test('the bermuda removal step options share one group id in the completion projection', () => {
+  const { plan, context } = fixture();
+  const step = (id, name) => ({
+    selected: false, role: 'conditional', bermudaStep: true,
+    product: { id, name, active: true, labelVerifiedAt: '2026-01-01' }, mix: null,
+  });
+  plan.protocol.structured.products.push(
+    { productId: 'rec', defaultInPlan: false, applicationMode: 'spot', gates: {} },
+    { productId: 'fus', defaultInPlan: false, applicationMode: 'spot', gates: {} },
+    { productId: 'nis', defaultInPlan: false, applicationMode: 'spot', gates: {} },
+  );
+  plan.mixCalculator.conditionalOptions = [step('rec', 'Recognition'), step('fus', 'Fusilade'), step('nis', 'Surfactant')];
+  const { options, items } = buildLawnCompletionDefaults(plan, context);
+  expect(options.filter((o) => o.group === 'bermuda_removal').map((o) => o.product.id).sort()).toEqual(['fus', 'nis', 'rec']);
+  expect(options.find((o) => o.product.id === 'product')).not.toHaveProperty('group');
+  expect(items.map((i) => i.product.id)).toEqual(['product']);
+});
