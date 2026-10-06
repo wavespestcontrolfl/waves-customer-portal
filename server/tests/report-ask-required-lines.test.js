@@ -926,3 +926,28 @@ describe('answer screen, Codex round 10', () => {
     expect(medicalExposureAnswer(question)).toBeTruthy();
   });
 });
+
+describe('answer screen, Codex round 11', () => {
+  test.each(['lockbox BLUE', 'lock box XY', 'keypad AB'])('alphabetic shorthand %s is masked', (credential) => {
+    const facts = buildReportAskFacts({ data: pestData({ customerConcern: `Use ${credential} to get in` }) });
+    expect(facts.customer_concern).toContain('[redacted]');
+    expect(facts.customer_concern).not.toMatch(/\b(?:BLUE|XY|AB)\b/);
+  });
+
+  test('a condition must govern the restriction', () => {
+    const line = 'Keep pets off treated zones until fully dry.';
+    const data = pestData();
+    const facts = buildReportAskFacts({ data, requiredLines: [line] });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'Can my dog go out?', data, facts, requiredLines: [line] });
+    expect(ask(`${line} After reading this, pets can go out right away.`)).toBe('second_instruction');
+    expect(ask(`${line} After it is dry, pets can go out.`)).toBeNull();
+  });
+
+  test('the office phone and the visit date ground no claim', () => {
+    const data = pestData();
+    const facts = buildReportAskFacts({ data });
+    const ask = (answer) => screenAskAnswer(answer, { question: 'How long?', data, facts });
+    expect(ask('It may take 941 days to improve.')).toBe('unstated_number');
+    expect(ask('It may take 2026 days to improve.')).toBe('unstated_number');
+  });
+});

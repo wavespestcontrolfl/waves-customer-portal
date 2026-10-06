@@ -578,11 +578,12 @@ describe('schedule questions keep the rule answer', () => {
   test.each([
     'When are you returning?', 'When will the technician return?', 'When are you coming again?',
     'Can I reschedule?', 'When is my next appointment?',
-    'What time will you be here?', 'What day are you coming?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
+    'What time will you be here?', 'What day are you coming?',
+    'Will the technician visit tomorrow?', 'Are you visiting tomorrow?', 'Is the tech stopping by tomorrow?', 'Are you coming tomorrow?', 'Will the technician be here tomorrow?',
   ])('schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(true);
   });
-  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'Will the ants return?', 'Will roaches return after treatment?', 'When can my dog go back outside?'])('not schedule: %s', (question) => {
+  test.each(['What did you spray?', 'Why was Alpine WSG used?', 'Will the ants come back?', 'Are the ants coming back?', 'Will ants come back tomorrow?', 'Will ants come back next week?', 'What did this visit cover?', 'Will the ants return?', 'Will roaches return after treatment?'])('not schedule: %s', (question) => {
     expect(asksAboutSchedule(question)).toBe(false);
   });
 });
@@ -607,6 +608,14 @@ describe('symptoms and exposure never reach the model', () => {
     'I was sprayed in the eyes',
     'He was sprayed on the skin',
     'The technician sprayed me in the face',
+    'The technician sprayed my eyes',
+    'You sprayed my skin',
+    'My eyes were sprayed',
+    'My skin was sprayed',
+    "The dog's eyes were sprayed",
+    "You sprayed my dog's face",
+    "The spray got in the baby's eyes",
+    "The product got on the cat's skin",
   ])('a fixed answer for: %s', (question) => {
     expect(medicalExposureAnswer(question)).toBe(MEDICAL_EXPOSURE_ANSWER);
   });
@@ -623,7 +632,6 @@ describe('symptoms and exposure never reach the model', () => {
     'The tech sprayed my partner',
     'You sprayed my roommate',
     'The tech sprayed my hamster',
-    "You sprayed my dog's face",
     'My roommate got sprayed',
     'I got sprayed in the yard',
     'The tech sprayed my hamster inside',

@@ -305,21 +305,26 @@ const LOCAL_STREET_SUFFIXES = ['pointe', 'villas', 'oaks', 'shores', 'cove', 'tr
 const STREET_SUFFIX = [...new Set([...Object.keys(USPS_STREET_SUFFIXES).map((suffix) => suffix.toLowerCase()), ...LOCAL_STREET_SUFFIXES])]
   .sort((x, y) => y.length - x.length)
   .join('|');
-// "12 1/2 Example Street" and "88B Example Street" mask whole; street-name
+// "12 1/2 Example Street", "88B Example Street" and "12-14 Main Street" mask whole; street-name
 // words may hold accents and curly apostrophes ("12 José Lane", "12 O’Neil St").
-const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
+const HOUSE_NUMBER = new RegExp(`\\b\\d{1,6}[a-z]?(?:[-/]\\d{1,6}[a-z]?)?(?:\\s+\\d\\/\\d)?(?=\\s+(?:[\\p{L}\\p{N}'’.-]+\\s+){1,6}(?:${STREET_SUFFIX})(?![\\p{L}\\p{N}]))`, 'giu');
 
 // "lockbox 42", "lock box A2", "keypad #7": a box or keypad word followed
-// directly by a short value with a digit in it is a credential even with no
-// "code" or "pin" noun (Codex P1 #5964 r7). The shared redactor needs the noun.
-const LOCKBOX_SHORTHAND = /\b(lock[\s-]?box|key[\s-]?box|key[\s-]?safe|keypad)(\s*(?:#|no\.?|number|is|=|:|-)?\s*)(?=[a-z*#]*\d)[a-z0-9*#]{1,10}\b/gi;
+// directly by a short value is a credential even with no "code" or "pin"
+// noun (Codex P1 #5964 r7). The shared redactor needs the noun.
+const LOCKBOX_SHORTHAND = /\b(lock[\s-]?box|key[\s-]?box|key[\s-]?safe|keypad)(\s*(?:#|no\.?|number|is|=|:|-)?\s*)([a-z0-9*#]{1,10})\b/gi;
+// Words that follow a box word as prose, not as its value ("the lockbox is
+// on the gate"). Any other short token is the credential, letters included
+// ("lockbox BLUE", "keypad AB") (Codex P1 #5964 r11).
+const LOCKBOX_PROSE_WORDS = new Set(('is on in at by the a an to of for near next under over behind beside inside outside '
+  + 'and or but was were has have will would can could should code pin combo combination').split(' '));
 
 function scrubFreeText(value, max = Infinity) {
   const text = cleanText(value);
   if (!text) return '';
   const { redactContact } = require('../../utils/redact-contact');
   const { redactAccessCodes } = require('../context-aggregator');
-  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, '$1$2[redacted]'))
+  const masked = redactAccessCodes(redactContact(text).replace(HOUSE_NUMBER, '[number]').replace(LOCKBOX_SHORTHAND, (match, box, gap, value) => (LOCKBOX_PROSE_WORDS.has(value.toLowerCase()) ? match : `${box}${gap}[redacted]`)))
     .replace(/\d{3,}/g, '[number]');
   return clip(masked, max);
 }
@@ -954,11 +959,18 @@ function numberIsKnown(value, after, sentence, known) {
     && (!kind || !named.length || named.some((keyRe) => keyRe.test(fact.key))));
 }
 
+// Fact-sheet lines that hold digits but no measurement: the office phone,
+// the visit date, the product names (Codex P1 #5964 r11).
+const METADATA_FACTS = new Set(['company', 'contact', 'service_date', 'asked_about_product']);
+const OFFICE_PHONE_RE = new RegExp(String(WAVES_SUPPORT_PHONE_DISPLAY).replace(/[()]/g, '\\$&').replace(/\s+/g, '\\s*'), 'g');
+
 function statesUnknownNumber(text, { facts, requiredLines }) {
-  const own = digitsForWords(requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text)));
+  const own = digitsForWords(requiredLines.reduce((rest, line) => rest.split(matchForm(line)).join(' '), matchForm(text)))
+    .replace(OFFICE_PHONE_RE, ' ');
   if (!NUMBER_RE.test(own)) return false;
   NUMBER_RE.lastIndex = 0;
-  const known = factNumbers([facts || {}, requiredLines]);
+  const governed = Object.fromEntries(Object.entries(facts || {}).filter(([key]) => !METADATA_FACTS.has(key)));
+  const known = factNumbers([governed, requiredLines]);
   // Each number is bound to its own clause ("Rain was 1.23 inches, and the
   // mowing height was 3.5 inches"), not the whole sentence (Codex P1 r10).
   const clauses = splitSentences(own).flatMap((sentence) => sentence.split(/[,;:]\s*|\s+(?:and|but|while|whereas)\s+/i));
@@ -999,7 +1011,10 @@ const REQUIRED_SUBJECT_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|famil(?:
 // A grant of permission with no condition: "can go out", "right away", "no
 // need to wait". "Once it is dry" and "until" keep the instruction's terms.
 const UNCONDITIONAL_PERMISSION_RE = /\b(?:right\s+away|immediately|right\s+now|any\s*time|no\s+need\s+to\s+(?:wait|keep|stay)|(?:don['’]?t|do\s+not|doesn['’]?t|does\s+not)\s+(?:need|have)\s+to\s+(?:wait|keep|stay)|(?:can|may|could)\s+(?:go|play|return|use|come|walk|water|run)|(?:okay|ok|fine|free|good)\s+to|go\s+ahead)\b/i;
-const CONDITION_RE = /\b(?:once|after|until|when|as\s+soon\s+as|unless|before)\b/i;
+// The condition must govern the restriction: drying, a wait in hours or
+// minutes, or the treatment settling ("once it is dry", "after 2 hours").
+// "After reading this" is no condition (Codex P1 #5964 r11).
+const CONDITION_RE = /\b(?:once|after|until|when|as\s+soon\s+as)\s+(?:\w+\s+){0,4}?(?:dry|dried|dries|drying|hours?|minutes?|settle[sd]?|settling|absorb\w*|it(?:['’]s|\s+is)\s+dry)\b/i;
 // The answer's sentences that are not part of a required line.
 function ownSentences(text, requiredLines) {
   const lines = requiredLines.map(matchForm);
@@ -1104,11 +1119,13 @@ const MEDICAL_CUES = [
   // Exposure: swallowed or breathed in, in the eyes or on the skin, sprayed.
   /\b(?:swallow(?:ed|ing)?|ingest(?:ed|ing)?|inhal(?:ed|ing)|breath(?:ed|ing)\s+(?:it|in|the)\b|poisoned)\b/i,
   new RegExp(`\\b${PATIENT}\\s+(?:\\w+\\s+){0,2}?(?:ate|eaten|eating|licked|licking|chewed|chewing|drank|tasted|sniffed|touched|got\\s+into|got\\s+(?:it|some|any)\\s+(?:in|on))\\b`, 'i'),
+  // Body part first: "my eyes were sprayed", "the dog's skin got sprayed" (Codex P1 #6016 r14).
+  /\b(?:my|his|her|their|our|your|the|[\w-]+['’]s)\s+(?:eyes?|skin|face|mouth|nose)\s+(?:was|were|got|get|gets|is|are|been|has\s+been|have\s+been)\s+(?:\w+\s+)?sprayed\b/i,
   // "On my skin", "in the baby's eyes", "on the cat's skin" (Codex P1 #5964 r10).
   /\b(?:in|into|on|onto)\s+(?:my|his|her|their|our|(?:the|a|my|our|his|her|their|your)\s+[\w-]+['’]s)\s+(?:eyes?|skin|mouth|face|hands?|arms?|legs?|paws?|fur)\b/i,
   // Sprayed in the eyes, on the skin, in the face, with or without a possessive;
   // never "the face of the house".
-  /\bspray\w*\s+(?:\w+\s+){0,3}?(?:in|into|on|onto|at)\s+(?:the\s+|my\s+|his\s+|her\s+|their\s+|our\s+|your\s+)?(?:eyes?|skin|face|mouth|nose)\b(?!\s+of\b)/i,
+  /\bspray\w*\s+(?:\w+\s+){0,3}?(?:(?:in|into|on|onto|at)\s+(?:the\s+|my\s+|his\s+|her\s+|their\s+|our\s+|your\s+|[\w-]+['’]s\s+)?|(?:my|his|her|their|our|your|[\w-]+['’]s)\s+)(?:eyes?|skin|face|mouth|nose)\b(?!\s+of\b)/i,
 ];
 
 // ── A question that sounds like a spray exposure: a safety line first ──
@@ -1162,7 +1179,7 @@ function defaultCallModel(payload, options) {
 // A schedule question the rule router left unrouted ("when are you coming
 // again?", "what time will you be here?") keeps the rule answer too (Codex
 // P1 #6016 r9-r11). Broad on purpose: a false match only means the rule answer.
-const SCHEDULE_QUESTION = /\b(?:what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|arriv\w*|show\s+up|coming(?!\s+back)|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
+const SCHEDULE_QUESTION = /\b(?:(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+){0,2}?(?:visit\w*|(?:stop|drop|swing)\w*\s+by)|(?:stop|drop|swing)(?:ping|s)?\s+by|what\s+(?:time|day|date)|which\s+day|be\s+(?:here|there|out|over|back)|arriv\w*|show\s+up|coming(?!\s+back)|come\s+(?:by|over|out|again)|eta|(?:you|y'all|they|tech|technician|someone|waves|team)\s+(?:\w+\s+)?(?:return(?:s|ing)?|(?:come|coming)\s+(?:back|again|out))|next\s+(?:time|service|treatment|appointment|visit)|appointments?|schedul\w*|reschedul\w*|when\s+(?:will|are|do|is|does|can)\s+(?:you|they|the\s+(?:tech|technician|team)|someone|somebody)\b)/i;
 function asksAboutSchedule(question) {
   return SCHEDULE_QUESTION.test(String(question == null ? '' : question));
 }
