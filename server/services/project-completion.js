@@ -646,6 +646,8 @@ async function completeProjectBackedService({
   // leaves the replaced appointment linked; completing it performs no
   // visit). GH codex #3996 r2 P2 ×2.
   let postCommitConsumption = null;
+  // Set only by the gated early-completion date move (completion-visit-date.js).
+  let visitDateMove = null;
   const result = await knex.transaction(async (trx) => {
     // Project row FIRST (codex #3344 r9 P2): the combined report/invoice
     // send (resolveOrCreateProjectInvoice) holds the project FOR UPDATE and
@@ -1024,6 +1026,24 @@ async function completeProjectBackedService({
         trx,
       });
       postCommitTrackServiceId = scheduledService.id;
+      // GATE_COMPLETION_MOVES_DATE: a visit closed out BEFORE its booked day
+      // moves to the day the work was done (the record's service_date), so the
+      // visit, its record and its invoice share one date. After the status
+      // flip on purpose (a date edit on a terminal row wakes no reminder).
+      // Savepoint-wrapped and non-blocking: a failure here never fails the
+      // closeout. Gate off = writes nothing. See services/completion-visit-date.js.
+      if (require('../config/feature-gates').completionMovesDateLive()) {
+        try {
+          visitDateMove = await trx.transaction(async (sp) => require('./completion-visit-date').moveCompletedVisitToWorkDay(sp, {
+            scheduledServiceId: scheduledService.id,
+            serviceRecord,
+            previousStatus: scheduledService.status,
+            scheduledServiceCols,
+          }));
+        } catch (err) {
+          logger.warn(`[project-completion] visit date move failed for ${scheduledService.id}: ${err.message}`);
+        }
+      }
       // This transition owes the kit: the same durable service_records
       // marker the recap flow writes (pest-recap.js), so a process death
       // between this commit and the post-commit hook is retried by the next
@@ -1067,6 +1087,7 @@ async function completeProjectBackedService({
       },
       reportPath,
       completionProfile: profile,
+      visitDateMove,
     };
   });
 

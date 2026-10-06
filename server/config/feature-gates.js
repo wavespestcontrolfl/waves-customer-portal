@@ -93,6 +93,7 @@
  *   GATE_CARD_HOLD_PARK_ON_CANCEL=true (cancelling a visit with a one-time card hold PARKS the hold for the rebooked visit instead of releasing it; fees/offboarding/revocation unchanged)
  *   GATE_PEST_STRANDED_RECOVERY=<ISO timestamp> (stranded-activation recovery sweep covers PEST parents created at/after this epoch; set AFTER a rollout completes so old-instance bookings from the Railway overlap can never match; unset/invalid = pest excluded — owner ruling 2026-08-27)
  *   GATE_COMPLETION_AUTOPAY_CHARGE=true (completion auto-charge extends to EVERY autopay customer's collectible self-pay completion invoice — hard-capped at the visit's accepted price or membership dues rate; no anchor or above-anchor → office review bell, never an uncapped charge)
+ *   GATE_COMPLETION_MOVES_DATE=true (a certificate or project closeout of a visit booked for a LATER day moves the visit to the day the work was done, keeps the booked day in scheduled_services.original_scheduled_date, keeps a recurring visit's series slot, and gives the visit's own invoice that same service date; a late completion keeps its booked day; read at call time via completionMovesDateLive(), strict 'true', dark by default; off = nothing moves and nothing is written)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_LEAD_TO_CASH_SWEEP=true (daily 6:55 ET read-only lead-to-cash invariants sweep — FIX: email to contact@ only on findings; never writes)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
@@ -4313,6 +4314,14 @@ function seriesMoveCarriesVisitLive() {
   return process.env.GATE_SERIES_MOVE_CARRIES_VISIT === 'true';
 }
 
+// GATE_COMPLETION_MOVES_DATE read at CALL time — strict `=== 'true'`.
+// Owner "go" 2026-10-06. Unset = a visit closed out before its booked day keeps
+// the booked scheduled_date while its service record carries the real work day
+// (byte-identical to before). Read by services/completion-visit-date.js.
+function completionMovesDateLive() {
+  return process.env.GATE_COMPLETION_MOVES_DATE === 'true';
+}
+
 // GATE_KB_SPECIES_QA read at CALL time (server/services/knowledge/wiki-qa.js).
 // Unset = WikiQA answers from knowledge_base alone, byte-identical to before.
 function kbSpeciesQaLive() {
@@ -5838,3 +5847,5 @@ module.exports.prepayMintPriceHoldMode = prepayMintPriceHoldMode;
 module.exports.estimateOfferTiersLive = estimateOfferTiersLive;
 // GATE_LAWN_V13 reader, on its own line so gate PRs never conflict.
 module.exports.lawnV13Live = lawnV13Live;
+// GATE_COMPLETION_MOVES_DATE reader, on its own line so gate PRs never conflict.
+module.exports.completionMovesDateLive = completionMovesDateLive;
