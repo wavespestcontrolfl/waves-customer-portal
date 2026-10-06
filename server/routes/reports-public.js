@@ -1918,7 +1918,7 @@ router.post('/:token/ask', async (req, res, next) => {
     } else if (data.serviceLine === 'pest' && AI_ASK_TOPICS.has(topic) && !asksAboutSchedule(question)
       && require('../config/feature-gates').reportAskAiLive?.() === true) {
       const { answerReportQuestionWithAI } = require('../services/service-report/report-ask-ai');
-      const ai = await answerReportQuestionWithAI({ question, data, nextAppointment });
+      const ai = await answerReportQuestionWithAI({ question, data });
       if (ai) answer = ai.answer;
     }
     // A question that mentions spray and a person, pet or body part gets the
