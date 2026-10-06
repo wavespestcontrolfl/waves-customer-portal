@@ -12,6 +12,7 @@
 // ============================================================
 
 const { priceTopDressing, priceTreeShrub, assertFinitePriceFields } = require('./service-pricing');
+const { authoritativeEstimateResult } = require('../estimate-result-container');
 
 const RECURRING_SERVICES = new Set([
   'pest_control', 'lawn_care', 'tree_shrub', 'palm_injection',
@@ -1492,7 +1493,8 @@ function estimateDataCarriesBermudaSuppression(estimateDataRaw) {
 // Does the estimate's CURRENT stored result still carry the bermuda suppression add-on on
 // its lawn line? Narrower than estimateDataCarriesBermudaSuppression (which also reads the
 // request options, and an opt-out leaves the request option behind): only the priced result
-// counts, the mapped lawnMeta, a lawn tier's provenance, or the raw engine lawn line. An
+// counts (the authoritative container: result when it exists, else engineResult): the mapped
+// lawnMeta, a lawn tier's provenance, or the raw engine lawn line. An
 // estimate with no lawn line in its result (pest only) never carries it.
 function estimateResultCarriesBermudaSuppression(estimateDataRaw) {
   let d = estimateDataRaw;
@@ -1501,11 +1503,13 @@ function estimateResultCarriesBermudaSuppression(estimateDataRaw) {
   }
   if (!d || typeof d !== 'object') return false;
   const positive = (value) => Number(value) > 0;
-  if (d.result?.results?.lawnMeta?.bermudaSuppression || d.result?.lawnMeta?.bermudaSuppression) return true;
-  const tiers = Array.isArray(d.result?.results?.lawn) ? d.result.results.lawn : [];
+  // The current result only: when `result` exists it is authoritative and a stale engineResult
+  // left behind by a revision is never read (see estimate-result-container.js).
+  const current = authoritativeEstimateResult(d);
+  if (current.results?.lawnMeta?.bermudaSuppression || current.lawnMeta?.bermudaSuppression) return true;
+  const tiers = Array.isArray(current.results?.lawn) ? current.results.lawn : [];
   if (tiers.some((tier) => positive(tier?.prov?.bermudaSuppressionPerApp))) return true;
-  const lines = [...(Array.isArray(d.engineResult?.lineItems) ? d.engineResult.lineItems : []),
-    ...(Array.isArray(d.result?.lineItems) ? d.result.lineItems : [])];
+  const lines = Array.isArray(current.lineItems) ? current.lineItems : [];
   return lines.some((line) => line && line.service === 'lawn_care' && (
     !!line.bermudaSuppression || positive(line.costs?.annualBermudaRemoval)
     || (Array.isArray(line.tiers) && line.tiers.some((tier) => positive(tier?.bermudaSuppressionPerApp)))));

@@ -237,6 +237,13 @@ describe('send-boundary gate for persisted suppression estimates', () => {
     expect(carries({ result: { results: { lawn: [{ prov: { bermudaSuppressionPerApp: 25 } }] } } })).toBe(true);
     expect(carries({ engineResult: { lineItems: [{ service: 'lawn_care', costs: { annualBermudaRemoval: 13.08 } }] } })).toBe(true);
     expect(carries({ engineResult: { lineItems: [{ service: 'pest_control', bermudaSuppression: { perApp: 25 } }] } })).toBe(false);
+    // A current `result` is authoritative: a stale engineResult left behind by a revision is never read.
+    const staleEngine = { lineItems: [{ service: 'lawn_care', bermudaSuppression: { perApp: 25 }, costs: { annualBermudaRemoval: 71.25 } }] };
+    expect(carries({ result: { results: { pest: { apps: 4 } } }, engineResult: staleEngine })).toBe(false);
+    expect(carries({ result: { lineItems: [{ service: 'pest_control' }] }, engineResult: staleEngine })).toBe(false);
+    expect(carries({ result: { results: { lawnMeta: { bermudaSuppression: { perApp: 25 } } } }, engineResult: { lineItems: [{ service: 'pest_control' }] } })).toBe(true);
+    // No `result` at all (a wizard or agent-draft row): the engineResult is the current one.
+    expect(carries({ engineResult: staleEngine })).toBe(true);
     expect(carries('not json')).toBe(false);
     expect(carries(null)).toBe(false);
   });

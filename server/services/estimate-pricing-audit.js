@@ -2,6 +2,7 @@ const db = require('../models/db');
 const { costLineFromUsage } = require('./product-costing');
 const { matchServiceProtocol } = require('./protocol-matcher');
 const { lineFlagsBlockPercentDiscount } = require('./pricing-engine/discount-engine');
+const { authoritativeEstimateResult } = require('./estimate-result-container');
 
 const SERVICE_MAP = {
   pest_control: {
@@ -702,11 +703,11 @@ async function inventoryCostFor(serviceKey, dimensions) {
   return inventoryCostFromRows(serviceKey, dimensions, await loadInventoryCostRows());
 }
 
-// The bermuda removal cost on the raw engine lawn line (engineResult.lineItems), for an
-// estimate whose mapped lawnMeta is absent.
-function rawLawnBermudaCost(data, result) {
-  const lines = [...(Array.isArray(data?.engineResult?.lineItems) ? data.engineResult.lineItems : []),
-    ...(Array.isArray(result?.lineItems) ? result.lineItems : [])];
+// The bermuda removal cost on the raw engine lawn line of THE result the audit settled on
+// (the authoritative container: a current `result` is never mixed with a stale engineResult
+// left behind by a revision), for an estimate whose mapped lawnMeta is absent.
+function rawLawnBermudaCost(result) {
+  const lines = Array.isArray(result?.lineItems) ? result.lineItems : [];
   const lawn = lines.find((item) => item?.service === 'lawn_care' && item?.costs?.annualBermudaRemoval != null);
   return lawn ? lawn.costs.annualBermudaRemoval : undefined;
 }
@@ -1066,7 +1067,8 @@ function normalizeProposalLines(estimate) {
 
 async function buildEstimatePricingAudit(estimate, context = {}) {
   const data = parseJson(estimate.estimate_data) || {};
-  let result = data.result || data.engineResult || {};
+  // The container that holds the CURRENT priced result (shared with the bermuda removal reader).
+  let result = authoritativeEstimateResult(data);
   // Branch on the OUTCOME, not the raw flag: a stored {enabled:true}
   // whose canonical normalization yields no itemization (synthesized/
   // disabled fallback) must fall through to the engine lines instead of
@@ -1256,7 +1258,7 @@ async function buildEstimatePricingAudit(estimate, context = {}) {
     // lawn COGS. Absent (gate off, no add-on) = 0.
     const bermudaRemovalCost = raw.serviceKey === 'lawn_care'
       ? Number(result?.results?.lawnMeta?.costs?.annualBermudaRemoval ?? result?.lawnMeta?.costs?.annualBermudaRemoval
-        ?? rawLawnBermudaCost(data, result)) || 0
+        ?? rawLawnBermudaCost(result)) || 0
       : 0;
     const estimatedCost = money((cogs.totalPerVisit || 0) * visits + (cogs.fixedCost || 0) + bermudaRemovalCost);
     const grossProfit = money(raw.price - estimatedCost);

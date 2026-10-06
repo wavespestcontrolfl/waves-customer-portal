@@ -198,6 +198,19 @@ describe('buildEstimatePricingAudit v2 quote provenance', () => {
     expect(without.lines.find((l) => l.serviceKey === 'lawn_care').cogs).not.toHaveProperty('bermudaRemovalCost');
   });
 
+  test('a current result is authoritative for the bermuda removal cost: a stale engineResult left by a revision is never read', async () => {
+    const lawnService = { service: 'lawn_care', name: 'Lawn Care', mo: 55, monthly: 55, tier: 'enhanced', cadence: 'every_6_weeks', visitsPerYear: 9, perTreatment: 64 };
+    const staleEngine = { lineItems: [{ service: 'lawn_care', name: 'Lawn Care', monthly: 55, annual: 660, frequency: 9, costs: { annualBermudaRemoval: 99 } }] };
+    const audit = (data) => buildEstimatePricingAudit({ id: 'est-rev', status: 'sent', source: 'manual', monthly_total: '55.00', annual_total: '660.00', onetime_total: null, estimate_data: data });
+    const lawnCogs = (built) => built.lines.find((l) => l.serviceKey === 'lawn_care').cogs;
+    // Current result without the add-on + stale engineResult carrying a cost: no cost added.
+    expect(lawnCogs(await audit({ result: { recurring: { services: [lawnService] } }, engineResult: staleEngine }))).not.toHaveProperty('bermudaRemovalCost');
+    // Current result with a newer cost in its lawnMeta: that one is used.
+    expect(lawnCogs(await audit({ result: { recurring: { services: [lawnService] }, results: { lawnMeta: { costs: { annualBermudaRemoval: 71.25 } } } }, engineResult: staleEngine })).bermudaRemovalCost).toBe(71.25);
+    // Current result carrying the raw lawn line with a newer cost: that one, not the stale engineResult's.
+    expect(lawnCogs(await audit({ result: { recurring: { services: [lawnService] }, lineItems: [{ service: 'lawn_care', costs: { annualBermudaRemoval: 10 } }] }, engineResult: staleEngine })).bermudaRemovalCost).toBe(10);
+  });
+
   test('wizard rows with ONLY engineResult.lineItems still produce audit lines', async () => {
     const audit = await buildEstimatePricingAudit({
       id: 'est-li', status: 'sent', source: 'quote_wizard',

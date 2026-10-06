@@ -190,6 +190,11 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       const result = await plan(plain.visit);
       expect(result.bermudaRemoval).toBeUndefined();
       expect(optionNames(result)).not.toContain(REC);
+      // A revised estimate: the current result is pest only and a STALE engineResult still carries the
+      // suppression. The current result is authoritative: no step.
+      const staleEngine = { lineItems: [{ service: 'lawn_care', bermudaSuppression: { perApp: 25 }, costs: { annualBermudaRemoval: 71.25 } }] };
+      await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify({ result: { results: { pest: { apps: 4 } } }, engineResult: staleEngine }) });
+      expect((await plan(plain.visit)).bermudaRemoval).toBeUndefined();
       // The raw engine lawn line alone (no mapped result) counts as the current result.
       await knex('estimates').insert({ customer_id: plain.customerId, status: 'accepted', estimate_data: JSON.stringify({ engineResult: { lineItems: [{ service: 'lawn_care', bermudaSuppression: { perApp: 25 } }] } }) });
       expect((await plan(plain.visit)).bermudaRemoval).toMatchObject({ active: true, source: 'estimate' });
