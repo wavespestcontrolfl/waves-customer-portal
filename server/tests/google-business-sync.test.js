@@ -1723,6 +1723,24 @@ describe('Google Business review sync', () => {
       expect(removals()).toHaveLength(1);
       expect(removals()[0]).toMatchObject({ done_by: 'supersede', resolution: 'The reviews are back on Google' });
     });
+
+    test('a restored bell that did not persist leaves the removal row open', async () => {
+      gbpFeed([]);
+      await service.syncAllReviews();
+      expect(removals()).toHaveLength(1);
+      // notifyAdmin returns null on an insert failure; the stamp clears anyway,
+      // so the removal row must stay as the office's only record.
+      const NS = require('../services/notification-service');
+      const realNotify = NS.notifyAdmin.bind(NS);
+      const spy = jest.spyOn(NS, 'notifyAdmin').mockImplementation(async (category, title, ...rest) => (
+        /restored at/.test(title) ? null : realNotify(category, title, ...rest)));
+      staleSync();
+      gbpFeed([feedRow]);
+      await service.syncAllReviews();
+      spy.mockRestore();
+      expect(removals()).toHaveLength(1);
+      expect(isOpen(removals()[0])).toBe(true);
+    });
   });
 
   test('Places fallback clears missing_since when the sample confirms the review is live again', async () => {
