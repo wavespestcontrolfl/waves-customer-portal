@@ -75,7 +75,7 @@ beforeEach(async () => {
         data.plan.mixCalculator.items = items;
         data.plan.completionDefaults = { enabled: true, serviceId: visitId, propertyId: 'property-a', lawnSqft: sqft,
           // Optional protocol rows reach the client as id/name only (server options), never as defaults.
-          items, options: [...items, ...optionalOptions.map(({ applicationMethod, group, ...product }) => ({ product: { id: product.id, name: product.name }, applicationMethod, ...(group ? { group } : {}) }))], propertyMatchesProfile: true,
+          items, options: [...items, ...optionalOptions.map(({ applicationMethod, group, gateNotes, ...product }) => ({ product: { id: product.id, name: product.name }, applicationMethod, ...(group ? { group } : {}), ...(gateNotes ? { gateNotes } : {}) }))], propertyMatchesProfile: true,
           history: { available: true, rows: [baseline, previous], current: null, baseline, previous, progress: { baselineDelta: 21 } } };
       }
     }
@@ -1474,6 +1474,19 @@ it('an "Additional work" protocol option is built from the catalog product, not 
   expect(selects.slice(0, 3).map((select) => select.value)).toEqual(['fl_oz', 'fl_oz', 'broadcast_spray']);
   expect(screen.getAllByPlaceholderText('Rate')[2].value).toBe('6');
   expect(totals()[2].value).toBe('30');
+});
+
+it.each([[true], [false]])('the test-patch line shows beside the Additional work selector only when the mix carries the note (note: %s)', async (withNote) => {
+  enableDefaults();
+  const note = { key: 'testPatchFirst', severity: 'required', text: 'Test patch first: spray a 3 x 3 ft patch and watch it for 3 to 4 weeks before the full spot.' };
+  const mix = ['rec', 'fus', 'nis'].map((id) => ({ id: `test-${id}`, name: `Mix ${id}`, category: 'herbicide', rate_unit: 'fl_oz', default_rate_per_1000: 1, applicationMethod: 'spot_treatment', group: 'bermuda_removal', ...(withNote ? { gateNotes: [note] } : {}) }));
+  optionalOptions = mix;
+  render(<CompletionPanel service={service} products={[...catalog, ...mix.map(({ applicationMethod, group, gateNotes, ...row }) => row)]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  await screen.findByRole('option', { name: 'Mix rec' });
+  const line = 'Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot';
+  if (withNote) expect(screen.getByText(line)).toBeTruthy();
+  else expect(screen.queryByText(line)).toBeNull();
 });
 
 it('the bermuda removal mix options go on together and come off together', async () => {

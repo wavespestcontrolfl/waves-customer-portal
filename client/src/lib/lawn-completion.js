@@ -188,6 +188,8 @@ export function lawnPlanActionOptions(items = []) {
     scope: 'exterior', treatmentApplied: true,
     // Options that go on together (the bermuda removal mix) share one group id.
     ...(item.group ? { group: item.group } : {}),
+    // The test-patch note of the bermuda removal mix (the server's own gate note).
+    ...(item.gateNotes?.length ? { gateNotes: item.gateNotes } : {}),
   }));
 }
 

@@ -356,6 +356,14 @@ async function projectBermudaStep(items, { rows, probeLimits, testPatch = false 
   return { ...settled, items: testPatch ? addTestPatchNote(settled.items) : settled.items };
 }
 
+// The test-patch note an option or action carries through a completion projection (the
+// plan's completion options, /completion-actions): the step line's own gate notes, as
+// the same { key, text } shape, nothing when there is none.
+const optionNotes = (item) => {
+  const notes = (item?.gateNotes || []).filter((note) => note.key === 'testPatchFirst');
+  return notes.length ? { gateNotes: notes } : {};
+};
+
 // The step as one reader sees it (the tank sheet, the completion actions): opened once
 // from the booked visit, then asked for its lines, its staged-row options, its one
 // selection, its settlement and its decoration of the response. Every method is a no-op
@@ -368,24 +376,25 @@ async function openStep(knex, { loadVisit, trackKey, month, parseLines, loadRows
   const step = eligible ? await stepForVisit(knex, await loadVisit(), { trackKey, month }) : { active: false };
   const active = step.active === true;
   const state = { blocks: [], mark: false };
+  // The cultivar policy's own warning for an excluded cultivar (the step is then off).
+  const stepWarnings = step.excluded ? [EXCLUDED_CULTIVAR_WARNING] : [];
   const rowOptions = active ? { includeBermudaRemoval: true } : undefined;
   return {
     lines: active ? markStepLines(parseLines(step.addOn.secondary, 'conditional')) : [],
     rowOptions,
-    // The cultivar policy's own warning for an excluded cultivar.
-    warnings: step.excluded ? [EXCLUDED_CULTIVAR_WARNING] : [],
     select: (items) => (active ? selectStepAtomically(items) : items),
     // Settle against `rows`, or (the completion actions, which load none) the window's
     // staged rows loaded here; a missing v13 protocol reads as no rows.
     async settle(items, rows = null) {
-      if (!active) return { items, blocks: [], warnings: [], warningFields: {} };
+      if (!active) return { items, blocks: [], warnings: stepWarnings, warningFields: stepWarnings.length ? { warnings: stepWarnings } : {} };
       let staged = rows;
       if (!staged) staged = await loadRows(rowOptions).catch((err) => { if (err.code === 'lawn_v13_protocol_missing') return new Map(); throw err; });
       const settled = await projectBermudaStep(items, { rows: staged, probeLimits });
       state.blocks = settled.blocks;
       state.mark = step.cultivar === 'test_patch';
       // `warningFields`: a response that carries warnings only when there are some.
-      return { ...settled, warningFields: settled.warnings.length ? { warnings: settled.warnings } : {} };
+      const warnings = [...stepWarnings, ...settled.warnings];
+      return { ...settled, warnings, warningFields: warnings.length ? { warnings } : {} };
     },
     // The response items: the test-patch note, and the unavailable mark a blocked step keeps.
     decorate(items) {
@@ -407,6 +416,6 @@ module.exports = {
   BERMUDA_REMOVAL_TRACKS, BERMUDA_REMOVAL_MONTHS,
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, stepAddOn, cultivarState,
   markStepLines, isStepLine, isRecognitionLine, isFusiladeLine,
-  selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, inMixingOrder, EXCLUDED_CULTIVAR_WARNING,
+  selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, inMixingOrder, optionNotes, EXCLUDED_CULTIVAR_WARNING,
   stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction,
 };

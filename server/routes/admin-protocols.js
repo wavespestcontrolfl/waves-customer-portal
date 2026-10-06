@@ -1091,7 +1091,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       mix: item.jobMix,
     })));
     const warnings = [];
-    warnings.push(...settled.warnings, ...bermuda.warnings);
+    warnings.push(...settled.warnings);
     if (!calibration) {
       warnings.push({
         code: 'missing_calibration',
@@ -1234,7 +1234,7 @@ router.get('/completion-actions', async (req, res, next) => {
       programKey,
       visit,
     }), actionLines));
-    const actions = settled.items;
+    const actions = bermuda.decorate(settled.items);
     // GATE_LAWN_V13: this fallback never sizes a lawn product from the catalog defaults
     // (January Nutra-TECH is 6 fl oz in the v13 program, not the catalog's 12; spot
     // products have no amount). Amounts come from the visit plan's completion defaults,

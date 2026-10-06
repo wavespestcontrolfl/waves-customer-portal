@@ -362,6 +362,24 @@ describe('the account decides, on the server', () => {
       expect(body.warnings.map((w) => w.code)).toEqual(['lawn_bermuda_step_unavailable']);
     });
 
+    test.each([['CitraBlue'], [null]])('cultivar %p: each of the three actions carries the test-patch note', async (cultivar) => {
+      account.profile.cultivar = cultivar;
+      const body = await actionsFor();
+      const grouped = body.actions.filter((a) => a.group);
+      expect(grouped).toHaveLength(3);
+      for (const action of grouped) expect(action.gateNotes).toEqual([expect.objectContaining({ key: 'testPatchFirst', severity: 'required', text: expect.stringMatching(/3 x 3 ft patch/) })]);
+      expect(body.actions.filter((a) => !a.group && a.gateNotes)).toEqual([]);
+    });
+
+    test('an eligible cultivar carries no note; an excluded cultivar offers none of the three and says why', async () => {
+      const ok = await actionsFor();
+      expect(ok.actions.filter((a) => a.group && a.gateNotes)).toEqual([]);
+      account.profile.cultivar = 'ProVista';
+      const excluded = await actionsFor();
+      expect(excluded.actions.filter((a) => a.group)).toEqual([]);
+      expect(excluded.warnings.map((w) => w.code)).toEqual(['lawn_bermuda_cultivar_excluded']);
+    });
+
     test('nothing limited: the three actions are offered and there is no warning; the program is passed to the limit check', async () => {
       const body = await actionsFor();
       expect(body.actions.filter((a) => a.group)).toHaveLength(3);

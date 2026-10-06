@@ -331,6 +331,11 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         expect(note.text).toMatch(/3 x 3 ft patch.*3 to 4 weeks/);
       }
       expect(result.propertyGate.warnings.filter((w) => w.code === 'lawn_v13_product_gate' && /Test patch first/.test(w.message))).toHaveLength(3);
+      // Unselected options (what the completion projection lists) carry the note too.
+      const unselected = await plan((await lawn({ bermuda: true, cultivar })).visit);
+      const options = unselected.mixCalculator.conditionalOptions.filter((item) => item.bermudaStep);
+      expect(options).toHaveLength(3);
+      for (const option of options) expect(option.gateNotes.map((n) => n.key)).toContain('testPatchFirst');
     });
 
     test('Zoysia has no cultivar rule: even ProVista on file gets the step with no note', async () => {

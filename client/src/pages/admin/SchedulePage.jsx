@@ -12123,6 +12123,10 @@ function PestRecapCard({ serviceId }) {
   );
 }
 
+// Shown beside the Additional work selector while the bermuda removal mix carries the
+// server's test-patch note (a CitraBlue or unconfirmed St. Augustine cultivar).
+const BERMUDA_TEST_PATCH_LINE = "Test patch first: spray a 3x3 ft patch and watch 3–4 weeks before the full spot";
+
 export function CompletionPanel({
   service,
   products,
@@ -18943,6 +18947,9 @@ export function CompletionPanel({
     selected: isProtocolActionSelected(action),
     action,
   }));
+  // The bermuda removal mix on a CitraBlue or unconfirmed cultivar carries the server's
+  // test-patch note: one short line beside the selector.
+  const bermudaTestPatch = effectiveProtocolActions.some((action) => action.group && action.gateNotes?.some((note) => note.key === "testPatchFirst"));
   const selectedProtocolActionCount = protocolActionSelectOptions.filter(
     (opt) => opt.selected,
   ).length;
@@ -20434,6 +20441,11 @@ export function CompletionPanel({
                             </option>
                           ))}
                     </select>
+                    {bermudaTestPatch && (
+                      <div style={{ fontFamily: font, fontSize: 12, color: M.ink3, marginTop: 6 }}>
+                        {BERMUDA_TEST_PATCH_LINE}
+                      </div>
+                    )}
                     {selectedProtocolActionCount > 0 && (
                       <div
                         style={{
@@ -22951,6 +22963,9 @@ export function CompletionPanel({
                           </option>
                         ))}
                   </select>
+                  {bermudaTestPatch && (
+                    <div style={{ fontSize: 11, color: D.muted }}>{BERMUDA_TEST_PATCH_LINE}</div>
+                  )}
                   {selectedProtocolActionCount > 0 && (
                     <div style={{ fontSize: 11, color: D.muted }}>
                       {selectedProtocolActionCount} protocol action
