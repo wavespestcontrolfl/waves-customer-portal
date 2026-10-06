@@ -174,6 +174,23 @@ function aliasesOf(ast, target) {
 
 const isExportContext = (ancestors) => ancestors.some((a) => a.type === 'AssignmentExpression'
   && /^(module\.)?exports\b/.test(sourceOf(a.left)));
+// Is this reference the function exported UNDER ITS OWN NAME:
+// `module.exports = { performPropertyLookup }` / `{ performPropertyLookup: x }`
+// or `module.exports.performPropertyLookup = x` / `exports.performPropertyLookup = x`?
+// Any other export shape (`module.exports.lookup = performPropertyLookup`,
+// `module.exports = performPropertyLookup`) is an alias a consumer could
+// require under a name this guard never sees.
+function exportedUnderOwnName(node, ancestors, target) {
+  const parent = ancestors[ancestors.length - 2];
+  const grand = ancestors[ancestors.length - 3];
+  const great = ancestors[ancestors.length - 4];
+  const isExportsTarget = (left) => left && left.type === 'MemberExpression' && /^(module\.)?exports$/.test(sourceOf(left.object)) && memberName(left) === target;
+  const isModuleExports = (left) => left && /^(module\.exports|exports)$/.test(sourceOf(left));
+  if (parent && parent.type === 'Property' && parent.value === node && !parent.computed && parent.key.type === 'Identifier' && parent.key.name === target
+    && grand && grand.type === 'ObjectExpression' && great && great.type === 'AssignmentExpression' && great.right === grand && isModuleExports(great.left)) return true;
+  if (parent && parent.type === 'AssignmentExpression' && parent.right === node && isExportsTarget(parent.left)) return true;
+  return false;
+}
 let currentSrc = '';
 const sourceOf = (node) => currentSrc.slice(node.start, node.end);
 
@@ -342,10 +359,11 @@ function analyze(file) {
         if (!aliases[t].has(node.name)) continue;
         if (inCalleePosition || memberCallee) continue; // the call itself (counted above)
         if (aliasBinding && refersTo(parent.init || parent.right, t, aliases[t])) continue; // an alias binding
-        // Only the defining module may export it. A re-export anywhere else
-        // (`module.exports = performPropertyLookup`, `exports.lookup = renamed`)
-        // is a one-line wrapper another file could call under any name.
-        if (isExportContext(ancestors) && r === DEFINING[t]) continue;
+        // Only the defining module may export it, and only under its own
+        // name. A re-export anywhere else, or under another name even there
+        // (`module.exports.lookup = performPropertyLookup`), is a wrapper a
+        // consumer could require under a name this guard never sees.
+        if (isExportContext(ancestors) && r === DEFINING[t] && exportedUnderOwnName(node, ancestors, t)) continue;
         out.valueRefs.push({ target: t, line: node.loc.start.line, text: sourceOf(parent).split('\n')[0].trim() });
       }
       if ((node.name === HELPER || helperLocals.has(node.name)) && !inCalleePosition && !isExportContext(ancestors) && !(parent.type === 'Property' && parent.key === node && !parent.computed)) {
