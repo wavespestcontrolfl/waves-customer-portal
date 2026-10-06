@@ -931,8 +931,21 @@ function leaksTargetList(text, {
     .join(' '));
   const said = stemmedTerms(text);
   const shaped = (text.match(PEST_SHAPE_RE) || []).map((term) => stemmedTerms(term));
-  return [...targetLabelsOf(data), ...PEST_TERMS, ...shaped].some((label) => said.includes(label) && !allowed.includes(label));
+  const terms = [...targetLabelsOf(data), ...PEST_TERMS, ...shaped];
+  if (terms.some((label) => said.includes(label) && !allowed.includes(label))) return true;
+  // A term only the question names may be repeated, never confirmed: "Is this
+  // root rot?" -> "Yes, your lawn has root rot" (Codex P1 #5964 r37).
+  const inFacts = stemmedTerms([
+    data?.customerConcern, facts?.customer_concern, facts?.report_sections, facts?.findings, facts?.waves_summary, facts?.visit_summary, facts?.lawn_assessment,
+    facts?.lawn_report, facts?.tree_shrub_report, approvedWording, requiredLines,
+  ].map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '));
+  return splitSentences(text).some((sentence) => DIAGNOSIS_RE.test(sentence) && !NOT_CONFIRMED_RE.test(sentence)
+    && terms.some((label) => stemmedTerms(sentence).includes(label) && !inFacts.includes(label)));
 }
+// A sentence that says the condition is present, not one that says what we
+// checked or treated for.
+const DIAGNOSIS_RE = /^\s*(?:yes|yep|correct|right)\b|\b(?:has|have|had|got|is|are|it['’]s|that['’]s|this['’]s|looks?\s+like|appears?\s+to\s+be|caused\s+by|signs?\s+of|suffering\s+from|infested|infestation|confirmed|diagnos\w*)\b/i;
+const NOT_CONFIRMED_RE = /\b(?:no|not|never|none|without|doesn['’]?t|does\s+not|isn['’]?t|aren['’]?t|can['’]?t|cannot|unable|unclear|unknown|don['’]?t\s+know|whether|if)\b/i;
 
 const splitSentences = (text) => text.split(/(?<=[.!?])\s+/).filter(Boolean);
 const sentenceCount = (text) => splitSentences(text).length;
@@ -1157,7 +1170,9 @@ function statesUnknownNumber(text, { facts, requiredLines }) {
 
 // A sentence just before a required line that takes it back. The answer must
 // state the line as itself, not as something the customer is told to ignore.
-const DISMISSAL_CUE = /\b(?:ignore|disregard|not true|no longer|outdated|out of date|you can skip)\b/i;
+// Dismissals in other words too: "That is incorrect", "That instruction is
+// optional" (Codex P1 #5964 r37).
+const DISMISSAL_CUE = /\b(?:ignore|disregard|not true|no longer|outdated|out of date|you can skip|incorrect|inaccurate|wrong|a mistake|an error|false|optional|not (?:needed|necessary|required|important|accurate|correct)|unnecessary|(?:does|do)\s?n['’]?o?t apply|not applicable|safe to skip|skip (?:it|that|this))\b/i;
 const DISMISSES_NEXT = [
   (before) => /:$/.test(before),
   (before) => DISMISSAL_CUE.test(before),
@@ -1548,9 +1563,23 @@ const NAME = `(?!${NOT_A_NAME}\\b)[a-z][a-z'’-]+`;
 const PERSON = `(?:i|we|he|she|you|they|someone|somebody|anyone|(?:my|our|his|her|their)\\s+[\\w-]+|(?:the|a|your)\\s+(?:\\w+\\s+)?${PATIENT_NOUNS})`;
 const INGEST = '(?:scarf\\w*|munch\\w*|snack\\w*|crunch\\w*|feast\\w*|gulp(?:ed|ing|s)?|gobbl\\w*|devour\\w*|wolf(?:ed|ing|s)?|chomp\\w*|slurp\\w*|guzzl\\w*|(?:bit|bites?|biting|bitten)(?!\\s+of\\b)\\s+(?:into\\s+|on\\s+)?(?:the\\s+|some\\s+|a\\s+|an\\s+|that\\s+|this\\s+)?(?:(?!(?:near|by|at|in|on|next|beside|behind|under|over|while|and|but|or|with|without|from|of|to|for|after|before|when|i|we|it|was|were|is|are)\\b)\\w+\\s+){0,3}(?:bait\\w*|poison\\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)|(?:bait\\w*|poison\\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)\\s+(?:\\w+\\s+)?(?:was|were|got|been|is|are)\\s+(?:\\w+\\s+)?bitten|(?:took|takes?|taking|taken|got|gets?|getting|had|has|have)\\s+(?:\\w+\\s+){0,4}?(?:bites?|mouthfuls?|sips?|tastes?|licks?|nibbles?|gulps?|swallows?|swigs?|drinks?|chunks?|pieces?)\\s+(?:of|out\\s+of|from)\\s+(?:the\\s+|some\\s+|a\\s+|an\\s+|that\\s+|this\\s+|my\\s+|our\\s+)?(?:(?!(?:near|by|at|in|on|next|beside|behind|under|over|while|and|but|or|with|without|from|of|to|for|after|before|when|i|we|it|was|were|is|are)\\b)\\w+\\s+){0,3}(?:bait\\w*|poison\\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)|swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|drank|drinks|drinking|lick(?:ed|ing|s)?|chew(?:ed|ing|s)?|suck(?:ed|ing|s)?|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl(?:ed|ing|es)|gnaw(?:ed|ing|s)?)';
 const EATER_ACTS = new RegExp(`(?:^|[^\\w])(?:${PERSON}\\s+(?:\\w+\\s+){0,2}?|${NAME}\\s+)${INGEST}\\b|\\bby\\s+(?:${PERSON}|${NAME})\\b`, 'i');
+// The eating verb must take the product as its object, or the product must be
+// the subject of the passive: "snacked outside after the spray dried" is no
+// ingestion (Codex P1 #5964 r37).
+const EAT_VERBS = '(?:swallow\\w*|ingest\\w*|consum(?:e|ed|es|ing)|ate|eats|eating|eaten|drank|drunk|drinks?|drinking|lick\\w*|chew\\w*|suck\\w*|lapp?(?:ed|ing|s)?|mouth(?:ed|ing|s)|nibbl\\w*|gnaw\\w*|gulp\\w*|gobbl\\w*|devour\\w*|wolf(?:ed|ing|s)?|chomp\\w*|slurp\\w*|guzzl\\w*|scarf\\w*|munch\\w*|snack\\w*|crunch\\w*|feast\\w*|bit|bites?|biting|bitten)';
+const EXPOSURE_PRODUCT = '(?:bait\\w*|poison\\w*|pellets?|blocks?|granules?|granular|gel|products?|pesticides?|stations?|chemicals?|spray|insecticides?|herbicides?|fungicides?|rodenticides?|fertilizer|treatment|powder|dust)';
+const OBJECT_WORDS = '(?:(?:down|up|on|into|at|through|some|the|a|an|of|any|more|my|our|that|this|from|out)\\s+)*';
+const NOT_IN_PRODUCT_NAME = '(?!(?:near|by|at|in|on|next|beside|behind|under|over|while|and|but|or|with|without|from|of|to|for|after|before|when|i|we|it|was|were|is|are|outside|inside)\\b)';
+const OBJECT_BOUND_INGESTION = new RegExp(`\\b${EAT_VERBS}(?!\\s+of\\b)\\s+${OBJECT_WORDS}(?:${NOT_IN_PRODUCT_NAME}\\w+\\s+){0,3}${EXPOSURE_PRODUCT}\\b|\\b${EXPOSURE_PRODUCT}\\s+(?:\\w+\\s+){0,2}?(?:was|were|got|gets|been|has\\s+been|have\\s+been|is|are)\\s+(?:\\w+\\s+)?${EAT_VERBS}`, 'i');
 function ingestsProduct(text) {
-  return text.split(/(?<=[.!?])\s+/).some((sentence) => INGESTION_VERB.test(sentence) && EXPOSURE_WORD.test(sentence)
+  return text.split(/(?<=[.!?])\s+/).some((sentence) => (OBJECT_BOUND_INGESTION.test(sentence) || INGESTION_VERB.test(sentence))
+    && EXPOSURE_WORD.test(sentence) && boundToProduct(sentence)
     && EATER_ACTS.test(sentence) && !PEST_EATING.test(sentence));
+}
+// The noun forms ("took a bite of the bait") already name their product.
+const NOUN_INGESTION = /\b(?:took|takes?|taking|taken|got|gets?|getting|had|has|have)\s+(?:\w+\s+){0,4}?(?:bites?|mouthfuls?|sips?|tastes?|licks?|nibbles?|gulps?|swallows?|swigs?|drinks?|chunks?|pieces?)\s+(?:of|out\s+of|from)\b/i;
+function boundToProduct(sentence) {
+  return OBJECT_BOUND_INGESTION.test(sentence) || (NOUN_INGESTION.test(sentence) && INGESTION_VERB.test(sentence));
 }
 
 function medicalExposureAnswer(question) {

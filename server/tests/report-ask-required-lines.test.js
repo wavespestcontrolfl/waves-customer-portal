@@ -1512,3 +1512,37 @@ describe('answer screen, Codex round 36', () => {
     expect(medicalExposureAnswer(question)).toBeTruthy();
   });
 });
+
+describe('answer screen, Codex round 37', () => {
+  test.each([
+    'My kids snacked outside after the spray dried. Is that okay?',
+    'The kids snacked on chips after the treatment.',
+    'I had a bite of lunch near the bait.',
+  ])('an eating verb with no product object is not an ingestion: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeNull();
+  });
+
+  test.each([
+    'My dog ate some of the bait.',
+    'The bait was eaten by my dog.',
+    'My dog gulped down the pesticide.',
+    'My dog took a bite of the bait station.',
+  ])('an eating verb on the product is an ingestion: %s', (question) => {
+    expect(medicalExposureAnswer(question)).toBeTruthy();
+  });
+
+  test.each(['That is incorrect.', 'That instruction is optional.', 'This is not necessary.', 'That does not apply to you.'])('a dismissal in other words is rejected: %s', (tail) => {
+    const line = 'Keep pets off treated zones until fully dry.';
+    const data = { serviceLine: 'pest', applications: [] };
+    expect(screenAskAnswer(`${line} ${tail}`, { question: 'Anything I should do?', data, facts: { required_lines: [line] }, requiredLines: [line] })).toBe('dismisses_required_line');
+  });
+
+  test('a diagnosis only the question names cannot be confirmed', () => {
+    const data = lawnData({ reportV2: { aftercare: {} } });
+    const question = 'Is this root rot?';
+    const facts = buildReportAskFacts({ question, data });
+    expect(screenAskAnswer('Yes, your lawn has root rot.', { question, data, facts })).toBe('target_list');
+    expect(screenAskAnswer('This is root rot.', { question, data, facts })).toBe('target_list');
+    expect(screenAskAnswer('The report does not say whether this is root rot.', { question, data, facts })).toBeNull();
+  });
+});
