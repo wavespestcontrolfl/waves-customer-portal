@@ -1802,8 +1802,9 @@ async function reportEmailTo(conn, { after, until, customerId }) {
 const PROMISED_TEXT_AUTOMATED_TYPES = ["call_booking_link_text"];
 async function textToCaller(conn, { after, until = null, phone, customerId }) {
   if (!phone) return null;
-  const row = await firstContactMatch((cursor, size) => conn("sms_log as os")
-    .where("os.direction", "outbound")
+  const { excludeUnresolvedSendReservations } = require("./messaging/review-ask-reservation");
+  const row = await firstContactMatch((cursor, size) => excludeUnresolvedSendReservations(conn("sms_log as os")
+    .where("os.direction", "outbound"), "os")
     .whereIn("os.status", PROVIDER_ACCEPTED)
     .where(function promisedText() {
       this.whereRaw(operatorSentSql("os")).orWhereIn("os.message_type", [...STAFF_APPROVED_SMS_TYPES, ...PROMISED_TEXT_AUTOMATED_TYPES]);
