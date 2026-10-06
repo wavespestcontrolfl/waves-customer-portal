@@ -2083,14 +2083,17 @@ async function resolveAppointmentConfirmation({ conn, commitment, phone, custome
 // source-call link) whose CUSTOMER leg completed >= 60 s with a reviewed
 // extraction of a real conversation: the stricter bar a card call needs (the
 // stored parent-leg duration and status are the staff leg's). Shared by the
-// callback proof and by an "other" call promise, which the same Call Log
-// action can return. Answers the call row, or null.
-async function cardConnectedCall(conn, commitment, { after, phone, customerId }) {
+// callback proof (no `until`: a callback returned late was still returned) and
+// by an "other" call promise, which the same Call Log action can return and
+// which, as an association proof, stays inside the 14-day window (`until`).
+// Answers the call row, or null.
+async function cardConnectedCall(conn, commitment, { after, until = null, phone, customerId }) {
   if (!phone) return null;
   const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
   return conn('call_log').where('direction', 'outbound')
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
     .where('created_at', '>', after).where('v2_extraction_status', 'valid')
+    .modify((b) => { if (until) b.where('created_at', '<=', until); })
     .whereRaw(policyLink, [commitment.id, commitment.call_log_id])
     .whereRaw("metadata->'customer_leg'->>'status' = 'completed'")
     .whereRaw("CASE WHEN metadata->'customer_leg'->>'duration_seconds' ~ '^[0-9]+$' THEN (metadata->'customer_leg'->>'duration_seconds')::numeric >= 60 ELSE FALSE END")
@@ -2798,6 +2801,13 @@ async function listLapsedEvidenceClosedCallIds(conn) {
                 -- it must still be a staff-bridge call that reached the customer
                 -- (personCallBack's SQL twin, >= 60 s), or a reprocess that
                 -- reads it as voicemail / invalid reopens the promise.
+                -- ... and inside the association window (14 days from the promise
+                -- call's end), as the resolver reads it.
+                OR ((cc.fulfillment ->> 'kind') = 'outbound_call' AND (cc.fulfillment ->> 'basis') LIKE 'outbound\\_call\\_to\\_caller%'
+                  AND ev.created_at > CASE
+                    WHEN cl.bridged_at IS NOT NULL THEN cl.bridged_at + make_interval(secs => GREATEST(COALESCE(cl.duration_seconds, 0), 0))
+                    WHEN cl.direction = 'inbound' THEN cl.created_at + make_interval(secs => GREATEST(COALESCE(cl.duration_seconds, 0), 0))
+                    ELSE cl.created_at END + make_interval(days => ${ASSOCIATION_WINDOW_DAYS}))
                 OR ((cc.fulfillment ->> 'kind') = 'outbound_call' AND (ev.direction IS DISTINCT FROM 'outbound'
                   OR (CASE WHEN ev.metadata->>'callback_policy' = 'card' THEN (${cardLegSql('ev')})
                     ELSE (COALESCE(ev.duration_seconds, 0) >= 60 AND ${personCallBackSql('ev')}) END) IS NOT TRUE))

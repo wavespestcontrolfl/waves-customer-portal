@@ -393,6 +393,19 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
       expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 0 });
       expect(await row(w.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
     }
+    // A card leg after the 14-day window keeps nothing (association proof stays inside it).
+    const late = await world({ kind: 'other', channel: 'call' });
+    await cardCall(late, { created_at: new Date(Date.now() - 3 * DAY + 15 * DAY) });
+    expect(await cc.refreshFulfillment(db, late.call.id)).toMatchObject({ fulfilled: 0 });
+    expect(await row(late.commitment.id)).toMatchObject({ status: 'open', fulfillment: null });
+    // A close whose proof call lies beyond the window is listed by the scan and reopens.
+    const inside = await world({ kind: 'other', channel: 'call' });
+    const insideCall = await cardCall(inside);
+    await cc.refreshFulfillment(db, inside.call.id);
+    expect((await row(inside.commitment.id)).status).toBe('fulfilled');
+    await db('call_log').where({ id: insideCall.id }).update({ created_at: new Date(Date.now() - 3 * DAY + 15 * DAY) });
+    expect(await cc.listLapsedEvidenceClosedCallIds(db)).toContain(inside.call.id);
+    expect(await cc.refreshFulfillment(db, inside.call.id)).toMatchObject({ reopened: 1, failed: 0 });
     const w = await world({ kind: 'other', channel: 'call' });
     const done = await cardCall(w);
     expect(await cc.refreshFulfillment(db, w.call.id)).toMatchObject({ fulfilled: 1, failed: 0 });
