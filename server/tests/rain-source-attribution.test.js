@@ -35,7 +35,15 @@ describe('Open-Meteo service week — archive first, forecast as fallback', () =
   });
 
   let conditions;
+  // A caller's own key must survive this suite; the free-path tests run
+  // without one (Codex #6052 r1).
+  const ORIGINAL_KEY = process.env.OPEN_METEO_API_KEY;
+  afterAll(() => {
+    if (ORIGINAL_KEY === undefined) delete process.env.OPEN_METEO_API_KEY;
+    else process.env.OPEN_METEO_API_KEY = ORIGINAL_KEY;
+  });
   beforeEach(() => {
+    delete process.env.OPEN_METEO_API_KEY;
     jest.resetModules();
      
     conditions = require('../services/service-report/application-conditions');
@@ -63,6 +71,19 @@ describe('Open-Meteo service week — archive first, forecast as fallback', () =
       expect(urls.length).toBeGreaterThan(0);
       expect(urls.every((u) => u.startsWith('https://customer-api.open-meteo.com/v1/forecast'))).toBe(true);
       expect(urls.every((u) => u.includes('apikey=fixture-key'))).toBe(true);
+    } finally {
+      delete process.env.OPEN_METEO_API_KEY;
+    }
+  });
+
+  test('with the paid key a week older than 92 days asks Open-Meteo nothing', async () => {
+    process.env.OPEN_METEO_API_KEY = 'fixture-key';
+    try {
+      const urls = [];
+      global.fetch = jest.fn(async (url) => { urls.push(String(url)); return OK([0.1, 0, 0.2, 1.0, 0.05, 0.38, 0.66]); });
+      const out = await conditions.fetchServiceWeekWeather({ latitude: 27.5, longitude: -82.5, serviceDate: '2026-01-10' });
+      expect(urls.some((u) => u.includes('open-meteo.com'))).toBe(false);
+      expect(out.et0Inches).toBeNull();
     } finally {
       delete process.env.OPEN_METEO_API_KEY;
     }

@@ -1,4 +1,4 @@
-const { openMeteoForecastUrl, openMeteoArchiveAvailable } = require('../open-meteo-endpoint');
+const { openMeteoForecastUrl, openMeteoArchiveAvailable, openMeteoCoversDate } = require('../open-meteo-endpoint');
 const logger = require('../logger');
 const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
@@ -788,8 +788,12 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   const mrmsPromise = mode !== 'off'
     ? require('../mrms-qpe').fetchMrmsDailyRain({ latitude: lat, longitude: lon, start: range.start, end: range.end }).catch(() => null)
     : Promise.resolve(null);
+  // Paid key, week older than the forecast endpoint keeps: no Open-Meteo
+  // source exists (Standard has no archive), so ask nothing and settle on
+  // MRMS rain without ET₀ (Codex #6052 r1).
+  const omCovers = openMeteoCoversDate(range.start, etTodayYmd());
   const [om, mrms] = await Promise.all([
-    fetchOpenMeteoServiceWeek({ lat, lon, range, empty }),
+    omCovers ? fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) : empty,
     mrmsPromise,
   ]);
   let value = om;
@@ -821,7 +825,9 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     // (merge failed → modeled, or gap days filled by the model) retries the
     // primary source so IEM's late backfills upgrade it instead of being
     // pinned behind the 6h TTL.
-    const missingIndependentInput = value.et0Inches == null
+    // ET₀ that no source can supply (an old week on the paid key) is not
+    // "missing": retrying cannot fill it, so it keeps the full TTL.
+    const missingIndependentInput = (value.et0Inches == null && omCovers)
       || (mode === 'live' && value.rainSource !== 'mrms');
     const effectiveTtlMs = missingIndependentInput ? Math.min(ttlMs, 30 * 60 * 1000) : ttlMs;
     _rainCache.set(key, { at: Date.now(), ttlMs: effectiveTtlMs, value, windowClosed });

@@ -3,7 +3,7 @@
  * customer host carries the key and the archive (not in Standard) is off;
  * without it, the free endpoint exactly as before.
  */
-const { openMeteoForecastUrl, openMeteoArchiveAvailable } = require('../services/open-meteo-endpoint');
+const { openMeteoForecastUrl, openMeteoArchiveAvailable, openMeteoCoversDate } = require('../services/open-meteo-endpoint');
 
 describe('open-meteo endpoint', () => {
   const ENV = process.env.OPEN_METEO_API_KEY;
@@ -27,5 +27,13 @@ describe('open-meteo endpoint', () => {
     expect(url.pathname).toBe('/v1/forecast');
     expect(url.searchParams.get('apikey')).toBe('fixture-key');
     expect(openMeteoArchiveAvailable()).toBe(false);
+  });
+
+  test('92-day reach: only limits the paid key', () => {
+    delete process.env.OPEN_METEO_API_KEY;
+    expect(openMeteoCoversDate('2026-01-01', '2026-10-06')).toBe(true);
+    process.env.OPEN_METEO_API_KEY = 'k';
+    expect(openMeteoCoversDate('2026-07-06', '2026-10-06')).toBe(true);
+    expect(openMeteoCoversDate('2026-07-05', '2026-10-06')).toBe(false);
   });
 });

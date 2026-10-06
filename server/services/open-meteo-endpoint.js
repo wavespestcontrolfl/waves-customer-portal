@@ -23,4 +23,15 @@ function openMeteoArchiveAvailable() {
   return !openMeteoKey();
 }
 
-module.exports = { openMeteoForecastUrl, openMeteoArchiveAvailable };
+// The forecast endpoint keeps 92 past days (`past_days` max). With the paid
+// key (no archive) an older window has no Open-Meteo source at all: callers
+// skip the request and settle on what NOAA MRMS gives (Codex #6052 r1).
+const FORECAST_PAST_DAYS = 92;
+
+function openMeteoCoversDate(ymd, todayYmd) {
+  if (!openMeteoKey()) return true;
+  const days = (Date.parse(`${todayYmd}T00:00:00Z`) - Date.parse(`${ymd}T00:00:00Z`)) / 86400000;
+  return !(days > FORECAST_PAST_DAYS);
+}
+
+module.exports = { openMeteoForecastUrl, openMeteoArchiveAvailable, openMeteoCoversDate, FORECAST_PAST_DAYS };
