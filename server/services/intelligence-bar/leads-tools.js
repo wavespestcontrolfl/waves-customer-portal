@@ -165,7 +165,7 @@ ALWAYS show the operator the before → after values and get approval before sav
         last_name: { type: 'string' },
         phone: { type: 'string', description: 'Any US format; stored as E.164' },
         email: { type: 'string' },
-        address: { type: 'string', description: "The lead's street address (the leads.address field, 255 characters max). Pass the whole corrected value; a blank clears it. Leads have no state field. When the lead's address is stored as one line (street, City, FL zip), an address, city or zip edit rewrites that line so it never disagrees with the city and zip columns." },
+        address: { type: 'string', description: "The lead's street address (the leads.address field, 255 characters max). Pass the whole corrected value; a blank clears it. Leads have no state field. When the lead's address is stored as one line (street, City, FL zip), the only accepted edit is the whole corrected address (street, city, state and 5-digit zip in one string); it replaces the line and the city and zip columns together." },
         city: { type: 'string', description: "The lead's city (120 characters max); a blank clears it" },
         zip: { type: 'string', description: "The lead's zip code (20 characters max); a blank clears it" },
       },
@@ -720,98 +720,54 @@ function normalizeLeadContactField(field, raw) {
   return { error: `Unknown contact field: ${field}` };
 }
 
-// ─── COMPOSED ADDRESSES ─────────────────────────────────────────
+// ─── ONE-LINE ADDRESSES ─────────────────────────────────────────
 //
-// leads.address holds either a street-only line or a fully composed
-// "street, City, FL 34221" string, depending on which intake path wrote the row
-// (client LeadsTabs.jsx formatLeadAddress documents both shapes, and lead →
-// customer conversion copies leads.address into customers.address_line1
-// verbatim). The split is the shared parseRawAddress (utils/address-normalizer),
-// which reads "street, City, FL zip", "street, City FL zip" and unit segments.
-// A stored value is COMPOSED when it parses to a state, or to the lead's own zip.
-// Editing city or zip, or only the street, on a composed row rebuilds the whole
-// line (formatAddress) so the lead never holds two places.
+// leads.address holds either a street-only line or a whole "street, City, FL
+// 34221" string, depending on which intake path wrote the row (client
+// LeadsTabs.jsx formatLeadAddress documents both shapes, and lead → customer
+// conversion copies leads.address into customers.address_line1 verbatim). The
+// rule is closed (Codex r6, after five rounds of partial-rebuild grammar):
+//   BARE row (the stored line parses to no state and no ZIP, and does not name
+//   the lead's city): a street-only edit writes `address` as typed, city / zip
+//   edits write their columns, and a WHOLE address replaces all three.
+//   ONE-LINE row (parses to a state or ZIP, or names the lead's city): the only
+//   accepted edit is a WHOLE corrected address; any partial edit refuses.
+//   WHOLE address: parseRawAddress yields a street, a city with a letter that is
+//   not a unit / floor designator, a state and a 5-digit ZIP. `address` is
+//   written as formatAddress of the parts (one canonical line); city and zip
+//   come from the parse. Explicit city / zip fields beside it must agree.
+// Nothing is ever rebuilt from parts.
 const ADDRESS_FIELDS = ['address', 'city', 'zip'];
 const COMPOSED_REFUSAL = "This lead's address is stored as one line (street, city, ZIP). Give the whole corrected address in one message.";
 
-// A parsed city that can be a real place: it has a letter and is not a unit or
-// floor token ("2", "2B", "#4", "Unit 4", "Fl 2"). parseRawAddress reads
-// "123 Main St, Fl 2" as state FL + city "2" (Codex r5 P1), so this check, not
-// the shared parser, decides whether a parse carries locality data.
-function plausibleCity(city) {
+// A city the parse can be trusted on: at least one letter, and not a unit or
+// floor designator ("Fl", "Unit", "Apt B").
+function cityIsReal(city) {
   const text = String(city || '').trim();
-  if (!text || !/[A-Za-z]/.test(text)) return false;
-  if (/^#/.test(text)) return false;
-  const tokens = text.split(/\s+/);
-  if (UNIT_DESIGNATORS.has(tokens[0].replace(/[.,]/g, '').toLowerCase()) && tokens.length <= 2) return false;
-  return !/^\d+[A-Za-z]?$/.test(text);
+  if (!/[A-Za-z]/.test(text)) return false;
+  const first = text.split(/\s+/)[0].replace(/[.,#]/g, '').toLowerCase();
+  return !UNIT_DESIGNATORS.has(first);
 }
 
-// A parse carries locality data when it has a ZIP (with no city or a plausible
-// one), or a state accompanied by a ZIP or a plausible city. A state beside a
-// numeric or empty city and no ZIP is floor notation, not a place.
-function carriesLocality(parts) {
-  const cityOk = plausibleCity(parts.city);
-  if (parts.zip) return !parts.city || cityOk;
-  return Boolean(parts.state) && cityOk;
+// The parsed parts when `text` is a whole address, else null.
+function parseWholeAddress(text) {
+  if (typeof text !== 'string' || !text.trim()) return null;
+  const parts = parseRawAddress(text);
+  if (!parts.line1 || !parts.state || !/^\d{5}$/.test(parts.zip || '') || !cityIsReal(parts.city)) return null;
+  return parts;
 }
 
-// A whole replacement: street, plausible city, state and ZIP all present.
-function wholeAddress(parts) {
-  return Boolean(parts && parts.line1 && parts.state && parts.zip && plausibleCity(parts.city));
-}
-
-// What the stored address is: 'bare' (a street only), 'composed' (parts in
-// `parts`) or 'opaque' (a one-line address that names the lead's city but that
-// the parser cannot split, so a partial edit is not safe). Every value goes
-// through parseRawAddress, commas or not (Codex r3 P1: "100 Main St Sarasota FL
-// 34236" is a legacy comma-free line). A row is composed when the parse carries
-// locality data, or finds a ZIP equal to the lead's zip column: the parser reads
-// any trailing five digits as a ZIP, so a bare "100 Main St Apt 34236" with a
-// different zip column is not called composed on the unit number alone.
-function readStoredAddress(lead) {
+// Does the stored line carry more than a street?
+function storedIsOneLine(lead) {
   const stored = String(lead.address || '').trim();
-  if (!stored) return { kind: 'bare' };
+  if (!stored) return false;
   const parts = parseRawAddress(stored);
-  const zipColumn = String(lead.zip || '').trim();
-  if (carriesLocality(parts) || (parts.zip && parts.zip === zipColumn)) return { kind: 'composed', parts };
+  if (parts.state || parts.zip) return true;
   const city = String(lead.city || '').trim().toLowerCase();
-  const namesCity = city && (
+  return Boolean(city) && (
     (parts.city || '').toLowerCase() === city
     || stored.split(',').slice(1).some(seg => seg.trim().toLowerCase() === city)
   );
-  return namesCity ? { kind: 'opaque' } : { kind: 'bare' };
-}
-
-// The operator's own address text, when it carries more than a street.
-// Locality data (see carriesLocality) makes it a whole address. A street plus a
-// city only (Codex r4 P2: "12 Oak Ave, Sarasota") is accepted when that city is
-// the lead's own city (the column or the stored line), case-insensitively, so
-// the stored state and ZIP complete it; a DIFFERENT city with no ZIP on a
-// composed row is ambiguous and refuses unless the city field is given
-// explicitly. A text whose parsed city is not plausible ("123 Main St, Fl 2")
-// is a plain street line. Returns parts, null (a plain street) or { error }.
-function readGivenAddress(requested, lead, stored) {
-  if (typeof requested.address !== 'string') return null;
-  const parts = parseRawAddress(requested.address);
-  if (carriesLocality(parts)) return parts;
-  if (!plausibleCity(parts.city)) return null;
-  const known = [lead.city, stored.parts && stored.parts.city]
-    .map(c => String(c || '').trim().toLowerCase()).filter(Boolean);
-  if (known.includes(parts.city.toLowerCase())) return parts;
-  if (stored.kind === 'composed' && !('city' in requested)) return { error: COMPOSED_REFUSAL };
-  return 'city' in requested ? parts : null;
-}
-
-// A city or ZIP the parser derived from the operator's combined address obeys
-// the same caps as a typed field (Codex r4 P2); over the cap refuses.
-function synthesizedFieldError(given) {
-  for (const field of ['city', 'zip']) {
-    if (!given || !given[field]) continue;
-    const norm = normalizeLeadAddressField(field, given[field]);
-    if (norm.error) return norm.error;
-  }
-  return null;
 }
 
 // Never a doubled segment ("12 Oak Ave, Sarasota, Sarasota, FL 34236").
@@ -820,64 +776,33 @@ function hasRepeatedSegment(line) {
   return new Set(segs).size !== segs.length;
 }
 
-// What the rebuilt line is made of: the street the operator gave (or the stored
-// one), with city, state and zip from the operator's whole address, then the
-// explicit city / zip inputs, then what the stored line already holds.
-function addressTargetParts(requested, stored, given) {
-  const base = stored.parts || {};
-  const parts = {
-    line1: given ? given.line1 : ('address' in requested ? requested.address : base.line1),
-    city: (given && given.city) || base.city || '',
-    state: (given && given.state) || base.state || '',
-    zip: (given && given.zip) || base.zip || '',
-  };
-  if ('city' in requested) parts.city = requested.city || '';
-  if ('zip' in requested) parts.zip = requested.zip || '';
-  return parts;
-}
-
-function sameAddressParts(parts, base) {
-  return ['line1', 'city', 'state', 'zip'].every(k => (parts[k] || '') === (base[k] || ''));
-}
-
-// A whole address given by the operator also fixes the city and zip columns it
-// names. A component it leaves out never clears a column; only an explicit
-// blank city or zip input does.
-function syncedColumns(given, requested) {
-  const cols = {};
-  if (given && given.city && !('city' in requested)) cols.city = given.city;
-  if (given && given.zip && !('zip' in requested)) cols.zip = given.zip;
-  return cols;
-}
-
-// Turns the operator's address / city / zip request into what must be written.
-// Bare rows keep the plain behavior; a composed row (or a composed request) is
-// rebuilt so address, city and zip never disagree. Returns { requested } or
-// { error }. A stored one-line address the parser cannot split refuses a partial
-// edit; a request naming all three fields replaces it whole.
-function rebuildLeadAddress(lead, requested) {
-  if (!ADDRESS_FIELDS.some(f => f in requested)) return { requested };
-  const stored = readStoredAddress(lead);
-  const given = readGivenAddress(requested, lead, stored);
-  if (given && given.error) return { error: given.error };
-  // An opaque line takes a whole replacement (Codex r5 P2) or all three fields;
-  // a partial correction refuses.
-  if (stored.kind === 'opaque' && !wholeAddress(given) && !ADDRESS_FIELDS.every(f => f in requested)) {
-    return { error: COMPOSED_REFUSAL };
+// The three fields a whole address writes, each through the typed-field caps.
+function wholeAddressFields(parts, requested) {
+  const values = { address: formatAddress(parts), city: parts.city, zip: parts.zip };
+  for (const field of ADDRESS_FIELDS) {
+    if (field !== 'address' && field in requested && requested[field] !== values[field]) {
+      return { error: `${field} "${requested[field]}" does not match the ${field} in the address given. Give one address.` };
+    }
+    const norm = normalizeLeadAddressField(field, values[field]);
+    if (norm.error) return { error: norm.error };
   }
-  if (stored.kind !== 'composed' && !given) return { requested };
-  const fieldError = synthesizedFieldError(given);
-  if (fieldError) return { error: fieldError };
+  if (hasRepeatedSegment(values.address)) return { error: COMPOSED_REFUSAL };
+  return { values };
+}
 
-  const out = { ...requested, ...syncedColumns(given, requested) };
-  const parts = addressTargetParts(requested, stored, given);
-  if (stored.kind === 'composed' && sameAddressParts(parts, stored.parts)) delete out.address;
-  else out.address = parts.line1 ? formatAddress(parts) : null;
-  if (out.address && out.address.length > LEAD_ADDRESS_MAX.address) {
-    return { error: `address is too long once the city and zip are included (${LEAD_ADDRESS_MAX.address} characters max).` };
+// Applies the closed rule above. Returns { requested, asserted } or { error }.
+// `asserted` lists the address fields a whole address states, changed or not,
+// so a card for it supersedes an older city / zip card on the same lead.
+function resolveLeadAddressRequest(lead, requested) {
+  if (!ADDRESS_FIELDS.some(f => f in requested)) return { requested, asserted: [] };
+  const whole = parseWholeAddress(requested.address);
+  if (whole) {
+    const fields = wholeAddressFields(whole, requested);
+    if (fields.error) return { error: fields.error };
+    return { requested: { ...requested, ...fields.values }, asserted: ADDRESS_FIELDS };
   }
-  if (out.address && hasRepeatedSegment(out.address)) return { error: COMPOSED_REFUSAL };
-  return { requested: out };
+  if (storedIsOneLine(lead)) return { error: COMPOSED_REFUSAL };
+  return { requested, asserted: [] };
 }
 
 // { field: { from, to } } for every requested field whose stored value
@@ -936,10 +861,10 @@ async function updateLeadContact(input) {
   if (!lead) return { error: input.lead_id ? 'Lead not found' : 'No active lead matches that name.' };
   if (lead.error) return lead;
 
-  // A one-line "street, City, FL zip" address is rebuilt, never half-edited.
-  const rebuilt = rebuildLeadAddress(lead, collected.requested);
-  if (rebuilt.error) return { error: rebuilt.error };
-  const requested = rebuilt.requested;
+  // A one-line address is replaced whole, never half-edited.
+  const resolved = resolveLeadAddressRequest(lead, collected.requested);
+  if (resolved.error) return { error: resolved.error };
+  const requested = resolved.requested;
 
   // Only fields whose stored value actually differs are written (and shown).
   // A confirmed run uses the APPROVED diff the route pinned at proposal
@@ -960,6 +885,7 @@ async function updateLeadContact(input) {
     lead_name: leadName,
     lead_status: lead.status,
     changes,
+    asserted_fields: resolved.asserted,
     ...(lead.customer_id ? { linked_customer_unchanged: true } : {}),
   };
 

@@ -111,6 +111,14 @@ function leadFieldsChanged(p) {
   const isSet = approved && typeof approved === 'object' && !Array.isArray(approved);
   return LEAD_CONTACT_FIELDS.filter(f => (isSet ? approved[f] !== undefined : approved == null && p[f] !== undefined));
 }
+// The fields a NEWER card states: its approved changes plus the fields a whole
+// address asserts (params._asserted_fields: address, city, zip) even when one
+// of them is a preview-time no-op, so it still replaces an older card for
+// that field.
+function leadFieldsAsserted(p) {
+  const asserted = Array.isArray(p._asserted_fields) ? p._asserted_fields.filter(f => LEAD_CONTACT_FIELDS.includes(f)) : [];
+  return [...new Set([...leadFieldsChanged(p), ...asserted])];
+}
 const SUPERSEDE_RULES = {
   // A booking is one event: a new proposal for the same customer, catalog
   // service and day replaces the earlier one (a changed time or price is the
@@ -145,7 +153,7 @@ const SUPERSEDE_RULES = {
     key: p => idPart(p.lead_id ?? p.leadId),
     covers: (newer, older) => {
       const written = leadFieldsChanged(older);
-      const covered = leadFieldsChanged(newer);
+      const covered = leadFieldsAsserted(newer);
       return written.some(f => covered.includes(f));
     },
     afterConfirmed: 'allow',
